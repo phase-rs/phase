@@ -32,12 +32,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   EngineAdapter,
+  EngineSnapshot,
   GameAction,
   GameState,
   LegalActionsResult,
   SubmitResult,
   WaitingFor,
 } from "../../adapter/types";
+import { nextSnapshotSeq } from "../../adapter/types";
 import { OptionalEffectModalContent } from "../../components/modal/OptionalEffectModal.tsx";
 import { DialogHost } from "../../components/modal/DialogHost.tsx";
 import { dispatchAction } from "../../game/dispatch.ts";
@@ -45,46 +47,40 @@ import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { buildGameObjectWithCoreTypes, buildObjectMap } from "../../test/factories/gameObjectFactory.ts";
+import { buildGameState, buildPlayers, buildPriorityWaitingFor, buildStackEntry } from "../../test/factories/gameStateFactory.ts";
 
 // ── Engine-shaped fixtures ──────────────────────────────────────────────
 
 const OB_NIXILIS_ID = 100;
 
 function baseState(waitingFor: WaitingFor, stack: GameState["stack"]): GameState {
-  return {
+  return buildGameState({
     turn_number: 3,
     active_player: 0,
     phase: "PreCombatMain",
-    players: [
-      { id: 0, life: 20 } as unknown as GameState["players"][number],
-      { id: 1, life: 20 } as unknown as GameState["players"][number],
-    ],
+    players: buildPlayers([{ id: 0, life: 20 }, { id: 1, life: 20 }]),
     priority_player: 0,
-    objects: {
-      [OB_NIXILIS_ID]: {
+    objects: buildObjectMap(
+      buildGameObjectWithCoreTypes(["Creature"], {
+        id: OB_NIXILIS_ID,
         name: "Ob Nixilis, the Fallen",
-      } as unknown as GameState["objects"][number],
-    },
+        zone: "Battlefield",
+      }),
+    ),
     next_object_id: 300,
     battlefield: [OB_NIXILIS_ID],
     stack,
     exile: [],
     rng_seed: 42,
-    combat: null,
     waiting_for: waitingFor,
-    has_pending_cast: false,
     lands_played_this_turn: 1,
-    max_lands_per_turn: 1,
-    priority_pass_count: 0,
-    pending_replacement: null,
-    layers_dirty: false,
-    next_timestamp: 1,
     turn_decision_controller: 0,
-  } as unknown as GameState;
+  });
 }
 
-const PRIORITY_P0: WaitingFor = { type: "Priority", data: { player: 0 } };
-const PRIORITY_P1: WaitingFor = { type: "Priority", data: { player: 1 } };
+const PRIORITY_P0: WaitingFor = buildPriorityWaitingFor({ data: { player: 0 } });
+const PRIORITY_P1: WaitingFor = buildPriorityWaitingFor({ data: { player: 1 } });
 
 const OPTIONAL_EFFECT_CHOICE: WaitingFor = {
   type: "OptionalEffectChoice",
@@ -96,8 +92,8 @@ const OPTIONAL_EFFECT_CHOICE: WaitingFor = {
 };
 
 const TWO_TRIGGERS_ON_STACK: GameState["stack"] = [
-  { id: 1 } as unknown as GameState["stack"][number],
-  { id: 2 } as unknown as GameState["stack"][number],
+  buildStackEntry({ id: 1 }),
+  buildStackEntry({ id: 2 }),
 ];
 
 const EMPTY_LEGAL: LegalActionsResult = {
@@ -138,8 +134,12 @@ function scriptedAdapter(): {
     ),
     getState: vi.fn(async () => sequence[step]),
     getLegalActions: vi.fn(async () => EMPTY_LEGAL),
+    getSnapshot: vi.fn(async (): Promise<EngineSnapshot> => ({
+      state: sequence[step],
+      legalResult: EMPTY_LEGAL,
+      seq: nextSnapshotSeq(),
+    })),
     restoreState: vi.fn(),
-    getAiAction: vi.fn().mockReturnValue(null),
     estimateBracket: vi.fn().mockResolvedValue(null),
     dispose: vi.fn(),
   };

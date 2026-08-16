@@ -80,13 +80,16 @@ fn hideaway_trigger(n: u32) -> TriggerDefinition {
             count: QuantityExpr::Fixed { value: n as i32 },
             destination: Some(Zone::Exile),
             keep_count: Some(1),
+            keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
             // CR 702.75a: "put the rest on the bottom of your library."
             rest_destination: Some(Zone::Library),
+            rest_order: crate::types::ability::DigRestOrder::Random,
             // CR 701.20e: the cards are looked at privately, not revealed.
             reveal: false,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         },
     )

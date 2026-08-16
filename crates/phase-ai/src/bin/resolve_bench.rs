@@ -11,6 +11,12 @@
 //!   RUSTFLAGS="-C debug-assertions=on" CARGO_TARGET_DIR=/tmp/forge-prof-target-dbg \
 //!       cargo build --profile tool --bin resolve_bench
 
+// pod-lab loop-3 Q5: native-binary throughput lever, gated in Cargo.toml so
+// wasm32 builds of this crate's lib (pulled in by engine-wasm/draft-wasm)
+// never see it.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::time::Instant;

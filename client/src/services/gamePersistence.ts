@@ -1,7 +1,16 @@
 import { createStore, del, get, set } from "idb-keyval";
 
-import type { FormatConfig, GameState, MatchConfig } from "../adapter/types";
+import type {
+  EngineAdapter,
+  FormatConfig,
+  GameState,
+  MatchConfig,
+  PersistedGameState,
+  PlayerId,
+} from "../adapter/types";
 import type { SeatState } from "../multiplayer/seatTypes";
+import type { FullSessionKey } from "./multiplayerSession";
+import type { P2PSessionKey } from "./p2pSession";
 import { ACTIVE_GAME_KEY, GAME_CHECKPOINTS_PREFIX, GAME_KEY_PREFIX } from "../constants/storage";
 
 /** Snapshot of an AI seat's configuration at game-start time. The per-seat
@@ -13,6 +22,23 @@ export interface AiSeatMeta {
   difficulty: string;
   deckId?: string | null;
   deckName?: string | null;
+}
+
+/**
+ * Credentials to reconnect a suspended native-engine solo (AI) game.
+ *
+ * Native games are server-authoritative: the game state lives in the local
+ * phase-server's `games.db`, never in IndexedDB. The player token is issued
+ * once at game creation and is the reconnect security boundary — it lives only
+ * client-side, so it must be persisted here for the game to be resumable.
+ * Presence of this field is what marks an `ActiveGameMeta` as a native resume
+ * (which has no local `saveGame` snapshot to validate against).
+ */
+export interface NativeSoloSession {
+  gameCode: string;
+  playerId: PlayerId;
+  playerToken: string;
+  fullKey: FullSessionKey;
 }
 
 export interface ActiveGameMeta {
@@ -31,6 +57,11 @@ export interface ActiveGameMeta {
   formatConfig?: FormatConfig;
   /** Bare 5-char room code for P2P guest resume. */
   p2pRoomCode?: string;
+  /** Present for native-engine solo (AI) games hosted by the local
+   *  phase-server. Its presence marks this pointer as a native resume; on
+   *  resume the client reconnects to the server session rather than loading a
+   *  local snapshot. Absent for in-browser (WASM) AI games. */
+  nativeSession?: NativeSoloSession;
 }
 
 /**
@@ -38,8 +69,8 @@ export interface ActiveGameMeta {
  * can resume the game on the same room code. Mirrors the server-side
  * `PersistedSession` pattern in `server-core::persist`:
  *
- * - `state: GameState` lives in a separate IDB record via `saveGame`
- *   (written on every action). This record is only written on
+ * - The engine's trusted state envelope lives in a separate IDB record via
+ *   `saveGame` (written on every action). This record is only written on
  *   lifecycle events (guest join, reconnect, game start, kick, elim).
  * - `playerTokens` is keyed by PlayerId numeric value so non-contiguous
  *   seats (e.g., pre-game disconnect + rejoin) round-trip correctly.
@@ -52,6 +83,8 @@ export interface PersistedP2PHostSession {
   gameId: string;
   /** Bare 5-char room code; the PeerJS prefix is reattached by `hostRoom`. */
   roomCode: string;
+  /** Stable authority identity. A resumed host claims a fresh incarnation. */
+  sessionKey: P2PSessionKey;
   brokerGameCode?: string;
   useBroker: boolean;
   /** PlayerId.0 → token. PlayerId 0 is the host's own slot. */
@@ -71,6 +104,19 @@ export interface PersistedP2PHostSession {
   /** True once `initializeGame` has run; false while still in lobby. */
   gameStarted: boolean;
   seatState?: SeatState;
+  /**
+   * Present when the desktop host delegated authority to its local
+   * phase-server. The server persists the game state; IndexedDB retains only
+   * the opaque credentials needed to reconnect each host-local viewer.
+   */
+  nativeSession?: NativeP2PServerSession;
+}
+
+export interface NativeP2PServerSession {
+  gameCode: string;
+  fullKey: FullSessionKey;
+  /** Native player token keyed by the matching P2P player id. */
+  playerTokens: Record<number, string>;
 }
 
 const P2P_HOST_KEY_PREFIX = "phase-p2p-host:";
@@ -98,12 +144,15 @@ function getGameStore(): ReturnType<typeof createStore> {
 
 // ── Game State (IndexedDB) ──────────────────────────────────────────────
 
-export async function saveGame(gameId: string, state: GameState): Promise<void> {
+export async function saveGame(gameId: string, state: PersistedGameState): Promise<void> {
+  const publicState = "state" in state ? state.state : state;
   if (
-    state.match_phase === "Completed"
-    || (!state.match_phase && state.waiting_for.type === "GameOver")
+    publicState.match_phase === "Completed"
+    || (!publicState.match_phase && publicState.waiting_for.type === "GameOver")
   ) {
-    await clearGame(gameId);
+    // A terminal StateUpdate can arrive before its recipient-specific GameOver
+    // envelope. The latter carries the terminal access record, so this path
+    // must not clear resumable state before that record has been committed.
     return;
   }
   try {
@@ -113,9 +162,25 @@ export async function saveGame(gameId: string, state: GameState): Promise<void> 
   }
 }
 
-export async function loadGame(gameId: string): Promise<GameState | null> {
+/**
+ * Persist the engine's trusted envelope whenever this adapter owns an engine;
+ * adapters that only hold a public remote view retain the legacy raw snapshot.
+ */
+export async function saveAuthoritativeGame(
+  gameId: string,
+  adapter: EngineAdapter,
+  fallbackState: GameState,
+): Promise<void> {
+  const trustedJson = await adapter.exportPersistenceState?.();
+  await saveGame(
+    gameId,
+    trustedJson ? JSON.parse(trustedJson) as PersistedGameState : fallbackState,
+  );
+}
+
+export async function loadGame(gameId: string): Promise<PersistedGameState | null> {
   try {
-    const state = await get<GameState>(GAME_KEY_PREFIX + gameId, getGameStore());
+    const state = await get<PersistedGameState>(GAME_KEY_PREFIX + gameId, getGameStore());
     return state ?? null;
   } catch {
     return null;
@@ -158,7 +223,8 @@ export async function loadP2PHostSession(
       P2P_HOST_KEY_PREFIX + gameId,
       getGameStore(),
     );
-    return s ?? null;
+    if (!s || typeof s.sessionKey !== "string" || s.sessionKey.length === 0) return null;
+    return s;
   } catch {
     return null;
   }

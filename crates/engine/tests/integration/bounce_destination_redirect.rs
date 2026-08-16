@@ -195,7 +195,7 @@ fn mass_bounce_under_two_redirects_delivers_every_permanent_through_choices() {
         "no bounced creature may reach the hand under the redirects"
     );
     assert!(
-        state.pending_batch_deliveries.is_none(),
+        state.active_batch_delivery().is_none(),
         "the parked mass-bounce tail must be fully drained"
     );
 }

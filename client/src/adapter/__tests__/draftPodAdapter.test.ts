@@ -48,6 +48,7 @@ const mockHostOnEvent = vi.fn((_handler: (event: Record<string, unknown>) => voi
 const mockHostInitialize = vi.fn(async () => {});
 const mockHostStartDraft = vi.fn(async () => {});
 const mockHostSubmitHostPick = vi.fn(async () => mockView("Drafting"));
+const mockHostSubmitHostPickWithDraftEffect = vi.fn(async () => mockView("Drafting"));
 const mockHostSubmitHostDeck = vi.fn(async () => mockView("Deckbuilding"));
 const mockHostGetHostView = vi.fn(async () => mockView("Lobby"));
 const mockHostKickPlayer = vi.fn();
@@ -64,6 +65,7 @@ vi.mock("../p2p-draft-host", () => ({
       initialize: mockHostInitialize,
       startDraft: mockHostStartDraft,
       submitHostPick: mockHostSubmitHostPick,
+      submitHostPickWithDraftEffect: mockHostSubmitHostPickWithDraftEffect,
       submitHostDeck: mockHostSubmitHostDeck,
       getHostView: mockHostGetHostView,
       kickPlayer: mockHostKickPlayer,
@@ -83,6 +85,7 @@ vi.mock("../p2p-draft-host", () => ({
 const mockGuestOnEvent = vi.fn((_handler: (event: Record<string, unknown>) => void) => vi.fn());
 const mockGuestInitialize = vi.fn(async () => {});
 const mockGuestSubmitPick = vi.fn(async () => {});
+const mockGuestSubmitPickWithDraftEffect = vi.fn(async () => {});
 const mockGuestSubmitDeck = vi.fn(async () => {});
 const mockGuestLeave = vi.fn(async () => {});
 
@@ -92,6 +95,7 @@ vi.mock("../p2p-draft-guest", () => ({
       onEvent: mockGuestOnEvent,
       initialize: mockGuestInitialize,
       submitPick: mockGuestSubmitPick,
+      submitPickWithDraftEffect: mockGuestSubmitPickWithDraftEffect,
       submitDeck: mockGuestSubmitDeck,
       leave: mockGuestLeave,
       view: null,
@@ -112,6 +116,13 @@ function mockView(status: string): DraftPlayerView {
     pass_direction: "Left",
     current_pack: null,
     pool: [],
+    draft_effects: [],
+    pool_groups: {
+      color_groups: [],
+      type_groups: [],
+      cmc_groups: [],
+      color_counts: { white: 0, blue: 0, black: 0, red: 0, green: 0 },
+    },
     seats: [],
     cards_per_pack: 14,
     pack_count: 3,
@@ -123,6 +134,7 @@ function mockView(status: string): DraftPlayerView {
     tournament_format: "Swiss",
     pod_policy: "Competitive",
     pairings: [],
+    match_config: { match_type: "Bo1" },
   };
 }
 
@@ -284,6 +296,21 @@ describe("DraftPodHostAdapter", () => {
 
     const view = await adapter.submitPick("card-123");
     expect(mockHostSubmitHostPick).toHaveBeenCalledWith("card-123");
+    expect(view.status).toBe("Drafting");
+  });
+
+  it("delegates draft-effect picks and returns view", async () => {
+    await adapter.initialize({
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      kind: "Premier",
+      podSize: 8,
+      hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+    });
+
+    const view = await adapter.submitPickWithDraftEffect("cogwork-1", ["card-1", "card-2"]);
+    expect(mockHostSubmitHostPickWithDraftEffect).toHaveBeenCalledWith("cogwork-1", ["card-1", "card-2"]);
     expect(view.status).toBe("Drafting");
   });
 
@@ -491,6 +518,13 @@ describe("DraftPodGuestAdapter", () => {
 
     await adapter.submitPick("card-456");
     expect(mockGuestSubmitPick).toHaveBeenCalledWith("card-456");
+  });
+
+  it("delegates draft-effect picks to P2PDraftGuest", async () => {
+    await adapter.initialize({ roomCode: "ABCDE", displayName: "Alice" });
+
+    await adapter.submitPickWithDraftEffect("cogwork-1", ["card-1", "card-2"]);
+    expect(mockGuestSubmitPickWithDraftEffect).toHaveBeenCalledWith("cogwork-1", ["card-1", "card-2"]);
   });
 
   it("delegates submitDeck to P2PDraftGuest", async () => {

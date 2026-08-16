@@ -10,7 +10,9 @@
 //! type-system lookup; there is no semantic translation. Cost/filter
 //! keywords need real conversion logic, so they land with their phase.
 
-use engine::types::ability::{AbilityCost, CostObjectCount, QuantityExpr};
+use engine::types::ability::{
+    AbilityCost, CostObjectCount, QuantityExpr, TargetFilter, TypeFilter,
+};
 use engine::types::keywords::{
     BestowCost, BloodthirstValue, BuybackCost, CyclingCost, EscapeCost, FlashbackCost,
     HexproofFilter, ProtectionTarget, WardCost,
@@ -19,9 +21,10 @@ use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::Keyword;
 
 use crate::convert::result::{ConvResult, ConversionGap};
-use crate::convert::{cost as cost_conv, quantity};
+use crate::convert::{cost as cost_conv, filter, quantity};
 use crate::schema::types::{
-    CardType, Cards, Color, Cost, CreatureType, GameNumber, Protectable, ProtectableColor, Rule,
+    CardType, Cards, Color, Cost, CreatureType, GameNumber, Permanents, Protectable,
+    ProtectableColor, Rule,
 };
 
 /// If `rule` is a keyword Rule we can translate today, return the engine
@@ -163,7 +166,7 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         Rule::Blitz(c) => Keyword::Blitz(pure_mana(c, "Rule::Blitz", path)?),
         Rule::Dash(c) => Keyword::Dash(pure_mana(c, "Rule::Dash", path)?),
         Rule::Disturb(c) => Keyword::Disturb(pure_mana(c, "Rule::Disturb", path)?),
-        Rule::Disguise(c) => Keyword::Disguise(pure_mana(c, "Rule::Disguise", path)?),
+        Rule::Disguise(c) => Keyword::Disguise(pure_mana(c, "Rule::Disguise", path)?.into()),
         Rule::Echo(c) => Keyword::Echo(engine::types::keywords::EchoCost::Mana(pure_mana(
             c,
             "Rule::Echo",
@@ -174,7 +177,10 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
             "Rule::Embalm",
             path,
         )?)),
-        Rule::Emerge(c) => Keyword::Emerge(pure_mana(c, "Rule::Emerge", path)?),
+        // CR 702.119a: Bare Emerge defaults to sacrificing a creature.
+        Rule::Emerge(c) => Keyword::Emerge(engine::types::keywords::EmergeCost::creature(
+            pure_mana(c, "Rule::Emerge", path)?,
+        )),
         Rule::Encore(c) => Keyword::Encore(pure_mana(c, "Rule::Encore", path)?),
         Rule::Eternalize(c) => Keyword::Eternalize(engine::types::keywords::EternalizeCost::Mana(
             pure_mana(c, "Rule::Eternalize", path)?,
@@ -327,9 +333,17 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         Rule::Firebending(g) => Keyword::Firebending(QuantityExpr::Fixed {
             value: int_or_gap(g, "Rule::Firebending", path)? as i32,
         }),
-        // CR 702.81: Devour N — engine encodes only N (the "creatures you
-        // sacrifice" filter is implicit).
-        Rule::Devour(_perm, g) => Keyword::Devour(int_or_gap(g, "Rule::Devour", path)?),
+        // CR 702.82a / CR 702.82c: Devour [quality] N — the engine now carries the
+        // sacrifice-pool quality (plain devour = creatures, CR 702.82a). The mtgish
+        // AST holds the "[quality] permanents" qualifier as `Permanents`; map it to
+        // the engine `TypeFilter` via the shared filter converter. Strict-fails
+        // rather than silently defaulting to Creature (a forbidden semantic drop —
+        // mtgish-import CLAUDE.md §1/§3) when the qualifier is not a single-type
+        // quality.
+        Rule::Devour(perm, g) => Keyword::Devour {
+            n: int_or_gap(g, "Rule::Devour", path)?,
+            quality: devour_quality(perm, path)?,
+        },
         // CR 702.160a: Prototype — alt-cost cast that uses the secondary
         // power/toughness and mana cost characteristics.
         // CR 702.176a: Impending N—{cost} — alternative cost. "You may
@@ -513,6 +527,11 @@ fn convert_hexproof_filter(p: &Protectable, path: &str) -> ConvResult<HexproofFi
             // `parse_hexproof_filter` does it (keywords.rs:1536).
             ProtectableColor::Multicolored => Ok(HexproofFilter::Quality("multicolored".into())),
             ProtectableColor::Monocolored => Ok(HexproofFilter::Quality("monocolored".into())),
+            // CR 702.11d + CR 105.4: "hexproof from the chosen color" — runtime
+            // resolves via `chosen_attributes`, paralleling
+            // `ProtectionTarget::ChosenColor`. `ChooseAColorOrColorless` branch
+            // lowering (convert/action.rs) rewrites this per concrete branch.
+            ProtectableColor::TheChosenColor => Ok(HexproofFilter::ChosenColor),
             other => Err(ConversionGap::MalformedIdiom {
                 idiom: "Rule::HexproofFrom.color",
                 path: path.to_string(),
@@ -886,12 +905,90 @@ fn int_or_gap(g: &GameNumber, idiom: &'static str, path: &str) -> ConvResult<u32
     }
 }
 
+/// CR 702.82a / CR 702.82c: reduce a Devour `[quality]` qualifier (mtgish
+/// `Permanents`) to a single engine `TypeFilter`. Plain devour is
+/// `IsCardtype(Creature)` (CR 702.82a → `Creature`). Reuses `filter::convert`,
+/// then extracts one type: a subtype (e.g. Food, which implies Artifact) takes
+/// priority over its base type — matching the native parser's `Subtype("Food")`.
+///
+/// Strict-fails (per this crate's strict-failure discipline §1/§3 — never
+/// silently widen or default) when the qualifier does not reduce to a single,
+/// *specific* type quality. In particular a bare `permanent`/`card`/`any`
+/// reduction (e.g. `Permanents::AnyPermanent`/`IsPermanent` → `TypedFilter::
+/// permanent()` → primary type `TypeFilter::Permanent`) is a non-specific
+/// catch-all, NOT a valid Devour quality: CR 702.82c names a *specific* permanent
+/// type. Returning it would silently widen the synthesized sacrifice pool to
+/// every permanent the controller owns, so it fails loud instead of defaulting to
+/// Creature.
+fn devour_quality(perm: &Permanents, path: &str) -> ConvResult<TypeFilter> {
+    let TargetFilter::Typed(tf) = filter::convert(perm)? else {
+        return Err(ConversionGap::MalformedIdiom {
+            idiom: "Rule::Devour",
+            path: path.to_string(),
+            detail: format!("quality qualifier is not a typed filter: {perm:?}"),
+        });
+    };
+    if let Some(subtype) = tf.get_subtype() {
+        return Ok(TypeFilter::Subtype(subtype.to_string()));
+    }
+    match tf.get_primary_type() {
+        // A non-specific catch-all (`permanent`/`card`/`any`) or no type at all is
+        // not a CR 702.82c quality — fail loud rather than widen the sac pool.
+        Some(TypeFilter::Permanent | TypeFilter::Card | TypeFilter::Any) | None => {
+            Err(ConversionGap::MalformedIdiom {
+                idiom: "Rule::Devour",
+                path: path.to_string(),
+                detail: format!("quality qualifier has no single-type reduction: {perm:?}"),
+            })
+        }
+        Some(ty) => Ok(ty.clone()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use engine::types::ability::{CountScope, QuantityExpr, QuantityRef, TypeFilter, ZoneRef};
     use engine::types::Keyword;
 
     use super::*;
+
+    /// CR 702.82a / CR 702.82c: `devour_quality` reduces a mtgish `Permanents`
+    /// qualifier to a single specific engine `TypeFilter`, and STRICT-FAILS (never
+    /// silently widens) on a non-specific catch-all. Exercised against the real
+    /// `filter::convert` output, using the exact `Permanents` shapes the Devour
+    /// rules encode (`IsCardtype(Creature)` for plain devour, `IsArtifactType(Food)`
+    /// for Feasting Hobbit, `AnyPermanent` for the catch-all defence case).
+    #[test]
+    fn devour_quality_reduces_specific_types_and_strict_fails_catch_all() {
+        use crate::schema::types::ArtifactType;
+
+        // CR 702.82a: plain devour = `IsCardtype(Creature)` → Creature.
+        // (`ConversionGap` has no `PartialEq`, so unwrap the Ok and compare the
+        // `TypeFilter` rather than the whole `Result`.)
+        assert_eq!(
+            devour_quality(&Permanents::IsCardtype(CardType::Creature), "test").unwrap(),
+            TypeFilter::Creature
+        );
+
+        // CR 702.82c + CR 205.3g: Feasting Hobbit's `IsArtifactType(Food)` reduces
+        // to the SUBTYPE (Food ⊂ Artifact), matching the native parser.
+        assert_eq!(
+            devour_quality(&Permanents::IsArtifactType(ArtifactType::Food), "test").unwrap(),
+            TypeFilter::Subtype("Food".to_string())
+        );
+
+        // Strict-failure defence: `AnyPermanent` reduces to `TypedFilter::
+        // permanent()` (primary type `Permanent`), a non-specific catch-all that is
+        // NOT a valid CR 702.82c quality. It must fail loud, not silently widen the
+        // sacrifice pool to every permanent.
+        assert!(matches!(
+            devour_quality(&Permanents::AnyPermanent, "test"),
+            Err(ConversionGap::MalformedIdiom {
+                idiom: "Rule::Devour",
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn aftermath_lowers_to_keyword() {

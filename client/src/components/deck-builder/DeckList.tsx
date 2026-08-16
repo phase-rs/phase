@@ -13,15 +13,22 @@ import type { ScryfallCard } from "../../services/scryfall";
 
 import { MoveList } from "./MoveList";
 import { mouseHoverPreview } from "./hoverPreview";
+import type { CardHoverHandler } from "./hoverPreview";
 import { groupAccent, groupKey, groupOrder, groupTitleKey, type GroupMode } from "./deckGrouping";
 import { isMaybeboardPolicy, useSideboardPolicy } from "./useSideboardPolicy";
 
 interface DeckListProps {
   deck: ParsedDeck;
   onRemoveCard: (name: string, section: "main" | "sideboard") => void;
+  /** Adds one more copy of an existing entry, in place. See
+   *  `CardEntryRowProps.onIncrement`. */
+  onIncrementCard: (name: string, section: "main" | "sideboard") => void;
+  /** CR 100.2a: engine-resolved copy-limit predicate paired with
+   *  `onIncrementCard`. See `CardEntryRowProps.canIncrement`. */
+  canIncrementCard: (name: string) => boolean;
   onMoveCard: (name: string, from: "main" | "sideboard") => void;
   onImport: (deck: ParsedDeck) => void;
-  onCardHover?: (cardName: string | null) => void;
+  onCardHover?: CardHoverHandler;
   format?: string;
   compatibility?: DeckCompatibilityResult | null;
   onChooseArt?: (cardName: string, x: number, y: number) => void;
@@ -55,6 +62,8 @@ function totalCards(entries: DeckEntry[]): number {
 export function DeckList({
   deck,
   onRemoveCard,
+  onIncrementCard,
+  canIncrementCard,
   onMoveCard,
   onImport,
   onCardHover,
@@ -244,8 +253,13 @@ export function DeckList({
             >
               <span
                 className={`text-fuchsia-50 ${onCardHover ? "cursor-pointer" : ""}`}
-                onClick={() => onCardHover?.(name)}
-                {...mouseHoverPreview(onCardHover, name)}
+                onClick={() =>
+                  onCardHover?.({ name, scryfallId: cardDataCache.get(name)?.id })
+                }
+                {...mouseHoverPreview(onCardHover, {
+                  name,
+                  scryfallId: cardDataCache.get(name)?.id,
+                })}
               >
                 {name}
               </span>
@@ -314,6 +328,8 @@ export function DeckList({
                 entries={mainGroups.get(key) ?? []}
                 section="main"
                 onRemove={onRemoveCard}
+                onIncrement={onIncrementCard}
+                canIncrement={canIncrementCard}
                 onMove={onMoveCard}
                 onCardHover={onCardHover}
                 unsupportedMap={unsupportedMap}
@@ -331,6 +347,8 @@ export function DeckList({
                 entries={deck.sideboard}
                 section="sideboard"
                 onRemove={onRemoveCard}
+                onIncrement={onIncrementCard}
+                canIncrement={canIncrementCard}
                 onMove={onMoveCard}
                 onCardHover={onCardHover}
                 unsupportedMap={unsupportedMap}

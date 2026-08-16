@@ -1,11 +1,13 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameObject, GameState } from "../../../adapter/types.ts";
+import type { GameObject } from "../../../adapter/types.ts";
 import { GameCardPreview } from "../../card/GameCardPreview.tsx";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
+import { buildGameObjectWithCoreTypes, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
+import { buildGameState, buildPlayers, buildPriorityWaitingFor } from "../../../test/factories/gameStateFactory.ts";
 import type { GroupedPermanent as GroupedPermanentType } from "../../../viewmodel/battlefieldProps.ts";
 import { BattlefieldZoneOverflow } from "../BattlefieldZoneOverflow.tsx";
 import { BoardInteractionContext } from "../BoardInteractionContext.tsx";
@@ -27,67 +29,27 @@ vi.mock("../../../hooks/useEngineCardData.ts", () => ({
 }));
 
 function makeObject(id: number, coreTypes: string[] = ["Land"]): GameObject {
-  return {
+  return buildGameObjectWithCoreTypes(coreTypes, {
     id,
     card_id: id,
-    owner: 0,
-    controller: 0,
     zone: "Battlefield",
-    tapped: false,
-    face_down: false,
-    flipped: false,
-    transformed: false,
-    damage_marked: 0,
-    dealt_deathtouch_damage: false,
-    attached_to: null,
-    attachments: [],
-    counters: {},
     name: `Permanent ${id}`,
-    power: null,
-    toughness: null,
-    loyalty: null,
-    card_types: { supertypes: [], core_types: coreTypes, subtypes: [] },
-    mana_cost: { type: "NoCost" },
-    keywords: [],
-    abilities: [],
-    trigger_definitions: [],
-    replacement_definitions: [],
-    static_definitions: [],
-    color: [],
-    base_power: null,
-    base_toughness: null,
-    base_keywords: [],
-    base_color: [],
     timestamp: id,
     entered_battlefield_turn: null,
     available_mana_pips: [{ type: "Color", data: "Green" }],
-  };
+  });
 }
 
-function makeState(objects: Record<number, GameObject>): GameState {
-  const ids = Object.keys(objects).map(Number);
-  return {
-    players: [
-      {
-        id: 0,
-        life: 20,
-        poison_counters: 0,
-        mana_pool: { mana: [] },
-        library: [],
-        hand: [],
-        graveyard: [],
-        has_drawn_this_turn: false,
-        lands_played_this_turn: 0,
-        turns_taken: 0,
-      },
-    ],
+function makeState(objects: Record<string, GameObject>) {
+  const permanents = Object.values(objects);
+  return buildGameState({
+    players: buildPlayers([0]),
     objects,
-    battlefield: ids,
+    battlefield: permanents.map((object) => object.id),
     exile: [],
     stack: [],
-    combat: null,
-    waiting_for: { type: "Priority", data: { player: 0 } },
-  } as unknown as GameState;
+    waiting_for: buildPriorityWaitingFor(),
+  });
 }
 
 function makeGroups(count: number): GroupedPermanentType[] {
@@ -98,6 +60,7 @@ function makeGroups(count: number): GroupedPermanentType[] {
       ids: [id],
       count: 1,
       representative: {} as GroupedPermanentType["representative"],
+      isUnboundedPile: false,
     };
   });
 }
@@ -109,7 +72,8 @@ function makeCreature(id: number, power = 2, toughness = 2): GameObject {
 function renderOverflow(options: {
   groups?: GroupedPermanentType[];
   includePreview?: boolean;
-  objects?: Record<number, GameObject>;
+  objects?: Record<string, GameObject>;
+  activatableObjectIds?: Set<number>;
   boardChoiceObjectIds?: Set<number>;
   selectableSacrificeObjectIds?: Set<number>;
   validTargetObjectIds?: Set<number>;
@@ -117,14 +81,14 @@ function renderOverflow(options: {
   zone?: "lands" | "support" | "creatures";
 } = {}) {
   const groups = options.groups ?? makeGroups(9);
-  const objects = options.objects ?? Object.fromEntries(
-    groups.flatMap((group) => group.ids).map((id) => [id, makeObject(id)]),
+  const objects = options.objects ?? buildObjectMap(
+    ...groups.flatMap((group) => group.ids).map((id) => makeObject(id)),
   );
   useGameStore.setState({ gameState: makeState(objects) });
   return render(
     <BoardInteractionContext.Provider
       value={{
-        activatableObjectIds: new Set(),
+        activatableObjectIds: options.activatableObjectIds ?? new Set(),
         boardChoiceObjectIds: options.boardChoiceObjectIds ?? new Set(),
         committedAttackerIds: options.committedAttackerIds ?? new Set(),
         incomingAttackerCounts: new Map(),
@@ -192,8 +156,8 @@ describe("BattlefieldZoneOverflow", () => {
     // stacks (what the player actually sees), not raw object count.
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 500 });
     const groups: GroupedPermanentType[] = [
-      { name: "Forest", ids: [1, 2, 3, 4, 5, 6, 7], count: 7, representative: {} as GroupedPermanentType["representative"] },
-      { name: "Vernal Fen", ids: [8, 9], count: 2, representative: {} as GroupedPermanentType["representative"] },
+      { name: "Forest", ids: [1, 2, 3, 4, 5, 6, 7], count: 7, representative: {} as GroupedPermanentType["representative"], isUnboundedPile: false },
+      { name: "Vernal Fen", ids: [8, 9], count: 2, representative: {} as GroupedPermanentType["representative"], isUnboundedPile: false },
     ];
 
     renderOverflow({ groups });
@@ -238,6 +202,28 @@ describe("BattlefieldZoneOverflow", () => {
     expect(screen.getByText(/mana 1/i)).toBeInTheDocument();
   });
 
+  // V24 — this component is the SECOND consumer of the affordance pair this PR
+  // re-plumbs (`:378`/`:382` destructured from `useBoardInteractionState()`,
+  // read at `:407`/`:410`), and its `activatableObjectIds` read was unaudited:
+  // the sibling `manaTappableObjectIds` read is already load-bearing (the stub
+  // seeds `new Set([1])` and the badge test above asserts `/mana 1/i`), but the
+  // activatable read could be DELETED with the whole board suite still green.
+  // QUOTED (plan §7.0, the two arms of one recipe — the sibling is the control
+  // that makes the silent arm readable):
+  //   `R8BZO[mutant-DELETE-activatable-read@407]  Tests 130 passed (130) `
+  //   `R8BZO[mutant-DELETE-mana-read@410] Tests 1 failed | 129 passed (130) `
+  // MEASURED (drop side — the `:407` read deleted): `Unable to find an element
+  //   with the text: /^act 2$/i`.
+  // MEASURED (always side — `activatable++` made unconditional, i.e. count the
+  //   whole group instead of the set): `act 9` renders and the anchored matcher
+  //   fails. The count is asserted against the SEEDED SET, never the group size,
+  //   which is what makes "count everything" visible.
+  it("counts only the activatable ids the board published, not the whole group", () => {
+    renderOverflow({ activatableObjectIds: new Set([2, 5]) });
+
+    expect(screen.getByText(/^act 2$/i)).toBeInTheDocument();
+  });
+
   it("surfaces hidden board-choice permanents as interactive", () => {
     renderOverflow({ boardChoiceObjectIds: new Set([2]) });
 
@@ -253,7 +239,7 @@ describe("BattlefieldZoneOverflow", () => {
     const drawerCard = document.querySelector('[data-object-id="1"]');
     expect(drawerCard).not.toBeNull();
 
-    fireEvent.mouseEnter(drawerCard as Element);
+    fireEvent.pointerEnter(drawerCard as Element, { pointerType: "mouse" });
 
     expect(useUiStore.getState().inspectedObjectId).toBe(1);
     expect(screen.getAllByAltText("Permanent 1").length).toBeGreaterThan(0);
@@ -267,7 +253,7 @@ describe("BattlefieldZoneOverflow", () => {
     const drawerCard = document.querySelector('[data-object-id="1"]');
     expect(drawerCard).not.toBeNull();
 
-    fireEvent.mouseEnter(drawerCard as Element);
+    fireEvent.pointerEnter(drawerCard as Element, { pointerType: "mouse" });
     fireEvent.mouseMove(drawerCard as Element, { clientX: 24, clientY: 24 });
 
     expect(useUiStore.getState().inspectedObjectId).toBeNull();

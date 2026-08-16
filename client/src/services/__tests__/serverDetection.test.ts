@@ -1,6 +1,31 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import { formatJoinShare, mixedContentBlockReason, parseJoinCode } from "../serverDetection";
+import {
+  DEFAULT_MULTIPLAYER_SERVER_URL,
+  OFFICIAL_MULTIPLAYER_SERVER_URL,
+} from "../../config/multiplayerServer";
+import {
+  DEFAULT_SERVER,
+  SERVER_PRESETS,
+  formatJoinShare,
+  mixedContentBlockReason,
+  parseJoinCode,
+} from "../serverDetection";
+
+describe("server defaults", () => {
+  it("uses the configured build default as the first server preset", () => {
+    expect(DEFAULT_SERVER).toBe(DEFAULT_MULTIPLAYER_SERVER_URL);
+    expect(DEFAULT_SERVER).toBe(SERVER_PRESETS[0].url);
+    expect(SERVER_PRESETS).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          labelKey: "serverPicker.official",
+          url: OFFICIAL_MULTIPLAYER_SERVER_URL,
+        }),
+      ]),
+    );
+  });
+});
 
 describe("parseJoinCode", () => {
   it("returns just the code when no server address is present", () => {

@@ -16,6 +16,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::VentureIntoDungeon,
         source_id: ability.source_id,
+        subject: None,
     });
     resolve_venture_for_player(state, ability.controller, VentureSource::Normal, events)
 }
@@ -30,6 +31,7 @@ pub fn resolve_venture_into(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::VentureInto,
         source_id: ability.source_id,
+        subject: None,
     });
     resolve_venture_for_player(
         state,
@@ -57,6 +59,7 @@ pub fn resolve_take_initiative(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::TakeTheInitiative,
         source_id: ability.source_id,
+        subject: None,
     });
 
     // CR 726.2: "Whenever a player takes the initiative, that player ventures into Undercity."
@@ -236,7 +239,7 @@ fn queue_room_trigger(
         source_id,
         controller: player,
         condition: None,
-        ability: room_ability,
+        ability: Box::new(room_ability),
         timestamp: 0,
         target_constraints,
         distribute: None,
@@ -252,6 +255,7 @@ fn queue_room_trigger(
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        provenance: None,
     };
 
     // CR 603.2 + CR 309.4c: Dispatch through the standard

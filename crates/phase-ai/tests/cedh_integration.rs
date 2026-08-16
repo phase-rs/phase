@@ -26,7 +26,7 @@ use phase_ai::combo::ComboRegistry;
 use phase_ai::config::{create_config, create_config_for_players, AiDifficulty, Platform};
 use phase_ai::features::DeckFeatures;
 use phase_ai::policies::registry::{PolicyId, PolicyRegistry};
-use phase_ai::search::{choose_action, score_candidates};
+use phase_ai::search::{choose_action, score_candidates, select_safe_action_from_scores};
 
 /// Builds the minimal `GameState` shared by the `score_candidates` and
 /// `choose_action` cEDH combo tests.
@@ -366,7 +366,7 @@ fn score_candidates_boosts_heliod_combo_activation_for_cedh_ai() {
 /// Closes the selection-layer gap left by `score_candidates_boosts_*`.
 ///
 /// `score_candidates` proved the combo bonus reaches the final score. This
-/// test proves the SELECTION layer — `choose_action`'s `softmax_select_pairs`
+/// test proves the SELECTION layer — `choose_action`'s softmax
 /// call — uses that score dominance to pick a combo activation in practice.
 ///
 /// A single trial would be seed-dependent. Instead we run 50 trials with
@@ -385,10 +385,22 @@ fn choose_action_picks_combo_activation_for_cedh_ai() {
         cedh_combo_state_with_synthetic_abilities(CommanderBracketTier::Cedh);
     let config = create_config(AiDifficulty::CEDH, Platform::Native).into_measurement(42);
 
+    let mut smoke_rng = SmallRng::seed_from_u64(0);
+    assert!(
+        choose_action(&state, PlayerId(0), &config, &mut smoke_rng).is_some(),
+        "choose_action smoke must return a legal action"
+    );
+
+    let scored = score_candidates(&state, PlayerId(0), &config);
+    assert!(
+        !scored.is_empty(),
+        "score_candidates returned no candidates"
+    );
+
     let mut combo_count = 0u32;
     for seed in 0..50u64 {
         let mut rng = SmallRng::seed_from_u64(seed);
-        let action = choose_action(&state, PlayerId(0), &config, &mut rng);
+        let action = select_safe_action_from_scores(&state, &scored, config.temperature, &mut rng);
         if matches!(
             action,
             Some(GameAction::ActivateAbility {
@@ -428,10 +440,22 @@ fn choose_action_does_not_boost_combo_without_is_cedh() {
     // Difficulty stays CEDH so the only variable is the deck tier / is_cedh flag.
     let config = create_config(AiDifficulty::CEDH, Platform::Native).into_measurement(42);
 
+    let mut smoke_rng = SmallRng::seed_from_u64(0);
+    assert!(
+        choose_action(&state, PlayerId(0), &config, &mut smoke_rng).is_some(),
+        "choose_action smoke must return a legal action"
+    );
+
+    let scored = score_candidates(&state, PlayerId(0), &config);
+    assert!(
+        !scored.is_empty(),
+        "score_candidates returned no candidates"
+    );
+
     let mut combo_count = 0u32;
     for seed in 0..50u64 {
         let mut rng = SmallRng::seed_from_u64(seed);
-        let action = choose_action(&state, PlayerId(0), &config, &mut rng);
+        let action = select_safe_action_from_scores(&state, &scored, config.temperature, &mut rng);
         if matches!(
             action,
             Some(GameAction::ActivateAbility {

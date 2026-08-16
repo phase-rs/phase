@@ -3,6 +3,7 @@ import { cardImageLookup } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { shouldRenderCardBack } from "../../viewmodel/cardProps.ts";
 import { CardPreview } from "./CardPreview.tsx";
 
 /**
@@ -24,6 +25,7 @@ export function GameCardPreview() {
 
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
   const inspectedFaceIndex = useUiStore((s) => s.inspectedFaceIndex);
+  const previewPlacement = useUiStore((s) => s.previewPlacement);
   const isDragging = useUiStore((s) => s.isDragging);
   const shiftHeld = useUiStore((s) => s.shiftHeld);
   // Card-preview behavior preference. In "shift" mode the preview only renders
@@ -42,13 +44,13 @@ export function GameCardPreview() {
   // obj.name to the back-face name — cardImageLookup recovers the front name
   // from obj.back_face. See services/cardImageLookup.ts (issue #90).
   const inspectedLookup = inspectedObj ? cardImageLookup(inspectedObj) : null;
-  const inspectedCardName = inspectedObj && !inspectedObj.face_down
+  const inspectedCardName = inspectedObj && !shouldRenderCardBack(inspectedObj)
     ? inspectedFaceIndex === 1 && inspectedObj.back_face
       ? inspectedObj.back_face.name
       : inspectedLookup?.name ?? inspectedObj.name
     : null;
   // The "other" face: when viewing front, this is back_face; when viewing back, this is the front.
-  const inspectedOtherFaceName = inspectedObj?.back_face && !inspectedObj.face_down
+  const inspectedOtherFaceName = inspectedObj?.back_face && !shouldRenderCardBack(inspectedObj)
     ? inspectedFaceIndex === 1 ? inspectedObj.name : inspectedObj.back_face.name
     : null;
 
@@ -57,8 +59,10 @@ export function GameCardPreview() {
   return (
     <CardPreview
       cardName={previewSuppressed ? null : inspectedCardName}
+      objectId={inspectedObj?.id ?? null}
       backFaceName={previewSuppressed ? null : inspectedOtherFaceName}
-      dockSide={cardPreviewMode === "side"}
+      dockSide={cardPreviewMode === "side" || previewPlacement === "side"}
+      handSourceObjectId={inspectedObj?.zone === "Hand" ? inspectedObj.id : null}
     />
   );
 }

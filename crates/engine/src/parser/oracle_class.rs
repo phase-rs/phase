@@ -1,23 +1,31 @@
+use super::oracle_ir::doc::{OracleNodeIr, PrintedTriggerIndex, UnsupportedAbilityIr};
 use crate::parser::oracle_nom::error::OracleError;
 use nom::bytes::complete::tag;
 use nom::Parser;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ActivationRestriction, Effect, ReplacementCondition,
-    ReplacementDefinition, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
-    TriggerConstraint, TriggerDefinition,
+    AbilityKind, ActivationRestriction, Effect, ReplacementCondition, ReplacementDefinition,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition,
 };
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
-use super::oracle::{has_unimplemented, make_unimplemented, ParsedAbilities};
+use super::oracle::has_unimplemented;
 use super::oracle_classifier::{
     is_effect_sentence_candidate, is_granted_static_line, is_replacement_pattern, is_static_pattern,
 };
 use super::oracle_cost::parse_oracle_cost;
-use super::oracle_effect::parse_effect_chain;
+use super::oracle_effect::{lower_ability_ir, parse_ability_ir_standalone, parse_effect_chain};
+use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::ParseContext;
-use super::oracle_keyword::extract_keyword_line;
+use super::oracle_ir::effect_chain::{
+    AbilityIr, AbilityShellIr, EffectChainIr, PlayerScopeRewrite,
+};
+use super::oracle_ir::replacement::ReplacementIr;
+use super::oracle_ir::static_ir::StaticIr;
+use super::oracle_ir::trigger::TriggerNodeIr;
+use super::oracle_keyword::extract_granted_keyword_list;
 use super::oracle_modal::strip_ability_word;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_replacement::parse_replacement_line;
@@ -55,15 +63,19 @@ pub(crate) fn parse_class_oracle_text(
     lines: &[&str],
     card_name: &str,
     mtgjson_keyword_names: &[String],
-    mut result: ParsedAbilities,
-) -> ParsedAbilities {
-    // Split lines into level sections: (level, lines)
-    // Level 1 section has level=1, subsequent sections have level=2, 3, etc.
+) -> Vec<(usize, OracleNodeIr)> {
+    // Split lines into level sections. Level 1 has level=1; each "{cost}: Level N"
+    // line opens a new section. Every retained line keeps the index of the printed
+    // source line it came from, so each item this function produces can be emitted
+    // at its true position (`DocEmitter::emit_at`) instead of at a whole-document
+    // span. Reminder-text stripping and trimming rewrite the line's TEXT but never
+    // its INDEX, so the index stays a faithful pointer into `lines`.
     struct LevelSection {
         level: u8,
-        /// For levels > 1: cost text and the level line description.
-        level_up: Option<(String, String)>,
-        lines: Vec<String>,
+        /// For levels > 1: the level line's source index, its cost text, and the
+        /// level line description.
+        level_up: Option<(usize, String, String)>,
+        lines: Vec<(usize, String)>,
     }
 
     let mut sections: Vec<LevelSection> = vec![LevelSection {
@@ -72,7 +84,7 @@ pub(crate) fn parse_class_oracle_text(
         lines: Vec::new(),
     }];
 
-    for &raw_line in lines {
+    for (index, &raw_line) in lines.iter().enumerate() {
         let trimmed = raw_line.trim();
         if trimmed.is_empty() {
             continue;
@@ -85,57 +97,113 @@ pub(crate) fn parse_class_oracle_text(
         if let Some((level, cost_text)) = parse_class_level_line(&stripped) {
             sections.push(LevelSection {
                 level,
-                level_up: Some((cost_text, stripped.to_string())),
+                level_up: Some((index, cost_text, stripped.to_string())),
                 lines: Vec::new(),
             });
         } else {
             // Add line to the current (last) section
             if let Some(section) = sections.last_mut() {
-                section.lines.push(stripped);
+                section.lines.push((index, stripped));
             }
         }
     }
 
+    // Items in printed source order: sections run in source order, and within a
+    // section the "{cost}: Level N" line precedes the lines it gates.
+    let mut items: Vec<(usize, OracleNodeIr)> = Vec::new();
+
     // Process each level section
     for section in &sections {
         // Generate the "{cost}: Level N" activated ability
-        if let Some((cost_text, description)) = &section.level_up {
-            let cost = parse_oracle_cost(cost_text);
-            let mut def = AbilityDefinition::new(
+        if let Some((level_line, cost_text, description)) = &section.level_up {
+            // Plan 05b T8-A4, recipe R2: the hand-built definition becomes a
+            // one-clause `EffectChainIr` body plus a CR 602.1 activation shell,
+            // lowered through the single authority `lower_ability_ir`. Phase A
+            // still emits the pre-lowered node, so this is the same value the
+            // hand-built path produced; T9 swaps the payload for the IR itself.
+            //
+            // `source_text` is the whole printed level line, which is also the
+            // chain text and therefore the single clause's fragment: the clause
+            // IS the whole ability body here, so its span is the line's own
+            // `0..len` and nothing about the provenance is invented.
+            let mut body = EffectChainIr::single_clause(
+                description,
                 AbilityKind::Activated,
-                Effect::SetClassLevel {
+                parsed_clause(Effect::SetClassLevel {
                     level: section.level,
-                },
+                }),
+                None,
+                None,
+                false,
             );
-            def.cost = Some(cost);
-            def.description = Some(description.clone());
-            // CR 602.5d + CR 716.4: Level N+1 can only activate at sorcery speed
-            // and only when at level N.
-            def.activation_restrictions
-                .push(ActivationRestriction::AsSorcery);
-            def.activation_restrictions
-                .push(ActivationRestriction::ClassLevelIs {
-                    level: section.level - 1,
-                });
-            result.abilities.push(def);
+            // The hand-built definition never ran `apply_player_scope_rewrites`,
+            // so `Preserve` — not `single_clause`'s `Apply` default — is what
+            // reproduces it. This is also T8's mandated R2 mitigation: it removes
+            // the one rewrite family that is not inert on shape alone.
+            body.player_scope_rewrite = PlayerScopeRewrite::Preserve;
+            let ir = AbilityIr {
+                source_text: description.clone(),
+                body,
+                shell: AbilityShellIr {
+                    // CR 602.1a: the activation cost, everything before the colon.
+                    cost: Some(parse_oracle_cost(cost_text)),
+                    description: Some(description.clone()),
+                    // CR 602.1b + CR 716.2a: "[Cost]: Level N" means "Activate
+                    // only if this Class is level N-1 and only as a sorcery"
+                    // (CR 602.5d supplies the sorcery-speed timing). The vec is
+                    // applied verbatim, so it is built in the order the
+                    // hand-built site pushed them — which is the REVERSE of the
+                    // order CR 716.2a states them in. That order is a
+                    // pre-existing property of this site, preserved here rather
+                    // than quietly changed inside a byte-identical conversion.
+                    activation_restrictions: vec![
+                        ActivationRestriction::AsSorcery,
+                        ActivationRestriction::ClassLevelIs {
+                            level: section.level - 1,
+                        },
+                    ],
+                    ..AbilityShellIr::default()
+                },
+                die_results: vec![],
+                modal: None,
+                root_transforms: vec![],
+            };
+            items.push((
+                *level_line,
+                OracleNodeIr::PreLoweredSpell(lower_ability_ir(&ir)),
+            ));
         }
 
         // Parse ability lines for this level section
-        for line in &section.lines {
+        for (line_index, line) in &section.lines {
+            let line_index = *line_index;
             let lower = line.to_lowercase();
             let static_line = normalize_self_refs_for_static(line, card_name);
 
             // Check for "When this Class becomes level N" trigger pattern
             if is_class_level_trigger(&lower, card_name) {
                 if let Some(trigger) = parse_class_level_trigger(line, card_name, section.level) {
-                    result.triggers.push(trigger);
+                    // The `ClassLevelGained` mode, the `AtClassLevel { level }`
+                    // constraint and the `"When ~ becomes level N"` description
+                    // are all stamped by the recognizer.
+                    // `lower_trigger_node_ir` is the identity on `Assembled`, so
+                    // none of them is re-derived — in particular the description
+                    // is not overwritten with `source_text`.
+                    items.push((
+                        line_index,
+                        OracleNodeIr::Trigger(TriggerNodeIr::from_definition(line, trigger)),
+                    ));
                     continue;
                 }
             }
 
             // Keyword-only lines
-            if let Some(extracted) = extract_keyword_line(line, mtgjson_keyword_names) {
-                result.extracted_keywords.extend(extracted);
+            if let Some(extracted) = extract_granted_keyword_list(line, mtgjson_keyword_names) {
+                items.extend(
+                    extracted
+                        .into_iter()
+                        .map(|kw| (line_index, OracleNodeIr::Keyword(kw))),
+                );
                 continue;
             }
 
@@ -153,18 +221,20 @@ pub(crate) fn parse_class_oracle_text(
                 let mut triggers = parse_trigger_lines_at_index(
                     line,
                     card_name,
-                    Some(result.triggers.len()),
+                    Some(PrintedTriggerIndex::placeholder()),
                     &mut ParseContext::default(),
                 );
                 // CR 716.2a: Gate continuous triggers at levels > 1.
                 if section.level > 1 {
                     for trigger in &mut triggers {
-                        trigger.condition = Some(TriggerCondition::ClassLevelGE {
-                            level: section.level,
-                        });
+                        wrap_trigger_with_class_level(trigger, section.level);
                     }
                 }
-                result.triggers.extend(triggers);
+                items.extend(
+                    triggers
+                        .into_iter()
+                        .map(|t| (line_index, OracleNodeIr::PreLoweredTrigger(t))),
+                );
                 continue;
             }
 
@@ -174,7 +244,10 @@ pub(crate) fn parse_class_oracle_text(
                     if section.level > 1 {
                         static_def = wrap_static_with_class_level(static_def, section.level);
                     }
-                    result.statics.push(static_def);
+                    items.push((
+                        line_index,
+                        OracleNodeIr::Static(StaticIr::from_definition(&static_line, static_def)),
+                    ));
                     continue;
                 }
             }
@@ -185,7 +258,10 @@ pub(crate) fn parse_class_oracle_text(
                     if section.level > 1 {
                         static_def = wrap_static_with_class_level(static_def, section.level);
                     }
-                    result.statics.push(static_def);
+                    items.push((
+                        line_index,
+                        OracleNodeIr::Static(StaticIr::from_definition(&static_line, static_def)),
+                    ));
                     continue;
                 }
             }
@@ -202,7 +278,10 @@ pub(crate) fn parse_class_oracle_text(
                     if section.level > 1 {
                         rep_def = wrap_replacement_with_class_level(rep_def, section.level);
                     }
-                    result.replacements.push(rep_def);
+                    items.push((
+                        line_index,
+                        OracleNodeIr::Replacement(ReplacementIr::from_definition(line, rep_def)),
+                    ));
                     continue;
                 }
             }
@@ -220,17 +299,19 @@ pub(crate) fn parse_class_oracle_text(
                     let mut triggers = parse_trigger_lines_at_index(
                         &effect_text,
                         card_name,
-                        Some(result.triggers.len()),
+                        Some(PrintedTriggerIndex::placeholder()),
                         &mut ParseContext::default(),
                     );
                     if section.level > 1 {
                         for trigger in &mut triggers {
-                            trigger.condition = Some(TriggerCondition::ClassLevelGE {
-                                level: section.level,
-                            });
+                            wrap_trigger_with_class_level(trigger, section.level);
                         }
                     }
-                    result.triggers.extend(triggers);
+                    items.extend(
+                        triggers
+                            .into_iter()
+                            .map(|t| (line_index, OracleNodeIr::PreLoweredTrigger(t))),
+                    );
                     continue;
                 }
                 if is_static_pattern(&effect_lower) {
@@ -239,27 +320,70 @@ pub(crate) fn parse_class_oracle_text(
                         if section.level > 1 {
                             static_def = wrap_static_with_class_level(static_def, section.level);
                         }
-                        result.statics.push(static_def);
+                        items.push((
+                            line_index,
+                            OracleNodeIr::Static(StaticIr::from_definition(
+                                &effect_static,
+                                static_def,
+                            )),
+                        ));
                         continue;
                     }
                 }
             }
 
             // Effect/spell-like lines (e.g., "You may play an additional land...")
+            //
+            // Mode-preserving hoist (Plan 05b U0-61): `parse_effect_chain(t, k)`
+            // **is** `lower_ability_ir(&parse_ability_ir_standalone(t, k))` —
+            // that is the function's body, not a claim about it
+            // (`oracle_effect/mod.rs`). So splitting it into its two halves
+            // moves *where* the lowering happens without changing *what* it
+            // produces: the node now carries the IR, and `lower_oracle_ir`
+            // performs the same `lower_ability_ir` this line used to.
+            //
+            // The gate keeps reading a LOWERED definition, as at U0-12 and
+            // U0-39: whether to emit is control flow, and `has_unimplemented`
+            // is defined over an `AbilityDefinition`, so the predicate must see
+            // the definition this site will actually emit. A second
+            // `has_unimplemented` over `EffectChainIr` would be a rival
+            // authority free to diverge from this one.
             if is_effect_sentence_candidate(&lower) {
-                let def = parse_effect_chain(line, AbilityKind::Spell);
-                if !has_unimplemented(&def) {
-                    result.abilities.push(def);
+                let ir = parse_ability_ir_standalone(line, AbilityKind::Spell);
+                if !has_unimplemented(&lower_ability_ir(&ir)) {
+                    items.push((line_index, OracleNodeIr::Spell(ir)));
                     continue;
                 }
             }
 
-            // Fallback: unimplemented
-            result.abilities.push(make_unimplemented(line));
+            // Fallback: the honest-failure residual (Plan 05b U0-62).
+            //
+            // Two routes reach here, and **the discard on the second one is
+            // deliberate and preserved exactly.** Route one is a line no
+            // recognizer above claimed at all. Route two is an effect-sentence
+            // candidate whose chain DID parse, but whose lowered root contains an
+            // `Unimplemented` — that `ir` is thrown away and the residual is
+            // rebuilt from `line`. Keeping the partial chain instead would be a
+            // *behavior* change, not a conversion: it would name the failed
+            // clause rather than the fixed `"unknown"` sentinel and would move
+            // the coverage key. `ir` is scoped inside the `if` block above, so
+            // the discard is structural here rather than a convention a later
+            // edit could quietly drop.
+            //
+            // `min_x_value: 0` is the floor the discarded shape carried:
+            // `AbilityDefinition::new` defaults it to 0 and nothing on either
+            // route raises it before this point.
+            items.push((
+                line_index,
+                OracleNodeIr::Unsupported {
+                    unsupported: UnsupportedAbilityIr::unknown(line),
+                    min_x_value: 0,
+                },
+            ));
         }
     }
 
-    result
+    items
 }
 
 /// Check if a line matches "when ~ becomes level N" pattern.
@@ -322,6 +446,26 @@ fn parse_class_level_trigger(line: &str, card_name: &str, level: u8) -> Option<T
     )
 }
 
+/// CR 716.2a: Gate a Class-level trigger's intervening-if on the source Class
+/// being at `level` or higher. If the trigger already carries a condition
+/// (e.g. a printed intervening-if like "if a modified creature died under
+/// your control this turn"), compose both predicates with And instead of
+/// overwriting — mirrors `wrap_static_with_class_level` /
+/// `wrap_replacement_with_class_level` below.
+fn wrap_trigger_with_class_level(trigger: &mut TriggerDefinition, level: u8) {
+    let level_cond = TriggerCondition::ClassLevelGE { level };
+    trigger.condition = Some(match trigger.condition.take() {
+        Some(TriggerCondition::And { mut conditions }) => {
+            conditions.insert(0, level_cond);
+            TriggerCondition::And { conditions }
+        }
+        Some(existing) => TriggerCondition::And {
+            conditions: vec![level_cond, existing],
+        },
+        None => level_cond,
+    });
+}
+
 /// Wrap a static definition's condition with ClassLevelGE.
 /// If the static already has a condition, compose with And.
 fn wrap_static_with_class_level(mut static_def: StaticDefinition, level: u8) -> StaticDefinition {
@@ -355,17 +499,82 @@ fn wrap_replacement_with_class_level(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::types::ability::{ContinuousModification, Effect};
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{ContinuousModification, Effect, TriggerCondition};
+    use crate::types::phase::Phase;
+    use crate::types::triggers::TriggerMode;
+
+    /// CR 716.2a: A level-3+ trigger that already carries a printed
+    /// intervening-if ("if a modified creature died under your control this
+    /// turn") must keep BOTH the printed condition and the level gate. Before
+    /// this fix, `parse_class_oracle_text` unconditionally overwrote
+    /// `trigger.condition` with `ClassLevelGE`, silently dropping the printed
+    /// intervening-if (issue #5638 — Intermediate Chirography's level-3
+    /// ability parsed as "at the beginning of each end step, create a token"
+    /// with no death check at all).
+    #[test]
+    fn class_level_trigger_composes_printed_condition_with_class_level_gate() {
+        let oracle_text = "When this Class enters, create a 2/1 white and black Inkling creature token with flying.\n\
+             {1}{B}: Level 2\n\
+             Whenever you lose life for the first time each turn, put a +1/+1 counter on target creature you control.\n\
+             {2}{B}: Level 3\n\
+             At the beginning of each end step, if a modified creature died under your control this turn, create a 2/1 white and black Inkling creature token with flying.";
+        let result = parse_oracle_text(
+            oracle_text,
+            "Intermediate Chirography",
+            &[],
+            &["Enchantment".to_string()],
+            &["Class".to_string()],
+        );
+
+        let level_3_trigger = result
+            .triggers
+            .iter()
+            .find(|t| t.mode == TriggerMode::Phase && t.phase == Some(Phase::End))
+            .expect("level-3 end-step trigger should be present");
+
+        match level_3_trigger
+            .condition
+            .as_ref()
+            .expect("level-3 trigger must carry a condition")
+        {
+            TriggerCondition::And { conditions } => {
+                assert!(
+                    conditions
+                        .iter()
+                        .any(|c| matches!(c, TriggerCondition::ClassLevelGE { level: 3 })),
+                    "expected ClassLevelGE(3) among composed conditions, got {conditions:?}"
+                );
+                assert!(
+                    conditions
+                        .iter()
+                        .any(|c| matches!(c, TriggerCondition::QuantityComparison { .. })),
+                    "expected the printed 'died under your control this turn' \
+                     intervening-if to survive as a QuantityComparison, got {conditions:?}"
+                );
+            }
+            other => panic!(
+                "expected TriggerCondition::And composing the class-level gate \
+                 with the printed intervening-if, got {other:?} — the printed \
+                 condition was likely overwritten"
+            ),
+        }
+    }
 
     /// CR 707.9a + CR 716.2a: A Class-level trigger body using "becomes a copy
-    /// of <X>, except <pronoun> has this ability" must emit
-    /// `RetainPrintedTriggerFromSource { source_trigger_index: <N> }` where
-    /// `<N>` is the trigger's index in the card's full printed-trigger list.
-    /// This guards against the regression where Class-level triggers called
-    /// `parse_trigger_lines` (no index thread), causing the retain modification
-    /// to either silently drop or point at trigger index 0 regardless of where
-    /// the trigger actually sits in the printed list.
+    /// of <X>, except <pronoun> has this ability" must resolve
+    /// `RetainPrintedTriggerFromSource { source_trigger_index: <N> }` to `<N>` =
+    /// the trigger's index in the card's full printed-trigger list.
+    ///
+    /// Drives the FULL pipeline (`parse_oracle_text`) rather than the
+    /// `parse_class_oracle_text` preprocessor alone: under late-binding the
+    /// dispatch/preprocessor path bakes a `placeholder()` (= 0) into the retain
+    /// modification, and only `finish()` resolves it to the item's real printed
+    /// slot from the source-ordered document. A preprocessor-only call would
+    /// observe the unresolved placeholder, so this test must run the whole path.
+    /// It guards both the class trigger-index threading and the `finish()`-time
+    /// resolution: reverting the `finish()` stamp yields `source_trigger_index:
+    /// 0` and this assertion fails.
     #[test]
     fn class_level_trigger_become_copy_threads_trigger_index() {
         // Synthetic two-level Class enchantment: level 1 has a trigger
@@ -374,38 +583,20 @@ mod tests {
         // "At the beginning of your upkeep, ~ becomes a copy of … and
         // it has this ability".
         //
-        // Without the index thread, `RetainPrintedTriggerFromSource` would
-        // come out as `source_trigger_index: 0`, pointing at the wrong
-        // trigger. With the thread, it correctly points at index 1.
-        //
         // The level-2 body uses a phase trigger (At the beginning of …)
         // rather than the class-level `When ~ becomes level N` trigger,
         // because the latter takes a special path that doesn't dispatch
         // to the chain parser for the body — the AtClassLevel trigger is
         // a registration-time event, not a body-effect trigger.
-        let lines = vec![
-            "When this Class enters, draw a card.",
-            "{2}: Level 2",
-            "At the beginning of your upkeep, ~ becomes a copy of target creature you control, except its name is ~ and it has this ability.",
-        ];
-        let result = parse_class_oracle_text(
-            &lines,
+        let oracle_text = "When this Class enters, draw a card.\n\
+             {2}: Level 2\n\
+             At the beginning of your upkeep, ~ becomes a copy of target creature you control, except its name is ~ and it has this ability.";
+        let result = parse_oracle_text(
+            oracle_text,
             "Test Class",
             &[],
-            ParsedAbilities {
-                abilities: Vec::new(),
-                triggers: Vec::new(),
-                statics: Vec::new(),
-                replacements: Vec::new(),
-                extracted_keywords: Vec::new(),
-                modal: None,
-                additional_cost: None,
-                casting_restrictions: Vec::new(),
-                casting_options: Vec::new(),
-                solve_condition: None,
-                strive_cost: None,
-                parse_warnings: Vec::new(),
-            },
+            &["Enchantment".to_string()],
+            &["Class".to_string()],
         );
 
         // Find the level-2 BecomeCopy trigger.

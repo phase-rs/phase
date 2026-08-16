@@ -1,6 +1,6 @@
 //! Engine surface inventory generator.
 //!
-//! Walks `crates/engine/src/types/` via `syn`, enumerates every `pub enum` and
+//! Walks `crates/engine/src/` via `syn`, enumerates every `pub enum` and
 //! its variants with file:line, doc comments, and CR annotations. Auto-detects
 //! sibling-cluster smells (variants sharing a name root that look like
 //! parameterization candidates per the workspace "Parameterize, don't proliferate"
@@ -37,6 +37,10 @@ struct Inventory {
 
 #[derive(Serialize)]
 struct EnumEntry {
+    /// The bare ident. Carried as a field because the map key is module-qualified: without it
+    /// a quoted grep (`"LayoutKind"`) — a form the discoverability gate is written in — went
+    /// from 1 hit to 0. MEASURED on this tree before the field was added.
+    name: String,
     file: String,
     line: usize,
     doc: String,
@@ -74,12 +78,41 @@ struct ClusterSmell {
     cluster: SiblingCluster,
 }
 
-const TARGET_DIR: &str = "crates/engine/src/types";
+/// Every directory whose `pub enum`s are engine surface a variant proposal must be able to
+/// discover. CLAUDE.md makes an inventory grep the mandatory discoverability gate before
+/// proposing a variant and scopes it to "any other engine enum", so the walk is the WHOLE
+/// engine crate rather than a hand-kept subset: a `types/` + `analysis/` walk leaves 85
+/// top-level `pub enum`s under `crates/engine/src` structurally invisible to the gate
+/// (`game/` 61, `ai_support/` 13, `parser/` 7, `database/` 4). That split is the standing
+/// reason for the walk root, and it is re-derivable at any time by grouping the emitted
+/// `file` fields. One root is also shorter than the list it replaces.
+///
+/// THE TOTALS ARE A SNAPSHOT, NOT A STANDING FACT — deliberately stated apart from the split
+/// above, because pinning the two together is what let one stale digit rot the other. Measured
+/// 2026-08-13: 655 enums, 5320 variants. If they move, RE-TAKE them rather than re-label; and
+/// prefer not to read them here at all, since every run prints its own totals on the success
+/// line, which is the only current answer. What must stay true is the invariant those totals
+/// are evidence for: the catalogue holds one entry per DECLARATION, so `enum_count` and the
+/// declaration count are the same number.
+///
+/// THE CATALOGUE KEY IS MODULE-QUALIFIED (`types::card::LayoutKind`), because the widened walk
+/// makes ident collisions reachable and an ident key drops one side of every collision. Measured
+/// on this tree: `LayoutKind` is declared in BOTH `types/card.rs` and `database/synthesis.rs`,
+/// and the two are NOT variant-identical — `Omen` exists only in `card.rs`, `Specialize` only in
+/// `synthesis.rs`. An ident key therefore answered the discoverability gate with ONE enum's
+/// variant list, so an existence check for the shadowed variant returned a FALSE NEGATIVE — the
+/// exact outcome CLAUDE.md makes this grep mandatory to prevent. It also made the output
+/// irreproducible: which side survived was decided by `readdir` order.
+///
+/// Grep still works on the qualified key: `LayoutKind` is a substring of
+/// `types::card::LayoutKind`, so the skill's `rg "<concept>" data/engine-inventory.json`
+/// existence check is unaffected. Unique keys additionally make the `BTreeMap` order — and so
+/// the emitted JSON — a function of the source tree alone.
+const TARGET_DIRS: &[&str] = &["crates/engine/src"];
 const OUTPUT: &str = "data/engine-inventory.json";
 
 fn main() -> Result<()> {
     let workspace_root = find_workspace_root()?;
-    let target = workspace_root.join(TARGET_DIR);
     let output = workspace_root.join(OUTPUT);
 
     let cr_re = Regex::new(r"CR \d{3}(?:\.\d+[a-z]?)?")?;
@@ -87,28 +120,54 @@ fn main() -> Result<()> {
     let mut enums: BTreeMap<String, EnumEntry> = BTreeMap::new();
     let mut sources: Vec<String> = Vec::new();
 
-    for entry in WalkDir::new(&target).into_iter().filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.extension().is_none_or(|ext| ext != "rs") {
-            continue;
-        }
-        let rel = path.strip_prefix(&workspace_root).unwrap_or(path);
-        sources.push(rel.display().to_string());
+    for dir in TARGET_DIRS {
+        let target = workspace_root.join(dir);
+        // Sorted so the emitted `sources` list — and the walk itself — does not depend on
+        // `readdir` order.
+        //
+        // ALL THREE per-file failures propagate: walk, read, AND parse. The parse arm used to
+        // `continue` past unparseable files as "likely WIP" while `sources.push` ran BEFORE
+        // it, so such a file was LISTED as scanned while contributing zero enums — the
+        // inventory reported success over a file it never read, and the `add-engine-variant`
+        // existence gate got a FALSE NEGATIVE indistinguishable from a true one. A WIP file is
+        // a reason to fix the file, not to hand that gate a silent hole.
+        for entry in WalkDir::new(&target).sort_by_file_name() {
+            let entry = entry.with_context(|| format!("walk {}", target.display()))?;
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "rs") {
+                continue;
+            }
+            let module = module_path(path.strip_prefix(&target).unwrap_or(path));
+            let rel = path.strip_prefix(&workspace_root).unwrap_or(path);
 
-        let content =
-            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        let file = match syn::parse_file(&content) {
-            Ok(f) => f,
-            Err(_) => continue, // skip unparseable files (likely WIP)
-        };
+            let content =
+                fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+            let file =
+                syn::parse_file(&content).with_context(|| format!("parse {}", path.display()))?;
+            // AFTER the parse, not before. The ordering is unobservable today (every failure
+            // above aborts the run and writes nothing), so this is the structural form of the
+            // fix rather than the fix: `sources` means "files this inventory actually read",
+            // and position now enforces that instead of the error handling continuing to.
+            sources.push(rel.display().to_string());
 
-        for item in &file.items {
-            if let Item::Enum(e) = item {
-                if !is_pub(&e.vis) {
-                    continue;
+            for item in &file.items {
+                if let Item::Enum(e) = item {
+                    if !is_pub(&e.vis) {
+                        continue;
+                    }
+                    let entry = build_enum_entry(e, &content, rel, &cr_re);
+                    let key = if module.is_empty() {
+                        e.ident.to_string()
+                    } else {
+                        format!("{module}::{}", e.ident)
+                    };
+                    // Rust cannot declare two same-named top-level enums in one file, so a
+                    // collision here means the key stopped identifying a declaration. Loud,
+                    // because a silent overwrite is the defect this key shape exists to close.
+                    if let Some(prev) = enums.insert(key.clone(), entry) {
+                        anyhow::bail!("duplicate inventory key {key}: already held {}", prev.file);
+                    }
                 }
-                let entry = build_enum_entry(e, &content, rel, &cr_re);
-                enums.insert(e.ident.to_string(), entry);
             }
         }
     }
@@ -165,6 +224,23 @@ fn find_workspace_root() -> Result<PathBuf> {
     }
 }
 
+/// The module path of a source file relative to the walk root: `types/card.rs` → `types::card`,
+/// `game/mod.rs` → `game`, `lib.rs` → `` (crate root).
+///
+/// Derived from the PATH rather than from `syn`, which is exact here because only top-level
+/// `file.items` are catalogued — an enum inside an inline `mod` is not walked at all.
+fn module_path(rel_to_root: &Path) -> String {
+    let mut parts: Vec<String> = rel_to_root
+        .with_extension("")
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    if let Some("mod" | "lib" | "main") = parts.last().map(String::as_str) {
+        parts.pop();
+    }
+    parts.join("::")
+}
+
 fn is_pub(vis: &syn::Visibility) -> bool {
     matches!(vis, syn::Visibility::Public(_))
 }
@@ -207,6 +283,7 @@ fn build_enum_entry(e: &ItemEnum, _source: &str, rel_path: &Path, cr_re: &Regex)
     let sibling_clusters = detect_clusters(&variants);
 
     EnumEntry {
+        name: e.ident.to_string(),
         file: rel_path.display().to_string(),
         line,
         doc,

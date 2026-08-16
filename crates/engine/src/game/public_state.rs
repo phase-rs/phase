@@ -17,10 +17,9 @@ use super::turn_control;
 /// is split into [`finalize_display_state`] so engine-owned fast-forward loops
 /// can keep rules state current while batching expensive display recomputes.
 pub fn finalize_rules_state(state: &mut GameState) {
-    // CR 614.12a + CR 615.5: Backward-compat for the 2026-05-09 audit M4
-    // post-replacement-continuation slot fold. Idempotent on already-migrated
-    // states; cheap on every other invocation.
-    state.migrate_post_replacement_continuation();
+    // Persistence conversion is performed by ResolutionStateWire at the first
+    // deserialize boundary. This action-boundary finalizer must not mutate a
+    // restored legacy shape into a different runtime state.
     normalize_legacy_attach_waiting_for(state);
     sync_priority_player_from_waiting_for(state);
     flush_layers(state);
@@ -57,7 +56,7 @@ fn normalize_legacy_attach_waiting_for(state: &mut GameState) {
         return;
     };
 
-    let Some(cont) = state.pending_continuation.as_ref() else {
+    let Some(cont) = state.active_ability_continuation() else {
         return;
     };
     if !matches!(&cont.chain.effect, Effect::Attach { .. }) || !cont.chain.targeting_is_optional() {
@@ -250,6 +249,9 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
                 mark_public_state_object_dirty(state, *attacker);
                 mark_public_state_object_dirty(state, *tapped);
             }
+            GameEvent::ArmyAmassed { object_id, .. } => {
+                mark_public_state_object_dirty(state, *object_id);
+            }
             GameEvent::ManaAdded { player_id, .. }
             | GameEvent::ManaPoolEmptied { player_id, .. }
             | GameEvent::ManaRecolored { player_id, .. } => {
@@ -265,6 +267,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
                 mark_public_state_object_dirty(state, *source_id);
                 mark_mana_display_dirty(state);
             }
+            GameEvent::ManaAbilityProduced { .. } => {}
             GameEvent::ManaExpended { player_id, .. } => {
                 mark_public_state_player_dirty(state, *player_id);
                 mark_mana_display_dirty(state);
@@ -356,6 +359,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             }
             GameEvent::MonarchChanged { player_id }
             | GameEvent::CityBlessingGained { player_id }
+            | GameEvent::EnduringStoryGained { player_id }
             | GameEvent::InitiativeTaken { player_id }
             | GameEvent::AttractionOpened { player_id, .. }
             | GameEvent::ContraptionAssembled { player_id, .. }
@@ -374,6 +378,10 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             // Transform changes copiable values (Layer 1) and can flip statics
             // on/off; conservatively all-dirty.
             | GameEvent::Transformed { .. }
+            // CR 710.1b: flipping replaces the permanent's name, type line,
+            // power, toughness, and text box (Layer 1 copiable values) and can
+            // flip statics on/off; conservatively all-dirty like Transform.
+            | GameEvent::Flipped { .. }
             | GameEvent::Specialized { .. }
             | GameEvent::TurnedFaceUp { .. }
             // Turning a permanent face down resets its copiable values to a 2/2
@@ -396,6 +404,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             // field `derive_display_state` computes. Grouped explicitly (never
             // `_ => {}`) so a new event variant must be classified to compile.
             GameEvent::GameStarted
+            | GameEvent::HiddenSearchViewed { .. }
             | GameEvent::PhaseChanged { .. }
             | GameEvent::PriorityPassed { .. }
             | GameEvent::SpellCast { .. }
@@ -407,14 +416,25 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::LandPlayed { .. }
             | GameEvent::StackPushed { .. }
             | GameEvent::StackResolved { .. }
+            // CR 714.2: a notification consumed by triggers only; the chapter
+            // ability's own effects dirty whatever display state they touched.
+            | GameEvent::SagaChapterAbilityResolved { .. }
             | GameEvent::GameOver { .. }
             // CR 732.2: a halted-resolution notification dirties no display state.
             | GameEvent::ResolutionHalted { .. }
             | GameEvent::SpellCountered { .. }
             | GameEvent::EffectResolved { .. }
             | GameEvent::Unattached { .. }
+            // CR 116.2c + CR 613.1: ending a continuous effect DOES change
+            // derived characteristics, but `GameState::end_continuous_effect`
+            // sets `layers_dirty.mark_full()`, so Gate 1 above has already
+            // marked everything and returned before this match is reached. No
+            // additional per-event marking is needed or correct here.
+            | GameEvent::ContinuousEffectEnded { .. }
             | GameEvent::AttackersDeclared { .. }
             | GameEvent::BlockersDeclared { .. }
+            | GameEvent::AttackerBecameBlockedByEffect { .. }
+            | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
             | GameEvent::CombatTaxPaid { .. }
             | GameEvent::CombatTaxDeclined { .. }
             | GameEvent::BecomesTarget { .. }
@@ -424,6 +444,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::ReplacementApplied { .. }
             | GameEvent::DayNightChanged { .. }
             | GameEvent::CardsRevealed { .. }
+            | GameEvent::ChosenNumbersRevealed { .. }
             | GameEvent::CombatDamageDealtToPlayer { .. }
             | GameEvent::PlayerEliminated { .. }
             | GameEvent::CrimeCommitted { .. }
@@ -467,6 +488,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::VoteResolved { .. }
             | GameEvent::PowerToughnessChanged { .. }
             | GameEvent::CascadeMissed { .. }
+            | GameEvent::CardPredicateGuessMade { .. }
             | GameEvent::DebugActionUsed { .. }
             | GameEvent::DebugPermissionGranted { .. }
             | GameEvent::DebugPermissionRevoked { .. }
@@ -501,6 +523,7 @@ mod tests {
                 kind: CastOfferKind::Discover {
                     hit_card: ObjectId(10),
                     exiled_misses: Vec::new(),
+                    source_id: ObjectId(11),
                     discover_value: 0,
                 },
             },
@@ -518,6 +541,7 @@ mod tests {
             kind: CastOfferKind::Discover {
                 hit_card: ObjectId(10),
                 exiled_misses: Vec::new(),
+                source_id: ObjectId(11),
                 discover_value: 0,
             },
         };
@@ -558,7 +582,7 @@ mod tests {
             PlayerId(0),
         );
         ability.multi_target = Some(crate::types::ability::MultiTargetSpec::unlimited(0));
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(ability)));
+        state.park_ability_continuation(PendingContinuation::new(Box::new(ability), &state));
         state.waiting_for = WaitingFor::EffectZoneChoice {
             enters_modified_if: None,
             player: PlayerId(0),
@@ -582,6 +606,7 @@ mod tests {
             count_param: 0,
             library_position: None,
             is_cost_payment: false,
+            duration: None,
         };
 
         finalize_rules_state(&mut state);

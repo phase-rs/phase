@@ -19,13 +19,15 @@ export AUDIO_BASE_URL="${AUDIO_BASE_URL:-$R2_PUBLIC/audio}"
 # Per-locale content-i18n sidecars are offloaded to R2 like card-data.json;
 # the {lng} template resolves to where the upload loop below PUTs them.
 export CARD_DATA_LOCALE_URL_TEMPLATE="${CARD_DATA_LOCALE_URL_TEMPLATE:-$R2_PUBLIC/card-data.{lng}.json}"
+# Per-locale card-art maps, same lifecycle as the content sidecars above.
+export SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE="${SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE:-$R2_PUBLIC/scryfall-images.{lng}.json}"
 
 DEPLOY_CACHE=".deploy-cache"
 touch "$DEPLOY_CACHE"
 
 # --- Generate lightweight coverage summary for menu page ---
 echo "Generating coverage summary..."
-jq '{total_cards, supported_cards, coverage_pct, coverage_by_format}' \
+jq '{total_cards, supported_cards, coverage_pct, coverage_by_format, token_coverage}' \
   client/public/coverage-data.json > client/public/coverage-summary.json
 
 # --- R2 uploads (run in background, parallel to WASM build) ---
@@ -44,6 +46,11 @@ upload_to_r2() {
     "card-data.fr.json:public/card-data.fr.json" \
     "card-data.it.json:public/card-data.it.json" \
     "card-data.pt.json:public/card-data.pt.json" \
+    "scryfall-images.de.json:public/scryfall-images.de.json" \
+    "scryfall-images.es.json:public/scryfall-images.es.json" \
+    "scryfall-images.fr.json:public/scryfall-images.fr.json" \
+    "scryfall-images.it.json:public/scryfall-images.it.json" \
+    "scryfall-images.pt.json:public/scryfall-images.pt.json" \
     "coverage-data.json:public/coverage-data.json" \
     "coverage-summary.json:public/coverage-summary.json"; do
     key="${entry%%:*}"
@@ -61,10 +68,13 @@ upload_to_r2() {
         brotli -q 9 -c "client/$file" > "$BRDIR/$key.br"
         (cd client && pnpm wrangler r2 object put "$R2_BUCKET/$key" \
           --file "$BRDIR/$key.br" --content-type application/json --content-encoding br --remote)
-        # Update cache atomically
-        grep -v "^$key:" "$DEPLOY_CACHE" > "$DEPLOY_CACHE.tmp" 2>/dev/null || true
-        echo "$key:$local_tag" >> "$DEPLOY_CACHE.tmp"
-        mv "$DEPLOY_CACHE.tmp" "$DEPLOY_CACHE"
+        # Record the tag in a private per-key file instead of editing
+        # $DEPLOY_CACHE here. Every entry in this loop runs in its own
+        # background subshell, so a read-modify-write through one shared
+        # "$DEPLOY_CACHE.tmp" path drops entries whenever two workers interleave:
+        # both read the old cache, both write the same temp name, and the last
+        # `mv` wins. The merge after the wait loop is the single writer.
+        echo "$key:$local_tag" > "$BRDIR/$key.cachetag"
       fi
     ) &
     json_pids+=($!)
@@ -92,6 +102,17 @@ upload_to_r2() {
     wait "$pid"
   done
   echo "R2 uploads complete."
+
+  # Fold the workers' recorded tags into $DEPLOY_CACHE. Every worker has exited
+  # by now, so this is the only process touching the file — the read-modify-write
+  # below is safe here in a way it was not inside the loop.
+  for tagfile in "$BRDIR"/*.cachetag; do
+    [ -e "$tagfile" ] || continue          # no glob match => nothing was uploaded
+    tag_entry=$(cat "$tagfile")
+    grep -v "^${tag_entry%%:*}:" "$DEPLOY_CACHE" > "$DEPLOY_CACHE.tmp" 2>/dev/null || true
+    echo "$tag_entry" >> "$DEPLOY_CACHE.tmp"
+    mv "$DEPLOY_CACHE.tmp" "$DEPLOY_CACHE"
+  done
 
   # Verify uploads actually reached remote R2 (not local emulator)
   echo "Verifying R2 uploads are accessible..."
@@ -126,6 +147,8 @@ echo "  AUDIO_BASE_URL=$AUDIO_BASE_URL"
 rm -f client/dist/card-data.json client/dist/card-data.json.br
 # Locale sidecars (card-data.<lng>.json) — served from R2, strip from bundle.
 rm -f client/dist/card-data.??.json client/dist/card-data.??.json.br
+# Locale card-art maps (scryfall-images.<lng>.json) — same, served from R2.
+rm -f client/dist/scryfall-images.??.json client/dist/scryfall-images.??.json.br
 rm -f client/dist/coverage-data.json client/dist/coverage-data.json.br
 rm -f client/dist/coverage-summary.json client/dist/coverage-summary.json.br
 rm -f client/dist/audio/music/planeswalker-*.m4a

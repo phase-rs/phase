@@ -1,0 +1,26 @@
+{
+  "viewer": {
+    "title": "Visualizzatore replay",
+    "eyebrow": "Guarda una partita registrata",
+    "chooseFile": "Scegli file di replay",
+    "loading": "Caricamento del replay…",
+    "errorGeneric": "Impossibile caricare questo file di replay.",
+    "backToMenu": "Torna al menu"
+  },
+  "controls": {
+    "play": "Riproduci",
+    "pause": "Pausa",
+    "stepBack": "Indietro",
+    "stepForward": "Avanti",
+    "actionOf": "Azione {{current}} / {{total}}",
+    "speed": "Velocità",
+    "speedValue": "{{value}}x",
+    "seekError": "Impossibile ricostruire questo punto del replay: {{message}}"
+  },
+  "export": {
+    "button": "Esporta replay",
+    "success": "Replay salvato come {{filename}}",
+    "noRecording": "Nessuna registrazione di replay disponibile per questa partita.",
+    "error": "Impossibile esportare il replay."
+  }
+}

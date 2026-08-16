@@ -32,7 +32,7 @@ export function ConnectionDot() {
 
   return (
     <div
-      className="flex h-9 items-center gap-1.5 rounded-lg bg-gray-800/80 px-2"
+      className="flex h-7 items-center gap-1.5 rounded-md bg-white/6 px-1.5"
       title={label}
     >
       {connectionStatus === "connecting" ? (
@@ -48,9 +48,9 @@ export function ConnectionDot() {
           style={{ backgroundColor: color }}
         />
       )}
-      <span className="text-[10px] font-medium text-gray-500">{label}</span>
+      <span className="hidden text-[10px] font-medium text-gray-500 2xl:inline">{label}</span>
       {latencyLabel && (
-        <span className={`text-[10px] font-medium ${latencyColor}`}>
+        <span className={`hidden text-[10px] font-medium 2xl:inline ${latencyColor}`}>
           {latencyLabel}
         </span>
       )}

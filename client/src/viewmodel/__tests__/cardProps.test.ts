@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { GameObject } from "../../adapter/types";
-import { toCardProps } from "../cardProps";
+import { formatCounterTooltip, shouldRenderCardBack, toCardProps, toRoman } from "../cardProps";
 
 function makeGameObject(overrides: Partial<GameObject> = {}): GameObject {
   return {
@@ -128,14 +128,15 @@ describe("toCardProps", () => {
     expect(props.toughness).toBe(4);
   });
 
-  it("extracts counters as typed array", () => {
-    const obj = makeGameObject({ counters: { P1P1: 2, loyalty: 3 } });
-    const props = toCardProps(obj);
+  it("uses the engine-projected identity for a face-down card the viewer may inspect", () => {
+    const obj = makeGameObject({
+      face_down: true,
+      display_visible_to_viewer: true,
+      name: "Hidden Sorcery",
+    });
 
-    expect(props.counters).toEqual([
-      { type: "P1P1", count: 2 },
-      { type: "loyalty", count: 3 },
-    ]);
+    expect(shouldRenderCardBack(obj)).toBe(false);
+    expect(toCardProps(obj).name).toBe("Hidden Sorcery");
   });
 
   it("detects creature and land types", () => {
@@ -165,5 +166,69 @@ describe("toCardProps", () => {
     expect(props.attachmentIds).toEqual([10, 11]);
     expect(props.keywords).toEqual(["Flying", "Trample"]);
     expect(props.colorIdentity).toEqual(["White", "Blue"]);
+  });
+});
+
+describe("toRoman", () => {
+  it("converts 1-5 to Roman numerals", () => {
+    expect(["", "I", "II", "III", "IV", "V"].map((_, i) => toRoman(i))).toEqual([
+      "", "I", "II", "III", "IV", "V",
+    ]);
+  });
+
+  it("renders blank (never the literal 'undefined'/'NaN') for a missing/invalid level", () => {
+    expect(toRoman(undefined as unknown as number)).toBe("");
+    expect(toRoman(NaN)).toBe("");
+    expect(toRoman(0)).toBe("");
+    expect(toRoman(-1)).toBe("");
+  });
+
+  it("falls back to the arabic numeral for a Class level beyond V", () => {
+    expect(toRoman(6)).toBe("6");
+  });
+});
+
+// LOW-4 (CR 732.2a / CR 701.34a): while an accepted counter-growth loop pumps a counter, the
+// badge renders `∞` — the tooltip summary must say "unbounded" and NOT leak the still-finite
+// count. `isUnbounded` is the display-only distinction read off the engine's `counter_display`
+// projection (never computed in the frontend): each `CounterRowView` names an (object, counter)
+// pair, carries the live count — which is `0` when the loop pumps a counter the object does not
+// carry — and carries a typed `magnitude`, absent on the wire for the dominant `Finite` case.
+describe("formatCounterTooltip — unbounded summary", () => {
+  it("says ∞ and hides the finite count when unbounded (fallback, no translator)", () => {
+    const summary = formatCounterTooltip("charge", 4, undefined, true);
+    expect(summary).toContain("∞");
+    expect(summary).not.toContain("4");
+  });
+
+  it("shows the finite count when bounded (fallback, no translator) — matched pair", () => {
+    const summary = formatCounterTooltip("charge", 4, undefined, false);
+    expect(summary).toContain("4");
+    expect(summary).not.toContain("∞");
+  });
+
+  it("routes to the summaryUnbounded key WITHOUT forwarding the finite count (translator path)", () => {
+    const calls: Array<{ key: string; opts: Record<string, unknown> }> = [];
+    const translate = ((key: string, opts: Record<string, unknown>) => {
+      calls.push({ key, opts });
+      return key;
+    }) as never;
+    formatCounterTooltip("charge", 4, translate, true);
+    const call = calls.find((c) => c.key === "counterTooltip.summaryUnbounded");
+    expect(call, "the unbounded flag must select the summaryUnbounded key").toBeDefined();
+    // The finite `count` is NOT interpolated into the unbounded summary (no leak).
+    expect(call?.opts).not.toHaveProperty("count");
+  });
+
+  it("routes to the plural summary key WITH the count when bounded (revert-flip matched pair)", () => {
+    const calls: Array<{ key: string; opts: Record<string, unknown> }> = [];
+    const translate = ((key: string, opts: Record<string, unknown>) => {
+      calls.push({ key, opts });
+      return key;
+    }) as never;
+    formatCounterTooltip("charge", 4, translate, false);
+    const call = calls.find((c) => c.key === "counterTooltip.summary");
+    expect(call, "the bounded path must select the numeric summary key").toBeDefined();
+    expect(call?.opts).toMatchObject({ count: 4 });
   });
 });

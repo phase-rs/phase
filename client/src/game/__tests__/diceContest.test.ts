@@ -1,9 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameEvent } from "../../adapter/types";
+import type { GameAction, GameEvent, SubmitResult } from "../../adapter/types";
+import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { useUiStore } from "../../stores/uiStore";
-import { flashInGameRolls, flashStartingPlayerContest } from "../diceContest";
+import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory";
+import { buildGameState } from "../../test/factories/gameStateFactory";
+import { dispatchAction } from "../dispatch";
+import { flashCompletedScry, flashInGameRolls, flashStartingPlayerContest } from "../diceContest";
 
 const die = (player_id: number, sides: number, result: number): GameEvent => ({
   type: "DieRolled",
@@ -20,11 +24,23 @@ const contest = (rounds: [number, number][][], winner: number): GameEvent => ({
   type: "StartingPlayerContest",
   data: { rounds: rounds.map((rolls) => ({ rolls })), winner },
 });
+const scry = (player_id: number, top: number, bottom: number): GameEvent => ({
+  type: "PlayerPerformedAction",
+  data: {
+    player_id,
+    action: "Scry",
+    look_count: top + bottom,
+    scry_top_count: top,
+    scry_bottom_count: bottom,
+  },
+});
 
 beforeEach(() => {
   vi.useFakeTimers();
+  useGameStore.getState().reset();
   usePreferencesStore.setState({ animationSpeedMultiplier: 1 });
   useUiStore.setState({ diceRoll: null, diceRollQueue: [] });
+  useUiStore.getState().resetScryOutcome();
 });
 
 afterEach(() => {
@@ -34,7 +50,18 @@ afterEach(() => {
 
 describe("flashStartingPlayerContest", () => {
   it("builds a startingPlayer die payload from the engine contest event", () => {
-    flashStartingPlayerContest([contest([[[0, 17], [1, 9]]], 0), gameStarted], 0);
+    const turnOrder = [
+      { player: 0, slot_index: 0, turns_from_now: 0, turn_number: 1, is_starting_player: true },
+      { player: 1, slot_index: 1, turns_from_now: 1, turn_number: 2 },
+      { player: 2, slot_index: 2, turns_from_now: 2, turn_number: 3, is_viewer: true },
+      { player: 3, slot_index: 3, turns_from_now: 3, turn_number: 4 },
+    ];
+    flashStartingPlayerContest(
+      [contest([[[0, 17], [1, 9]]], 0), gameStarted],
+      0,
+      turnOrder,
+      3,
+    );
     const d = useUiStore.getState().diceRoll;
     expect(d).toMatchObject({ kind: "die", sides: 20, context: "startingPlayer", winner: 0 });
     expect(d?.kind === "die" && d.rounds).toEqual([
@@ -48,6 +75,8 @@ describe("flashStartingPlayerContest", () => {
       { playerId: 0, value: 17 },
       { playerId: 1, value: 9 },
     ]);
+    expect(d?.kind === "die" && d.turnOrder).toEqual(turnOrder);
+    expect(d?.kind === "die" && d.viewerTurnNumber).toBe(3);
   });
 
   it("preserves the per-round structure across a tie reroll", () => {
@@ -72,6 +101,7 @@ describe("flashStartingPlayerContest", () => {
         gameStarted,
       ],
       0,
+      undefined,
     );
     const d = useUiStore.getState().diceRoll;
     expect(d?.kind === "die" && d.rounds).toEqual([
@@ -93,19 +123,88 @@ describe("flashStartingPlayerContest", () => {
   it("uses the engine winner, never recomputed from the rolls (lowest-seat fallback)", () => {
     // The engine's all-tied-at-cap fallback picks the lowest seat; the winner is
     // passed in, not derived from the shown dice.
-    flashStartingPlayerContest([contest([[[0, 7], [1, 7]]], 0), gameStarted], 0);
+    flashStartingPlayerContest([contest([[[0, 7], [1, 7]]], 0), gameStarted], 0, undefined);
     expect(useUiStore.getState().diceRoll).toMatchObject({ winner: 0 });
   });
 
   it("no-ops when the starter was chosen explicitly (no contest event)", () => {
-    flashStartingPlayerContest([gameStarted], 1);
+    flashStartingPlayerContest([gameStarted], 1, undefined);
     expect(useUiStore.getState().diceRoll).toBeNull();
   });
 
   it("skips the overlay entirely at instant animation speed (0)", () => {
     usePreferencesStore.setState({ animationSpeedMultiplier: 0 });
-    flashStartingPlayerContest([contest([[[0, 5], [1, 3]]], 0), gameStarted], 0);
+    flashStartingPlayerContest([contest([[[0, 5], [1, 3]]], 0), gameStarted], 0, undefined);
     expect(useUiStore.getState().diceRoll).toBeNull();
+  });
+});
+
+describe("flashCompletedScry", () => {
+  it("publishes engine-provided top and bottom counts without inspecting cards", () => {
+    flashCompletedScry([scry(1, 1, 2)]);
+
+    expect(useUiStore.getState().scryOutcome).toEqual({
+      playerId: 1,
+      topCount: 1,
+      bottomCount: 2,
+    });
+
+    vi.advanceTimersByTime(4_000);
+    expect(useUiStore.getState().scryOutcome).toBeNull();
+  });
+
+  it("queues every completed scry in an event batch in order", () => {
+    flashCompletedScry([scry(1, 1, 2), scry(2, 3, 0)]);
+
+    expect(useUiStore.getState().scryOutcome).toEqual({
+      playerId: 1,
+      topCount: 1,
+      bottomCount: 2,
+    });
+    expect(useUiStore.getState().scryOutcomeQueue).toEqual([
+      { playerId: 2, topCount: 3, bottomCount: 0 },
+    ]);
+
+    vi.advanceTimersByTime(4_000);
+    expect(useUiStore.getState().scryOutcome).toEqual({
+      playerId: 2,
+      topCount: 3,
+      bottomCount: 0,
+    });
+
+    vi.advanceTimersByTime(4_000);
+    expect(useUiStore.getState().scryOutcome).toBeNull();
+  });
+
+  it("does not show a result for an incomplete or unrelated player action", () => {
+    flashCompletedScry([
+      {
+        type: "PlayerPerformedAction",
+        data: { player_id: 1, action: "Scry", look_count: 3, scry_bottom_count: 2 },
+      },
+    ]);
+
+    expect(useUiStore.getState().scryOutcome).toBeNull();
+  });
+
+  it("is invoked by the production dispatch pipeline", async () => {
+    usePreferencesStore.setState({ animationSpeedMultiplier: 0 });
+    const state = buildGameState({ stack: [], players: [] });
+    const adapter = buildEngineAdapterMock(state, {
+      submitAction: vi.fn().mockResolvedValue({
+        events: [scry(0, 2, 1)],
+        log_entries: [],
+      } satisfies SubmitResult),
+    });
+    useGameStore.setState({ adapter, gameState: state, gameMode: "ai" });
+
+    await dispatchAction({ type: "PassPriority" } as GameAction, 0);
+
+    expect(useUiStore.getState().scryOutcome).toEqual({
+      playerId: 0,
+      topCount: 2,
+      bottomCount: 1,
+    });
   });
 });
 
@@ -125,6 +224,13 @@ describe("flashInGameRolls", () => {
       won: true,
       context: "ability",
     });
+  });
+
+  it("queues every coin flip in an event batch", () => {
+    flashInGameRolls([coin(1, true), coin(1, false)]);
+    const state = useUiStore.getState();
+    expect(state.diceRoll).toMatchObject({ kind: "coin", playerId: 1, won: true });
+    expect(state.diceRollQueue).toMatchObject([{ kind: "coin", playerId: 1, won: false }]);
   });
 
   it("no-ops on a batch containing neither dice nor coins", () => {

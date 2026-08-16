@@ -18,7 +18,7 @@ import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
  */
 export function TurnStatusLine() {
   const { t } = useTranslation("game");
-  const { waitingSeatId, canIActNow, waitingOnOpponent, reason } = useTurnStatus();
+  const { waitingSeatId, canIActNow, reason } = useTurnStatus();
   // Hook must run unconditionally (before the early return). Resolves NEUTRAL
   // for a null seat, which is never rendered thanks to the guard below.
   const waitingSeatColor = useSeatColor(waitingSeatId);
@@ -58,11 +58,11 @@ export function TurnStatusLine() {
     <div
       role="status"
       aria-live="polite"
-      className={`group relative flex max-w-[min(22rem,calc(100vw-1.25rem))] items-center rounded-full border px-2.5 py-1 text-[11px] font-medium tracking-wide shadow-[0_12px_32px_rgba(15,23,42,0.45)] backdrop-blur-xl ${tone} [@media(max-height:500px)]:px-2 [@media(max-height:500px)]:py-0.5 [@media(max-height:500px)]:text-[10px]`}
+      className={`group relative flex max-w-[min(22rem,calc(100vw-1.25rem))] items-center rounded-[8px] border px-2.5 py-1 text-[11px] font-medium tracking-wide shadow-[0_8px_20px_rgba(15,23,42,0.38)] ${tone} [@media(max-height:500px)]:px-2 [@media(max-height:500px)]:py-0.5 [@media(max-height:500px)]:text-[10px]`}
     >
       <span
         aria-hidden
-        className={`pointer-events-none absolute -left-1.5 -top-1.5 z-10 flex h-4 w-4 items-center justify-center rounded-full border shadow-[0_2px_6px_rgba(0,0,0,0.45)] ${badgeTone} ${waitingOnOpponent ? "animate-pulse" : ""}`}
+        className={`pointer-events-none absolute -left-1 -top-1 z-10 flex h-4 w-4 items-center justify-center rounded-[5px] border shadow-[0_2px_6px_rgba(0,0,0,0.45)] ${badgeTone}`}
         style={canIActNow ? undefined : { color: waitingSeatColor, borderColor: `${waitingSeatColor}99` }}
       >
         <ReasonIcon reasonKey={reason?.key} />

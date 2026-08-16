@@ -12,16 +12,18 @@ use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_contains, split_once_on};
 use super::oracle_nom::quantity as nom_quantity;
+use super::oracle_nom::target::parse_cost_self_reference;
 use super::oracle_static::parse_dynamic_x_clause;
 use super::oracle_target::{parse_target, parse_type_phrase};
 use super::oracle_util::parse_count_expr;
+use super::oracle_util::parse_creature_subtype;
 use super::oracle_util::parse_mana_symbols;
 use super::oracle_util::parse_number;
 use super::oracle_util::TextPair;
 use crate::types::ability::{
-    AbilityCost, AggregateFunction, BeholdCostAction, Comparator, ControllerRef, CostReduction,
-    CounterCostSelection, FilterProp, ObjectProperty, PlayerScope, QuantityExpr, QuantityRef,
-    SacrificeCost, TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X,
+    AbilityCost, AggregateFunction, BeholdCostAction, ChoiceType, Comparator, ControllerRef,
+    CostReduction, CounterCostSelection, FilterProp, ObjectProperty, PlayerScope, QuantityExpr,
+    QuantityRef, SacrificeCost, TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X,
     REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
 };
 use crate::types::counter::parse_counter_match;
@@ -50,18 +52,129 @@ pub fn parse_oracle_cost(text: &str) -> AbilityCost {
                 costs: vec![left, right],
             };
         }
+        // CR 118.12a: "Pay {3} or discard a card" — disjunctive verb costs where
+        // only the mana branch carries `{` symbols (Bloodthorn Flail equip).
+        let left = parse_oracle_cost_no_or(left_text);
+        let right = parse_oracle_cost_no_or(right_text);
+        if is_disjunctive_alt_cost(&left) && is_disjunctive_alt_cost(&right) {
+            return AbilityCost::OneOf {
+                costs: vec![left, right],
+            };
+        }
     }
 
     parse_oracle_cost_no_or(text)
 }
 
+/// CR 601.2f: Parse a GERUND-form cost phrase ("discarding a card", "paying 1
+/// life", "sacrificing a creature") into an `AbilityCost` by de-conjugating the
+/// leading verb to its imperative stem and delegating to [`parse_oracle_cost`],
+/// the single cost authority.
+///
+/// The gerund construction appears in "cast … by <doing X> in addition to
+/// (paying) its other costs" ADDITIONAL-cost riders (Festival of Embers pay-life;
+/// Dragon Man, Reformed Robot discard; Demilich / Helbrute exile-from-graveyard)
+/// and in the self-flash rider in `oracle_casting.rs`. English gerund→imperative
+/// is irregular (pay→paying, discard→discarding, sacrifice→sacrificing[−e],
+/// remove→removing[−e], exile→exiling[−e], tap→tapping[+p]), so it cannot be a
+/// generic `strip_suffix("ing")`; each verb is one composed `value(stem,
+/// tag(gerund))` arm. Extend by a single arm per cost verb, only once
+/// `parse_oracle_cost` models its imperative.
+///
+/// Returns `AbilityCost::Unimplemented { .. }` when the leading verb is not a
+/// modeled cost gerund OR the delegated imperative is itself unmodeled, so
+/// callers can decline (or drop) rather than silently attach a wrong/absent cost.
+pub(crate) fn parse_gerund_cost(phrase: &str) -> AbilityCost {
+    type E<'a> = super::oracle_nom::error::OracleError<'a>;
+    let original = phrase.trim();
+    let lower = original.to_lowercase();
+    // Compose one `value(stem, tag(gerund))` arm per cost verb — each maps a
+    // gerund onto the imperative stem `parse_oracle_cost` already recognizes.
+    let Some((stem, rest)) = nom_on_lower(original, &lower, |input| {
+        alt((
+            value("pay", tag::<_, _, E<'_>>("paying ")),
+            value("discard", tag("discarding ")),
+            value("sacrifice", tag("sacrificing ")),
+            value("tap", tag("tapping ")),
+            value("remove", tag("removing ")),
+            value("exile", tag("exiling ")),
+        ))
+        .parse(input)
+    }) else {
+        return AbilityCost::Unimplemented {
+            description: original.to_string(),
+        };
+    };
+    parse_oracle_cost(&format!("{stem} {rest}"))
+}
+
+/// True when a top-level ` or ` branch parsed to a concrete activation cost
+/// rather than falling through to `Unimplemented` / `EffectCost`.
+fn is_disjunctive_alt_cost(cost: &AbilityCost) -> bool {
+    !matches!(
+        cost,
+        AbilityCost::Unimplemented { .. } | AbilityCost::EffectCost { .. }
+    )
+}
+
 /// Inner cost parser that handles comma-splitting but NOT top-level `or`.
 /// Prevents infinite recursion when parsing each alternative of a OneOf.
+/// CR 607.2d + CR 608.2h: "reveal the <chosen attribute> you chose" (A Killer
+/// Among Us) reveals a value already stored on the source's `chosen_attributes`
+/// and openly visible in this full-information engine — informationally a no-op,
+/// the same reason "secretly" is stripped from the linked choice. Recognize it
+/// so the cost splitter drops it instead of misparsing "Reveal the …" as a
+/// phantom `Sacrifice` and leaving a spurious second cost component.
+///
+/// The revealed descriptor must name a chosen-attribute category (a creature
+/// type word or a category noun), not an arbitrary object, so this stays scoped
+/// to CR 607.2d linked reveals.
+fn is_reveal_chosen_attribute_noop(part: &str) -> bool {
+    type E<'a> = super::oracle_nom::error::OracleError<'a>;
+    let lower = part.trim().trim_end_matches('.').to_lowercase();
+    let Ok((mid, _)) = tag::<_, _, E<'_>>("reveal the ").parse(lower.as_str()) else {
+        return false;
+    };
+    let Ok((rest, attr)) = terminated(
+        take_until::<_, _, E<'_>>(" you chose"),
+        tag::<_, _, E<'_>>(" you chose"),
+    )
+    .parse(mid) else {
+        return false;
+    };
+    if !rest.trim().is_empty() {
+        return false;
+    }
+    matches!(
+        attr,
+        "creature type"
+            | "color"
+            | "card type"
+            | "card name"
+            | "name"
+            | "land type"
+            | "basic land type"
+    ) || parse_creature_subtype(attr).is_some_and(|(_, len)| len == attr.len())
+}
+
 fn parse_oracle_cost_no_or(text: &str) -> AbilityCost {
     let text = text.trim();
 
     // Split on ", " for composite costs
     let parts = fixup_from_among_remove_counter_parts(split_cost_parts(text));
+    // Drop no-op "reveal the <chosen attribute> you chose" components so the
+    // remaining cost list is exactly the real costs (e.g. a single Sacrifice),
+    // never a Composite carrying a phantom reveal-Sacrifice. Keep the original
+    // parts if this would eliminate everything (defensive — never happens for a
+    // real cost line, which always has a paying component).
+    // ponytail: filtered here rather than modeled as an AbilityCost::None
+    // variant — dropping a part is a smaller diff than a new no-op cost arm.
+    let filtered: Vec<String> = parts
+        .iter()
+        .filter(|p| !is_reveal_chosen_attribute_noop(p))
+        .cloned()
+        .collect();
+    let parts = if filtered.is_empty() { parts } else { filtered };
     if parts.len() > 1 {
         let mut costs: Vec<AbilityCost> =
             parts.iter().map(|p| parse_single_cost(p.trim())).collect();
@@ -178,7 +291,56 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
             }
             AbilityCost::TapCreatures { .. } => last_verb = Some(PrecedingVerb::TapCreatures),
             AbilityCost::Unimplemented { description } if last_verb.is_some() => {
+                if description.trim().is_empty() {
+                    continue;
+                }
+                let verb = last_verb.unwrap();
                 let lower = description.to_lowercase();
+                // CR 601.2b/f + #2343 (Mechtitan Core): a continuation that names an
+                // explicit count of two or more objects ("four other artifact
+                // creatures and/or Vehicles you control") must recover that true
+                // count and the full (possibly disjunctive) filter — the historical
+                // `count: 1` + `parse_target` path dropped both. Scope the recovery
+                // to explicit counts >= 2 so single-object continuations keep their
+                // previous parse unchanged (this fix moves no parser surface outside
+                // the explicit-multi-count class). `parse_type_phrase` (the exile
+                // arm's own consumption-aware primitive) must consume the whole
+                // object phrase into a concrete filter, so an unsupported rider
+                // stays an honest `Unimplemented` rather than a false-green cost.
+                if let Some((count, rest)) = parse_number(&lower).filter(|(n, _)| *n >= 2) {
+                    let filter_text = strip_count_article_prefix(rest.trim())
+                        .trim_end_matches('.')
+                        .trim();
+                    let (filter, remainder) = parse_type_phrase(filter_text);
+                    if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+                        costs[i] = match verb {
+                            PrecedingVerb::Sacrifice => {
+                                AbilityCost::Sacrifice(SacrificeCost::count(filter, count))
+                            }
+                            PrecedingVerb::Exile { zone } => AbilityCost::Exile {
+                                count,
+                                zone: extract_filter_zone(&filter).or(zone),
+                                filter: Some(filter),
+                            },
+                            PrecedingVerb::TapCreatures => AbilityCost::TapCreatures {
+                                requirement: TapCreaturesRequirement::count(count),
+                                filter,
+                            },
+                        };
+                    }
+                    // An explicit-count continuation is terminal: only the
+                    // full-consumption/non-`Any` branch above may rehydrate it. If
+                    // that did not fire (an unmodeled rider left a remainder, or an
+                    // `Any` filter), leave the continuation as an honest
+                    // `Unimplemented` — never fall through to the article/count-1
+                    // fallback below, which would emit a broad `count: 1` cost that
+                    // both drops the unmodeled rider and loses the real count.
+                    continue;
+                }
+                // Baseline single-object rehydration (unchanged pre-existing
+                // behavior): a bare "<article> <type>" continuation of the verb
+                // ("Sacrifice a green creature, a white creature, and a blue
+                // creature"). Left exactly as before so this fix does not move it.
                 let stripped = strip_article(description, &lower);
                 if stripped.is_empty() {
                     continue;
@@ -187,30 +349,67 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
                 if matches!(filter, TargetFilter::Any) {
                     continue;
                 }
-                match last_verb.unwrap() {
+                costs[i] = match verb {
                     PrecedingVerb::Sacrifice => {
-                        costs[i] = AbilityCost::Sacrifice(SacrificeCost::count(filter, 1));
+                        AbilityCost::Sacrifice(SacrificeCost::count(filter, 1))
                     }
-                    PrecedingVerb::Exile { zone } => {
-                        costs[i] = AbilityCost::Exile {
-                            count: 1,
-                            zone,
-                            filter: Some(filter),
-                        };
-                    }
-                    PrecedingVerb::TapCreatures => {
-                        costs[i] = AbilityCost::TapCreatures {
-                            requirement: TapCreaturesRequirement::count(1),
-                            filter,
-                        };
-                    }
-                }
+                    PrecedingVerb::Exile { zone } => AbilityCost::Exile {
+                        count: 1,
+                        zone,
+                        filter: Some(filter),
+                    },
+                    PrecedingVerb::TapCreatures => AbilityCost::TapCreatures {
+                        requirement: TapCreaturesRequirement::count(1),
+                        filter,
+                    },
+                };
             }
             _ => {
                 last_verb = None;
             }
         }
     }
+}
+
+/// CR 601.2b + CR 701.4a: Parse the pre-choice behold cost "choose a creature
+/// type and behold N creatures of that type" (Celestial Reunion). Emits a
+/// `Behold { type_choice: Some(CreatureType) }` whose `filter` carries the
+/// `IsChosenCreatureType` leg — the "of that type" scoping resolved at cost time
+/// against the type the player will choose. Combinators only (one `alt` per
+/// axis); the found creatures are beheld from hand/battlefield as usual.
+fn parse_choose_type_and_behold_cost(lower: &str) -> Option<AbilityCost> {
+    type E<'a> = super::oracle_nom::error::OracleError<'a>;
+    let (input, _) = tag::<_, _, E<'_>>("choose ").parse(lower).ok()?;
+    let (input, _) = alt((tag::<_, _, E<'_>>("a "), tag("an ")))
+        .parse(input)
+        .ok()?;
+    let (input, _) = tag::<_, _, E<'_>>("creature type and behold ")
+        .parse(input)
+        .ok()?;
+    let (input, count) =
+        if let Ok((rest, _)) = alt((tag::<_, _, E<'_>>("a "), tag("an "))).parse(input) {
+            (rest, 1)
+        } else if let Ok((rest, count)) =
+            terminated(nom_primitives::parse_number, tag::<_, _, E<'_>>(" ")).parse(input)
+        {
+            (rest, count)
+        } else {
+            return None;
+        };
+    all_consuming(alt((
+        tag::<_, _, E<'_>>("creatures of that type"),
+        tag("creature of that type"),
+    )))
+    .parse(input.trim())
+    .ok()?;
+    Some(AbilityCost::Behold {
+        count,
+        filter: TypedFilter::creature()
+            .properties(vec![FilterProp::IsChosenCreatureType])
+            .into(),
+        action: BeholdCostAction::ChooseOrReveal,
+        type_choice: Some(ChoiceType::creature_type()),
+    })
 }
 
 fn parse_behold_cost(lower: &str) -> Option<AbilityCost> {
@@ -254,6 +453,7 @@ fn parse_behold_cost(lower: &str) -> Option<AbilityCost> {
         count,
         filter,
         action,
+        type_choice: None,
     })
 }
 
@@ -320,6 +520,7 @@ fn parse_choose_or_reveal_behold_cost(lower: &str) -> Option<AbilityCost> {
         count: 1,
         filter: choose_filter,
         action: BeholdCostAction::ChooseOrReveal,
+        type_choice: None,
     })
 }
 
@@ -429,11 +630,18 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     let text = text.trim();
     let lower = text.to_lowercase();
 
+    // CR 601.2b + CR 701.4a: pre-choice behold ("choose a creature type and
+    // behold N creatures of that type") — tried first so the "choose … and
+    // behold …" shape is not swallowed by the generic choose-effect cost.
+    if let Some(cost) = parse_choose_type_and_behold_cost(&lower) {
+        return cost;
+    }
+
     if let Some(cost) = parse_behold_cost(&lower) {
         return cost;
     }
 
-    // CR 701.4a + CR 601.2b/f: spelled-out "choose … or reveal …" behold cost
+    // CR 701.4a + CR 601.2f: spelled-out "choose … or reveal …" behold cost
     // (Monstrous Emergence). Tried after the keyword form; both yield `Behold`.
     if let Some(cost) = parse_choose_or_reveal_behold_cost(&lower) {
         return cost;
@@ -472,11 +680,20 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     {
         let rest = rest.trim();
         let rest_lower = rest.to_lowercase();
-        let is_self = nom_on_lower(rest, &rest_lower, |i| {
-            value((), alt((tag("~"), tag("cardname"), tag("this ")))).parse(i)
+        // CR 201.5 / CR 201.5a / CR 701.21a: "Sacrifice <self>". The shared cost
+        // self-ref combinator distinguishes the host (`~`/"cardname"/"this X" →
+        // SelfRef) from a granted body's by-name reference to its granting object
+        // (GRANTING_SELF_PLACEHOLDER → GrantingObject, e.g. Deconstruction
+        // Hammer's "Sacrifice Deconstruction Hammer").
+        let self_filter = nom_on_lower(rest, &rest_lower, |i| {
+            alt((
+                parse_cost_self_reference,
+                value(TargetFilter::SelfRef, tag("this ")),
+            ))
+            .parse(i)
         });
-        if is_self.is_some() {
-            return AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1));
+        if let Some((filter, _)) = self_filter {
+            return AbilityCost::Sacrifice(SacrificeCost::count(filter, 1));
         }
         // CR 107.2: "sacrifice any number of [filter]" — player chooses 0..=all
         // eligible permanents (Rottenmouth Viper, Scapeshift-class additional costs).
@@ -623,7 +840,10 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
             };
         }
-        if nom_on_lower(rest, &rest_lower, |i| value((), tag("a card")).parse(i)).is_some() {
+        if all_consuming(tag::<_, _, nom::error::Error<&str>>("a card"))
+            .parse(rest_lower.as_str())
+            .is_ok()
+        {
             return AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
@@ -680,13 +900,15 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
 
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("exile ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
-        // CR 112.3: Self-exile costs — "Exile this card from your graveyard/hand"
-        // or "Exile this artifact/creature/enchantment/land"
-        if let Some(zone) = try_parse_self_exile_cost(&rest_lower) {
+        // CR 701.13a: Self-exile costs — "Exile this card from your
+        // graveyard/hand", "Exile this artifact/creature/enchantment/land", or a
+        // granted body naming its granting object ("Exile The Dominion Bracelet"
+        // → GrantingObject).
+        if let Some((filter, zone)) = try_parse_self_exile_cost(&rest_lower) {
             return AbilityCost::Exile {
                 count: 1,
                 zone,
-                filter: Some(TargetFilter::SelfRef),
+                filter: Some(filter),
             };
         }
         // "Exile the top card of your library" / "Exile the top N cards of your library"
@@ -876,13 +1098,9 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         };
     }
 
-    // "Pay {E}" / "Pay {E}{E}" / "Pay N {E}" — energy costs (CR 107.14)
-    if let Some(energy) = try_parse_energy_cost(&lower) {
-        return AbilityCost::PayEnergy {
-            amount: QuantityExpr::Fixed {
-                value: energy as i32,
-            },
-        };
+    // "Pay {E}" / "Pay {E}{E}" / "Pay N {E}" / "Pay X {E}" — energy costs (CR 107.14)
+    if let Some(amount) = try_parse_energy_cost(&lower) {
+        return AbilityCost::PayEnergy { amount };
     }
 
     // "Return a land you control to its owner's hand" — bounce cost
@@ -901,6 +1119,28 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     .is_some()
     {
         return AbilityCost::Unattach;
+    }
+
+    // CR 701.3d + CR 608.2k: "Unattach a[n] <type> from ~" — unattach a matching
+    // attachment from the source host as a cost (Captain America's Throw). The
+    // detached object stays on the battlefield and becomes this ability's
+    // cost-referent. Kept AFTER the more-specific self-unattach branch above.
+    // The "from ~" recipient is normalized from the card name upstream
+    // (`normalize_card_name_refs`).
+    if let Some(((), after_article)) = nom_on_lower(text, &lower, |i| {
+        let (i, _) = tag("unattach ").parse(i)?;
+        value((), alt((tag("an "), tag("a ")))).parse(i)
+    }) {
+        let (filter, remainder) = parse_type_phrase(after_article);
+        let rem_lower = remainder.to_lowercase();
+        if let Some(((), tail)) = nom_on_lower(remainder, &rem_lower, |i| {
+            value((), preceded(tag(" from "), parse_cost_self_reference)).parse(i)
+        }) {
+            if tail.is_empty() {
+                // Only count == 1 has Oracle support today ("a[n] <type>").
+                return AbilityCost::UnattachFrom { filter, count: 1 };
+            }
+        }
     }
 
     // "reveal your hand" — reveal the controller's entire hand.
@@ -1076,9 +1316,9 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
 /// Combinator-based (parser-combinator gate): runs on an already-lowercase slice
 /// and mirrors `try_parse_cost_reduction`'s `parse_mana_symbols` path.
 pub(crate) fn is_self_cost_reduction_prefix(lower: &str) -> bool {
-    // Scoped to the ACTIVATED-ability form only ("this ability costs {N} less to
-    // activate"). The spell form ("this spell costs {N} less to cast") is parsed
-    // through a different (spell) path that does NOT route through
+    // Scoped to the ACTIVATED-ability form only ("this ability costs {N} less/more
+    // to activate"). The spell form ("this spell costs {N} less/more to cast") is
+    // parsed through a different (spell) path that does NOT route through
     // `strip_cost_reduction_node`, so suppressing the suffix split there would
     // only strand its condition as a swallowed clause (e.g. Lashwhip Predator).
     let Ok((rest, _)) = tag::<_, _, nom::error::Error<&str>>("this ability costs ").parse(lower)
@@ -1092,12 +1332,18 @@ pub(crate) fn is_self_cost_reduction_prefix(lower: &str) -> bool {
     };
 
     let after_mana = after_mana.trim_start();
-    tag::<_, _, nom::error::Error<&str>>("less to activate")
-        .parse(after_mana)
-        .is_ok()
+    // CR 601.2f: both cost reductions ("less") and cost increases ("more") are
+    // self-referential total-cost modifiers — keep the whole sentence intact for
+    // `try_parse_cost_reduction` (Loreseeker's Stone class).
+    alt((
+        tag::<_, _, nom::error::Error<&str>>("less to activate"),
+        tag::<_, _, nom::error::Error<&str>>("more to activate"),
+    ))
+    .parse(after_mana)
+    .is_ok()
 }
 
-/// CR 601.2f: Parse "this ability/spell costs {N} less to activate/cast for each [condition]".
+/// CR 601.2f: Parse "this ability/spell costs {N} less/more to activate/cast for each [condition]".
 /// Returns `None` for unrecognized patterns.
 pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
     let lower = text.to_lowercase();
@@ -1114,90 +1360,78 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
     let (mana_cost, after_mana) = parse_mana_symbols(&rest_lower)?;
     let amount_per = match mana_cost {
         crate::types::mana::ManaCost::Cost { generic, shards } if shards.is_empty() => generic,
-        // CR 107.3c: When the cost reduction is "{X}" and X is *defined by the
-        // text* ("..., where X is <count>"), the reduction is a dynamic amount,
-        // not a player-chosen one. Route to the where-X branch; any other shard
-        // shape (colored/colorless reductions) stays an honest gap — CR 118.7a
-        // limits cost reduction to the generic component.
+        // CR 107.3c: When the cost modification is "{X}" and X is *defined by the
+        // text* ("..., where X is <count>"), the amount is dynamic, not a
+        // player-chosen one. Route to the where-X branch; any other shard
+        // shape (colored/colorless adjustments) stays an honest gap — CR 118.7a
+        // limits generic-component adjustments for the Reduce path; Raise grows
+        // only generic as well (CR 601.2f).
         crate::types::mana::ManaCost::Cost { generic: 0, shards }
             if shards.as_slice() == [crate::types::mana::ManaCostShard::X] =>
         {
             return try_parse_dynamic_x_cost_reduction(after_mana.trim_start());
         }
-        _ => return None, // Only generic mana reduction supported
+        _ => return None, // Only generic mana modification supported
     };
 
     let after_mana = after_mana.trim_start();
 
+    // CR 601.2f: Directional axis — "less" reduces, "more" raises. Shared with
+    // external `ReduceAbilityCost` statics via `CostModifyMode`.
+    let (mode, after_mode) = parse_self_cost_modify_direction(after_mana)?;
+
     // CR 602.2b: An activated ability's analog to a spell's mana cost is its activation cost.
-    // CR 601.2f: Cost reductions reduce that cost, with the mana component floored at {0}.
+    // CR 601.2f: Cost reductions reduce that cost, with the mana component floored at {0};
+    //           cost increases are added into the total cost.
     // CR 102.1: The active player is the player whose turn it is, so "during your
     //           turn" is the controller-is-active-player test.
-    // Timing-gated flat form ("... less to activate during your turn[s]" / "... less
+    // Timing-gated flat form ("... less/more to activate during your turn[s]" / "... less/more
     // to cast during your turn[s]") is therefore exactly the `IsYourTurn` flat
     // conditional (count = Fixed(1)). Checked before the generic "if [condition]"
     // form because "during your turn" is not introduced by "if". Hylda's Crown of
     // Winter: "This ability costs {1} less to activate during your turn."
-    if nom_on_lower(after_mana, after_mana, |i| {
-        value(
-            (),
-            (
-                alt((
-                    tag("less to activate during your "),
-                    tag("less to cast during your "),
-                )),
-                alt((tag("turns"), tag("turn"))),
-            ),
-        )
-        .parse(i)
+    if nom_on_lower(after_mode, after_mode, |i| {
+        value((), (tag(" during your "), alt((tag("turns"), tag("turn"))))).parse(i)
     })
     .is_some_and(|((), rest)| rest.trim().trim_end_matches('.').trim().is_empty())
     {
         return Some(CostReduction {
+            mode,
             amount_per,
             count: QuantityExpr::Fixed { value: 1 },
             condition: Some(crate::types::ability::ParsedCondition::IsYourTurn),
         });
     }
 
-    // CR 602.2b + CR 601.2f conditional flat form: "... less to activate if [condition]" /
-    // "... less to cast if [condition]". The reduction is a flat {amount_per}
+    // CR 602.2b + CR 601.2f conditional flat form: "... less/more to activate if [condition]" /
+    // "... less/more to cast if [condition]". The adjustment is a flat {amount_per}
     // (count = Fixed(1)) gated by `condition`. Checked before the "for each"
     // form; if the "if " marker is present but the condition does not parse,
     // return None so the clause stays a loud gap (coverage honesty) rather than
     // silently mis-parsing.
-    if let Some(((), cond_text)) = nom_on_lower(after_mana, after_mana, |i| {
-        value(
-            (),
-            alt((tag("less to activate if "), tag("less to cast if "))),
-        )
-        .parse(i)
-    }) {
+    if let Some(((), cond_text)) =
+        nom_on_lower(after_mode, after_mode, |i| value((), tag(" if ")).parse(i))
+    {
         let cond_text = cond_text.trim().trim_end_matches('.').trim();
         let condition = super::oracle_condition::parse_restriction_condition(cond_text)?;
         return Some(CostReduction {
+            mode,
             amount_per,
             count: QuantityExpr::Fixed { value: 1 },
             condition: Some(condition),
         });
     }
 
-    // Strip " less to activate for each " or " less to cast for each "
-    let ((), after_less) = nom_on_lower(after_mana, after_mana, |i| {
-        value(
-            (),
-            alt((
-                tag("less to activate for each "),
-                tag("less to cast for each "),
-            )),
-        )
-        .parse(i)
+    // Strip " for each " after the already-consumed less/more verb.
+    let ((), after_less) = nom_on_lower(after_mode, after_mode, |i| {
+        value((), tag(" for each ")).parse(i)
     })?;
 
-    // Try parse_for_each_clause first (handles counters, player counts, etc.),
+    // Try parse_for_each_clause first (handles counters, player counts, hand size, etc.),
     // then fall back to parse_type_phrase for standard object count patterns.
     if let Ok((_, qty)) = nom_quantity::parse_for_each_clause_ref_complete(after_less) {
         return Some(CostReduction {
+            mode,
             amount_per,
             count: QuantityExpr::Ref { qty },
             condition: None,
@@ -1211,6 +1445,7 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
     }
 
     Some(CostReduction {
+        mode,
         amount_per,
         count: QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount { filter },
@@ -1219,32 +1454,49 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
     })
 }
 
+/// CR 601.2f: After the `{N}` amount, consume "less|more to activate|cast" and
+/// return the direction plus the remainder (timing / if / for each / where-X).
+fn parse_self_cost_modify_direction(
+    after_mana: &str,
+) -> Option<(crate::types::statics::CostModifyMode, &str)> {
+    use crate::types::statics::CostModifyMode;
+    nom_on_lower(after_mana, after_mana, |i| {
+        alt((
+            map(alt((tag("less to activate"), tag("less to cast"))), |_| {
+                CostModifyMode::Reduce
+            }),
+            map(alt((tag("more to activate"), tag("more to cast"))), |_| {
+                CostModifyMode::Raise
+            }),
+        ))
+        .parse(i)
+    })
+}
+
 /// CR 601.2f + CR 602.2b + CR 107.3c: Parse the dynamic-{X} activated-ability
-/// cost-reduction tail "less to activate, where X is <count>" (verb axis also
-/// accepts "less to cast"). `input` is the already-lowercase slice immediately
+/// cost-modification tail "less|more to activate, where X is <count>" (verb axis also
+/// accepts "… to cast"). `input` is the already-lowercase slice immediately
 /// after the leading "{X}" amount.
 ///
 /// CR 107.3c: because X is defined by the ability's own text ("where X is ..."),
-/// the controller does not choose it — the reduction is a dynamic amount. This
+/// the controller does not choose it — the amount is dynamic. This
 /// maps to `CostReduction { amount_per: 1, count: Ref(<qty>), .. }` so the
-/// runtime `apply_cost_reduction` computes `reduce_by = 1 * count` and resolves
-/// `count` from game state. CR 118.7a/CR 601.2f then reduce only the generic
-/// component, flooring at {0}.
+/// runtime `apply_cost_reduction` computes `delta = 1 * count` and resolves
+/// `count` from game state. CR 118.7a/CR 601.2f then adjust only the generic
+/// component (`Reduce` floors at {0}; `Raise` adds).
 ///
-/// Covers the entire "{X} less to activate, where X is <any QuantityRef>" class
+/// Covers the entire "{X} less/more to activate, where X is <any QuantityRef>" class
 /// (Survey Mechan, The Dominion Bracelet, and any future card of this shape) by
 /// delegating the count phrase to `parse_dynamic_x_clause`. Returns `None` when
 /// the where-X clause does not parse so the clause stays an honest gap rather
 /// than a misparse.
 fn try_parse_dynamic_x_cost_reduction(input: &str) -> Option<CostReduction> {
-    // Strip the verb. No trailing space: the where-X clause begins with ", ".
-    let ((), after_verb) = nom_on_lower(input, input, |i| {
-        value((), alt((tag("less to activate"), tag("less to cast")))).parse(i)
-    })?;
+    let (mode, after_verb) = parse_self_cost_modify_direction(input)?;
 
     // Delegate ", where x is <phrase>" to the shared dynamic-X combinator.
     let (_, qty) = parse_dynamic_x_clause(after_verb).ok()?;
     Some(CostReduction {
+        mode,
         amount_per: 1,
         count: QuantityExpr::Ref { qty },
         condition: None,
@@ -1367,25 +1619,31 @@ fn try_parse_exile_with_aggregate_cost(lower: &str) -> Option<AbilityCost> {
     })
 }
 
-/// CR 112.3: Parse self-exile cost patterns like "this card from your graveyard",
-/// "this artifact", "this creature from your hand". Returns the zone (if specified).
-/// Also handles `~` (normalized card name) variants.
-fn try_parse_self_exile_cost(rest: &str) -> Option<Option<Zone>> {
+/// CR 701.13a: Parse self-exile cost patterns like "this card from
+/// your graveyard", "this artifact", "this creature from your hand". Returns the
+/// self-reference filter (`SelfRef` for the host; `GrantingObject` when a
+/// granted body names its granting object — The Dominion Bracelet's "Exile The
+/// Dominion Bracelet") and the zone (if specified). Also handles `~`
+/// (normalized card name) variants.
+fn try_parse_self_exile_cost(rest: &str) -> Option<(TargetFilter, Option<Zone>)> {
     let rest = rest.trim().trim_end_matches('.');
+    // Bare "~" / "cardname" / granter placeholder means exile the referenced
+    // object itself (from the battlefield, implicit zone).
+    if let Some((filter, tail)) = nom_on_lower(rest, rest, parse_cost_self_reference) {
+        if tail.trim().is_empty() {
+            return Some((filter, None));
+        }
+    }
     let is_self = nom_on_lower(rest, rest, |i| {
         value((), alt((tag("this "), tag("~ ")))).parse(i)
     })
     .is_some();
-    // Bare "~" means exile self (normalized card name)
-    if rest == "~" {
-        return Some(None);
-    }
     // "<self> from your <zone>" / "<self> in your <zone>" — delegate the trailing zone
     // phrase to the shared scanner so hand/graveyard/library/exile are all supported
     // via one combinator with word-boundary safety (rejects "from your graveyardkeeper").
     if is_self {
         if let Some((zone, _ctrl, _props)) = super::oracle_target::scan_zone_phrase(rest) {
-            return Some(Some(zone));
+            return Some((TargetFilter::SelfRef, Some(zone)));
         }
     }
     // "this artifact" / "this creature" / "this enchantment" / "this land" / "this permanent"
@@ -1395,7 +1653,7 @@ fn try_parse_self_exile_cost(rest: &str) -> Option<Option<Zone>> {
             after_this,
             "artifact" | "creature" | "enchantment" | "land" | "permanent" | "card" | "vehicle"
         ) {
-            return Some(None); // battlefield (implicit)
+            return Some((TargetFilter::SelfRef, None)); // battlefield (implicit)
         }
     }
     None
@@ -1424,8 +1682,12 @@ fn try_parse_exile_top_library(rest: &str) -> Option<u32> {
     None
 }
 
-/// CR 107.9: Parse energy costs like "{E}", "{E}{E}", "pay N {e}", "pay eight {e}".
-fn try_parse_energy_cost(lower: &str) -> Option<u32> {
+/// CR 107.3a + CR 107.14: Parse energy costs like "{E}", "{E}{E}", "pay N {e}", "pay eight {e}",
+/// "pay x {e}" (Chthonian Nightmare / issue #1092). Returns a `QuantityExpr` rather
+/// than a bare count so a variable-X amount ("pay x {e}") can be represented as
+/// `QuantityExpr::Ref { qty: Variable("X") }`, mirroring the "pay x life" /
+/// "pay x speed" branches above instead of silently collapsing X to 0.
+fn try_parse_energy_cost(lower: &str) -> Option<QuantityExpr> {
     let text = nom_on_lower(lower, lower, |i| value((), tag("pay ")).parse(i))
         .map(|((), rest)| rest)
         .unwrap_or(lower)
@@ -1436,14 +1698,23 @@ fn try_parse_energy_cost(lower: &str) -> Option<u32> {
         // Verify the text is ONLY {E} symbols (no other text)
         let cleaned = text.replace("{e}", "").replace(' ', "");
         if cleaned.is_empty() {
-            return Some(count);
+            return Some(QuantityExpr::Fixed {
+                value: count as i32,
+            });
         }
     }
-    // "pay N {e}" / "pay eight {e}" / "pay six {e}"
+    // "pay N {e}" / "pay eight {e}" / "pay six {e}" / "pay x {e}"
     if text.ends_with("{e}") {
         let prefix = text.trim_end_matches("{e}").trim();
+        if prefix == "x" {
+            return Some(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            });
+        }
         if let Some((n, _)) = parse_number(prefix) {
-            return Some(n);
+            return Some(QuantityExpr::Fixed { value: n as i32 });
         }
     }
     None
@@ -1466,32 +1737,35 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
     let filter_text = nom_on_lower(filter_text, filter_text, nom_primitives::parse_article)
         .map(|((), rest)| rest)
         .unwrap_or(filter_text);
-    // "~" is the self-reference placeholder. Preserve it as an explicit
-    // SelfRef so the runtime does not treat an unconstrained filter as "any
-    // permanent you control".
-    if nom_on_lower(filter_text, filter_text, |i| {
-        value(
-            (),
-            alt((
-                tag("~"),
-                tag("this card"),
-                tag("this creature"),
-                tag("this artifact"),
-                tag("this equipment"),
-                tag("this land"),
-                tag("this permanent"),
-                tag("this enchantment"),
-            )),
-        )
+    // CR 201.5 / CR 201.5a: "~" / "this X" is the host self-reference; the
+    // granter placeholder is a granted body's by-name reference to its granting
+    // object. Preserve the explicit filter so the runtime does not treat an
+    // unconstrained filter as "any permanent you control".
+    if let Some((filter, rest)) = nom_on_lower(filter_text, filter_text, |i| {
+        alt((
+            parse_cost_self_reference,
+            value(
+                TargetFilter::SelfRef,
+                alt((
+                    tag("this card"),
+                    tag("this creature"),
+                    tag("this artifact"),
+                    tag("this equipment"),
+                    tag("this land"),
+                    tag("this permanent"),
+                    tag("this enchantment"),
+                )),
+            ),
+        ))
         .parse(i)
-    })
-    .is_some_and(|((), rest)| rest.trim().is_empty())
-    {
-        return Some(AbilityCost::ReturnToHand {
-            count: 1,
-            filter: Some(TargetFilter::SelfRef),
-            from_zone: None,
-        });
+    }) {
+        if rest.trim().is_empty() {
+            return Some(AbilityCost::ReturnToHand {
+                count: 1,
+                filter: Some(filter),
+                from_zone: None,
+            });
+        }
     }
     let target_text = format!("target {filter_text}");
     let (filter, rem) = parse_target(&target_text);
@@ -1566,6 +1840,19 @@ fn extract_filter_zone(filter: &TargetFilter) -> Option<Zone> {
                 None
             }
         }),
+        // Recurse into composite filters so a multi-type source-zone cost carries
+        // the same top-level `zone` a single-type one would. "Exile four instant
+        // and/or sorcery cards from your graveyard" (Demilich) lowers to an
+        // `Or([Typed{Instant, InZone(Graveyard)}, Typed{Sorcery, InZone(Graveyard)}])`
+        // filter; without this, `zone` stayed `None` and the payment layer's
+        // no-zone default (`exile_cost_effective_zone`) looked in the hand instead
+        // of the graveyard, making the cost unpayable and the card uncastable.
+        // Every leg of these disjunctions names the same zone, so the first leg
+        // that yields a zone is authoritative.
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().find_map(extract_filter_zone)
+        }
+        TargetFilter::Not { filter } => extract_filter_zone(filter),
         _ => None,
     }
 }
@@ -1652,7 +1939,8 @@ fn parse_mana_cost_nom(
 mod tests {
     use super::*;
     use crate::types::ability::{
-        ControllerRef, ObjectScope, SharedQuality, TypeFilter, TypedFilter,
+        ControllerRef, DiscardSelfScope, FilterProp, ObjectScope, QuantityExpr,
+        SacrificeRequirement, SharedQuality, TypeFilter, TypedFilter,
     };
     use crate::types::counter::CounterMatch;
     use crate::types::mana::{ManaCost, ManaCostShard};
@@ -1660,6 +1948,245 @@ mod tests {
     #[test]
     fn cost_tap() {
         assert_eq!(parse_oracle_cost("{T}"), AbilityCost::Tap);
+    }
+
+    /// CR 601.2f: `parse_gerund_cost` de-conjugates the gerund verb and delegates
+    /// to the single cost authority, so a gerund cost phrase lowers identically to
+    /// its imperative form across the whole verb class — and an unmodeled verb
+    /// stays honest `Unimplemented`. Tests the building block, not one card.
+    #[test]
+    fn gerund_cost_matches_imperative_authority() {
+        for (gerund, imperative) in [
+            ("discarding a card", "discard a card"),
+            ("paying 1 life", "pay 1 life"),
+            ("sacrificing a creature", "sacrifice a creature"),
+            ("sacrificing a Vehicle", "sacrifice a Vehicle"),
+            // CR 701.13a: the exile arm — Demilich / Helbrute cast-from-graveyard
+            // riders exile cards as an additional cost.
+            (
+                "exiling four instant and/or sorcery cards from your graveyard",
+                "exile four instant and/or sorcery cards from your graveyard",
+            ),
+            (
+                "exiling another creature card from your graveyard",
+                "exile another creature card from your graveyard",
+            ),
+        ] {
+            assert_eq!(
+                parse_gerund_cost(gerund),
+                parse_oracle_cost(imperative),
+                "gerund {gerund:?} must lower like imperative {imperative:?}"
+            );
+        }
+        assert!(matches!(
+            parse_gerund_cost("sacrificing a Vehicle"),
+            AbilityCost::Sacrifice(SacrificeCost {
+                target: TargetFilter::Typed(TypedFilter { type_filters, .. }),
+                ..
+            }) if type_filters == [TypeFilter::Subtype("Vehicle".to_string())]
+        ));
+        // The required-for-this-fix arm is concretely a discard-a-card cost.
+        assert!(
+            matches!(
+                parse_gerund_cost("discarding a card"),
+                AbilityCost::Discard { .. }
+            ),
+            "discarding a card must lower to a Discard cost"
+        );
+        // CR 701.13a: the exile arm lowers to a real graveyard Exile cost — the
+        // regression that turned Demilich/Helbrute from castable-with-dropped-cost
+        // into declined-and-uncastable is fixed at its root (the missing gerund).
+        assert!(
+            matches!(
+                parse_gerund_cost("exiling four instant and/or sorcery cards from your graveyard"),
+                AbilityCost::Exile {
+                    count: 4,
+                    zone: Some(Zone::Graveyard),
+                    filter: Some(_),
+                }
+            ),
+            "Demilich's exile-four rider must lower to an Exile-from-graveyard cost, got {:?}",
+            parse_gerund_cost("exiling four instant and/or sorcery cards from your graveyard")
+        );
+        assert!(
+            matches!(
+                parse_gerund_cost("exiling another creature card from your graveyard"),
+                AbilityCost::Exile {
+                    count: 1,
+                    zone: Some(Zone::Graveyard),
+                    filter: Some(_),
+                }
+            ),
+            "Helbrute's exile-another-creature rider must lower to an Exile-from-graveyard cost, got {:?}",
+            parse_gerund_cost("exiling another creature card from your graveyard")
+        );
+        // A verb the cost authority does not model stays honest.
+        assert!(
+            matches!(
+                parse_gerund_cost("frobnicating a card"),
+                AbilityCost::Unimplemented { .. }
+            ),
+            "an unmodeled gerund verb must lower to Unimplemented"
+        );
+    }
+
+    #[test]
+    fn cost_explicit_count_continuation_with_unmodeled_rider_stays_unimplemented() {
+        // Terminal explicit-count guard: a "<N>=2 …" continuation whose object
+        // phrase carries an unmodeled rider that `parse_type_phrase` cannot fully
+        // consume ("… that were dealt damage this turn") must stay honest
+        // `Unimplemented` — it must NOT fall through to the count-1 fallback,
+        // which would emit a broad supported cost that drops both the rider and
+        // the real count.
+        match parse_oracle_cost(
+            "Sacrifice a creature and two artifacts that were dealt damage this turn",
+        ) {
+            AbilityCost::Composite { costs } => {
+                assert!(
+                    costs
+                        .iter()
+                        .any(|c| matches!(c, AbilityCost::Unimplemented { .. })),
+                    "explicit-count continuation with an unmodeled rider must stay \
+                     Unimplemented, got {costs:#?}"
+                );
+                assert_eq!(
+                    costs
+                        .iter()
+                        .filter(|c| matches!(c, AbilityCost::Sacrifice(_)))
+                        .count(),
+                    1,
+                    "must not rehydrate the unsupported continuation as a count-1 \
+                     sacrifice, got {costs:#?}"
+                );
+            }
+            other => panic!("expected Composite, got {other:#?}"),
+        }
+    }
+
+    #[test]
+    fn cost_single_object_continuation_keeps_count_one_baseline() {
+        // Scope guard: a single-object continuation ("a creature") is NOT touched
+        // by the multi-count recovery — it keeps its historical `count: 1` parse,
+        // so this fix moves no parser surface outside the explicit-multi-count
+        // class (only counts >= 2 are recovered).
+        match parse_oracle_cost("Sacrifice this creature and a creature you control") {
+            AbilityCost::Composite { costs } => {
+                assert!(
+                    costs.iter().any(|c| matches!(
+                        c,
+                        AbilityCost::Sacrifice(sc)
+                            if matches!(sc.requirement, SacrificeRequirement::Count { count: 1 })
+                                && matches!(&sc.target, TargetFilter::Typed(t)
+                                    if t.controller == Some(ControllerRef::You))
+                    )),
+                    "single-object continuation must stay count 1, got {costs:#?}"
+                );
+            }
+            other => panic!("expected Composite, got {other:#?}"),
+        }
+    }
+
+    #[test]
+    fn cost_exile_self_and_count_other_you_control_recovers_count_and_filter() {
+        // CR 601.2f: Mechtitan Core — "Exile this Vehicle and four other artifact
+        // creatures and/or Vehicles you control" is one exile cost split across a
+        // conjunction. The continuation must recover count 4 and the disjunctive
+        // "you control" filter, not collapse to `count: 1` with an empty filter.
+        match parse_oracle_cost(
+            "{5}, Exile this Vehicle and four other artifact creatures and/or Vehicles you control",
+        ) {
+            AbilityCost::Composite { costs } => {
+                assert!(
+                    costs.iter().any(|c| matches!(
+                        c,
+                        AbilityCost::Exile {
+                            count: 1,
+                            filter: Some(TargetFilter::SelfRef),
+                            ..
+                        }
+                    )),
+                    "expected the self-exile conjunct, got {costs:#?}"
+                );
+                let other = costs
+                    .iter()
+                    .find_map(|c| match c {
+                        AbilityCost::Exile {
+                            count,
+                            filter: Some(f),
+                            ..
+                        } if *count == 4 => Some(f),
+                        _ => None,
+                    })
+                    .expect("expected an Exile with count 4 for the continuation");
+                match other {
+                    TargetFilter::Or { filters } => {
+                        assert_eq!(filters.len(), 2);
+                        assert!(filters.iter().all(|f| matches!(
+                            f,
+                            TargetFilter::Typed(t)
+                                if t.controller == Some(ControllerRef::You)
+                                    && t.properties.contains(&FilterProp::Another)
+                        )));
+                        // Both disjunction legs preserve their concrete types
+                        // through the "and/or" continuation, not just an empty
+                        // filter: "artifact creatures" and "Vehicles".
+                        assert!(filters.iter().any(|f| matches!(
+                            f,
+                            TargetFilter::Typed(t)
+                                if t.type_filters == [TypeFilter::Artifact, TypeFilter::Creature]
+                        )));
+                        assert!(filters.iter().any(|f| matches!(
+                            f,
+                            TargetFilter::Typed(t)
+                                if t.type_filters == [TypeFilter::Subtype("Vehicle".to_string())]
+                        )));
+                    }
+                    other => panic!("expected a disjunctive continuation filter, got {other:#?}"),
+                }
+            }
+            other => panic!("expected Composite, got {other:#?}"),
+        }
+    }
+
+    #[test]
+    fn cost_sacrifice_and_count_other_continuation_recovers_count() {
+        // CR 601.2b/f: the same split-conjunction pattern for the sacrifice verb.
+        // "Sacrifice a creature and two other artifacts you control" must recover
+        // count 2 with the "other … you control" filter, not collapse to count 1.
+        match parse_oracle_cost("Sacrifice a creature and two other artifacts you control") {
+            AbilityCost::Composite { costs } => {
+                assert!(
+                    costs.iter().any(|c| matches!(
+                        c,
+                        AbilityCost::Sacrifice(sc)
+                            if matches!(sc.requirement, SacrificeRequirement::Count { count: 2 })
+                                && matches!(&sc.target, TargetFilter::Typed(t)
+                                    if t.controller == Some(ControllerRef::You)
+                                        && t.properties.contains(&FilterProp::Another))
+                    )),
+                    "expected a count-2 'other artifacts you control' sacrifice, got {costs:#?}"
+                );
+            }
+            other => panic!("expected Composite, got {other:#?}"),
+        }
+    }
+
+    #[test]
+    fn cost_sacrifice_article_continuations_stay_count_one() {
+        // Regression: "A, B, and C" article continuations must still each parse as
+        // independent count-1 sacrifices — the fix must not inflate their count.
+        match parse_oracle_cost("Sacrifice a green creature, a white creature, and a blue creature")
+        {
+            AbilityCost::Composite { costs } => {
+                assert_eq!(costs.len(), 3);
+                assert!(costs.iter().all(|c| matches!(
+                    c,
+                    AbilityCost::Sacrifice(sc)
+                        if matches!(sc.requirement, SacrificeRequirement::Count { count: 1 })
+                )));
+            }
+            other => panic!("expected Composite, got {other:#?}"),
+        }
     }
 
     // CR 702.24a: `parse_or_separated_mana_costs` building-block tests.
@@ -1826,6 +2353,36 @@ mod tests {
             AbilityCost::Unattach
         );
         assert_eq!(parse_oracle_cost("Unattach ~"), AbilityCost::Unattach);
+    }
+
+    #[test]
+    fn cost_unattach_a_type_from_self() {
+        // CR 701.3d + CR 608.2k: Captain America's Throw cost. The recipient
+        // "from Captain America, First Avenger" is normalized to "from ~"
+        // upstream by `normalize_card_name_refs`.
+        let (expected_filter, remainder) = super::parse_type_phrase("Equipment from ~");
+        assert_eq!(remainder, " from ~");
+        assert_eq!(
+            parse_oracle_cost("Unattach an Equipment from ~"),
+            AbilityCost::UnattachFrom {
+                filter: expected_filter,
+                count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn cost_unattach_self_still_unit_variant() {
+        // Negative: the more-specific self-unattach branch must win; it must NOT
+        // be captured by the new "unattach a[n] <type> from ~" branch.
+        assert_eq!(
+            parse_oracle_cost("Unattach this Equipment"),
+            AbilityCost::Unattach
+        );
+        assert!(!matches!(
+            parse_oracle_cost("Unattach this Equipment"),
+            AbilityCost::UnattachFrom { .. }
+        ));
     }
 
     #[test]
@@ -2104,6 +2661,30 @@ mod tests {
     }
 
     #[test]
+    fn equip_pay_mana_or_discard_parses_as_one_of() {
+        use crate::types::ability::{CardSelectionMode, DiscardSelfScope};
+
+        assert_eq!(
+            parse_oracle_cost("Pay {3} or discard a card"),
+            AbilityCost::OneOf {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            generic: 3,
+                            shards: vec![],
+                        },
+                    },
+                    AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        filter: None,
+                        selection: CardSelectionMode::Chosen,
+                        self_scope: DiscardSelfScope::FromHand,
+                    },
+                ],
+            }
+        );
+    }
+    #[test]
     fn cost_pay_life_equal_to_commanders_color_identity() {
         // CR 903.4: War Room — "Pay life equal to the number of colors in your
         // commanders' color identity".
@@ -2285,6 +2866,29 @@ mod tests {
         }
     }
 
+    /// CR 107.3a + CR 701.9a: the shared X in an activated discard cost is
+    /// retained as a typed mana-value filter rather than swallowed as "a card".
+    #[test]
+    fn cost_discard_card_with_mana_value_x() {
+        use crate::types::ability::{Comparator, FilterProp, QuantityExpr, QuantityRef};
+
+        match parse_oracle_cost("Discard a card with mana value X") {
+            AbilityCost::Discard {
+                filter: Some(TargetFilter::Typed(typed)),
+                ..
+            } => assert!(typed.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { name }
+                    }
+                } if name == "X"
+            ))),
+            other => panic!("expected discard with CmcEQ(X), got {other:?}"),
+        }
+    }
+
     #[test]
     fn cost_exile_colored_card_from_hand() {
         match parse_oracle_cost("Exile a blue card from your hand") {
@@ -2421,12 +3025,13 @@ mod tests {
     }
 
     /// CR 508.1a + CR 601.2f: the conditional flat form gated by "you attacked
-    /// with a <filter>" extracts a filtered `YouAttackedWithAtLeast { count: 1 }`.
-    /// The trailing "this turn" is stripped upstream as a duration before the
-    /// reparse, so the bare form is what reaches the reducer (Thaumaton Torpedo).
+    /// with a <filter>" extracts a filtered `AttackedThisTurn` quantity gate
+    /// (GE 1). The trailing "this turn" is stripped upstream as a duration
+    /// before the reparse, so the bare form is what reaches the reducer
+    /// (Thaumaton Torpedo).
     #[test]
     fn cost_reduction_if_attacked_with_filter_gate() {
-        use crate::types::ability::ParsedCondition;
+        use crate::types::ability::{Comparator, CountScope, ParsedCondition, QuantityRef};
         let r = try_parse_cost_reduction(
             "this ability costs {3} less to activate if you attacked with a spacecraft",
         )
@@ -2434,9 +3039,17 @@ mod tests {
         assert_eq!(r.amount_per, 3);
         assert_eq!(r.count, QuantityExpr::Fixed { value: 1 });
         match r.condition {
-            Some(ParsedCondition::YouAttackedWithAtLeast {
-                count: 1,
-                filter: Some(TargetFilter::Typed(tf)),
+            Some(ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::AttackedThisTurn {
+                                scope: CountScope::Controller,
+                                filter: Some(TargetFilter::Typed(tf)),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
             }) => assert!(
                 tf.type_filters
                     .iter()
@@ -2880,6 +3493,31 @@ mod tests {
         }
     }
 
+    /// CR 118.12a: Bloodthorn Flail — "Pay {3} or discard a card".
+    #[test]
+    fn cost_pay_mana_or_discard_card() {
+        match parse_oracle_cost("Pay {3} or discard a card") {
+            AbilityCost::OneOf { costs } => {
+                assert_eq!(costs.len(), 2);
+                assert!(matches!(
+                    &costs[0],
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost { generic: 3, .. }
+                    }
+                ));
+                assert!(matches!(
+                    &costs[1],
+                    AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        self_scope: DiscardSelfScope::FromHand,
+                        ..
+                    }
+                ));
+            }
+            other => panic!("Expected OneOf, got {:?}", other),
+        }
+    }
+
     /// CR 602.2b + CR 601.2f: the conditional flat form "costs {N} less to activate if
     /// [condition]" parses to a `CostReduction` with `count = Fixed(1)` and a
     /// `condition` gate (Esquire of the King, Razorlash Transmogrant, …) — the
@@ -3028,6 +3666,71 @@ mod tests {
             "creatures you control get +1/+1"
         ));
         assert!(!is_self_cost_reduction_prefix("draw a card"));
+
+        // CR 601.2f Raise: "more to activate" is the same self-referential class
+        // (Loreseeker's Stone) — keep the sentence intact for the directional parser.
+        assert!(is_self_cost_reduction_prefix(
+            "this ability costs {1} more to activate for each card in your hand"
+        ));
+    }
+
+    /// CR 601.2f + CR 602.2b: Loreseeker's Stone class — "costs {1} more to
+    /// activate for each card in your hand" parses as Raise × HandSize/zone
+    /// card count, not an Unimplemented gap.
+    #[test]
+    fn cost_increase_for_each_card_in_hand() {
+        use crate::types::ability::{QuantityRef, ZoneRef};
+        use crate::types::statics::CostModifyMode;
+
+        let reduction = try_parse_cost_reduction(
+            "this ability costs {1} more to activate for each card in your hand",
+        )
+        .expect("hand-size cost increase should parse");
+        assert_eq!(reduction.mode, CostModifyMode::Raise);
+        assert_eq!(reduction.amount_per, 1);
+        assert_eq!(reduction.condition, None);
+        match &reduction.count {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Hand,
+                        ..
+                    },
+            }
+            | QuantityExpr::Ref {
+                qty: QuantityRef::HandSize { .. },
+            } => {}
+            other => panic!("expected hand-size count, got {other:?}"),
+        }
+    }
+
+    /// CR 601.2f Raise: the spell-form verb follows the same directional
+    /// cost-modification grammar as the activated-ability form.
+    #[test]
+    fn cost_increase_spell_variant_for_each_card_in_hand() {
+        use crate::types::ability::{QuantityRef, ZoneRef};
+        use crate::types::statics::CostModifyMode;
+
+        let reduction = try_parse_cost_reduction(
+            "this spell costs {1} more to cast for each card in your hand",
+        )
+        .expect("spell-form hand-size cost increase should parse");
+        assert_eq!(reduction.mode, CostModifyMode::Raise);
+        assert_eq!(reduction.amount_per, 1);
+        assert_eq!(reduction.condition, None);
+        match &reduction.count {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Hand,
+                        ..
+                    },
+            }
+            | QuantityExpr::Ref {
+                qty: QuantityRef::HandSize { .. },
+            } => {}
+            other => panic!("expected hand-size count, got {other:?}"),
+        }
     }
 
     /// CR 107.3c: The dynamic-{X} head still routes through the self

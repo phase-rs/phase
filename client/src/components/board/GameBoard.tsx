@@ -2,44 +2,52 @@ import { memo, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
-import { isMultiplayerMode, useGameStore } from "../../stores/gameStore.ts";
+import type { MultiplayerBoardLayout } from "../../stores/preferencesStore.ts";
+import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { sortCreaturesForBlockers } from "../../viewmodel/blockerSorting.ts";
-import { isManaObjectAction } from "../../viewmodel/cardActionChoice.ts";
+import { deriveActivationAffordances } from "../../viewmodel/cardActionChoice.ts";
 import {
   buildPlayerBattlefieldView,
   getBoardChoiceView,
   getBattlefieldSacrificeChoice,
   getWaitingForObjectChoiceIds,
   getOpponentIds,
+  getSeatCount,
+  isSplitBoardActive,
   isOneOnOne,
   resolveFocusedOpponent,
 } from "../../viewmodel/gameStateView.ts";
 import { BoardInteractionContext } from "./BoardInteractionContext.tsx";
 import { ArchenemyPanel } from "./ArchenemyPanel.tsx";
 import { CombatLine } from "./CombatLine.tsx";
-import { ManualManaToggle } from "./ManualManaToggle.tsx";
+import { OpponentSeatPane } from "./OpponentSeatPane.tsx";
 import { PlayerArea } from "./PlayerArea.tsx";
 import { PlanechasePanel } from "./PlanechasePanel.tsx";
 import { DraggableWidget } from "../flexlayout/DraggableWidget.tsx";
 
 interface GameBoardProps {
+  effectiveMultiplayerBoardLayout: MultiplayerBoardLayout;
   oppHud?: React.ReactNode;
   playerHud?: React.ReactNode;
+  showOpponentCards?: boolean;
+  onKickPlayer?: (playerId: PlayerId) => void;
+  onViewZone?: (zone: "graveyard" | "exile" | "library", playerId: PlayerId) => void;
 }
 
-export const GameBoard = memo(function GameBoard({ oppHud, playerHud }: GameBoardProps) {
+export const GameBoard = memo(function GameBoard({
+  effectiveMultiplayerBoardLayout,
+  oppHud,
+  playerHud,
+  showOpponentCards = false,
+  onKickPlayer,
+  onViewZone = () => {},
+}: GameBoardProps) {
   const { t } = useTranslation("game");
   const gameState = useGameStore((s) => s.gameState);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
-  // Undo is a single-player affordance only — multiplayer games have
-  // authoritative shared state and can't safely rewind one client.
-  const canUndo = useGameStore(
-    (s) => s.stateHistory.length > 0 && !isMultiplayerMode(s.gameMode),
-  );
-  const undo = useGameStore((s) => s.undo);
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
   const localPlayerId = usePlayerId();
   const myId = usePerspectivePlayerId();
@@ -61,22 +69,39 @@ export const GameBoard = memo(function GameBoard({ oppHud, playerHud }: GameBoar
     () => (focusedId == null ? null : buildPlayerBattlefieldView(gameState, focusedId)),
     [gameState, focusedId],
   );
+  const opponentBattlefieldViews = useMemo(() => {
+    return new Map(
+      opponents.map((opponentId) => [
+        opponentId,
+        buildPlayerBattlefieldView(gameState, opponentId),
+      ]),
+    );
+  }, [gameState, opponents]);
+  const splitBoardActive = isSplitBoardActive(effectiveMultiplayerBoardLayout, getSeatCount(gameState));
 
   const sortedPlayerCreatures = useMemo(() => {
-    if (!focusedBattlefieldView) return undefined;
+    if (splitBoardActive || !focusedBattlefieldView) return undefined;
     return sortCreaturesForBlockers(
       playerBattlefieldView.creatures,
       focusedBattlefieldView.creatures,
       blockerAssignments,
     );
-  }, [playerBattlefieldView, focusedBattlefieldView, blockerAssignments]);
+  }, [splitBoardActive, playerBattlefieldView, focusedBattlefieldView, blockerAssignments]);
 
   const boardInteractionState = useMemo(() => {
+    // THE single authority (viewmodel/cardActionChoice.ts). Computed BEFORE the
+    // `!gameState?.objects` early return so both returns spread the same value and
+    // no local shadow can exist: deleting the locals makes a stale shorthand key a
+    // compile error (TS18004) instead of a silent board-wide regression.
+    const affordances = deriveActivationAffordances(
+      waitingFor,
+      canActForWaitingState,
+      legalActionsByObject,
+      gameState?.objects,
+    );
     const validTargetObjectIds = new Set<number>();
     const validAttackerIds = new Set<number>();
-    const activatableObjectIds = new Set<number>();
     const boardChoiceObjectIds = new Set<number>();
-    const manaTappableObjectIds = new Set<number>();
     const selectableSacrificeObjectIds = new Set<number>();
     const selectableManaCostCreatureIds = new Set<number>();
     const undoableTapObjectIds = new Set<number>();
@@ -154,11 +179,10 @@ export const GameBoard = memo(function GameBoard({ oppHud, playerHud }: GameBoar
 
     if (!gameState?.objects) {
       return {
-        activatableObjectIds,
+        ...affordances,
         boardChoiceObjectIds,
         committedAttackerIds,
         incomingAttackerCounts,
-        manaTappableObjectIds,
         selectableSacrificeObjectIds,
         selectableManaCostCreatureIds,
         undoableTapObjectIds,
@@ -167,52 +191,11 @@ export const GameBoard = memo(function GameBoard({ oppHud, playerHud }: GameBoar
       };
     }
 
-    const playerCanAct =
-      waitingFor != null
-      && (
-        (waitingFor.type === "Priority" && canActForWaitingState)
-        || (waitingFor.type === "ManaPayment" && canActForWaitingState)
-        || (waitingFor.type === "UnlessPayment" && canActForWaitingState)
-        // CR 118.12a: Disjunctive unless-cost — same input enablement as
-        // UnlessPayment (player chooses among sub-costs).
-        || (waitingFor.type === "UnlessPaymentChooseCost" && canActForWaitingState)
-      );
-
-    if (waitingFor?.type === "Priority" && canActForWaitingState) {
-      // The engine owns the "which permanent does this action act on" mapping
-      // via GameAction::source_object(), exposed as `legalActionsByObject`.
-      // The cyan activatable ring surfaces battlefield permanents with at
-      // least one non-mana action; mana abilities are handled by the separate
-      // mana-tappable ring below. This iteration is variant-agnostic — adding
-      // a future keyword activation requires zero frontend changes.
-      for (const [idStr, actions] of Object.entries(legalActionsByObject)) {
-        const objectId = Number(idStr);
-        const object = gameState.objects[objectId];
-        if (!object) continue;
-        const hasNonManaAction = actions.some((action) => !isManaObjectAction(action, object));
-        if (hasNonManaAction) {
-          activatableObjectIds.add(objectId);
-        }
-      }
-    }
-
-    if (playerCanAct) {
-      for (const [idStr, actions] of Object.entries(legalActionsByObject)) {
-        const objectId = Number(idStr);
-        const object = gameState.objects[objectId];
-        if (!object) continue;
-        if (actions.some((action) => isManaObjectAction(action, object))) {
-          manaTappableObjectIds.add(objectId);
-        }
-      }
-    }
-
     return {
-      activatableObjectIds,
+      ...affordances,
       boardChoiceObjectIds,
       committedAttackerIds,
       incomingAttackerCounts,
-      manaTappableObjectIds,
       selectableSacrificeObjectIds,
       selectableManaCostCreatureIds,
       undoableTapObjectIds,
@@ -235,30 +218,6 @@ export const GameBoard = memo(function GameBoard({ oppHud, playerHud }: GameBoar
   // OpponentHud rail into PlayerArea's small `hud` slot.
   const is1v1 = isOneOnOne(gameState);
 
-  // Undo button for the player's land column
-  const undoButton = canUndo ? (
-    <button
-      onClick={undo}
-      className="mt-auto mx-auto flex items-center gap-1 rounded-md bg-gray-800/80 px-2.5 py-1 text-[11px] font-medium text-gray-400 transition-colors hover:bg-gray-700/80 hover:text-gray-200"
-    >
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3 w-3">
-        <path fillRule="evenodd" d="M14 8a6 6 0 1 1-12 0 6 6 0 0 1 12 0ZM7.72 4.22a.75.75 0 0 0-1.06 0L4.97 5.91a.75.75 0 0 0 0 1.06l1.69 1.69a.75.75 0 1 0 1.06-1.06l-.47-.47h1.63a1.25 1.25 0 0 1 0 2.5H7.5a.75.75 0 0 0 0 1.5h1.38a2.75 2.75 0 0 0 0-5.5H7.25l.47-.47a.75.75 0 0 0 0-1.06Z" clipRule="evenodd" />
-      </svg>
-      {t("board.undo")}
-    </button>
-  ) : null;
-
-  // Land-column stack: the per-game "Manual mana" toggle above the undo button.
-  // `landColumnExtra` is an absolutely-positioned single-child overlay that
-  // stacks upward from `bottom-0` (see PlayerArea), where the undo button's
-  // `mt-auto` is inert — so use an explicit `gap-1` flex column for spacing.
-  const landColumnExtra = (
-    <div className="flex flex-col items-center gap-1">
-      <ManualManaToggle />
-      {undoButton}
-    </div>
-  );
-
   return (
     <BoardInteractionContext.Provider value={boardInteractionState}>
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
@@ -280,6 +239,33 @@ export const GameBoard = memo(function GameBoard({ oppHud, playerHud }: GameBoar
             // with `undefined` in the interim.
             <div className="flex flex-1 items-center justify-center" />
           )
+        ) : splitBoardActive ? (
+          <div className="flex min-h-0 basis-[60%] flex-col overflow-visible pt-[var(--game-split-safe-top,0px)]">
+            {opponents.length > 0 ? (
+              <div
+                className="grid min-h-0 min-w-0 flex-1 items-stretch gap-1 overflow-visible px-1"
+                style={{ gridTemplateColumns: `repeat(${opponents.length}, minmax(0, 1fr))` }}
+              >
+                {opponents.map((opponentId) => (
+                  <OpponentSeatPane
+                    key={opponentId}
+                    playerId={opponentId}
+                    battlefieldView={
+                      opponentBattlefieldViews.get(opponentId)
+                      ?? buildPlayerBattlefieldView(gameState, opponentId)
+                    }
+                    showCards={showOpponentCards}
+                    onKickPlayer={onKickPlayer}
+                    onViewZone={onViewZone}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="flex flex-1 items-center justify-center">
+                <span className="text-xs text-gray-600">{t("board.clickOpponent")}</span>
+              </div>
+            )}
+          </div>
         ) : (
           <div className="flex min-h-0 flex-1 flex-col">
             {/* Keep opponent controls above overflowing command-zone cards.
@@ -313,7 +299,6 @@ export const GameBoard = memo(function GameBoard({ oppHud, playerHud }: GameBoar
           battlefieldView={playerBattlefieldView}
           playerId={myId}
           mode="full"
-          landColumnExtra={landColumnExtra}
           creatureOverride={sortedPlayerCreatures}
           hud={playerHud}
         />

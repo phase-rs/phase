@@ -133,7 +133,7 @@ pub fn convert_ability(c: &Condition) -> ConvResult<AbilityCondition> {
         // CR 608.2c + CR 702.34 (Flashback) + CR 702.143 (Foretell): "If you
         // cast it from [zone], [do A]. Otherwise, [do B]." — self-referential
         // check on the resolving spell's `cast_from_zone`. Maps the zone-bound
-        // `Spells` predicates onto `AbilityCondition::CastFromZone { zone }`.
+        // `Spells` predicates onto `AbilityCondition::WasCast { zone: Some(zone) }`.
         // Non-zone predicates (`AlternateCostWasPaid`, `WasKicked`, `WasForetold`,
         // `WasBargained`, etc.) need separate engine slots and strict-fail.
         Condition::CastSpellPassesFilter(spells) => spells_to_cast_zone_ability(spells)?,
@@ -152,6 +152,7 @@ pub fn convert_ability(c: &Condition) -> ConvResult<AbilityCondition> {
             AbilityCondition::TargetMatchesFilter {
                 filter: crate::convert::filter::spells_to_filter(spells)?,
                 use_lki: false,
+                subject_slot: None,
             }
         }
         _ => {
@@ -164,7 +165,7 @@ pub fn convert_ability(c: &Condition) -> ConvResult<AbilityCondition> {
 }
 
 /// CR 608.2c + CR 702.34 + CR 702.143: Map a `Spells` predicate that gates
-/// the resolving spell's effect onto `AbilityCondition::CastFromZone`. Only
+/// the resolving spell's effect onto `AbilityCondition::WasCast`. Only
 /// zone-axis predicates translate today — the engine's per-spell context
 /// stores `cast_from_zone` (a `Zone`) but no kicker/foretell/bargain-paid
 /// flags reachable from `AbilityCondition`. Player-scoped variants
@@ -179,9 +180,9 @@ fn spells_to_cast_zone_ability(spells: &Spells) -> ConvResult<AbilityCondition> 
             Players::AnyPlayer => Zone::Graveyard,
             other => {
                 return Err(ConversionGap::EnginePrerequisiteMissing {
-                    engine_type: "AbilityCondition::CastFromZone",
+                    engine_type: "AbilityCondition::WasCast",
                     needed_variant: format!(
-                        "CastFromZone with player-scoped graveyard: {}",
+                        "WasCast with player-scoped graveyard: {}",
                         players_variant_tag(other)
                     ),
                 });
@@ -197,8 +198,8 @@ fn spells_to_cast_zone_ability(spells: &Spells) -> ConvResult<AbilityCondition> 
             Player::You => Zone::Hand,
             other => {
                 return Err(ConversionGap::EnginePrerequisiteMissing {
-                    engine_type: "AbilityCondition::CastFromZone",
-                    needed_variant: format!("CastFromZone with non-You hand axis: {other:?}"),
+                    engine_type: "AbilityCondition::WasCast",
+                    needed_variant: format!("WasCast with non-You hand axis: {other:?}"),
                 });
             }
         },
@@ -206,7 +207,7 @@ fn spells_to_cast_zone_ability(spells: &Spells) -> ConvResult<AbilityCondition> 
         Spells::WasCastFromTheirLibrary => Zone::Library,
         other => {
             return Err(ConversionGap::EnginePrerequisiteMissing {
-                engine_type: "AbilityCondition::CastFromZone",
+                engine_type: "AbilityCondition::WasCast",
                 needed_variant: format!(
                     "CastSpellPassesFilter with non-zone predicate: {}",
                     spells_variant_tag(other)
@@ -214,7 +215,7 @@ fn spells_to_cast_zone_ability(spells: &Spells) -> ConvResult<AbilityCondition> 
             });
         }
     };
-    Ok(AbilityCondition::CastFromZone { zone })
+    Ok(AbilityCondition::WasCast { zone: Some(zone) })
 }
 
 /// CR 608.2c: Convert a condition for use as the negated form on
@@ -688,6 +689,7 @@ fn permanent_filter_to_ability(
         PermanentAxis::Target => AbilityCondition::TargetMatchesFilter {
             filter,
             use_lki: false,
+            subject_slot: None,
         },
     })
 }
@@ -1059,9 +1061,13 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::Player => "Player",
         TargetFilter::AllPlayers => "AllPlayers",
         TargetFilter::Controller => "Controller",
+        TargetFilter::SourceController => "SourceController",
+        TargetFilter::Opponent => "Opponent",
         TargetFilter::OriginalController => "OriginalController",
+        TargetFilter::OriginalSource => "OriginalSource",
         TargetFilter::ScopedPlayer => "ScopedPlayer",
         TargetFilter::SelfRef => "SelfRef",
+        TargetFilter::GrantingObject => "GrantingObject",
         TargetFilter::SourceOrPaired => "SourceOrPaired",
         TargetFilter::Typed(_) => "Typed",
         TargetFilter::Not { .. } => "Not",
@@ -1076,6 +1082,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::ExiledCardByIndex { .. } => "ExiledCardByIndex",
         TargetFilter::LastCreated => "LastCreated",
         TargetFilter::LastRevealed => "LastRevealed",
+        TargetFilter::LastZoneChanged => "LastZoneChanged",
         TargetFilter::CostPaidObject => "CostPaidObject",
         TargetFilter::ChosenCard => "ChosenCard",
         TargetFilter::TrackedSet { .. } => "TrackedSet",
@@ -1091,15 +1098,20 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::ParentTargetController => "ParentTargetController",
         TargetFilter::ParentTargetOwner => "ParentTargetOwner",
         TargetFilter::PostReplacementSourceController => "PostReplacementSourceController",
+        TargetFilter::PostReplacementDamageSource => "PostReplacementDamageSource",
         TargetFilter::PostReplacementDamageTarget => "PostReplacementDamageTarget",
         TargetFilter::PostReplacementDamageTargetOwner => "PostReplacementDamageTargetOwner",
+        TargetFilter::ControllerAndControlledPermanents { .. } => {
+            "ControllerAndControlledPermanents"
+        }
         TargetFilter::DefendingPlayer => "DefendingPlayer",
         TargetFilter::HasChosenName => "HasChosenName",
-        TargetFilter::ChosenDamageSource => "ChosenDamageSource",
+        TargetFilter::ChosenDamageSource { .. } => "ChosenDamageSource",
         TargetFilter::Named { .. } => "Named",
         TargetFilter::Owner => "Owner",
         TargetFilter::SourceChosenPlayer => "SourceChosenPlayer",
         TargetFilter::EventTarget => "EventTarget",
+        TargetFilter::PlayerWhoChoseLabel { .. } => "PlayerWhoChoseLabel",
     }
 }
 
@@ -1116,7 +1128,7 @@ fn unsafe_prop_name(p: &FilterProp) -> Option<&'static str> {
         FilterProp::Attacking { .. } => Some("Attacking"),
         FilterProp::Blocking => Some("Blocking"),
         FilterProp::Unblocked => Some("Unblocked"),
-        FilterProp::AttackedThisTurn => Some("AttackedThisTurn"),
+        FilterProp::AttackedThisTurn { .. } => Some("AttackedThisTurn"),
         FilterProp::BlockedThisTurn => Some("BlockedThisTurn"),
         FilterProp::AttackedOrBlockedThisTurn => Some("AttackedOrBlockedThisTurn"),
         FilterProp::EnchantedBy => Some("EnchantedBy"),
@@ -1168,6 +1180,13 @@ pub struct TriggerCondExt {
 /// engine variants in a separate round).
 pub fn convert_trigger_with_etb_filter(c: &Condition) -> ConvResult<TriggerCondExt> {
     match c {
+        // CR 603.4 + CR 701.9a: "if the discarded card [passes predicate]" on a
+        // discard trigger — lower onto `valid_card` so `match_discarded` gates
+        // the event object (Anje Falkenrath's madness rider).
+        Condition::DiscardedCardPassesFilter(cards) => Ok(TriggerCondExt {
+            condition: None,
+            valid_card: Some(crate::convert::filter::cards_to_filter(cards)?),
+        }),
         Condition::EnteringPermanentPassesFilter(pred) => {
             // Try the event-object condition path first; fall through to the
             // legacy valid_card route only for predicates that still cannot be
@@ -3753,7 +3772,9 @@ mod tests {
         let converted = convert_ability(&condition).unwrap();
 
         match converted {
-            AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
+            AbilityCondition::TargetMatchesFilter {
+                filter, use_lki, ..
+            } => {
                 assert!(!use_lki);
                 assert!(matches!(
                     filter,

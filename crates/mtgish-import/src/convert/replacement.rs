@@ -7,10 +7,10 @@
 
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ContinuousModification, ControllerRef,
-    DamageModification, DamageTargetFilter, DamageTargetPlayerScope, Effect, EffectScope,
-    FilterProp, ManaReplacementScope, QuantityExpr, QuantityModification, QuantityRef,
-    ReplacementCondition, ReplacementDefinition, ReplacementMode, RestrictionExpiry,
-    TapStateChange, TargetFilter, TypedFilter,
+    CounterReplacementSubject, DamageModification, DamageTargetFilter, DamageTargetPlayerScope,
+    DrawReplacementScope, Effect, EffectScope, FilterProp, ManaReplacementScope, QuantityExpr,
+    QuantityModification, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, RestrictionExpiry, TapStateChange, TargetFilter, TypedFilter,
 };
 use engine::types::card_type::Supertype;
 use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
@@ -73,6 +73,8 @@ pub fn convert_as_enters(
         out.push(ReplacementDefinition {
             expiry: None,
             event: ReplacementEvent::ChangeZone,
+            draw_scope: None,
+            planeswalk_scope: None,
             execute: Some(Box::new(exec)),
             runtime_execute: None,
             mode,
@@ -99,6 +101,7 @@ pub fn convert_as_enters(
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         });
     }
     Ok(out)
@@ -155,6 +158,8 @@ pub fn convert_replace_would_enter(
         out.push(ReplacementDefinition {
             expiry: None,
             event: ReplacementEvent::ChangeZone,
+            draw_scope: None,
+            planeswalk_scope: None,
             execute: Some(Box::new(exec)),
             runtime_execute: None,
             mode,
@@ -181,6 +186,7 @@ pub fn convert_replace_would_enter(
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         });
     }
     Ok(out)
@@ -220,6 +226,8 @@ pub fn convert_replace_would_deal_damage(
         out.push(ReplacementDefinition {
             expiry: None,
             event: ReplacementEvent::DamageDone,
+            draw_scope: None,
+            planeswalk_scope: None,
             execute: None,
             runtime_execute: None,
             mode: Default::default(),
@@ -246,6 +254,7 @@ pub fn convert_replace_would_deal_damage(
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         });
     }
     Ok(out)
@@ -330,6 +339,16 @@ fn event_to_damage_filters(
         },
         // Combat-only / noncombat-only restrictors set `combat_scope` per
         // CR 614.1a.
+        //
+        // CR 510.1a: The unqualified "combat damage would be dealt" event names
+        // neither a source nor a recipient, so both filter slots stay `None`
+        // and only the combat scope narrows the replacement. Mirrors the same
+        // variant's handling in `damage_event_to_prevent_params`.
+        E::CombatDamageWouldBeDealt => DamageEventFilters {
+            source_filter: None,
+            target_filter: None,
+            combat_scope: Some(CombatDamageScope::CombatOnly),
+        },
         E::CombatDamageWouldBeDealtByACreatureToRecipient(_perm, recipient) => DamageEventFilters {
             source_filter: None,
             target_filter: recipient_to_damage_target_filter(recipient),
@@ -387,7 +406,9 @@ fn recipient_to_damage_target_filter(r: &SingleDamageRecipient) -> Option<Damage
 
 fn single_damage_source_to_filter(source: &SingleDamageSource) -> TargetFilter {
     match source {
-        SingleDamageSource::TheChosenDamageSource => TargetFilter::ChosenDamageSource,
+        SingleDamageSource::TheChosenDamageSource => {
+            TargetFilter::ChosenDamageSource { filter: None }
+        }
     }
 }
 
@@ -400,27 +421,28 @@ fn damage_action_to_modification(
     match act {
         // CR 615.1: "Prevent that damage." / "If a source would deal damage
         // ... prevent that damage." Continuous prevent-all replacement encoded
-        // as `Minus { value: u32::MAX }` — saturating-subtraction yields 0 for
-        // any amount and the replacement is not consumed.
+        // as `PreventionMinus { value: u32::MAX }` — saturating-subtraction
+        // yields 0 for any amount and the replacement is not consumed.
         ReplacementActionWouldDealDamage::PreventThatDamage
         | ReplacementActionWouldDealDamage::CancelThatDamage => {
-            Ok(DamageModification::Minus { value: u32::MAX })
+            Ok(DamageModification::PreventionMinus { value: u32::MAX })
         }
         // "Prevent N of that damage."
         ReplacementActionWouldDealDamage::PreventSomeOfThatDamage(g) => {
             let qty = quantity::convert(g)?;
             match qty {
-                QuantityExpr::Fixed { value } if (0..=u32::MAX as i32).contains(&value) => {
-                    Ok(DamageModification::Minus {
-                        value: value as u32,
-                    })
-                }
+                QuantityExpr::Fixed { value } => u32::try_from(value)
+                    .map(|value| DamageModification::PreventionMinus { value })
+                    .map_err(|_| ConversionGap::EnginePrerequisiteMissing {
+                        engine_type: "DamageModification",
+                        needed_variant: "PreventionMinus { count: QuantityExpr }".into(),
+                    }),
                 // CR 615.1: Dynamic prevention amount ("prevent X damage,
-                // where X is …") — engine `DamageModification::Minus`
+                // where X is …") — engine `DamageModification::PreventionMinus`
                 // takes only `u32`, not `QuantityExpr`.
                 _ => Err(ConversionGap::EnginePrerequisiteMissing {
                     engine_type: "DamageModification",
-                    needed_variant: "Minus { count: QuantityExpr }".into(),
+                    needed_variant: "PreventionMinus { count: QuantityExpr }".into(),
                 }),
             }
         }
@@ -438,11 +460,13 @@ fn damage_action_to_modification(
             }
             let qty = quantity::convert(g)?;
             match qty {
-                QuantityExpr::Fixed { value } if (0..=u32::MAX as i32).contains(&value) => {
-                    Ok(DamageModification::SetTo {
-                        value: value as u32,
-                    })
-                }
+                QuantityExpr::Fixed { value } => u32::try_from(value)
+                    .map(|value| DamageModification::SetTo { value })
+                    .map_err(|_| ConversionGap::MalformedIdiom {
+                        idiom: "DamageAction/DealDamageInstead",
+                        path: String::new(),
+                        detail: "non-fixed override amount needs dynamic SetTo".into(),
+                    }),
                 _ => Err(ConversionGap::MalformedIdiom {
                     idiom: "DamageAction/DealDamageInstead",
                     path: String::new(),
@@ -594,6 +618,20 @@ pub fn convert_replace_would_draw(
         out.push(ReplacementDefinition {
             expiry: None,
             event: ReplacementEvent::Draw,
+            // CR 121.2 + CR 121.2a: the scope follows the Forge event variant and is
+            // NOT one constant. A count-form antecedent ("would draw one or more /
+            // two or more cards") is the instruction-level hook CR 121.2a modifies
+            // "before considering any of the individual card draws"; a singular
+            // antecedent ("would draw a card", the draw step, a cycling draw) is one
+            // individual draw. Same rule the Oracle parser applies.
+            draw_scope: Some(match event {
+                ReplacableEventWouldDraw::APlayerWouldDrawOneOrMoreCards(_)
+                | ReplacableEventWouldDraw::APlayerWouldDrawTwoOrMoreCards(_) => {
+                    DrawReplacementScope::InstructionCount
+                }
+                _ => DrawReplacementScope::IndividualDraw,
+            }),
+            planeswalk_scope: None,
             execute: Some(Box::new(exec)),
             runtime_execute: None,
             mode: Default::default(),
@@ -620,6 +658,7 @@ pub fn convert_replace_would_draw(
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         });
     }
     Ok(out)
@@ -719,6 +758,8 @@ pub fn convert_replace_would_put_into_graveyard(
         out.push(ReplacementDefinition {
             expiry: None,
             event: ReplacementEvent::Moved,
+            draw_scope: None,
+            planeswalk_scope: None,
             execute: Some(Box::new(exec)),
             runtime_execute: None,
             mode: Default::default(),
@@ -745,6 +786,7 @@ pub fn convert_replace_would_put_into_graveyard(
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         });
     }
     Ok(out)
@@ -969,6 +1011,8 @@ pub fn convert_as_put_into_graveyard_from_anywhere(
         out.push(ReplacementDefinition {
             expiry: None,
             event: ReplacementEvent::Moved,
+            draw_scope: None,
+            planeswalk_scope: None,
             execute: Some(Box::new(exec)),
             runtime_execute: None,
             mode: Default::default(),
@@ -995,6 +1039,7 @@ pub fn convert_as_put_into_graveyard_from_anywhere(
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         });
     }
     Ok(out)
@@ -1059,6 +1104,8 @@ pub fn convert_replace_would_put_counters(
         out.push(ReplacementDefinition {
             expiry: None,
             event: ReplacementEvent::AddCounter,
+            draw_scope: None,
+            planeswalk_scope: None,
             execute: None,
             runtime_execute: None,
             mode: Default::default(),
@@ -1085,6 +1132,7 @@ pub fn convert_replace_would_put_counters(
             counter_match: counter_match.clone(),
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         });
     }
     Ok(out)
@@ -1243,6 +1291,8 @@ pub fn convert_replace_would_gain_life(
         out.push(ReplacementDefinition {
             expiry: None,
             event: ReplacementEvent::GainLife,
+            draw_scope: None,
+            planeswalk_scope: None,
             execute: None,
             runtime_execute: None,
             mode: Default::default(),
@@ -1269,6 +1319,7 @@ pub fn convert_replace_would_gain_life(
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         });
     }
     Ok(out)
@@ -1361,6 +1412,8 @@ fn try_build_may_cost_pair(
     Ok(Some(ReplacementDefinition {
         expiry: None,
         event: ReplacementEvent::ChangeZone,
+        draw_scope: None,
+        planeswalk_scope: None,
         execute: execute.map(Box::new),
         runtime_execute: None,
         mode: ReplacementMode::MayCost {
@@ -1390,6 +1443,7 @@ fn try_build_may_cost_pair(
         counter_match: None,
         enters_under: None,
         source_controller: None,
+        counter_replacement_subject: CounterReplacementSubject::Recipient,
     }))
 }
 
@@ -1757,18 +1811,21 @@ fn build_replacement_exec(
         // to the same ContinuousModification list used by the native parser.
         A::EnterAsACopyOfAPermanent(perms, copy_effects) => Effect::BecomeCopy {
             target: convert_permanents(perms)?,
+            recipient: TargetFilter::SelfRef,
             duration: None,
             mana_value_limit: None,
             additional_modifications: convert_copy_effects(copy_effects)?,
         },
         A::EnterAsACopyOfPermanent(perm, copy_effects) => Effect::BecomeCopy {
             target: convert_permanent(perm)?,
+            recipient: TargetFilter::SelfRef,
             duration: None,
             mana_value_limit: None,
             additional_modifications: convert_copy_effects(copy_effects)?,
         },
         A::EnterAsACopyOfAPermanentUntil(perms, copy_effects, expiration) => Effect::BecomeCopy {
             target: convert_permanents(perms)?,
+            recipient: TargetFilter::SelfRef,
             duration: Some(static_effect::expiration_to_duration(expiration)?),
             mana_value_limit: None,
             additional_modifications: convert_copy_effects(copy_effects)?,
@@ -1783,7 +1840,7 @@ fn build_replacement_exec(
         // the native parser shape in `oracle_replacement.rs`
         // (`parse_as_enters_choose`).
         A::ChooseACreatureType => Effect::Choose {
-            choice_type: ChoiceType::CreatureType,
+            choice_type: ChoiceType::creature_type(),
             persist: true,
             selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
@@ -1817,15 +1874,15 @@ fn build_replacement_exec(
             persist: true,
             selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
-        // CR 800.4a: opponent-scoped player choice when the schema
-        // filter narrows to opponents; broader player choice
+        // CR 102.1-102.3 + CR 608.2d: opponent-scoped player choice when the
+        // schema filter narrows to opponents; broader player choice
         // otherwise. Re-uses the existing `players_to_controller`
         // bridge for opponent detection.
         A::ChooseAPlayer(players) => {
             let choice_type = match crate::convert::filter::players_to_controller(players.as_ref())
             {
-                Ok(ControllerRef::Opponent) => ChoiceType::Opponent { restriction: None },
-                _ => ChoiceType::Player,
+                Ok(ControllerRef::Opponent) => ChoiceType::opponent(),
+                _ => ChoiceType::player(),
             };
             Effect::Choose {
                 choice_type,
@@ -1838,10 +1895,10 @@ fn build_replacement_exec(
         // values are out of range or inverted (defensive — the engine
         // would generate a degenerate option list).
         A::ChooseANumberBetween(min, max) => {
-            let (Ok(min_u8), Ok(max_u8)) = (u8::try_from(*min), u8::try_from(*max)) else {
+            let (Ok(min_u8), Ok(max_u8)) = (u32::try_from(*min), u32::try_from(*max)) else {
                 return Err(ConversionGap::EnginePrerequisiteMissing {
                     engine_type: "ChoiceType::NumberRange",
-                    needed_variant: format!("number-range bounds out of u8 ({min}, {max})"),
+                    needed_variant: format!("number-range bounds out of u32 ({min}, {max})"),
                 });
             };
             if min_u8 > max_u8 {
@@ -1853,7 +1910,10 @@ fn build_replacement_exec(
             Effect::Choose {
                 choice_type: ChoiceType::NumberRange {
                     min: min_u8,
-                    max: max_u8,
+                    // CR 107.1a: "between X and Y" states an upper bound, so this
+                    // converts to the BOUNDED form.
+                    max: Some(max_u8),
+                    distinctness: engine::types::ability::NumberDistinctness::Repeatable,
                 },
                 persist: true,
                 selection: engine::types::ability::TargetSelectionMode::Chosen,
@@ -2054,6 +2114,7 @@ fn build_replacement_exec(
             let additional_modifications = convert_copy_effects(copy_effects)?;
             Effect::BecomeCopy {
                 target,
+                recipient: TargetFilter::SelfRef,
                 duration: None,
                 mana_value_limit: None,
                 additional_modifications,
@@ -3238,8 +3299,8 @@ fn expiration_tag(e: &Expiration) -> String {
 #[cfg(test)]
 mod tests {
     use engine::types::ability::{
-        AbilityCost, ContinuousModification, Duration, Effect, QuantityExpr, ReplacementMode,
-        TargetFilter,
+        AbilityCost, CombatDamageScope, ContinuousModification, DamageModification, Duration,
+        Effect, QuantityExpr, ReplacementMode, TargetFilter,
     };
     use engine::types::card_type::{CoreType, Supertype};
     use engine::types::keywords::Keyword;
@@ -3248,9 +3309,63 @@ mod tests {
     use crate::schema::types::{
         CardInExile, CardType, Condition, CopyEffect, CopyEffects,
         FutureReplacableEventWouldDealDamage, GameNumber, Permanent, Permanents, Player, Players,
-        ReplacementActionWouldDealDamage, ReplacementActionWouldEnter, Rule, SingleDamageSource,
-        SuperType,
+        ReplacableEventWouldDealDamage, ReplacementActionWouldDealDamage,
+        ReplacementActionWouldEnter, Rule, SingleDamageSource, SuperType,
     };
+
+    #[test]
+    fn would_deal_damage_fixed_actions_convert_to_typed_modifications() {
+        let defs = convert_replace_would_deal_damage(
+            &ReplacableEventWouldDealDamage::CombatDamageWouldBeDealt,
+            &[
+                ReplacementActionWouldDealDamage::PreventThatDamage,
+                ReplacementActionWouldDealDamage::PreventSomeOfThatDamage(Box::new(
+                    GameNumber::Integer(2),
+                )),
+                ReplacementActionWouldDealDamage::DealDamageInstead(Box::new(GameNumber::Integer(
+                    3,
+                ))),
+            ],
+        )
+        .expect("fixed damage replacement actions should convert");
+
+        assert_eq!(defs.len(), 3);
+
+        // CR 510.1a: the unqualified event names neither a damage source nor a
+        // recipient, so both filter slots must stay unset and the combat scope
+        // is the ONLY narrowing the event contributes. Asserted on every
+        // definition the action list produced, since they all share one event.
+        // Without this, a wrong scope or an over-narrow filter would still
+        // leave the `damage_modification` assertions below green.
+        for (idx, def) in defs.iter().enumerate() {
+            assert_eq!(
+                def.damage_source_filter, None,
+                "defs[{idx}]: unqualified combat event must not narrow the damage source"
+            );
+            assert_eq!(
+                def.damage_target_filter, None,
+                "defs[{idx}]: unqualified combat event must not narrow the damage target"
+            );
+            assert_eq!(
+                def.combat_scope,
+                Some(CombatDamageScope::CombatOnly),
+                "defs[{idx}]: combat-damage event must restrict the replacement to combat damage"
+            );
+        }
+
+        assert!(matches!(
+            defs[0].damage_modification.as_ref(),
+            Some(DamageModification::PreventionMinus { value: u32::MAX })
+        ));
+        assert!(matches!(
+            defs[1].damage_modification.as_ref(),
+            Some(DamageModification::PreventionMinus { value: 2 })
+        ));
+        assert!(matches!(
+            defs[2].damage_modification.as_ref(),
+            Some(DamageModification::SetTo { value: 3 })
+        ));
+    }
 
     #[test]
     fn as_enters_may_pay_life_unless_tapped_lowers_to_single_cost_gate() {
@@ -3441,7 +3556,10 @@ mod tests {
         else {
             panic!("expected PreventDamage, got {effect:?}");
         };
-        assert_eq!(damage_source_filter, Some(TargetFilter::ChosenDamageSource));
+        assert_eq!(
+            damage_source_filter,
+            Some(TargetFilter::ChosenDamageSource { filter: None })
+        );
     }
 
     #[test]

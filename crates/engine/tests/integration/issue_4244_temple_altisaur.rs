@@ -22,6 +22,7 @@ fn damage_ability(
             amount: QuantityExpr::Fixed { value: amount },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         },
         vec![target],
         source_id,

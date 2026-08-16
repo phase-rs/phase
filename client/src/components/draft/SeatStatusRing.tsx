@@ -40,29 +40,40 @@ function SeatBadge({ seat, isLocal }: SeatBadgeProps) {
     : isLocal
       ? "border-emerald-400/40"
       : PICK_STATUS_BORDER[seat.pick_status];
+  const faceUpNames = seat.face_up_draft_cards.map((card) => card.name).join(", ");
 
   return (
     <div
-      className={`flex items-center gap-1.5 rounded-[12px] border bg-black/18 px-2 py-1 backdrop-blur-md ${borderColor}`}
+      className={`flex min-w-0 flex-col items-start gap-1 rounded-[12px] border bg-black/18 px-2 py-1 backdrop-blur-md ${borderColor}`}
     >
-      <div
-        className={`h-1.5 w-1.5 rounded-full ${
-          showDisconnected
-            ? "bg-rose-400"
-            : PICK_STATUS_DOT[seat.pick_status]
-        }`}
-        aria-label={
-          showDisconnected ? t("seat.disconnected") : t("seat.connected")
-        }
-      />
-      <span
-        className={`truncate text-xs ${
-          showDisconnected ? "text-white/40 line-through" : "text-white/70"
-        }`}
-      >
-        {seat.display_name || t("seat.label", { number: seat.seat_index + 1 })}
-      </span>
-      {seat.is_bot && <BotIndicator label={botLabel} size="sm" />}
+      <div className="flex min-w-0 items-center gap-1.5">
+        <div
+          className={`h-1.5 w-1.5 rounded-full ${
+            showDisconnected
+              ? "bg-rose-400"
+              : PICK_STATUS_DOT[seat.pick_status]
+          }`}
+          aria-label={
+            showDisconnected ? t("seat.disconnected") : t("seat.connected")
+          }
+        />
+        <span
+          className={`truncate text-xs ${
+            showDisconnected ? "text-white/40 line-through" : "text-white/70"
+          }`}
+        >
+          {seat.display_name || t("seat.label", { number: seat.seat_index + 1 })}
+        </span>
+        {seat.is_bot && <BotIndicator label={botLabel} size="sm" />}
+      </div>
+      {faceUpNames && (
+        <span
+          className="max-w-full break-words text-[10px] leading-tight text-amber-200"
+          title={faceUpNames}
+        >
+          {t("seat.faceUpDraftCards", { cards: faceUpNames })}
+        </span>
+      )}
     </div>
   );
 }
@@ -78,13 +89,14 @@ export function SeatStatusRing() {
 
   if (seats.length === 0) return null;
 
-  // Top row: seats 0-3, Bottom row: seats 4-7
+  // Top row: seats 0-3, Bottom row: seats 4-7. On phones each row uses two
+  // columns so public face-up card names remain readable.
   const topRow = seats.slice(0, 4);
   const bottomRow = seats.slice(4, 8);
 
   return (
     <div className="flex flex-col gap-2 mb-4">
-      <div className="grid grid-cols-4 gap-2">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         {topRow.map((seat) => (
           <SeatBadge
             key={seat.seat_index}
@@ -99,7 +111,7 @@ export function SeatStatusRing() {
           ? t("seat.passingLeft")
           : t("seat.passingRight")}
       </div>
-      <div className="grid grid-cols-4 gap-2">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         {bottomRow.map((seat) => (
           <SeatBadge
             key={seat.seat_index}

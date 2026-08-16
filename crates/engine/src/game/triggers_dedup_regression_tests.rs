@@ -5,7 +5,7 @@ use crate::types::ability::{
     TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
 };
 use crate::types::actions::GameAction;
-use crate::types::card_type::CoreType;
+use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     AutoMayChoice, GameState, MayTriggerAutoChoiceKey, MayTriggerOrigin, WaitingFor,
@@ -18,6 +18,18 @@ use crate::types::zones::Zone;
 
 fn setup() -> GameState {
     GameState::new_two_player(42)
+}
+
+fn live_trigger_origin(
+    state: &GameState,
+    source_id: ObjectId,
+    live_index: usize,
+) -> MayTriggerOrigin {
+    let source = state.objects.get(&source_id).unwrap();
+    let entry = source.trigger_definitions.get(live_index).unwrap();
+    MayTriggerOrigin::Definition {
+        definition_ref: source.trigger_definition_ref(entry),
+    }
 }
 
 fn make_creature(
@@ -90,6 +102,7 @@ fn etb_observer_fires_once_per_event() {
         .get_mut(&observer)
         .unwrap()
         .trigger_definitions[0]
+        .definition
         .destination = Some(Zone::Battlefield);
 
     let new_etb = create_object(
@@ -193,6 +206,7 @@ fn spell_cast_observer_fires_once_per_event() {
         card_id: CardId(4),
         controller: PlayerId(0),
         object_id: spell,
+        cast_mana_value: None,
     };
 
     process_triggers(&mut state, &[event]);
@@ -864,6 +878,7 @@ fn landfall_fires_once_per_land_etb() {
         .get_mut(&observer)
         .unwrap()
         .trigger_definitions[0]
+        .definition
         .destination = Some(Zone::Battlefield);
     // Narrow the valid_card to lands to mimic landfall's filter.
     state
@@ -871,6 +886,7 @@ fn landfall_fires_once_per_land_etb() {
         .get_mut(&observer)
         .unwrap()
         .trigger_definitions[0]
+        .definition
         .valid_card = Some(TargetFilter::Typed(
         crate::types::ability::TypedFilter::land(),
     ));
@@ -928,6 +944,7 @@ fn panharmonicon_still_doubles_after_dedup() {
         .get_mut(&observer_id)
         .unwrap()
         .trigger_definitions[0]
+        .definition
         .destination = Some(Zone::Battlefield);
 
     // Put a Panharmonicon on the battlefield with its static.
@@ -1016,6 +1033,177 @@ fn install_doubler(state: &mut GameState, cause: TriggerCause) -> ObjectId {
     id
 }
 
+/// CR 603.2d + CR 603.6a + CR 603.6c: Gandalf the White-class doubler.
+fn install_gandalf_doubler(state: &mut GameState) -> ObjectId {
+    use crate::types::statics::{TriggerCause, ZoneChangeQualifier};
+    install_doubler(
+        state,
+        TriggerCause::BattlefieldTransition {
+            enter: true,
+            leave: true,
+            qualifiers: vec![
+                ZoneChangeQualifier::Supertype(Supertype::Legendary),
+                ZoneChangeQualifier::CoreType(CoreType::Artifact),
+            ],
+        },
+    )
+}
+
+/// CR 603.2d: Gandalf doubles ETB triggers caused by a legendary permanent.
+#[test]
+fn gandalf_doubles_legendary_etb_triggers() {
+    let (mut state, observer) = setup_with_observer(TriggerMode::ChangesZone);
+    state
+        .objects
+        .get_mut(&observer)
+        .unwrap()
+        .trigger_definitions[0]
+        .definition
+        .destination = Some(Zone::Battlefield);
+    let _gandalf = install_gandalf_doubler(&mut state);
+
+    let norin = create_object(
+        &mut state,
+        CardId(5332),
+        PlayerId(0),
+        "Norin the Wary".to_string(),
+        Zone::Battlefield,
+    );
+    state.objects.get_mut(&norin).unwrap().card_types = crate::types::card_type::CardType {
+        core_types: vec![CoreType::Creature],
+        supertypes: vec![Supertype::Legendary],
+        subtypes: vec![],
+    };
+
+    let event = GameEvent::ZoneChanged {
+        object_id: norin,
+        from: Some(Zone::Exile),
+        to: Zone::Battlefield,
+        record: Box::new(ZoneChangeRecord {
+            name: "Norin the Wary".to_string(),
+            core_types: vec![CoreType::Creature],
+            supertypes: vec![Supertype::Legendary],
+            ..ZoneChangeRecord::test_minimal(norin, Some(Zone::Exile), Zone::Battlefield)
+        }),
+    };
+
+    process_triggers(&mut state, &[event]);
+    super::drain_order_triggers_with_identity(&mut state);
+    let observer_triggers = state
+        .stack
+        .iter()
+        .filter(|e| e.source_id == observer)
+        .count();
+    assert_eq!(
+        observer_triggers, 2,
+        "Gandalf must double ETB triggers caused by a legendary permanent re-entering"
+    );
+}
+
+/// CR 603.2d: Gandalf doubles ETB triggers caused by an artifact.
+#[test]
+fn gandalf_doubles_artifact_etb_triggers() {
+    let (mut state, observer) = setup_with_observer(TriggerMode::ChangesZone);
+    state
+        .objects
+        .get_mut(&observer)
+        .unwrap()
+        .trigger_definitions[0]
+        .definition
+        .destination = Some(Zone::Battlefield);
+    let _gandalf = install_gandalf_doubler(&mut state);
+
+    let genesis = create_object(
+        &mut state,
+        CardId(5333),
+        PlayerId(0),
+        "Genesis Chamber".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&genesis)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Artifact);
+
+    let event = GameEvent::ZoneChanged {
+        object_id: genesis,
+        from: Some(Zone::Hand),
+        to: Zone::Battlefield,
+        record: Box::new(ZoneChangeRecord {
+            name: "Genesis Chamber".to_string(),
+            core_types: vec![CoreType::Artifact],
+            ..ZoneChangeRecord::test_minimal(genesis, Some(Zone::Hand), Zone::Battlefield)
+        }),
+    };
+
+    process_triggers(&mut state, &[event]);
+    super::drain_order_triggers_with_identity(&mut state);
+    let observer_triggers = state
+        .stack
+        .iter()
+        .filter(|e| e.source_id == observer)
+        .count();
+    assert_eq!(
+        observer_triggers, 2,
+        "Gandalf must double ETB triggers caused by an artifact entering"
+    );
+}
+
+/// CR 603.2d: Gandalf does not double ETB triggers from ordinary non-artifact creatures.
+#[test]
+fn gandalf_does_not_double_ordinary_creature_etb_triggers() {
+    let (mut state, observer) = setup_with_observer(TriggerMode::ChangesZone);
+    state
+        .objects
+        .get_mut(&observer)
+        .unwrap()
+        .trigger_definitions[0]
+        .definition
+        .destination = Some(Zone::Battlefield);
+    let _gandalf = install_gandalf_doubler(&mut state);
+
+    let greeter = create_object(
+        &mut state,
+        CardId(5334),
+        PlayerId(0),
+        "Gala Greeters".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&greeter)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Creature);
+
+    let event = GameEvent::ZoneChanged {
+        object_id: greeter,
+        from: Some(Zone::Hand),
+        to: Zone::Battlefield,
+        record: Box::new(ZoneChangeRecord {
+            name: "Gala Greeters".to_string(),
+            core_types: vec![CoreType::Creature],
+            ..ZoneChangeRecord::test_minimal(greeter, Some(Zone::Hand), Zone::Battlefield)
+        }),
+    };
+
+    process_triggers(&mut state, &[event]);
+    super::drain_order_triggers_with_identity(&mut state);
+    let observer_triggers = state
+        .stack
+        .iter()
+        .filter(|e| e.source_id == observer)
+        .count();
+    assert_eq!(
+        observer_triggers, 1,
+        "Gandalf must not double ETB triggers caused by a non-legendary non-artifact creature"
+    );
+}
+
 /// CR 603.2d: Isshin (CreatureAttacking cause) doubles attack triggers
 /// of a permanent the controller owns.
 #[test]
@@ -1069,6 +1257,7 @@ fn isshin_does_not_double_etb_triggers() {
         .get_mut(&observer)
         .unwrap()
         .trigger_definitions[0]
+        .definition
         .destination = Some(Zone::Battlefield);
     let _isshin = install_doubler(&mut state, TriggerCause::CreatureAttacking);
 
@@ -1153,6 +1342,154 @@ fn panharmonicon_does_not_double_attack_triggers() {
     assert_eq!(
         observer_triggers, 1,
         "Panharmonicon must NOT double attack triggers — cause is EntersBattlefield"
+    );
+}
+
+/// CR 603.2d + CR 601.2 + CR 707.10: Veyran, Voice of Duality
+/// (`ControllerCastOrCopiedSpell { [Instant, Sorcery] }`) doubles a
+/// magecraft-style trigger when its controller casts an instant.
+#[test]
+fn veyran_doubles_trigger_caused_by_controller_casting_instant() {
+    use crate::types::statics::TriggerCause;
+
+    let (mut state, observer) = setup_with_observer(TriggerMode::SpellCastOrCopy);
+    let _veyran = install_doubler(
+        &mut state,
+        TriggerCause::ControllerCastOrCopiedSpell {
+            core_types: vec![CoreType::Instant, CoreType::Sorcery],
+        },
+    );
+
+    // An instant spell on the stack, cast by the doubler's controller.
+    let spell = create_object(
+        &mut state,
+        CardId(200),
+        PlayerId(0),
+        "Opt".to_string(),
+        Zone::Stack,
+    );
+    state
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Instant);
+
+    let event = GameEvent::SpellCast {
+        card_id: CardId(200),
+        controller: PlayerId(0),
+        object_id: spell,
+        cast_mana_value: None,
+    };
+
+    process_triggers(&mut state, &[event]);
+    // CR 603.3b (#531): drain the per-controller ordering prompt.
+    super::drain_order_triggers_with_identity(&mut state);
+    let observer_triggers = state
+        .stack
+        .iter()
+        .filter(|e| e.source_id == observer)
+        .count();
+    assert_eq!(
+        observer_triggers, 2,
+        "Veyran must double a trigger caused by its controller casting an instant"
+    );
+}
+
+/// CR 603.2d: Veyran does NOT double attack triggers — the cause predicate is
+/// `ControllerCastOrCopiedSpell`, not `CreatureAttacking`. Regression for
+/// issue #5291 (Veyran was copying an attack trigger).
+#[test]
+fn veyran_does_not_double_attack_triggers() {
+    use crate::types::statics::TriggerCause;
+
+    let (mut state, observer) = setup_with_observer(TriggerMode::Attacks);
+    state
+        .objects
+        .get_mut(&observer)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Creature);
+    let _veyran = install_doubler(
+        &mut state,
+        TriggerCause::ControllerCastOrCopiedSpell {
+            core_types: vec![CoreType::Instant, CoreType::Sorcery],
+        },
+    );
+
+    let event = GameEvent::AttackersDeclared {
+        attacker_ids: vec![observer],
+        defending_player: PlayerId(1),
+        attacks: vec![(
+            observer,
+            crate::game::combat::AttackTarget::Player(PlayerId(1)),
+        )],
+    };
+
+    process_triggers(&mut state, &[event]);
+    // CR 603.3b (#531): drain the per-controller ordering prompt.
+    super::drain_order_triggers_with_identity(&mut state);
+    let observer_triggers = state
+        .stack
+        .iter()
+        .filter(|e| e.source_id == observer)
+        .count();
+    assert_eq!(
+        observer_triggers, 1,
+        "Veyran must NOT double attack triggers — cause is ControllerCastOrCopiedSpell (#5291)"
+    );
+}
+
+/// CR 603.2d + CR 601.2: Veyran does NOT double a trigger caused by an
+/// OPPONENT casting a spell — "you casting or copying" scopes the cause to
+/// the doubler's controller.
+#[test]
+fn veyran_does_not_double_opponent_cast_trigger() {
+    use crate::types::statics::TriggerCause;
+
+    let (mut state, observer) = setup_with_observer(TriggerMode::SpellCastOrCopy);
+    let _veyran = install_doubler(
+        &mut state,
+        TriggerCause::ControllerCastOrCopiedSpell {
+            core_types: vec![CoreType::Instant, CoreType::Sorcery],
+        },
+    );
+
+    // An instant spell on the stack, cast by the OPPONENT.
+    let spell = create_object(
+        &mut state,
+        CardId(201),
+        PlayerId(1),
+        "Opt".to_string(),
+        Zone::Stack,
+    );
+    state
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Instant);
+
+    let event = GameEvent::SpellCast {
+        card_id: CardId(201),
+        controller: PlayerId(1),
+        object_id: spell,
+        cast_mana_value: None,
+    };
+
+    process_triggers(&mut state, &[event]);
+    super::drain_order_triggers_with_identity(&mut state);
+    let observer_triggers = state
+        .stack
+        .iter()
+        .filter(|e| e.source_id == observer)
+        .count();
+    assert_eq!(
+        observer_triggers, 1,
+        "Veyran must NOT double a trigger caused by an opponent's cast"
     );
 }
 
@@ -1548,6 +1885,7 @@ fn drivnod_doubles_dies_triggers() {
         .get_mut(&observer)
         .unwrap()
         .trigger_definitions[0]
+        .definition
         .destination = Some(Zone::Graveyard);
     let _drivnod = install_doubler(&mut state, TriggerCause::CreatureDying);
 
@@ -1653,6 +1991,7 @@ fn wayta_does_not_double_unrelated_triggers() {
         .get_mut(&observer)
         .unwrap()
         .trigger_definitions[0]
+        .definition
         .destination = Some(Zone::Battlefield);
     let _wayta = install_doubler(&mut state, TriggerCause::ControlledCreatureDealtDamage);
 
@@ -1692,6 +2031,189 @@ fn wayta_does_not_double_unrelated_triggers() {
     assert_eq!(
         observer_triggers, 1,
         "Wayta must not double ETB triggers when the cause is damage to your creature"
+    );
+}
+
+/// Install Cloud, Midgar Mercenary with its parsed trigger-doubler static.
+/// The static is `DoubleTriggers{cause:Any}` scoped to `affected =
+/// Or[SelfRef, Typed(Equipment, AttachedToSource)]` and gated on
+/// `condition = SourceIsEquipped` — exercising the real parser output.
+fn install_cloud(state: &mut GameState) -> ObjectId {
+    let id = create_object(
+        state,
+        CardId(120),
+        PlayerId(0),
+        "Cloud, Midgar Mercenary".to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Creature);
+    obj.static_definitions.push(
+        crate::parser::oracle_static::parse_static_line(
+            "As long as ~ is equipped, if a triggered ability of ~ or an Equipment attached to it triggers, that ability triggers an additional time.",
+        )
+        .expect("expected Cloud trigger-doubler static"),
+    );
+    id
+}
+
+/// Attach an Equipment (subtype "Equipment") to `host`, optionally carrying an
+/// attacks-mode draw trigger that fires on any AttackersDeclared event. When
+/// `with_trigger` is false it only satisfies the `SourceIsEquipped` gate.
+fn attach_equipment(
+    state: &mut GameState,
+    host: ObjectId,
+    card: CardId,
+    with_trigger: bool,
+) -> ObjectId {
+    let id = create_object(
+        state,
+        card,
+        PlayerId(0),
+        "Buster Sword".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.subtypes.push("Equipment".to_string());
+        obj.attached_to = Some(host.into());
+        if with_trigger {
+            let mut trigger = draw_one_trigger(TriggerMode::Attacks);
+            trigger.valid_card = Some(TargetFilter::Any);
+            obj.trigger_definitions.push(trigger);
+        }
+    }
+    state.objects.get_mut(&host).unwrap().attachments.push(id);
+    id
+}
+
+fn count_triggers_from(state: &GameState, source: ObjectId) -> usize {
+    state.stack.iter().filter(|e| e.source_id == source).count()
+}
+
+fn attack_event(attacker: ObjectId) -> GameEvent {
+    GameEvent::AttackersDeclared {
+        attacker_ids: vec![attacker],
+        defending_player: PlayerId(1),
+        attacks: vec![(
+            attacker,
+            crate::game::combat::AttackTarget::Player(PlayerId(1)),
+        )],
+    }
+}
+
+/// CR 603.2d + CR 301.5a: An Equipment attached to an equipped Cloud has its
+/// trigger doubled — the `affected` `Typed(Equipment, AttachedToSource)` arm
+/// matches the attachment, and the `SourceIsEquipped` gate holds. Confirms the
+/// narrowed affected filter still covers the attached-Equipment case.
+#[test]
+fn cloud_doubles_attached_equipment_trigger_when_equipped() {
+    let mut state = setup();
+    let cloud = install_cloud(&mut state);
+    let equip = attach_equipment(&mut state, cloud, CardId(121), true);
+    let attacker = make_creature(&mut state, PlayerId(0), "Soldier", 1, 1);
+
+    process_triggers(&mut state, &[attack_event(attacker)]);
+    super::drain_order_triggers_with_identity(&mut state);
+    assert_eq!(
+        count_triggers_from(&state, equip),
+        2,
+        "Cloud must double an attached Equipment's trigger while equipped"
+    );
+}
+
+/// CR 603.2d: Self-inclusion — Cloud's OWN triggered ability is doubled while
+/// equipped, because its `affected` filter references the source (`~`), so the
+/// self-exclusion carve-out fires. Discriminating: reverting the runtime
+/// `affected_references_self` gate (or the SelfRef affected arm) re-applies the
+/// unconditional self-exclusion and this drops to 1.
+#[test]
+fn cloud_doubles_its_own_trigger_when_equipped_self_inclusion() {
+    let mut state = setup();
+    let cloud = install_cloud(&mut state);
+    {
+        let mut trigger = draw_one_trigger(TriggerMode::Attacks);
+        trigger.valid_card = Some(TargetFilter::Any);
+        state
+            .objects
+            .get_mut(&cloud)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+    }
+    // Equip Cloud (plain Equipment, no trigger of its own) to satisfy the gate.
+    let _equip = attach_equipment(&mut state, cloud, CardId(122), false);
+    let attacker = make_creature(&mut state, PlayerId(0), "Soldier", 1, 1);
+
+    process_triggers(&mut state, &[attack_event(attacker)]);
+    super::drain_order_triggers_with_identity(&mut state);
+    assert_eq!(
+        count_triggers_from(&state, cloud),
+        2,
+        "equipped Cloud must double its OWN triggered ability (self-inclusion)"
+    );
+}
+
+/// CR 301.5a: Unequipped Cloud does NOT double — the `SourceIsEquipped`
+/// condition gates the static off. Discriminating: reverting the dispatch
+/// condition re-attachment leaves `condition: None`, the static stays active,
+/// self-inclusion fires, and Cloud's own trigger doubles to 2.
+#[test]
+fn cloud_does_not_double_when_unequipped() {
+    let mut state = setup();
+    let cloud = install_cloud(&mut state);
+    {
+        let mut trigger = draw_one_trigger(TriggerMode::Attacks);
+        trigger.valid_card = Some(TargetFilter::Any);
+        state
+            .objects
+            .get_mut(&cloud)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+    }
+    // No Equipment attached → SourceIsEquipped is false.
+    let attacker = make_creature(&mut state, PlayerId(0), "Soldier", 1, 1);
+
+    process_triggers(&mut state, &[attack_event(attacker)]);
+    super::drain_order_triggers_with_identity(&mut state);
+    assert_eq!(
+        count_triggers_from(&state, cloud),
+        1,
+        "unequipped Cloud must not double — SourceIsEquipped gate is unmet"
+    );
+}
+
+/// CR 603.2d: An unrelated permanent you control (not Cloud, not an Equipment
+/// attached to Cloud) is NOT doubled even while Cloud is equipped — the
+/// `affected` filter narrows to self + attached Equipment. Discriminating:
+/// reverting the SelfRef/Equipment affected arms leaves `affected: None`, which
+/// over-doubles every controlled trigger and this rises to 2.
+#[test]
+fn cloud_does_not_double_unrelated_controlled_trigger() {
+    let mut state = setup();
+    let cloud = install_cloud(&mut state);
+    let _equip = attach_equipment(&mut state, cloud, CardId(123), false);
+    // Unrelated creature you control with its own attacks-mode trigger.
+    let unrelated = make_creature(&mut state, PlayerId(0), "Chocobo", 2, 2);
+    {
+        let mut trigger = draw_one_trigger(TriggerMode::Attacks);
+        trigger.valid_card = Some(TargetFilter::Any);
+        state
+            .objects
+            .get_mut(&unrelated)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+    }
+
+    process_triggers(&mut state, &[attack_event(unrelated)]);
+    super::drain_order_triggers_with_identity(&mut state);
+    assert_eq!(
+        count_triggers_from(&state, unrelated),
+        1,
+        "Cloud must not double an unrelated controlled permanent's trigger"
     );
 }
 
@@ -2392,6 +2914,7 @@ fn make_phase_trigger_source(
     let obj = state.objects.get_mut(&id).unwrap();
     obj.trigger_definitions.push(trig_def.clone());
     std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trig_def);
+    obj.materialize_base_trigger_definitions();
     id
 }
 
@@ -2424,7 +2947,77 @@ fn make_optional_phase_trigger_with_no_legal_target(
     let obj = state.objects.get_mut(&id).unwrap();
     obj.trigger_definitions.push(trig_def.clone());
     std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trig_def);
+    obj.materialize_base_trigger_definitions();
     id
+}
+
+/// Helper: install an optional upkeep trigger whose accepted resolution runs
+/// `effect`. Used with effects that surface no stack-time target slot (CR 115.1):
+/// context-refs whose "target" is the controller / "you" (`Effect::Draw`,
+/// `Effect::Token`), and resolution-time selections (`Effect::Sacrifice`). All
+/// are ALWAYS resolvable, so an auto-accepted instance must NOT be suppressed as
+/// inert.
+fn make_optional_phase_trigger_effect(
+    state: &mut GameState,
+    owner: PlayerId,
+    name: &str,
+    effect: Effect,
+) -> ObjectId {
+    let id = make_creature(state, owner, name, 1, 1);
+    let trig_def = TriggerDefinition::new(TriggerMode::Phase)
+        .phase(Phase::Upkeep)
+        .optional()
+        .execute(AbilityDefinition::new(AbilityKind::Database, effect).optional())
+        .description(format!("{name}: at the beginning of upkeep, you may."));
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.trigger_definitions.push(trig_def.clone());
+    std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trig_def);
+    id
+}
+
+/// A context-ref "you may draw a card" effect (target is the controller).
+fn optional_draw_effect() -> Effect {
+    Effect::Draw {
+        count: QuantityExpr::Fixed { value: 1 },
+        target: TargetFilter::Controller,
+    }
+}
+
+/// A context-ref "you may create a 1/1 token" effect (owner is the controller) —
+/// the Brood Sliver class. Goes through a DIFFERENT `target_filter()` match arm
+/// than `Effect::Draw`, so it independently exercises the context-ref guard.
+fn optional_create_token_effect() -> Effect {
+    Effect::Token {
+        name: "Sliver".into(),
+        power: crate::types::ability::PtValue::Fixed(1),
+        toughness: crate::types::ability::PtValue::Fixed(1),
+        types: vec!["Creature".into()],
+        colors: vec![],
+        keywords: vec![],
+        tapped: false,
+        count: QuantityExpr::Fixed { value: 1 },
+        owner: TargetFilter::Controller,
+        attach_to: None,
+        enters_attacking: false,
+        supertypes: vec![],
+        static_abilities: vec![],
+        enter_with_counters: vec![],
+    }
+}
+
+/// A "you may sacrifice a creature" effect. CR 701.21a: Sacrifice chooses its
+/// permanents at RESOLUTION (via `EffectZoneChoice`), so
+/// `extract_target_filter_from_effect` returns `None` (no stack-time slot) even
+/// though raw `target_filter()` yields a NON-context-ref filter. This is the
+/// discriminator between the single-authority fix and a narrow context-ref-only
+/// guard: only delegating to the slot builder keeps this trigger off the inert
+/// list.
+fn optional_sacrifice_effect() -> Effect {
+    Effect::Sacrifice {
+        target: TargetFilter::Typed(TypedFilter::creature()),
+        count: QuantityExpr::Fixed { value: 1 },
+        min_count: 0,
+    }
 }
 
 /// Read the source IDs of the current stack entries in stack-bottom-to-top
@@ -2556,7 +3149,7 @@ fn auto_accepted_optional_triggers_without_legal_targets_are_suppressed() {
             MayTriggerAutoChoiceKey {
                 player: PlayerId(0),
                 source_id,
-                origin: MayTriggerOrigin::Printed { trigger_index: 0 },
+                origin: live_trigger_origin(&state, source_id, 0),
             },
             AutoMayChoice::Accept,
         );
@@ -2581,6 +3174,76 @@ fn auto_accepted_optional_triggers_without_legal_targets_are_suppressed() {
         state.stack.is_empty(),
         "suppressed inert triggers must not reach the stack"
     );
+}
+
+/// CR 603.3d + CR 115.1 — regression for the "don't ask again → Yes silently
+/// answers No" report. An auto-ACCEPTED optional trigger that surfaces no
+/// stack-time target slot is ALWAYS resolvable, so it MUST reach the stack — it
+/// is not an inert no-op.
+///
+/// The perf refactor (#3917) gated inert-suppression on raw
+/// `target_filter().is_some() && slots.is_empty()`. But `target_filter()` is not
+/// the authority for "surfaces a chooseable slot": `extract_target_filter_from_effect`
+/// is, and it returns `None` for both context-refs (CR 121.1 "you may draw a
+/// card", the controller is never a declared target) AND resolution-time
+/// selections (CR 701.21a "you may sacrifice a creature", chosen during
+/// resolution). All report a `Some(non-context-ref)` from raw `target_filter()`
+/// yet build zero slots, so the gate mistook a remembered Accept for "no legal
+/// targets" and dropped the trigger — indistinguishable from a decline.
+///
+/// Three arms cover the class through THREE distinct `target_filter()`/authority
+/// paths: "you may draw a card" (`Effect::Draw`), Brood Sliver's "you may create
+/// a Sliver token" (`Effect::Token`), and "you may sacrifice a creature"
+/// (`Effect::Sacrifice`). The Sacrifice arm is the discriminator that a
+/// context-ref-only guard would still drop — it forces the fix to delegate to
+/// the slot-builder authority rather than re-derive a subset.
+///
+/// This drives `process_triggers` — the trigger-collection/stack path where the
+/// drop happens — so it cannot be satisfied by the resolution-path coverage in
+/// `effects/mod.rs` (`saved_accept_for_may_trigger_resolves_without_prompt`).
+#[test]
+fn auto_accepted_optional_context_ref_effect_reaches_stack() {
+    for (label, effect) in [
+        ("you may draw a card", optional_draw_effect()),
+        ("you may create a token", optional_create_token_effect()),
+        ("you may sacrifice a creature", optional_sacrifice_effect()),
+    ] {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.phase = Phase::Upkeep;
+        let src = make_optional_phase_trigger_effect(&mut state, PlayerId(0), "Remembered", effect);
+
+        // Player remembered "yes, do it every time" for this trigger.
+        state.set_may_trigger_auto_choice(
+            MayTriggerAutoChoiceKey {
+                player: PlayerId(0),
+                source_id: src,
+                origin: live_trigger_origin(&state, src, 0),
+            },
+            AutoMayChoice::Accept,
+        );
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::PhaseChanged {
+                phase: Phase::Upkeep,
+            }],
+        );
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }),
+            "[{label}] a single auto-accepted trigger needs no ordering prompt; got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "[{label}] an auto-accepted context-ref trigger is always resolvable \
+             (its controller target is never chosen) and must reach the stack — \
+             not be dropped as an inert no-op"
+        );
+    }
 }
 
 /// CR 603.3b: Two genuinely INDISTINGUISHABLE no-input triggers (same
@@ -2655,7 +3318,7 @@ fn order_triggers_distinct_event_context_still_prompt() {
             source_id: source,
             controller: PlayerId(0),
             condition: None,
-            ability: ability.clone(),
+            ability: Box::new(ability.clone()),
             timestamp: count,
             target_constraints: Vec::new(),
             distribute: None,
@@ -2666,6 +3329,7 @@ fn order_triggers_distinct_event_context_still_prompt() {
             may_trigger_origin: None,
             subject_match_count: Some(count),
             die_result: None,
+            provenance: None,
         })
     };
     let ctx_a = make_ctx(ObjectId(1), 1);
@@ -2711,7 +3375,7 @@ fn order_triggers_event_context_ability_still_prompts_on_distinct_events() {
             source_id: source,
             controller: PlayerId(0),
             condition: None,
-            ability: ability.clone(),
+            ability: Box::new(ability.clone()),
             timestamp: source.0 as u32,
             target_constraints: Vec::new(),
             distribute: None,
@@ -2725,6 +3389,7 @@ fn order_triggers_event_context_ability_still_prompts_on_distinct_events() {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         })
     };
     let ctx_a = make_ctx(ObjectId(1), ObjectId(11));
@@ -2765,7 +3430,7 @@ fn archenemy_hero_team_orders_triggers_from_multiple_heroes_together() {
             source_id: source,
             controller,
             condition: None,
-            ability,
+            ability: Box::new(ability),
             timestamp: source.0 as u32,
             target_constraints: Vec::new(),
             distribute: None,
@@ -2776,6 +3441,7 @@ fn archenemy_hero_team_orders_triggers_from_multiple_heroes_together() {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         })
     };
 
@@ -2982,4 +3648,431 @@ fn order_triggers_apnap_three_players() {
             "stack top must contain NAP triggers (CR 405.3 + 603.3b)"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// CR 603.2c: the shared "already collected" authority
+// (`filter_already_collected_trigger_events_from`).
+//
+// These pin the exact semantics of the queued-context witness, which is a BOUND
+// and not an occurrence count: `deferred_triggers` holds one context per matching
+// observer, so N observers of ONE occurrence contribute N copies of that value.
+// ---------------------------------------------------------------------------
+
+/// A byte-identical `ZoneChanged` builder — `ZoneChangeRecord::test_minimal` is
+/// fully deterministic, so two calls with the same arguments compare equal.
+fn zone_change_event(object_id: ObjectId) -> GameEvent {
+    GameEvent::ZoneChanged {
+        object_id,
+        from: Some(Zone::Library),
+        to: Zone::Battlefield,
+        record: Box::new(ZoneChangeRecord::test_minimal(
+            object_id,
+            Some(Zone::Library),
+            Zone::Battlefield,
+        )),
+    }
+}
+
+/// One queued context carrying exactly one copy of `event`, matching the
+/// one-witness-copy-per-matched-observer shape
+/// `collect_pending_triggers_with_collection` produces. That function builds
+/// `PendingTriggerContext::batched(matched.pending, matched.trigger_events)`, but
+/// for a non-batched trigger `matched.trigger_events` is the singleton
+/// `vec![event.clone()]` — so a `::single` context is the same one-copy shape and
+/// is used here because `::batched` is private to `triggers`.
+fn queued_context_for(event: GameEvent) -> PendingTriggerContext {
+    PendingTriggerContext::single(PendingTrigger {
+        source_id: ObjectId(99),
+        controller: PlayerId(0),
+        condition: None,
+        ability: Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(99),
+            PlayerId(0),
+        )),
+        timestamp: 0,
+        target_constraints: Vec::new(),
+        distribute: None,
+        trigger_event: Some(event),
+        modal: None,
+        mode_abilities: Vec::new(),
+        description: None,
+        may_trigger_origin: None,
+        subject_match_count: None,
+        die_result: None,
+        provenance: None,
+    })
+}
+
+fn zone_change_count(events: &[GameEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+        .count()
+}
+
+fn recorded_zone_change_event(state: &mut GameState, object_id: ObjectId) -> GameEvent {
+    let mut event = zone_change_event(object_id);
+    let GameEvent::ZoneChanged { record, .. } = &mut event else {
+        unreachable!("zone_change_event always returns ZoneChanged");
+    };
+    crate::game::restrictions::record_zone_change(state, record);
+    event
+}
+
+#[test]
+fn deferred_zone_change_witness_does_not_alias_the_next_turns_ledger_index() {
+    let mut state = setup();
+    let old_turn = state.turn_number;
+    let old_event = recorded_zone_change_event(&mut state, ObjectId(7));
+    state
+        .deferred_triggers
+        .push(queued_context_for(old_event.clone()));
+
+    assert!(
+        filter_already_collected_trigger_events_from(
+            &state,
+            std::slice::from_ref(&old_event),
+            0,
+            &[]
+        )
+        .is_empty(),
+        "the same-turn queued witness must suppress its own occurrence"
+    );
+
+    crate::game::turns::start_next_turn(&mut state, &mut Vec::new());
+    let new_event = recorded_zone_change_event(&mut state, ObjectId(7));
+    let GameEvent::ZoneChanged { record, .. } = &new_event else {
+        unreachable!("recorded helper always returns ZoneChanged");
+    };
+    assert_eq!(record.turn_zone_change_index, 0);
+    assert_eq!(
+        filter_already_collected_trigger_events_from(
+            &state,
+            std::slice::from_ref(&new_event),
+            0,
+            &[],
+        ),
+        vec![new_event],
+        "a deferred witness from turn {old_turn} must not consume index 0 from turn {}",
+        state.turn_number
+    );
+}
+
+#[test]
+fn batched_zone_change_replay_guard_keeps_old_turn_markers_distinct_from_new_index_zero() {
+    let (mut state, observer) = setup_with_observer(TriggerMode::ChangesZone);
+    let (definition, definition_ref) = {
+        let object = state.objects.get_mut(&observer).unwrap();
+        object.trigger_definitions[0].definition.batched = true;
+        let definition = object.trigger_definitions[0].definition.clone();
+        let definition_ref = object.trigger_definition_ref(&object.trigger_definitions[0]);
+        (definition, definition_ref)
+    };
+    let old_event = recorded_zone_change_event(&mut state, ObjectId(7));
+
+    assert!(batched_zone_change_replay_guard_applies(
+        &definition,
+        std::slice::from_ref(&old_event)
+    ));
+    record_batched_zone_change_collected(
+        &mut state,
+        Some(&definition_ref),
+        std::slice::from_ref(&old_event),
+    );
+    assert!(
+        batched_zone_change_already_collected(
+            &state,
+            Some(&definition_ref),
+            std::slice::from_ref(&old_event),
+        ),
+        "the same-turn marker must suppress the event it recorded"
+    );
+
+    let GameEvent::ZoneChanged { record, .. } = &old_event else {
+        unreachable!("recorded helper always returns ZoneChanged");
+    };
+    let old_key = (
+        definition_ref.clone(),
+        record.recorded_turn_number,
+        record.turn_zone_change_index,
+    );
+    crate::game::turns::start_next_turn(&mut state, &mut Vec::new());
+    state.batched_zone_change_trigger_fired.insert(old_key);
+    assert!(
+        batched_zone_change_already_collected(
+            &state,
+            Some(&definition_ref),
+            std::slice::from_ref(&old_event),
+        ),
+        "a retained marker must still suppress its old-turn event after the boundary"
+    );
+
+    let new_event = recorded_zone_change_event(&mut state, ObjectId(7));
+    let GameEvent::ZoneChanged { record, .. } = &new_event else {
+        unreachable!("recorded helper always returns ZoneChanged");
+    };
+    assert_eq!(record.turn_zone_change_index, 0);
+    assert!(
+        !batched_zone_change_already_collected(
+            &state,
+            Some(&definition_ref),
+            std::slice::from_ref(&new_event),
+        ),
+        "a new-turn index-0 event must not alias the retained old-turn marker"
+    );
+}
+
+/// U1 — the queued witness is COUNT-LIMITED, not set membership.
+///
+/// Two byte-identical `ZoneChanged` in the slice against ONE queued context
+/// carrying that value must leave exactly one survivor. Set membership would
+/// return 0, and so would a blanket `ZoneChanged` drop; both are wrong, because
+/// the second occurrence belongs to no owner.
+#[test]
+fn owner_collected_filter_consumes_one_witness_per_queued_context() {
+    let mut state = setup();
+    let event = zone_change_event(ObjectId(7));
+    let events = vec![event.clone(), event.clone()];
+    state.deferred_triggers.push(queued_context_for(event));
+
+    assert_eq!(
+        zone_change_count(&events),
+        2,
+        "the slice must really hold two byte-identical ZoneChanged"
+    );
+    assert_eq!(
+        state.deferred_triggers.len(),
+        1,
+        "exactly one context must be queued"
+    );
+
+    let survivors = filter_already_collected_trigger_events_from(&state, &events, 0, &[]);
+    assert_eq!(
+        zone_change_count(&survivors),
+        1,
+        "CR 603.2c: one queued witness consumes one copy, not every copy"
+    );
+}
+
+/// U2 — the consumed-occurrence ledger alone suppresses, with an empty queue.
+///
+/// This is the witness that survives an intervening `drain_deferred_trigger_queue`.
+/// Production isolation of this case at the search-delivery park is an open gap;
+/// it is evidenced here at the authority layer.
+#[test]
+fn owner_collected_filter_honors_consumed_ledger_with_empty_queue() {
+    let state = setup();
+    let claimed = zone_change_event(ObjectId(7));
+    let other = zone_change_event(ObjectId(8));
+    let events = vec![claimed.clone(), other.clone()];
+
+    assert!(
+        state.deferred_triggers.is_empty(),
+        "the queued-context witness must be absent so the ledger is isolated"
+    );
+
+    let consumed = vec![ConsumedTriggerEventOccurrence {
+        event: claimed.clone(),
+        occurrence: 0,
+    }];
+    let survivors = filter_already_collected_trigger_events_from(&state, &events, 0, &consumed);
+    assert_eq!(
+        survivors,
+        vec![other],
+        "the ledger-claimed occurrence is removed and the unrelated one survives"
+    );
+}
+
+/// U3 — the queued witness never touches a non-`ZoneChanged` event.
+#[test]
+fn owner_collected_filter_never_drops_non_zone_change_events() {
+    let mut state = setup();
+    let zone_change = zone_change_event(ObjectId(7));
+    let life = GameEvent::LifeChanged {
+        player_id: PlayerId(0),
+        amount: -1,
+    };
+    let events = vec![zone_change.clone(), life.clone()];
+    state
+        .deferred_triggers
+        .push(queued_context_for(zone_change));
+
+    let survivors = filter_already_collected_trigger_events_from(&state, &events, 0, &[]);
+    assert!(
+        !survivors.is_empty(),
+        "the non-zone event must not be swept away with the zone change"
+    );
+    assert_eq!(
+        survivors,
+        vec![life],
+        "only the owner-collected ZoneChanged is removed"
+    );
+}
+
+/// U4 — the witness counts CONTEXT COPIES, not occurrences.
+///
+/// Two observers of ONE occurrence queue two contexts, each carrying that same
+/// single value. A slice holding two byte-identical copies therefore loses BOTH.
+/// This is the documented bound in
+/// `filter_already_collected_trigger_events_from`'s contract, made executable so
+/// no future author can re-assert occurrence-exactness without deliberately
+/// updating this row.
+///
+/// THIS ROW DESCRIBES A `#[cfg(test)]`-ONLY INPUT, NOT A PRODUCTION LOSS. Both
+/// events come from `zone_change_event`, which builds its record with
+/// `ZoneChangeRecord::test_minimal` — a `#[cfg(test)]` constructor whose own doc
+/// says *"Production code must use `GameObject::snapshot_for_zone_change`"*. It
+/// pins `turn_zone_change_index` at `0` for BOTH events and leaves
+/// `trigger_source_context` and `entered_incarnation` as `None`. In production,
+/// two byte-identical `ZoneChanged` denote ONE occurrence emitted twice, so
+/// dropping both is the CORRECT answer for this input.
+///
+/// Distinct production occurrences are separated by `turn_zone_change_index` in
+/// EVERY family, and additionally by `object_id` (a top-level field of the
+/// event, sibling to `record`), by `entered_incarnation` (battlefield
+/// destinations only), and by
+/// `trigger_source_context.identity.reference.incarnation` (only where the path
+/// bumps the incarnation). Within-library reorders are excluded entirely: they
+/// emit neither a `ZoneChanged` event nor a ledger row, as pinned by
+/// `within_library_reposition_does_not_create_a_zone_change` (in `game/zones.rs`).
+/// The occurrence-separation links are pinned by
+/// `occurrence_exact_witness_consumes_the_occurrence_its_witness_names` (U5,
+/// below) and by `parked_delivery_records_carry_distinct_occurrence_indices` (in
+/// `tests/integration/search_delivery_observer_dedup.rs`).
+#[test]
+fn owner_collected_filter_counts_contexts_not_occurrences() {
+    let mut state = setup();
+    let event = zone_change_event(ObjectId(7));
+    let events = vec![event.clone(), event.clone()];
+    state
+        .deferred_triggers
+        .push(queued_context_for(event.clone()));
+    state.deferred_triggers.push(queued_context_for(event));
+
+    assert_eq!(
+        zone_change_count(&events),
+        2,
+        "the slice must really hold two byte-identical ZoneChanged"
+    );
+    assert_eq!(
+        state.deferred_triggers.len(),
+        2,
+        "two observers of one occurrence queue two contexts"
+    );
+
+    let survivors = filter_already_collected_trigger_events_from(&state, &events, 0, &[]);
+    assert_eq!(
+        zone_change_count(&survivors),
+        0,
+        "the queued witness is a min(queued_copies, slice_copies) BOUND, and is \
+         NOT occurrence-exact"
+    );
+}
+
+/// U5 — the witness consumes the occurrence IT NAMES, not merely one of that shape.
+///
+/// CR 603.2c sentence 2. Two DISTINCT occurrences of one object are separated in
+/// production by `turn_zone_change_index` always, and by up to three further
+/// fields depending on the family (`object_id`, `entered_incarnation`,
+/// `trigger_source_context.identity.reference.incarnation`). This row isolates the
+/// one that is live for EVERY family and lives inside `ZoneChangeRecord`'s
+/// equality — `turn_zone_change_index`, assigned per-occurrence by
+/// `restrictions::record_zone_change`. `ZoneChangeRecord::test_minimal` leaves
+/// `trigger_source_context` and `entered_incarnation` as `None`, and both events
+/// here share one `ObjectId`, so the index is the SOLE difference.
+///
+/// There is no production analogue with these same three fields neutralized:
+/// a within-library reorder emits neither a `ZoneChanged` event nor a ledger row
+/// (see `within_library_reposition_does_not_create_a_zone_change` in `zones.rs`).
+/// A production fixture for the FILTER-AUTHORITY link pinned here is
+/// CONSTRUCTIBLE but deliberately NOT built: the only known route depends on a duplicate-id
+/// `SelectCards` payload that the `EffectZoneChoice` arm fails to reject, and
+/// every sibling validator rejects such a payload with an error. So once that
+/// gap is closed the action is REJECTED, the row fails to construct, and it goes
+/// RED — the row would be testing the validation gap, not the invariant. The
+/// behavioural pin therefore lives here.
+///
+/// The witness names the SECOND occurrence, so the survivor must be the FIRST.
+/// The survivor is identified by a RAW FIELD READ, not by `GameEvent` equality:
+/// an equality-based assertion would itself be evaluated under the very
+/// `PartialEq` a regression would break, and would pass either way.
+///
+/// Goes red if a future change drops `turn_zone_change_index` out of
+/// `ZoneChangeRecord` equality (e.g. a manual `impl PartialEq` that skips it), or
+/// if the filter regresses to set membership.
+#[test]
+fn occurrence_exact_witness_consumes_the_occurrence_its_witness_names() {
+    let mut state = setup();
+
+    let first_event = GameEvent::ZoneChanged {
+        object_id: ObjectId(7),
+        from: Some(Zone::Library),
+        to: Zone::Battlefield,
+        record: Box::new(ZoneChangeRecord {
+            turn_zone_change_index: 0,
+            ..ZoneChangeRecord::test_minimal(ObjectId(7), Some(Zone::Library), Zone::Battlefield)
+        }),
+    };
+    let second_event = GameEvent::ZoneChanged {
+        object_id: ObjectId(7),
+        from: Some(Zone::Library),
+        to: Zone::Battlefield,
+        record: Box::new(ZoneChangeRecord {
+            turn_zone_change_index: 1,
+            ..ZoneChangeRecord::test_minimal(ObjectId(7), Some(Zone::Library), Zone::Battlefield)
+        }),
+    };
+
+    assert_ne!(
+        first_event, second_event,
+        "CR 400.7: turn_zone_change_index is the ONLY field separating these two \
+         occurrences of one object, and it MUST participate in GameEvent equality"
+    );
+
+    let events = vec![first_event.clone(), second_event.clone()];
+
+    // Reach-guard: with an empty queue the filter body still runs and keeps both
+    // events. Without this the main assertion below would also be satisfied by a
+    // function that returned everything. NOT revert-failing under F-EQ.
+    assert!(
+        state.deferred_triggers.is_empty(),
+        "the reach-guard needs an empty queue"
+    );
+    assert_eq!(
+        zone_change_count(&filter_already_collected_trigger_events_from(
+            &state,
+            &events,
+            0,
+            &[]
+        )),
+        2,
+        "reach-guard: with no queued witness the filter keeps both occurrences"
+    );
+
+    // The witness names the SECOND occurrence.
+    state
+        .deferred_triggers
+        .push(queued_context_for(second_event.clone()));
+
+    let survivors = filter_already_collected_trigger_events_from(&state, &events, 0, &[]);
+    assert_eq!(
+        survivors.len(),
+        1,
+        "one witness consumes exactly one occurrence"
+    );
+    let GameEvent::ZoneChanged { record, .. } = &survivors[0] else {
+        panic!("the survivor must be the ZoneChanged that no witness named");
+    };
+    assert_eq!(
+        record.turn_zone_change_index, 0,
+        "CR 603.2c: the witness named occurrence 1, so occurrence 0 must survive; \
+         reading the index RAW (not via GameEvent equality) is what makes this \
+         assertion survive a broken ZoneChangeRecord PartialEq"
+    );
 }

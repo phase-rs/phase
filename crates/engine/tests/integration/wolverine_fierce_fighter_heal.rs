@@ -29,6 +29,7 @@ fn damage_ability(source_id: ObjectId, target: ObjectId, amount: i32) -> Resolve
             amount: QuantityExpr::Fixed { value: amount },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         },
         vec![TargetRef::Object(target)],
         source_id,
@@ -57,6 +58,10 @@ fn wolverine_noncombat_separate_instance_heals_prior_damage() {
         &mut events,
     )
     .expect("first damage resolves");
+    assert!(
+        !runner.state().has_post_replacement_drain(),
+        "Wolverine's inline heal must not leave a dead post-replacement drain"
+    );
     assert_eq!(
         runner.state().objects[&wolverine].damage_marked,
         2,

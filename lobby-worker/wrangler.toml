@@ -28,6 +28,16 @@ class_name = "LobbyDO"
 tag = "v1"
 new_sqlite_classes = ["LobbyDO"]
 
+# Analytics Engine dataset for client telemetry (`POST /telemetry`). Write-only,
+# high-cardinality event store queried out-of-band via the SQL-over-HTTP API.
+# AE is available on the Workers Free plan and is currently UNBILLED; Cloudflare
+# has said pricing will be announced in advance, so a future billing change here
+# is expected, not a surprise. The binding is optional in the Worker (`TELEMETRY?`)
+# so a deploy without this stanza still serves the lobby — ingest just no-ops.
+[[analytics_engine_datasets]]
+binding = "TELEMETRY"
+dataset = "phase_telemetry"
+
 # Workers Logs — persistent logs in the dashboard Observability tab. We keep this
 # ON for our structured console.* output: relay-mint failures surface via
 # `console.error({event:"turn_mint_failed"})` in turn.ts (the always-on Workers

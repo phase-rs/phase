@@ -5,10 +5,11 @@ import {
   HIDDEN_CARD_NAME,
   type GameAction,
   type GameObject,
-  type GameState,
 } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
+import { buildGameObjectWithCoreTypes, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
+import { buildGameState, buildPlayers, buildPriorityWaitingFor } from "../../../test/factories/gameStateFactory.ts";
 import { LibraryPile } from "../LibraryPile.tsx";
 
 vi.mock("../../../hooks/useCardImage", () => ({
@@ -22,40 +23,15 @@ vi.mock("../../../hooks/useGameDispatch.ts", () => ({
 }));
 
 function makeObject(id: number, name: string): GameObject {
-  return {
+  return buildGameObjectWithCoreTypes(["Artifact"], {
     id,
     card_id: id,
-    owner: 0,
-    controller: 0,
     zone: "Library",
-    tapped: false,
-    face_down: false,
-    flipped: false,
-    transformed: false,
-    damage_marked: 0,
-    dealt_deathtouch_damage: false,
-    attached_to: null,
-    attachments: [],
-    counters: {},
     name,
-    power: null,
-    toughness: null,
-    loyalty: null,
-    card_types: { supertypes: [], core_types: ["Artifact"], subtypes: [] },
     mana_cost: { type: "Cost", shards: [], generic: 1 },
-    keywords: [],
-    abilities: [],
-    trigger_definitions: [],
-    replacement_definitions: [],
-    static_definitions: [],
-    color: [],
-    base_power: null,
-    base_toughness: null,
-    base_keywords: [],
-    base_color: [],
     timestamp: 1,
     entered_battlefield_turn: null,
-  };
+  });
 }
 
 function setStore({
@@ -70,44 +46,27 @@ function setStore({
   actions: GameAction[];
 }) {
   const top = makeObject(topCardId, topCardName);
-  const gameState = {
+  top.display_visible_to_viewer = canPeek;
+  const gameState = buildGameState({
     active_player: 0,
-    objects: { [topCardId]: top },
-    players: [
+    objects: buildObjectMap(top),
+    players: buildPlayers([
       {
         id: 0,
-        life: 20,
-        poison_counters: 0,
-        mana_pool: { mana: [] },
         library: [topCardId],
-        hand: [],
-        graveyard: [],
-        has_drawn_this_turn: false,
-        lands_played_this_turn: 0,
-        turns_taken: 0,
         can_look_at_top_of_library: canPeek,
       },
       {
         id: 1,
-        life: 20,
-        poison_counters: 0,
-        mana_pool: { mana: [] },
-        library: [],
-        hand: [],
-        graveyard: [],
-        has_drawn_this_turn: false,
-        lands_played_this_turn: 0,
-        turns_taken: 0,
         can_look_at_top_of_library: false,
       },
-    ],
+    ]),
     battlefield: [],
     exile: [],
     stack: [],
-    combat: null,
     revealed_cards: [],
-    waiting_for: { type: "Priority", data: { player: 0 } },
-  } as unknown as GameState;
+    waiting_for: buildPriorityWaitingFor(),
+  });
 
   useGameStore.setState({
     gameState,
@@ -128,66 +87,46 @@ function castAction(objectId: number): GameAction {
   return {
     type: "CastSpell",
     data: { object_id: objectId, card_id: objectId, targets: [] },
-  } as unknown as GameAction;
+  };
 }
 
 function playLandAction(objectId: number): GameAction {
   return {
     type: "PlayLand",
     data: { object_id: objectId, card_id: objectId },
-  } as unknown as GameAction;
+  };
 }
 
 function setOpponentLibraryTop(
   topCardName: string,
   reveal: {
     revealedCards?: number[];
-    privateLookPlayer?: number;
-    privateLookIds?: number[];
+    displayVisible?: boolean;
   } = {},
 ) {
   const topCardId = 77;
   const top = makeObject(topCardId, topCardName);
-  const gameState = {
+  top.display_visible_to_viewer = reveal.displayVisible ?? false;
+  const gameState = buildGameState({
     active_player: 0,
-    objects: { [topCardId]: top },
-    players: [
+    objects: buildObjectMap(top),
+    players: buildPlayers([
       {
         id: 0,
-        life: 20,
-        poison_counters: 0,
-        mana_pool: { mana: [] },
-        library: [],
-        hand: [],
-        graveyard: [],
-        has_drawn_this_turn: false,
-        lands_played_this_turn: 0,
-        turns_taken: 0,
         can_look_at_top_of_library: false,
       },
       {
         id: 1,
-        life: 20,
-        poison_counters: 0,
-        mana_pool: { mana: [] },
         library: [topCardId],
-        hand: [],
-        graveyard: [],
-        has_drawn_this_turn: false,
-        lands_played_this_turn: 0,
-        turns_taken: 0,
         can_look_at_top_of_library: false,
       },
-    ],
+    ]),
     battlefield: [],
     exile: [],
     stack: [],
-    combat: null,
     revealed_cards: reveal.revealedCards ?? [],
-    private_look_player: reveal.privateLookPlayer,
-    private_look_ids: reveal.privateLookIds ?? [],
-    waiting_for: { type: "Priority", data: { player: 0 } },
-  } as unknown as GameState;
+    waiting_for: buildPriorityWaitingFor(),
+  });
 
   useGameStore.setState({
     gameState,
@@ -253,10 +192,8 @@ describe("LibraryPile play/cast surfacing (#297)", () => {
     });
   });
 
-  it("shows opponent library top after a private look peek (Mishra's Bauble)", () => {
-    // CR 701.20e: I (player 0) privately look at the opponent's (player 1) top.
-    // The engine records the look in private_look_player/ids; the pile shows it.
-    setOpponentLibraryTop("Lightning Bolt", { privateLookPlayer: 0, privateLookIds: [77] });
+  it("shows an opponent library top when Rust projects it as visible", () => {
+    setOpponentLibraryTop("Lightning Bolt", { displayVisible: true });
     render(<LibraryPile playerId={1} />);
     const button = screen.getByRole("button", { name: /library \(1 card\)/i });
     expect(button).toBeInTheDocument();
@@ -276,10 +213,8 @@ describe("LibraryPile play/cast surfacing (#297)", () => {
     expect(screen.getByAltText("Library")).toBeInTheDocument();
   });
 
-  it("shows an opponent library top that is publicly revealed (revealed_cards)", () => {
-    // CR 701.20b: opponent's own public reveal (Oracle of Mul Daya) — visible to
-    // all players via revealed_cards, so the pile shows it with the amber border.
-    setOpponentLibraryTop("Lightning Bolt", { revealedCards: [77] });
+  it("uses reveal state only for the public-reveal treatment, not visibility", () => {
+    setOpponentLibraryTop("Lightning Bolt", { revealedCards: [77], displayVisible: true });
     render(<LibraryPile playerId={1} />);
     const button = screen.getByRole("button", { name: /library \(1 card\)/i });
     expect(button.className).toContain("border-amber-500");

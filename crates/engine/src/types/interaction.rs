@@ -1,0 +1,1402 @@
+//! Self-contained DTOs for the engine-authored interaction contract.
+//!
+//! These types intentionally contain no `GameState`, `WaitingFor`, `GameAction`,
+//! `ObjectId`, `PlayerId`, mana, zone, or card-model types. That keeps generated
+//! bindings narrow and prevents a second generated copy of the existing engine
+//! wire graph. All display text is supplied by consumers from the semantic codes
+//! below; the engine never places localized UI prose in this contract.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+pub const MAX_INTERACTION_LIST_LEN: usize = 10_000;
+
+macro_rules! opaque_string_id {
+    ($name:ident) => {
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+        pub struct $name(pub String);
+
+        impl $name {
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+    };
+}
+
+opaque_string_id!(InteractionSessionId);
+opaque_string_id!(InteractionId);
+opaque_string_id!(InteractionChoiceId);
+opaque_string_id!(InteractionActionId);
+opaque_string_id!(PreviewRequestId);
+// Viewer-safe object reference. Only the engine maps this opaque interaction
+// value back to an in-game object.
+opaque_string_id!(InteractionObjectReference);
+
+/// Persistence slot semantics. Simultaneous pregame decisions deliberately
+/// retain one capability per semantic owner instead of sharing one global ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionSlotKind {
+    Single,
+    Mulligan,
+    OpeningBottom,
+}
+
+/// Trusted, persistence-only binding between one semantic decision owner and
+/// the opaque interaction capability currently naming that decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct ActiveInteractionSlot {
+    pub semantic_owner: u8,
+    pub slot_kind: InteractionSlotKind,
+    pub interaction_id: InteractionId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum SimultaneousDecisionKind {
+    Mulligan,
+    OpeningBottom,
+}
+
+/// Stable protocol classification of an engine prompt. This deliberately
+/// describes the interaction shape instead of mirroring `WaitingFor` variant
+/// names into the wire contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionWaitingForCode {
+    Terminal,
+    Mulligan,
+    OpeningBottom,
+    Choose,
+    Select,
+    Sequence,
+    Relations,
+    ManaGroups,
+    Text,
+    DeckPartition,
+    Number,
+    Shortcut,
+    AssignAmounts,
+    AssignDamage,
+}
+
+/// Parameterized description of the current state-machine surface. It is not a
+/// mirror of the large `WaitingFor` enum: consumers use it for
+/// simultaneous/terminal semantics and stable prompt identity, while the
+/// opportunity response variant is the sole response-shape discriminator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionWaitingForKind {
+    pub simultaneous: Option<SimultaneousDecisionKind>,
+    pub terminal: bool,
+    pub code: InteractionWaitingForCode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionReasonCode {
+    AuthorityUnbound,
+    InvalidAuthorityState,
+    NotAuthorized,
+    StaleInteraction,
+    UnknownChoice,
+    MalformedResponse,
+    PayloadTooLarge,
+    ConstraintUnsatisfied,
+    NoLegalResponse,
+    CancelOnly,
+    ReducerRejected,
+    UnsupportedResponse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionOutcomeCode {
+    Preserved,
+    Advanced,
+    Replaced,
+    Cleared,
+    Terminal,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionSummaryCode {
+    Decision,
+    Candidate,
+    Source,
+    SelectionBounds,
+    AggregateConstraint,
+    ConfirmAvailable,
+    ConfirmUnavailable,
+    Cancel,
+    Progress,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionZoneCode {
+    Battlefield,
+    Hand,
+    Library,
+    Graveyard,
+    Exile,
+    Stack,
+    Command,
+    OutsideGame,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionIntentCode {
+    Choose,
+    Keep,
+    Sacrifice,
+    Return,
+    Exile,
+    Tap,
+    Crew,
+    Saddle,
+    Station,
+    RingBearer,
+    Blight,
+    Pay,
+    Attack,
+    Block,
+    // CR 115.1 targeting vocabulary. Each of these names a distinct game
+    // action in its own CR section, so they stay flat siblings rather than one
+    // parameterized variant: unifying e.g. Destroy (CR 701.8), Counter
+    // (CR 701.6) and Mill (CR 701.17) under a single code with a "which
+    // action" axis would conflate rule sections the engine resolves
+    // separately, which the workspace categorical-boundary rule forbids.
+    /// CR 120.1: damage dealt to the chosen target.
+    Damage,
+    /// CR 701.8: destroy the chosen permanent.
+    Destroy,
+    /// CR 701.19: put a regeneration shield on the chosen permanent.
+    Regenerate,
+    /// CR 701.6: counter the chosen spell.
+    Counter,
+    /// CR 701.26: untap the chosen permanent.
+    Untap,
+    /// CR 701.17: mill from the chosen player's library.
+    Mill,
+    /// CR 701.9: the chosen player discards.
+    Discard,
+    /// CR 121.1: the chosen player draws.
+    Draw,
+    /// CR 119.3: the chosen player gains life.
+    GainLife,
+    /// CR 119.3: the chosen player loses life.
+    LoseLife,
+    /// CR 701.14: the chosen creature fights.
+    Fight,
+    /// CR 701.3: attach to the chosen permanent.
+    Attach,
+    /// CR 707: copy the chosen object.
+    Copy,
+    /// CR 613.1b: take control of the chosen permanent.
+    GainControl,
+    /// CR 701.20: reveal the chosen card.
+    Reveal,
+    /// CR 613.4: change the chosen object's characteristics (power/toughness,
+    /// counters, types) with NO claim about direction. Used when no single
+    /// direction is true — a dynamic magnitude (X / count-based) or a genuinely
+    /// opposing modification such as "+2/-2".
+    Modify,
+    /// CR 613.4: a modification that raises the chosen object's power and/or
+    /// toughness. Split from `Modify` because `TargetSelectionSlot` stamps the
+    /// direction read off the effect payload at construction; the unit
+    /// `EffectKind` tag alone cannot distinguish these three.
+    Buff,
+    /// CR 613.4: a modification that lowers the chosen object's power and/or
+    /// toughness.
+    Debuff,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum AggregateComparator {
+    GreaterThan,
+    LessThan,
+    AtLeast,
+    AtMost,
+    Equal,
+    NotEqual,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionAggregateFunction {
+    Max,
+    Min,
+    Sum,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionManaColor {
+    White,
+    Blue,
+    Black,
+    Red,
+    Green,
+}
+
+/// Stable comparison axis used by mana-spend restrictions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionManaComparator {
+    GreaterThan,
+    LessThan,
+    AtLeast,
+    AtMost,
+    Equal,
+    NotEqual,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionManaAbilityActivationScope {
+    OfSpellType,
+    Any,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionManaZoneSpendPolarity {
+    From,
+    NotFrom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionManaSpecialAction {
+    CompanionToHand,
+    UnlockDoor,
+    Plot,
+    TurnFaceUp,
+    RollPlanarDie,
+    /// CR 116.2c: pay a continuous effect's printed termination cost to end it.
+    EndContinuousEffect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[cfg_attr(
+    feature = "interaction-bindings",
+    ts(rename_all = "camelCase", rename_all_fields = "camelCase")
+)]
+pub enum InteractionManaSpellCostCriterion {
+    ManaValue {
+        comparator: InteractionManaComparator,
+        value: u32,
+    },
+    HasXInCost,
+}
+
+/// Viewer-safe, lossless projection of a runtime mana-spend restriction.
+///
+/// Type and keyword names intentionally stay semantic strings: they come from
+/// card text and are already the canonical engine vocabulary. Every runtime
+/// `ManaRestriction` variant has a corresponding case here, including nested
+/// `OnlyForAny` restrictions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[cfg_attr(
+    feature = "interaction-bindings",
+    ts(rename_all = "camelCase", rename_all_fields = "camelCase")
+)]
+pub enum InteractionManaRestriction {
+    OnlyForSpell,
+    OnlyForSpellType {
+        spell_type: String,
+    },
+    OnlyForCreatureType {
+        creature_type: String,
+    },
+    OnlyForTypeSpellsOrAbilities {
+        spell_type: String,
+        ability: InteractionManaAbilityActivationScope,
+    },
+    OnlyForActivation,
+    OnlyForTaggedActivation {
+        tag: String,
+    },
+    OnlyForXCosts,
+    OnlyForSpellWithKeywordKind {
+        keyword: String,
+    },
+    OnlyForSpellWithKeywordKindFromZone {
+        keyword: String,
+        zone: InteractionZoneCode,
+    },
+    OnlyForSpellWithManaValue {
+        comparator: InteractionManaComparator,
+        value: u32,
+    },
+    OnlyForSpellMatchingCostCriteria {
+        spell_type: Option<String>,
+        criteria: Vec<InteractionManaSpellCostCriterion>,
+    },
+    OnlyForSpellWithColorCount {
+        comparator: InteractionManaComparator,
+        count: u32,
+    },
+    OnlyForSpellColor {
+        color: InteractionManaColor,
+    },
+    OnlyForSpellFromZone {
+        zone: InteractionZoneCode,
+        polarity: InteractionManaZoneSpendPolarity,
+    },
+    OnlyForFaceDownSpell,
+    OnlyForAny {
+        restrictions: Vec<InteractionManaRestriction>,
+    },
+    OnlyForSpecialAction {
+        action: InteractionManaSpecialAction,
+    },
+    Impossible,
+    ConvokePayment,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[cfg_attr(
+    feature = "interaction-bindings",
+    ts(rename_all = "camelCase", rename_all_fields = "camelCase")
+)]
+pub enum InteractionObjectProperty {
+    Power,
+    Toughness,
+    ManaValue,
+    ManaSymbolCount { color: InteractionManaColor },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[cfg_attr(
+    feature = "interaction-bindings",
+    ts(rename_all = "camelCase", rename_all_fields = "camelCase")
+)]
+pub enum SelectionConstraint {
+    Count {
+        min: u32,
+        max: u32,
+    },
+    Aggregate {
+        function: InteractionAggregateFunction,
+        property: InteractionObjectProperty,
+        comparator: AggregateComparator,
+        amount: i32,
+    },
+    EngineValidatedCount {
+        min: u32,
+        max: u32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum ConfirmSemantics {
+    Immediate,
+    Explicit,
+}
+
+/// Protocol-owned action discriminators. Mapping from `GameAction` is explicit
+/// and exhaustive in the interaction projector, so internal Rust variant-name
+/// formatting cannot silently change this wire vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionActionCode {
+    PassPriority,
+    ChooseMeldPair,
+    ChooseEntryAttackTarget,
+    PlayLand,
+    CastSpell,
+    Foretell,
+    ActivateAbility,
+    DeclareAttackers,
+    DeclareBlockers,
+    ChooseUntap,
+    ChooseExert,
+    ChooseEnlist,
+    ChooseClashOpponent,
+    ChooseZoneOpponentChooser,
+    ChoosePileOpponent,
+    ChooseAnnouncingOpponent,
+    ChooseGiftRecipient,
+    ChooseAssistPlayer,
+    CommitAssistPayment,
+    MulliganDecision,
+    ReorderHand,
+    TapLandForMana,
+    ActivateManaSource,
+    BackToManaPayment,
+    UntapLandForMana,
+    SpendPoolMana,
+    UnspendPoolMana,
+    SelectCards,
+    ChooseRemoveCounterCostDistribution,
+    SelectCoinFlips,
+    ChooseOutsideGameCards,
+    SelectTargets,
+    ChooseTarget,
+    ChooseReplacement,
+    ChooseEntryController,
+    OrderTriggers,
+    CancelCast,
+    Equip,
+    CrewVehicle,
+    ActivateStation,
+    SaddleMount,
+    Transform,
+    PlayFaceDown,
+    TurnFaceUp,
+    SubmitSideboard,
+    ChoosePlayDraw,
+    ChooseOption,
+    SubmitVoteCandidate,
+    SubmitSpellbookDraft,
+    SubmitPilePartition,
+    ChoosePile,
+    ChooseBranch,
+    SubmitLifeRedistribution,
+    ChooseDamageSource,
+    SelectModes,
+    DecideOptionalCost,
+    ChooseAdventureFace,
+    ChooseModalFace,
+    ChooseAlternativeCast,
+    ChooseCastingVariant,
+    KeepAllCopyTargets,
+    ChoosePermanentTypeSlot,
+    ActivateNinjutsu,
+    CastSpellAsSneak,
+    CastSpellAsWebSlinging,
+    CastSpellForFree,
+    CastSpellAsMiracle,
+    CastSpellAsMadness,
+    DecideOptionalEffect,
+    RespondToSpliceOffer,
+    DecideOptionalEffectAndRemember,
+    PayUnlessCost,
+    ChooseUnlessCostBranch,
+    ChooseActivationCostBranch,
+    PayCombatTax,
+    ChooseRingBearer,
+    ChoosePair,
+    ChooseDungeon,
+    ChooseDungeonRoom,
+    UnlockRoomDoor,
+    RollPlanarDie,
+    ChooseRoomDoor,
+    TapForConvoke,
+    HarmonizeTap,
+    DeclareCompanion,
+    CompanionToHand,
+    DiscoverChoice,
+    GraveyardPaidCastChoice,
+    CascadeChoice,
+    RippleChoice,
+    FreeCastWindowChoice,
+    ChooseTopOrBottom,
+    ChooseMutateMergeSide,
+    CipherEncode,
+    ChooseLegend,
+    ChooseBattleProtector,
+    SetAutoPass,
+    CancelAutoPass,
+    SetPhaseStops,
+    SetPriorityPassingMode,
+    SetPriorityYield,
+    SetMayTriggerAutoChoice,
+    SetTriggerOrderTemplate,
+    AssignCombatDamage,
+    AssignBlockerDamage,
+    DistributeAmong,
+    ChooseCounterMoveDistribution,
+    ChooseCountersToRemove,
+    SubmitPayAmount,
+    RetargetSpell,
+    LearnDecision,
+    SelectCategoryPermanents,
+    ChooseKeptCreatures,
+    ChooseKeptPermanents,
+    ChooseX,
+    SubmitPhyrexianChoices,
+    ChooseManaColor,
+    PayManaAbilityMana,
+    CastPreparedCopy,
+    ChooseSpecializeColor,
+    CastParadigmCopy,
+    PassParadigmOffer,
+    GrantDebugPermission,
+    RevokeDebugPermission,
+    Concede,
+    DeclareShortcut,
+    RespondToShortcut,
+    DeclineShortcut,
+    PrecastCopyShortcut,
+    /// CR 116.2c: pay a continuous effect's printed termination cost to end it.
+    EndContinuousEffect,
+    Debug,
+}
+
+/// Semantic role for one player, object, value, mana, or zone surface. Indexed
+/// repetitions carry their ordinal separately, keeping the role vocabulary
+/// finite and generated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionRoleCode {
+    Source,
+    Candidate,
+    Partner,
+    AttackTarget,
+    Target,
+    PaymentMode,
+    AbilityIndex,
+    Attacker,
+    BandCount,
+    Blocker,
+    Blocked,
+    Untap,
+    Exert,
+    EnlistTarget,
+    Enlist,
+    Opponent,
+    AssistPlayer,
+    Assist,
+    GenericMana,
+    Mulligan,
+    SerumPowder,
+    HandCard,
+    Selected,
+    CounterSource,
+    CounterType,
+    Amount,
+    CoinFlipIndex,
+    SideboardIndex,
+    FaceUpExile,
+    OptionIndex,
+    TriggerIndex,
+    CrewMember,
+    StationCrew,
+    X,
+    MainCard,
+    SideboardCard,
+    PlayFirst,
+    Option,
+    CandidateIndex,
+    CardName,
+    PileA,
+    Pile,
+    ModeIndex,
+    Pay,
+    Face,
+    CastCost,
+    PermanentType,
+    ReturnCreature,
+    PermissionSource,
+    Accept,
+    SpliceCard,
+    Splice,
+    Choice,
+    CostBranch,
+    CostBranchIndex,
+    Pair,
+    Dungeon,
+    RoomIndex,
+    Door,
+    Operation,
+    ConvokeMana,
+    HarmonizeCreature,
+    Harmonize,
+    Companion,
+    CastChoice,
+    CastCard,
+    Placement,
+    MergeSide,
+    EncodeCreature,
+    Encode,
+    Defender,
+    Protector,
+    AssignmentMode,
+    DamageTarget,
+    DamageAmount,
+    TrampleDamage,
+    ControllerDamage,
+    Destination,
+    DiscardCard,
+    Learn,
+    Category,
+    Kept,
+    PhyrexianPayment,
+    ManaChoice,
+    Count,
+    ManaPayment,
+    ProducedMana,
+    Color,
+    Player,
+    CastingVariant,
+    Mode,
+    ModeCost,
+    CastingCost,
+    VoteOption,
+    VoteCandidate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionShortcutResponseCode {
+    Propose,
+    Accept,
+    Decline,
+    Shorten,
+}
+
+/// Composable semantic surfaces. `name` is copied only from the viewer-filtered
+/// state and may therefore contain a redacted public placeholder.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[cfg_attr(
+    feature = "interaction-bindings",
+    ts(rename_all = "camelCase", rename_all_fields = "camelCase")
+)]
+pub enum InteractionPresentationSurface {
+    Summary {
+        code: InteractionSummaryCode,
+    },
+    Action {
+        code: InteractionActionCode,
+        /// Opaque deterministic identity for the exact action payload.
+        action_id: Option<InteractionActionId>,
+    },
+    Player {
+        role: InteractionRoleCode,
+        index: Option<u32>,
+        seat: u8,
+    },
+    Object {
+        role: InteractionRoleCode,
+        index: Option<u32>,
+        reference: String,
+        name: Option<String>,
+        zone: Option<InteractionZoneCode>,
+        controller: Option<u8>,
+        power: Option<i32>,
+        tapped: Option<bool>,
+    },
+    Zone {
+        role: InteractionRoleCode,
+        index: Option<u32>,
+        zone: InteractionZoneCode,
+    },
+    Value {
+        role: InteractionRoleCode,
+        index: Option<u32>,
+        value: String,
+    },
+    Selection {
+        intent: InteractionIntentCode,
+        constraint: SelectionConstraint,
+        confirm: ConfirmSemantics,
+    },
+    Amount {
+        min: u32,
+        max: u32,
+        total: Option<u32>,
+    },
+    Mana {
+        role: InteractionRoleCode,
+        index: Option<u32>,
+        symbols: Vec<String>,
+        restrictions: Vec<InteractionManaRestriction>,
+    },
+    Counter {
+        counter_type: String,
+        available: u32,
+    },
+    ShortcutResponse {
+        response: InteractionShortcutResponseCode,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[cfg_attr(
+    feature = "interaction-bindings",
+    ts(rename_all = "camelCase", rename_all_fields = "camelCase")
+)]
+pub enum InteractionChoiceStatus {
+    Available,
+    Rejected { reason: InteractionReasonCode },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionChoice {
+    pub id: InteractionChoiceId,
+    pub surfaces: Vec<InteractionPresentationSurface>,
+    pub status: InteractionChoiceStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionGroupConstraint {
+    pub group: u32,
+    pub min: u32,
+    pub max: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionRelationConstraint {
+    pub source_id: InteractionChoiceId,
+    pub target_ids: Vec<InteractionChoiceId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionRelationSourceConstraint {
+    AtMostOne,
+    EngineValidated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionShortcutPointKind {
+    Targets,
+    ConvokeTaps,
+    Mode,
+    MayChoice,
+    UnlessBreak,
+    ManaColor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionShortcutPoint {
+    pub group: u32,
+    pub kind: InteractionShortcutPointKind,
+    pub min: u32,
+    pub max: u32,
+    pub unique: bool,
+    pub ordered: bool,
+    pub read_only: bool,
+    pub candidate_ids: Vec<InteractionChoiceId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionShortcutPin {
+    pub group: u32,
+    pub choice_ids: Vec<InteractionChoiceId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[cfg_attr(
+    feature = "interaction-bindings",
+    ts(rename_all = "camelCase", rename_all_fields = "camelCase")
+)]
+pub enum InteractionResponseSpec {
+    Select {
+        constraint: SelectionConstraint,
+        confirm: ConfirmSemantics,
+    },
+    AssignAmounts {
+        min_total: u32,
+        max_total: u32,
+        exact_total: Option<u32>,
+    },
+    AssignDamage {
+        total: u32,
+        modes: Vec<InteractionDamageAssignmentMode>,
+        confirm: ConfirmSemantics,
+    },
+    Sequence {
+        min: u32,
+        max: u32,
+        unique: bool,
+        include_all: bool,
+        engine_validated: bool,
+        escape: Option<InteractionChoiceId>,
+        confirm: ConfirmSemantics,
+    },
+    GroupedSequence {
+        groups: Vec<InteractionGroupConstraint>,
+        unique: bool,
+        confirm: ConfirmSemantics,
+    },
+    ManaGroups {
+        groups: Vec<InteractionGroupConstraint>,
+        max_batch: u32,
+        escape: Option<InteractionChoiceId>,
+        confirm: ConfirmSemantics,
+    },
+    Text {
+        allow_arbitrary: bool,
+        max_len: u32,
+        confirm: ConfirmSemantics,
+    },
+    /// CR 100.2a / CR 100.4a / CR 100.5: a between-games main/sideboard split.
+    ///
+    /// The card pool is invariant, so `sideboard = pool - main` and both the
+    /// minimum deck size and the sideboard cap collapse into one closed
+    /// interval on the main-deck total. `min_main_total` is a *minimum* — there
+    /// is no maximum deck size, so a client must not require an exact match.
+    DeckPartition {
+        min_main_total: u32,
+        max_main_total: u32,
+        confirm: ConfirmSemantics,
+    },
+    Relations {
+        edges: Vec<InteractionRelationConstraint>,
+        min: u32,
+        max: u32,
+        source_constraint: InteractionRelationSourceConstraint,
+        allow_groups: bool,
+        confirm: ConfirmSemantics,
+    },
+    Number {
+        min: u32,
+        max: u32,
+        confirm: ConfirmSemantics,
+    },
+    /// CR 732.2a: the loop-shortcut declaration. `count` is the picker's window and
+    /// `preview` is what the count it states actually DOES, per axis — see
+    /// [`InteractionShortcutPreview`] for why the count travels with the magnitudes.
+    ///
+    /// The doc lives on the VARIANT rather than on `preview`: ts_rs emits field docs into
+    /// the generated bindings as JSDoc but drops variant docs, and a comment block in the
+    /// middle of a union keeps that file from being one declaration per line.
+    Shortcut {
+        count: InteractionShortcutCountSpec,
+        points: Vec<InteractionShortcutPoint>,
+        allow_decline: bool,
+        preview: Option<InteractionShortcutPreview>,
+        confirm: ConfirmSemantics,
+    },
+    ShortcutReply {
+        min_iteration: u32,
+        max_iteration: u32,
+        confirm: ConfirmSemantics,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[cfg_attr(
+    feature = "interaction-bindings",
+    ts(rename_all = "camelCase", rename_all_fields = "camelCase")
+)]
+pub enum InteractionShortcutCountSpec {
+    Fixed { min: u32, max: u32, suggested: u32 },
+    UntilLethal,
+}
+
+/// The display family one shortcut-preview magnitude belongs to — the projection-layer code
+/// for `game::derived_views::UnboundedFamily`, mapped by an exhaustive `match` in
+/// `game::interaction`.
+///
+/// A code rather than a mirror of `analysis::resource::ResourceAxis`, for this module's own
+/// stated reason: `ResourceAxis` carries `PlayerId`, `ManaType`, `CounterClass`,
+/// `ObjectClass` and `TriggerKind` payloads, and generating those would be the "second
+/// generated copy of the existing engine wire graph" this file exists to avoid. The client
+/// already labels these eleven families (glyph + i18n key per family), so a code is
+/// everything a renderer needs.
+///
+/// No CR governs a display grouping — the grouping authority is `derived_views::family_of`,
+/// and this enum tracks it variant-for-variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionShortcutPreviewFamily {
+    Mana,
+    Life,
+    Damage,
+    Mill,
+    Counters,
+    Tokens,
+    Cards,
+    Casts,
+    Combats,
+    Turns,
+    Triggers,
+}
+
+/// One axis of what a declared shortcut count finishes with: a signed magnitude, already
+/// multiplied out by the engine.
+///
+/// `amount` is the FINISHED total, not a per-cycle rate, and it is signed — a drain loop
+/// states its victim's life as negative. `player` is the seat the magnitude lands on for the
+/// per-seat families (life, damage, mill, and the poison term of counters) and `None` for the
+/// whole-game ones (mana, tokens, cards, casts, combats, turns, triggers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionShortcutPreviewEntry {
+    pub family: InteractionShortcutPreviewFamily,
+    pub player: Option<u8>,
+    pub amount: i32,
+}
+
+/// CR 732.2a: the engine-computed consequence of repeating a certified loop a stated number
+/// of times — "the predictable results of the sequence of choices", published as numbers.
+///
+/// `count` is carried WITH the entries, and that pairing is the point: every magnitude here
+/// is stated for exactly this count and for no other, so a renderer can never attach these
+/// numbers to a different one. The engine multiplies; the display layer reads.
+///
+/// Absent (`None` on the spec) when the offer states no per-period signature to multiply, or
+/// states no finite count to multiply it by.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionShortcutPreview {
+    pub count: u32,
+    pub entries: Vec<InteractionShortcutPreviewEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[cfg_attr(
+    feature = "interaction-bindings",
+    ts(rename_all = "camelCase", rename_all_fields = "camelCase")
+)]
+pub enum InteractionShortcutDecision {
+    Decline,
+    AcceptSuggested,
+    Fixed { iterations: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[cfg_attr(
+    feature = "interaction-bindings",
+    ts(rename_all = "camelCase", rename_all_fields = "camelCase")
+)]
+pub enum InteractionShortcutReply {
+    Accept,
+    Shorten { at_iteration: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionDamageAssignmentMode {
+    Normal,
+    AsThoughUnblocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[cfg_attr(
+    feature = "interaction-bindings",
+    ts(rename_all = "camelCase", rename_all_fields = "camelCase")
+)]
+pub enum InteractionOpportunityResponse {
+    ExactChoices {
+        choices: Vec<InteractionChoice>,
+    },
+    Schema {
+        spec: InteractionResponseSpec,
+        candidates: Vec<InteractionChoice>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionProgress {
+    pub selected: u32,
+    pub minimum: u32,
+    pub maximum: Option<u32>,
+    pub aggregate: Option<i32>,
+    pub confirmable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionOpportunity {
+    pub interaction_id: InteractionId,
+    pub response: InteractionOpportunityResponse,
+    pub surfaces: Vec<InteractionPresentationSurface>,
+    pub progress: InteractionProgress,
+}
+
+/// A direct, engine-authored interaction submission for one attachment.
+///
+/// The UI must echo this opaque response rather than deriving an action or a
+/// response envelope from the opportunity schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionAttachmentFanChild {
+    #[cfg_attr(feature = "interaction-bindings", ts(type = "number"))]
+    pub object_id: u64,
+    pub submission: InteractionSubmission,
+}
+
+/// Viewer-scoped attachment affordance for a single interaction opportunity.
+/// It is derived from the filtered projection, not by consumers scanning game
+/// state that may carry authority-only relationship information.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionAttachmentFan {
+    #[cfg_attr(feature = "interaction-bindings", ts(type = "number"))]
+    pub host_id: u64,
+    pub children: Vec<InteractionAttachmentFanChild>,
+}
+
+/// One card in a host's attachment view, with the engine's own submission when
+/// a one-step pick was published for it and `None` when it was not.
+///
+/// `None` is not "unavailable": it means this projection publishes no direct
+/// pick, and the card's remaining affordances stay on the normal interaction
+/// surface. Membership does not depend on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionAttachmentViewCard {
+    #[cfg_attr(feature = "interaction-bindings", ts(type = "number"))]
+    pub object_id: u64,
+    pub submission: Option<InteractionSubmission>,
+}
+
+/// Viewer-scoped membership of one host's attachment subtree: what is attached
+/// to this object, in the order the engine lays it out, whatever the viewer may
+/// currently do about it.
+///
+/// This is deliberately a different question from [`InteractionAttachmentFan`],
+/// which publishes the picks the viewer is *authorized to submit right now*. An
+/// attached permanent is an object on the battlefield (CR 301.5 / CR 303.4), so
+/// its membership follows visibility, not authorization — it must survive an
+/// opponent's turn, a prompt that owns the waiting state, and a terminal game.
+/// Consumers render and count this list; they must never rebuild it by scanning
+/// `attachments`, which carries authority-only relationship data.
+///
+/// Every card here is validated in both directions (the host lists the child and
+/// the child points back at the host) and read only from the filtered
+/// projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionAttachmentView {
+    #[cfg_attr(feature = "interaction-bindings", ts(type = "number"))]
+    pub host_id: u64,
+    pub cards: Vec<InteractionAttachmentViewCard>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[cfg_attr(
+    feature = "interaction-bindings",
+    ts(rename_all = "camelCase", rename_all_fields = "camelCase")
+)]
+pub enum InteractionAvailability {
+    ProgressAvailable { witness: InteractionSubmission },
+    InputRequired,
+    EscapeOnly { reason: InteractionReasonCode },
+    Waiting,
+    Terminal { outcome: InteractionOutcomeCode },
+    Unsupported { reason: InteractionReasonCode },
+    Stuck { reason: InteractionReasonCode },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct ViewerInteraction {
+    pub waiting_for_kind: InteractionWaitingForKind,
+    pub authorized_submitters: Vec<u8>,
+    pub can_submit: bool,
+    pub auto_pass_recommended: bool,
+    pub opportunities: Vec<InteractionOpportunity>,
+    #[serde(default)]
+    #[cfg_attr(
+        feature = "interaction-bindings",
+        ts(type = "Record<number, InteractionAttachmentFan>")
+    )]
+    pub attachment_fans: BTreeMap<u64, InteractionAttachmentFan>,
+    /// What is attached to each visible object, keyed by that object. Published
+    /// on every projection, including the ones that carry no opportunity at all.
+    #[serde(default)]
+    #[cfg_attr(
+        feature = "interaction-bindings",
+        ts(type = "Record<number, InteractionAttachmentView>")
+    )]
+    pub attachment_views: BTreeMap<u64, InteractionAttachmentView>,
+    pub availability: InteractionAvailability,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct AmountAssignment {
+    pub choice_id: InteractionChoiceId,
+    pub amount: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionRelation {
+    pub source_id: InteractionChoiceId,
+    pub target_id: InteractionChoiceId,
+    pub group: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[cfg_attr(
+    feature = "interaction-bindings",
+    ts(rename_all = "camelCase", rename_all_fields = "camelCase")
+)]
+pub enum InteractionResponse {
+    Choose {
+        choice_id: InteractionChoiceId,
+    },
+    Select {
+        choice_ids: Vec<InteractionChoiceId>,
+    },
+    AssignAmounts {
+        assignments: Vec<AmountAssignment>,
+    },
+    AssignDamage {
+        mode: InteractionDamageAssignmentMode,
+        assignments: Vec<AmountAssignment>,
+    },
+    Sequence {
+        choice_ids: Vec<InteractionChoiceId>,
+    },
+    Relations {
+        relations: Vec<InteractionRelation>,
+    },
+    ManaGroups {
+        choice_ids: Vec<InteractionChoiceId>,
+        count: u32,
+    },
+    Text {
+        value: String,
+    },
+    DeckPartition {
+        main: Vec<AmountAssignment>,
+    },
+    Number {
+        value: u32,
+    },
+    Shortcut {
+        decision: InteractionShortcutDecision,
+        pins: Vec<InteractionShortcutPin>,
+    },
+    ShortcutReply {
+        reply: InteractionShortcutReply,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionSubmission {
+    pub interaction_id: InteractionId,
+    pub response: InteractionResponse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionPreviewRequest {
+    pub request_id: PreviewRequestId,
+    pub interaction_id: InteractionId,
+    pub response: InteractionResponse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[cfg_attr(
+    feature = "interaction-bindings",
+    ts(rename_all = "camelCase", rename_all_fields = "camelCase")
+)]
+pub enum InteractionPreviewStatus {
+    Confirmable,
+    Rejected { reason: InteractionReasonCode },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionPreview {
+    pub request_id: PreviewRequestId,
+    pub interaction_id: InteractionId,
+    pub status: InteractionPreviewStatus,
+    pub progress: InteractionProgress,
+    pub outcome: InteractionOutcomeCode,
+    pub summaries: Vec<InteractionSummaryCode>,
+}

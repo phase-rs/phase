@@ -69,6 +69,8 @@ pub fn collect_game_card_universe(state: &GameState, db: &CardDatabase) -> BTree
             &pool.current_main,
             &pool.registered_sideboard,
             &pool.current_sideboard,
+            &pool.registered_companion,
+            &pool.current_companion,
             &pool.registered_commander,
             &pool.current_commander,
             &pool.registered_signature_spell,
@@ -426,5 +428,35 @@ mod tests {
             "single-face card must carry no layout"
         );
         assert!(subset.get_face_by_name("Plain Card").is_some());
+    }
+
+    #[test]
+    fn subset_preserves_duplicate_meld_back_storage_keys() {
+        let front_a = creature_face("Meld Front A", "meld-a");
+        let front_b = creature_face("Meld Front B", "meld-b");
+        let back_a = creature_face("Shared Meld Back", "meld-a");
+        let back_b = creature_face("Shared Meld Back", "meld-b");
+        let export = serde_json::json!({
+            "meld front a": entry_value(&front_a, Some("meld"), &[], &[], false),
+            "meld front b": entry_value(&front_b, Some("meld"), &[], &[], false),
+            "shared meld back": entry_value(&back_a, Some("meld"), &[], &[], false),
+            "shared meld back [meld-b]": entry_value(&back_b, Some("meld"), &[], &[], false),
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&export).expect("meld export parses");
+        let names = db.face_index.keys().cloned().collect();
+        let subset = CardDatabase::from_json_str(&db.export_subset_json(&names))
+            .expect("meld subset parses");
+
+        for front in [&front_a, &front_b] {
+            let printed = printed_ref_from_face(front).expect("front has printed identity");
+            assert_eq!(
+                subset
+                    .get_other_face_by_printed_ref(&printed)
+                    .map(|face| face.name.as_str()),
+                Some("Shared Meld Back"),
+                "each front oracle id retains its own shared-name back"
+            );
+        }
     }
 }

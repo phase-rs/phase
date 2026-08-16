@@ -1,11 +1,20 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use super::counter::CounterType;
 
-use super::ability::{AbilityTag, CostPaidObjectSnapshot, EffectKind, TargetRef};
-use super::game_state::ZoneChangeRecord;
-use super::identifiers::{CardId, ObjectId};
-use super::mana::ManaType;
+use super::ability::{
+    AbilityTag, AttachmentKind, CostPaidObjectSnapshot, EffectKind, FilterProp, TargetFilter,
+    TargetRef, ThisWayCause, TypeFilter, TypedFilter,
+};
+use super::card::PrintedCardRef;
+use super::card_type::{CardType, CoreType, Supertype};
+use super::game_state::{TriggerSourceContext, ZoneChangeRecord};
+use super::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
+use super::keywords::Keyword;
+use super::mana::ManaCost;
+use super::mana::{ManaColor, ManaType};
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
 use super::stickers::StickerKind;
@@ -21,6 +30,36 @@ fn default_nth_in_step() -> u32 {
 
 fn default_nth_in_turn() -> u32 {
     1
+}
+
+/// A passive, viewer-safe snapshot of one face seen during a hidden-zone search.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibrarySearchCardFaceView {
+    pub name: String,
+    pub mana_cost: ManaCost,
+    pub mana_value: u32,
+    pub colors: Vec<ManaColor>,
+    pub card_type: CardType,
+    pub keywords: Vec<Keyword>,
+    pub power: Option<i32>,
+    pub toughness: Option<i32>,
+    pub loyalty: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_ref: Option<PrintedCardRef>,
+}
+
+/// CR 400.7: search knowledge is bound to the exact incarnation that was
+/// looked at, never merely to a reusable object storage id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibrarySearchCardView {
+    pub owner: PlayerId,
+    pub zone: Zone,
+    pub identity: ObjectIncarnationRef,
+    pub card_id: CardId,
+    pub current_face: LibrarySearchCardFaceView,
+    pub front_face: LibrarySearchCardFaceView,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back_face: Option<LibrarySearchCardFaceView>,
 }
 
 /// CR 605.1a + CR 605.1b + CR 605.4a: Records whether a `ManaAdded` event was
@@ -44,6 +83,23 @@ pub enum ManaTapState {
     /// Produced by tapping a source; coupled triggered mana abilities were
     /// already resolved inline during cost payment (CR 605.4a).
     FromTapTriggersResolved,
+}
+
+/// CR 605.4a: Records whether the triggered mana abilities coupled to one
+/// aggregate mana-ability production event have already resolved inline.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ManaAbilityTriggerState {
+    /// Coupled triggered mana abilities have not yet resolved.
+    #[default]
+    Pending,
+    /// Coupled triggered mana abilities resolved inline during a payment.
+    InlineResolved,
+}
+
+impl ManaAbilityTriggerState {
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending)
+    }
 }
 
 /// CR 602.2 + CR 606.2: Discriminates how an activated ability was activated so
@@ -84,7 +140,7 @@ impl ManaTapState {
 }
 
 /// Avatar crossover: The four elemental bending types, tracked per-turn on each player.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum BendingType {
     Fire,
     Air,
@@ -92,7 +148,7 @@ pub enum BendingType {
     Water,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum PlayerActionKind {
     /// A player accepted a resolution-time optional effect.
     AcceptedOptionalEffect,
@@ -106,6 +162,19 @@ pub enum PlayerActionKind {
     Proliferate,
     /// CR 701.16a: A player investigated (created a Clue token).
     Investigate,
+    /// CR 701.61a: A player foraged by exiling three cards from their graveyard
+    /// or sacrificing a Food.
+    Forage,
+    /// A player completed a draw instruction that delivered at least
+    /// one card. Emitted once per settled draw INSTRUCTION (at draw-sequence
+    /// completion), not once per card — so a multi-card draw records a single
+    /// event. Recorded so "for each opponent who drew a card this way" (Cut a
+    /// Deal) resolves via `PlayerFilter::PerformedActionThisWay` — a count over
+    /// players, not objects — and so `PlayerActionsThisTurn { Draw }` would count
+    /// draw events rather than cards. `player_actions_this_way` (a set) counts the
+    /// drawing player once; a draw that delivered no card (empty library, or every
+    /// unit replaced away) emits nothing because that player did not draw.
+    Draw,
 }
 
 /// CR 701.30d: Result of a clash — whether the controller won, lost, or tied.
@@ -114,6 +183,36 @@ pub enum ClashResult {
     Won,
     Lost,
     Tied,
+}
+
+impl ClashResult {
+    /// CR 701.30d: A clash's `result` is stated from the clash controller's
+    /// perspective (the player who initiated the clash). Re-express it from
+    /// `player`'s perspective, returning `None` if `player` did not participate.
+    /// The controller sees `self`; the opponent sees the mirror (Won ⇄ Lost, Tied
+    /// unchanged).
+    ///
+    /// Single source of truth shared by resolution-time "if you won" gating
+    /// (`event_outcome_was_won_by_controller`) and trigger MATCHING
+    /// (`match_clash`'s `clash_result` gate) so both agree on who won.
+    pub fn for_player(
+        self,
+        clash_controller: PlayerId,
+        opponent: PlayerId,
+        player: PlayerId,
+    ) -> Option<ClashResult> {
+        if player == clash_controller {
+            Some(self)
+        } else if player == opponent {
+            Some(match self {
+                ClashResult::Won => ClashResult::Lost,
+                ClashResult::Lost => ClashResult::Won,
+                ClashResult::Tied => ClashResult::Tied,
+            })
+        } else {
+            None
+        }
+    }
 }
 
 /// CR 103.1 / CR 706: one round of the starting-player d20 roll-off.
@@ -125,10 +224,542 @@ pub struct ContestRound {
     pub rolls: Vec<(PlayerId, u8)>,
 }
 
+/// CR 400.7 + CR 608.2b: One attachment on an [`EventObjectSnapshot`], addressed by
+/// exact incarnation rather than by raw `ObjectId`.
+///
+/// The live sibling is [`crate::types::game_state::AttachmentSnapshot`], which stores a
+/// bare `ObjectId`. That is a look-back convenience: by the time an event subject is
+/// evaluated, the storage id may have been reused by a *new* object (CR 400.7), so a raw
+/// id is not proof of identity. This record therefore carries the full
+/// [`ObjectIncarnationRef`] and is never rebound to whatever currently sits at that id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventAttachmentSnapshot {
+    pub identity: ObjectIncarnationRef,
+    pub controller: PlayerId,
+    pub kind: AttachmentKind,
+}
+
+/// CR 506.1 + CR 509.1: The subject's combat role as it stood at capture time.
+///
+/// `related_objects` is the exact-incarnation set the subject blocks or is blocked by.
+/// Combat maps are keyed by raw `ObjectId` and are mutated (and cleared at end of
+/// combat) after the event is captured, so a `CombatRelation` predicate that re-read them
+/// at trigger time could match a different object — hence the frozen identity set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventCombatSnapshot {
+    pub attacking: bool,
+    pub blocking: bool,
+    pub blocked: bool,
+    pub attacking_alone: bool,
+    pub blocking_alone: bool,
+    /// CR 506.2: The player or planeswalker being attacked, when the subject is attacking.
+    pub defending_player: Option<PlayerId>,
+    pub related_objects: Vec<ObjectIncarnationRef>,
+}
+
+/// CR 603.10a: Per-turn history facts copied off the authoritative ledgers *while the
+/// subject's identity is still known*, rather than re-read later by `ObjectId`.
+///
+/// Re-reading later is the bug this closes: the turn ledgers are keyed by raw
+/// `ObjectId`, so after the subject leaves and a new object takes its id (CR 400.7), a
+/// history lookup would answer for the wrong object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventObjectHistorySnapshot {
+    pub was_dealt_damage_this_turn: bool,
+    pub entered_this_turn: bool,
+    /// CR 506.2: Defenders this subject attacked this turn.
+    pub attacked_defenders_this_turn: Vec<PlayerId>,
+    pub blocked_this_turn: bool,
+    /// CR 603.6a: `(from, to)` zone transitions recorded for this exact incarnation.
+    pub zone_changes_this_turn: Vec<(Option<Zone>, Zone)>,
+    /// CR 122.1: Counters placed on this subject this turn, retaining actor and type.
+    pub counters_put_on_this_turn: Vec<EventCounterHistoryEntry>,
+}
+
+/// CR 122.1: One "counters were put on this object this turn" record, retaining the actor
+/// and counter kind so `CountersPutOnThisTurn { by, counter }` can be answered from the
+/// snapshot alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventCounterHistoryEntry {
+    pub actor: PlayerId,
+    pub counter: CounterType,
+    pub count: u32,
+}
+
+/// Object-to-object relations the subject participates in, each stored by exact
+/// incarnation. A raw `ObjectId` here would let a *returned* object (a new incarnation at
+/// the same id, CR 400.7) satisfy a `SaddledSource`/`ConvokedSource` predicate it never
+/// earned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventObjectRelationSnapshot {
+    /// CR 702.164a: Sources that saddled this subject.
+    pub saddled_sources: Vec<ObjectIncarnationRef>,
+    /// CR 702.51a: Creatures that convoked this subject.
+    pub convoked_sources: Vec<ObjectIncarnationRef>,
+    /// Tracked-set memberships published for this exact incarnation, with the cause that
+    /// put it there.
+    pub tracked_sets: Vec<EventTrackedSetMembership>,
+}
+
+/// One concrete tracked-set membership for the subject, retaining the optional cause so
+/// `TrackedSetFiltered { caused_by, .. }` is answerable without a live set lookup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventTrackedSetMembership {
+    pub set_id: TrackedSetId,
+    pub caused_by: Option<ThisWayCause>,
+}
+
+/// CR 400.7 + CR 608.2b + CR 701.50a: An immutable, identity-exact projection of the
+/// object an event happened *to*, captured at the instruction that caused the event.
+///
+/// This exists because the engine's event payloads carry a raw `ObjectId`, and by the time
+/// an event's observers run (replacement `valid_card` filtering, trigger `valid_card`
+/// matching) the subject may have left the battlefield, or — worse — a *different* object
+/// may now occupy that storage id. Under CR 400.7 that is a new object, so answering a
+/// predicate about "the creature that connived" from live state keyed by `ObjectId` can
+/// silently answer about someone else. Every candidate fact an observer can ask about the
+/// subject is therefore frozen here at capture time.
+///
+/// Deliberately **not** a second `GameObject`: it stores only facts the reachable subject
+/// grammar can interrogate. No ability/replacement/static definitions, no display
+/// metadata, and no card-database payload enter the event.
+///
+/// Deliberately **not** `Default`: an absent field must never be readable as evidence that
+/// the event-time fact was false. Backward compatibility lives at the enclosing
+/// `Option<Box<EventObjectSnapshot>>`, not inside the record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventObjectSnapshot {
+    /// CR 400.7: the exact `(ObjectId, incarnation)` this snapshot speaks for.
+    pub identity: ObjectIncarnationRef,
+    pub controller: PlayerId,
+    pub owner: PlayerId,
+    pub zone: Zone,
+
+    pub name: String,
+    pub core_types: Vec<CoreType>,
+    pub subtypes: Vec<String>,
+    pub supertypes: Vec<Supertype>,
+    pub colors: Vec<ManaColor>,
+    pub keywords: Vec<Keyword>,
+    /// CR 208.1: Power/toughness as of capture.
+    pub power: Option<i32>,
+    pub toughness: Option<i32>,
+    /// CR 208.4b + CR 613.4b: layer-7b base P/T, so `PtComparison { scope: Base }` and
+    /// `PowerExceedsBase` are answerable from the snapshot.
+    pub base_power: Option<i32>,
+    pub base_toughness: Option<i32>,
+    /// CR 202.3: effective mana value as of capture.
+    pub mana_value: u32,
+    /// CR 122.1: counters on the subject as of capture.
+    #[serde(with = "crate::types::counter::counter_map_serde")]
+    pub counters: HashMap<CounterType, u32>,
+
+    pub is_token: bool,
+    pub is_commander: bool,
+    pub tapped: bool,
+    pub face_down: bool,
+    pub transformed: bool,
+    pub is_suspected: bool,
+    pub is_renowned: bool,
+    pub is_saddled: bool,
+    /// Capture-time derived fact (the existing `object_has_no_abilities` authority).
+    /// Derived at capture because the ability list itself is deliberately not carried.
+    pub has_no_abilities: bool,
+
+    pub attachments: Vec<EventAttachmentSnapshot>,
+    /// CR 702.16e: the subject's protector, when it has one.
+    pub protector: Option<PlayerId>,
+    pub combat: EventCombatSnapshot,
+    pub history: EventObjectHistorySnapshot,
+    pub relations: EventObjectRelationSnapshot,
+}
+
+/// How an [`EventObjectSnapshot`] can answer a given [`TargetFilter`] shape.
+///
+/// This is a *structural* classification, computed without a game state, so a parser gate
+/// can assert at card-data generation time that every reachable Connives subject filter is
+/// answerable from an event snapshot — before any card reaches the runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EventObjectFilterSupport {
+    /// Fully answerable from the embedded snapshot (plus external, non-candidate context).
+    Supported,
+    /// Structurally reachable but necessarily `false` for an event subject, because the
+    /// selector addresses a domain a permanent subject cannot be in — e.g. `ExiledBySource`
+    /// (the subject is on the battlefield, not exiled with the source) or the stack-only
+    /// target predicates (CR 701.50 connives a permanent, not a stack entry).
+    ///
+    /// Distinct from `Unsupported`: this is a decided `false`, not a coverage gap.
+    PermanentDomainFalse,
+    /// Not answerable from an event snapshot. Not reachable from the current subject
+    /// grammar; if a parser change ever makes it reachable, the gate fails and this
+    /// classification (and the evaluator) must be extended.
+    Unsupported,
+}
+
+impl EventObjectFilterSupport {
+    /// Fold a **conjunction** (`And`, and a `Typed` filter's types + properties, which the
+    /// live evaluator combines with `.all()`).
+    ///
+    /// `Unsupported` dominates: an unanswerable conjunct makes the whole shape
+    /// unanswerable, and the gate must fail. Otherwise a *single* `PermanentDomainFalse`
+    /// conjunct decides the whole conjunction false — `false && x == false` — so
+    /// `Typed { Creature, props: [HasSingleTarget] }` is domain-false, not "supported".
+    fn combine_conjunction(children: impl IntoIterator<Item = Self>) -> Self {
+        let mut domain_false = false;
+        for c in children {
+            match c {
+                Self::Unsupported => return Self::Unsupported,
+                Self::PermanentDomainFalse => domain_false = true,
+                Self::Supported => {}
+            }
+        }
+        if domain_false {
+            Self::PermanentDomainFalse
+        } else {
+            // An empty conjunction is vacuously true, hence answerable.
+            Self::Supported
+        }
+    }
+
+    /// Fold a **disjunction** (`Or`, `FilterProp::AnyOf`, `TypeFilter::AnyOf`).
+    ///
+    /// `Unsupported` still dominates. But a disjunction is domain-false only when *every*
+    /// branch is — `false || x == x` — so one answerable branch keeps the whole expression
+    /// answerable, with the domain-false branch simply contributing `false`.
+    fn combine_disjunction(children: impl IntoIterator<Item = Self>) -> Self {
+        let mut saw_supported = false;
+        for c in children {
+            match c {
+                Self::Unsupported => return Self::Unsupported,
+                Self::Supported => saw_supported = true,
+                Self::PermanentDomainFalse => {}
+            }
+        }
+        if saw_supported {
+            Self::Supported
+        } else {
+            // Empty or all-domain-false: decided false, not a coverage gap.
+            Self::PermanentDomainFalse
+        }
+    }
+
+    /// Negation of a decided-false is a decided-*true* — still answerable, hence
+    /// `Supported`. Only an unanswerable inner shape stays unanswerable.
+    fn negate(self) -> Self {
+        match self {
+            Self::Unsupported => Self::Unsupported,
+            Self::Supported | Self::PermanentDomainFalse => Self::Supported,
+        }
+    }
+}
+
+impl EventObjectSnapshot {
+    /// Structurally classify whether a [`TargetFilter`] can be evaluated against an event
+    /// subject snapshot, without a game state.
+    ///
+    /// This is the gate that keeps the snapshot honest as the parser grows: card-data
+    /// generation asserts that every parsed Connives `valid_card` classifies as *not*
+    /// `Unsupported`. If a future parser change makes a new filter shape reachable from
+    /// `parse_trigger_subject`, the gate fails and this classification — and the evaluator
+    /// beside it — must be extended in the same change.
+    ///
+    /// Exhaustive by construction: no wildcard arm, so adding an engine `TargetFilter`
+    /// variant is a compile error here rather than a silent `Unsupported`.
+    pub fn classify_filter_shape(filter: &TargetFilter) -> EventObjectFilterSupport {
+        use EventObjectFilterSupport::{PermanentDomainFalse, Supported, Unsupported};
+        match filter {
+            // ---- constants + identity: answered from the embedded snapshot ----
+            // `None` is classified for exhaustiveness even though the subject grammar
+            // does not currently emit it.
+            TargetFilter::None | TargetFilter::Any => Supported,
+            // CR 400.7: compared as exact (id, incarnation), never as a raw id.
+            TargetFilter::SelfRef => Supported,
+            // No parent-ability context exists for an ordinary Connives matcher, so this
+            // fails closed rather than resolving the candidate from live state.
+            TargetFilter::ParentTarget => Supported,
+            // Compared against the exact attachment target derived from the trigger source.
+            TargetFilter::AttachedTo => Supported,
+            TargetFilter::HasChosenName | TargetFilter::Named { .. } => Supported,
+
+            // ---- composites: recurse against the same snapshot ----
+            TargetFilter::Typed(typed) => Self::classify_typed_filter(typed),
+            TargetFilter::Not { filter } => Self::classify_filter_shape(filter).negate(),
+            TargetFilter::Or { filters } => EventObjectFilterSupport::combine_disjunction(
+                filters.iter().map(Self::classify_filter_shape),
+            ),
+            TargetFilter::And { filters } => EventObjectFilterSupport::combine_conjunction(
+                filters.iter().map(Self::classify_filter_shape),
+            ),
+            // Concrete embedded membership + cause, then recurse the inner filter.
+            TargetFilter::TrackedSetFiltered { filter, .. } => Self::classify_filter_shape(filter),
+
+            // ---- permanent-domain false: reachable, but necessarily false ----
+            // A Connive subject is a permanent on the battlefield; it is not currently
+            // exiled with the source, so no exile-link payload is carried for it.
+            TargetFilter::ExiledBySource => PermanentDomainFalse,
+            // CR 701.50a connives a *permanent*, never a stack entry.
+            TargetFilter::StackAbility { .. } | TargetFilter::StackSpell => PermanentDomainFalse,
+            // Player-axis selectors: false on the object axis. This preserves current
+            // semantics for a nonsensical player-Connives subject rather than inventing one.
+            TargetFilter::Player
+            | TargetFilter::Controller
+            | TargetFilter::SourceController
+            | TargetFilter::Opponent
+            | TargetFilter::Owner
+            | TargetFilter::AllPlayers
+            | TargetFilter::ScopedPlayer
+            | TargetFilter::SpecificPlayer { .. }
+            | TargetFilter::PlayerWhoChoseLabel { .. }
+            | TargetFilter::Neighbor { .. }
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::SourceChosenPlayer
+            | TargetFilter::OriginalController
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringSourceController
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageTargetOwner => PermanentDomainFalse,
+
+            // ---- unsupported: not reachable from the subject grammar today ----
+            // Answering any of these would require resolving the candidate (or an engine
+            // referent) out of live state, which is exactly what this snapshot forbids.
+            // If the parser ever reaches one, the gate fails and it must be handled here.
+            TargetFilter::GrantingObject
+            | TargetFilter::SourceOrPaired
+            | TargetFilter::SpecificObject { .. }
+            | TargetFilter::LastCreated
+            | TargetFilter::LastRevealed
+            | TargetFilter::LastZoneChanged
+            | TargetFilter::CostPaidObject
+            | TargetFilter::ChosenCard
+            | TargetFilter::TrackedSet { .. }
+            | TargetFilter::ExiledCardByIndex { .. }
+            | TargetFilter::TriggeringSource
+            | TargetFilter::EventTarget
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::OriginalSource
+            | TargetFilter::PostReplacementDamageTarget
+            // CR 615.5 + CR 615: object/compound referents never reachable from
+            // the Connive subject grammar; resolving them needs live state.
+            | TargetFilter::PostReplacementDamageSource
+            | TargetFilter::ControllerAndControlledPermanents { .. }
+            | TargetFilter::ChosenDamageSource { .. } => Unsupported,
+        }
+    }
+
+    /// Classify a `Typed` filter. Its type axis and its controller axis are always
+    /// answerable — types from the embedded core/sub/supertypes (with the Changeling rule
+    /// read off embedded keywords), the controller by comparing the embedded controller to
+    /// an externally resolved `ControllerRef` — so support is decided by its property list.
+    fn classify_typed_filter(typed: &TypedFilter) -> EventObjectFilterSupport {
+        EventObjectFilterSupport::combine_conjunction(
+            typed
+                .type_filters
+                .iter()
+                .map(Self::classify_type_filter)
+                .chain(typed.properties.iter().map(Self::classify_prop)),
+        )
+    }
+
+    /// Every type axis is answerable from the embedded types + keywords. Matched
+    /// exhaustively anyway, so that a new engine `TypeFilter` variant is a compile error
+    /// here rather than a silently-assumed `Supported`.
+    fn classify_type_filter(ty: &TypeFilter) -> EventObjectFilterSupport {
+        use EventObjectFilterSupport::Supported;
+        match ty {
+            TypeFilter::Creature
+            | TypeFilter::Land
+            | TypeFilter::Artifact
+            | TypeFilter::Enchantment
+            | TypeFilter::Instant
+            | TypeFilter::Sorcery
+            | TypeFilter::Planeswalker
+            | TypeFilter::Battle
+            | TypeFilter::Kindred
+            | TypeFilter::Permanent
+            | TypeFilter::Card
+            | TypeFilter::Any
+            | TypeFilter::Subtype(_) => Supported,
+            TypeFilter::Non(inner) => Self::classify_type_filter(inner).negate(),
+            TypeFilter::AnyOf(types) => EventObjectFilterSupport::combine_disjunction(
+                types.iter().map(Self::classify_type_filter),
+            ),
+        }
+    }
+
+    /// Structurally classify one [`FilterProp`] against the event-subject snapshot.
+    ///
+    /// Exhaustive by construction — no wildcard arm.
+    fn classify_prop(prop: &FilterProp) -> EventObjectFilterSupport {
+        use EventObjectFilterSupport::{PermanentDomainFalse, Supported, Unsupported};
+        match prop {
+            // ---- embedded status bits / designations ----
+            FilterProp::Token
+            | FilterProp::NonToken
+            | FilterProp::IsCommander
+            | FilterProp::Tapped
+            | FilterProp::Untapped
+            | FilterProp::FaceDown
+            | FilterProp::Transformed
+            | FilterProp::Suspected
+            | FilterProp::Renowned
+            | FilterProp::IsSaddled => Supported,
+
+            // ---- embedded characteristics ----
+            FilterProp::WithKeyword { .. }
+            | FilterProp::HasKeywordKind { .. }
+            | FilterProp::WithoutKeyword { .. }
+            | FilterProp::WithoutKeywordKind { .. }
+            | FilterProp::HasColor { .. }
+            | FilterProp::NotColor { .. }
+            | FilterProp::ColorCount { .. }
+            | FilterProp::HasSupertype { .. }
+            | FilterProp::NotSupertype { .. }
+            | FilterProp::Historic
+            | FilterProp::NotHistoric
+            | FilterProp::Cmc { .. }
+            | FilterProp::ManaValueParity { .. }
+            | FilterProp::HasNoAbilities => Supported,
+
+            // ---- embedded P/T (current + layer-7b base) ----
+            FilterProp::PtComparison { .. }
+            | FilterProp::PowerGTSource
+            | FilterProp::ToughnessGTPower
+            | FilterProp::PowerExceedsBase => Supported,
+
+            // ---- embedded counters; threshold may be resolved externally ----
+            FilterProp::Counters { .. } | FilterProp::Modified => Supported,
+
+            // ---- embedded zone ----
+            FilterProp::InZone { .. } | FilterProp::InAnyZone { .. } => Supported,
+
+            // ---- embedded controller/owner vs externally resolved ControllerRef ----
+            FilterProp::Owned { .. } | FilterProp::ProtectorMatches { .. } => Supported,
+
+            // ---- exact-identity comparisons against the trigger source ----
+            // CR 400.7: a returned object at the same storage id is *another* object.
+            FilterProp::Another => Supported,
+
+            // ---- embedded attachments ----
+            FilterProp::EnchantedBy
+            | FilterProp::EquippedBy
+            | FilterProp::HasAttachment { .. }
+            | FilterProp::HasAnyAttachmentOf { .. } => Supported,
+
+            // ---- embedded combat role; candidate membership never re-read ----
+            FilterProp::Attacking { .. }
+            | FilterProp::Blocking
+            | FilterProp::Unblocked
+            | FilterProp::AttackingAlone
+            | FilterProp::BlockingAlone
+            | FilterProp::CombatRelation { .. } => Supported,
+
+            // ---- embedded exact source relations ----
+            FilterProp::SaddledSource | FilterProp::ConvokedSource => Supported,
+
+            // ---- embedded per-turn history ----
+            FilterProp::WasDealtDamageThisTurn
+            | FilterProp::DealtDamageThisTurn
+            | FilterProp::EnteredThisTurn
+            | FilterProp::AttackedThisTurn { .. }
+            | FilterProp::BlockedThisTurn
+            | FilterProp::AttackedOrBlockedThisTurn
+            | FilterProp::ZoneChangedThisTurn { .. }
+            | FilterProp::CountersPutOnThisTurn { .. } => Supported,
+
+            // ---- embedded tracked-set membership ----
+            FilterProp::InTrackedSet { .. } => Supported,
+
+            // ---- candidate name embedded; reference half is external context ----
+            FilterProp::Named { .. }
+            | FilterProp::SameName
+            | FilterProp::SameNameAsParentTarget
+            | FilterProp::DifferentNameFrom { .. }
+            | FilterProp::NameMatchesAnyPermanent { .. }
+            | FilterProp::SharesQuality { .. }
+            | FilterProp::IsChosenCreatureType
+            | FilterProp::IsChosenCardType => Supported,
+
+            // ---- composites ----
+            FilterProp::AnyOf { props } => {
+                EventObjectFilterSupport::combine_disjunction(props.iter().map(Self::classify_prop))
+            }
+            FilterProp::Not { prop } => Self::classify_prop(prop).negate(),
+
+            // ---- permanent-domain false: stack-only predicates ----
+            // CR 701.50a: the subject is a permanent, not a spell/ability on the stack, so
+            // these are decided `false` rather than fabricated from a fake target list.
+            FilterProp::HasSingleTarget
+            | FilterProp::Targets { .. }
+            | FilterProp::TargetsOnly { .. }
+            | FilterProp::Modal => PermanentDomainFalse,
+
+            // ---- unsupported: needs a live candidate lookup or an unmodeled field ----
+            // Not reachable from the subject grammar today. Reaching one fails the gate,
+            // which is the designed signal to extend the snapshot + evaluator together.
+            // CR 701.15b/c: goad is a designation on the LIVE permanent (its `goaded_by`
+            // set, read by game/filter.rs `FilterProp::Goaded => !obj.goaded_by.is_empty()`).
+            // Neither EventObjectSnapshot nor ZoneChangeRecord carries a goaded field, and the
+            // runtime already fail-closes it (game/filter.rs zone-change-record matcher).
+            // Classify Unsupported so a future goaded event-subject filter fails the reach gate
+            // LOUDLY rather than silently reading an ungoaded snapshot. Deferred follow-up
+            // (option a): snapshot goaded onto EventObjectSnapshot + ZoneChangeRecord.
+            FilterProp::Goaded
+            | FilterProp::WasPlayed
+            // CR 108.2 + CR 108.2b: event snapshots retain token status but not whether
+            // a nontoken object is a copy, so card representation cannot be reconstructed.
+            | FilterProp::RepresentedByCard
+            | FilterProp::ControllerChoseLabel { .. }
+            | FilterProp::ControllerMatches { .. }
+            | FilterProp::BlockingSource
+            | FilterProp::HasHasteOrControlledSinceTurnBegan
+            | FilterProp::ControlledContinuouslySinceTurnBegan
+            | FilterProp::CanEnchant { .. }
+            | FilterProp::ManaCostIn { .. }
+            | FilterProp::ManaSymbolCount { .. }
+            | FilterProp::Foretold
+            | FilterProp::HasAdventure
+            // CR 607.2a: This compares against an object linked in the live
+            // exile-link side table, which event snapshots deliberately omit.
+            | FilterProp::SameNameAsExiledBySource
+            | FilterProp::AttachedToSource
+            | FilterProp::AttachedToRecipient
+            | FilterProp::Unpaired
+            | FilterProp::OtherThanTriggerObject
+            | FilterProp::MostPrevalentCreatureTypeIn { .. }
+            | FilterProp::IsChosenColor
+            | FilterProp::MatchesLastChosenCardPredicate
+            | FilterProp::DistinctFrom { .. }
+            | FilterProp::CouldBeTargetedByTriggeringSpell
+            | FilterProp::HasXInManaCost
+            | FilterProp::HasXInActivationCost
+            | FilterProp::WasKicked
+            | FilterProp::HasManaAbility
+            // CR 903.3: needs the live deck-pool commander registry (owner-scoped),
+            // not the subject snapshot. Parsed only inside mana-spend SPELL filters
+            // (CR 106.6 / CR 603.7a), which are evaluated live at the casting site —
+            // never from the event-subject grammar.
+            | FilterProp::SharesCreatureTypeWithCommander
+            | FilterProp::Other { .. } => Unsupported,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum GameEvent {
     GameStarted,
+    /// CR 400.2 + CR 701.23e: private knowledge captured while searching a
+    /// hidden zone is transported only to its latched audience; it is not a
+    /// public reveal or a searched-a-library marker.
+    HiddenSearchViewed {
+        searcher: PlayerId,
+        cards: Vec<LibrarySearchCardView>,
+        audience: Vec<PlayerId>,
+    },
     TurnStarted {
         player_id: PlayerId,
         turn_number: u32,
@@ -143,6 +774,11 @@ pub enum GameEvent {
         card_id: CardId,
         controller: PlayerId,
         object_id: ObjectId, // CR 601.2a: The spell object on the stack
+        /// CR 202.3e + CR 601.2i: Mana value while this cast was on the stack,
+        /// including the announced value of X. Optional for legacy and
+        /// synthetic events that do not carry cast-time characteristics.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cast_mana_value: Option<u32>,
     },
     /// CR 702.140c + CR 730.2: A mutating creature spell merged with a target
     /// creature, forming a mutated permanent. Emitted by
@@ -261,6 +897,16 @@ pub enum GameEvent {
         #[serde(default, skip_serializing_if = "ManaTapState::is_not_from_tap")]
         tap_state: ManaTapState,
     },
+    /// CR 605.1b: An activated mana ability resolved and produced mana. Unlike
+    /// `ManaAdded`, this is one aggregate event per ability resolution; unlike
+    /// `TappedForMana`, it also covers mana abilities without a tap cost.
+    ManaAbilityProduced {
+        player_id: PlayerId,
+        source_id: ObjectId,
+        produced: Vec<ManaType>,
+        #[serde(default, skip_serializing_if = "ManaAbilityTriggerState::is_pending")]
+        trigger_state: ManaAbilityTriggerState,
+    },
     /// CR 500.5 + CR 703.4q: A single mana unit was emptied from a player's
     /// pool during the step-end empty event after the CR 616.1 replacement
     /// pipeline resolved. `source_id` is the unit's original producer
@@ -298,6 +944,14 @@ pub enum GameEvent {
         attacker: ObjectId,
         tapped: ObjectId,
         tapped_snapshot: Box<CostPaidObjectSnapshot>,
+    },
+    /// CR 701.47c: An amass instruction chose an Army creature. This event is
+    /// observational; the resolving ability carries the authoritative
+    /// `amassed_army_object` snapshot for later CR 701.47c references.
+    ArmyAmassed {
+        object_id: ObjectId,
+        source_id: ObjectId,
+        controller: PlayerId,
     },
     /// CR 702.143a: A player foretold a card from their hand.
     Foretold {
@@ -432,6 +1086,53 @@ pub enum GameEvent {
         object_id: ObjectId,
         counter_type: CounterType,
         count: u32,
+        // CR 122.1 + CR 603.2c: the player who put the counters, so "whenever
+        // you/an opponent put one or more counters" triggers can gate on the
+        // actor. Defaults to `PlayerId(0)` on pre-field serialized fixtures.
+        #[serde(default)]
+        actor: PlayerId,
+    },
+    /// CR 714.2 + CR 608.2p: A Saga's chapter ability finished resolving.
+    ///
+    /// CR 608.2p is the rule this event exists to serve: once every resolution
+    /// step is completed, abilities that trigger on that ability resolving
+    /// trigger. Nothing else on the bus reports that moment for a chapter
+    /// ability.
+    ///
+    /// A chapter ability is not a distinct AST concept — CR 714.2b defines a
+    /// chapter symbol as a lore-counter threshold trigger on the Saga itself.
+    /// This event is the resolution half of that ability's lifecycle, which
+    /// nothing else on the bus reports: `StackResolved` is emitted for fizzles
+    /// and failed intervening-ifs too, and carries the stack entry id rather
+    /// than the Saga.
+    ///
+    /// `chapter` and `final_chapter` are captured BEFORE the chapter ability
+    /// executes, because a chapter ability may remove its own Saga from the
+    /// battlefield as its effect (Fable of the Mirror-Breaker III), and CR 714.4
+    /// sacrifices it as soon as the ability leaves the stack — after which
+    /// neither number could be re-derived.
+    SagaChapterAbilityResolved {
+        /// CR 400.7 + CR 113.7a: The exact Saga incarnation whose chapter ability
+        /// resolved, with the characteristics it had when the ability triggered.
+        ///
+        /// The trigger's own source context, not a raw `ObjectId`, for the same
+        /// reason `ConniveSubject` carries a snapshot: a chapter ability already
+        /// on the stack still resolves after its Saga leaves and re-enters, and
+        /// the re-entered permanent can occupy the same storage id. A bare id
+        /// would let an observer's "that Saga" bind to the NEW incarnation and
+        /// read its mana value (CR 202.3); suppressing the event instead would
+        /// lose an occurrence that genuinely resolved. Carrying the context does
+        /// neither — `identity.reference` pins the incarnation and `lki` answers
+        /// every characteristic an observer can ask about.
+        saga: Box<TriggerSourceContext>,
+        /// CR 109.5: controller of the resolved chapter ability.
+        controller: PlayerId,
+        /// CR 714.2b: the chapter number (lore threshold) that resolved.
+        chapter: u32,
+        /// CR 714.2d: the greatest chapter number among this Saga's chapter
+        /// abilities. Per CR 714.2e, `chapter == final_chapter` is exactly what
+        /// makes this the Saga's *final* chapter ability.
+        final_chapter: u32,
     },
     /// Digital-only Alchemy (no CR entry): a card's intensity increased by
     /// `amount`. Emitted per affected card so consumers (triggers that watch for
@@ -480,13 +1181,38 @@ pub enum GameEvent {
     },
     EffectResolved {
         kind: EffectKind,
+        /// The raw storage id of the effect's source. Retained as the compatibility and
+        /// trigger-index key, but it is NOT the candidate authority for an event whose
+        /// subject can leave or be replaced — see `subject`.
         source_id: ObjectId,
+        /// CR 400.7 + CR 608.2b: the identity-exact projection of the object this effect
+        /// happened *to*, frozen at the instruction that caused it.
+        ///
+        /// `None` for ordinary completions, whose observers do not interrogate a subject.
+        /// `Some` for Connive (CR 701.50a), where the conniver may leave the battlefield —
+        /// or return as a new incarnation at the same `source_id` — before the completion
+        /// event's triggers are matched. Boxed to keep `GameEvent`'s size down.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject: Option<Box<EventObjectSnapshot>>,
     },
     /// CR 701.3d: An Aura, Equipment, or Fortification became unattached from
     /// the object or player it was attached to.
     Unattached {
         attachment_id: ObjectId,
         old_target: TargetRef,
+    },
+    /// CR 109.5 + CR 116.2c: the player meant by "you" took the special action
+    /// of paying the printed termination cost, ending the effect. CR 116.1: the
+    /// action does not use the stack, so this event records a completed state
+    /// change rather than something that can be responded to.
+    ///
+    /// `group` names every `TransientContinuousEffect` the creating resolution
+    /// installed (see `EndEffectPermission`); `source_id` is the object whose
+    /// resolution installed them.
+    ContinuousEffectEnded {
+        group: crate::types::game_state::EndEffectGroupId,
+        source_id: ObjectId,
+        player: PlayerId,
     },
     AttackersDeclared {
         attacker_ids: Vec<ObjectId>,
@@ -497,6 +1223,23 @@ pub enum GameEvent {
     },
     BlockersDeclared {
         assignments: Vec<(ObjectId, ObjectId)>,
+    },
+    /// CR 509.3c: An effect made an attacking creature become blocked, and it was
+    /// an unblocked creature at that time — the precondition for "becomes blocked"
+    /// triggers to fire from an effect-block.
+    /// CR 509.3d: A "becomes blocked BY A CREATURE" trigger, and any blocker-side
+    /// "whenever ~ blocks" trigger, must NOT fire from an effect-block — this event
+    /// is distinct from BlockersDeclared precisely so those matchers ignore it.
+    AttackerBecameBlockedByEffect {
+        attacker: ObjectId,
+    },
+    /// CR 509.3d: A per-blocker `Blocks`/`BecomesBlocked`/`BlocksOrBecomesBlocked`
+    /// firing with an explicit blocker/attacker qualifier — carries both ids so
+    /// "that creature"/"the other creature" resolution never has to infer
+    /// orientation from event shape.
+    AttackerBecameBlockedByFilteredBlocker {
+        attacker: ObjectId,
+        blocker: ObjectId,
     },
     /// CR 508.1h + CR 509.1d: The aggregate combat tax was paid; the declaration
     /// proceeds with every declared creature intact.
@@ -513,6 +1256,7 @@ pub enum GameEvent {
     BecomesTarget {
         target: TargetRef,
         source_id: ObjectId,
+        source_controller: PlayerId,
     },
     /// CR 702.122e: A Vehicle's crew ability resolved.
     /// Carries creature list for trigger conditions that reference "creatures that crewed it".
@@ -547,6 +1291,15 @@ pub enum GameEvent {
     Transformed {
         object_id: ObjectId,
     },
+    /// CR 710.4: A Kamigawa flip permanent was flipped to its alternative face.
+    /// Distinct from `Transformed` — CR 701.27a restricts transforming to
+    /// double-faced permanents, and CR 710.1c keeps a flipped permanent's color
+    /// and mana cost unchanged where transforming swaps them. Drives the game
+    /// log and the public-state/frontend re-render. No printed card triggers on
+    /// a permanent flipping, so this event dispatches no trigger key.
+    Flipped {
+        object_id: ObjectId,
+    },
     /// Digital-only Specialize: a permanent became a color-specific specialized face.
     Specialized {
         object_id: ObjectId,
@@ -571,6 +1324,20 @@ pub enum GameEvent {
         #[serde(default)]
         card_ids: Vec<ObjectId>,
         card_names: Vec<String>,
+    },
+    /// CR 101.4 + CR 608.2c: Secretly-chosen numbers were published by a reveal
+    /// instruction ("then all players reveal those numbers simultaneously" —
+    /// Wheel of Misfortune). One event carries every number published by the
+    /// single instruction, because the card reveals them SIMULTANEOUSLY; a
+    /// per-player event would imply an ordering the rules do not have.
+    ///
+    /// Distinct from `CardsRevealed`, which is CR 701.20 (showing a card). This
+    /// is the game log's and the frontend's view of the secret→public
+    /// transition that `game::visibility` enforces on
+    /// `ChosenAttribute::RevealedNumber`.
+    ChosenNumbersRevealed {
+        /// Each revealing player and the number they had chosen, in APNAP order.
+        numbers: Vec<(PlayerId, u32)>,
     },
     CombatDamageDealtToPlayer {
         player_id: PlayerId,
@@ -611,6 +1378,38 @@ pub enum GameEvent {
     PlayerPerformedAction {
         player_id: PlayerId,
         action: PlayerActionKind,
+        /// CR 701.22a: For `PlayerActionKind::Scry`, the effective number of
+        /// cards looked at — the requested amount clamped to library size.
+        /// This is the PER-EVENT provenance for "the number of cards looked
+        /// at while scrying this way" (Elrond, Master of Healing →
+        /// `QuantityRef::TriggeringScryLookCount`): each queued "whenever you
+        /// scry" trigger preserves its own event through target selection and
+        /// stack resolution (`PendingTriggerContext`), so two scries with
+        /// different look counts in one resolution keep distinct values —
+        /// a global scalar could be overwritten before the queued triggers
+        /// are constructed. `None` for actions without a magnitude.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        look_count: Option<u32>,
+        /// CR 701.22a + CR 701.22d: Number of cards put on the bottom as the
+        /// completed scry's controller chose. `Some(0)` distinguishes a
+        /// completed nonzero scry that left every looked-at card on top.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scry_bottom_count: Option<u32>,
+        /// CR 701.22a: Number of cards the player kept on top during a
+        /// completed scry. This is presentation data paired with the bottom
+        /// count; it lets observers display the public outcome without
+        /// reconstructing it from hidden-zone data.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scry_top_count: Option<u32>,
+    },
+    /// Engine-authored diagnostic for top-card predicate
+    /// guesses. This is intentionally a log/debug event rather than rules input:
+    /// `ChooseOption` remains the authoritative action, while this records
+    /// which predicate AI or a human guessed.
+    CardPredicateGuessMade {
+        player_id: PlayerId,
+        source_id: Option<ObjectId>,
+        choice: String,
     },
     /// CR 701.19a: Regeneration shield — consumed on use, expires at cleanup.
     Regenerated {
@@ -660,6 +1459,10 @@ pub enum GameEvent {
     },
     /// CR 702.131b: A player gained the city's blessing (Ascend).
     CityBlessingGained {
+        player_id: PlayerId,
+    },
+    /// A player gained an enduring story.
+    EnduringStoryGained {
         player_id: PlayerId,
     },
     /// CR 706: A die was rolled. `result` is `None` when the roll has no numeric
@@ -924,6 +1727,29 @@ pub enum GameEvent {
     },
 }
 
+/// CR 603.2 + CR 702.59a: True when an off-zone trigger source was already
+/// functioning in `zone` when `event` occurred — i.e. it did not co-depart into
+/// that zone as the triggering object moved there. Shared by off-zone trigger
+/// collection and SelfRef co-departure mis-latch gating (CR 400.7e).
+pub(crate) fn source_was_not_co_departed_into_zone(
+    event: &GameEvent,
+    source_id: ObjectId,
+    zone: Zone,
+) -> bool {
+    match event {
+        GameEvent::ZoneChanged {
+            object_id,
+            to,
+            record,
+            ..
+        } if *to == zone => {
+            (*object_id != source_id || record.from_zone != Some(Zone::Battlefield))
+                && !record.co_departed.contains(&source_id)
+        }
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1038,6 +1864,7 @@ mod tests {
         let event = GameEvent::EffectResolved {
             kind: EffectKind::DealDamage,
             source_id: ObjectId(5),
+            subject: None,
         };
         let serialized = serde_json::to_string(&event).unwrap();
         let deserialized: GameEvent = serde_json::from_str(&serialized).unwrap();
@@ -1068,5 +1895,207 @@ mod tests {
         let serialized = serde_json::to_string(&event).unwrap();
         let deserialized: GameEvent = serde_json::from_str(&serialized).unwrap();
         assert_eq!(event, deserialized);
+    }
+
+    // ---------------------------------------------------------------------
+    // EventObjectSnapshot::classify_filter_shape — the reach gate.
+    //
+    // The classifier is exhaustive by construction (no wildcard arm), so a new
+    // engine TargetFilter/FilterProp/TypeFilter variant is a compile error rather
+    // than a silent `Unsupported`. These tests pin the *semantics* the compiler
+    // cannot check: which shapes are answerable, which are decided-false, and how
+    // composites fold.
+    // ---------------------------------------------------------------------
+    use super::super::ability::{ControllerRef, TypeFilter, TypedFilter};
+    use EventObjectFilterSupport::{PermanentDomainFalse, Supported, Unsupported};
+
+    fn classify(f: &TargetFilter) -> EventObjectFilterSupport {
+        EventObjectSnapshot::classify_filter_shape(f)
+    }
+
+    /// Positive reach guard. This is the ONLY `valid_card` shape any Connives trigger
+    /// in the card pool actually emits today (glorious purpose / iron monger, sadistic
+    /// tycoon / ultron, unlimited — 3 cards out of a 35,396-card corpus, verified
+    /// 2026-07-12). If this ever classifies as anything but `Supported`, every live
+    /// connive card has stopped being matchable.
+    ///
+    /// A negative test without this guard would be vacuous: it would pass just as
+    /// happily if the classifier rejected everything.
+    #[test]
+    fn live_connives_subject_shape_is_supported() {
+        let live = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        });
+        assert_eq!(classify(&live), Supported);
+    }
+
+    /// The subject grammar is shared with ~15 other trigger modes (Mutates, Exploits,
+    /// Explores, Evolves, ...), so a property suffix is one Oracle word away from being
+    /// reachable on a Connives subject. Properties answerable from the embedded snapshot
+    /// must classify `Supported` *before* such a card prints.
+    #[test]
+    fn snapshot_answerable_properties_are_supported() {
+        for prop in [
+            FilterProp::Tapped,
+            FilterProp::Token,
+            FilterProp::Another,
+            FilterProp::EnteredThisTurn,
+            FilterProp::Attacking { defender: None },
+            FilterProp::SaddledSource,
+            FilterProp::HasNoAbilities,
+        ] {
+            let f = TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::You),
+                properties: vec![prop.clone()],
+            });
+            assert_eq!(
+                classify(&f),
+                Supported,
+                "{prop:?} must be snapshot-answerable"
+            );
+        }
+    }
+
+    /// `PermanentDomainFalse` is a *decided false*, not a coverage gap: CR 701.50a
+    /// connives a permanent, so stack-only predicates and the exile-link selector can
+    /// never hold — and must not be confused with "we cannot answer this".
+    #[test]
+    fn permanent_domain_shapes_are_decided_false_not_gaps() {
+        assert_eq!(
+            classify(&TargetFilter::ExiledBySource),
+            PermanentDomainFalse
+        );
+        assert_eq!(classify(&TargetFilter::StackSpell), PermanentDomainFalse);
+        // Player-axis selectors are false on the object axis.
+        assert_eq!(classify(&TargetFilter::Player), PermanentDomainFalse);
+
+        let stack_prop = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![FilterProp::HasSingleTarget],
+        });
+        assert_eq!(classify(&stack_prop), PermanentDomainFalse);
+    }
+
+    /// A shape that needs a live candidate lookup is `Unsupported` — the signal that the
+    /// snapshot and its evaluator must be extended in the same change.
+    #[test]
+    fn live_lookup_shapes_are_unsupported() {
+        assert_eq!(classify(&TargetFilter::LastCreated), Unsupported);
+
+        let needs_live = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![FilterProp::WasKicked],
+        });
+        assert_eq!(classify(&needs_live), Unsupported);
+    }
+
+    /// CR 701.15b/c: goad is a designation on the LIVE permanent, not a fact the event
+    /// snapshot / zone-change record carries — the runtime fail-closes it. The reach-gate
+    /// classifier must AGREE: a goaded event-subject filter is `Unsupported`, so a future
+    /// card that reaches it fails the gate loudly instead of silently certifying ungoaded.
+    /// Revert-probe: returning Goaded to the Supported group (its state on head e3448a3c3)
+    /// makes classify yield Supported, flipping this assertion.
+    #[test]
+    fn goaded_subject_filter_is_unsupported() {
+        let goaded = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![FilterProp::Goaded],
+        });
+        assert_eq!(classify(&goaded), Unsupported);
+    }
+
+    /// `Unsupported` dominates a composite: if one branch cannot be answered, the whole
+    /// filter cannot be. Getting this backwards would let an unanswerable filter through
+    /// the gate and be silently evaluated as `false` at runtime.
+    #[test]
+    fn unsupported_dominates_composites() {
+        let mixed = TargetFilter::Or {
+            filters: vec![TargetFilter::Any, TargetFilter::LastCreated],
+        };
+        assert_eq!(classify(&mixed), Unsupported);
+
+        let all_answerable = TargetFilter::Or {
+            filters: vec![TargetFilter::Any, TargetFilter::SelfRef],
+        };
+        assert_eq!(classify(&all_answerable), Supported);
+    }
+
+    /// Conjunction and disjunction fold `PermanentDomainFalse` differently, and conflating
+    /// them is a live bug: a `Typed` filter's types and properties are combined with
+    /// `.all()` by the runtime evaluator, so ONE domain-false conjunct decides the whole
+    /// filter false (`false && x == false`). A disjunction needs *every* branch to be
+    /// domain-false before it is (`false || x == x`).
+    ///
+    /// Caught in review: folding `And`/`Typed` with the disjunction rule reported
+    /// `Typed { Creature, props: [HasSingleTarget] }` as `Supported` — claiming the engine
+    /// could meaningfully evaluate "a creature that has a single target" against a
+    /// permanent, when CR 701.50a guarantees it is simply false.
+    #[test]
+    fn conjunction_and_disjunction_fold_domain_false_differently() {
+        let one_false_conjunct = TargetFilter::And {
+            filters: vec![TargetFilter::Any, TargetFilter::ExiledBySource],
+        };
+        assert_eq!(classify(&one_false_conjunct), PermanentDomainFalse);
+
+        let one_false_disjunct = TargetFilter::Or {
+            filters: vec![TargetFilter::Any, TargetFilter::ExiledBySource],
+        };
+        assert_eq!(classify(&one_false_disjunct), Supported);
+    }
+
+    /// A composite of only domain-false children is itself domain-false; mixing in one
+    /// answerable child makes a *disjunction* answerable (the false child just contributes
+    /// `false`).
+    #[test]
+    fn domain_false_folds_but_does_not_poison() {
+        let all_false = TargetFilter::Or {
+            filters: vec![TargetFilter::Player, TargetFilter::ExiledBySource],
+        };
+        assert_eq!(classify(&all_false), PermanentDomainFalse);
+
+        let mixed = TargetFilter::Or {
+            filters: vec![TargetFilter::Player, TargetFilter::SelfRef],
+        };
+        assert_eq!(classify(&mixed), Supported);
+    }
+
+    /// Negating a decided-false yields a decided-*true* — still answerable. Only an
+    /// unanswerable inner shape stays unanswerable through a `Not`.
+    #[test]
+    fn negation_of_domain_false_is_answerable() {
+        let not_exiled = TargetFilter::Not {
+            filter: Box::new(TargetFilter::ExiledBySource),
+        };
+        assert_eq!(classify(&not_exiled), Supported);
+
+        let not_unsupported = TargetFilter::Not {
+            filter: Box::new(TargetFilter::LastCreated),
+        };
+        assert_eq!(classify(&not_unsupported), Unsupported);
+    }
+
+    /// Composites recurse rather than bottoming out at the top level.
+    #[test]
+    fn classification_recurses_into_nested_composites() {
+        let nested = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Any,
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::SelfRef,
+                        TargetFilter::Not {
+                            filter: Box::new(TargetFilter::LastCreated),
+                        },
+                    ],
+                },
+            ],
+        };
+        assert_eq!(classify(&nested), Unsupported);
     }
 }

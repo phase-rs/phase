@@ -40,11 +40,18 @@ pub(crate) fn parse_visit_trigger(line: &str, card_name: &str) -> Option<Trigger
     )
 }
 
-/// Returns line indices consumed by visit triggers (for oracle.rs dispatcher).
+/// Returns visit triggers paired with their source line index (for source-order
+/// emission in `parse_oracle_ir`, unit-4 c2) plus the consumed line indices.
+///
+/// CR 717: each Attraction visit line yields at most one trigger, emitted at its
+/// own printed line.
 pub(crate) fn parse_attraction_visit_triggers(
     lines: &[&str],
     card_name: &str,
-) -> (Vec<TriggerDefinition>, std::collections::HashSet<usize>) {
+) -> (
+    Vec<(usize, TriggerDefinition)>,
+    std::collections::HashSet<usize>,
+) {
     let mut triggers = Vec::new();
     let mut consumed = std::collections::HashSet::new();
     for (idx, line) in lines.iter().enumerate() {
@@ -55,7 +62,7 @@ pub(crate) fn parse_attraction_visit_triggers(
         let lower = trimmed.to_ascii_lowercase();
         if is_attraction_visit_line(&lower) {
             if let Some(trigger) = parse_visit_trigger(trimmed, card_name) {
-                triggers.push(trigger);
+                triggers.push((idx, trigger));
                 consumed.insert(idx);
             }
         }

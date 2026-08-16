@@ -1,0 +1,77 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "PutCounter",
+        "counter_type": "P1P1",
+        "count": {
+          "type": "Fixed",
+          "value": 1
+        },
+        "target": {
+          "type": "SelfRef"
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": {
+          "type": "Cost",
+          "shards": [
+            "Black"
+          ],
+          "generic": 2
+        }
+      },
+      "sub_ability": null,
+      "else_ability": {
+        "kind": "Activated",
+        "effect": {
+          "type": "Suspect",
+          "target": {
+            "type": "SelfRef"
+          },
+          "scope": {
+            "type": "Single"
+          }
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "duration": null,
+      "description": "{2}{B}: If ~ is suspected, put a +1/+1 counter on it. Otherwise, suspect it.",
+      "target_prompt": null,
+      "condition": {
+        "type": "SourceMatchesFilter",
+        "filter": {
+          "type": "Typed",
+          "type_filters": [],
+          "controller": null,
+          "properties": [
+            {
+              "type": "Suspected"
+            }
+          ]
+        }
+      },
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

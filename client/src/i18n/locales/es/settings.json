@@ -22,9 +22,16 @@
     "title": "Jugabilidad",
     "language": "Idioma",
     "cardSize": "Tamaño de las cartas",
+    "commandZone": "Zona de mando",
+    "autoPass": "Auto-Pass",
+    "skipLowUsePriorityWindows": "Omitir ventanas de prioridad de poco uso (experimental)",
+    "skipLowUsePriorityWindowsDescription": "Pasa automáticamente tus propias ventanas de prioridad con la pila vacía durante el mantenimiento, el paso de robar y el paso final. Las paradas de fase y el Control total siguen pausando.",
     "logDefault": "Registro predeterminado",
     "spellPayment": "Pago de hechizos",
     "manualManaPayment": "Pago manual de maná para hechizos",
+    "spellPaymentOptions": { "auto": "Automático", "autoExceptSacrificialMana": "Preguntar antes de sacrificar", "manual": "Manual" },
+    "nativeEngine": "Usar el motor nativo para partidas locales y multijugador alojado",
+    "nativeEngineDescription": "Usa el motor descargado para partidas locales contra IA y partidas que alojes mediante una sala. Los invitados siguen conectándose mediante la conexión punto a punto de la sala. Usa el motor integrado cuando no está disponible.",
     "boardBackground": "Fondo del tablero",
     "boardBackgroundGroups": {
       "automatic": "Automático",
@@ -61,6 +68,11 @@
     "showKeywords": "Mostrar palabras clave en las cartas del campo de batalla",
     "opponentHoverPreview": "Vista previa al pasar el cursor sobre el oponente",
     "showOpponentBoard": "Mostrar el tablero del oponente al pasar el cursor sobre el HUD",
+    "multiplayerBoardLayout": "Diseño de tablero multijugador",
+    "multiplayerBoardLayoutOptions": {
+      "focused": "Oponente enfocado",
+      "split": "Mesa dividida"
+    },
     "cardPreviewDelay": "Retardo al pasar el cursor",
     "cardPreviewDelayInstant": "Instantáneo",
     "cardPreviewDelayValue": "{{ms}} ms",
@@ -76,6 +88,9 @@
       "side": "La vista previa se ancla al borde de la pantalla para que nunca tape el tablero.",
       "shift": "La vista previa solo aparece mientras mantienes pulsada la tecla Shift, como en Tabletop Simulator."
     },
+    "cardPreviewFooter": "Información de la vista previa",
+    "showCardPreviewFooter": "Mostrar información bajo las vistas previas",
+    "cardPreviewFooterHint": "Incluye el nombre de la carta, las habilidades activadas disponibles y los atajos de teclado. Alt sigue abriendo los detalles de análisis cuando está oculto.",
     "cardArtPreferences": "Preferencias de ilustración de cartas",
     "clearArtOverrides_one": "Borrar todas las anulaciones de ilustración ({{count}})",
     "clearArtOverrides_other": "Borrar todas las anulaciones de ilustración ({{count}})",
@@ -152,9 +167,10 @@
     "lastSynced": "Última sincronización: {{time}}",
     "never": "nunca",
     "conflictTitle": "Ambas copias tienen cambios",
-    "conflictBody": "Este dispositivo y tu cuenta en la nube tienen datos y no podemos determinar cuál es la actual. Elige qué copia conservar; la otra se reemplazará.",
+    "conflictBody": "Este dispositivo y tu cuenta en la nube tienen datos y no podemos determinar cuál es la actual. Elige una copia o conserva ambas colecciones de mazos.",
     "keepCloud": "Usar la nube",
     "keepLocal": "Conservar este dispositivo",
+    "keepBothDecks": "Conservar ambas colecciones de mazos",
     "savesNote": "Las partidas guardadas y las cachés permanecen en este dispositivo.",
     "diffDecks": "Mazos: {{added}} añadidos, {{modified}} modificados, {{removed}} eliminados",
     "diffPrefs": "Las preferencias difieren",
@@ -179,7 +195,9 @@
     "importedWithPreferences_one": "Se importó {{count}} mazo y las preferencias.",
     "importedWithPreferences_other": "Se importaron {{count}} mazos y las preferencias.",
     "skippedMalformed_one": "Se omitió {{count}} entrada con formato incorrecto.",
-    "skippedMalformed_other": "Se omitieron {{count}} entradas con formato incorrecto."
+    "skippedMalformed_other": "Se omitieron {{count}} entradas con formato incorrecto.",
+    "telemetry": "Enviar informes anónimos de fallos y uso",
+    "telemetryDescription": "Ayuda a corregir fallos y priorizar la compatibilidad de cartas. Sin cuenta ni datos personales, solo recuentos de errores y resúmenes de partida."
   },
   "resetAll": {
     "confirm": "¿Restablecer todas las preferencias a sus valores predeterminados? Esto borra todos los ajustes de este diálogo.",

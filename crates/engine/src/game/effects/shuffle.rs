@@ -1,5 +1,5 @@
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
-use crate::types::events::{GameEvent, PlayerActionKind};
+use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
 /// CR 701.24a: Shuffle — randomize the cards in a library.
@@ -19,6 +19,36 @@ pub fn resolve(
         Effect::Shuffle { target } => target.clone(),
         _ => TargetFilter::Controller,
     };
+
+    // CR 701.24a: "Shuffle a library OR a face-down pile of cards." A pile is a
+    // first-class shuffle target modeled as the chain's tracked object set
+    // (Expose the Culprit's "shuffle that pile"). Randomize the set's order via
+    // the game RNG and return WITHOUT emitting `PlayerPerformedAction::
+    // ShuffledLibrary` — a pile shuffle is categorically not a library shuffle,
+    // so "whenever you shuffle your library" triggers (Cosi's Trickster, Psychic
+    // Spiral) must not fire. The `TrackedSetId(0)` sentinel is bound to the
+    // active chain set through the single-authority `resolve_tracked_set_sentinel`
+    // so Shuffle and the downstream Cloak read the same set.
+    let resolved_target =
+        crate::game::targeting::resolve_tracked_set_sentinel(state, shuffle_target.clone());
+    if let TargetFilter::TrackedSet { id } = resolved_target {
+        use rand::seq::SliceRandom;
+        let GameState {
+            tracked_object_sets,
+            rng,
+            ..
+        } = state;
+        if let Some(set) = tracked_object_sets.get_mut(&id) {
+            set.shuffle(rng);
+        }
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::Shuffle,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
+
     let target_player = if matches!(shuffle_target, TargetFilter::Owner) {
         // CR 400.3: "its owner's library" resolves to the owner of source_id.
         state
@@ -30,35 +60,35 @@ pub fn resolve(
         super::resolve_player_for_context_ref(state, ability, &shuffle_target)
     };
 
+    // CR 701.24a: the target player must exist before any shuffle logic runs.
+    // Validate first, unconditionally, so an unknown player is rejected even
+    // when a broad "Can't shuffle" static would otherwise suppress the shuffle.
+    if !state
+        .players
+        .iter()
+        .any(|player| player.id == target_player)
+    {
+        return Err(EffectError::PlayerNotFound);
+    }
+
     // CR 701.24: "Can't shuffle" suppresses library shuffling. Per CR 701.24d,
     // if a player would shuffle their library and can't, they don't shuffle.
     // The effect itself still resolves (EffectResolved fires below).
     let suppressed =
         crate::game::static_abilities::player_has_static_other(state, target_player, "CantShuffle");
 
-    if !suppressed {
-        let GameState { players, rng, .. } = state;
-        let player = players
-            .iter_mut()
-            .find(|p| p.id == target_player)
-            .ok_or(EffectError::PlayerNotFound)?;
-
-        // CR 701.24a: Randomize cards so that no player knows their order.
-        crate::util::im_ext::shuffle_vector(&mut player.library, rng);
-    }
-
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Shuffle,
         source_id: ability.source_id,
+        subject: None,
     });
 
-    // CR 701.24a: Emit player-action event so trigger matchers (e.g.
-    // Cosi's Trickster: "Whenever an opponent shuffles their library")
-    // can filter by the identity of the shuffling player.
-    events.push(GameEvent::PlayerPerformedAction {
-        player_id: target_player,
-        action: PlayerActionKind::ShuffledLibrary,
-    });
+    if !suppressed {
+        // CR 701.24a: Keep the pre-existing EffectResolved → ShuffledLibrary
+        // event order while the shared resolved-command authority owns the
+        // semantic library permutation and entropy receipt.
+        crate::game::effects::change_zone::shuffle_library(state, target_player, events);
+    }
 
     Ok(())
 }
@@ -108,6 +138,12 @@ mod tests {
                 ..
             }
         )));
+        assert!(state.resolved_rules_journal.entries().iter().any(|entry| {
+            matches!(
+                entry.command.as_ref(),
+                Some(crate::types::resolved_commands::ResolvedRulesCommand::LibraryShuffle(_))
+            )
+        }));
     }
 
     #[test]

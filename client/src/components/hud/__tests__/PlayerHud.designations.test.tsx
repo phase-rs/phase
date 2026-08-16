@@ -1,62 +1,17 @@
 import { act } from "react";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { GameState } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
+import { buildGameState, buildPlayers } from "../../../test/factories/gameStateFactory.ts";
 import { PlayerHud } from "../PlayerHud.tsx";
-
-function createGameState(overrides: Partial<GameState> = {}): GameState {
-  return {
-    turn_number: 1,
-    active_player: 0,
-    phase: "PreCombatMain",
-    players: [
-      { id: 0, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-      { id: 1, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-    ],
-    priority_player: 0,
-    objects: {},
-    next_object_id: 1,
-    battlefield: [],
-    stack: [],
-    exile: [],
-    rng_seed: 1,
-    combat: null,
-    waiting_for: { type: "Priority", data: { player: 0 } },
-    has_pending_cast: false,
-    lands_played_this_turn: 0,
-    max_lands_per_turn: 1,
-    priority_pass_count: 0,
-    pending_replacement: null,
-    layers_dirty: false,
-    next_timestamp: 1,
-    seat_order: [0, 1],
-    format_config: {
-      format: "Standard",
-      starting_life: 20,
-      min_players: 2,
-      max_players: 2,
-      deck_size: 60,
-      singleton: false,
-      command_zone: false,
-      commander_damage_threshold: null,
-      range_of_influence: null,
-      team_based: false,
-      uses_commander: false,
-
-      allow_debug_actions: false,
-    },
-    eliminated_players: [],
-    ...overrides,
-  };
-}
 
 describe("PlayerHud designations", () => {
   beforeEach(() => {
     useMultiplayerStore.setState({ activePlayerId: 0 });
-    useGameStore.setState({ gameState: createGameState() });
+    useGameStore.setState({ gameState: buildGameState() });
   });
 
   afterEach(() => {
@@ -66,7 +21,7 @@ describe("PlayerHud designations", () => {
   describe("Monarch", () => {
     it("renders the crown when the local player is the monarch", () => {
       act(() => {
-        useGameStore.setState({ gameState: createGameState({ monarch: 0 }) });
+        useGameStore.setState({ gameState: buildGameState({ monarch: 0 }) });
       });
       render(<PlayerHud />);
       expect(screen.getByLabelText("Monarch")).toBeInTheDocument();
@@ -74,7 +29,7 @@ describe("PlayerHud designations", () => {
 
     it("does not render the crown when an opponent is the monarch", () => {
       act(() => {
-        useGameStore.setState({ gameState: createGameState({ monarch: 1 }) });
+        useGameStore.setState({ gameState: buildGameState({ monarch: 1 }) });
       });
       render(<PlayerHud />);
       expect(screen.queryByLabelText("Monarch")).toBeNull();
@@ -89,7 +44,7 @@ describe("PlayerHud designations", () => {
   describe("Initiative", () => {
     it("renders when the local player has the initiative", () => {
       act(() => {
-        useGameStore.setState({ gameState: createGameState({ initiative: 0 }) });
+        useGameStore.setState({ gameState: buildGameState({ initiative: 0 }) });
       });
       render(<PlayerHud />);
       expect(screen.getByLabelText("Initiative")).toBeInTheDocument();
@@ -97,7 +52,7 @@ describe("PlayerHud designations", () => {
 
     it("does not render when an opponent has the initiative", () => {
       act(() => {
-        useGameStore.setState({ gameState: createGameState({ initiative: 1 }) });
+        useGameStore.setState({ gameState: buildGameState({ initiative: 1 }) });
       });
       render(<PlayerHud />);
       expect(screen.queryByLabelText("Initiative")).toBeNull();
@@ -112,7 +67,7 @@ describe("PlayerHud designations", () => {
   describe("City's Blessing", () => {
     it("renders when the local player has the blessing", () => {
       act(() => {
-        useGameStore.setState({ gameState: createGameState({ city_blessing: [0] }) });
+        useGameStore.setState({ gameState: buildGameState({ city_blessing: [0] }) });
       });
       render(<PlayerHud />);
       expect(screen.getByLabelText("City's Blessing")).toBeInTheDocument();
@@ -120,7 +75,7 @@ describe("PlayerHud designations", () => {
 
     it("does not render when only an opponent has the blessing", () => {
       act(() => {
-        useGameStore.setState({ gameState: createGameState({ city_blessing: [1] }) });
+        useGameStore.setState({ gameState: buildGameState({ city_blessing: [1] }) });
       });
       render(<PlayerHud />);
       expect(screen.queryByLabelText("City's Blessing")).toBeNull();
@@ -132,10 +87,20 @@ describe("PlayerHud designations", () => {
     });
   });
 
+  describe("Enduring Story", () => {
+    it("renders only for the designated local player", () => {
+      act(() => {
+        useGameStore.setState({ gameState: buildGameState({ enduring_story: [0] }) });
+      });
+      render(<PlayerHud />);
+      expect(screen.getByLabelText("Enduring Story")).toBeInTheDocument();
+    });
+  });
+
   describe("Ring level", () => {
     it("renders the ring counter at level 3 for the local player", () => {
       act(() => {
-        useGameStore.setState({ gameState: createGameState({ ring_level: { "0": 3 } }) });
+        useGameStore.setState({ gameState: buildGameState({ ring_level: { "0": 3 } }) });
       });
       render(<PlayerHud />);
       expect(screen.getByLabelText(/the ring tempts you \(level 3\)/i)).toBeInTheDocument();
@@ -143,7 +108,7 @@ describe("PlayerHud designations", () => {
 
     it("does not render at level 0", () => {
       act(() => {
-        useGameStore.setState({ gameState: createGameState({ ring_level: { "0": 0 } }) });
+        useGameStore.setState({ gameState: buildGameState({ ring_level: { "0": 0 } }) });
       });
       render(<PlayerHud />);
       expect(screen.queryByLabelText(/the ring tempts you/i)).toBeNull();
@@ -151,7 +116,7 @@ describe("PlayerHud designations", () => {
 
     it("does not render when only an opponent is tempted", () => {
       act(() => {
-        useGameStore.setState({ gameState: createGameState({ ring_level: { "1": 2 } }) });
+        useGameStore.setState({ gameState: buildGameState({ ring_level: { "1": 2 } }) });
       });
       render(<PlayerHud />);
       expect(screen.queryByLabelText(/the ring tempts you/i)).toBeNull();
@@ -160,7 +125,7 @@ describe("PlayerHud designations", () => {
 
   describe("Energy", () => {
     it("renders the energy counter when the local player has energy", () => {
-      const gameState = createGameState();
+      const gameState = buildGameState();
       gameState.players[0].energy = 5;
       act(() => {
         useGameStore.setState({ gameState });
@@ -170,7 +135,7 @@ describe("PlayerHud designations", () => {
     });
 
     it("uses singular form for one energy", () => {
-      const gameState = createGameState();
+      const gameState = buildGameState();
       gameState.players[0].energy = 1;
       act(() => {
         useGameStore.setState({ gameState });
@@ -189,7 +154,7 @@ describe("PlayerHud designations", () => {
     it("renders the dungeon badge when the local player is venturing", () => {
       act(() => {
         useGameStore.setState({
-          gameState: createGameState({
+          gameState: buildGameState({
             dungeon_progress: {
               "0": { current_dungeon: "LostMineOfPhandelver", current_room: 1, completed: [] },
             },
@@ -203,7 +168,7 @@ describe("PlayerHud designations", () => {
     it("does not render when the player has progress but no active dungeon", () => {
       act(() => {
         useGameStore.setState({
-          gameState: createGameState({
+          gameState: buildGameState({
             dungeon_progress: {
               "0": { current_dungeon: null, current_room: 0, completed: ["TombOfAnnihilation"] },
             },
@@ -217,7 +182,7 @@ describe("PlayerHud designations", () => {
     it("does not render when only an opponent is venturing", () => {
       act(() => {
         useGameStore.setState({
-          gameState: createGameState({
+          gameState: buildGameState({
             dungeon_progress: {
               "1": { current_dungeon: "Undercity", current_room: 0, completed: [] },
             },
@@ -230,18 +195,23 @@ describe("PlayerHud designations", () => {
   });
 
   // CR 732.2a: the `∞` HUD badge is driven ONLY by the engine projection
-  // `derived.unbounded_resources` — the FE never derives which axes are unbounded.
+  // `derived.unbounded_families` — the FE derives neither which axes are unbounded, nor the
+  // family they group into, nor whether a collapse is coming.
   describe("Unbounded resources (∞)", () => {
-    it("renders an ∞ badge for the local player's engine-attributed axis", () => {
+    it("renders an ∞ badge for the local player's engine-attributed family", () => {
       act(() => {
         useGameStore.setState({
-          gameState: createGameState({
-            derived: { unbounded_resources: [{ player: 0, axis: "TokensCreated" }] },
+          gameState: buildGameState({
+            derived: {
+              unbounded_families: [
+                { player: 0, family: "tokens", state: { type: "Unscheduled" } },
+              ],
+            },
           }),
         });
       });
       render(<PlayerHud />);
-      // REVERT-PROBE: stop reading `derived.unbounded_resources` (or remove the
+      // REVERT-PROBE: stop reading `derived.unbounded_families` (or remove the
       // PlayerHud map) → the badge is absent → this assertion fails.
       expect(screen.getByLabelText("Unbounded tokens (∞)")).toBeInTheDocument();
     });
@@ -249,41 +219,102 @@ describe("PlayerHud designations", () => {
     it("does not render when there are no unbounded resources", () => {
       act(() => {
         useGameStore.setState({
-          gameState: createGameState({ derived: { unbounded_resources: [] } }),
+          gameState: buildGameState({ derived: { unbounded_families: [] } }),
         });
       });
       render(<PlayerHud />);
       expect(screen.queryByLabelText(/Unbounded/)).toBeNull();
     });
 
-    it("does not render when only an opponent has an unbounded axis", () => {
+    it("does not render when only an opponent has an unbounded family", () => {
       act(() => {
         useGameStore.setState({
-          gameState: createGameState({
-            derived: { unbounded_resources: [{ player: 1, axis: "TokensCreated" }] },
-          }),
-        });
-      });
-      render(<PlayerHud />);
-      expect(screen.queryByLabelText(/Unbounded/)).toBeNull();
-    });
-
-    it("collapses multiple axes of the same family into one badge", () => {
-      act(() => {
-        useGameStore.setState({
-          gameState: createGameState({
+          gameState: buildGameState({
             derived: {
-              unbounded_resources: [
-                { player: 0, axis: { Mana: "Red" } },
-                { player: 0, axis: { Mana: "Blue" } },
+              unbounded_families: [
+                { player: 1, family: "tokens", state: { type: "Unscheduled" } },
               ],
             },
           }),
         });
       });
       render(<PlayerHud />);
-      // Six Mana(color) rows would collapse the same way: one mana family badge.
-      expect(screen.getAllByLabelText("Unbounded mana (∞)")).toHaveLength(1);
+      expect(screen.queryByLabelText(/Unbounded/)).toBeNull();
+    });
+
+    // The "two mana axes collapse to one badge" case MOVED TO THE ENGINE as
+    // `derived_views::tests::two_mana_axes_fold_to_one_family_row`; migrating it IS the evidence
+    // that the fold left the display layer. What remains here is the render-level consequence:
+    // the engine hands down one row per family, so the HUD renders one badge per row.
+  });
+
+  // The mana-pool `∞` marker is a SECOND ∞ surface — rendered by `ManaPoolSummary` beside the pool
+  // pills, not in the badge strip. It used to answer "is mana unbounded?" by running the client's
+  // `familyOf` mirror over `derived.unbounded_resources`: a family derivation in the display layer,
+  // which is exactly what `ResourceAxis`'s own doc claimed the frontend never does.
+  //
+  // These two cases DELIBERATELY put the channels in conflict. On the wire they never disagree
+  // (`derive_views` emits both from one loop over `unbounded_resources`), so an AGREEING fixture
+  // cannot tell which channel is the authority — it goes green either way. Disagreement is the only
+  // shape that discriminates, and it discriminates in both directions.
+  describe("Unbounded mana pool marker (∞)", () => {
+    const withPool = (derived: GameState["derived"]) =>
+      buildGameState({
+        players: buildPlayers([
+          {
+            id: 0,
+            mana_pool: {
+              mana: [{ color: "Blue", source_id: 1, pip_id: 1, snow: false, restrictions: [] }],
+            },
+          },
+          { id: 1 },
+        ]),
+        derived,
+      });
+
+    // The badge-strip badge for the `mana` family carries the SAME aria-label as this marker, so
+    // an unscoped query matches both (measured: `getByLabelText` found two elements). Every
+    // assertion below is scoped to the pool row, and the throw is the reach-guard — a null query
+    // inside a row that never rendered would be vacuous, and `ManaPoolSummary` returns `null`
+    // outright on an empty pool.
+    const manaPoolRow = (): HTMLElement => {
+      const row = document.querySelector<HTMLElement>("[data-mana-pool-summary]");
+      if (!row) throw new Error("the mana pool row did not render; the assertion would be vacuous");
+      return row;
+    };
+
+    it("follows the engine's family channel, not the axis list", () => {
+      act(() => {
+        // Engine says: no mana family unbounded. The axis list says the opposite.
+        useGameStore.setState({
+          gameState: withPool({
+            unbounded_resources: [{ player: 0, axis: { Mana: "Blue" } }],
+            unbounded_families: [],
+          }),
+        });
+      });
+      render(<PlayerHud />);
+      // REVERT-PROBE (negative direction): restore
+      // `unboundedResources.some((u) => familyOf(u.axis) === "mana")` ⇒ the marker appears ⇒ this
+      // fails. NOT vacuous: the sibling below renders the marker from this same pool, so absence
+      // here is the channel choice, not an unreachable render.
+      expect(within(manaPoolRow()).queryByLabelText("Unbounded mana (∞)")).toBeNull();
+    });
+
+    it("renders from the family channel alone, with no unbounded axis row", () => {
+      act(() => {
+        // Engine says: mana family unbounded. The axis list is empty.
+        useGameStore.setState({
+          gameState: withPool({
+            unbounded_resources: [],
+            unbounded_families: [{ player: 0, family: "mana", state: { type: "Unscheduled" } }],
+          }),
+        });
+      });
+      render(<PlayerHud />);
+      // REVERT-PROBE (positive direction): the old `familyOf` derivation over an EMPTY
+      // `unbounded_resources` yields `false` ⇒ the marker is absent ⇒ this fails.
+      expect(within(manaPoolRow()).getByLabelText("Unbounded mana (∞)")).toBeInTheDocument();
     });
   });
 });

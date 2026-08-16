@@ -1,6 +1,6 @@
 import { open } from "@tauri-apps/plugin-shell";
 
-import { isTauri } from "./sidecar";
+import { isTauri } from "./platform";
 
 /**
  * Open an external URL in the user's default browser.

@@ -22,9 +22,16 @@
     "title": "Rozgrywka",
     "language": "Język",
     "cardSize": "Rozmiar kart",
+    "commandZone": "Strefa dowodzenia",
+    "autoPass": "Auto-Pass",
+    "skipLowUsePriorityWindows": "Pomijaj rzadko używane okna priorytetu (eksperymentalne)",
+    "skipLowUsePriorityWindowsDescription": "Automatycznie pomijaj własne okna priorytetu przy pustym stosie podczas kroku utrzymania, dobierania i końcowego. Zatrzymania faz oraz Pełna kontrola nadal wstrzymują grę.",
     "logDefault": "Domyślny dziennik",
     "spellPayment": "Płatność za czary",
     "manualManaPayment": "Ręczna płatność many za czary",
+    "spellPaymentOptions": { "auto": "Automatycznie", "autoExceptSacrificialMana": "Pytaj przed poświęceniem", "manual": "Ręcznie" },
+    "nativeEngine": "Używaj natywnego silnika w lokalnych grach i hostowanym trybie wieloosobowym",
+    "nativeEngineDescription": "Używaj pobranego silnika do lokalnych gier z AI i gier hostowanych przez lobby. Goście nadal łączą się przez połączenie peer-to-peer lobby. Gdy silnik jest niedostępny, używany jest wbudowany silnik.",
     "boardBackground": "Tło pola bitwy",
     "boardBackgroundGroups": {
       "automatic": "Automatyczne",
@@ -61,6 +68,11 @@
     "showKeywords": "Pokaż słowa kluczowe na kartach na polu bitwy",
     "opponentHoverPreview": "Podgląd po najechaniu na przeciwnika",
     "showOpponentBoard": "Pokaż pole bitwy przeciwnika po najechaniu na HUD",
+    "multiplayerBoardLayout": "Układ planszy wieloosobowej",
+    "multiplayerBoardLayoutOptions": {
+      "focused": "Skupiony przeciwnik",
+      "split": "Podzielony stół"
+    },
     "cardPreviewDelay": "Opóźnienie podglądu",
     "cardPreviewDelayInstant": "Natychmiast",
     "cardPreviewDelayValue": "{{ms}} ms",
@@ -76,6 +88,9 @@
       "side": "Podgląd dokuje się przy krawędzi ekranu, więc nigdy nie zasłania pola bitwy.",
       "shift": "Podgląd pojawia się tylko wtedy, gdy przytrzymasz klawisz Shift, tak jak w Tabletop Simulator."
     },
+    "cardPreviewFooter": "Informacje podglądu",
+    "showCardPreviewFooter": "Pokazuj informacje pod podglądem karty",
+    "cardPreviewFooterHint": "Obejmuje nazwę karty, dostępne zdolności aktywowane i podpowiedzi klawiaturowe. Alt nadal otwiera szczegóły parsowania, gdy opcja jest ukryta.",
     "cardArtPreferences": "Preferencje grafiki kart",
     "clearArtOverrides_one": "Wyczyść wszystkie nadpisania grafiki ({{count}})",
     "clearArtOverrides_other": "Wyczyść wszystkie nadpisania grafiki ({{count}})",
@@ -152,9 +167,10 @@
     "lastSynced": "Ostatnia synchronizacja: {{time}}",
     "never": "nigdy",
     "conflictTitle": "Obie kopie mają zmiany",
-    "conflictBody": "To urządzenie i Twoje konto w chmurze zawierają dane, a nie możemy ustalić, która kopia jest aktualna. Wybierz, którą zachować — druga zostanie zastąpiona.",
+    "conflictBody": "To urządzenie i Twoje konto w chmurze zawierają dane, a nie możemy ustalić, która kopia jest aktualna. Wybierz jedną kopię albo zachowaj obie kolekcje talii.",
     "keepCloud": "Użyj chmury",
     "keepLocal": "Zachowaj to urządzenie",
+    "keepBothDecks": "Zachowaj obie kolekcje talii",
     "savesNote": "Zapisy gier i pamięć podręczna pozostają na tym urządzeniu.",
     "diffDecks": "Talie: {{added}} dodanych, {{modified}} zmienionych, {{removed}} usuniętych",
     "diffPrefs": "Preferencje są różne",
@@ -179,7 +195,9 @@
     "importedWithPreferences_one": "Zaimportowano {{count}} talię i preferencje.",
     "importedWithPreferences_other": "Zaimportowano {{count}} talii i preferencje.",
     "skippedMalformed_one": "Pominięto {{count}} nieprawidłowy wpis.",
-    "skippedMalformed_other": "Pominięto {{count}} nieprawidłowych wpisów."
+    "skippedMalformed_other": "Pominięto {{count}} nieprawidłowych wpisów.",
+    "telemetry": "Wysyłaj anonimowe raporty o awariach i użyciu",
+    "telemetryDescription": "Pomaga naprawiać awarie i ustalać priorytety obsługi kart. Bez konta, bez danych osobowych — tylko liczniki błędów i podsumowań gier."
   },
   "resetAll": {
     "confirm": "Zresetować wszystkie preferencje do wartości domyślnych? Spowoduje to wyczyszczenie każdego ustawienia w tym oknie.",

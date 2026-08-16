@@ -1,4 +1,4 @@
-use crate::game::effects::life::{apply_damage_life_loss, apply_life_gain};
+use crate::game::effects::life::{apply_life_gain, apply_life_loss};
 use crate::game::static_abilities::{player_has_cant_gain_life, player_has_cant_lose_life};
 use crate::types::ability::{
     ContinuousModification, Duration, Effect, EffectError, EffectKind, PtStat, ResolvedAbility,
@@ -52,6 +52,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: resolved_kind,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     };
@@ -69,6 +70,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: resolved_kind,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     };
@@ -92,6 +94,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: resolved_kind,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -124,7 +127,7 @@ pub fn resolve(
     let diff = stat_value - old_life;
     let deferred = match diff.signum() {
         1 => apply_life_gain(state, player_id, diff as u32, events).err(),
-        -1 => apply_damage_life_loss(state, player_id, (-diff) as u32, events).err(),
+        -1 => apply_life_loss(state, player_id, (-diff) as u32, events).err(),
         _ => None,
     };
     if deferred.is_some() {
@@ -136,6 +139,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: resolved_kind,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }
@@ -269,6 +273,13 @@ mod tests {
                     TypedFilter::default().controller(ControllerRef::You),
                 )),
             );
+
+        // Flush after installing the CantGainLife static so the `StaticModePresence`
+        // index (consulted by `check_static_ability` via `player_has_cant_gain_life`)
+        // reflects it. In production a static entering the battlefield always triggers a
+        // layers flush; this test mutates `static_definitions` directly, so it must flush
+        // to reproduce the production invariant.
+        evaluate_layers(&mut state);
 
         let ability = ResolvedAbility::new(
             Effect::ExchangeLifeWithStat {

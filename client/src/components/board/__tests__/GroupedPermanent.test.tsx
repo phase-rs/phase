@@ -6,6 +6,15 @@ import { dispatchAction } from "../../../game/dispatch.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
+import { buildGameObject, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
+import {
+  buildGameState,
+  buildPendingCast,
+  buildTargetSelectionProgress,
+  buildTargetSelectionSlot,
+  buildTargetSelectionWaitingFor,
+} from "../../../test/factories/gameStateFactory.ts";
+import { toCardProps } from "../../../viewmodel/cardProps.ts";
 import type { GroupedPermanent as GroupedPermanentType } from "../../../viewmodel/battlefieldProps.ts";
 import { BattlefieldRow } from "../BattlefieldRow.tsx";
 import { BoardInteractionContext } from "../BoardInteractionContext.tsx";
@@ -22,66 +31,39 @@ vi.mock("../../card/CardImage.tsx", () => ({
 }));
 
 function makeObject(id: number): GameObject {
-  return {
+  return buildGameObject({
     id,
     card_id: 100,
-    owner: 0,
-    controller: 0,
-    zone: "Battlefield",
-    tapped: false,
-    face_down: false,
-    flipped: false,
-    transformed: false,
-    damage_marked: 0,
-    dealt_deathtouch_damage: false,
-    attached_to: null,
-    attachments: [],
-    counters: {},
     name: "Saproling",
     power: 1,
     toughness: 1,
-    loyalty: null,
     card_types: { supertypes: [], core_types: ["Creature"], subtypes: ["Saproling"] },
-    mana_cost: { type: "NoCost" },
-    keywords: [],
-    abilities: [],
-    trigger_definitions: [],
-    replacement_definitions: [],
-    static_definitions: [],
     color: ["Green"],
     base_power: 1,
     base_toughness: 1,
-    base_keywords: [],
     base_color: ["Green"],
     timestamp: id,
-    entered_battlefield_turn: null,
-  };
+  });
 }
 
 function makeState(waitingFor: WaitingFor): GameState {
-  const objects = Object.fromEntries(
-    [1, 2, 3, 4, 5].map((id) => [id, makeObject(id)]),
+  const objects = buildObjectMap(
+    ...[1, 2, 3, 4, 5].map((id) => makeObject(id)),
   );
-  return {
-    players: [
-      { id: 0, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-      { id: 1, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-    ],
+  return buildGameState({
     objects,
     battlefield: [1, 2, 3, 4, 5],
-    exile: [],
-    stack: [],
-    combat: null,
     waiting_for: waitingFor,
-  } as unknown as GameState;
+  });
 }
 
-function makeGroup(): GroupedPermanentType {
+function makeGroup(ids = [1, 2, 3, 4, 5]): GroupedPermanentType {
   return {
     name: "Saproling",
-    ids: [1, 2, 3, 4, 5],
-    count: 5,
-    representative: {} as GroupedPermanentType["representative"],
+    ids,
+    count: ids.length,
+    representative: toCardProps(makeObject(1)),
+    isUnboundedPile: false,
   };
 }
 
@@ -90,6 +72,7 @@ function renderGroup(options: {
   validAttackerIds?: Set<number>;
   validTargetObjectIds?: Set<number>;
   committedAttackerIds?: Set<number>;
+  group?: GroupedPermanentType;
 } = {}) {
   return render(
     <BoardInteractionContext.Provider
@@ -107,7 +90,7 @@ function renderGroup(options: {
       }}
     >
       <GroupedPermanentDisplay
-        group={makeGroup()}
+        group={options.group ?? makeGroup()}
         rowType="creatures"
         manualExpanded={false}
         onExpand={vi.fn()}
@@ -148,6 +131,7 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
       waitingFor,
       legalActions: [],
       legalActionsByObject: {},
+      manaPaymentPreviewSourceIds: [],
       spellCosts: {},
     });
     useUiStore.setState({
@@ -180,6 +164,31 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
     expect(screen.getByRole("button", { name: "Expand Saproling group" })).toHaveTextContent("×5");
   });
 
+  // DESIGN STEP 4 (∞-pile): an accepted object-growth loop's pile renders ∞, not ×N.
+  it("renders ∞ instead of ×N for a collapsed unbounded-pile group", () => {
+    renderGroup({ group: { ...makeGroup([1, 2, 3, 4, 5]), isUnboundedPile: true } });
+
+    expect(
+      screen.getByRole("button", { name: "Expand Saproling group" }),
+    ).toHaveTextContent("∞");
+  });
+
+  // SHOULD-FIX #1 (singleton trap): count <= 1 → "single" mode renders no count
+  // badge, but ∞ is COUNT-INDEPENDENT, so a 1-member pile must still show ∞.
+  it("renders ∞ for a single-member unbounded-pile group", () => {
+    renderGroup({ group: { ...makeGroup([1]), isUnboundedPile: true } });
+
+    expect(screen.getByText("∞")).toBeInTheDocument();
+  });
+
+  it("renders ×N (not ∞) when a group is not an unbounded pile", () => {
+    renderGroup({ group: makeGroup([1, 2, 3, 4, 5]) });
+
+    const badge = screen.getByRole("button", { name: "Expand Saproling group" });
+    expect(badge).toHaveTextContent("×5");
+    expect(badge).not.toHaveTextContent("∞");
+  });
+
   it("regroups manually expanded duplicate creature groups from a stable row control", () => {
     const { container } = renderCreatureRow();
 
@@ -190,6 +199,18 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
     fireEvent.click(screen.getByRole("button", { name: "Regroup duplicate creature groups" }));
 
     expect(container.querySelectorAll("[data-object-id]")).toHaveLength(1);
+  });
+
+  it("lifts an engine-selected mana source above the other cards in a staggered group", () => {
+    useGameStore.setState({ manaPaymentPreviewSourceIds: [1] });
+
+    const { container } = renderGroup({ group: makeGroup([1, 2]) });
+
+    const selectedSource = container.querySelector('[data-object-id="1"]') as HTMLElement;
+    const coveredCard = container.querySelector('[data-object-id="2"]') as HTMLElement;
+
+    expect(selectedSource.parentElement?.style.zIndex).toBe("2");
+    expect(coveredCard.parentElement?.style.zIndex).toBe("1");
   });
 
   it("opens an attacker picker that replaces only this group's selected attackers", () => {
@@ -207,18 +228,20 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
   });
 
   it("dispatches a concrete target choice from the picker", () => {
-    const waitingFor = {
-      type: "TargetSelection",
+    const waitingFor = buildTargetSelectionWaitingFor({
       data: {
         player: 0,
-        pending_cast: {},
-        target_slots: [],
-        selection: {
+        pending_cast: buildPendingCast(),
+        target_slots: [
+          buildTargetSelectionSlot({
+            legal_targets: [{ Object: 1 }, { Object: 2 }, { Object: 3 }],
+          }),
+        ],
+        selection: buildTargetSelectionProgress({
           current_legal_targets: [{ Object: 1 }, { Object: 2 }, { Object: 3 }],
-          selected_targets: [],
-        },
+        }),
       },
-    } as unknown as WaitingFor;
+    });
     useGameStore.setState({
       gameState: makeState(waitingFor),
       waitingFor,
@@ -284,6 +307,28 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
     });
   });
 
+  it("uses delegated untap authority for a collapsed group picker", () => {
+    const waitingFor: WaitingFor = {
+      type: "UntapChoice",
+      data: { player: 1, candidates: [1] },
+    };
+    const gameState = {
+      ...makeState(waitingFor),
+      turn_decision_controller: 0,
+      active_player: 1,
+    };
+    useGameStore.setState({ gameState, waitingFor });
+    renderGroup({ boardChoiceObjectIds: new Set([1]) });
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose Saproling token" }));
+    fireEvent.click(screen.getByRole("button", { name: "Untap" }));
+
+    expect(dispatchAction).toHaveBeenCalledWith({
+      type: "ChooseUntap",
+      data: { object_id: 1, untap: true },
+    });
+  });
+
   it("sacrifices one of many identical tokens with a single action (no #1-#N list) — #4375", () => {
     const waitingFor: WaitingFor = {
       type: "EffectZoneChoice",
@@ -296,7 +341,7 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
         zone: "Battlefield",
         destination: null,
       },
-    } as unknown as WaitingFor;
+    };
     useGameStore.setState({
       gameState: makeState(waitingFor),
       waitingFor,
@@ -329,7 +374,7 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
         zone: "Battlefield",
         destination: null,
       },
-    } as unknown as WaitingFor;
+    };
     useGameStore.setState({
       gameState: makeState(waitingFor),
       waitingFor,

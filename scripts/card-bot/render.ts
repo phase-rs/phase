@@ -187,15 +187,26 @@ export interface Embed {
   footer?: { text: string };
 }
 
-/** Builds the parse-breakdown embed for a found card. */
+/** Per-face rendering overrides for multi-face (DFC) cards. */
+export interface FaceOptions {
+  /** This face's own image (replaces the whole-card front image). */
+  faceImage?: string | null;
+  /** Description budget for this embed. Two faces must share Discord's 6000-char
+   *  per-message total, so the caller passes a smaller budget than the default. */
+  descriptionBudget?: number;
+}
+
+/** Builds the parse-breakdown embed for a found card (one face for a DFC). */
 export function renderCardEmbed(
   entry: CoverageEntry,
   scry: ScryfallCard | null,
   build: Build,
   meta: BuildMeta | null,
+  opts: FaceOptions = {},
 ): Embed {
   const counts = countItems(entry.parse_details);
   const ok = entry.supported;
+  const budgetMax = opts.descriptionBudget ?? DESCRIPTION_MAX;
 
   const meter = supportMeter(counts.supported, counts.total);
   const summary = ok
@@ -210,9 +221,12 @@ export function renderCardEmbed(
   if (entry.parse_details.length === 0) {
     description = `${head}\n\n${summary}\n\n*Vanilla — no parsed abilities*`;
   } else {
-    const budget = DESCRIPTION_MAX - head.length - summary.length - 4; // "\n\n" + "\n\n"
+    const budget = budgetMax - head.length - summary.length - 4; // "\n\n" + "\n\n"
     description = `${head}\n\n${summary}\n\n${fitLines(treeLines(entry.parse_details), budget)}`;
   }
+
+  // A DFC face carries its own image; otherwise use the whole-card front image.
+  const image = opts.faceImage !== undefined ? opts.faceImage : scry?.image ?? null;
 
   return {
     author: { name: "ENGINE PARSE" },
@@ -220,7 +234,50 @@ export function renderCardEmbed(
     color: ok ? COLOR_OK : COLOR_GAPS,
     // Top-right thumbnail: compact beside the parse, click/tap to expand to the
     // full card. Discord auto-reflows it on mobile.
-    thumbnail: scry?.image ? { url: scry.image } : undefined,
+    thumbnail: image ? { url: image } : undefined,
+    footer: { text: footerText(build, meta) },
+  };
+}
+
+/**
+ * Builds an embed for a token. Tokens have no engine parse tree (they are not
+ * playable card entries), so this shows the Scryfall characteristics: type line,
+ * P/T, and rules text. `oracleText` is null until the R2 data carries it, in
+ * which case the rules line is simply omitted.
+ */
+export function renderTokenEmbed(token: ScryfallCard, build: Build, meta: BuildMeta | null): Embed {
+  const name = `**${token.name}**`;
+  const lines: string[] = [token.scryfallUri ? `[${name}](${token.scryfallUri})` : name];
+  if (token.typeLine) lines.push(`**${token.typeLine}**`);
+  if (token.power !== null && token.toughness !== null) {
+    lines.push(`\`${token.power}/${token.toughness}\``);
+  }
+  if (token.oracleText) lines.push(oracleQuote(token.oracleText));
+  return {
+    author: { name: "TOKEN" },
+    description: lines.join("\n"),
+    color: COLOR_OK,
+    thumbnail: token.image ? { url: token.image } : undefined,
+    footer: { text: footerText(build, meta) },
+  };
+}
+
+/**
+ * Fallback embed for a DFC face that has Scryfall data but no coverage entry
+ * (rare — both faces are normally in coverage-data). Shows the face image + name
+ * without a parse tree.
+ */
+export function renderFaceFallback(
+  faceName: string,
+  faceImage: string | null,
+  build: Build,
+  meta: BuildMeta | null,
+): Embed {
+  return {
+    author: { name: "ENGINE PARSE" },
+    description: `**${faceName}**\n\n-# No parse data for this face in the \`${build}\` build.`,
+    color: COLOR_GAPS,
+    thumbnail: faceImage ? { url: faceImage } : undefined,
     footer: { text: footerText(build, meta) },
   };
 }

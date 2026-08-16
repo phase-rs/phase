@@ -60,6 +60,17 @@ describe("getKeywordDetail", () => {
     expect(getKeywordDetail({ Flashback: "SelfManaCost" })).toBe("its mana cost");
   });
 
+  it("formats the mana cost nested in EmergeCost", () => {
+    expect(
+      getKeywordDetail({
+        Emerge: {
+          mana_cost: { Cost: { shards: ["Black", "Black"], generic: 5 } },
+          sacrifice_filter: { type: "Typed", type_filters: ["Artifact"] },
+        },
+      }),
+    ).toBe("{5}{B}{B}");
+  });
+
   it("formats u32 params", () => {
     expect(getKeywordDetail({ Dredge: 3 })).toBe("3");
     expect(getKeywordDetail({ Annihilator: 2 })).toBe("2");

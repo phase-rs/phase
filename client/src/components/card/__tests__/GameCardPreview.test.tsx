@@ -1,10 +1,17 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { GameObject, GameState } from "../../../adapter/types.ts";
+import type { GameObject } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
+import {
+  buildGameObject,
+  buildObjectMap,
+  gameObjectFactory,
+} from "../../../test/factories/gameObjectFactory.ts";
+import { buildGameState, gameStateFactory } from "../../../test/factories/gameStateFactory.ts";
+import { PlayerHand } from "../../hand/PlayerHand.tsx";
 import { GameCardPreview } from "../GameCardPreview.tsx";
 
 // CardPreview renders <img alt={cardName} …>; mocking the image hook lets us
@@ -26,66 +33,23 @@ vi.mock("../../../hooks/useEngineCardData.ts", () => ({
 }));
 
 function battlefieldObject(overrides: Partial<GameObject> = {}): GameObject {
-  return {
+  return buildGameObject({
     id: 101,
     card_id: 1,
-    owner: 0,
-    controller: 0,
     zone: "Battlefield",
-    tapped: false,
-    face_down: false,
-    flipped: false,
-    transformed: false,
-    damage_marked: 0,
-    dealt_deathtouch_damage: false,
-    attached_to: null,
-    attachments: [],
-    counters: {},
     name: "Pithing Needle",
-    power: null,
-    toughness: null,
-    loyalty: null,
-    card_types: { supertypes: [], core_types: ["Artifact"], subtypes: [] },
     mana_cost: { type: "Cost", shards: [], generic: 1 },
-    keywords: [],
-    abilities: [],
-    trigger_definitions: [],
-    replacement_definitions: [],
-    static_definitions: [],
-    color: [],
-    base_power: null,
-    base_toughness: null,
-    base_keywords: [],
-    base_color: [],
-    timestamp: 1,
-    entered_battlefield_turn: 1,
     ...overrides,
-  };
+  });
 }
 
-function gameStateWithObject(object: GameObject): GameState {
-  return {
-    turn_number: 1,
-    active_player: 0,
-    phase: "PreCombatMain",
-    players: [],
-    priority_player: 0,
-    objects: { [String(object.id)]: object },
+function gameStateWithObject(object: GameObject) {
+  return buildGameState({
+    objects: buildObjectMap(object),
     next_object_id: 102,
     battlefield: [object.id],
-    stack: [],
-    exile: [],
-    rng_seed: 1,
-    combat: null,
-    waiting_for: { type: "Priority", data: { player: 0 } },
-    has_pending_cast: false,
-    lands_played_this_turn: 0,
-    max_lands_per_turn: 1,
-    priority_pass_count: 0,
-    pending_replacement: null,
-    layers_dirty: false,
     next_timestamp: 2,
-  } as GameState;
+  });
 }
 
 function inspect(object: GameObject, faceIndex = 0): void {
@@ -99,7 +63,9 @@ afterEach(() => {
   useUiStore.setState({
     inspectedObjectId: null,
     inspectedFaceIndex: 0,
+    previewPlacement: "cursor",
     isDragging: false,
+    mobileHandGesture: null,
     shiftHeld: false,
     altHeld: false,
   });
@@ -114,6 +80,137 @@ describe("GameCardPreview", () => {
     render(<GameCardPreview />);
 
     expect(screen.getAllByAltText("Pithing Needle").length).toBeGreaterThan(0);
+  });
+
+  it("docks a preview opened from a modal even when cursor-follow is preferred", () => {
+    inspect(battlefieldObject());
+    useUiStore.setState({ previewPlacement: "side" });
+
+    const { container } = render(<GameCardPreview />);
+
+    expect(container.querySelector<HTMLElement>("[data-card-preview]")).toHaveStyle({
+      right: "calc(env(safe-area-inset-right) + 1rem + var(--game-right-rail-offset, 0px))",
+    });
+  });
+
+  it("anchors the preview to the hand card hovered through PlayerHand", async () => {
+    const firstCard = gameObjectFactory
+      .withId(201)
+      .inHand()
+      .named("First Card")
+      .build();
+    const hoveredCard = gameObjectFactory
+      .withId(202)
+      .inHand()
+      .named("Hovered Card")
+      .build();
+    const gameState = gameStateFactory
+      .withPlayers({ id: 0, hand: [firstCard.id, hoveredCard.id] }, 1)
+      .withObjects(firstCard, hoveredCard)
+      .build();
+    useGameStore.setState({ gameState, spellCosts: {} });
+
+    const { container } = render(
+      <>
+        <PlayerHand />
+        <GameCardPreview />
+      </>,
+    );
+    const firstSource = container.querySelector<HTMLElement>(
+      `[data-hand-card][data-object-id="${firstCard.id}"]`,
+    );
+    const hoveredSource = container.querySelector<HTMLElement>(
+      `[data-hand-card][data-object-id="${hoveredCard.id}"]`,
+    );
+    expect(firstSource).not.toBeNull();
+    expect(hoveredSource).not.toBeNull();
+    if (!firstSource || !hoveredSource) return;
+
+    vi.spyOn(firstSource, "matches").mockReturnValue(false);
+    vi.spyOn(hoveredSource, "matches").mockImplementation(
+      (selector) => selector === ":hover",
+    );
+    vi.spyOn(hoveredSource, "getBoundingClientRect").mockReturnValue({
+      bottom: 700,
+      height: 140,
+      left: 400,
+      right: 500,
+      top: 560,
+      width: 100,
+      x: 400,
+      y: 560,
+      toJSON: () => ({}),
+    });
+    Object.defineProperty(hoveredSource, "offsetWidth", {
+      configurable: true,
+      value: 100,
+    });
+
+    fireEvent.mouseEnter(hoveredSource);
+
+    await waitFor(() => {
+      const preview = container.querySelector<HTMLElement>("[data-card-preview]");
+      expect(preview).not.toBeNull();
+      expect(preview).toHaveStyle({ bottom: "0px" });
+      expect(within(preview!).getByAltText("Hovered Card")).toBeInTheDocument();
+    });
+  });
+
+  it("keeps the held card in the stable fan until direct dragging begins", () => {
+    const card = gameObjectFactory
+      .withId(203)
+      .inHand()
+      .named("Held Card")
+      .build();
+    const gameState = gameStateFactory
+      .withPlayers({ id: 0, hand: [card.id] }, 1)
+      .withObjects(card)
+      .build();
+    useGameStore.setState({ gameState, spellCosts: {} });
+
+    const { container } = render(<PlayerHand />);
+    const source = container.querySelector<HTMLElement>(
+      `[data-hand-card][data-object-id="${card.id}"]`,
+    );
+    expect(source).not.toBeNull();
+
+    const sourceOrigin = {
+      bottom: 700,
+      centerX: 450,
+      height: 140,
+      rotation: 0,
+      top: 560,
+      width: 100,
+    };
+    act(() => {
+      useUiStore.getState().setMobileHandGesture({
+        objectId: card.id,
+        phase: "preview",
+        sourceOrigin,
+        offsetX: 0,
+        offsetY: 0,
+        playable: true,
+        castReady: false,
+      });
+    });
+
+    expect(source).not.toHaveAttribute("data-hand-held-source");
+    expect(source).not.toHaveClass("w-0", "opacity-0");
+
+    act(() => {
+      useUiStore.getState().setMobileHandGesture({
+        objectId: card.id,
+        phase: "drag",
+        sourceOrigin,
+        offsetX: 0,
+        offsetY: -24,
+        playable: true,
+        castReady: false,
+      });
+    });
+
+    expect(source).toHaveAttribute("data-hand-held-source", "true");
+    expect(source).toHaveClass("w-0", "opacity-0");
   });
 
   it("renders no preview while a card is being dragged", () => {
@@ -169,5 +266,13 @@ describe("GameCardPreview", () => {
     const { container } = render(<GameCardPreview />);
 
     expect(container.firstChild).toBeNull();
+  });
+
+  it("previews a face-down permanent when the engine projects its identity", () => {
+    inspect(battlefieldObject({ face_down: true, display_visible_to_viewer: true }));
+
+    render(<GameCardPreview />);
+
+    expect(screen.getAllByAltText("Pithing Needle").length).toBeGreaterThan(0);
   });
 });

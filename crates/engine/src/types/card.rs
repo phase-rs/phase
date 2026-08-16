@@ -55,6 +55,17 @@ pub struct CardMetadata {
     /// `spellbook` so the `DraftFromSpellbook` resolver can present the list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spellbook: Vec<String>,
+    /// CR 202.3d + CR 709.4b: The card's OFF-STACK mana value when it differs from
+    /// this face's own `mana_cost.mana_value()` — i.e. the COMBINED mana value of
+    /// both halves for a SPLIT card (Fire // Ice is MV 4, not one half's 2).
+    /// Precomputed at deck-load time (`deck_loading::resolve_names`, where the
+    /// `CardDatabase` is available) so runtime deck checks that have only a single
+    /// `CardFace` — notably companion validation, which has no database — can read
+    /// the rules-correct combined value. `None` means "use this face's own mana
+    /// value"; the field lives on the already-`Default`-constructed `CardMetadata`
+    /// so no `CardFace`/`DeckEntry` construction site needs to change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub off_stack_mana_value_override: Option<u32>,
 }
 
 impl CardMetadata {
@@ -66,6 +77,7 @@ impl CardMetadata {
             && self.related_token_ids.is_empty()
             && self.source_printing_ids.is_empty()
             && self.spellbook.is_empty()
+            && self.off_stack_mana_value_override.is_none()
     }
 }
 
@@ -77,6 +89,13 @@ fn is_zero(v: &u32) -> bool {
 pub struct PrintedCardRef {
     pub oracle_id: String,
     pub face_name: String,
+}
+
+/// A card ability that changes how the booster draft proceeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DraftEffect {
+    AdditionalPick,
 }
 
 /// Exact image reference for a printed token.
@@ -92,6 +111,45 @@ pub struct TokenImageRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub face_name: Option<String>,
     pub preset_id: String,
+}
+
+/// CR 306.5b + CR 107.3m: A supported printed planeswalker-loyalty value.
+///
+/// `CardFace::loyalty` deliberately remains raw source data because card data
+/// also contains unsupported expressions such as `*` and `1d4+1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PrintedLoyalty {
+    Fixed(u32),
+    X,
+}
+
+impl PrintedLoyalty {
+    /// Interprets only the printed loyalty forms the runtime can model.
+    pub fn from_raw(raw: Option<&str>) -> Option<Self> {
+        raw.and_then(|value| {
+            if value == "X" {
+                Some(Self::X)
+            } else {
+                value.parse().ok().map(Self::Fixed)
+            }
+        })
+    }
+
+    /// CR 107.3m: only the resolving spell's own X supplies this ETB replacement.
+    pub fn entry_counter_count(self, resolving_spell_x: Option<u32>) -> u32 {
+        match self {
+            Self::Fixed(value) => value,
+            Self::X => resolving_spell_x.unwrap_or(0),
+        }
+    }
+
+    /// CR 107.3g: off the stack, a printed X is zero.
+    pub fn off_stack_value(self) -> u32 {
+        match self {
+            Self::Fixed(value) => value,
+            Self::X => 0,
+        }
+    }
 }
 
 /// CR 702.148a-b + CR 612: The alternate (cleave-cost) text variant of a spell

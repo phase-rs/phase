@@ -45,6 +45,7 @@ pub fn resolve(
                 events.push(GameEvent::EffectResolved {
                     kind: EffectKind::ApplySticker,
                     source_id: ability.source_id,
+                    subject: None,
                 });
                 return Ok(());
             };
@@ -59,6 +60,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::ApplySticker,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -87,6 +89,7 @@ fn resolve_put_sticker(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::PutSticker,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -104,6 +107,7 @@ fn resolve_put_sticker(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::PutSticker,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -133,6 +137,7 @@ fn resolve_put_sticker(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::PutSticker,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     };
@@ -159,6 +164,7 @@ fn resolve_put_sticker(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::PutSticker,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -176,6 +182,7 @@ fn resolve_put_sticker(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::PutSticker,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -197,16 +204,21 @@ fn resolve_put_sticker(
         .collect();
     super::choose_one_of::prompt_next(
         state,
-        ability.controller,
-        ability.source_id,
-        branches,
-        ability.targets.clone(),
-        ability.context.clone(),
-        vec![ability.controller],
+        super::choose_one_of::PromptRequest {
+            controller: ability.controller,
+            source_id: ability.source_id,
+            branches,
+            parent_targets: ability.targets.clone(),
+            context: ability.context.clone(),
+            replacement_applied: ability.replacement_applied.clone(),
+            continuation: None,
+            players: vec![ability.controller],
+        },
     );
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::PutSticker,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }
@@ -259,12 +271,16 @@ fn prompt_count_choice(
 
     super::choose_one_of::prompt_next(
         state,
-        ability.controller,
-        ability.source_id,
-        branches,
-        ability.targets.clone(),
-        ability.context.clone(),
-        vec![ability.controller],
+        super::choose_one_of::PromptRequest {
+            controller: ability.controller,
+            source_id: ability.source_id,
+            branches,
+            parent_targets: ability.targets.clone(),
+            context: ability.context.clone(),
+            replacement_applied: ability.replacement_applied.clone(),
+            continuation: None,
+            players: vec![ability.controller],
+        },
     );
 }
 

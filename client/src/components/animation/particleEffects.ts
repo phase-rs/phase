@@ -44,7 +44,12 @@ export function lerpColor(a: RGB, b: RGB, t: number): RGB {
 }
 
 export function hexToRgb(hex: string): RGB {
-  const h = hex.replace("#", "");
+  // Expand CSS 3-digit shorthand (`#fff` -> `ffffff`) first. Without this the
+  // blue channel reads `h.substring(4, 6)` === "" -> parseInt("", 16) === NaN,
+  // producing a corrupt `rgb(r,g,NaN)` color that renders nothing.
+  const h = hex
+    .replace("#", "")
+    .replace(/^([0-9a-f])([0-9a-f])([0-9a-f])$/i, "$1$1$2$2$3$3");
   return {
     r: parseInt(h.substring(0, 2), 16),
     g: parseInt(h.substring(2, 4), 16),

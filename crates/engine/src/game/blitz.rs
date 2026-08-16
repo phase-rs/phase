@@ -48,6 +48,7 @@ pub(crate) fn install_blitz_riders(
     state: &mut GameState,
     object_id: ObjectId,
     controller: PlayerId,
+    events: &mut Vec<crate::types::events::GameEvent>,
 ) {
     // CR 702.152a: the permanent gains haste. A transient continuous effect
     // scoped to this object (Layer 6 keyword grant) — present for as long as the
@@ -73,13 +74,18 @@ pub(crate) fn install_blitz_riders(
     // CR 702.152a: "Sacrifice the permanent at the beginning of the next end step."
     let sacrifice =
         ResolvedAbility::new(sacrifice_self_effect(), Vec::new(), object_id, controller);
-    state.delayed_triggers.push(DelayedTrigger {
-        condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
-        ability: sacrifice,
-        controller,
-        source_id: object_id,
-        one_shot: true,
-    });
+    crate::game::triggers::install_delayed_trigger(
+        state,
+        DelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            ability: Box::new(sacrifice),
+            controller,
+            source_id: object_id,
+            one_shot: true,
+            provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
+        },
+        events,
+    );
 }
 
 /// CR 702.152a: Grant the dies-draw trigger to a live permanent, idempotently.
@@ -88,14 +94,17 @@ pub(crate) fn install_blitz_riders(
 /// refresh the live copy so the trigger is collectable this same resolution.
 fn grant_dies_draw_trigger(obj: &mut GameObject) {
     if obj.base_trigger_definitions.iter().any(is_blitz_dies_draw) {
-        if !obj.trigger_definitions.iter_all().any(is_blitz_dies_draw) {
-            obj.trigger_definitions.push(build_dies_draw_trigger());
+        if !obj
+            .trigger_definitions
+            .iter_all()
+            .any(|entry| is_blitz_dies_draw(entry.definition()))
+        {
+            obj.relive_printed_trigger(is_blitz_dies_draw);
         }
         return;
     }
-    let trigger = build_dies_draw_trigger();
-    std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger.clone());
-    obj.trigger_definitions.push(trigger);
+    std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(build_dies_draw_trigger());
+    obj.materialize_base_trigger_definitions();
 }
 
 /// Exact description of the Blitz-granted dies-draw trigger. Used both as the

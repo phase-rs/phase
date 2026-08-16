@@ -1,0 +1,148 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "RevealTop",
+          "player": {
+            "type": "Controller"
+          },
+          "count": 1
+        },
+        "cost": null,
+        "sub_ability": {
+          "kind": "Spell",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": null,
+            "destination": "Hand",
+            "target": {
+              "type": "ParentTarget"
+            },
+            "owner_library": false,
+            "enter_transformed": false,
+            "enter_tapped": false,
+            "enters_attacking": false
+          },
+          "cost": null,
+          "sub_ability": {
+            "kind": "Spell",
+            "effect": {
+              "type": "LoseLife",
+              "amount": {
+                "type": "Ref",
+                "qty": {
+                  "type": "ObjectManaValue",
+                  "scope": {
+                    "type": "Demonstrative"
+                  }
+                }
+              },
+              "target": {
+                "type": "Controller"
+              }
+            },
+            "cost": null,
+            "sub_ability": null,
+            "else_ability": {
+              "kind": "Spell",
+              "effect": {
+                "type": "LoseLife",
+                "amount": {
+                  "type": "Ref",
+                  "qty": {
+                    "type": "ObjectManaValue",
+                    "scope": {
+                      "type": "Demonstrative"
+                    }
+                  }
+                }
+              },
+              "cost": null,
+              "sub_ability": null,
+              "duration": null,
+              "description": null,
+              "target_prompt": null,
+              "condition": null,
+              "optional_targeting": false,
+              "optional": false,
+              "forward_result": false,
+              "player_scope": {
+                "type": "Opponent"
+              }
+            },
+            "duration": null,
+            "description": null,
+            "target_prompt": null,
+            "condition": {
+              "type": "Not",
+              "condition": {
+                "type": "SourceMatchesFilter",
+                "filter": {
+                  "type": "Typed",
+                  "type_filters": [],
+                  "controller": null,
+                  "properties": [
+                    {
+                      "type": "IsSaddled"
+                    }
+                  ]
+                }
+              }
+            },
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false,
+            "sub_link": "SequentialSibling"
+          },
+          "duration": null,
+          "description": null,
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        },
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": {
+        "type": "SelfRef"
+      },
+      "origin": null,
+      "destination": null,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "Whenever ~ attacks, reveal the top card of your library and put it into your hand. You lose life equal to that card's mana value if ~ isn't saddled. Otherwise, each opponent loses that much life.",
+      "constraint": null,
+      "condition": null,
+      "batched": false
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": [
+    {
+      "Saddle": 3
+    }
+  ]
+}

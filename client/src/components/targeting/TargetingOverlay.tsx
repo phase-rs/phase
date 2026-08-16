@@ -16,6 +16,7 @@ import {
 } from "../../viewmodel/gameStateView.ts";
 import { renderDescription } from "../../utils/description.ts";
 import type { GameEvent, GameObject } from "../../adapter/types.ts";
+import { GAME_Z_LAYER } from "../../constants/ui.ts";
 import { RichLabel } from "../mana/RichLabel.tsx";
 
 export function TargetingOverlay() {
@@ -64,6 +65,12 @@ export function TargetingOverlay() {
     : (selection?.current_slot ?? 0);
   const activeSlot = targetSlots[currentTargetSlot];
   const isOptionalCurrentSlot = activeSlot?.optional === true;
+  // CR 601.2c: display-only hint that this slot is announced by a non-controller
+  // ("of an opponent's choice", e.g. Volcanic Offering). The engine routes the
+  // prompt's `WaitingFor.player` to that announcer — who is exactly the viewer of
+  // this overlay — so the slot is labelled whenever it carries any `chooser`.
+  // This only labels the slot; no game logic in the client.
+  const isOpponentChosenSlot = activeSlot?.chooser != null;
   const sourceId = boardChoice?.sourceId ?? (
     waitingFor?.type === "TriggerTargetSelection"
       ? waitingFor.data.source_id
@@ -175,7 +182,7 @@ export function TargetingOverlay() {
   return (
     <AnimatePresence>
       <motion.div
-        className="pointer-events-none fixed inset-0 z-40"
+        className={`pointer-events-none fixed inset-0 ${GAME_Z_LAYER.dialogHost}`}
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
@@ -188,7 +195,10 @@ export function TargetingOverlay() {
             opponent's face-down hand (low-value space) and clears the
             opponent-HUD tab rail below it — the rail carries life/creature/land
             counts that must stay readable and clickable during targeting. */}
-        <div className="absolute left-0 right-0 top-1 flex flex-col items-center gap-1">
+        <div
+          className="absolute left-0 right-0 flex flex-col items-center gap-1"
+          style={{ top: "var(--game-targeting-prompt-top, 0.25rem)" }}
+        >
           {sourceName && (
             <div className="rounded-md bg-gray-800/90 px-4 py-1 text-sm font-medium text-amber-300 shadow">
               {sourceName}
@@ -197,6 +207,11 @@ export function TargetingOverlay() {
           <div className="rounded-lg bg-gray-900/90 px-6 py-2 text-lg font-semibold text-cyan-400 shadow-lg">
             <RichLabel text={overlayPrompt} />
           </div>
+          {isOpponentChosenSlot && (
+            <div className="rounded-md bg-gray-800/90 px-3 py-1 text-xs font-medium text-amber-300 shadow">
+              {t("targeting.opponentChoice")}
+            </div>
+          )}
           {enginePrompt && (
             <div className="max-w-md rounded-md bg-gray-800/90 px-4 py-1 text-center text-xs text-gray-300 shadow">
               <RichLabel text={enginePrompt} size="xs" />
@@ -228,7 +243,7 @@ export function TargetingOverlay() {
             <button
               onClick={handleConfirmTap}
               disabled={selectedCardIds.length !== waitingFor.data.count}
-              className="rounded-lg bg-emerald-700 px-6 py-2 font-semibold text-gray-100 shadow-lg transition hover:bg-emerald-600 disabled:cursor-not-allowed disabled:bg-gray-700 disabled:text-gray-400"
+              className="rounded-lg bg-emerald-700 px-6 py-2 font-semibold text-white shadow-lg transition hover:bg-emerald-600 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-white/50"
             >
               {t("targeting.confirmTap", { selected: selectedCardIds.length, count: waitingFor.data.count })}
             </button>
@@ -245,7 +260,7 @@ export function TargetingOverlay() {
             <button
               onClick={handleConfirmBoardChoice}
               disabled={!canConfirmBoardChoice(boardChoice, selectedBoardChoiceIds, objects)}
-              className={`${boardChoiceConfirmClass(boardChoice)} rounded-lg px-6 py-2 font-semibold text-gray-100 shadow-lg transition disabled:cursor-not-allowed disabled:bg-gray-700 disabled:text-gray-400`}
+              className={`${boardChoiceConfirmClass(boardChoice)} rounded-lg px-6 py-2 font-semibold text-white shadow-lg transition disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-white/50`}
             >
               {boardChoiceConfirmLabel(boardChoice, selectedBoardChoiceIds, objects, t)}
             </button>
@@ -253,9 +268,9 @@ export function TargetingOverlay() {
           {boardChoice?.skipAction && (
             <button
               onClick={handleSkipBoardChoice}
-              className="rounded-lg bg-amber-700 px-6 py-2 font-semibold text-gray-100 shadow-lg transition hover:bg-amber-600"
+              className="rounded-lg bg-amber-700 px-6 py-2 font-semibold text-white shadow-lg transition hover:bg-amber-600"
             >
-              {t("boardChoice.skip")}
+              {boardChoiceSkipLabel(boardChoice, t)}
             </button>
           )}
           {canKeepCurrentTargets && (
@@ -265,7 +280,7 @@ export function TargetingOverlay() {
                   type: "KeepAllCopyTargets",
                 })
               }
-              className="rounded-lg bg-emerald-700 px-6 py-2 font-semibold text-gray-100 shadow-lg transition hover:bg-emerald-600"
+              className="rounded-lg bg-emerald-700 px-6 py-2 font-semibold text-white shadow-lg transition hover:bg-emerald-600"
             >
               {t("targeting.keepCurrentTargets")}
             </button>
@@ -273,7 +288,7 @@ export function TargetingOverlay() {
           {isOptionalCurrentSlot && (
             <button
               onClick={handleSkip}
-              className="rounded-lg bg-amber-700 px-6 py-2 font-semibold text-gray-100 shadow-lg transition hover:bg-amber-600"
+              className="rounded-lg bg-amber-700 px-6 py-2 font-semibold text-white shadow-lg transition hover:bg-amber-600"
             >
               {t("targeting.skip")}
             </button>
@@ -505,6 +520,8 @@ function boardChoiceConfirmClass(choice: BoardChoiceView): string {
       return "bg-red-700 hover:bg-red-600";
     case "tap":
       return "bg-emerald-700 hover:bg-emerald-600";
+    case "untap":
+      return "bg-emerald-700 hover:bg-emerald-600";
     case "blight":
       return "bg-purple-700 hover:bg-purple-600";
     case "ringBearer":
@@ -516,5 +533,14 @@ function boardChoiceConfirmClass(choice: BoardChoiceView): string {
     case "station":
     case "keep":
       return "bg-sky-700 hover:bg-sky-600";
+  }
+}
+
+function boardChoiceSkipLabel(choice: BoardChoiceView, t: TFunction<"game">): string {
+  switch (choice.skipLabel) {
+    case "keepTapped":
+      return t("gamePage.untap.keepTapped");
+    case undefined:
+      return t("boardChoice.skip");
   }
 }

@@ -23,6 +23,8 @@
 //! Shipped predicates (see `redundancy_delta` arms):
 //! - `Tap` — every candidate target is already tapped.
 //! - `Untap` — every candidate target is already untapped.
+//! - `FlipPermanent` — every candidate target is already flipped (CR 710.4:
+//!   flipping is one-way, so re-flipping a flipped permanent is a no-op).
 //! - `Pump` — every candidate target already has an active
 //!   `UntilEndOfTurn` pump from this same source with matching P/T.
 //! - `GainLife` — controller's life ≥ `LIFE_DIMINISHING_RETURNS`.
@@ -147,6 +149,10 @@ const KIND_ADD_COUNTER_ZERO: i64 = 9;
 /// CR 601.3b: Activating a flash-cast permission (Alchemist's Refuge class)
 /// when no hand spell would gain instant-speed timing.
 const KIND_FLASH_CAST_PERMISSION: i64 = 10;
+/// CR 710.4: Flipping is a one-way process — once a permanent is flipped it can
+/// never become unflipped. Targeting an already-flipped permanent with a flip
+/// instruction is therefore a deterministic no-op, unlike two-way `Transform`.
+const KIND_FLIP_ALREADY_FLIPPED: i64 = 11;
 
 pub struct RedundancyAvoidancePolicy;
 
@@ -237,10 +243,15 @@ impl TacticalPolicy for RedundancyAvoidancePolicy {
                 .with_fact("effect_kind", kind_tag)
                 .with_fact("redundant_value", extra);
         }
-        PolicyVerdict::Score {
-            delta: total,
-            reason,
-        }
+        // Range check (issue #5473): per-effect penalties are small (-3.0 tap /
+        // untap / no-op, -2.0 keyword, -1.5 pump, -0.5 lifegain). Real cards
+        // carry 1-3 such redundant effects, so `total` stays within the critical
+        // band; only a pathological 5+ redundant-effect chain (no printed card)
+        // could approach 15, and there every candidate is already "strongly
+        // disprefer", so ceiling saturation is harmless — ordering that matters
+        // is preserved. PolicyVerdict::score is therefore identity in practice
+        // and upholds the band contract (no raw Score literal).
+        PolicyVerdict::score(total, reason)
     }
 }
 
@@ -353,6 +364,11 @@ fn redundancy_delta(
             }
             Some(_) => None,
         },
+        // CR 710.4: flipping is one-way — an already-flipped permanent can never
+        // become unflipped, so a flip instruction on it is a deterministic no-op.
+        // Unlike two-way `Transform` (which stays in the no-op list below), this
+        // admits a target-aware redundancy signal when every candidate is flipped.
+        Effect::FlipPermanent { target } => flip_redundancy(state, source_id, target),
 
         // ----- Variants with no shipped redundancy check -----
         //
@@ -378,6 +394,7 @@ fn redundancy_delta(
         | Effect::DiscardCard { .. }
         | Effect::Mill { .. }
         | Effect::Scry { .. }
+        | Effect::ArrangePlanarDeckTop { .. }
         | Effect::PumpAll { .. }
         | Effect::DamageAll { .. }
         | Effect::DamageEachPlayer { .. }
@@ -395,6 +412,7 @@ fn redundancy_delta(
         | Effect::Surveil { .. }
         | Effect::Fight { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::EachSourceDealsDamage { .. }
         | Effect::Explore
         | Effect::ExploreAll { .. }
         | Effect::Investigate
@@ -406,6 +424,7 @@ fn redundancy_delta(
         | Effect::EndCombatPhase
         | Effect::Populate
         | Effect::Clash
+        | Effect::Behold { .. }
         | Effect::Vote { .. }
         | Effect::SeparateIntoPiles { .. }
         | Effect::SwitchPT { .. }
@@ -435,13 +454,19 @@ fn redundancy_delta(
         // spell with an exile-instead/linked-source rider. Its value is realized
         // by the stack resolution replacement path, so this policy has no static
         // redundancy signal to score.
-        | Effect::ExileResolvingSpellInsteadOfGraveyard
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
+        // CR 707.2c (Metamorphic Alteration): as-enters copy choice carries no
+        // "redundant if already controlled" signal for this policy.
+        | Effect::ChoosePermanent { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::ChooseCard { .. }
         | Effect::PutCounterAll { .. }
         | Effect::MultiplyCounter { .. }
+        // CR 122.1 + CR 603.2c: reproduction has no static zero-count redundancy
+        // check (the count is event-derived).
+        | Effect::ReproduceEventCounters { .. }
         | Effect::DoublePT { .. }
         | Effect::DoublePTAll { .. }
         | Effect::MoveCounters { .. }
@@ -456,8 +481,11 @@ fn redundancy_delta(
         | Effect::RevealHand { .. }
         | Effect::RevealTop { .. }
         | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
+        | Effect::OpponentGuess { .. }
+        | Effect::SwapChosenLabels { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
         | Effect::Unsuspect { .. }
@@ -473,6 +501,7 @@ fn redundancy_delta(
         | Effect::ReduceNextSpellCost { .. }
         | Effect::GrantNextSpellAbility { .. }
         | Effect::AddPendingETBCounters { .. }
+        | Effect::AddPendingEntersModifications { .. }
         | Effect::CreateEmblem { .. }
         | Effect::PayCost { .. }
         | Effect::CastFromZone { .. }
@@ -489,11 +518,20 @@ fn redundancy_delta(
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
+        // CR 311.7: ChaosEnsues fires the current plane's "whenever chaos ensues"
+        // triggered ability — it has no target and no static redundancy signal.
+        | Effect::ChaosEnsues
+        // CR 119.7 + CR 119.8: RedistributeLifeTotals is a one-time interactive life
+        // permutation — no target and no static redundancy signal.
+        | Effect::RedistributeLifeTotals
+        // CR 103.1: ReverseTurnOrder has no target and no static redundancy signal.
+        | Effect::ReverseTurnOrder
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
-        | Effect::ForEachCategoryExile { .. }
+        | Effect::ForEachCategory { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::EachPlayerCopyChosen { .. }
         | Effect::Exploit { .. }
         | Effect::GainEnergy { .. }
         | Effect::GivePlayerCounter { .. }
@@ -530,6 +568,7 @@ fn redundancy_delta(
         | Effect::Adapt { .. }
         | Effect::Learn
         | Effect::Forage
+        | Effect::CompletePlayerAction { .. }
         | Effect::Harness
         | Effect::CollectEvidence { .. }
         | Effect::Endure { .. }
@@ -551,12 +590,19 @@ fn redundancy_delta(
         | Effect::Cascade
         | Effect::Ripple { .. }
         | Effect::Reveal { .. }
+        // CR 101.4: no targets and nothing to deduplicate — publishing a
+        // committed number is idempotent, so a second application is harmless
+        // rather than redundant in the sense this policy detects.
+        | Effect::RevealChosenNumbers { .. }
         // CR 702.xxx: Prepare (Strixhaven) — no redundancy detection.
         | Effect::BecomePrepared { .. }
         | Effect::BecomeUnprepared { .. }
         // CR 702.171b: a permanent cannot become saddled if already saddled; no
         // static redundancy signal — leave to the resolver.
         | Effect::BecomeSaddled { .. }
+        // CR 509.1h: "becomes blocked" has no static redundancy signal (the
+        // target's blocked state is combat-scoped) — leave it to the resolver.
+        | Effect::BecomeBlocked { .. }
         // CR 702.95c-d: PairWith mutates the source/target pair relationship;
         // redundancy depends on trigger timing and revalidation, so this policy
         // leaves it to the resolver.
@@ -576,6 +622,10 @@ fn redundancy_delta(
         // branches — redundancy would require evaluating each branch in turn,
         // which is beyond this policy's scope. Fall through to None.
         | Effect::ChooseOneOf { .. }
+        // CR 122.1 + CR 608.2d: ChooseCounterAdjustment is the choose-one-kind
+        // sibling of ChooseOneOf — the counter kind and add/remove operation are
+        // chosen at resolution, so there is no static redundancy signal to score.
+        | Effect::ChooseCounterAdjustment { .. }
         // CR 614.1a + CR 514.2: AddTargetReplacement registers a one-shot
         // replacement on the resolved target (e.g., "if that creature would
         // die this turn, exile it instead"). Its value depends on whether the
@@ -593,6 +643,11 @@ fn redundancy_delta(
         // instead"). Its value depends on whether a draw later occurs — no
         // static redundancy signal, same as the damage replacement above.
         | Effect::CreateDrawReplacement { .. }
+        // CR 614.1a + CR 614.5: CreatePlaneswalkReplacement installs a continuous,
+        // duration-bound planar-die planeswalk "shield" (Fixed Point in Time). Its
+        // value depends on whether a planeswalk later occurs within the window — no
+        // static redundancy signal, same as the draw replacement above.
+        | Effect::CreatePlaneswalkReplacement { .. }
         // CR 614.12 + CR 303.4: ReturnAsAura installs an Aura conversion +
         // attach pick. Its redundancy is the new Aura's grants vs. the
         // existing static layer — out of scope for this policy.
@@ -630,6 +685,11 @@ fn redundancy_delta(
         | Effect::PutSticker { .. }
         | Effect::ApplySticker { .. }
         | Effect::RememberCard { .. }
+        | Effect::NoteManaSpent
+        // CR 608.2d + CR 122.1: the counter-kind choice + its consume carry no
+        // static redundancy signal (the value depends on the runtime choice).
+        | Effect::ChooseCounterKind { .. }
+        | Effect::PutChosenCounter { .. }
         | Effect::HeistExile => None,
     }
 }
@@ -737,6 +797,32 @@ fn tap_redundancy(
         .all(|id| state.objects.get(id).is_some_and(|o| o.tapped));
     if all_tapped {
         Some((-3.0, KIND_TAP, candidates.len() as i64))
+    } else {
+        None
+    }
+}
+
+/// Flip-on-flipped: every candidate match already has `obj.flipped == true`.
+///
+/// CR 710.4: flipping is a one-way process — once a permanent is flipped it can
+/// never become unflipped. A flip instruction whose entire candidate set is
+/// already flipped therefore does nothing, exactly like tap-on-tapped. This is
+/// the axis on which `FlipPermanent` diverges from the two-way `Transform`,
+/// which stays in the no-op list because re-transforming flips the face back.
+fn flip_redundancy(
+    state: &GameState,
+    source_id: ObjectId,
+    target: &TargetFilter,
+) -> Option<(f64, i64, i64)> {
+    let candidates = resolved_candidate_targets(state, source_id, target);
+    if candidates.is_empty() {
+        return None;
+    }
+    let all_flipped = candidates
+        .iter()
+        .all(|id| state.objects.get(id).is_some_and(|o| o.flipped));
+    if all_flipped {
+        Some((-3.0, KIND_FLIP_ALREADY_FLIPPED, candidates.len() as i64))
     } else {
         None
     }
@@ -1127,6 +1213,7 @@ mod tests {
             config,
             context: ai_ctx,
             cast_facts,
+            search_depth: crate::policies::context::SearchDepth::Root,
         }
     }
 
@@ -1151,10 +1238,7 @@ mod tests {
                 source_id,
                 ability_index: 0,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Ability,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Ability),
         }
     }
 
@@ -1272,6 +1356,63 @@ mod tests {
     }
 
     #[test]
+    fn flip_on_flipped_source_penalized() {
+        // CR 710.4: flipping is one-way, so a flip instruction targeting an
+        // already-flipped permanent is a deterministic no-op — same -3.0
+        // classification as tap-on-tapped.
+        let mut state = GameState::new_two_player(0);
+        let obj_id = make_creature_with_ability(
+            &mut state,
+            "Kenzo the Hardhearted",
+            Effect::FlipPermanent {
+                target: TargetFilter::SelfRef,
+            },
+        );
+        state.objects.get_mut(&obj_id).unwrap().flipped = true;
+
+        let config = AiConfig::default();
+        let ai_ctx = AiContext::empty(&config.weights);
+        let decision = priority_decision();
+        let candidate = activate_candidate(obj_id);
+        let ctx = mk_ctx(&state, &decision, &candidate, &config, &ai_ctx);
+
+        let PolicyVerdict::Score { delta, .. } = RedundancyAvoidancePolicy.verdict(&ctx) else {
+            panic!("expected Score verdict");
+        };
+        assert_eq!(
+            delta, -3.0,
+            "flip on already-flipped should emit -3.0 delta"
+        );
+    }
+
+    #[test]
+    fn flip_on_unflipped_source_not_penalized() {
+        // Reach guard: same effect, unflipped target — the flip is meaningful,
+        // so the redundancy arm must NOT fire (proves the -3.0 above is driven
+        // by the `flipped` state, not an upstream short-circuit).
+        let mut state = GameState::new_two_player(0);
+        let obj_id = make_creature_with_ability(
+            &mut state,
+            "Bushi Tenderfoot",
+            Effect::FlipPermanent {
+                target: TargetFilter::SelfRef,
+            },
+        );
+        // default flipped = false -- flipping is a real state change here
+
+        let config = AiConfig::default();
+        let ai_ctx = AiContext::empty(&config.weights);
+        let decision = priority_decision();
+        let candidate = activate_candidate(obj_id);
+        let ctx = mk_ctx(&state, &decision, &candidate, &config, &ai_ctx);
+
+        let PolicyVerdict::Score { delta, .. } = RedundancyAvoidancePolicy.verdict(&ctx) else {
+            panic!("expected Score verdict");
+        };
+        assert_eq!(delta, 0.0, "flip on unflipped must not penalise");
+    }
+
+    #[test]
     fn walking_ballista_deal_damage_not_penalized() {
         // Walking Ballista's ability is "Remove +1/+1 counter → deal 1 damage".
         // The DealDamage(Fixed(1)) must not trigger zero-quantity redundancy.
@@ -1283,6 +1424,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
 
@@ -1311,6 +1453,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 0 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
 
@@ -1448,6 +1591,7 @@ mod tests {
                 static_abilities: vec![stat],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: Some(TargetFilter::SelfRef),
+                end_cost: None,
             },
         );
         // Pre-existing flying on the source — the grant is redundant.
@@ -1485,6 +1629,7 @@ mod tests {
                 })],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
         );
         let instant = create_object(
@@ -1530,6 +1675,7 @@ mod tests {
                 })],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
         );
         let sorcery = create_object(
@@ -1575,6 +1721,7 @@ mod tests {
                 })],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
         );
         let artifact = create_object(
@@ -1619,6 +1766,7 @@ mod tests {
                 static_abilities: vec![stat],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: Some(TargetFilter::SelfRef),
+                end_cost: None,
             },
         );
         // No pre-existing flying on source — the grant is new value.
@@ -1656,6 +1804,7 @@ mod tests {
                 static_abilities: vec![stat],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
         );
         // Hexproof already active from a prior activation this turn — re-granting
@@ -1700,6 +1849,7 @@ mod tests {
                 static_abilities: vec![stat],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
         );
         // No pre-existing hexproof — the grant is new value.
@@ -1821,6 +1971,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 0 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -1909,10 +2060,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         }
     }
 
@@ -2100,6 +2248,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 0 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
         let config = AiConfig::default();

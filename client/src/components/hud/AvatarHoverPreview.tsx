@@ -14,6 +14,7 @@ interface Props {
   children: ReactNode;
   className?: string;
   style?: CSSProperties;
+  title?: string;
   /** Per-seat identity color, used to tint the preview's outer glow and
    *  accent line so the hover preview is visually tied to the player it
    *  represents. Falls back to a neutral platinum when absent. */
@@ -28,6 +29,7 @@ export function AvatarHoverPreview({
   children,
   className,
   style,
+  title,
   seatColor,
 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
@@ -56,6 +58,7 @@ export function AvatarHoverPreview({
       ref={ref}
       className={className}
       style={style}
+      title={title}
       onMouseEnter={show}
       onMouseLeave={hide}
       onFocus={show}

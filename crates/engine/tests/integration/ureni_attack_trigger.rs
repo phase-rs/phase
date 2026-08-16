@@ -152,6 +152,8 @@ fn ureni_attacks_in_second_combat_fires_again() {
     runner.state_mut().extra_phases.push(ExtraPhase {
         anchor: current_phase,
         phase: Phase::BeginCombat,
+        attacker_restriction: None,
+        attacker_restriction_source: None,
     });
 
     // Advance out of the current step (post-combat / end phase) into the
@@ -212,6 +214,7 @@ fn etb_suppression_does_not_block_ureni_attack_trigger() {
     // Torpor-Orb-style static on P1's side: suppress ETB triggers from any creature.
     let suppressor_def = StaticDefinition::new(StaticMode::SuppressTriggers {
         source_filter: TargetFilter::Typed(TypedFilter::creature()),
+        trigger_source_filter: None,
         events: vec![SuppressedTriggerEvent::EntersBattlefield],
     });
     let mut suppressor_builder = scenario.add_creature(P1, "Torpor Orb Stand-In", 1, 1);

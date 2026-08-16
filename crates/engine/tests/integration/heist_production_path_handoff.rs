@@ -443,7 +443,7 @@ fn heist_look_step_does_not_drain_when_library_has_no_nonlands() {
         "Heist must not raise a choice when the opponent has no nonlands",
     );
     assert!(
-        state.pending_continuation.is_none(),
+        state.active_ability_continuation().is_none(),
         "Heist must not stash a continuation when there is nothing to choose",
     );
     assert!(
@@ -554,7 +554,7 @@ fn heist_target_filter_round_trips_through_parse() {
 // Fixture: this test references "bear cub", "goblin arsonist", "elf
 // replica", and "forest" as quoted string literals so
 // `scripts/gen-test-fixture.py --check` keeps them in
-// `tests/fixtures/integration_cards.json`. Grenzo himself is built from
+// `tests/fixtures/integration_cards.json.gz`. Grenzo himself is built from
 // inline Oracle text via `add_creature_to_hand_from_oracle` (no fixture
 // entry needed), which is the cleanest way to exercise the production
 // parser path on this branch's Heist parser change before the card-data
@@ -632,9 +632,10 @@ fn heist_full_production_path_grenzo_cast_etb_end_to_end() {
         .trigger_definitions
         .as_slice()
         .iter()
-        .find(|t| t.mode == TriggerMode::ChangesZone)
+        .find(|t| t.definition.mode == TriggerMode::ChangesZone)
         .expect("Grenzo must have a ChangesZone (ETB) trigger");
     let etb_effect = etb_trigger
+        .definition
         .execute
         .as_ref()
         .expect("ETB trigger must have an execute body");

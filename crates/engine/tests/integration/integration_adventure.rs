@@ -47,6 +47,7 @@ fn stomp_back_face() -> BackFaceData {
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: {
             let mut ct = CardType::default();
@@ -77,6 +78,7 @@ fn stomp_back_face() -> BackFaceData {
                     amount: QuantityExpr::Fixed { value: 2 },
                     target: TargetFilter::Any,
                     damage_source: None,
+                    excess: None,
                 },
             ),
         ],
@@ -91,6 +93,7 @@ fn stomp_back_face() -> BackFaceData {
         casting_restrictions: Vec::new(),
         casting_options: Vec::new(),
         layout_kind: None,
+        parse_warnings: vec![],
     }
 }
 
@@ -102,6 +105,7 @@ fn bonecrusher_trigger() -> TriggerDefinition {
             amount: QuantityExpr::Fixed { value: 2 },
             target: TargetFilter::TriggeringSpellController,
             damage_source: None,
+            excess: None,
         },
     ))
 }

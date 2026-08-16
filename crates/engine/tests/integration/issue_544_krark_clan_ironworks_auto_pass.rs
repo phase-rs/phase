@@ -7,7 +7,9 @@
 //! still consult activatable sacrifice mana sources so the client does not
 //! auto-pass when the player may want to sac for triggers or mana.
 
-use engine::ai_support::{auto_pass_recommended, legal_actions_full};
+use engine::ai_support::{
+    auto_pass_recommended, has_meaningful_priority_action, legal_actions_full,
+};
 use engine::game::apply_as_current;
 use engine::game::zones::create_object;
 use engine::types::ability::{
@@ -88,10 +90,15 @@ fn add_artifact_creature(
     id
 }
 
-// CR 605.3a + CR 603.6: Sacrificing a permanent for mana is a meaningful
-// priority decision — the player may want ETB/dies triggers or graveyard value.
+// CR 605.3a + CR 603.6 (narrowed): Sacrificing a permanent for mana stays a
+// meaningful priority decision for the CR 732.5 loop firewall (the classifier
+// `has_meaningful_priority_action` still returns true). But on a BARE board —
+// vanilla artifact fodder with no death-trigger payoff, nothing castable, no
+// mana-costed activated ability — the sacrifice enables no concrete follow-up,
+// so the frontend auto-pass recommendation now fires. Classifier and
+// recommendation deliberately DISAGREE for this bare case.
 #[test]
-fn auto_pass_blocked_when_kci_sacrifice_mana_is_only_action() {
+fn auto_pass_fires_for_bare_kci_sacrifice_mana() {
     let mut state = GameState::new_two_player(42);
     priority_main_phase(&mut state, P0);
 
@@ -114,9 +121,18 @@ fn auto_pass_blocked_when_kci_sacrifice_mana_is_only_action() {
         !flat.contains(&kci_activation),
         "precondition: sacrifice mana stays out of flat legal_actions during priority"
     );
+    // Classifier reach-guard (UNCHANGED): proves we truly reach the sac rung and
+    // the loop firewall still counts the sacrifice as meaningful (CR 605.3a +
+    // 603.6) — so this test is non-vacuous and the disagreement below is real.
     assert!(
-        !auto_pass_recommended(&state, &flat),
-        "Issue #544: must not auto-pass when KCI sacrifice-for-mana is available"
+        has_meaningful_priority_action(&state, &flat),
+        "classifier still counts sacrifice-for-mana as meaningful (loop firewall intact)"
+    );
+    // Flipped-on-revert assertion: with a bare board the sacrifice enables no
+    // downstream follow-up, so auto-pass now fires.
+    assert!(
+        auto_pass_recommended(&state, &flat),
+        "bare KCI sacrifice-for-mana with no downstream follow-up → auto-pass fires"
     );
 }
 

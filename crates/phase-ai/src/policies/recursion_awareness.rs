@@ -117,14 +117,17 @@ impl TacticalPolicy for RecursionAwarenessPolicy {
 /// Check if a creature has triggers that fire when it leaves the battlefield
 /// (dies triggers, leaves-play triggers).
 fn has_death_trigger(obj: &GameObject) -> bool {
-    obj.trigger_definitions.iter_unchecked().any(|trigger| {
-        matches!(trigger.mode, TriggerMode::ChangesZone)
-            && trigger.origin == Some(Zone::Battlefield)
-            && matches!(
-                trigger.destination,
-                Some(Zone::Graveyard) | None // None = any destination (includes dies)
-            )
-    })
+    obj.trigger_definitions
+        .iter_unchecked()
+        .map(|entry| &entry.definition)
+        .any(|trigger| {
+            matches!(trigger.mode, TriggerMode::ChangesZone)
+                && trigger.origin == Some(Zone::Battlefield)
+                && matches!(
+                    trigger.destination,
+                    Some(Zone::Graveyard) | None // None = any destination (includes dies)
+                )
+        })
 }
 
 #[cfg(test)]
@@ -133,8 +136,10 @@ mod tests {
     use crate::config::AiConfig;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
-    use engine::types::ability::{ResolvedAbility, TargetFilter};
-    use engine::types::game_state::{PendingCast, TargetSelectionSlot, WaitingFor};
+    use engine::types::ability::{EffectKind, ResolvedAbility, TargetFilter};
+    use engine::types::game_state::{
+        PendingCast, TargetEffectDetail, TargetSelectionSlot, WaitingFor,
+    };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::Keyword;
     use engine::types::mana::ManaCost;
@@ -190,6 +195,9 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: vec![TargetRef::Object(creature)],
                     optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -200,10 +208,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(creature)),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -213,6 +218,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = RecursionAwarenessPolicy.score(&ctx);
@@ -283,6 +289,9 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: vec![TargetRef::Object(creature)],
                     optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -293,10 +302,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(creature)),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -306,6 +312,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = RecursionAwarenessPolicy.score(&ctx);

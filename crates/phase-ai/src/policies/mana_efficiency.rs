@@ -148,10 +148,7 @@ mod tests {
     fn make_pass_candidate(player: PlayerId) -> CandidateAction {
         CandidateAction {
             action: GameAction::PassPriority,
-            metadata: ActionMetadata {
-                actor: Some(player),
-                tactical_class: TacticalClass::Pass,
-            },
+            metadata: ActionMetadata::for_actor(Some(player), TacticalClass::Pass),
         }
     }
 
@@ -168,10 +165,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(player),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(player), TacticalClass::Spell),
         }
     }
 
@@ -238,6 +232,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         assert_eq!(
@@ -268,6 +263,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         assert!(
@@ -301,6 +297,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = ManaEfficiencyPolicy.score(&ctx);
@@ -344,6 +341,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let ctx_without = PolicyContext {
             state: &state_no_instant,
@@ -353,6 +351,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score_with = ManaEfficiencyPolicy.score(&ctx_with);
@@ -385,6 +384,7 @@ mod tests {
             config: &config_patient,
             context: &crate::context::AiContext::empty(&config_patient.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = ManaEfficiencyPolicy.score(&ctx);
@@ -433,6 +433,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = ManaEfficiencyPolicy.score(&ctx);

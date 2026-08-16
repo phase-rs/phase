@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { GameObject, ManaCost, ObjectId } from "../../../../adapter/types.ts";
+import { buildGameObjectWithCoreTypes } from "../../../../test/factories/gameObjectFactory.ts";
 import {
   orderCards,
   groupCards,
@@ -10,14 +11,21 @@ import {
 
 const cost = (generic: number): ManaCost => ({ type: "Cost", shards: [], generic } as ManaCost);
 
-function obj(id: number, name: string, types: string[], generic: number, color: string[]): GameObject {
-  return {
+function obj(
+  id: number,
+  name: string,
+  types: string[],
+  generic: number,
+  color: GameObject["color"],
+): GameObject {
+  return buildGameObjectWithCoreTypes(types, {
     id,
+    card_id: id,
     name,
-    card_types: { supertypes: [], core_types: types, subtypes: [] },
     mana_cost: cost(generic),
     color,
-  } as unknown as GameObject;
+    base_color: color,
+  });
 }
 
 const objects: Record<ObjectId, GameObject> = {

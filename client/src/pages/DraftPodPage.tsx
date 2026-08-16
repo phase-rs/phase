@@ -12,9 +12,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router";
 
-import { CardPreview } from "../components/card/CardPreview";
 import { MenuSelect } from "../components/ui/MenuSelect";
 import type { CardHoverInfo } from "../components/card/CardPreview";
+import { HoverCardPreview } from "../components/card/HoverCardPreview";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { CubeSetupPanel } from "../components/draft/CubeSetupPanel";
 import { DraftIntro } from "../components/draft/DraftIntro";
@@ -61,9 +61,11 @@ function PodSetup() {
   const poolMode = useDraftPodStore((s) => s.poolMode);
   const setPoolMode = useDraftPodStore((s) => s.setPoolMode);
   const setCubeForm = useDraftPodStore((s) => s.setCubeForm);
-  const kindDescription = config.kind === "Premier"
-    ? t("podSetup.kindPremierDesc")
-    : t("podSetup.kindTraditionalDesc");
+  const kindDescription = {
+    Premier: t("podSetup.kindPremierDesc"),
+    Traditional: t("podSetup.kindTraditionalDesc"),
+    Sealed: t("podSetup.kindSealedDesc"),
+  }[config.kind];
   const tournamentDescription = config.tournamentFormat === "Swiss"
     ? t("podSetup.tournamentSwissDesc")
     : t("podSetup.tournamentEliminationDesc");
@@ -165,7 +167,7 @@ function PodSetup() {
             {t("podSetup.draftType")}
           </label>
           <div className="flex gap-4">
-            <label className="flex items-center gap-2 text-sm text-white/70">
+            <label className="flex min-h-11 items-center gap-2 py-2 text-sm text-white/70">
               <input
                 type="radio"
                 name="draftKind"
@@ -184,6 +186,16 @@ function PodSetup() {
                 className="accent-emerald-400"
               />
               {t("podSetup.kindTraditional")}
+            </label>
+            <label className="flex items-center gap-2 text-sm text-white/70">
+              <input
+                type="radio"
+                name="draftKind"
+                checked={config.kind === "Sealed"}
+                onChange={() => setConfig({ kind: "Sealed" })}
+                className="accent-emerald-400"
+              />
+              {t("podSetup.kindSealed")}
             </label>
           </div>
           <p className="text-xs text-white/40">{kindDescription}</p>
@@ -283,6 +295,7 @@ function PodSetup() {
           <button
             type="button"
             onClick={() => setPoolMode("cube")}
+            disabled={config.kind === "Sealed"}
             className={
               poolMode === "cube"
                 ? "border-b-2 border-emerald-400 px-4 py-2 text-sm font-medium text-white"
@@ -293,7 +306,7 @@ function PodSetup() {
           </button>
         </div>
 
-        {poolMode === "set" ? (
+        {poolMode === "set" || config.kind === "Sealed" ? (
           <>
             {/* Set selector — reuse the Quick Draft component */}
             <div className="rounded-[16px] border border-white/8 bg-white/3 px-4 py-3 text-sm text-white/45">
@@ -481,9 +494,8 @@ function MatchInProgressView() {
         </button>
         {showPool && <PoolPanel onCardHover={setHoveredCard} />}
       </div>
-      <CardPreview
-        cardName={hoveredCard?.name ?? null}
-        sourcePrinting={hoveredCard?.sourcePrinting}
+      <HoverCardPreview
+        card={hoveredCard}
         mobileLayout="compact"
         onDismiss={() => setHoveredCard(null)}
       />
@@ -564,6 +576,11 @@ function BetweenGamesView() {
         <p className="text-sm text-white/60">
           {t("betweenGames.waitingSideboard")}
         </p>
+        {submittedDeck.length > 0 && (
+          <p className="text-sm text-white/50">
+            {submittedDeck.join(", ")}
+          </p>
+        )}
         <div className="h-6 w-6 animate-spin rounded-full border-2 border-white/20 border-t-emerald-400" />
       </div>
     );
@@ -622,6 +639,7 @@ function DraftingPhaseContent() {
   const selectedCard = useMultiplayerDraftStore((s) => s.selectedCard);
   const selectCard = useMultiplayerDraftStore((s) => s.selectCard);
   const confirmPick = useMultiplayerDraftStore((s) => s.confirmPick);
+  const submitPickWithDraftEffect = useMultiplayerDraftStore((s) => s.submitPickWithDraftEffect);
   const autoPickCard = useMultiplayerDraftStore((s) => s.autoPickCard);
   const paused = useMultiplayerDraftStore((s) => s.paused);
   const pauseReason = useMultiplayerDraftStore((s) => s.pauseReason);
@@ -645,7 +663,7 @@ function DraftingPhaseContent() {
           ⚠ {t(`podPhaseView.pauseReason.${pauseKey}`)}
         </div>
       )}
-      <div className="flex gap-4">
+      <div className="flex flex-col gap-4 lg:flex-row">
         <div className="flex min-w-0 flex-1 flex-col">
           <SeatStatusRing />
           <PickTimer />
@@ -655,6 +673,8 @@ function DraftingPhaseContent() {
             selectedCard={selectedCard}
             onSelectCard={selectCard}
             onConfirmPick={confirmPick}
+            onPickWithDraftEffect={submitPickWithDraftEffect}
+            enableDraftEffects
             showAutoPick
             onAutoPick={autoPickCard}
             onCardHover={setHoveredCard}
@@ -662,7 +682,7 @@ function DraftingPhaseContent() {
         </div>
         <PoolPanel view={view} onCardHover={setHoveredCard} />
       </div>
-      <CardPreview cardName={hoveredCard?.name ?? null} sourcePrinting={hoveredCard?.sourcePrinting} />
+      <HoverCardPreview card={hoveredCard} />
     </>
   );
 }
@@ -675,6 +695,7 @@ function PodDeckBuilder() {
   const removeFromDeck = useMultiplayerDraftStore((s) => s.removeFromDeck);
   const setLandCount = useMultiplayerDraftStore((s) => s.setLandCount);
   const submitDeck = useMultiplayerDraftStore((s) => s.submitDeck);
+  const submissionError = useMultiplayerDraftStore((s) => s.error);
 
   return (
     <LimitedDeckBuilder
@@ -685,6 +706,7 @@ function PodDeckBuilder() {
       onRemoveFromDeck={removeFromDeck}
       onSetLandCount={setLandCount}
       onSubmitDeck={submitDeck}
+      submissionError={submissionError}
       showSuggestions={false}
     />
   );

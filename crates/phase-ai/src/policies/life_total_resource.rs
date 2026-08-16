@@ -40,14 +40,11 @@ impl LifeTotalResourcePolicy {
         // Calculate opponent total power
         let opp_total_power: i32 = opponents
             .iter()
-            .map(|&opp| {
-                let (_, power, _, _) = board_stats(ctx.state, opp);
-                power
-            })
+            .map(|&opp| board_stats(ctx.state, opp).power)
             .sum();
 
         // Calculate AI total power
-        let (_, ai_power, _, _) = board_stats(ctx.state, ctx.ai_player);
+        let ai_power = board_stats(ctx.state, ctx.ai_player).power;
 
         let min_opp_life = opponents
             .iter()
@@ -249,10 +246,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -262,6 +256,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = LifeTotalResourcePolicy.score(&ctx);
@@ -311,10 +306,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -324,6 +316,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = LifeTotalResourcePolicy.score(&ctx);

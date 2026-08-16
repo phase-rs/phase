@@ -2,7 +2,7 @@ use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 
-/// CR 700.2: Choose — player makes a choice from available options.
+/// CR 608.2d: Choose — player makes a choice from available options.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -70,6 +70,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -85,13 +86,16 @@ pub fn resolve(
         up_to: false,
         kept_destination: None,
         rest_destination: None,
+        rest_order: crate::types::ability::DigRestOrder::Preserve,
         source_id: Some(ability.source_id),
         enter_tapped: false,
+        enters_attacking: false,
     };
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())

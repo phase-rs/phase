@@ -6,7 +6,7 @@ use nom::combinator::{all_consuming, map, opt, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
-use super::oracle_cost::parse_oracle_cost;
+use super::oracle_cost::{parse_gerund_cost, parse_oracle_cost};
 use super::oracle_util::{parse_mana_symbols, parse_ordinal, TextPair};
 use crate::parser::oracle_condition::parse_restriction_condition;
 use crate::types::ability::{
@@ -220,11 +220,40 @@ fn parse_self_flash_option(
         }
     }
 
-    if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("by ").parse(rest) {
-        if let Some(cost_text) = after.strip_suffix(" in addition to paying its other costs") {
-            option = option.cost(parse_oracle_cost(cost_text));
-            return Some(option);
+    if let Some(((), after)) = nom_on_lower(rest, &rest.to_lowercase(), |input| {
+        value((), tag::<_, _, OracleError<'_>>("by ")).parse(input)
+    }) {
+        let after = after.trim();
+        let after_lower = after.to_lowercase();
+        // CR 601.2f: the trailing closer has the same independent axes as the
+        // graveyard permission parser: optional "paying " and either possessive
+        // pronoun. A malformed closer must decline the whole option rather than
+        // fall through to an uncosted flash grant.
+        let (cost_len, _) = nom_on_lower(after, &after_lower, |input| {
+            all_consuming(map(
+                (
+                    terminated(
+                        take_until::<_, _, OracleError<'_>>(" in addition to "),
+                        tag(" in addition to "),
+                    ),
+                    opt(tag("paying ")),
+                    alt((tag("their other costs"), tag("its other costs"))),
+                    opt(tag(".")),
+                ),
+                |(cost, _, _, _)| cost.len(),
+            ))
+            .parse(input)
+        })?;
+        // CR 601.2f: the rider names the additional cost as a GERUND ("by
+        // discarding a card") — de-gerund via the shared cost authority. A
+        // present-but-unmodeled cost declines the whole option, avoiding a
+        // strictly-more-permissive cost-less flash permission.
+        let cost = parse_gerund_cost(&after[..cost_len]);
+        if matches!(cost, AbilityCost::Unimplemented { .. }) {
+            return None;
         }
+        option = option.cost(cost);
+        return Some(option);
     }
 
     if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("if you ").parse(rest) {
@@ -415,6 +444,9 @@ pub(crate) fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRe
     let trimmed = text.trim().trim_end_matches('.');
     // Try direct match first, then fall back to stripping ability word prefix
     let trimmed_lower = trimmed.to_lowercase();
+    if parse_cant_spend_mana_restriction(&trimmed_lower) {
+        return Some(vec![CastingRestriction::CantSpendMana]);
+    }
     if let Some(restriction) = parse_negative_self_casting_restriction(&trimmed_lower) {
         return Some(vec![restriction]);
     }
@@ -441,22 +473,55 @@ pub(crate) fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRe
     let mut restrictions = scan_timing_restrictions(rest);
 
     // Extract condition clauses: "if ...", "only if ...", or "... and only if ..."
+    //
+    // CR 601.3: An unrecognized condition must FAIL this candidate parse (the `?`), not
+    // be stored as `RequiresCondition { condition: None }`. A `None` condition consumes
+    // the "only if …" clause and then evaluates permissively at runtime
+    // (`Option::is_none_or` → true in `restrictions::evaluate_casting_restriction`), so
+    // the spell would be castable in exactly the situations its printed text forbids —
+    // and the card would still report as fully supported. Failing here leaves the whole
+    // line to the ordinary `Effect::Unimplemented` fallback, which is honest.
+    //
+    // Bailing also discards any timing restrictions already scanned from this line. That
+    // is intentional: a line we only half understand must not be applied in half.
     if let Ok((condition, _)) =
         alt((tag::<_, _, OracleError<'_>>("only if "), tag("if "))).parse(rest)
     {
         let condition_text = strip_casting_condition_suffixes(condition);
         restrictions.push(CastingRestriction::RequiresCondition {
-            condition: parse_restriction_condition(condition_text),
+            condition: Some(parse_restriction_condition(condition_text)?),
         });
     }
     if let Some(condition) = rest.split(" and only if ").nth(1) {
         let condition_text = strip_casting_condition_suffixes(condition);
         restrictions.push(CastingRestriction::RequiresCondition {
-            condition: parse_restriction_condition(condition_text),
+            condition: Some(parse_restriction_condition(condition_text)?),
         });
     }
 
     (!restrictions.is_empty()).then_some(restrictions)
+}
+
+/// CR 601.2g / CR 118.3: "You can't spend mana to cast this spell." A payment
+/// restriction (Hogaak, Arisen Necropolis) — no mana may leave the pool, so the
+/// whole mana cost must be met by alternative payments (convoke/delve).
+/// Recognized here so the line is not left to the effect-parser fallback as an
+/// `Effect::Unimplemented`. `~` covers the self-name rewrite of the card form.
+fn parse_cant_spend_mana_restriction(lower: &str) -> bool {
+    fn parser(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+        all_consuming(value(
+            (),
+            (
+                alt((
+                    tag("you can't spend mana to cast "),
+                    tag("you can\u{2019}t spend mana to cast "),
+                )),
+                alt((tag("this spell"), tag("~"))),
+            ),
+        ))
+        .parse(input)
+    }
+    parser(lower).is_ok()
 }
 
 fn parse_negative_self_casting_restriction(text: &str) -> Option<CastingRestriction> {
@@ -611,6 +676,7 @@ fn parse_timing_restriction(
     alt((
         preceded(tag("during "), parse_during_phrase),
         preceded(tag("before "), parse_before_phrase),
+        preceded(tag("after "), parse_after_phrase),
         preceded(
             tag("on "),
             alt((
@@ -618,7 +684,6 @@ fn parse_timing_restriction(
                 value(CastingRestriction::DuringYourTurn, tag("your turn")),
             )),
         ),
-        value(CastingRestriction::AfterCombat, tag("after combat")),
         value(CastingRestriction::AsSorcery, tag("as a sorcery")),
     ))
     .parse(input)
@@ -712,6 +777,24 @@ fn parse_before_phrase(input: &str) -> nom::IResult<&str, CastingRestriction, Or
     .parse(input)
 }
 
+/// Sub-dispatch for "after [rest]" — blockers declared, combat. Mirror of
+/// `parse_before_phrase`: `after blockers are declared` opens the post-blockers
+/// combat window (CR 509.1, CR 510.1, and CR 511.1), while `after combat` (folded in from
+/// the former standalone leaf) is the post-combat-phase window. Backs the class
+/// printing "Cast this spell only during combat after blockers are declared."
+/// (Aleatory, Chaotic Strike, Curtain of Light, Flash Foliage) alongside the
+/// separately-scanned `DuringCombat`.
+fn parse_after_phrase(input: &str) -> nom::IResult<&str, CastingRestriction, OracleError<'_>> {
+    alt((
+        value(
+            CastingRestriction::AfterBlockersDeclared,
+            tag("blockers are declared"),
+        ),
+        value(CastingRestriction::AfterCombat, tag("combat")),
+    ))
+    .parse(input)
+}
+
 /// Walk `text` word-by-word, collecting all timing restrictions found via nom combinators.
 /// Tries `parse_timing_restriction` at each word boundary — on match, consumes the phrase
 /// and advances; on miss, skips to the next word.
@@ -738,12 +821,75 @@ fn scan_timing_restrictions(text: &str) -> Vec<CastingRestriction> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AdditionalCostRepeatability, BeholdCostAction, CardSelectionMode, Comparator,
-        ControllerRef, FilterProp, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
-        TargetFilter, TypeFilter,
+        AdditionalCostRepeatability, AggregateFunction, BeholdCostAction, CardSelectionMode,
+        Comparator, ControllerRef, CountScope, FilterProp, ParsedCondition, PlayerScope,
+        QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
     };
+    use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost};
     use crate::types::zones::Zone;
+
+    #[test]
+    fn cant_spend_mana_to_cast_this_spell_parses() {
+        // Hogaak, Arisen Necropolis (issue #1095).
+        let restrictions =
+            parse_casting_restriction_line("You can't spend mana to cast this spell.")
+                .expect("restriction should parse");
+        assert_eq!(restrictions, vec![CastingRestriction::CantSpendMana]);
+    }
+
+    #[test]
+    fn cant_spend_mana_accepts_curly_apostrophe_and_self_name_form() {
+        assert_eq!(
+            parse_casting_restriction_line("You can\u{2019}t spend mana to cast this spell."),
+            Some(vec![CastingRestriction::CantSpendMana]),
+        );
+        // `~` is the self-name rewrite of the card form.
+        assert_eq!(
+            parse_casting_restriction_line("You can't spend mana to cast ~."),
+            Some(vec![CastingRestriction::CantSpendMana]),
+        );
+    }
+
+    #[test]
+    fn cant_spend_mana_does_not_overmatch_other_mana_lines() {
+        // A superficially similar but distinct line must not be swallowed.
+        assert_eq!(
+            parse_casting_restriction_line("You can't spend mana to activate abilities."),
+            None,
+        );
+    }
+
+    #[test]
+    fn hogaak_full_card_records_restriction_and_drops_no_unimplemented_line() {
+        // Issue #1095: the "can't spend mana" line previously fell through to the
+        // effect parser as an `Effect::Unimplemented` ("effect_structure"). It must
+        // now be captured as a structured casting restriction instead.
+        let hogaak = "You can't spend mana to cast this spell.\n\
+Convoke, delve (Each creature you tap while casting this spell pays for {1} or one mana of that creature's color. Each card you exile from your graveyard pays for {1}.)\n\
+You may cast this card from your graveyard.\n\
+Trample";
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            hogaak,
+            "Hogaak, Arisen Necropolis",
+            &[],
+            &[],
+            &[],
+        );
+        assert!(
+            parsed
+                .casting_restrictions
+                .contains(&CastingRestriction::CantSpendMana),
+            "Hogaak must record CastingRestriction::CantSpendMana, got {:?}",
+            parsed.casting_restrictions
+        );
+        let dump = format!("{:#?}", parsed);
+        assert!(
+            // allow-noncombinator: test assertion scanning a Debug dump, not parse dispatch
+            !dump.to_lowercase().contains("spend mana to cast"),
+            "the 'can't spend mana to cast' line must not remain as an Unimplemented effect"
+        );
+    }
 
     #[test]
     fn spell_cast_restriction_condition_is_preserved() {
@@ -795,14 +941,26 @@ mod tests {
             "Cast this spell only if you control two or more Vampires.",
         )
         .expect("restrictions should parse");
-        assert_eq!(
-            restrictions,
-            vec![CastingRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::YouControlSubtypeCountAtLeast {
-                    subtype: "vampire".to_string(),
-                    count: 2,
-                }),
-            }]
+        // CR 601.3: the shared static-condition grammar owns this phrase, so the
+        // restriction is the generic ObjectCount comparison — the same reading a
+        // static ability with these words produces.
+        assert!(
+            matches!(
+                restrictions.as_slice(),
+                [CastingRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(tf)
+                            }
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 2 },
+                    }),
+                }] if tf.controller == Some(ControllerRef::You)
+                    && tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Vampire"))
+            ),
+            "got {restrictions:?}"
         );
     }
 
@@ -812,17 +970,23 @@ mod tests {
             "Cast this spell only if there are four or more card types among cards in your graveyard and only as a sorcery.",
         )
         .expect("restrictions should parse");
-        assert_eq!(
-            restrictions,
-            vec![
-                CastingRestriction::AsSorcery,
-                CastingRestriction::RequiresCondition {
-                    condition: Some(ParsedCondition::ZoneCardTypeCountAtLeast {
-                        zone: Zone::Graveyard,
-                        count: 4
-                    }),
-                },
-            ]
+        assert!(
+            matches!(
+                restrictions.as_slice(),
+                [
+                    CastingRestriction::AsSorcery,
+                    CastingRestriction::RequiresCondition {
+                        condition: Some(ParsedCondition::QuantityComparison {
+                            lhs: QuantityExpr::Ref {
+                                qty: QuantityRef::DistinctCardTypes { .. }
+                            },
+                            comparator: Comparator::GE,
+                            rhs: QuantityExpr::Fixed { value: 4 },
+                        }),
+                    },
+                ]
+            ),
+            "got {restrictions:?}"
         );
     }
 
@@ -852,11 +1016,26 @@ mod tests {
             "Tragic Backstory \u{2014} Cast this spell only if a creature died this turn.",
         )
         .expect("restrictions should parse");
-        assert_eq!(
-            restrictions,
-            vec![CastingRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::CreatureDiedThisTurn),
-            }]
+        // CR 700.4: "died" = moved from the battlefield to a graveyard. The shared
+        // grammar spells that out as a zone-change count rather than an opaque leaf.
+        assert!(
+            matches!(
+                restrictions.as_slice(),
+                [CastingRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::ZoneChangeCountThisTurn {
+                                from: Some(Zone::Battlefield),
+                                to: Some(Zone::Graveyard),
+                                ..
+                            }
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    }),
+                }]
+            ),
+            "got {restrictions:?}"
         );
     }
 
@@ -866,11 +1045,24 @@ mod tests {
             "Cast this spell only if you've cast another spell this turn.",
         )
         .expect("restrictions should parse");
-        assert_eq!(
-            restrictions,
-            vec![CastingRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::YouCastSpellCountAtLeast { count: 1 }),
-            }]
+        // "another spell" — the spell being cast is itself counted, so the threshold is 2.
+        assert!(
+            matches!(
+                restrictions.as_slice(),
+                [CastingRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::SpellsCastThisTurn {
+                                scope: CountScope::Controller,
+                                filter: None,
+                            }
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 2 },
+                    }),
+                }]
+            ),
+            "got {restrictions:?}"
         );
     }
 
@@ -883,14 +1075,20 @@ mod tests {
         ] {
             let restrictions =
                 parse_casting_restriction_line(text).expect("restrictions should parse");
-            assert_eq!(
-                restrictions,
-                vec![CastingRestriction::RequiresCondition {
-                    condition: Some(ParsedCondition::Not {
-                        condition: Box::new(ParsedCondition::YouPlayedLandThisTurn),
-                    }),
-                }],
-                "text={text:?}"
+            assert!(
+                matches!(
+                    restrictions.as_slice(),
+                    [CastingRestriction::RequiresCondition {
+                        condition: Some(ParsedCondition::Not { condition }),
+                    }] if matches!(**condition, ParsedCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::LandsPlayedThisTurn { .. }
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    })
+                ),
+                "text={text:?} got {restrictions:?}"
             );
         }
     }
@@ -918,14 +1116,20 @@ mod tests {
         )
         .expect("restrictions should parse");
 
-        assert_eq!(
-            restrictions,
-            vec![CastingRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::PlayerCountAtLeast {
-                    filter: PlayerFilter::OpponentLostLife,
-                    minimum: 1,
-                }),
-            }]
+        assert!(
+            matches!(
+                restrictions.as_slice(),
+                [CastingRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::LifeLostThisTurn { .. }
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    }),
+                }]
+            ),
+            "got {restrictions:?}"
         );
     }
 
@@ -940,32 +1144,52 @@ mod tests {
         assert!(restrictions.contains(&CastingRestriction::BeforeBlockersDeclared));
     }
 
+    /// CR 509.1 + CR 510.1 + CR 511.1: the "after blockers are declared" window
+    /// used to be dropped — `during combat` matched and stranded the remainder,
+    /// leaving the spell castable during all of combat. The line must now emit
+    /// both `DuringCombat` and `AfterBlockersDeclared` (and NOT the opposite
+    /// `BeforeBlockersDeclared` window). Backs Aleatory, Chaotic Strike, Curtain
+    /// of Light, and Flash Foliage, which all print this exact line.
     #[test]
-    fn parse_additional_cost_optional_blight() {
-        let lower = "as an additional cost to cast this spell, you may blight 1.";
-        let raw = "As an additional cost to cast this spell, you may blight 1.";
-        let result = parse_additional_cost_line(lower, raw);
-        assert_eq!(
-            result,
-            Some(AdditionalCost::Optional {
-                cost: AbilityCost::Blight { count: 1 },
-                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
-            })
-        );
+    fn spell_cast_restriction_handles_combat_after_blockers() {
+        let restrictions = parse_casting_restriction_line(
+            "Cast this spell only during combat after blockers are declared.",
+        )
+        .expect("restrictions should parse");
+        assert!(restrictions.contains(&CastingRestriction::DuringCombat));
+        assert!(restrictions.contains(&CastingRestriction::AfterBlockersDeclared));
+        assert!(!restrictions.contains(&CastingRestriction::BeforeBlockersDeclared));
     }
 
+    /// Regression: folding the former standalone `after combat` leaf into the
+    /// `after` prefix sub-dispatch (`parse_after_phrase`) must preserve the
+    /// post-combat-phase window.
     #[test]
-    fn parse_additional_cost_optional_blight_2() {
-        let lower = "as an additional cost to cast this spell, you may blight 2.";
-        let raw = "As an additional cost to cast this spell, you may blight 2.";
-        let result = parse_additional_cost_line(lower, raw);
-        assert_eq!(
-            result,
-            Some(AdditionalCost::Optional {
-                cost: AbilityCost::Blight { count: 2 },
-                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
-            })
-        );
+    fn spell_cast_restriction_after_combat_still_parses() {
+        let restrictions =
+            parse_casting_restriction_line("Cast this spell only after combat on your turn.")
+                .expect("restrictions should parse");
+        assert!(restrictions.contains(&CastingRestriction::AfterCombat));
+    }
+
+    /// The blight count is parameterized, not enumerated — every count parses to the
+    /// same `Optional` shape with `AbilityCost::Blight { count }`.
+    #[test]
+    fn parse_additional_cost_optional_blight_counts() {
+        for count in [1, 2] {
+            let lower =
+                format!("as an additional cost to cast this spell, you may blight {count}.");
+            let raw = format!("As an additional cost to cast this spell, you may blight {count}.");
+            let result = parse_additional_cost_line(&lower, &raw);
+            assert_eq!(
+                result,
+                Some(AdditionalCost::Optional {
+                    cost: AbilityCost::Blight { count },
+                    repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+                }),
+                "blight {count}"
+            );
+        }
     }
 
     #[test]
@@ -982,6 +1206,7 @@ mod tests {
                         count: 1,
                         filter: TargetFilter::Typed(filter),
                         action: BeholdCostAction::ChooseOrReveal,
+                        ..
                     },
                 repeatability: AdditionalCostRepeatability::Once,
             }) => {
@@ -1007,6 +1232,7 @@ mod tests {
                     count: 1,
                     filter: TargetFilter::Typed(filter),
                     action: BeholdCostAction::ChooseOrReveal,
+                    ..
                 },
                 AbilityCost::Mana { cost },
             )) => {
@@ -1032,6 +1258,7 @@ mod tests {
                 count: 1,
                 filter: TargetFilter::Typed(filter),
                 action: BeholdCostAction::ExileChosen,
+                ..
             })) => {
                 assert!(filter
                     .type_filters
@@ -1057,6 +1284,7 @@ mod tests {
                 count: 1,
                 filter: TargetFilter::Typed(filter),
                 action: BeholdCostAction::ChooseOrReveal,
+                ..
             })) => {
                 assert!(
                     filter
@@ -1106,6 +1334,7 @@ mod tests {
                 count: 3,
                 filter: TargetFilter::Typed(filter),
                 action: BeholdCostAction::ChooseOrReveal,
+                ..
             })) => {
                 assert!(filter
                     .type_filters
@@ -1116,42 +1345,32 @@ mod tests {
         }
     }
 
+    /// Both the blight count and the generic-mana alternative are parameterized —
+    /// the `(blight N, pay {M})` pair varies independently of the `Choice` shape.
     #[test]
-    fn parse_additional_cost_choice_blight_or_pay() {
-        let lower = "as an additional cost to cast this spell, blight 2 or pay {1}.";
-        let raw = "As an additional cost to cast this spell, blight 2 or pay {1}.";
-        let result = parse_additional_cost_line(lower, raw);
-        assert_eq!(
-            result,
-            Some(AdditionalCost::Choice(
-                AbilityCost::Blight { count: 2 },
-                AbilityCost::Mana {
-                    cost: ManaCost::Cost {
-                        generic: 1,
-                        shards: vec![]
+    fn parse_additional_cost_choice_blight_or_pay_counts() {
+        for (blight, generic) in [(2, 1), (1, 3)] {
+            let lower = format!(
+                "as an additional cost to cast this spell, blight {blight} or pay {{{generic}}}."
+            );
+            let raw = format!(
+                "As an additional cost to cast this spell, blight {blight} or pay {{{generic}}}."
+            );
+            let result = parse_additional_cost_line(&lower, &raw);
+            assert_eq!(
+                result,
+                Some(AdditionalCost::Choice(
+                    AbilityCost::Blight { count: blight },
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            generic,
+                            shards: vec![]
+                        }
                     }
-                }
-            ))
-        );
-    }
-
-    #[test]
-    fn parse_additional_cost_choice_blight_or_pay_3() {
-        let lower = "as an additional cost to cast this spell, blight 1 or pay {3}.";
-        let raw = "As an additional cost to cast this spell, blight 1 or pay {3}.";
-        let result = parse_additional_cost_line(lower, raw);
-        assert_eq!(
-            result,
-            Some(AdditionalCost::Choice(
-                AbilityCost::Blight { count: 1 },
-                AbilityCost::Mana {
-                    cost: ManaCost::Cost {
-                        generic: 3,
-                        shards: vec![]
-                    }
-                }
-            ))
-        );
+                )),
+                "blight {blight} or pay {{{generic}}}"
+            );
+        }
     }
 
     #[test]
@@ -1449,6 +1668,59 @@ mod tests {
         }
     }
 
+    /// CR 601.2f: a self-flash rider that names its additional cost as a GERUND
+    /// ("as though it had flash by discarding a card in addition to paying its
+    /// other costs") must de-gerund the cost via the shared authority and carry a
+    /// concrete Discard cost — not the `Unimplemented` the old imperative-only
+    /// `parse_oracle_cost(cost_text)` produced. Class completeness for the
+    /// "cast … by <gerund> in addition to …" family alongside the graveyard rider.
+    #[test]
+    fn self_flash_by_gerund_additional_cost_carries_discard() {
+        for closer in [
+            "its other costs",
+            "their other costs",
+            "paying its other costs",
+            "paying their other costs",
+        ] {
+            let option = parse_spell_casting_option_line(
+                &format!(
+                    "You may cast this spell as though it had flash by discarding a card in addition to {closer}."
+                ),
+                "Test Card",
+            )
+            .expect("self-flash rider should parse");
+            match option {
+                SpellCastingOption {
+                    kind: crate::types::ability::SpellCastingOptionKind::AsThoughHadFlash,
+                    cost: Some(AbilityCost::Discard { .. }),
+                    condition: None,
+                } => {}
+                other => panic!("expected AsThoughHadFlash with a Discard cost, got {other:?}"),
+            }
+        }
+    }
+
+    /// The paired negative: an unmodeled gerund cost on the self-flash rider must
+    /// DECLINE the whole option (return `None`), mirroring the graveyard
+    /// `AdditionalCostRider::Unmodeled` decline — NOT emit a cost-less flash grant
+    /// (which coverage would falsely mark supported). Asserting `is_none()` is the
+    /// load-bearing, discriminating check: it flips to failure the instant the
+    /// guard falls through to the cost-less `Some(option)` tail. A `!matches!(cost,
+    /// Some(Unimplemented))` assertion would pass vacuously for that exact
+    /// (dishonest) `cost == None` outcome, so it cannot catch the regression.
+    #[test]
+    fn self_flash_by_unmodeled_gerund_declines_option() {
+        let option = parse_spell_casting_option_line(
+            "You may cast this spell as though it had flash by frobnicating a card in addition to paying its other costs.",
+            "Test Card",
+        );
+        assert!(
+            option.is_none(),
+            "an unmodeled gerund additional cost must decline the whole self-flash \
+             option (honest coverage gap), not emit a cost-less flash grant: {option:?}"
+        );
+    }
+
     #[test]
     fn alt_cost_sacrifice_typed_creature_arm() {
         // Delraich — "sacrifice three black creatures"
@@ -1525,11 +1797,23 @@ mod tests {
                         ref requirement, ..
                     }),
                 condition:
-                    Some(ParsedCondition::YouControlSubtypeCountAtLeast {
-                        ref subtype,
-                        count: 1,
+                    Some(ParsedCondition::QuantityComparison {
+                        lhs:
+                            QuantityExpr::Ref {
+                                qty:
+                                    QuantityRef::ObjectCount {
+                                        filter: TargetFilter::Typed(ref tf),
+                                    },
+                            },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
                     }),
-            } if subtype == "plains" && requirement.fixed_count() == Some(1) => {}
+            } if requirement.fixed_count() == Some(1)
+                && tf.controller == Some(ControllerRef::You)
+                && tf
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Plains")) => {}
             other => panic!("expected TapCreatures + Plains-control condition, got {other:?}"),
         }
     }
@@ -1568,11 +1852,25 @@ mod tests {
         )
         .expect("trap alt-cost should parse");
         match option.condition {
-            Some(ParsedCondition::BattlefieldEntriesThisTurn {
-                filter: TargetFilter::Typed(filter),
-                count: 1,
+            Some(ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::BattlefieldEntriesThisTurn {
+                                player:
+                                    PlayerScope::Opponent {
+                                        aggregate: AggregateFunction::Max,
+                                    },
+                                filter: TargetFilter::Typed(filter),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
             }) => {
-                assert_eq!(filter.controller, Some(ControllerRef::Opponent));
+                // The per-opponent scope carries "under their control" (the
+                // resolver counts entries whose recorded controller is the
+                // scoped opponent), so the filter itself must stay type-only.
+                assert_eq!(filter.controller, None);
                 assert!(filter.type_filters.contains(&TypeFilter::Artifact));
             }
             other => panic!("expected opponent artifact entry condition, got {other:?}"),
@@ -1587,11 +1885,25 @@ mod tests {
         )
         .expect("trap alt-cost should parse");
         match option.condition {
-            Some(ParsedCondition::BattlefieldEntriesThisTurn {
-                filter: TargetFilter::Typed(filter),
-                count: 2,
+            Some(ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::BattlefieldEntriesThisTurn {
+                                player:
+                                    PlayerScope::Opponent {
+                                        aggregate: AggregateFunction::Max,
+                                    },
+                                filter: TargetFilter::Typed(filter),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
             }) => {
-                assert_eq!(filter.controller, Some(ControllerRef::Opponent));
+                // Per-opponent Max is the semantic fix: "an opponent had two or
+                // more lands enter" means ONE opponent with 2+, never two
+                // opponents with 1 each (which a summed count would accept).
+                assert_eq!(filter.controller, None);
                 assert!(filter.type_filters.contains(&TypeFilter::Land));
             }
             other => panic!("expected opponent land entry condition, got {other:?}"),
@@ -1657,22 +1969,59 @@ mod tests {
     }
 
     #[test]
-    fn alt_cost_trailing_if_condition_drops_option_when_predicate_unrecognized() {
-        // Blasphemous Edict — only card in dataset with trailing "if [condition]" suffix.
-        // CR 118.9 + CR 601.3d: when the if-clause predicate cannot be parsed into a
-        // typed `ParsedCondition`, the alt-cost option is dropped entirely so the spell
-        // may only be cast at its printed cost. Strictly-safe degradation: a fail-silent
-        // unconditional alt-cost emission would let the player pay {B} regardless of
-        // the 13-creature threshold — strictly more permissive than the printed text.
-        // The unrecognized predicate is surfaced by the SwallowedClause / Condition_If
-        // detector for the parser gap-finder.
+    fn alt_cost_trailing_if_battlefield_creature_count_condition_binds() {
+        use crate::types::mana::ManaCostShard;
+        // Blasphemous Edict (FDN) — the only dataset card with a trailing
+        // "if there are N or more <type> on the battlefield" alt-cost gate.
+        // CR 118.9 + CR 601.3: the {B} alternative cost is offered only when the
+        // shared, controller-agnostic battlefield creature count reaches 13.
+        // Before the `parse_type_count_on_battlefield` arm this predicate was
+        // unrecognized and the WHOLE option was fail-closed dropped (this test
+        // historically asserted `is_none()`); recognizing it flips the option to
+        // Some — the on-resolution bogus `Effect::PayCost` ability disappears as a
+        // side effect. Revert-probe: remove the `parse_type_count_on_battlefield`
+        // arm → the option returns to `None`.
         let option = parse_spell_casting_option_line(
             "You may pay {B} rather than pay this spell's mana cost if there are thirteen or more creatures on the battlefield.",
             "Blasphemous Edict",
+        )
+        .expect("recognized battlefield-count if-clause must bind the alt-cost option");
+        // The condition MUST be the runtime-supported `QuantityComparison{ObjectCount}`
+        // (battlefield-aware, any controller), NOT `ZoneCoreTypeCardCountAtLeast`
+        // (whose evaluator is battlefield-blind and would silently brick the gate).
+        let SpellCastingOption {
+            kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+            cost: Some(AbilityCost::Mana { cost }),
+            condition:
+                Some(ParsedCondition::QuantityComparison {
+                    lhs:
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { filter },
+                        },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 13 },
+                }),
+        } = option
+        else {
+            panic!(
+                "expected AlternativeCost(Mana {{B}}) gated on ObjectCount >= 13, got {option:?}"
+            );
+        };
+        assert_eq!(
+            cost,
+            ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Black],
+            },
+            "the alternative cost must be exactly {{B}}"
         );
+        let TargetFilter::Typed(typed) = &filter else {
+            panic!("expected a Typed creature filter, got {filter:?}");
+        };
         assert!(
-            option.is_none(),
-            "unrecognized if-clause must drop the alt-cost option entirely, got: {option:?}"
+            typed.type_filters.contains(&TypeFilter::Creature),
+            "the counted objects must be creatures (any controller), got {:?}",
+            typed.type_filters
         );
     }
 
@@ -1732,6 +2081,115 @@ mod tests {
                 }
             }
             other => panic!("expected QuantityComparison GE 3 attacking creatures, got {other:?}"),
+        }
+    }
+
+    /// CR 508.1 + CR 105.1 + CR 118.9: Nemesis Trap — leading "If a white
+    /// creature is attacking, " gates the {B}{B} alternative casting cost on a
+    /// color-filtered attacker presence check (not a bare/count one).
+    #[test]
+    fn alt_cost_leading_if_filtered_attacking_creature_color_binds() {
+        let option = parse_spell_casting_option_line(
+            "If a white creature is attacking, you may pay {B}{B} rather than pay this spell's mana cost.",
+            "Nemesis Trap",
+        )
+        .expect("alt-cost should parse with leading-if filtered-attacker gate");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+                condition:
+                    Some(ParsedCondition::QuantityComparison {
+                        lhs:
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectCount { filter },
+                            },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    }),
+                ..
+            } => {
+                if let TargetFilter::Typed(tf) = filter {
+                    assert!(
+                        tf.properties.iter().any(|p| matches!(
+                            p,
+                            FilterProp::HasColor {
+                                color: ManaColor::White
+                            }
+                        )),
+                        "expected HasColor(White) filter, got {tf:?}"
+                    );
+                    assert!(
+                        tf.properties
+                            .iter()
+                            .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                        "expected Attacking filter, got {tf:?}"
+                    );
+                } else {
+                    panic!("expected Typed creature filter, got {filter:?}");
+                }
+            }
+            other => {
+                panic!("expected QuantityComparison GE 1 white attacking creature, got {other:?}")
+            }
+        }
+    }
+
+    /// CR 508.1 + CR 702.9 + CR 118.9: Slingbow Trap — leading "If a black
+    /// creature with flying is attacking, " stacks a color filter and a
+    /// keyword filter onto the {G} alternative casting cost's gate.
+    #[test]
+    fn alt_cost_leading_if_filtered_attacking_creature_color_and_keyword_binds() {
+        let option = parse_spell_casting_option_line(
+            "If a black creature with flying is attacking, you may pay {G} rather than pay this spell's mana cost.",
+            "Slingbow Trap",
+        )
+        .expect("alt-cost should parse with leading-if filtered-attacker gate");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+                condition:
+                    Some(ParsedCondition::QuantityComparison {
+                        lhs:
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectCount { filter },
+                            },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    }),
+                ..
+            } => {
+                if let TargetFilter::Typed(tf) = filter {
+                    assert!(
+                        tf.properties.iter().any(|p| matches!(
+                            p,
+                            FilterProp::HasColor {
+                                color: ManaColor::Black
+                            }
+                        )),
+                        "expected HasColor(Black) filter, got {tf:?}"
+                    );
+                    assert!(
+                        tf.properties.iter().any(|p| matches!(
+                            p,
+                            FilterProp::WithKeyword {
+                                value: Keyword::Flying
+                            }
+                        )),
+                        "expected WithKeyword(Flying) filter, got {tf:?}"
+                    );
+                    assert!(
+                        tf.properties
+                            .iter()
+                            .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                        "expected Attacking filter, got {tf:?}"
+                    );
+                } else {
+                    panic!("expected Typed creature filter, got {filter:?}");
+                }
+            }
+            other => panic!(
+                "expected QuantityComparison GE 1 black flying attacking creature, got {other:?}"
+            ),
         }
     }
 
@@ -1839,6 +2297,7 @@ mod tests {
                 count: 1,
                 filter: TargetFilter::Typed(filter),
                 action: BeholdCostAction::ChooseOrReveal,
+                ..
             }) => {
                 assert!(filter
                     .type_filters
@@ -1871,73 +2330,42 @@ mod tests {
     // because the global turn counter counts both players' turns (my turn 3 = global turn 5).
     #[test]
     fn spell_cast_restriction_parses_first_n_turns_of_game_per_player() {
-        // Spider-Man 2099 exact oracle text (with ability-word prefix and curly apostrophe,
-        // after card-name normalization to "~").
-        let restrictions = parse_casting_restriction_line(
-            "From the Future \u{2014} You can\u{2019}t cast ~ during your first, second, or third turns of the game.",
-        )
-        .expect("Spider-Man 2099 restriction should parse");
-        assert_eq!(
-            restrictions,
-            vec![CastingRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::Not {
-                    condition: Box::new(ParsedCondition::QuantityComparison {
-                        lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::TurnsTaken,
-                        },
-                        comparator: Comparator::LE,
-                        rhs: QuantityExpr::Fixed { value: 3 },
+        // Each row is a distinct English form, not just a different ordinal: the
+        // Spider-Man 2099 row carries an ability-word prefix, a curly apostrophe, and
+        // "~" after card-name normalization; the singular row uses "this spell".
+        for (max_ordinal, text) in [
+            (
+                3,
+                "From the Future \u{2014} You can\u{2019}t cast ~ during your first, second, or third turns of the game.",
+            ),
+            (
+                2,
+                "You can't cast ~ during your first or second turns of the game.",
+            ),
+            (
+                1,
+                "You can't cast this spell during your first turn of the game.",
+            ),
+        ] {
+            let restrictions = parse_casting_restriction_line(text)
+                .unwrap_or_else(|| panic!("{text:?} should parse"));
+            assert_eq!(
+                restrictions,
+                vec![CastingRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::Not {
+                        condition: Box::new(ParsedCondition::QuantityComparison {
+                            lhs: QuantityExpr::Ref {
+                                qty: QuantityRef::TurnsTaken,
+                            },
+                            comparator: Comparator::LE,
+                            rhs: QuantityExpr::Fixed { value: max_ordinal },
+                        }),
                     }),
-                }),
-            }],
-            "must block casting on turns 1–3 using per-player TurnsTaken, not global turn_number"
-        );
-    }
-
-    #[test]
-    fn spell_cast_restriction_parses_first_two_turns_of_game() {
-        // "first or second" variant — max_ordinal = 2.
-        let restrictions = parse_casting_restriction_line(
-            "You can't cast ~ during your first or second turns of the game.",
-        )
-        .expect("two-turn restriction should parse");
-        assert_eq!(
-            restrictions,
-            vec![CastingRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::Not {
-                    condition: Box::new(ParsedCondition::QuantityComparison {
-                        lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::TurnsTaken,
-                        },
-                        comparator: Comparator::LE,
-                        rhs: QuantityExpr::Fixed { value: 2 },
-                    }),
-                }),
-            }]
-        );
-    }
-
-    #[test]
-    fn spell_cast_restriction_parses_first_turn_of_game() {
-        // Singular "turn" variant — max_ordinal = 1.
-        let restrictions = parse_casting_restriction_line(
-            "You can't cast this spell during your first turn of the game.",
-        )
-        .expect("single-turn restriction should parse");
-        assert_eq!(
-            restrictions,
-            vec![CastingRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::Not {
-                    condition: Box::new(ParsedCondition::QuantityComparison {
-                        lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::TurnsTaken,
-                        },
-                        comparator: Comparator::LE,
-                        rhs: QuantityExpr::Fixed { value: 1 },
-                    }),
-                }),
-            }]
-        );
+                }],
+                "must block casting on turns 1–{max_ordinal} using per-player TurnsTaken, \
+                 not global turn_number: {text:?}"
+            );
+        }
     }
 
     #[test]

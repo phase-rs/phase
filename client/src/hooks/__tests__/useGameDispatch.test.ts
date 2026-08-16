@@ -1,11 +1,17 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameEvent, GameState } from "../../adapter/types";
+import type { GameEvent } from "../../adapter/types";
 import { normalizeEvents } from "../../animation/eventNormalizer";
 import { useAnimationStore } from "../../stores/animationStore";
 import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
+import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory";
+import {
+  buildGameState,
+  buildLegalActionsResult,
+  buildPriorityWaitingFor,
+} from "../../test/factories/gameStateFactory";
 import { useGameDispatch } from "../useGameDispatch";
 
 const mockPlaySfxForStep = vi.hoisted(() => vi.fn());
@@ -31,23 +37,15 @@ const mockEvents: GameEvent[] = [
   { type: "DamageDealt", data: { amount: 3, source_id: 1, target: { Object: 2 } } } as unknown as GameEvent,
 ];
 
-const mockState = {
-  waiting_for: null,
-  turn: { active_player: 0 },
+const mockState = buildGameState({
+  waiting_for: buildPriorityWaitingFor(),
   stack: [],
-} as unknown as GameState;
+});
 
-const mockAdapter = {
-  initialize: vi.fn(),
-  initializeGame: vi.fn(),
+const mockAdapter = buildEngineAdapterMock(mockState, {
   submitAction: vi.fn().mockResolvedValue({ events: mockEvents }),
   getState: vi.fn().mockResolvedValue(mockState),
-  getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
-  restoreState: vi.fn(),
-  getAiAction: vi.fn().mockReturnValue(null),
-  dispose: vi.fn(),
-  estimateBracket: vi.fn().mockResolvedValue(null),
-};
+});
 
 describe("useGameDispatch", () => {
   beforeEach(() => {
@@ -56,7 +54,7 @@ describe("useGameDispatch", () => {
     // Set up gameStore with a mock adapter and initial state
     useGameStore.setState({
       adapter: mockAdapter,
-      gameState: { waiting_for: null, stack: [] } as unknown as GameState,
+      gameState: buildGameState({ waiting_for: buildPriorityWaitingFor(), stack: [] }),
       events: [],
       eventHistory: [],
       stateHistory: [],
@@ -147,6 +145,9 @@ describe("useGameDispatch", () => {
         callOrder.push(2);
         return { events: mockEvents };
       });
+    mockAdapter.getLegalActions.mockResolvedValue(
+      buildLegalActionsResult({ actions: [action2] }),
+    );
 
     await act(async () => {
       const p1 = result.current(action1);

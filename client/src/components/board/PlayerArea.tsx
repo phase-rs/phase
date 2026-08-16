@@ -148,13 +148,13 @@ interface PlayerAreaProps {
   onFocus?: () => void;
   /** Whether this compact strip is the currently focused opponent */
   isActive?: boolean;
-  /** Extra content to render in the land column (e.g. undo button) */
-  landColumnExtra?: React.ReactNode;
   /** Override creature groups with pre-sorted list (for blocker alignment) */
   creatureOverride?: GroupedPermanent[];
   battlefieldView?: PlayerBattlefieldView;
   /** HUD element rendered inline between lands and support in the middle row */
   hud?: React.ReactNode;
+  /** Split multiplayer overview uses the focused layout, but top-anchors it. */
+  splitOverview?: boolean;
 }
 
 export function PlayerArea({
@@ -162,10 +162,10 @@ export function PlayerArea({
   mode,
   onFocus,
   isActive,
-  landColumnExtra,
   creatureOverride,
   battlefieldView,
   hud,
+  splitOverview = false,
 }: PlayerAreaProps) {
   const { t } = useTranslation("game");
   const gameState = useGameStore((s) => s.gameState);
@@ -280,6 +280,7 @@ export function PlayerArea({
             side="left"
             className="justify-start px-0"
             showCollapseControl={isOwnArea}
+            splitOverview={splitOverview}
           />
         </>
       ),
@@ -303,6 +304,7 @@ export function PlayerArea({
           dividerBeforeIndex={supportDividerIndex}
           className="justify-end px-0"
           showCollapseControl={isOwnArea}
+          splitOverview={splitOverview}
         />
       ),
     },
@@ -314,7 +316,13 @@ export function PlayerArea({
       labelKey: "zone.commandZone",
       editClass: "ring-2 ring-amber-400/70 bg-amber-400/10",
       badgeClass: "bg-amber-400",
-      content: <CommandDock playerId={playerId} isMirrored={isMirrored} />,
+      content: (
+        <CommandDock
+          playerId={playerId}
+          isMirrored={isMirrored}
+          splitOverview={splitOverview}
+        />
+      ),
     },
   };
 
@@ -329,7 +337,10 @@ export function PlayerArea({
   const supportIdx = middleOrder.indexOf("support");
   const dividerCell: MiddleCell | null =
     Math.abs(landsIdx - supportIdx) === 1 ? (landsIdx < supportIdx ? "lands" : "support") : null;
-  const middleRowClass = "flex min-h-0 min-w-0 items-stretch justify-between gap-2";
+  // Split panes get MORE row gap, not less — at a third-width the bands crowd
+  // each other visually, so breathing room does the de-cluttering.
+  const middleRowGap = "gap-2";
+  const middleRowClass = `flex min-h-0 min-w-0 items-stretch justify-between ${middleRowGap}`;
   // Drag-to-reorder is enabled only in the viewer's own area while editing; the
   // resulting order persists globally and applies to every area (incl. plain
   // render below). Framer's Reorder distinguishes a drag from a tap, so cards
@@ -400,6 +411,7 @@ export function PlayerArea({
     <div
       className={`absolute left-1/2 z-20 -translate-x-1/2 ${isMirrored ? "bottom-[130%] translate-y-full" : "top-[165%] -translate-y-full"}`}
       data-debug-label="HUD"
+      {...(mode === "full" ? { "data-player-hud-anchor": "" } : {})}
     >
       {/* Inner node owns the drag offset so the outer `-translate-x-1/2`
           centering transform is never clobbered. */}
@@ -412,20 +424,13 @@ export function PlayerArea({
     </div>
   ) : null;
 
-  const landColumnExtraOverlay = landColumnExtra ? (
-    // The stack anchors at the middle-row bottom and grows upward, so at bottom-0
-    // it rides up over the lowest lands / the collapsed land tile. Drop it into
-    // the outer column's reserved `pb-8` gutter (full, non-compact only — compact
-    // height has no bottom padding to borrow) so it clears the land row.
-    <div
-      className={`pointer-events-none absolute bottom-0 left-2 z-30 ${
-        isCompactHeight ? "" : "translate-y-8"
-      }`}
-      data-testid="land-column-extra"
-    >
-      <div className="pointer-events-auto">{landColumnExtra}</div>
-    </div>
-  ) : null;
+  const areaGap = splitOverview ? "gap-2.5" : isCompactHeight ? "gap-0.5" : "gap-2";
+  const verticalPlacement = mode === "full"
+    ? isCompactHeight ? "pt-0 pb-0.5" : "pt-1 pb-8"
+    : splitOverview
+      ? "justify-start py-1"
+      : isCompactHeight ? "justify-end py-0" : "justify-end py-1";
+  const mirroredCreatureAlign = "items-end";
 
   return (
     <div
@@ -436,13 +441,7 @@ export function PlayerArea({
       data-phased-out={isPhasedOut ? "true" : undefined}
     >
       <div
-        className={`flex min-w-0 flex-1 flex-col px-1 ${
-          isCompactHeight ? "gap-0.5" : "gap-2"
-        } ${
-          mode === "full"
-            ? isCompactHeight ? "pt-0 pb-0.5" : "pt-1 pb-8"
-            : isCompactHeight ? "justify-end py-0" : "justify-end py-1"
-        }`}
+        className={`flex min-w-0 flex-1 flex-col px-1 ${areaGap} ${verticalPlacement}`}
       >
         {isMirrored ? (
           <>
@@ -450,14 +449,17 @@ export function PlayerArea({
             <div className={`relative ${isCompactHeight ? "min-h-0 max-h-[40%]" : "shrink-0"}`}>
               {middleRow}
               {hudBand}
-              {landColumnExtraOverlay}
             </div>
-            <div className="flex min-h-0 flex-1 items-end px-2" data-debug-label="Opp Creatures">
+            <div
+              className={`flex min-h-0 flex-1 ${mirroredCreatureAlign} px-2`}
+              data-debug-label="Opp Creatures"
+            >
               <BattlefieldZoneOverflow
                 groups={creatures}
                 zone="creatures"
                 side="left"
                 className="w-full"
+                splitOverview={splitOverview}
               />
             </div>
           </>
@@ -473,7 +475,6 @@ export function PlayerArea({
             <div className={`relative ${isCompactHeight ? "min-h-0 max-h-[40%]" : "shrink-0"}`}>
               {middleRow}
               {hudBand}
-              {landColumnExtraOverlay}
             </div>
             <BattlefieldRow groups={partitioned?.other ?? []} rowType="other" />
           </>

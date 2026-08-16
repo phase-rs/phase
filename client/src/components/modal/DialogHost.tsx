@@ -8,6 +8,7 @@ import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { getBoardChoiceView } from "../../viewmodel/gameStateView.ts";
+import { GAME_Z_LAYER } from "../../constants/ui.ts";
 import { DialogPeekCtx, type DialogPeekContext } from "./dialogPeekContext.ts";
 
 // `WaitingFor` variants that do NOT render a centered dialog/overlay.
@@ -26,7 +27,6 @@ const NON_DIALOG_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> = new Set<Wa
   "DeclareAttackers",
   "DeclareBlockers",
   "MulliganDecision",
-  "MulliganBottomCards",
   "OpeningHandBottomCards",
   "BetweenGamesSideboard",
   "BetweenGamesChoosePlayDraw",
@@ -48,10 +48,11 @@ export const CLICK_THROUGH_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> = 
   "TriggerTargetSelection",
   "CopyTargetChoice",
   "CopyRetarget",
-  "RetargetChoice",
   "ExploreChoice",
   "PopulateChoice",
   "ReturnAsAuraTarget",
+  "UntapChoice",
+  "ChooseUntapSubset",
 ]);
 
 // CR 118.3 + CR 605.3b: a `PayCost` prompt is click-through only for the
@@ -62,6 +63,12 @@ export function isClickThroughWaitingFor(
   objects?: Record<ObjectId, GameObject | undefined>,
 ): boolean {
   if (!waitingFor) return false;
+  // CR 115.7: only a one-target retarget uses the board-picker. An `All`
+  // retarget renders RetargetChoiceModal, whose card choices and confirmation
+  // button need the host to retain pointer events.
+  if (waitingFor.type === "RetargetChoice") {
+    return waitingFor.data.scope.type === "Single";
+  }
   if (CLICK_THROUGH_WAITING_FOR_TYPES.has(waitingFor.type)) return true;
   return getBoardChoiceView(waitingFor, objects) != null;
 }
@@ -133,13 +140,13 @@ export function DialogHost({ children }: { children: ReactNode }) {
   // not the board, so suppress click-through to restore pointer events.
   const clickThrough = isClickThroughDialog(waitingFor, objects) && !hasUiDialog;
   // BASE INVARIANT: every visible prompt is anchored in this viewport-level
-  // `fixed inset-0 z-40` stacking context, so no prompt can ever be trapped
-  // beneath the board. The board grid is its own `relative z-10` stacking
-  // context; framer-motion leaves a `transform`/`will-change: transform` on
+  // DialogHost stacking context, so no prompt can ever be trapped beneath the
+  // board. The board grid is its own lower stacking context; framer-motion
+  // leaves a `transform`/`will-change: transform` on
   // this node, which would demote an un-anchored (className="") host to a
   // `z-auto` context that paints BELOW the board — burying the dialog behind
-  // the HUD and hand. Anchoring at an explicit `z-40` keeps the context at
-  // level 40 (above the board) regardless of any transform framer applies.
+  // the HUD and hand. Anchoring at GAME_Z_LAYER.dialogHost keeps the context
+  // above the board regardless of any transform framer applies.
   // Click-through is achieved with `pointer-events: none` (below), NOT by
   // un-anchoring, so board taps still reach the battlefield.
   const anchored = dialogVisible;
@@ -169,9 +176,13 @@ export function DialogHost({ children }: { children: ReactNode }) {
   const isNarrow = useIsNarrowViewport();
   // Only apply the peek slide transform while peeked. Framer-motion keeps a
   // residual `transform` (even at `{ x: 0, y: 0 }`) whenever `animate` is set,
-  // which breaks `<input type="range">` hit-testing in bottom-anchored panels
-  // such as ChooseXValueUI — the slider looks fine but ignores drags until
-  // something else reflows the tree (issue #2427).
+  // which breaks pointer hit-testing in bottom-anchored panels — the control
+  // looks fine but ignores input until something else reflows the tree
+  // (issue #2427). Originally hit `<input type="range">` in ChooseXValueUI;
+  // that slider no longer exists, and the live subjects are now the amount box
+  // and its ± steppers (AmountInput), which ChooseXValueUI's mount-integration
+  // test drives for exactly this reason. The guard is NOT obsolete just because
+  // the control it was written for is gone.
   const slideTransform = peeked
     ? isNarrow
       ? { x: 0, y: "calc(100vh - 64px)" }
@@ -180,7 +191,7 @@ export function DialogHost({ children }: { children: ReactNode }) {
 
   return (
     <DialogPeekCtx.Provider value={ctxValue}>
-      {/* When a dialog is visible the host fills the viewport as a `z-40`
+      {/* When a dialog is visible the host fills the viewport at the DialogHost
           stacking context so descendants render above the board; when none is
           up it collapses to an in-flow 0-size box that intercepts nothing.
           `pointer-events: none` lets taps/hovers pass through to the
@@ -189,7 +200,7 @@ export function DialogHost({ children }: { children: ReactNode }) {
           with `pointer-events-auto`. Otherwise the dialog handles events
           normally. */}
       <motion.div
-        className={anchored ? "fixed inset-0 z-40" : ""}
+        className={anchored ? `fixed inset-0 ${GAME_Z_LAYER.dialogHost}` : ""}
         style={
           anchored
             ? { pointerEvents: clickThrough || peeked ? "none" : undefined }
@@ -228,7 +239,7 @@ export function PeekRestoreTab({
   const positionClass =
     direction === "right"
       ? "right-3 top-1/2 -translate-y-1/2 h-24 w-9 rounded-2xl"
-      : "bottom-3 left-1/2 -translate-x-1/2 h-9 w-24 rounded-2xl";
+      : "left-3 top-[63%] -translate-y-1/2 h-9 w-9 rounded-2xl";
 
   const iconRotate = direction === "right" ? "rotate-180" : "-rotate-90";
 
@@ -253,7 +264,7 @@ export function PeekRestoreTab({
         scale: { delay: 0.1, duration: 0.2 },
         boxShadow: { duration: 2.4, repeat: Infinity, ease: "easeInOut" },
       }}
-      className={`fixed z-[60] flex items-center justify-center border border-cyan-400/40 bg-[#0b1020]/96 text-cyan-200 backdrop-blur-md transition-colors hover:bg-cyan-500/20 hover:text-white ${positionClass}`}
+      className={`fixed ${GAME_Z_LAYER.floatingOverlay} flex items-center justify-center border border-cyan-400/40 bg-[#0b1020]/96 text-cyan-200 backdrop-blur-md transition-colors hover:bg-cyan-500/20 hover:text-white ${positionClass}`}
     >
       <svg
         xmlns="http://www.w3.org/2000/svg"

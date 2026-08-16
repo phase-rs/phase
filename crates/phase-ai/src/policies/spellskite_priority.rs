@@ -192,7 +192,7 @@ mod tests {
             source_id: ObjectId(900),
             controller: OPP,
             kind: StackEntryKind::Spell {
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 card_id: CardId(900),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
@@ -227,7 +227,7 @@ mod tests {
             source_id: ObjectId(900),
             controller: OPP,
             kind: StackEntryKind::Spell {
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 card_id: CardId(900),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
@@ -241,10 +241,7 @@ mod tests {
                 source_id: spellskite_id,
                 ability_index: 0,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Ability,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
         let decision = AiDecisionContext {
             waiting_for: engine::types::game_state::WaitingFor::Priority { player: AI },
@@ -260,6 +257,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         SpellskitePriorityPolicy.verdict(&ctx)
     }

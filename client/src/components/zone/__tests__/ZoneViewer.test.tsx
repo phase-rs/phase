@@ -1,9 +1,18 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameAction, GameObject, GameState } from "../../../adapter/types.ts";
+import type { GameAction, GameObject } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
+import {
+  buildGameObjectWithCoreTypes,
+  buildObjectMap,
+} from "../../../test/factories/gameObjectFactory.ts";
+import {
+  buildGameState,
+  buildPlayers,
+  buildPriorityWaitingFor,
+} from "../../../test/factories/gameStateFactory.ts";
 import { ZoneViewer } from "../ZoneViewer.tsx";
 
 vi.mock("../../card/CardImage.tsx", () => ({
@@ -19,41 +28,19 @@ vi.mock("../../../hooks/useGameDispatch.ts", () => ({
 }));
 
 function makeObject(overrides: Partial<GameObject> = {}): GameObject {
-  return {
+  return buildGameObjectWithCoreTypes(["Sorcery"], {
     id: 7,
     card_id: 700,
-    owner: 0,
-    controller: 0,
     zone: "Graveyard",
-    tapped: false,
-    face_down: false,
-    flipped: false,
-    transformed: false,
-    damage_marked: 0,
-    dealt_deathtouch_damage: false,
-    attached_to: null,
-    attachments: [],
-    counters: {},
     name: "Flame Jab",
-    power: null,
-    toughness: null,
-    loyalty: null,
-    card_types: { supertypes: [], core_types: ["Sorcery"], subtypes: [] },
     mana_cost: { type: "Cost", shards: ["Red"], generic: 0 },
     keywords: ["Retrace"],
-    abilities: [],
-    trigger_definitions: [],
-    replacement_definitions: [],
-    static_definitions: [],
     color: ["Red"],
-    base_power: null,
-    base_toughness: null,
     base_keywords: ["Retrace"],
     base_color: ["Red"],
-    timestamp: 1,
     entered_battlefield_turn: null,
     ...overrides,
-  };
+  });
 }
 
 function makeCastAction(objectId: number): GameAction {
@@ -63,43 +50,20 @@ function makeCastAction(objectId: number): GameAction {
   };
 }
 
-function makeState(object: GameObject): GameState {
-  return {
+function makeState(object: GameObject) {
+  return buildGameState({
     active_player: 0,
     priority_player: 0,
-    players: [
-      {
-        id: 0,
-        life: 20,
-        poison_counters: 0,
-        mana_pool: { mana: [] },
-        library: [],
-        hand: [],
-        graveyard: [object.id],
-        has_drawn_this_turn: false,
-        lands_played_this_turn: 0,
-        turns_taken: 0,
-      },
-      {
-        id: 1,
-        life: 20,
-        poison_counters: 0,
-        mana_pool: { mana: [] },
-        library: [],
-        hand: [],
-        graveyard: [],
-        has_drawn_this_turn: false,
-        lands_played_this_turn: 0,
-        turns_taken: 0,
-      },
-    ],
-    objects: { [object.id]: object },
+    players: buildPlayers([
+      { id: 0, graveyard: [object.id] },
+      { id: 1 },
+    ]),
+    objects: buildObjectMap(object),
     battlefield: [],
     exile: [],
     stack: [],
-    combat: null,
-    waiting_for: { type: "Priority", data: { player: 0 } },
-  } as unknown as GameState;
+    waiting_for: buildPriorityWaitingFor(),
+  });
 }
 
 describe("ZoneViewer", () => {
@@ -169,30 +133,28 @@ describe("ZoneViewer", () => {
   });
 
   it("shows only the engine-revealed library cards, omitting unrevealed ones", () => {
-    // CR 701.20b: a RevealTop / "play with top revealed" surfaces specific top
-    // cards via `revealed_cards`. Visibility is gated on that engine set, NOT on
-    // the card name — single-player renders the raw, unredacted state, so the
-    // unrevealed cards below carry real names yet must NOT appear in the viewer.
+    // Rust projects identity visibility per object. Real names alone never make
+    // a library card render in the viewer.
     const revealed = makeObject({
       id: 20,
       zone: "Library",
       name: "Llanowar Elves",
+      display_visible_to_viewer: true,
       keywords: [],
       base_keywords: [],
     });
-    // Real names, but absent from revealed_cards → must be filtered out.
+    // Real names, but no engine display projection → must be filtered out.
     const unrevealedA = makeObject({ id: 21, zone: "Library", name: "Black Lotus" });
     const unrevealedB = makeObject({ id: 22, zone: "Library", name: "Mox Sapphire" });
     const base = makeState(revealed);
     const gameState = {
       ...base,
-      objects: { [revealed.id]: revealed, [unrevealedA.id]: unrevealedA, [unrevealedB.id]: unrevealedB },
-      revealed_cards: [revealed.id],
+      objects: buildObjectMap(revealed, unrevealedA, unrevealedB),
       players: [
         { ...base.players[0], graveyard: [], library: [revealed.id, unrevealedA.id, unrevealedB.id] },
         base.players[1],
       ],
-    } as unknown as GameState;
+    };
 
     useGameStore.setState({
       gameState,
@@ -223,6 +185,7 @@ describe("ZoneViewer", () => {
       id: 30,
       zone: "Library",
       name: "Mystic Sanctuary",
+      display_visible_to_viewer: true,
       keywords: [],
       base_keywords: [],
     });
@@ -231,13 +194,12 @@ describe("ZoneViewer", () => {
     const base = makeState(revealed);
     const gameState = {
       ...base,
-      objects: { [revealed.id]: revealed, [unrevealed.id]: unrevealed },
-      revealed_cards: [revealed.id],
+      objects: buildObjectMap(revealed, unrevealed),
       players: [
         { ...base.players[0], graveyard: [], library: [revealed.id, unrevealed.id] },
         base.players[1],
       ],
-    } as unknown as GameState;
+    };
 
     useGameStore.setState({
       gameState,
@@ -267,6 +229,7 @@ describe("ZoneViewer", () => {
       id: 50,
       zone: "Library",
       name: "Future Sight Top",
+      display_visible_to_viewer: true,
       keywords: [],
       base_keywords: [],
     });
@@ -275,8 +238,7 @@ describe("ZoneViewer", () => {
     const base = makeState(top);
     const gameState = {
       ...base,
-      objects: { [top.id]: top, [buried.id]: buried },
-      revealed_cards: [],
+      objects: buildObjectMap(top, buried),
       players: [
         {
           ...base.players[0],
@@ -286,7 +248,7 @@ describe("ZoneViewer", () => {
         },
         base.players[1],
       ],
-    } as unknown as GameState;
+    };
 
     useGameStore.setState({
       gameState,
@@ -326,6 +288,7 @@ describe("ZoneViewer", () => {
       controller: 1,
       zone: "Library",
       name: "Courser of Kruphix",
+      display_visible_to_viewer: true,
       keywords: [],
       base_keywords: [],
     });
@@ -339,13 +302,12 @@ describe("ZoneViewer", () => {
     const base = makeState(revealed);
     const gameState = {
       ...base,
-      objects: { [revealed.id]: revealed, [unrevealed.id]: unrevealed },
-      revealed_cards: [revealed.id],
+      objects: buildObjectMap(revealed, unrevealed),
       players: [
         { ...base.players[0], graveyard: [] },
         { ...base.players[1], graveyard: [], library: [revealed.id, unrevealed.id] },
       ],
-    } as unknown as GameState;
+    };
 
     useGameStore.setState({
       gameState,
@@ -390,13 +352,13 @@ describe("ZoneViewer", () => {
     const base = makeState(object);
     const gameState = {
       ...base,
-      objects: { [object.id]: object },
+      objects: buildObjectMap(object),
       exile: [object.id],
       players: [
         { ...base.players[0], graveyard: [] },
         { ...base.players[1], graveyard: [] },
       ],
-    } as unknown as GameState;
+    };
 
     useGameStore.setState({
       gameState,

@@ -7,6 +7,32 @@ pub fn apply_pick(
     seat: u8,
     card_instance_id: String,
 ) -> Result<Vec<DraftDelta>, DraftError> {
+    apply_pick_inner(session, seat, card_instance_id)
+}
+
+/// CR 905.1a + CR 905.2: Draft two cards from the current booster in exchange
+/// for returning the face-up effect card to that booster.
+pub fn apply_pick_with_draft_effect(
+    session: &mut DraftSession,
+    seat: u8,
+    effect_card_instance_id: String,
+    card_instance_ids: Vec<String>,
+) -> Result<Vec<DraftDelta>, DraftError> {
+    if card_instance_ids.len() != 2 {
+        return Err(DraftError::InvalidDraftEffectSelection {
+            expected_cards: 2,
+            actual_cards: card_instance_ids.len(),
+        });
+    }
+
+    apply_pick_with_effect_inner(session, seat, effect_card_instance_id, card_instance_ids)
+}
+
+fn apply_pick_inner(
+    session: &mut DraftSession,
+    seat: u8,
+    card_instance_id: String,
+) -> Result<Vec<DraftDelta>, DraftError> {
     if session.status != DraftStatus::Drafting {
         return Err(DraftError::InvalidTransition {
             from: session.status,
@@ -31,26 +57,124 @@ pub fn apply_pick(
         return Err(DraftError::SeatAlreadyPickedThisRound { seat });
     }
 
-    let pack = session.current_pack[seat as usize]
-        .as_mut()
-        .ok_or(DraftError::NoPendingPack { seat })?;
+    let picked = {
+        let pack = session.current_pack[seat as usize]
+            .as_mut()
+            .ok_or(DraftError::NoPendingPack { seat })?;
 
-    let card_index = pack
-        .0
+        let card_index = pack
+            .0
+            .iter()
+            .position(|c| c.instance_id == card_instance_id)
+            .ok_or_else(|| DraftError::CardNotInPack {
+                card_instance_id: card_instance_id.clone(),
+            })?;
+
+        pack.0.remove(card_index)
+    };
+
+    session.pools[seat as usize].push(picked);
+
+    finish_pick(session, seat, vec![card_instance_id])
+}
+
+fn apply_pick_with_effect_inner(
+    session: &mut DraftSession,
+    seat: u8,
+    effect_card_instance_id: String,
+    card_instance_ids: Vec<String>,
+) -> Result<Vec<DraftDelta>, DraftError> {
+    if session.status != DraftStatus::Drafting {
+        return Err(DraftError::InvalidTransition {
+            from: session.status,
+            action: "PickWithDraftEffect".to_string(),
+        });
+    }
+
+    let pod_size = session.seats.len() as u8;
+    if seat >= pod_size {
+        return Err(DraftError::SeatOutOfRange { seat, pod_size });
+    }
+    session.seats_picked_this_round.ensure_len(pod_size, false);
+    session.connected_seats.ensure_len(pod_size, true);
+    if session.seats_picked_this_round.get(seat) {
+        return Err(DraftError::SeatAlreadyPickedThisRound { seat });
+    }
+    if card_instance_ids[0] == card_instance_ids[1] {
+        return Err(DraftError::InvalidDraftEffectSelection {
+            expected_cards: 2,
+            actual_cards: 1,
+        });
+    }
+
+    let effect_index = session.pools[seat as usize]
         .iter()
-        .position(|c| c.instance_id == card_instance_id)
-        .ok_or_else(|| DraftError::CardNotInPack {
-            card_instance_id: card_instance_id.clone(),
+        .position(|card| {
+            card.instance_id == effect_card_instance_id
+                && matches!(
+                    card.draft_effect,
+                    Some(engine::types::card::DraftEffect::AdditionalPick)
+                )
+        })
+        .ok_or_else(|| DraftError::DraftEffectCardNotInPool {
+            card_instance_id: effect_card_instance_id.clone(),
         })?;
 
-    let picked = pack.0.remove(card_index);
-    session.pools[seat as usize].push(picked);
+    let pack = session.current_pack[seat as usize]
+        .as_ref()
+        .ok_or(DraftError::NoPendingPack { seat })?;
+    let missing_card = card_instance_ids
+        .iter()
+        .find(|card_id| !pack.0.iter().any(|card| card.instance_id == **card_id));
+    if let Some(missing_card) = missing_card {
+        return Err(DraftError::CardNotInPack {
+            card_instance_id: missing_card.clone(),
+        });
+    }
+
+    let picked_cards = {
+        let pack = session.current_pack[seat as usize]
+            .as_mut()
+            .expect("pack was present during draft-effect validation");
+        card_instance_ids
+            .iter()
+            .map(|card_id| {
+                let index = pack
+                    .0
+                    .iter()
+                    .position(|card| card.instance_id == *card_id)
+                    .expect("validated draft-effect card must remain in the pack");
+                pack.0.remove(index)
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let effect_card = session.pools[seat as usize].remove(effect_index);
+    session.pools[seat as usize].extend(picked_cards);
+    session.current_pack[seat as usize]
+        .as_mut()
+        .expect("pack was present while selecting the extra cards")
+        .0
+        .push(effect_card);
+
+    finish_pick(session, seat, card_instance_ids)
+}
+
+fn finish_pick(
+    session: &mut DraftSession,
+    seat: u8,
+    card_instance_ids: Vec<String>,
+) -> Result<Vec<DraftDelta>, DraftError> {
+    let pod_size = session.seats.len() as u8;
     session.seats_picked_this_round.set(seat, true);
 
-    let mut deltas = vec![DraftDelta::CardPicked {
-        seat,
-        card_instance_id,
-    }];
+    let mut deltas: Vec<DraftDelta> = card_instance_ids
+        .into_iter()
+        .map(|card_instance_id| DraftDelta::CardPicked {
+            seat,
+            card_instance_id,
+        })
+        .collect();
 
     // Round complete when every seat that still owes a pick has picked.
     // A seat owes a pick iff its current_pack is Some and non-empty. Seats
@@ -240,6 +364,68 @@ mod tests {
             None,
         );
         assert!(matches!(result, Err(DraftError::CardNotInPack { .. })));
+    }
+
+    #[test]
+    fn draft_effect_pick_returns_effect_card_to_pack() {
+        let (mut session, source) = test_session(2);
+        start_draft(&mut session, &source);
+
+        let effect_card = DraftCardInstance {
+            instance_id: "cogwork-1".to_string(),
+            name: "Cogwork Librarian".to_string(),
+            set_code: "CNS".to_string(),
+            collector_number: "58".to_string(),
+            rarity: "common".to_string(),
+            colors: Vec::new(),
+            cmc: 4,
+            type_line: "Artifact Creature — Construct".to_string(),
+            draft_effect: Some(engine::types::card::DraftEffect::AdditionalPick),
+        };
+        session.pools[0].push(effect_card.clone());
+        let first_card_id = session.current_pack[0].as_ref().unwrap().0[0]
+            .instance_id
+            .clone();
+        let second_card_id = session.current_pack[0].as_ref().unwrap().0[1]
+            .instance_id
+            .clone();
+        let pack_len = session.current_pack[0].as_ref().unwrap().0.len();
+
+        let deltas = session::apply(
+            &mut session,
+            DraftAction::PickWithDraftEffect {
+                seat: 0,
+                effect_card_instance_id: effect_card.instance_id.clone(),
+                card_instance_ids: vec![first_card_id.clone(), second_card_id.clone()],
+            },
+            None,
+        )
+        .unwrap();
+
+        let pack = session.current_pack[0].as_ref().unwrap();
+        assert_eq!(pack.0.len(), pack_len - 1);
+        assert!(pack
+            .0
+            .iter()
+            .any(|card| card.instance_id == effect_card.instance_id));
+        assert!(!session.pools[0]
+            .iter()
+            .any(|card| card.instance_id == effect_card.instance_id));
+        assert!(session.pools[0]
+            .iter()
+            .any(|card| card.instance_id == first_card_id));
+        assert!(session.pools[0]
+            .iter()
+            .any(|card| card.instance_id == second_card_id));
+        assert!(deltas.contains(&DraftDelta::CardPicked {
+            seat: 0,
+            card_instance_id: first_card_id,
+        }));
+        assert!(deltas.contains(&DraftDelta::CardPicked {
+            seat: 0,
+            card_instance_id: second_card_id,
+        }));
+        assert!(!deltas.contains(&DraftDelta::PackPassed));
     }
 
     #[test]

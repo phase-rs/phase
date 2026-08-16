@@ -28,14 +28,14 @@ interface GameListItemProps {
 // Badge color keyed on the format's group so we don't maintain a
 // per-format table. Short-label text comes from FORMAT_REGISTRY.short_label.
 const GROUP_BADGE_CLASSES: Record<FormatGroup, string> = {
-  Constructed: "bg-cyan-500/20 text-cyan-300",
-  Commander: "bg-indigo-500/20 text-indigo-300",
-  Limited: "bg-emerald-500/20 text-emerald-300",
-  Multiplayer: "bg-amber-500/20 text-amber-300",
+  Constructed: "border-cyan-300/20 bg-cyan-500/15 text-cyan-200",
+  Commander: "border-indigo-300/20 bg-indigo-500/15 text-indigo-200",
+  Limited: "border-emerald-300/20 bg-emerald-500/15 text-emerald-200",
+  Multiplayer: "border-amber-300/20 bg-amber-500/15 text-amber-200",
 };
 
 // Fallback styling for future wire formats not yet mirrored in the registry.
-const UNKNOWN_FORMAT_BADGE = "bg-slate-500/20 text-slate-300";
+const UNKNOWN_FORMAT_BADGE = "border-slate-300/20 bg-slate-500/15 text-slate-300";
 
 function formatWaitTime(createdAt: number, t: TFunction<"multiplayer">): string {
   const now = Math.floor(Date.now() / 1000);
@@ -92,14 +92,14 @@ export function GameListItem({ game, onJoin, compatible = true, hostGameCode }: 
       disabled={disabled}
       title={disabledTitle}
       className={
-        "flex w-full items-center gap-3 rounded-[18px] border px-4 py-3 text-left transition-colors " +
+        "flex w-full items-center gap-3 rounded-[10px] border px-4 py-3 text-left shadow-[0_10px_26px_rgba(0,0,0,0.22)] backdrop-blur-sm transition-colors " +
         (disabled
-          ? "cursor-not-allowed border-white/5 bg-black/10 opacity-60"
-          : "border-white/10 bg-black/18 hover:border-white/18 hover:bg-white/6")
+          ? "cursor-not-allowed border-white/6 bg-black/18 opacity-60"
+          : "border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.055),rgba(0,0,0,0.18))] hover:border-white/20 hover:bg-[linear-gradient(180deg,rgba(255,255,255,0.075),rgba(0,0,0,0.16))]")
       }
     >
       {/* Format badge */}
-      <span className={`flex-shrink-0 rounded px-1.5 py-0.5 text-xs font-semibold ${badgeClass}`}>
+      <span className={`flex-shrink-0 rounded-[5px] border px-1.5 py-0.5 text-xs font-semibold ${badgeClass}`}>
         {formatLabel}
       </span>
 
@@ -107,7 +107,7 @@ export function GameListItem({ game, onJoin, compatible = true, hostGameCode }: 
           Shows set code and draft kind for quick identification. */}
       {game.draft_metadata && (
         <span
-          className="flex-shrink-0 rounded bg-purple-500/20 px-1.5 py-0.5 text-xs font-semibold text-purple-300"
+          className="flex-shrink-0 rounded-[5px] border border-purple-300/20 bg-purple-500/15 px-1.5 py-0.5 text-xs font-semibold text-purple-200"
           title={t("gameListItem.draftBadgeTitle", {
             kind: game.draft_metadata.draftKind,
             setCode: game.draft_metadata.setCode,
@@ -124,7 +124,7 @@ export function GameListItem({ game, onJoin, compatible = true, hostGameCode }: 
           server-run visual. */}
       {game.is_p2p === true && (
         <span
-          className="flex-shrink-0 rounded bg-teal-500/20 px-1.5 py-0.5 text-xs font-semibold text-teal-300"
+          className="flex-shrink-0 rounded-[5px] border border-teal-300/20 bg-teal-500/15 px-1.5 py-0.5 text-xs font-semibold text-teal-200"
           title={t("gameListItem.p2pBadgeTitle")}
         >
           P2P
@@ -135,7 +135,7 @@ export function GameListItem({ game, onJoin, compatible = true, hostGameCode }: 
           this game. Joiners should be warned this isn't a competitive match. */}
       {game.is_sandbox === true && (
         <span
-          className="flex-shrink-0 rounded bg-amber-500/20 px-1.5 py-0.5 text-xs font-semibold text-amber-300"
+          className="flex-shrink-0 rounded-[5px] border border-amber-300/20 bg-amber-500/15 px-1.5 py-0.5 text-xs font-semibold text-amber-200"
           title={t("gameListItem.sandboxBadgeTitle")}
         >
           SANDBOX
@@ -191,7 +191,7 @@ export function GameListItem({ game, onJoin, compatible = true, hostGameCode }: 
 
       <span
         className={
-          "flex-shrink-0 rounded px-3 py-1 text-xs font-medium transition-colors " +
+          "flex-shrink-0 rounded-[6px] px-3 py-1 text-xs font-medium transition-colors " +
           (disabled ? "bg-gray-700 text-gray-500" : "bg-emerald-600 text-white")
         }
       >
@@ -199,7 +199,7 @@ export function GameListItem({ game, onJoin, compatible = true, hostGameCode }: 
       </span>
 
       {/* Game code badge */}
-      <span className="flex-shrink-0 rounded-full border border-white/10 bg-black/18 px-2 py-0.5 font-mono text-xs tracking-wider text-emerald-400">
+      <span className="flex-shrink-0 rounded-[6px] border border-white/10 bg-black/25 px-2 py-0.5 font-mono text-xs tracking-wider text-emerald-300">
         {game.game_code}
       </span>
     </button>

@@ -2,39 +2,435 @@ use crate::types::ability::{AbilityTag, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
-use crate::types::log::{GameLogEntry, LogCategory, LogSegment};
+use crate::types::log::{
+    GameLogEntry, LogBoundary, LogCategory, LogImportance, LogPresentation, LogSegment, LogTone,
+    LogVisibility,
+};
+use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 
 /// Resolve a batch of events into structured log entries.
-/// Events that would leak hidden information (e.g., cards drawn from library) are filtered out.
-pub fn resolve_log_entries(events: &[GameEvent], state: &GameState) -> Vec<GameLogEntry> {
+/// Events that could leak hidden information are tagged for an explicit diagnostic opt-in.
+pub fn resolve_log_entries(
+    events: &[GameEvent],
+    before: &GameState,
+    after: &GameState,
+) -> Vec<GameLogEntry> {
+    let has_game_start = events
+        .iter()
+        .any(|event| matches!(event, GameEvent::GameStarted));
+    let mut cursor = if has_game_start {
+        LogCursor::pregame()
+    } else {
+        LogCursor {
+            turn: before.turn_number,
+            phase: before.phase,
+        }
+    };
+
     events
         .iter()
-        .filter(|event| !should_exclude_event(event, state))
-        .map(|event| GameLogEntry {
-            seq: 0, // Assigned by frontend
-            turn: state.turn_number,
-            phase: state.phase,
-            category: categorize(event),
-            segments: format_segments(event, state),
+        .filter_map(|event| {
+            cursor.apply(event);
+            (!should_exclude_event(event, after)).then(|| {
+                let segments = format_segments(event, after);
+                (!segments.is_empty()).then(|| GameLogEntry {
+                    seq: 0, // Assigned by frontend
+                    turn: cursor.turn,
+                    phase: cursor.phase,
+                    category: categorize(event),
+                    segments,
+                    presentation: presentation(event),
+                })
+            })?
         })
         .collect()
 }
 
+#[derive(Debug, Clone, Copy)]
+struct LogCursor {
+    turn: u32,
+    phase: Phase,
+}
+
+impl LogCursor {
+    fn pregame() -> Self {
+        Self {
+            turn: 0,
+            phase: Phase::Untap,
+        }
+    }
+
+    fn apply(&mut self, event: &GameEvent) {
+        match event {
+            GameEvent::GameStarted => *self = Self::pregame(),
+            GameEvent::TurnStarted { turn_number, .. } => {
+                self.turn = *turn_number;
+                self.phase = Phase::Untap;
+            }
+            GameEvent::PhaseChanged { phase } => self.phase = *phase,
+            _ => {}
+        }
+    }
+}
+
+fn presentation(event: &GameEvent) -> LogPresentation {
+    LogPresentation {
+        importance: importance(event),
+        tone: tone(event),
+        boundary: boundary(event),
+        visibility: visibility(event),
+    }
+}
+
+fn importance(event: &GameEvent) -> LogImportance {
+    match event {
+        GameEvent::CardPredicateGuessMade { .. }
+        | GameEvent::DebugActionUsed { .. }
+        | GameEvent::DebugPermissionGranted { .. }
+        | GameEvent::DebugPermissionRevoked { .. } => LogImportance::Diagnostic,
+        GameEvent::GameStarted
+        | GameEvent::GameOver { .. }
+        | GameEvent::PlayerLost { .. }
+        | GameEvent::PlayerEliminated { .. }
+        | GameEvent::TurnStarted { .. }
+        | GameEvent::SpellCast { .. }
+        | GameEvent::SpellCopied { .. }
+        | GameEvent::LandPlayed { .. }
+        | GameEvent::AttackersDeclared { .. }
+        | GameEvent::BlockersDeclared { .. }
+        | GameEvent::DamageDealt { .. }
+        | GameEvent::CombatDamageDealtToPlayer { .. }
+        | GameEvent::LifeChanged { .. }
+        | GameEvent::CreatureDestroyed { .. }
+        | GameEvent::PermanentSacrificed { .. }
+        | GameEvent::TokenCreated { .. }
+        | GameEvent::ObjectConjured { .. } => LogImportance::Essential,
+        GameEvent::PhaseChanged { .. }
+        | GameEvent::AbilityActivated { .. }
+        | GameEvent::NinjutsuActivated { .. }
+        | GameEvent::KeywordAbilityActivated { .. }
+        | GameEvent::CounterAdded { .. }
+        | GameEvent::CounterRemoved { .. }
+        | GameEvent::ControllerChanged { .. }
+        | GameEvent::Transformed { .. }
+        | GameEvent::Flipped { .. }
+        | GameEvent::TurnedFaceUp { .. }
+        | GameEvent::TurnedFaceDown { .. }
+        | GameEvent::Discarded { .. }
+        | GameEvent::Cycled { .. }
+        | GameEvent::CardsRevealed { .. }
+        | GameEvent::ChosenNumbersRevealed { .. }
+        | GameEvent::BecomesTarget { .. }
+        | GameEvent::ReplacementApplied { .. }
+        | GameEvent::SpeedChanged { .. }
+        | GameEvent::ArmyAmassed { .. } => LogImportance::Context,
+        // The remaining variants are deliberately listed rather than covered by a
+        // wildcard. Adding a GameEvent must require an explicit presentation policy.
+        GameEvent::HiddenSearchViewed { .. }
+        | GameEvent::PriorityPassed { .. }
+        | GameEvent::Mutated { .. }
+        | GameEvent::Augmented { .. }
+        | GameEvent::XValueChosen { .. }
+        | GameEvent::ZoneChanged { .. }
+        | GameEvent::ManaAdded { .. }
+        | GameEvent::TappedForMana { .. }
+        | GameEvent::ManaAbilityProduced { .. }
+        | GameEvent::ManaPoolEmptied { .. }
+        | GameEvent::ManaRecolored { .. }
+        | GameEvent::PermanentTapped { .. }
+        | GameEvent::CreatureExerted { .. }
+        | GameEvent::CreatureEnlisted { .. }
+        | GameEvent::Foretold { .. }
+        | GameEvent::BecameForetold { .. }
+        | GameEvent::MulliganStarted
+        | GameEvent::CardsDrawn { .. }
+        | GameEvent::CardDrawn { .. }
+        | GameEvent::PermanentUntapped { .. }
+        | GameEvent::PermanentPhasedOut { .. }
+        | GameEvent::PermanentPhasedIn { .. }
+        | GameEvent::PlayerPhasedOut { .. }
+        | GameEvent::PlayerPhasedIn { .. }
+        | GameEvent::BecomesPlotted { .. }
+        | GameEvent::StackPushed { .. }
+        | GameEvent::StackResolved { .. }
+        // CR 714.2: bookkeeping the engine publishes so meta-triggers can
+        // observe a chapter ability finishing; the chapter's own effects carry
+        // the player-visible signal.
+        | GameEvent::SagaChapterAbilityResolved { .. }
+        | GameEvent::DamageCleared { .. }
+        | GameEvent::ResolutionHalted { .. }
+        | GameEvent::DamagePrevented { .. }
+        | GameEvent::SpellCountered { .. }
+        | GameEvent::ObjectIntensified { .. }
+        | GameEvent::Evolved { .. }
+        | GameEvent::Unattached { .. }
+        | GameEvent::ContinuousEffectEnded { .. }
+        | GameEvent::AttackerBecameBlockedByEffect { .. }
+        | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
+        | GameEvent::CombatTaxPaid { .. }
+        | GameEvent::CombatTaxDeclined { .. }
+        | GameEvent::VehicleCrewed { .. }
+        | GameEvent::Stationed { .. }
+        | GameEvent::Saddled { .. }
+        | GameEvent::Regenerated { .. }
+        | GameEvent::CreatureSuspected { .. }
+        | GameEvent::CreatureNoLongerSuspected { .. }
+        | GameEvent::Detained { .. }
+        | GameEvent::BecamePrepared { .. }
+        | GameEvent::BecameUnprepared { .. }
+        | GameEvent::CaseSolved { .. }
+        | GameEvent::ClassLevelGained { .. }
+        | GameEvent::DayNightChanged { .. }
+        | GameEvent::PowerToughnessChanged { .. }
+        | GameEvent::EffectResolved { .. }
+        | GameEvent::CrimeCommitted { .. }
+        | GameEvent::CascadeMissed { .. }
+        | GameEvent::MonarchChanged { .. }
+        | GameEvent::CityBlessingGained { .. }
+        | GameEvent::EnduringStoryGained { .. }
+        | GameEvent::DieRolled { .. }
+        | GameEvent::StartingPlayerContest { .. }
+        | GameEvent::CoinFlipped { .. }
+        | GameEvent::RingTemptsYou { .. }
+        | GameEvent::CreatureExploited { .. }
+        | GameEvent::RoomEntered { .. }
+        | GameEvent::RoomDoorUnlocked { .. }
+        | GameEvent::DungeonCompleted { .. }
+        | GameEvent::Planeswalked { .. }
+        | GameEvent::ChaosEnsued { .. }
+        | GameEvent::PlanarDieRolled { .. }
+        | GameEvent::SchemeSetInMotion { .. }
+        | GameEvent::SchemeAbandoned { .. }
+        | GameEvent::InitiativeTaken { .. }
+        | GameEvent::AttractionOpened { .. }
+        | GameEvent::ContraptionAssembled { .. }
+        | GameEvent::StickerPlaced { .. }
+        | GameEvent::AttractionsRolledToVisit { .. }
+        | GameEvent::AttractionVisited { .. }
+        | GameEvent::ContraptionCranked { .. }
+        | GameEvent::Firebend { .. }
+        | GameEvent::Airbend { .. }
+        | GameEvent::Earthbend { .. }
+        | GameEvent::Waterbend { .. }
+        | GameEvent::CompanionRevealed { .. }
+        | GameEvent::CompanionMovedToHand { .. }
+        | GameEvent::EnergyChanged { .. }
+        | GameEvent::PlayerCounterChanged { .. }
+        | GameEvent::ManaExpended { .. }
+        | GameEvent::PlayerPerformedAction { .. }
+        | GameEvent::Specialized { .. }
+        | GameEvent::Clash { .. }
+        | GameEvent::VoteCast { .. }
+        | GameEvent::VoteResolved { .. } => LogImportance::Detail,
+    }
+}
+
+fn tone(event: &GameEvent) -> LogTone {
+    match event {
+        GameEvent::CardPredicateGuessMade { .. }
+        | GameEvent::DebugActionUsed { .. }
+        | GameEvent::DebugPermissionGranted { .. }
+        | GameEvent::DebugPermissionRevoked { .. } => LogTone::Diagnostic,
+        GameEvent::LifeChanged { amount, .. } if *amount > 0 => LogTone::Positive,
+        GameEvent::TokenCreated { .. }
+        | GameEvent::ObjectConjured { .. }
+        | GameEvent::CityBlessingGained { .. }
+        | GameEvent::EnduringStoryGained { .. }
+        | GameEvent::MonarchChanged { .. }
+        | GameEvent::InitiativeTaken { .. } => LogTone::Positive,
+        GameEvent::DamageDealt { .. }
+        | GameEvent::DamagePrevented { .. }
+        | GameEvent::CreatureDestroyed { .. }
+        | GameEvent::PermanentSacrificed { .. }
+        | GameEvent::SpellCountered { .. }
+        | GameEvent::PlayerLost { .. }
+        | GameEvent::PlayerEliminated { .. } => LogTone::Negative,
+        GameEvent::LifeChanged { amount, .. } if *amount < 0 => LogTone::Negative,
+        GameEvent::SpellCast { .. }
+        | GameEvent::SpellCopied { .. }
+        | GameEvent::AbilityActivated { .. }
+        | GameEvent::NinjutsuActivated { .. }
+        | GameEvent::KeywordAbilityActivated { .. }
+        | GameEvent::AttackersDeclared { .. }
+        | GameEvent::BlockersDeclared { .. }
+        | GameEvent::AttackerBecameBlockedByEffect { .. }
+        | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
+        | GameEvent::CombatTaxPaid { .. }
+        | GameEvent::CombatTaxDeclined { .. }
+        | GameEvent::CreatureExerted { .. }
+        | GameEvent::CreatureEnlisted { .. }
+        | GameEvent::SpeedChanged { .. }
+        | GameEvent::ArmyAmassed { .. }
+        | GameEvent::DieRolled { .. }
+        | GameEvent::CoinFlipped { .. }
+        | GameEvent::RingTemptsYou { .. }
+        | GameEvent::Firebend { .. }
+        | GameEvent::Airbend { .. }
+        | GameEvent::Earthbend { .. }
+        | GameEvent::Waterbend { .. }
+        | GameEvent::Clash { .. }
+        | GameEvent::VoteCast { .. }
+        | GameEvent::VoteResolved { .. } => LogTone::Informational,
+        GameEvent::LifeChanged { .. }
+        | GameEvent::GameStarted
+        | GameEvent::HiddenSearchViewed { .. }
+        | GameEvent::CreatureExploited { .. }
+        | GameEvent::TurnStarted { .. }
+        | GameEvent::PhaseChanged { .. }
+        | GameEvent::PriorityPassed { .. }
+        | GameEvent::Mutated { .. }
+        | GameEvent::Augmented { .. }
+        | GameEvent::XValueChosen { .. }
+        | GameEvent::ZoneChanged { .. }
+        | GameEvent::ManaAdded { .. }
+        | GameEvent::TappedForMana { .. }
+        | GameEvent::ManaAbilityProduced { .. }
+        | GameEvent::ManaPoolEmptied { .. }
+        | GameEvent::ManaRecolored { .. }
+        | GameEvent::PermanentTapped { .. }
+        | GameEvent::Foretold { .. }
+        | GameEvent::BecameForetold { .. }
+        | GameEvent::MulliganStarted
+        | GameEvent::CardsDrawn { .. }
+        | GameEvent::CardDrawn { .. }
+        | GameEvent::PermanentUntapped { .. }
+        | GameEvent::PermanentPhasedOut { .. }
+        | GameEvent::PermanentPhasedIn { .. }
+        | GameEvent::PlayerPhasedOut { .. }
+        | GameEvent::PlayerPhasedIn { .. }
+        | GameEvent::BecomesPlotted { .. }
+        | GameEvent::LandPlayed { .. }
+        | GameEvent::StackPushed { .. }
+        | GameEvent::StackResolved { .. }
+        // CR 714.2: neither good nor bad news on its own — the drain or token
+        // the observing trigger produces is what carries tone.
+        | GameEvent::SagaChapterAbilityResolved { .. }
+        | GameEvent::Discarded { .. }
+        | GameEvent::Cycled { .. }
+        | GameEvent::DamageCleared { .. }
+        | GameEvent::GameOver { .. }
+        | GameEvent::ResolutionHalted { .. }
+        | GameEvent::CounterAdded { .. }
+        | GameEvent::ObjectIntensified { .. }
+        | GameEvent::Evolved { .. }
+        | GameEvent::CounterRemoved { .. }
+        | GameEvent::ControllerChanged { .. }
+        | GameEvent::EffectResolved { .. }
+        | GameEvent::Unattached { .. }
+        | GameEvent::ContinuousEffectEnded { .. }
+        | GameEvent::BecomesTarget { .. }
+        | GameEvent::VehicleCrewed { .. }
+        | GameEvent::Stationed { .. }
+        | GameEvent::Saddled { .. }
+        | GameEvent::ReplacementApplied { .. }
+        | GameEvent::Transformed { .. }
+        | GameEvent::Flipped { .. }
+        | GameEvent::Specialized { .. }
+        | GameEvent::DayNightChanged { .. }
+        | GameEvent::TurnedFaceUp { .. }
+        | GameEvent::TurnedFaceDown { .. }
+        | GameEvent::CardsRevealed { .. }
+        | GameEvent::ChosenNumbersRevealed { .. }
+        | GameEvent::CombatDamageDealtToPlayer { .. }
+        | GameEvent::CrimeCommitted { .. }
+        | GameEvent::Regenerated { .. }
+        | GameEvent::CreatureSuspected { .. }
+        | GameEvent::CreatureNoLongerSuspected { .. }
+        | GameEvent::Detained { .. }
+        | GameEvent::BecamePrepared { .. }
+        | GameEvent::BecameUnprepared { .. }
+        | GameEvent::CaseSolved { .. }
+        | GameEvent::ClassLevelGained { .. }
+        | GameEvent::PowerToughnessChanged { .. }
+        | GameEvent::CascadeMissed { .. }
+        | GameEvent::StartingPlayerContest { .. }
+        | GameEvent::RoomEntered { .. }
+        | GameEvent::RoomDoorUnlocked { .. }
+        | GameEvent::DungeonCompleted { .. }
+        | GameEvent::Planeswalked { .. }
+        | GameEvent::ChaosEnsued { .. }
+        | GameEvent::PlanarDieRolled { .. }
+        | GameEvent::SchemeSetInMotion { .. }
+        | GameEvent::SchemeAbandoned { .. }
+        | GameEvent::AttractionOpened { .. }
+        | GameEvent::ContraptionAssembled { .. }
+        | GameEvent::StickerPlaced { .. }
+        | GameEvent::AttractionsRolledToVisit { .. }
+        | GameEvent::AttractionVisited { .. }
+        | GameEvent::ContraptionCranked { .. }
+        | GameEvent::CompanionRevealed { .. }
+        | GameEvent::CompanionMovedToHand { .. }
+        | GameEvent::EnergyChanged { .. }
+        | GameEvent::PlayerCounterChanged { .. }
+        | GameEvent::ManaExpended { .. }
+        | GameEvent::PlayerPerformedAction { .. } => LogTone::Neutral,
+    }
+}
+
+fn boundary(event: &GameEvent) -> LogBoundary {
+    match event {
+        GameEvent::TurnStarted { .. } => LogBoundary::Turn,
+        GameEvent::PhaseChanged { .. } => LogBoundary::Phase,
+        _ => LogBoundary::None,
+    }
+}
+
+fn visibility(event: &GameEvent) -> LogVisibility {
+    match event {
+        // Draws are intentionally retained for diagnostics, but normal logs
+        // must not disclose an opponent or AI's private card flow.
+        GameEvent::CardDrawn { .. } | GameEvent::CardsDrawn { .. } => {
+            LogVisibility::HiddenInformation
+        }
+        _ => LogVisibility::Public,
+    }
+}
+
 /// Returns true for events that should be excluded from log output.
 /// Covers hidden-information leaks and low-signal stack bookkeeping.
-fn should_exclude_event(event: &GameEvent, _state: &GameState) -> bool {
+fn should_exclude_event(event: &GameEvent, state: &GameState) -> bool {
     match event {
-        // Individual card draws from library leak card identity — CardsDrawn summary suffices
+        GameEvent::HiddenSearchViewed { .. } => true,
+        // Library-origin moves and mulligan/tuck moves from hand to library
+        // expose hidden card identity. Public discard/moves remain loggable.
         GameEvent::ZoneChanged {
             from: Some(crate::types::zones::Zone::Library),
             ..
+        }
+        | GameEvent::ZoneChanged {
+            from: Some(crate::types::zones::Zone::Hand),
+            to: crate::types::zones::Zone::Library,
+            ..
         } => true,
-        // CardDrawn also reveals which specific card was drawn
-        GameEvent::CardDrawn { .. } => true,
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(crate::types::zones::Zone::Hand),
+            to: crate::types::zones::Zone::Exile,
+            ..
+        } if state
+            .objects
+            .get(object_id)
+            .is_some_and(|obj| obj.face_down) =>
+        {
+            true
+        }
+        // PlayerPerformedAction { Draw } is an internal ledger signal consumed by
+        // "for each player who drew a card this way" counting and
+        // the player-action trigger index), not a user-facing event. Unlike
+        // CardDrawn, which remains available as a HiddenInformation diagnostic,
+        // excluding it keeps the visible log from narrating internal ledger events.
+        GameEvent::PlayerPerformedAction {
+            action: crate::types::events::PlayerActionKind::Draw,
+            ..
+        } => true,
         // StackPushed/StackResolved are low-signal bookkeeping —
         // the meaningful info is in SpellCast/AbilityActivated and EffectResolved
         GameEvent::StackPushed { .. } | GameEvent::StackResolved { .. } => true,
+        // CR 714.2: the chapter-resolution notification exists so meta-triggers
+        // can observe it; the player already saw the chapter ability itself
+        // resolve. Same low-signal bookkeeping class as StackResolved.
+        GameEvent::SagaChapterAbilityResolved { .. } => true,
         _ => false,
     }
 }
@@ -86,6 +482,7 @@ fn num(n: i32) -> LogSegment {
 fn categorize(event: &GameEvent) -> LogCategory {
     match event {
         GameEvent::GameStarted
+        | GameEvent::HiddenSearchViewed { .. }
         | GameEvent::GameOver { .. }
         // CR 732.2: a halted runaway resolution is game-flow control, grouped
         // with GameOver under `Game` rather than object-state `State`.
@@ -109,10 +506,14 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::KeywordAbilityActivated { .. }
         | GameEvent::StackPushed { .. }
         | GameEvent::StackResolved { .. }
+        // CR 714.2: a chapter ability finishing resolution is a stack event.
+        | GameEvent::SagaChapterAbilityResolved { .. }
         | GameEvent::SpellCountered { .. } => LogCategory::Stack,
 
         GameEvent::AttackersDeclared { .. }
         | GameEvent::BlockersDeclared { .. }
+        | GameEvent::AttackerBecameBlockedByEffect { .. }
+        | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
         | GameEvent::CreatureExerted { .. }
         | GameEvent::CreatureEnlisted { .. }
         | GameEvent::CombatDamageDealtToPlayer { .. } => LogCategory::Combat,
@@ -134,6 +535,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::Discarded { .. }
         | GameEvent::Cycled { .. }
         | GameEvent::CardsRevealed { .. }
+        | GameEvent::ChosenNumbersRevealed { .. }
         | GameEvent::Foretold { .. }
         | GameEvent::BecameForetold { .. } => LogCategory::Zone,
 
@@ -141,6 +543,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
 
         GameEvent::ManaAdded { .. }
         | GameEvent::TappedForMana { .. }
+        | GameEvent::ManaAbilityProduced { .. }
         | GameEvent::ManaPoolEmptied { .. }
         | GameEvent::ManaRecolored { .. } => LogCategory::Mana,
 
@@ -157,6 +560,9 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::CounterRemoved { .. }
         | GameEvent::ControllerChanged { .. }
         | GameEvent::Transformed { .. }
+        // CR 710.4: flipping is an object-status change, grouped with transform
+        // and face up/down.
+        | GameEvent::Flipped { .. }
         | GameEvent::TurnedFaceUp { .. }
         | GameEvent::TurnedFaceDown { .. }
         | GameEvent::Regenerated { .. }
@@ -178,12 +584,15 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::Augmented { .. }
         | GameEvent::BecomesPlotted { .. } => LogCategory::State,
 
-        GameEvent::SpeedChanged { .. } => LogCategory::Special,
+        GameEvent::SpeedChanged { .. } | GameEvent::ArmyAmassed { .. } => LogCategory::Special,
 
         GameEvent::TokenCreated { .. } | GameEvent::ObjectConjured { .. } => LogCategory::Token,
 
         GameEvent::EffectResolved { .. }
         | GameEvent::Unattached { .. }
+        // CR 116.2c: a special action that ends a continuous effect is an
+        // effect-level state change, grouped with the other effect events.
+        | GameEvent::ContinuousEffectEnded { .. }
         | GameEvent::BecomesTarget { .. }
         | GameEvent::ReplacementApplied { .. }
         | GameEvent::CrimeCommitted { .. }
@@ -193,8 +602,14 @@ fn categorize(event: &GameEvent) -> LogCategory {
             LogCategory::Destroy
         }
 
+        GameEvent::CardPredicateGuessMade { .. }
+        | GameEvent::DebugActionUsed { .. }
+        | GameEvent::DebugPermissionGranted { .. }
+        | GameEvent::DebugPermissionRevoked { .. } => LogCategory::Debug,
+
         GameEvent::MonarchChanged { .. }
         | GameEvent::CityBlessingGained { .. }
+        | GameEvent::EnduringStoryGained { .. }
         | GameEvent::DieRolled { .. }
         | GameEvent::CoinFlipped { .. }
         | GameEvent::RingTemptsYou { .. }
@@ -232,10 +647,6 @@ fn categorize(event: &GameEvent) -> LogCategory {
         GameEvent::CombatTaxPaid { .. } | GameEvent::CombatTaxDeclined { .. } => {
             LogCategory::Combat
         }
-
-        GameEvent::DebugActionUsed { .. }
-        | GameEvent::DebugPermissionGranted { .. }
-        | GameEvent::DebugPermissionRevoked { .. } => LogCategory::Special,
     }
 }
 
@@ -243,6 +654,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
 fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
     match event {
         GameEvent::GameStarted => vec![text("Game started")],
+        GameEvent::HiddenSearchViewed { .. } => vec![],
 
         GameEvent::TurnStarted {
             player_id,
@@ -262,11 +674,45 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             vec![player_seg(state, *player_id), text(" passes priority")]
         }
 
-        GameEvent::PlayerPerformedAction { player_id, action } => vec![
+        GameEvent::PlayerPerformedAction {
+            player_id,
+            action: crate::types::events::PlayerActionKind::Scry,
+            look_count: Some(look_count),
+            scry_bottom_count: Some(scry_bottom_count),
+            ..
+        } => vec![
+            player_seg(state, *player_id),
+            text(" scries "),
+            num(*look_count as i32),
+            text(": "),
+            num(look_count.saturating_sub(*scry_bottom_count) as i32),
+            text(" on top and "),
+            num(*scry_bottom_count as i32),
+            text(" on bottom"),
+        ],
+        GameEvent::PlayerPerformedAction {
+            player_id, action, ..
+        } => vec![
             player_seg(state, *player_id),
             text(" performed action "),
             text(&format!("{action:?}")),
         ],
+        GameEvent::CardPredicateGuessMade {
+            player_id,
+            source_id,
+            choice,
+        } => {
+            let mut segments = vec![
+                player_seg(state, *player_id),
+                text(" guesses "),
+                text(choice),
+            ];
+            if let Some(source_id) = source_id {
+                segments.push(text(" for "));
+                segments.push(card_seg(state, *source_id));
+            }
+            segments
+        }
 
         GameEvent::SpellCast {
             controller,
@@ -358,6 +804,10 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             card_seg(state, *tapped),
         ],
 
+        GameEvent::ArmyAmassed { object_id, .. } => {
+            vec![card_seg(state, *object_id), text(" is amassed")]
+        }
+
         GameEvent::StackPushed { object_id } => {
             vec![card_seg(state, *object_id), text(" added to stack")]
         }
@@ -365,6 +815,10 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::StackResolved { object_id } => {
             vec![card_seg(state, *object_id), text(" resolves")]
         }
+
+        // CR 714.2: filtered out by `is_low_signal` above — the chapter
+        // ability's own resolution line already told the player what happened.
+        GameEvent::SagaChapterAbilityResolved { .. } => vec![],
 
         GameEvent::SpellCountered {
             object_id,
@@ -390,6 +844,20 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             }
             segments
         }
+
+        // CR 116.2c: a player-visible special action with no log line would be a
+        // defect. The group key is engine bookkeeping and is deliberately not
+        // rendered — the source permanent is the player-meaningful identity.
+        GameEvent::ContinuousEffectEnded {
+            group: _,
+            source_id,
+            player,
+        } => vec![
+            player_seg(state, *player),
+            text(" pays to end "),
+            card_seg(state, *source_id),
+            text("'s effect"),
+        ],
 
         // CR 111.1 + CR 603.6a: `from: None` indicates token creation (no prior
         // zone). Render without a source zone to avoid "moves from None to
@@ -465,6 +933,22 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" reveals: "),
             text(&card_names.join(", ")),
         ],
+
+        // CR 101.4: one line for the whole simultaneous reveal — the numbers
+        // become public together, so rendering them per-player would imply an
+        // ordering the rules do not have.
+        GameEvent::ChosenNumbersRevealed { numbers } => {
+            let mut segments = vec![text("Chosen numbers revealed: ")];
+            for (index, (player, value)) in numbers.iter().enumerate() {
+                if index > 0 {
+                    segments.push(text(", "));
+                }
+                segments.push(player_seg(state, *player));
+                segments.push(text(" "));
+                segments.push(num(crate::game::arithmetic::u32_to_i32_saturating(*value)));
+            }
+            segments
+        }
 
         GameEvent::LifeChanged { player_id, amount } => {
             if *amount >= 0 {
@@ -578,6 +1062,21 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             segs
         }
 
+        // CR 509.1h: an effect made an attacker become blocked (no blockers).
+        GameEvent::AttackerBecameBlockedByEffect { attacker } => {
+            vec![card_seg(state, *attacker), text(" becomes blocked")]
+        }
+
+        // CR 509.3d: a disambiguated single blocker/attacker pair from a
+        // per-blocker filtered blocks-or-becomes-blocked firing.
+        GameEvent::AttackerBecameBlockedByFilteredBlocker { attacker, blocker } => {
+            vec![
+                card_seg(state, *blocker),
+                text(" blocks "),
+                card_seg(state, *attacker),
+            ]
+        }
+
         GameEvent::CombatDamageDealtToPlayer {
             player_id,
             source_amounts,
@@ -660,6 +1159,11 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             object_id,
             counter_type,
             count,
+            // CR 122.1: the log line names the counters and recipient; the placing
+            // player is implied by the entry's stack/ability context, consistent
+            // with every other counter-placement log line (actor deliberately
+            // not surfaced).
+            ..
         } => vec![
             num(*count as i32),
             text(" "),
@@ -692,6 +1196,12 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
 
         GameEvent::Transformed { object_id } => {
             vec![card_seg(state, *object_id), text(" transforms")]
+        }
+
+        // CR 710.4: the log names the permanent by its (now alternative,
+        // CR 710.1b) characteristics, which `card_seg` reads live.
+        GameEvent::Flipped { object_id } => {
+            vec![card_seg(state, *object_id), text(" flips")]
         }
 
         GameEvent::Specialized { object_id, color } => {
@@ -811,13 +1321,17 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_seg(state, *new_controller),
         ],
 
-        GameEvent::EffectResolved { kind, source_id } => vec![
+        GameEvent::EffectResolved {
+            kind, source_id, ..
+        } => vec![
             card_seg(state, *source_id),
             text(": "),
             text(&format!("{kind:?}")),
         ],
 
-        GameEvent::BecomesTarget { target, source_id } => {
+        GameEvent::BecomesTarget {
+            target, source_id, ..
+        } => {
             let mut segments = Vec::new();
             match target {
                 TargetRef::Object(object_id) => segments.push(card_seg(state, *object_id)),
@@ -881,6 +1395,13 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             vec![
                 player_seg(state, *player_id),
                 text(" gets the city's blessing"),
+            ]
+        }
+
+        GameEvent::EnduringStoryGained { player_id } => {
+            vec![
+                player_seg(state, *player_id),
+                text(" gains an enduring story"),
             ]
         }
 
@@ -1215,24 +1736,17 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" revoked debug actions from "),
             player_seg(state, *player_id),
         ],
-        GameEvent::Foretold {
-            player_id,
-            object_id,
-        } => vec![
-            player_seg(state, *player_id),
-            text(" foretold "),
-            card_seg(state, *object_id),
-        ],
+        GameEvent::Foretold { player_id, .. } => {
+            vec![player_seg(state, *player_id), text(" foretold a card")]
+        }
         // CR 702.143d: an effect made an exiled card foretold (no foretelling
         // player — the card itself became foretold).
-        GameEvent::BecameForetold { object_id } => {
-            vec![card_seg(state, *object_id), text(" becomes foretold")]
-        }
+        GameEvent::BecameForetold { .. } => vec![text("An exiled card becomes foretold")],
         // CR 106.12a: `TappedForMana` is the per-resolution trigger event for
         // `TapsForMana` matchers. The per-unit `ManaAdded` events already
         // produce the user-facing "adds X mana" log lines, so this event is
         // internal plumbing and emits no segments of its own.
-        GameEvent::TappedForMana { .. } => vec![],
+        GameEvent::TappedForMana { .. } | GameEvent::ManaAbilityProduced { .. } => vec![],
     }
 }
 
@@ -1241,6 +1755,9 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::game::engine::{
+        start_game, start_game_skip_mulligan, start_game_with_starting_player,
+    };
     use crate::game::zones::create_object;
     use crate::types::identifiers::CardId;
 
@@ -1258,8 +1775,9 @@ mod tests {
             card_id: CardId(1),
             controller: PlayerId(0),
             object_id: id,
+            cast_mana_value: None,
         };
-        let entries = resolve_log_entries(&[event], &state);
+        let entries = resolve_log_entries(&[event], &state, &state);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].category, LogCategory::Stack);
         // Verify card name is resolved
@@ -1270,6 +1788,174 @@ mod tests {
         assert!(
             has_card_name,
             "Expected CardName segment with 'Lightning Bolt'"
+        );
+    }
+
+    #[test]
+    fn completed_scry_has_a_public_count_only_log_entry() {
+        let state = GameState::new_two_player(42);
+        let entries = resolve_log_entries(
+            &[GameEvent::PlayerPerformedAction {
+                player_id: PlayerId(0),
+                action: crate::types::events::PlayerActionKind::Scry,
+                look_count: Some(3),
+                scry_bottom_count: Some(2),
+                scry_top_count: Some(1),
+            }],
+            &state,
+            &state,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].presentation.visibility, LogVisibility::Public);
+        assert_eq!(
+            entries[0].segments,
+            vec![
+                LogSegment::PlayerName {
+                    name: "Player 1".to_string(),
+                    player_id: PlayerId(0),
+                },
+                LogSegment::Text(" scries ".to_string()),
+                LogSegment::Number(3),
+                LogSegment::Text(": ".to_string()),
+                LogSegment::Number(1),
+                LogSegment::Text(" on top and ".to_string()),
+                LogSegment::Number(2),
+                LogSegment::Text(" on bottom".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn public_log_hides_hand_to_library_but_keeps_public_discard() {
+        use crate::types::game_state::ZoneChangeRecord;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let mulligan = create_object(
+            &mut state,
+            CardId(98),
+            PlayerId(1),
+            "Secret Mulligan Card".to_string(),
+            Zone::Library,
+        );
+        let discarded = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(1),
+            "Public Discard".to_string(),
+            Zone::Graveyard,
+        );
+        let mut mulligan_record =
+            ZoneChangeRecord::test_minimal(mulligan, Some(Zone::Hand), Zone::Library);
+        mulligan_record.name = "Secret Mulligan Card".to_string();
+        let mut discard_record =
+            ZoneChangeRecord::test_minimal(discarded, Some(Zone::Hand), Zone::Graveyard);
+        discard_record.name = "Public Discard".to_string();
+        let events = vec![
+            GameEvent::ZoneChanged {
+                object_id: mulligan,
+                from: Some(Zone::Hand),
+                to: Zone::Library,
+                record: Box::new(mulligan_record),
+            },
+            GameEvent::ZoneChanged {
+                object_id: discarded,
+                from: Some(Zone::Hand),
+                to: Zone::Graveyard,
+                record: Box::new(discard_record),
+            },
+        ];
+
+        let entries = resolve_log_entries(&events, &state, &state);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].segments.iter().any(
+            |segment| matches!(segment, LogSegment::CardName { name, .. } if name == "Public Discard")
+        ));
+        assert!(entries.iter().all(|entry| entry.segments.iter().all(
+            |segment| !matches!(segment, LogSegment::CardName { name, .. } if name == "Secret Mulligan Card")
+        )));
+    }
+
+    #[test]
+    fn public_log_hides_foretold_card_name_and_hand_to_exile_record() {
+        use crate::types::game_state::ZoneChangeRecord;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let foretold = create_object(
+            &mut state,
+            CardId(704),
+            PlayerId(1),
+            "Secret Foretell".to_string(),
+            Zone::Exile,
+        );
+        let obj = state.objects.get_mut(&foretold).unwrap();
+        obj.foretold = true;
+        obj.face_down = true;
+        let mut record = ZoneChangeRecord::test_minimal(foretold, Some(Zone::Hand), Zone::Exile);
+        record.name = "Secret Foretell".to_string();
+        record.owner = PlayerId(1);
+        let entries = resolve_log_entries(
+            &[
+                GameEvent::ZoneChanged {
+                    object_id: foretold,
+                    from: Some(Zone::Hand),
+                    to: Zone::Exile,
+                    record: Box::new(record),
+                },
+                GameEvent::Foretold {
+                    player_id: PlayerId(1),
+                    object_id: foretold,
+                },
+            ],
+            &state,
+            &state,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(
+            entries[0].segments.as_slice(),
+            [LogSegment::PlayerName { player_id, .. }, LogSegment::Text(text)]
+                if *player_id == PlayerId(1) && text == " foretold a card"
+        ));
+    }
+
+    #[test]
+    fn draw_player_action_is_excluded_but_other_actions_are_logged() {
+        use crate::types::events::PlayerActionKind;
+
+        let state = GameState::new_two_player(42);
+        // The Draw ledger signal must not reach the visible log —
+        // this assertion flips (entries.len() == 1) if the exclusion is reverted.
+        let draw_event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(0),
+            action: PlayerActionKind::Draw,
+            look_count: None,
+            scry_bottom_count: None,
+            scry_top_count: None,
+        };
+        let draw_entries = resolve_log_entries(&[draw_event], &state, &state);
+        assert!(
+            draw_entries.is_empty(),
+            "PlayerPerformedAction {{ Draw }} is a ledger-only signal and must be excluded from the log"
+        );
+
+        // Reach-guard against an over-broad exclusion: a non-Draw player action
+        // (Scry) must still produce a log entry. Fails if someone excludes all
+        // PlayerPerformedAction variants instead of just Draw.
+        let scry_event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(0),
+            action: PlayerActionKind::Scry,
+            look_count: Some(1),
+            scry_bottom_count: Some(0),
+            scry_top_count: Some(1),
+        };
+        let scry_entries = resolve_log_entries(&[scry_event], &state, &state);
+        assert_eq!(
+            scry_entries.len(),
+            1,
+            "Non-Draw player actions must remain visible in the log"
         );
     }
 
@@ -1295,6 +1981,41 @@ mod tests {
             excess: 0,
         };
         assert_eq!(categorize(&event), LogCategory::Combat);
+    }
+
+    #[test]
+    fn named_choice_guess_logs_as_debug_with_source() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Gollum, Scheming Guide".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let event = GameEvent::CardPredicateGuessMade {
+            player_id: PlayerId(1),
+            source_id: Some(source_id),
+            choice: "Nonland".to_string(),
+        };
+        let entries = resolve_log_entries(&[event], &state, &state);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].category, LogCategory::Debug);
+        assert!(matches!(
+            entries[0].segments.as_slice(),
+            [
+                LogSegment::PlayerName { player_id, .. },
+                LogSegment::Text(guesses),
+                LogSegment::Text(choice),
+                LogSegment::Text(for_text),
+                LogSegment::CardName { name, .. },
+            ] if *player_id == PlayerId(1)
+                && guesses == " guesses "
+                && choice == "Nonland"
+                && for_text == " for "
+                && name == "Gollum, Scheming Guide"
+        ));
     }
 
     #[test]
@@ -1326,6 +2047,7 @@ mod tests {
             ObjectId(42),
             crate::types::game_state::LKISnapshot {
                 name: "Grizzly Bears".to_string(),
+                token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),
                 base_power: Some(2),
@@ -1341,6 +2063,8 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
                 tapped: false,
+                is_suspected: false,
+                attachments: Vec::new(),
             },
         );
         assert_eq!(resolve_object_name(&state, ObjectId(42)), "Grizzly Bears");
@@ -1444,13 +2168,208 @@ mod tests {
                 toughness_delta: 2,
             },
         ];
-        let entries = resolve_log_entries(&events, &state);
+        let entries = resolve_log_entries(&events, &state, &state);
         assert_eq!(entries.len(), events.len());
         for entry in &entries {
             assert!(
                 !entry.segments.is_empty(),
                 "Every event should produce at least one segment"
             );
+        }
+    }
+
+    #[test]
+    fn cursor_uses_pregame_context_then_turn_and_phase_boundaries() {
+        let mut before = GameState::new_two_player(42);
+        before.turn_number = 9;
+        before.phase = Phase::End;
+        let mut after = before.clone();
+        after.turn_number = 1;
+        after.phase = Phase::Upkeep;
+        let entries = resolve_log_entries(
+            &[
+                GameEvent::StartingPlayerContest {
+                    rounds: vec![],
+                    winner: PlayerId(0),
+                },
+                GameEvent::GameStarted,
+                GameEvent::TurnStarted {
+                    player_id: PlayerId(0),
+                    turn_number: 1,
+                },
+                GameEvent::PhaseChanged {
+                    phase: Phase::Upkeep,
+                },
+                GameEvent::CardDrawn {
+                    player_id: PlayerId(0),
+                    object_id: ObjectId(77),
+                    nth_in_turn: 1,
+                    nth_in_step: 1,
+                },
+            ],
+            &before,
+            &after,
+        );
+
+        assert_eq!(entries[0].turn, 0);
+        assert_eq!(entries[1].turn, 0);
+        assert_eq!(entries[2].turn, 1);
+        assert_eq!(entries[2].phase, Phase::Untap);
+        assert_eq!(entries[3].phase, Phase::Upkeep);
+        assert_eq!(entries[4].turn, 1);
+        assert_eq!(
+            entries[4].presentation.visibility,
+            LogVisibility::HiddenInformation
+        );
+        assert!(
+            matches!(entries[4].segments.as_slice(), [LogSegment::PlayerName { .. }, LogSegment::Text(text)] if text == " draws a card")
+        );
+    }
+
+    #[test]
+    fn factory_attaches_policy_metadata_and_omits_empty_entries() {
+        let state = GameState::new_two_player(42);
+        let entries = resolve_log_entries(
+            &[
+                GameEvent::LifeChanged {
+                    player_id: PlayerId(0),
+                    amount: 3,
+                },
+                GameEvent::LifeChanged {
+                    player_id: PlayerId(1),
+                    amount: -3,
+                },
+                GameEvent::TappedForMana {
+                    source_id: ObjectId(1),
+                    player_id: PlayerId(0),
+                    produced: vec![],
+                    tap_state: Default::default(),
+                },
+            ],
+            &state,
+            &state,
+        );
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].presentation.importance, LogImportance::Essential);
+        assert_eq!(entries[0].presentation.tone, LogTone::Positive);
+        assert_eq!(entries[1].presentation.tone, LogTone::Negative);
+    }
+
+    #[test]
+    fn presentation_policy_table_covers_importance_and_polarity() {
+        let cases = [
+            (
+                GameEvent::GameStarted,
+                LogImportance::Essential,
+                LogTone::Neutral,
+            ),
+            (
+                GameEvent::PhaseChanged {
+                    phase: Phase::Upkeep,
+                },
+                LogImportance::Context,
+                LogTone::Neutral,
+            ),
+            (
+                GameEvent::LifeChanged {
+                    player_id: PlayerId(0),
+                    amount: 1,
+                },
+                LogImportance::Essential,
+                LogTone::Positive,
+            ),
+            (
+                GameEvent::DamageDealt {
+                    source_id: ObjectId(1),
+                    target: TargetRef::Player(PlayerId(1)),
+                    amount: 2,
+                    is_combat: false,
+                    excess: 0,
+                },
+                LogImportance::Essential,
+                LogTone::Negative,
+            ),
+            (
+                GameEvent::DebugActionUsed {
+                    player_id: PlayerId(0),
+                    description: "set life".to_string(),
+                },
+                LogImportance::Diagnostic,
+                LogTone::Diagnostic,
+            ),
+            (
+                GameEvent::TappedForMana {
+                    source_id: ObjectId(1),
+                    player_id: PlayerId(0),
+                    produced: vec![],
+                    tap_state: Default::default(),
+                },
+                LogImportance::Detail,
+                LogTone::Neutral,
+            ),
+        ];
+
+        for (event, expected_importance, expected_tone) in cases {
+            assert_eq!(importance(&event), expected_importance, "{event:?}");
+            assert_eq!(tone(&event), expected_tone, "{event:?}");
+        }
+    }
+
+    #[test]
+    fn start_game_log_entries_reset_hostile_context_before_turn_one() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 99;
+        state.phase = Phase::End;
+
+        let result = start_game(&mut state);
+
+        assert!(matches!(
+            result.events.as_slice(),
+            [
+                GameEvent::StartingPlayerContest { .. },
+                GameEvent::GameStarted,
+                GameEvent::TurnStarted { turn_number: 1, .. },
+                ..
+            ]
+        ));
+        assert_eq!(result.log_entries[0].turn, 0);
+        assert_eq!(result.log_entries[0].phase, Phase::Untap);
+        assert_eq!(result.log_entries[1].turn, 0);
+        assert_eq!(result.log_entries[1].phase, Phase::Untap);
+        assert_eq!(result.log_entries[2].turn, 1);
+        assert_eq!(result.log_entries[2].phase, Phase::Untap);
+    }
+
+    #[test]
+    fn explicit_and_skip_mulligan_starts_reset_context_without_a_contest() {
+        let mut explicit_state = GameState::new_two_player(42);
+        explicit_state.turn_number = 99;
+        explicit_state.phase = Phase::End;
+        let explicit = start_game_with_starting_player(&mut explicit_state, PlayerId(1));
+
+        let mut skip_state = GameState::new_two_player(42);
+        skip_state.turn_number = 99;
+        skip_state.phase = Phase::End;
+        let skipped = start_game_skip_mulligan(&mut skip_state);
+
+        for result in [&explicit, &skipped] {
+            assert!(!result
+                .events
+                .iter()
+                .any(|event| matches!(event, GameEvent::StartingPlayerContest { .. })));
+            assert!(matches!(
+                result.events.as_slice(),
+                [
+                    GameEvent::GameStarted,
+                    GameEvent::TurnStarted { turn_number: 1, .. },
+                    ..
+                ]
+            ));
+            assert_eq!(result.log_entries[0].turn, 0);
+            assert_eq!(result.log_entries[0].phase, Phase::Untap);
+            assert_eq!(result.log_entries[1].turn, 1);
+            assert_eq!(result.log_entries[1].phase, Phase::Untap);
         }
     }
 
@@ -1468,9 +2387,19 @@ mod tests {
                     object_id: ObjectId(5),
                 },
             ],
+            presentation: Default::default(),
         };
         let json = serde_json::to_string(&entry).unwrap();
         let deserialized: GameLogEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(entry, deserialized);
+    }
+
+    #[test]
+    fn legacy_log_json_defaults_presentation() {
+        let json = r#"{"seq":1,"turn":1,"phase":"Untap","category":"Game","segments":[{"type":"Text","value":"Game started"}]}"#;
+        let entry: GameLogEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.presentation, LogPresentation::default());
+        let serialized = serde_json::to_value(&entry).unwrap();
+        assert_eq!(serialized["presentation"]["importance"], "Detail");
     }
 }

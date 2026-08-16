@@ -10,7 +10,11 @@ import type {
   PlayerId,
 } from "../adapter/types";
 import { FORMAT_REGISTRY } from "../data/formatRegistry";
-import { PROTOCOL_VERSION, type ServerInfo } from "../adapter/ws-adapter";
+import {
+  LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL,
+  PROTOCOL_VERSION,
+  type ServerInfo,
+} from "../adapter/ws-adapter";
 import {
   clearWsSession,
   loadWsSession,
@@ -26,7 +30,6 @@ import {
   type LookupJoinTargetResult,
   type RegisterHostRequest,
   type ResolveResult,
-  type ResolveGuestOptions,
 } from "../services/brokerClient";
 import {
   HandshakeError,
@@ -36,7 +39,17 @@ import {
   type ReconnectHandle,
 } from "../services/openPhaseSocket";
 import { isValidWebSocketUrl } from "../services/serverDetection";
+import {
+  DEFAULT_MULTIPLAYER_SERVER_URL,
+  isOfficialMultiplayerServerUrl,
+} from "../config/multiplayerServer";
 import { saveActiveGame, useGameStore } from "./gameStore";
+import { usePreferencesStore } from "./preferencesStore";
+import {
+  canAttemptNativeEngine,
+  ensureNativeEngine,
+  nativeEngineKeyForCurrentOrigin,
+} from "../services/nativeEngine";
 import type { P2PHostAdapter } from "../adapter/p2p-adapter";
 import {
   ServerDraftAdapter,
@@ -62,6 +75,7 @@ let activeBroker: BrokerClient | null = null;
 let activeBrokerGameCode: string | null = null;
 let activeP2PHostAdapter: P2PHostAdapter | null = null;
 let activeP2PHostGameId: string | null = null;
+let p2pHostingAttempt = 0;
 
 function asDeckPayload(deck: HostingDeck): {
   main_deck: string[];
@@ -316,6 +330,7 @@ interface MultiplayerActions {
   setLatency: (ms: number | null) => void;
   // Hosting session actions
   startHosting: (settings: HostingSettings, deck: HostingDeck) => void;
+  resumeServerHosting: () => boolean;
   cancelHosting: () => void;
   clearPendingGameRoute: () => void;
   setServerInfo: (info: ServerInfo | null) => void;
@@ -348,11 +363,7 @@ interface MultiplayerActions {
    * alive. Does NOT navigate — the caller inspects the result and handles
    * password retry, build mismatch, etc. before navigation.
    */
-  resolveGuest: (
-    code: string,
-    password?: string,
-    opts?: Pick<ResolveGuestOptions, "reservationToken">,
-  ) => Promise<ResolveResult>;
+  resolveGuest: (code: string, password?: string) => Promise<ResolveResult>;
   /**
    * Read-only typed-code lookup. Returns format/routing metadata without
    * consuming a seat.
@@ -487,7 +498,8 @@ export function isLobbyEntryCompatible(
 /** True when the client's wire-protocol can speak to the server's advertised mode. */
 export function isServerCompatible(info: ServerInfo | null): boolean {
   if (!info) return false;
-  const minProtocol = info.mode === "LobbyOnly" ? PROTOCOL_VERSION - 1 : PROTOCOL_VERSION;
+  const minProtocol =
+    info.mode === "LobbyOnly" ? LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL : PROTOCOL_VERSION;
   return info.protocolVersion >= minProtocol && info.protocolVersion <= PROTOCOL_VERSION;
 }
 
@@ -498,22 +510,232 @@ export const FORMAT_DEFAULTS: Record<GameFormat, FormatConfig> = Object.fromEntr
   FORMAT_REGISTRY.map((m) => [m.format, m.default_config]),
 ) as Record<GameFormat, FormatConfig>;
 
-/**
- * Canonical official lobby URL, mirroring `DEFAULT_SERVER` in serverDetection.
- * Kept as a local literal (not imported) because this constant is read at the
- * top level during `create()`, and serverDetection ↔ multiplayerStore form an
- * import cycle — a top-level read of the imported value could hit a TDZ crash
- * depending on bundler load order. The migration below uses the same constant
- * to retire the decommissioned regional host from persisted state.
- */
-const OFFICIAL_LOBBY_URL = "wss://lobby.phase-rs.dev/ws";
+export function migrateOfficialServerAddress(
+  address: unknown,
+  targetAddress: string,
+): unknown {
+  return typeof address === "string" && isOfficialMultiplayerServerUrl(address)
+    ? targetAddress
+    : address;
+}
+
+export function migratePersistedMultiplayerState(
+  persisted: unknown,
+  version: number,
+): unknown {
+  if (!persisted || typeof persisted !== "object") return persisted;
+  const migrated = persisted as Record<string, unknown>;
+  if (version < 2) {
+    migrated.serverAddress = migrateOfficialServerAddress(
+      migrated.serverAddress,
+      DEFAULT_MULTIPLAYER_SERVER_URL,
+    );
+  }
+  return migrated;
+}
+
+type MultiplayerSet = (
+  partial:
+    | Partial<MultiplayerState>
+    | ((state: MultiplayerState) => Partial<MultiplayerState>),
+) => void;
+type MultiplayerGet = () => MultiplayerState & MultiplayerActions;
+
+function resetServerHostSession(set: MultiplayerSet): void {
+  clearWsSession();
+  set({
+    hostGameCode: null,
+    hostIsPublic: false,
+    hostingStatus: "idle",
+    hostSession: null,
+    playerSlots: [],
+  });
+}
+
+function savePregameHostSession(
+  get: MultiplayerGet,
+  data: { game_code: string; player_token: string; full_key?: { game_code: string; generation: number } },
+): void {
+  if (!data.full_key || data.full_key.game_code !== data.game_code) return;
+  const existing = loadWsSession();
+  const hostSession = get().hostSession ?? existing?.hostSession;
+  saveWsSession({
+    gameCode: data.game_code,
+    playerToken: data.player_token,
+    fullKey: data.full_key,
+    serverUrl: get().serverAddress,
+    timestamp: Date.now(),
+    ...(hostSession ? { hostSession } : {}),
+    ...(hostSession ? { hostIsPublic: get().hostIsPublic } : {}),
+  });
+}
+
+function clearPregameHostMetadataFromWsSession(): void {
+  const session = loadWsSession();
+  if (!session) return;
+  saveWsSession({
+    gameCode: session.gameCode,
+    playerToken: session.playerToken,
+    fullKey: session.fullKey,
+    serverUrl: session.serverUrl,
+    timestamp: Date.now(),
+  });
+}
+
+function handleServerHostMessage(
+  set: MultiplayerSet,
+  get: MultiplayerGet,
+  ws: WebSocket,
+  msg: { type: string; data?: unknown },
+): void {
+  if (msg.type === "GameCreated") {
+    const data = msg.data as {
+      game_code: string;
+      player_token: string;
+      full_key?: { game_code: string; generation: number };
+    };
+    savePregameHostSession(get, data);
+    // Reset reconnect counter on successful (re)connection.
+    hostReconnectAttempt = 0;
+    set({ hostGameCode: data.game_code, hostingStatus: "waiting" });
+  } else if (msg.type === "GameStarted") {
+    gameStartedFired = true;
+    clearPregameHostMetadataFromWsSession();
+    ws.close();
+    hostWs = null;
+    const gameId = crypto.randomUUID();
+    saveActiveGame({ id: gameId, mode: "online", difficulty: "" });
+    useGameStore.setState({ gameId });
+    const names = new Map<number, string>();
+    for (const slot of get().playerSlots) {
+      if (slot.name) names.set(slot.playerId, slot.name);
+    }
+    set({
+      hostGameCode: null,
+      hostingStatus: "idle",
+      hostSession: null,
+      playerNames: names,
+      playerSlots: [],
+      pendingGameRoute: `/game/${gameId}?mode=host`,
+    });
+  } else if (msg.type === "PlayerSlotsUpdate") {
+    const data = msg.data as { slots: PlayerSlot[] };
+    const prior = get().playerSlots;
+    const newJoiners = data.slots.filter((slot) => {
+      if (slot.kind.type !== "JoinedHuman") return false;
+      const before = prior.find((p) => p.playerId === slot.playerId);
+      return !before || before.kind.type !== "JoinedHuman";
+    });
+    set({ playerSlots: data.slots });
+    for (const joiner of newJoiners) {
+      get().showToast(`${joiner.name} joined the game.`);
+    }
+  } else if (msg.type === "Error") {
+    const data = msg.data as { message: string };
+    console.error("Host error:", data.message);
+    get().showToast(data.message || "Failed to create game.");
+    if (get().hostingStatus !== "waiting") {
+      get().cancelHosting();
+    }
+  }
+}
+
+async function openServerHostSocket(
+  set: MultiplayerSet,
+  get: MultiplayerGet,
+  setupFrame: () => unknown,
+  onReopen: () => void,
+): Promise<void> {
+  if (!isValidWebSocketUrl(get().serverAddress)) {
+    resetServerHostSession(set);
+    get().showToast("Invalid server address. Update it in Settings.");
+    return;
+  }
+
+  let socket;
+  try {
+    socket = await openPhaseSocket(get().serverAddress);
+  } catch (err) {
+    if (
+      err instanceof HandshakeError &&
+      err.kind === "protocol_mismatch"
+    ) {
+      get().showToast(err.message);
+      get().cancelHosting();
+      return;
+    }
+    if (!gameStartedFired) {
+      hostWs = null;
+      onReopen();
+    }
+    return;
+  }
+
+  set({ serverInfo: socket.serverInfo });
+  hostWs = socket.ws;
+
+  socket.ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data as string) as {
+      type: string;
+      data?: unknown;
+    };
+    handleServerHostMessage(set, get, socket.ws, msg);
+  };
+  socket.ws.onerror = () => {
+    if (!gameStartedFired) {
+      hostWs = null;
+      onReopen();
+    }
+  };
+  socket.ws.onclose = () => {
+    if (!gameStartedFired && hostWs === socket.ws) {
+      hostWs = null;
+      onReopen();
+    }
+  };
+
+  socket.ws.send(JSON.stringify(setupFrame()));
+}
+
+function attemptServerHostReconnect(
+  set: MultiplayerSet,
+  get: MultiplayerGet,
+): void {
+  if (gameStartedFired) return;
+  const session = loadWsSession();
+  if (!session || hostReconnectAttempt >= HOST_MAX_RECONNECT_ATTEMPTS) {
+    resetServerHostSession(set);
+    get().showToast("Connection to server lost.");
+    return;
+  }
+
+  hostReconnectAttempt++;
+  const delay = Math.pow(2, hostReconnectAttempt - 1) * 1000;
+  hostReconnectTimer = setTimeout(() => {
+    hostReconnectTimer = null;
+    if (gameStartedFired) return;
+    void openServerHostSocket(
+      set,
+      get,
+      () => ({
+        type: "Reconnect",
+        data: {
+          game_code: session.gameCode,
+          player_token: session.playerToken,
+          full_key: session.fullKey,
+        },
+      }),
+      () => attemptServerHostReconnect(set, get),
+    );
+  }, delay);
+}
 
 export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>()(
   persist(
     (set, get) => ({
       playerId: crypto.randomUUID(),
       displayName: "",
-      serverAddress: OFFICIAL_LOBBY_URL,
+      serverAddress: DEFAULT_MULTIPLAYER_SERVER_URL,
       connectionStatus: "disconnected",
       activePlayerId: null,
       opponentDisplayName: null,
@@ -652,176 +874,9 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           pendingGameRoute: null,
         });
 
-        // Shared post-handshake message handler. ServerHello is handled
-        // upstream by `openPhaseSocket`, so by the time we get here the
-        // server's identity is already known and compatible.
-        const handleHostMessage = (ws: WebSocket, msg: { type: string; data?: unknown }) => {
-          if (msg.type === "GameCreated") {
-            const data = msg.data as { game_code: string; player_token: string };
-            saveWsSession({
-              gameCode: data.game_code,
-              playerToken: data.player_token,
-              serverUrl: get().serverAddress,
-              timestamp: Date.now(),
-            });
-            // Reset reconnect counter on successful (re)connection
-            hostReconnectAttempt = 0;
-            set({ hostGameCode: data.game_code, hostingStatus: "waiting" });
-          } else if (msg.type === "GameStarted") {
-            gameStartedFired = true;
-            ws.close();
-            hostWs = null;
-            const gameId = crypto.randomUUID();
-            saveActiveGame({ id: gameId, mode: "online", difficulty: "" });
-            useGameStore.setState({ gameId });
-            const names = new Map<number, string>();
-            for (const slot of get().playerSlots) {
-              if (slot.name) names.set(slot.playerId, slot.name);
-            }
-            // Reset hosting state FIRST so tile hides, then set route
-            set({
-              hostGameCode: null,
-              hostingStatus: "idle",
-              hostSession: null,
-              playerNames: names,
-              playerSlots: [],
-              pendingGameRoute: `/game/${gameId}?mode=host`,
-            });
-          } else if (msg.type === "PlayerSlotsUpdate") {
-            const data = msg.data as { slots: PlayerSlot[] };
-            // Toast newly-arrived human guests so the host gets per-joiner
-            // feedback in 3+ player lobbies. Without this, only the first
-            // joiner is signaled (via the `gameCreated` → `GameStarted`
-            // boundary in ws-adapter); subsequent guests appear silently in
-            // the slot list. Diff against the prior `playerSlots` snapshot:
-            // any slot whose seat transitioned from non-human-occupied to
-            // `JoinedHuman` is a fresh guest.
-            const prior = get().playerSlots;
-            const newJoiners = data.slots.filter((slot) => {
-              if (slot.kind.type !== "JoinedHuman") return false;
-              const before = prior.find((p) => p.playerId === slot.playerId);
-              return !before || before.kind.type !== "JoinedHuman";
-            });
-            set({ playerSlots: data.slots });
-            for (const joiner of newJoiners) {
-              get().showToast(`${joiner.name} joined the game.`);
-            }
-          } else if (msg.type === "Error") {
-            const data = msg.data as { message: string };
-            console.error("Host error:", data.message);
-            get().showToast(data.message || "Failed to create game.");
-            // Keep the pregame lobby open for recoverable errors (failed
-            // Start, seat edits, bracket checks). Only tear down when we
-            // never reached a lobby or the connection itself failed.
-            if (get().hostingStatus !== "waiting") {
-              get().cancelHosting();
-            }
-          }
-        };
-
-        // Open a phase socket (handshake + version gate) then attach our
-        // post-handshake message/close handlers and send `setupFrame`. All
-        // callers (initial connect + reconnect) funnel through here so the
-        // handshake policy lives in one place.
-        const openHostSocket = async (
-          setupFrame: () => unknown,
-          onReopen: () => void,
-        ): Promise<void> => {
-          if (!isValidWebSocketUrl(get().serverAddress)) {
-            clearWsSession();
-            set({
-              hostGameCode: null,
-              hostIsPublic: false,
-              hostingStatus: "idle",
-              hostSession: null,
-              playerSlots: [],
-            });
-            get().showToast("Invalid server address. Update it in Settings.");
-            return;
-          }
-
-          let socket;
-          try {
-            socket = await openPhaseSocket(get().serverAddress);
-          } catch (err) {
-            if (
-              err instanceof HandshakeError &&
-              err.kind === "protocol_mismatch"
-            ) {
-              get().showToast(err.message);
-              get().cancelHosting();
-              return;
-            }
-            if (!gameStartedFired) {
-              hostWs = null;
-              onReopen();
-            }
-            return;
-          }
-
-          set({ serverInfo: socket.serverInfo });
-          hostWs = socket.ws;
-
-          socket.ws.onmessage = (event) => {
-            const msg = JSON.parse(event.data as string) as {
-              type: string;
-              data?: unknown;
-            };
-            handleHostMessage(socket.ws, msg);
-          };
-          socket.ws.onerror = () => {
-            if (!gameStartedFired) {
-              hostWs = null;
-              onReopen();
-            }
-          };
-          socket.ws.onclose = () => {
-            if (!gameStartedFired && hostWs === socket.ws) {
-              hostWs = null;
-              onReopen();
-            }
-          };
-
-          socket.ws.send(JSON.stringify(setupFrame()));
-        };
-
-        // Attempt to reconnect the hosting WS using stored session token
-        const attemptHostReconnect = () => {
-          if (gameStartedFired) return;
-          const session = loadWsSession();
-          if (!session || hostReconnectAttempt >= HOST_MAX_RECONNECT_ATTEMPTS) {
-            // No session to reconnect or exhausted attempts — give up
-            clearWsSession();
-            set({
-              hostGameCode: null,
-              hostIsPublic: false,
-              hostingStatus: "idle",
-              hostSession: null,
-              playerSlots: [],
-            });
-            get().showToast("Connection to server lost.");
-            return;
-          }
-
-          hostReconnectAttempt++;
-          const delay = Math.pow(2, hostReconnectAttempt - 1) * 1000;
-          hostReconnectTimer = setTimeout(() => {
-            hostReconnectTimer = null;
-            if (gameStartedFired) return;
-            void openHostSocket(
-              () => ({
-                type: "Reconnect",
-                data: {
-                  game_code: session.gameCode,
-                  player_token: session.playerToken,
-                },
-              }),
-              attemptHostReconnect,
-            );
-          }, delay);
-        };
-
-        void openHostSocket(
+        void openServerHostSocket(
+          set,
+          get,
           () => ({
             type: "CreateGameWithSettings",
             data: {
@@ -842,11 +897,50 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               ranked: settings.ranked,
             },
           }),
-          attemptHostReconnect,
+          () => attemptServerHostReconnect(set, get),
         );
       },
 
+      resumeServerHosting: () => {
+        if (hostWs || get().hostingStatus !== "idle") {
+          return get().hostingStatus !== "idle";
+        }
+
+        const session = loadWsSession();
+        if (!session?.hostSession || session.serverUrl !== get().serverAddress) {
+          return false;
+        }
+
+        gameStartedFired = false;
+        hostReconnectAttempt = 0;
+        set({
+          hostIsPublic: session.hostIsPublic ?? false,
+          hostingStatus: "connecting",
+          hostGameCode: null,
+          hostSession: session.hostSession,
+          pendingGameRoute: null,
+          playerSlots: [],
+        });
+
+        void openServerHostSocket(
+          set,
+          get,
+          () => ({
+            type: "Reconnect",
+            data: {
+              game_code: session.gameCode,
+              player_token: session.playerToken,
+              full_key: session.fullKey,
+            },
+          }),
+          () => attemptServerHostReconnect(set, get),
+        );
+
+        return true;
+      },
+
       cancelHosting: () => {
+        p2pHostingAttempt += 1;
         closeHostWebSocket();
         disposeActiveP2PHost();
         if (activeBroker) {
@@ -904,6 +998,8 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       },
 
       startP2PHostingSession: async (settings, deck, opts) => {
+        const attempt = ++p2pHostingAttempt;
+        const isCurrentAttempt = () => p2pHostingAttempt === attempt;
         const aiSeats = effectiveAiSeats(settings);
         closeHostWebSocket();
         clearWsSession();
@@ -911,6 +1007,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         hostReconnectAttempt = 0;
 
         const resetFailedHosting = () => {
+          if (!isCurrentAttempt()) return;
           set({
             hostIsPublic: false,
             hostingStatus: "idle",
@@ -921,7 +1018,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         };
 
         set({
-          hostIsPublic: opts.useBroker,
+          hostIsPublic: opts.useBroker && settings.public,
           hostingStatus: "connecting",
           hostGameCode: null,
           hostSession: {
@@ -935,12 +1032,35 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         let broker: BrokerClient | null = null;
         let brokerGameCode: string | null = null;
         let destroyHostedRoom: (() => void) | null = null;
+        let adapter: P2PHostAdapter | null = null;
+        const releaseAttempt = () => {
+          if (adapter) {
+            if (activeP2PHostAdapter === adapter) {
+              disposeActiveP2PHost();
+            } else {
+              adapter.dispose();
+            }
+          } else {
+            destroyHostedRoom?.();
+          }
+          if (broker) {
+            if (brokerGameCode) {
+              void broker.unregister(brokerGameCode).catch(() => {});
+            }
+            broker.close();
+            if (activeBroker === broker) {
+              activeBroker = null;
+              activeBrokerGameCode = null;
+            }
+          }
+        };
 
         try {
           const [{ hostRoom }, { P2PHostAdapter }] = await Promise.all([
             import("../network/connection"),
             import("../adapter/p2p-adapter"),
           ]);
+          if (!isCurrentAttempt()) return false;
 
           if (activeP2PHostAdapter) {
             activeP2PHostAdapter.dispose();
@@ -948,15 +1068,42 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             activeP2PHostGameId = null;
           }
 
+          let nativeP2P: { expectedServerVersion?: string } | undefined;
+          const nativeEngineKey = nativeEngineKeyForCurrentOrigin();
+          if (
+            nativeEngineKey
+            && canAttemptNativeEngine(usePreferencesStore.getState().nativeEngineEnabled)
+          ) {
+            try {
+              await ensureNativeEngine(nativeEngineKey);
+              if (!isCurrentAttempt()) return false;
+              nativeP2P = {
+                expectedServerVersion:
+                  "release" in nativeEngineKey ? nativeEngineKey.release.version : undefined,
+              };
+            } catch (err) {
+              console.warn("[P2P] native engine unavailable; using WASM host", err);
+            }
+          }
+          if (!isCurrentAttempt()) return false;
+
           const host = await hostRoom(undefined, {});
           destroyHostedRoom = () => host.destroy();
+          if (!isCurrentAttempt()) {
+            releaseAttempt();
+            return false;
+          }
           if (opts.useBroker) {
             broker = await openBrokerClient(get().serverAddress);
+            if (!isCurrentAttempt()) {
+              releaseAttempt();
+              return false;
+            }
             const registered = await broker.registerHost({
               hostPeerId: host.peer.id,
               deck: asDeckPayload(deck),
               displayName: get().displayName || "Host",
-              public: true,
+              public: settings.public,
               password: settings.password || null,
               timerSeconds: null,
               playerCount: settings.formatConfig.max_players,
@@ -972,12 +1119,16 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               ranked: settings.ranked,
             });
             brokerGameCode = registered.gameCode;
+            if (!isCurrentAttempt()) {
+              releaseAttempt();
+              return false;
+            }
             activeBroker = broker;
             activeBrokerGameCode = registered.gameCode;
           }
 
           const gameId = crypto.randomUUID();
-          const adapter = new P2PHostAdapter(
+          const p2pAdapter = new P2PHostAdapter(
             {
               player: asDeckPayload(deck),
               opponent: { main_deck: [], sideboard: [], commander: [], planar_deck: [], scheme_deck: [] },
@@ -997,11 +1148,14 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               roomCode: host.roomCode,
               hostDisplayName: get().displayName || undefined,
             },
+            nativeP2P,
           );
+          adapter = p2pAdapter;
 
-          adapter.onEvent((event) => {
+          p2pAdapter.onEvent((event) => {
+            if (!isCurrentAttempt()) return;
             if (event.type === "playerSlotsUpdated" || event.type === "lobbyProgress") {
-              set({ playerSlots: adapter.getPlayerSlots() });
+              set({ playerSlots: p2pAdapter.getPlayerSlots() });
             } else if (event.type === "playerIdentity") {
               const names = new Map<number, string>();
               for (const [playerId, name] of Object.entries(event.playerNames ?? {})) {
@@ -1021,14 +1175,18 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             }
           });
 
-          activeP2PHostAdapter = adapter;
+          activeP2PHostAdapter = p2pAdapter;
           activeP2PHostGameId = gameId;
 
-          await adapter.initialize();
+          await p2pAdapter.initialize();
+          if (!isCurrentAttempt()) {
+            releaseAttempt();
+            return false;
+          }
           destroyHostedRoom = null;
 
           set({
-            hostIsPublic: opts.useBroker,
+            hostIsPublic: opts.useBroker && settings.public,
             hostingStatus: "waiting",
             hostGameCode: host.roomCode,
             hostSession: {
@@ -1036,7 +1194,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               timerSeconds: settings.timerSeconds,
               matchType: settings.matchType,
             },
-            playerSlots: adapter.getPlayerSlots(),
+            playerSlots: p2pAdapter.getPlayerSlots(),
             // P2P/broker hosting has no advertised game-server URL. Clear any
             // serverInfo left by a prior online-host session so the P2P share
             // string is the bare room code, never a stale `code@<old-server>`.
@@ -1044,7 +1202,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           });
 
           for (const seat of aiSeats) {
-            await adapter.applySeatMutation({
+            await p2pAdapter.applySeatMutation({
               type: "SetKind",
               data: {
                 seatIndex: seat.seatIndex,
@@ -1057,27 +1215,16 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
                 },
               },
             });
+            if (!isCurrentAttempt()) {
+              releaseAttempt();
+              return false;
+            }
           }
 
           return true;
         } catch (err) {
-          if (activeP2PHostAdapter) {
-            activeP2PHostAdapter.dispose();
-            activeP2PHostAdapter = null;
-            activeP2PHostGameId = null;
-          } else {
-            destroyHostedRoom?.();
-          }
-          if (broker) {
-            if (brokerGameCode) {
-              await broker.unregister(brokerGameCode).catch(() => {});
-            }
-            broker.close();
-            if (activeBroker === broker) {
-              activeBroker = null;
-              activeBrokerGameCode = null;
-            }
-          }
+          releaseAttempt();
+          if (!isCurrentAttempt()) return false;
           console.error("[startP2PHostingSession] failed:", err);
           resetFailedHosting();
           return false;
@@ -1225,7 +1372,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         subscriptionReconnect = null;
       },
 
-      resolveGuest: async (code, password, opts) => {
+      resolveGuest: async (code, password) => {
         const socket = await get().ensureSubscriptionSocket();
         if (!socket) {
           return {
@@ -1242,7 +1389,6 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         try {
           return await resolveGuestOver(socket, code, password, {
             signal: ac.signal,
-            reservationToken: opts?.reservationToken,
             // The broker rejects a blank display_name on the resolve frame
             // (required-label rule) and the worker shell drops it without a
             // reply — the guest then times out at deck-select. Always carry
@@ -1325,24 +1471,12 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
     }),
     {
       name: "phase-multiplayer",
-      version: 1,
-      // v0 → v1: the regional "us.phase-rs.dev" lobby was retired in favour of
-      // the single global broker at "lobby.phase-rs.dev". A returning user's
-      // persisted serverAddress overrides the in-code default on rehydrate, so
-      // without this rewrite they stay pinned to the dead host forever. Only the
-      // old official host is rewritten — custom self-hosted addresses are left
-      // untouched.
-      migrate: (persisted: unknown, version: number) => {
-        if (!persisted || typeof persisted !== "object") return persisted;
-        const migrated = persisted as Record<string, unknown>;
-        if (version < 1) {
-          const addr = migrated.serverAddress;
-          if (typeof addr === "string" && addr.includes("us.phase-rs.dev")) {
-            migrated.serverAddress = OFFICIAL_LOBBY_URL;
-          }
-        }
-        return migrated;
-      },
+      version: 2,
+      // v0/v1 → v2: official hosted lobby addresses are deployment defaults,
+      // not user intent. A self-hosted build must move returning browsers from
+      // the official lobby to its configured default while preserving explicit
+      // custom/self-hosted addresses.
+      migrate: migratePersistedMultiplayerState,
       partialize: (state) => ({
         playerId: state.playerId,
         displayName: state.displayName,

@@ -54,16 +54,26 @@ pub(crate) fn players_for_filter(
         // CR 506.2 + CR 508.6: Count-only filter (Suppressor Skyguard); it has
         // no live speed-effect recipient meaning.
         PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => Vec::new(),
-        // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent who was
-        // dealt combat damage this turn, optionally restricted to a matching
-        // source.
-        PlayerFilter::OpponentDealtCombatDamage { source } => state
+        // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i + CR 120.2a/120.2b: Each
+        // opponent who was dealt damage of the given kind this turn, optionally
+        // restricted to a matching source.
+        PlayerFilter::OpponentDealtDamage {
+            kind,
+            source,
+            min_sources,
+        } => state
             .players
             .iter()
             .filter(|player| !player.is_eliminated)
             .filter(|player| {
-                crate::game::quantity::opponent_dealt_combat_damage_matches(
-                    state, player.id, controller, source, source_id,
+                crate::game::quantity::opponent_dealt_damage_matches(
+                    state,
+                    player.id,
+                    controller,
+                    *kind,
+                    source,
+                    *min_sources,
+                    source_id,
                 )
             })
             .map(|player| player.id)
@@ -79,6 +89,25 @@ pub(crate) fn players_for_filter(
             })
             .map(|player| player.id)
             .collect(),
+        // CR 508.6 + CR 102.2 + CR 508.1b: each opponent of the controller who
+        // is attacking the enchanted/defending player this combat (the Commander
+        // 2017 "each opponent attacking that player does the same" curse rider).
+        // The "that player" anchor is the trigger source's AttachedTo host.
+        PlayerFilter::OpponentAttackingEnchantedPlayer => {
+            match crate::game::effects::enchanted_player_anchor(state, source_id) {
+                Some(enchanted) => state
+                    .players
+                    .iter()
+                    .filter(|player| !player.is_eliminated)
+                    .filter(|player| {
+                        player.id != controller
+                            && state.player_attacked_player_this_combat(player.id, enchanted)
+                    })
+                    .map(|player| player.id)
+                    .collect(),
+                None => Vec::new(),
+            }
+        }
         PlayerFilter::All => state
             .players
             .iter()
@@ -308,6 +337,33 @@ pub(crate) fn players_for_filter(
                 .map(|player| player.id)
                 .collect()
         }
+        // CR 608.2c + CR 608.2h + CR 109.4: "each [player class] who
+        // controlled/owned a [filter] this way" — candidates satisfying both
+        // `relation` and possession of a member of the most recent tracked
+        // object set. Delegates to the shared possession authority.
+        PlayerFilter::TrackedSetPossessor {
+            relation,
+            possession,
+            filter,
+            caused_by,
+        } => state
+            .players
+            .iter()
+            .filter(|player| !player.is_eliminated)
+            .filter(|player| {
+                crate::game::players::matches_relation(state, player.id, controller, *relation)
+                    && crate::game::quantity::possessed_tracked_set_member(
+                        state,
+                        player.id,
+                        *possession,
+                        filter,
+                        *caused_by,
+                        controller,
+                        source_id,
+                    )
+            })
+            .map(|player| player.id)
+            .collect(),
     }
 }
 

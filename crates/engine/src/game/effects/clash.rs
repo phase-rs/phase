@@ -26,11 +26,16 @@ pub fn resolve(
 ) -> Result<(), EffectError> {
     let controller = ability.controller;
 
-    // CR 701.30b: The clashing player chooses which opponent to clash with.
+    // CR 701.30b: "Choose an opponent. You and that opponent each clash." — a CHOICE, not
+    // a target (CR 115.10a), so the seat is judged by `player_exists_for_choice` and NOT
+    // by the targeting-only exclusions. `p.id != controller` stays: that is opponent
+    // SCOPE, not legality.
     let candidates: Vec<PlayerId> = state
         .players
         .iter()
-        .filter(|p| p.id != controller && !p.is_eliminated)
+        .filter(|p| {
+            p.id != controller && crate::game::players::player_exists_for_choice(state, p.id)
+        })
         .map(|p| p.id)
         .collect();
 
@@ -105,6 +110,7 @@ pub fn perform_clash(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Clash,
         source_id: ability.source_id,
+        subject: None,
     });
 
     // Build the sub_ability chain with updated context for optional_effect_performed.
@@ -126,7 +132,7 @@ pub fn perform_clash(
     // redundant sub_ability processing.
     let stash_sub = |state: &mut GameState| {
         if let Some(sub) = original_sub {
-            state.pending_continuation = Some(PendingContinuation::new(Box::new(sub)));
+            state.park_ability_continuation(PendingContinuation::new(Box::new(sub), state));
         }
     };
 
@@ -183,7 +189,11 @@ fn top_card_of_library(state: &GameState, player: PlayerId) -> Option<ObjectId> 
 }
 
 /// Get the mana value of a card by its object ID.
+///
+/// CR 202.3d + CR 709.4b: A clashed card is on top of a library (off the stack),
+/// so a split card reports its combined mana value; `effective_mana_value`
+/// no-ops for single-face cards.
 fn card_mana_value(state: &GameState, object_id: ObjectId) -> Option<u32> {
     let obj = state.objects.get(&object_id)?;
-    Some(obj.mana_cost.mana_value())
+    Some(obj.effective_mana_value())
 }

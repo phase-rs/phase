@@ -9,6 +9,8 @@ import {
   getCardPrintings,
   isCardImageFlipLayoutSync,
   isCardImageRotatedSync,
+  isLocaleArtReady,
+  loadLocaleArt,
   pickOldestPrinting,
   resolveFaceIndexSync,
   resolveOracleIdSync,
@@ -105,6 +107,81 @@ registerStrategyCacheClearFn(() => {
   printingsNegativeCache.clear();
   strategyNoWinnerCache.clear();
 });
+
+/**
+ * Locales whose card-art map is currently being fetched. Same anti-spin-loop
+ * discipline as `strategyInflight`: without it, every render before the map
+ * lands would start another fetch.
+ *
+ * A failed fetch cannot loop either — `loadLocaleArt` swallows errors and
+ * resolves an empty map, which still installs, so `isLocaleArtReady` flips true
+ * and every card simply keeps its English art.
+ */
+const localeArtInflight = new Set<string>();
+
+/**
+ * Fetch the active locale's card-art map, then invalidate every mounted tile.
+ *
+ * The dispatch deliberately carries no `detail`: unlike a printings fetch (which
+ * concerns one oracleId), a language change re-resolves the URL of every card on
+ * screen, and the listener treats a detail-less event as a global invalidation.
+ */
+function loadLocaleArtInBackground(lang: string): void {
+  if (isLocaleArtReady(lang) || localeArtInflight.has(lang)) return;
+  localeArtInflight.add(lang);
+  loadLocaleArt(lang)
+    .then(() => {
+      localeArtInflight.delete(lang);
+      artCacheEvents.dispatchEvent(new Event("update"));
+    })
+    .catch(() => {
+      localeArtInflight.delete(lang);
+    });
+}
+
+/**
+ * Cache-key component for a resolved image URL. It encodes the *art vocabulary*
+ * the URL was produced with, not merely the language: before the locale map
+ * arrives every card legitimately resolves to English art, and caching that
+ * under a bare `"de"` key would pin it there forever — the background load
+ * dispatches an invalidation, but the request key would be unchanged, so the
+ * resolution effect would never re-run. Distinguishing pending from ready makes
+ * the map's arrival a genuine key change.
+ */
+function localeArtCacheKey(lang: string): string {
+  return isLocaleArtReady(lang) ? lang : `${lang}:pending`;
+}
+
+/**
+ * Load the active language's card-art map and re-render the caller when it
+ * lands, returning the art-locale key its URLs were resolved with.
+ *
+ * For components that resolve art through `resolvePrintingImageUrl` directly
+ * instead of through `useCardImage` — they otherwise render whatever vocabulary
+ * happened to be installed at mount and never hear about the map arriving.
+ *
+ * `useCardImage` deliberately does NOT call this: it already owns an
+ * `artCacheEvents` subscription filtered by oracleId, and an unfiltered second
+ * one per tile would resurrect the unscoped re-render storm that filter exists
+ * to prevent (see the subscription comment in the hook body). Callers of this
+ * hook subscribe once per component, not once per rendered card.
+ */
+export function useLocaleArt(): string {
+  const language = usePreferencesStore((s) => s.language);
+  const [, setLocaleArtTick] = useState(0);
+
+  useEffect(() => {
+    const handler = () => setLocaleArtTick((t) => t + 1);
+    artCacheEvents.addEventListener("update", handler);
+    return () => artCacheEvents.removeEventListener("update", handler);
+  }, []);
+
+  useEffect(() => {
+    loadLocaleArtInBackground(language);
+  }, [language]);
+
+  return localeArtCacheKey(language);
+}
 
 function applyChainEntry(
   entry: ArtChainEntry,
@@ -241,6 +318,12 @@ function imageRequestKey(
   tokenImageRefKey: string,
   oracleId: string,
   faceName: string,
+  // `imageRequestCache` stores the FINAL resolved URL, which differs per
+  // language once localized art is applied — so the art locale belongs in the
+  // key. The printing-selection caches (`strategyCacheMap`, `printingsCacheMap`)
+  // stay language-neutral on purpose: which printing wins is a function of the
+  // user's art preferences, not of their language.
+  artLocaleKey: string,
 ): string {
   return [
     oracleId || cardName,
@@ -253,6 +336,7 @@ function imageRequestKey(
     filterSubtypes,
     String(filterHasAbilities),
     tokenImageRefKey,
+    artLocaleKey,
   ].join("|");
 }
 
@@ -370,11 +454,17 @@ export function useCardImage(
 
   const artOverrides = usePreferencesStore((s) => s.artOverrides);
   const artChain = usePreferencesStore((s) => s.artChain);
+  // Card art follows the UI language: the printing the user chose is kept, and
+  // only its image is swapped for the same printing in their language. Cards
+  // with no localized sibling keep their English art.
+  const language = usePreferencesStore((s) => s.language);
+  const artLocaleKey = localeArtCacheKey(language);
 
   const [src, setSrc] = useState<string | null>(null);
   const [isRotated, setIsRotated] = useState(false);
   const [isFlip, setIsFlip] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [stateRequestKey, setStateRequestKey] = useState<string | null>(null);
   const [, setArtCacheTick] = useState(0);
 
   const resolvedOracleId = oracleId || resolveOracleIdSync(cardName) || "";
@@ -403,6 +493,20 @@ export function useCardImage(
     artCacheEvents.addEventListener("update", handler);
     return () => artCacheEvents.removeEventListener("update", handler);
   }, []);
+
+  // Kick the locale-art load from an effect, not from render. It writes
+  // module-global state (`desiredArtLang`, which decides whose fetch may
+  // install itself), and under concurrent rendering React may start a render
+  // and discard it — so a render-phase call can let a language that was never
+  // committed win that race. Running after commit means only the committed
+  // language is ever requested.
+  //
+  // Deliberately placed after the subscription effect above: effects run in
+  // source order, so the `update` listener is registered before any dispatch
+  // this load can trigger, even when `loadLocaleArt` resolves from cache.
+  useEffect(() => {
+    loadLocaleArtInBackground(language);
+  }, [language]);
 
   // The printings/art-strategy path indexes faces numerically, but for a
   // DFC/MDFC the reliable signal is the engine's `faceName` (an MDFC cast as its
@@ -455,10 +559,12 @@ export function useCardImage(
     tokenImageRefKey,
     oracleId,
     faceName,
+    artLocaleKey,
   );
 
   useEffect(() => {
     if (overrideUrl) {
+      setStateRequestKey(requestKey);
       setSrc(overrideUrl);
       setIsRotated(isCardImageRotatedSync(resolvedOracleId, cardName));
       setIsFlip(isCardImageFlipLayoutSync(resolvedOracleId, cardName));
@@ -467,6 +573,7 @@ export function useCardImage(
     }
 
     if (!cardName && !oracleId) {
+      setStateRequestKey(requestKey);
       setSrc(null);
       setIsRotated(false);
       setIsFlip(false);
@@ -477,8 +584,17 @@ export function useCardImage(
     let cancelled = false;
 
     async function loadImage() {
-      setIsLoading(true);
-      setSrc(null);
+      const cachedEntry = imageRequestCache.get(requestKey);
+      setStateRequestKey(requestKey);
+      if (cachedEntry && !cachedEntry.promise) {
+        setSrc(cachedEntry.asset?.src ?? null);
+        setIsRotated(cachedEntry.asset?.isRotated ?? false);
+        setIsFlip(isCardImageFlipLayoutSync(resolvedOracleId, cardName));
+        setIsLoading(false);
+      } else {
+        setIsLoading(true);
+        setSrc(null);
+      }
 
       try {
         const imageAsset = await acquireCachedImageSrc(
@@ -535,6 +651,35 @@ export function useCardImage(
     resolvedOracleId,
     size,
   ]);
+
+  // Effects reset the state after render, so a component reused for a new card
+  // would otherwise expose the previous card's src for one frame. Hand previews
+  // intentionally keep one mounted component while scrubbing; gate the result
+  // by request identity and synchronously reuse the hand card's cached asset
+  // when available.
+  if (stateRequestKey !== requestKey) {
+    if (overrideUrl) {
+      return {
+        src: overrideUrl,
+        isLoading: false,
+        isRotated: isCardImageRotatedSync(resolvedOracleId, cardName),
+        isFlip: isCardImageFlipLayoutSync(resolvedOracleId, cardName),
+      };
+    }
+    if (!cardName && !oracleId) {
+      return { src: null, isLoading: false, isRotated: false, isFlip: false };
+    }
+    const cachedEntry = imageRequestCache.get(requestKey);
+    if (cachedEntry && !cachedEntry.promise) {
+      return {
+        src: cachedEntry.asset?.src ?? null,
+        isLoading: false,
+        isRotated: cachedEntry.asset?.isRotated ?? false,
+        isFlip: isCardImageFlipLayoutSync(resolvedOracleId, cardName),
+      };
+    }
+    return { src: null, isLoading: true, isRotated: false, isFlip: false };
+  }
 
   return { src, isLoading, isRotated, isFlip };
 }

@@ -1,10 +1,12 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameState, WaitingFor } from "../../../adapter/types.ts";
+import type { WaitingFor } from "../../../adapter/types.ts";
 import { CardChoiceModal } from "../CardChoiceModal.tsx";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
+import { buildGameObject, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
+import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
 
 const dispatchMock = vi.fn();
 
@@ -13,73 +15,36 @@ vi.mock("../../../hooks/useGameDispatch.ts", () => ({
 }));
 
 function makeCreature(id: number, name: string, controller: number) {
-  return {
+  return buildGameObject({
     id,
     card_id: id,
     owner: controller,
     controller,
-    zone: "Battlefield" as const,
-    tapped: false,
-    face_down: false,
-    flipped: false,
-    transformed: false,
-    damage_marked: 0,
-    dealt_deathtouch_damage: false,
-    attached_to: null,
-    attachments: [],
-    counters: {},
+    zone: "Battlefield",
     name,
     power: 1,
     toughness: 1,
-    loyalty: null,
     card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] },
-    mana_cost: { type: "NoCost" as const },
-    keywords: [],
-    abilities: [],
-    trigger_definitions: [],
-    replacement_definitions: [],
-    static_definitions: [],
-    color: [],
     base_power: 1,
     base_toughness: 1,
-    base_keywords: [],
-    base_color: [],
     timestamp: 1,
     entered_battlefield_turn: 1,
-  };
+  });
 }
 
-function baseState(waitingFor: WaitingFor): GameState {
-  return {
-    turn_number: 1,
-    active_player: 0,
-    phase: "Main1",
-    players: [
-      { id: 0, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-      { id: 1, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-    ],
-    priority_player: 0,
-    objects: {
-      10: makeCreature(10, "Grizzly Bears", 1),
-      11: makeCreature(11, "Llanowar Elves", 1),
-      12: makeCreature(12, "Birds of Paradise", 1),
-    },
+function baseState(waitingFor: WaitingFor) {
+  return buildGameState({
+    phase: "PreCombatMain",
+    objects: buildObjectMap(
+      makeCreature(10, "Grizzly Bears", 1),
+      makeCreature(11, "Llanowar Elves", 1),
+      makeCreature(12, "Birds of Paradise", 1),
+    ),
     next_object_id: 100,
     battlefield: [10, 11, 12],
-    stack: [],
-    exile: [],
-    rng_seed: 1,
-    combat: null,
     waiting_for: waitingFor,
-    has_pending_cast: false,
-    lands_played_this_turn: 0,
-    max_lands_per_turn: 1,
-    priority_pass_count: 0,
-    pending_replacement: null,
-    layers_dirty: false,
     next_timestamp: 2,
-    eliminated_players: [],
-  } as unknown as GameState;
+  });
 }
 
 describe("SeparatePilesPartitionModal (via CardChoiceModal)", () => {

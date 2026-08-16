@@ -1,0 +1,26 @@
+{
+  "viewer": {
+    "title": "Visor de repeticiones",
+    "eyebrow": "Mira una partida grabada",
+    "chooseFile": "Elegir archivo de repetición",
+    "loading": "Cargando repetición…",
+    "errorGeneric": "No se pudo cargar ese archivo de repetición.",
+    "backToMenu": "Volver al menú"
+  },
+  "controls": {
+    "play": "Reproducir",
+    "pause": "Pausar",
+    "stepBack": "Retroceder",
+    "stepForward": "Avanzar",
+    "actionOf": "Acción {{current}} / {{total}}",
+    "speed": "Velocidad",
+    "speedValue": "{{value}}x",
+    "seekError": "No se pudo reconstruir este punto de la repetición: {{message}}"
+  },
+  "export": {
+    "button": "Exportar repetición",
+    "success": "Repetición guardada como {{filename}}",
+    "noRecording": "No hay ninguna grabación disponible para esta partida.",
+    "error": "No se pudo exportar la repetición."
+  }
+}

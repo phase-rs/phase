@@ -27,16 +27,16 @@ use crate::context::AiContext;
 use crate::features::energy::{EnergyFeature, COMMITMENT_FLOOR};
 use crate::features::DeckFeatures;
 use crate::policies::context::PolicyContext;
-use crate::policies::energy_payoff::EnergyPayoffPolicy;
+use crate::policies::payoff::{PayoffPolicy, ENERGY_PAYOFF};
 use crate::policies::registry::{
-    DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy,
+    DecisionKind, PolicyId, PolicyReason, PolicyRegistry, PolicyVerdict, TacticalPolicy,
 };
 use crate::session::AiSession;
 
 const AI: PlayerId = PlayerId(0);
 
-fn policy() -> EnergyPayoffPolicy {
-    EnergyPayoffPolicy
+fn policy() -> PayoffPolicy {
+    PayoffPolicy::new(&ENERGY_PAYOFF)
 }
 
 // ─── fixtures ───────────────────────────────────────────────────────────────
@@ -78,10 +78,7 @@ fn cast_candidate(object_id: ObjectId) -> CandidateAction {
             targets: Vec::new(),
             payment_mode: CastPaymentMode::default(),
         },
-        metadata: ActionMetadata {
-            actor: Some(AI),
-            tactical_class: TacticalClass::Spell,
-        },
+        metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Spell),
     }
 }
 
@@ -93,10 +90,7 @@ fn land_candidate(object_id: ObjectId) -> CandidateAction {
             object_id,
             card_id: CardId(object_id.0),
         },
-        metadata: ActionMetadata {
-            actor: Some(AI),
-            tactical_class: TacticalClass::Land,
-        },
+        metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Land),
     }
 }
 
@@ -193,6 +187,7 @@ fn ctx<'a>(
         config,
         context,
         cast_facts: None,
+        search_depth: crate::policies::context::SearchDepth::Root,
     }
 }
 
@@ -221,6 +216,9 @@ fn identity_is_energy_payoff() {
     assert_eq!(policy().id(), PolicyId::EnergyPayoff);
     assert!(policy().decision_kinds().contains(&DecisionKind::CastSpell));
     assert!(!policy().decision_kinds().contains(&DecisionKind::PlayLand));
+    // Registry-membership guard: a dropped `Box::new(PayoffPolicy::new(&ENERGY_PAYOFF))`
+    // registration line would otherwise be invisible to these direct-construction tests.
+    assert!(PolicyRegistry::default().has_policy(PolicyId::EnergyPayoff));
 }
 
 // ─── activation gate ────────────────────────────────────────────────────────
@@ -427,7 +425,7 @@ fn verdict_trigger_energy_sink_body_is_scored() {
 /// error. Surfaced as a `#[test]` for discoverability.
 #[test]
 fn momentum_constants_are_ordered() {
-    use crate::policies::energy_payoff::{
+    use crate::policies::payoff::{
         MOMENTUM_SCALE_HIGH, MOMENTUM_SCALE_MID, MOMENTUM_SCALE_NORMAL, RESERVE_THRESHOLD_HIGH,
         RESERVE_THRESHOLD_MID,
     };

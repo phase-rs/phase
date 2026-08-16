@@ -4,7 +4,7 @@ import { useNavigate } from "react-router";
 import { clearPromptOverlayState } from "../game/sessionCleanup";
 import { clearGame, useGameStore } from "../stores/gameStore";
 import { useDraftStore } from "../stores/draftStore";
-import { useMultiplayerDraftStore } from "../stores/multiplayerDraftStore";
+import { supportsMatchConcede } from "../adapter/types";
 import { getPlayerId } from "./usePlayerId";
 
 export interface ConcedeHandlerOptions {
@@ -40,8 +40,9 @@ export interface ConcedeHandlerOptions {
  *
  * Branches (priority order):
  *  1. `isDraft` — quick-draft single-match concede.
- *  2. `isDraftPodMatch` — pod-match concede (P2P adapter sendConcede +
- *     multiplayer draft store concession report).
+ *  2. `isDraftPodMatch` — only a transport-installed whole-match capability
+ *     may settle a pod match. It never dispatches a game-level Concede or
+ *     writes a raw draft result from this UI path.
  *  3. Default — AI / local / p2p-host / p2p-join: dispatch `Concede` to the
  *     engine, then clear local state and navigate home.
  *
@@ -71,33 +72,12 @@ export function useConcedeHandler({
     }
 
     if (isDraftPodMatch) {
-      const adapter = useGameStore.getState().adapter as {
-        sendConcede?: () => void | Promise<void>;
-      } | null;
-      // Host's sendConcede (p2p-adapter.ts:1062) is async — it awaits
-      // concedePlayer (engine dispatch) then fans out player_conceded to
-      // every guest's PeerJS data channel. Guest/WS versions are sync
-      // void-returners; Promise.resolve() normalizes both shapes so we
-      // serialize the chain and never tear down the adapter mid-fan-out.
-      const sendPromise = adapter?.sendConcede
-        ? Promise.resolve(adapter.sendConcede())
-        : Promise.resolve();
-      void sendPromise
-        .catch((err) => {
-          console.error("[useConcedeHandler] sendConcede failed:", err);
-        })
-        .then(() => useMultiplayerDraftStore.getState().reportActiveMatchConcession())
-        .then(() => {
-          clearGame(gameId);
-          navigate("/draft-pod");
-        })
-        .catch((err) => {
-          // User intent is to leave — strand them on the conceded screen
-          // is a worse outcome than logging the store-mutation failure.
-          console.error("[useConcedeHandler] failed to report draft pod concession:", err);
-          clearGame(gameId);
-          navigate("/draft-pod");
-        });
+      const adapter = useGameStore.getState().adapter;
+      if (supportsMatchConcede(adapter)) {
+        adapter.sendMatchConcede();
+      } else {
+        console.error("[useConcedeHandler] refused unbound draft pod match concession");
+      }
       return;
     }
 

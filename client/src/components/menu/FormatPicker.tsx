@@ -28,27 +28,24 @@ const GROUP_TONE: Record<EngineFormatGroup, string> = {
 // format hierarchy (sanctioned → Commander → Limited → casual).
 const GROUP_ORDER: EngineFormatGroup[] = ["Constructed", "Commander", "Limited", "Multiplayer"];
 
-const GROUP_TONES: Record<string, { kicker: string; accent: string; border: string; bg: string; hover: string }> = {
+const GROUP_TONES: Record<string, { kicker: string; border: string; bg: string; hover: string }> = {
   indigo: {
     kicker: "text-indigo-300/60",
-    accent: "bg-indigo-300/70",
     border: "border-white/10",
-    bg: "bg-[linear-gradient(180deg,rgba(76,105,255,0.05),rgba(9,13,24,0.80))]",
-    hover: "hover:border-white/18 hover:bg-[linear-gradient(180deg,rgba(76,105,255,0.10),rgba(9,13,24,0.88))]",
+    bg: "bg-[linear-gradient(180deg,rgba(255,255,255,0.045),rgba(9,13,24,0.82))]",
+    hover: "hover:border-white/20 hover:bg-[linear-gradient(180deg,rgba(255,255,255,0.07),rgba(9,13,24,0.88))]",
   },
   amber: {
     kicker: "text-amber-300/60",
-    accent: "bg-amber-300/70",
     border: "border-white/10",
-    bg: "bg-[linear-gradient(180deg,rgba(255,196,122,0.05),rgba(9,13,24,0.80))]",
-    hover: "hover:border-white/18 hover:bg-[linear-gradient(180deg,rgba(255,196,122,0.10),rgba(9,13,24,0.88))]",
+    bg: "bg-[linear-gradient(180deg,rgba(255,255,255,0.045),rgba(9,13,24,0.82))]",
+    hover: "hover:border-white/20 hover:bg-[linear-gradient(180deg,rgba(255,255,255,0.07),rgba(9,13,24,0.88))]",
   },
   emerald: {
     kicker: "text-emerald-300/60",
-    accent: "bg-emerald-300/70",
     border: "border-white/10",
-    bg: "bg-[linear-gradient(180deg,rgba(52,211,153,0.05),rgba(9,13,24,0.80))]",
-    hover: "hover:border-white/18 hover:bg-[linear-gradient(180deg,rgba(52,211,153,0.10),rgba(9,13,24,0.88))]",
+    bg: "bg-[linear-gradient(180deg,rgba(255,255,255,0.045),rgba(9,13,24,0.82))]",
+    hover: "hover:border-white/20 hover:bg-[linear-gradient(180deg,rgba(255,255,255,0.07),rgba(9,13,24,0.88))]",
   },
 };
 
@@ -86,9 +83,8 @@ export function FormatPicker({ onFormatSelect, formats = FORMAT_REGISTRY }: Form
                 <button
                   key={opt.format}
                   onClick={() => onFormatSelect(opt.format)}
-                  className={`group relative flex flex-col overflow-hidden rounded-[18px] border px-4 py-3.5 text-left transition-colors sm:py-4 ${tone.border} ${tone.bg} ${tone.hover} cursor-pointer`}
+                  className={`group relative flex flex-col overflow-hidden rounded-[8px] border px-4 py-3.5 text-left transition-colors sm:py-4 ${tone.border} ${tone.bg} ${tone.hover} cursor-pointer`}
                 >
-                  <div className={`absolute inset-y-3.5 left-0 w-[3px] rounded-r sm:inset-y-4 ${tone.accent}`} />
                   <div className="text-base font-semibold text-white sm:text-[1.05rem]">
                     {opt.label}
                   </div>

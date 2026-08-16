@@ -92,9 +92,17 @@ fn oft_nabbed_goat_controller_cannot_activate() {
 fn oft_nabbed_goat_opponent_activates_at_sorcery_speed() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    // Toughness 2 so the ability's self-inflicted -1/-1 counter (below) leaves the
+    // goat a 1/1 survivor rather than a 0/0 that dies as an SBA (CR 704.5f) — the
+    // test asserts the surviving goat is under the opponent's control.
     let goat = scenario
-        .add_creature_from_oracle(P0, "Oft-Nabbed Goat", 1, 1, GOAT_ORACLE)
+        .add_creature_from_oracle(P0, "Oft-Nabbed Goat", 2, 2, GOAT_ORACLE)
         .id();
+    // The ability's "Draw a card" is resolved by the activating opponent P1. Give
+    // P1 a library card so that draw does not empty their (default-empty) library
+    // and lose them the game (CR 704.5b) — an eliminated P1 would have its gained
+    // control of the goat end (CR 800.4a), which is not what this test exercises.
+    scenario.add_card_to_library_top(P1, "Plains");
 
     let mut runner = scenario.build();
     runner.state_mut().active_player = P1;

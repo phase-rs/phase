@@ -5,17 +5,31 @@ edition = "2021"
 license.workspace = true
 
 [dependencies]
-engine = { path = "../engine" }
+engine = { path = "../engine", package = "phase-engine" }
 serde = { workspace = true }
 serde_json = "1"
 rand = "0.9"
+rand_chacha = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 web-time = "1"
 rayon = { version = "1", optional = true }
 
+# Native-binary throughput lever (pod-lab loop-3 Q5). Target-gated, not a
+# plain [dependencies] entry: `engine-wasm`/`draft-wasm` both depend on this
+# crate's lib for their wasm32 builds, which are explicitly size-tuned
+# (`opt-level = 'z'`, the #6313 25 MiB pages-deploy guard) -- an ungated
+# entry would pull mimalloc's C sources into those builds too. `[[bin]]`
+# targets are never part of that wasm-bindgen graph, so no further per-bin
+# cfg is needed once the dependency itself is scoped here.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+mimalloc = "0.1"
+
 [features]
 tune = ["rayon"]
+# Scenario-backed benchmark binaries are opt-in: build them with
+# `cargo check -p phase-ai --features scenario-benches --bin combat-priority-bench --bin attack-scaling-bench`.
+scenario-benches = ["engine/test-support"]
 
 [[bin]]
 name = "ai-duel"
@@ -30,7 +44,6 @@ test = false
 [[bin]]
 name = "ai-commander"
 path = "src/bin/ai_commander.rs"
-test = false
 
 [[bin]]
 name = "ai-bench-state"
@@ -43,8 +56,32 @@ path = "src/bin/ai_gate.rs"
 test = false
 
 [[bin]]
+name = "ai-perf-gate"
+path = "src/bin/ai_perf_gate.rs"
+test = false
+
+[[bin]]
 name = "legal-actions-bench"
 path = "src/bin/legal_actions_bench.rs"
 test = false
 
+[[bin]]
+name = "combat-priority-bench"
+path = "src/bin/combat_priority_bench.rs"
+required-features = ["scenario-benches"]
+test = false
+
+[[bin]]
+name = "attack-scaling-bench"
+path = "src/bin/attack_scaling_bench.rs"
+required-features = ["scenario-benches"]
+test = false
+
 [dev-dependencies]
+# cfg(test) modules place objects with the raw zone API (sealed in production builds).
+engine = { path = "../engine", package = "phase-engine", features = ["test-support"] }
+flate2 = "1"
+# `DeckArchetype::iter()` in the mana-development floor test — exhaustiveness comes
+# from the enum, not a hand-written array, so a sixth archetype cannot escape the
+# floor guarantee. Test-only: the derive is `cfg_attr(test, ..)`-gated.
+strum = { version = "0.27", features = ["derive"] }

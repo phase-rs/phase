@@ -2,6 +2,16 @@ import { describe, expect, it } from "vitest";
 
 import type { GameAction, GameObject, GameState, PlayerId, WaitingFor } from "../../adapter/types";
 import {
+  buildGameObject,
+  buildGameObjectWithCoreTypes,
+  buildObjectMap,
+} from "../../test/factories/gameObjectFactory";
+import {
+  buildGameState,
+  buildGameStateWithoutSeatOrder,
+  buildPlayers,
+} from "../../test/factories/gameStateFactory";
+import {
   boardChoiceSelectedPower,
   buildBoardChoiceAction,
   canConfirmBoardChoice,
@@ -10,21 +20,21 @@ import {
   getCastableZoneViewerTarget,
   getOpponentIds,
   getSeatCount,
+  getVisibleBoardPlayerIds,
   getWaitingForObjectChoiceIds,
   isFaceDownExileCardVisibleToViewer,
   isOneOnOne,
+  isSplitBoardActive,
   resolveFocusedOpponent,
+  shouldRenderFocusedOpponentTopRow,
 } from "../gameStateView";
 
-// Test fixtures only populate the fields these helpers actually read.
-// Cast through `unknown` so we don't have to hand-construct the full
-// hundreds-of-fields GameState surface.
 function makeState(seatOrder: PlayerId[], eliminated: PlayerId[] = []): GameState {
-  return {
+  return buildGameState({
     seat_order: seatOrder,
     eliminated_players: eliminated,
-    players: seatOrder.map((id) => ({ id })),
-  } as unknown as GameState;
+    players: buildPlayers(seatOrder),
+  });
 }
 
 describe("getSeatCount", () => {
@@ -41,7 +51,7 @@ describe("getSeatCount", () => {
   });
 
   it("falls back to players.length when seat_order is absent", () => {
-    const state = { players: [{ id: 0 }, { id: 1 }, { id: 2 }] } as unknown as GameState;
+    const state = buildGameStateWithoutSeatOrder({ players: buildPlayers([0, 1, 2]) });
     expect(getSeatCount(state)).toBe(3);
   });
 
@@ -99,6 +109,46 @@ describe("resolveFocusedOpponent", () => {
   });
 });
 
+describe("getVisibleBoardPlayerIds", () => {
+  it("returns local and focused live opponent in focused multiplayer", () => {
+    expect(getVisibleBoardPlayerIds(makeState([0, 1, 2, 3]), 0, 2, "focused")).toEqual([0, 2]);
+  });
+
+  it("falls back to the first live opponent in focused multiplayer", () => {
+    expect(getVisibleBoardPlayerIds(makeState([0, 1, 2, 3]), 0, null, "focused")).toEqual([0, 1]);
+  });
+
+  it("returns local and all live opponents in split multiplayer", () => {
+    expect(getVisibleBoardPlayerIds(makeState([0, 1, 2, 3]), 0, 2, "split")).toEqual([0, 1, 2, 3]);
+  });
+
+  it("excludes eliminated opponents in split multiplayer", () => {
+    expect(getVisibleBoardPlayerIds(makeState([0, 1, 2, 3], [2]), 0, 2, "split")).toEqual([0, 1, 3]);
+  });
+
+  it("returns an empty list for null state", () => {
+    expect(getVisibleBoardPlayerIds(null, 0, 1, "split")).toEqual([]);
+  });
+
+  it("keeps 1v1 unchanged even when split is selected", () => {
+    expect(getVisibleBoardPlayerIds(makeState([0, 1]), 0, null, "split")).toEqual([0, 1]);
+  });
+});
+
+describe("split board ownership helpers", () => {
+  it("activates split layout only for 3+ player games", () => {
+    expect(isSplitBoardActive("split", 4)).toBe(true);
+    expect(isSplitBoardActive("split", 2)).toBe(false);
+    expect(isSplitBoardActive("focused", 4)).toBe(false);
+  });
+
+  it("suppresses the focused opponent top row only in active split mode", () => {
+    expect(shouldRenderFocusedOpponentTopRow("split", 4)).toBe(false);
+    expect(shouldRenderFocusedOpponentTopRow("split", 2)).toBe(true);
+    expect(shouldRenderFocusedOpponentTopRow("focused", 4)).toBe(true);
+  });
+});
+
 describe("getWaitingForObjectChoiceIds", () => {
   it("returns valid_tokens for PopulateChoice", () => {
     expect(
@@ -120,6 +170,18 @@ describe("getWaitingForObjectChoiceIds", () => {
         data: { player: 0, source_id: 1, choices: [20, 21, 22] },
       }),
     ).toEqual([]);
+  });
+
+  // CR 707.9: Copy Enchantment's copy pool arrives as `CopyTargetChoice`.
+  // Every surface that can offer one of these objects — battlefield card or
+  // the player-attached-Aura dialog — must read the pool from here.
+  it("returns valid_targets for CopyTargetChoice", () => {
+    expect(
+      getWaitingForObjectChoiceIds({
+        type: "CopyTargetChoice",
+        data: { player: 0, source_id: 1, valid_targets: [30, 31] },
+      }),
+    ).toEqual([30, 31]);
   });
 });
 
@@ -207,10 +269,10 @@ describe("getBoardChoiceView", () => {
           },
         },
       },
-      {
-        4: { id: 4, zone: "Battlefield" },
-        5: { id: 5, zone: "Battlefield" },
-      } as unknown as Record<number, GameObject>,
+      buildObjectMap(
+        buildGameObject({ id: 4, zone: "Battlefield" }),
+        buildGameObject({ id: 5, zone: "Battlefield" }),
+      ),
     );
 
     expect(choice).toMatchObject({
@@ -224,6 +286,77 @@ describe("getBoardChoiceView", () => {
     });
   });
 
+  it("maps battlefield untap effects to board card selection", () => {
+    const choice = getBoardChoiceView({
+      type: "EffectZoneChoice",
+      data: {
+        player: 1,
+        cards: [10, 11],
+        count: 2,
+        min_count: 1,
+        up_to: true,
+        source_id: 9,
+        effect_kind: "Untap",
+        zone: "Battlefield",
+      },
+    });
+
+    expect(choice).toMatchObject({
+      player: 1,
+      objectIds: [10, 11],
+      intent: "untap",
+      selection: { type: "rangeCount", min: 1, max: 2 },
+      response: { type: "SelectCards" },
+    });
+  });
+
+  it("maps capped untap subsets to a zero-to-max board selection", () => {
+    const choice = getBoardChoiceView({
+      type: "ChooseUntapSubset",
+      data: { player: 1, group: [10, 11], max: 1 },
+    });
+
+    expect(choice).toMatchObject({
+      player: 1,
+      objectIds: [10, 11],
+      intent: "untap",
+      selection: { type: "rangeCount", min: 0, max: 1 },
+      response: { type: "SelectCards" },
+    });
+    expect(choice && buildBoardChoiceAction(choice, [10])).toEqual({
+      type: "SelectCards",
+      data: { cards: [10] },
+    });
+  });
+
+  it("maps an untap decision to the first candidate and typed choose action", () => {
+    const choice = getBoardChoiceView({
+      type: "UntapChoice",
+      data: { player: 1, candidates: [10, 11] },
+    });
+
+    expect(choice).toMatchObject({
+      player: 1,
+      objectIds: [10],
+      intent: "untap",
+      selection: { type: "single", immediate: true },
+      response: { type: "ChooseUntap", objectId: 10 },
+      skipAction: { type: "ChooseUntap", data: { object_id: 10, untap: false } },
+      skipLabel: "keepTapped",
+    });
+    expect(choice && buildBoardChoiceAction(choice, [10])).toEqual({
+      type: "ChooseUntap",
+      data: { object_id: 10, untap: true },
+    });
+  });
+
+  it("does not surface an empty untap decision", () => {
+    expect(getBoardChoiceView({
+      type: "UntapChoice",
+      data: { player: 1, candidates: [] },
+    })).toBeNull();
+  });
+
   it("builds CrewVehicle actions and gates by selected total power", () => {
     const choice = getBoardChoiceView({
       type: "CrewVehicle",
@@ -232,12 +365,13 @@ describe("getBoardChoiceView", () => {
         vehicle_id: 30,
         crew_power: 4,
         eligible_creatures: [10, 11],
+        contributions: [2, 3],
       },
     });
-    const objects = {
-      10: { id: 10, power: 2 },
-      11: { id: 11, power: 3 },
-    } as unknown as Record<number, GameObject>;
+    const objects = buildObjectMap(
+      buildGameObject({ id: 10, power: 2 }),
+      buildGameObject({ id: 11, power: 3 }),
+    );
 
     expect(choice).not.toBeNull();
     if (!choice) return;
@@ -247,6 +381,54 @@ describe("getBoardChoiceView", () => {
     expect(buildBoardChoiceAction(choice, [10, 11])).toEqual({
       type: "CrewVehicle",
       data: { vehicle_id: 30, creature_ids: [10, 11] },
+    });
+    expect(choice.cancelAction).toEqual({ type: "CancelCast" });
+  });
+
+  // Regression: a Pilot token (Shorikai) has printed power 1 but crews "as though
+  // its power were 2 greater" (contribution 3). The UI must gate on the engine's
+  // contribution, not raw power, so a lone Pilot satisfies Crew 3. Summing raw
+  // power gave 1 < 3 and wrongly blocked the crew ("crews for just 1").
+  it("gates CrewVehicle by the engine contribution, not printed power", () => {
+    const choice = getBoardChoiceView({
+      type: "CrewVehicle",
+      data: {
+        player: 0,
+        vehicle_id: 30,
+        crew_power: 3,
+        eligible_creatures: [10],
+        contributions: [3],
+      },
+    });
+    const objects = buildObjectMap(buildGameObject({ id: 10, power: 1 }));
+
+    expect(choice).not.toBeNull();
+    if (!choice) return;
+    // Printed power is 1, but the engine says this creature contributes 3.
+    expect(boardChoiceSelectedPower(choice, [10], objects)).toBe(3);
+    expect(canConfirmBoardChoice(choice, [10], objects)).toBe(true);
+  });
+
+  it("gates SaddleMount by the engine contribution, not printed power", () => {
+    const choice = getBoardChoiceView({
+      type: "SaddleMount",
+      data: {
+        player: 0,
+        mount_id: 40,
+        saddle_power: 3,
+        eligible_creatures: [10],
+        contributions: [3],
+      },
+    });
+    const objects = buildObjectMap(buildGameObject({ id: 10, power: 1 }));
+
+    expect(choice).not.toBeNull();
+    if (!choice) return;
+    expect(boardChoiceSelectedPower(choice, [10], objects)).toBe(3);
+    expect(canConfirmBoardChoice(choice, [10], objects)).toBe(true);
+    expect(buildBoardChoiceAction(choice, [10])).toEqual({
+      type: "SaddleMount",
+      data: { mount_id: 40, creature_ids: [10] },
     });
   });
 
@@ -264,10 +446,10 @@ describe("getBoardChoiceView", () => {
         scoped_players: [0],
       },
     });
-    const objects = {
-      10: { id: 10, power: 5 },
-      11: { id: 11, power: -1 },
-    } as unknown as Record<number, GameObject>;
+    const objects = buildObjectMap(
+      buildGameObject({ id: 10, power: 5 }),
+      buildGameObject({ id: 11, power: -1 }),
+    );
 
     expect(choice).not.toBeNull();
     if (!choice) return;
@@ -278,6 +460,25 @@ describe("getBoardChoiceView", () => {
     expect(canConfirmBoardChoice(choice, [10, 11], objects)).toBe(true);
     // Keeping only the 5-power creature exceeds the cap of 4.
     expect(canConfirmBoardChoice(choice, [10], objects)).toBe(false);
+  });
+
+  it("renders the engine-provided exact keeper requirement without client-side capping", () => {
+    const choice = getBoardChoiceView({
+      type: "KeepExactPermanentsChoice",
+      data: {
+        player: 0,
+        target_player: 0,
+        eligible: [10, 11],
+        required_count: 5,
+        source_id: 50,
+        remaining_players: [],
+        all_kept: [],
+        scoped_players: [0],
+      },
+    });
+
+    expect(choice).not.toBeNull();
+    expect(choice?.selection).toEqual({ type: "exactCount", count: 5 });
   });
 
   it("maps simple StationTarget and Ring-bearer choices to immediate single actions", () => {
@@ -329,8 +530,43 @@ describe("getBoardChoiceView", () => {
     ).toBeNull();
   });
 
+  it("maps resolution TapCreatures PayCost to a non-cancellable board choice", () => {
+    const waitingFor: WaitingFor = {
+      type: "PayCost",
+      data: {
+        player: 0,
+        kind: { type: "TapCreatures" },
+        choices: [4, 5],
+        count: 2,
+        min_count: 2,
+        resume: { type: "Resolution" },
+      },
+    };
+
+    const choice = getBoardChoiceView(
+      waitingFor,
+      buildObjectMap(
+        buildGameObject({ id: 4, zone: "Battlefield" }),
+        buildGameObject({ id: 5, zone: "Battlefield" }),
+      ),
+    );
+
+    expect(choice).toMatchObject({
+      player: 0,
+      objectIds: [4, 5],
+      intent: "tap",
+      selection: { type: "exactCount", count: 2 },
+      response: { type: "SelectCards" },
+      cancelAction: undefined,
+    });
+    expect(choice && buildBoardChoiceAction(choice, [4, 5])).toEqual({
+      type: "SelectCards",
+      data: { cards: [4, 5] },
+    });
+  });
+
   it("keeps PayCost choices modal-only unless every candidate is on the battlefield", () => {
-    const waitingFor = {
+    const waitingFor: WaitingFor = {
       type: "PayCost",
       data: {
         player: 0,
@@ -340,13 +576,16 @@ describe("getBoardChoiceView", () => {
         min_count: 1,
         resume: { type: "ManaAbility", ManaAbility: {} },
       },
-    } as unknown as WaitingFor;
+    };
 
     expect(
-      getBoardChoiceView(waitingFor, {
-        4: { id: 4, zone: "Battlefield" },
-        5: { id: 5, zone: "Graveyard" },
-      } as unknown as Record<number, GameObject>),
+      getBoardChoiceView(
+        waitingFor,
+        buildObjectMap(
+          buildGameObject({ id: 4, zone: "Battlefield" }),
+          buildGameObject({ id: 5, zone: "Graveyard" }),
+        ),
+      ),
     ).toBeNull();
   });
 });
@@ -362,47 +601,22 @@ describe("getCastableZoneViewerTarget", () => {
   };
 
   function makeGraveyardObject(id: number): GameObject {
-    return {
+    return buildGameObjectWithCoreTypes(["Instant"], {
       id,
       card_id: 700 + id,
-      owner: 0,
-      controller: 0,
       zone: "Graveyard",
-      tapped: false,
-      face_down: false,
-      flipped: false,
-      transformed: false,
-      damage_marked: 0,
-      dealt_deathtouch_damage: false,
-      attached_to: null,
-      attachments: [],
-      counters: {},
       name: `Spell ${id}`,
-      power: null,
-      toughness: null,
-      loyalty: null,
-      card_types: { supertypes: [], core_types: ["Instant"], subtypes: [] },
       mana_cost: { type: "Cost", shards: ["Red"], generic: 0 },
       keywords: ["Retrace"],
-      abilities: [],
-      trigger_definitions: [],
-      replacement_definitions: [],
-      static_definitions: [],
       color: ["Red"],
-      base_power: null,
-      base_toughness: null,
       base_keywords: ["Retrace"],
       base_color: ["Red"],
-      timestamp: 1,
       entered_battlefield_turn: null,
-    } as GameObject;
+    });
   }
 
   it("returns the graveyard pile when Priority surfaces cast actions there", () => {
-    const objects = {
-      7: makeGraveyardObject(7),
-      8: makeGraveyardObject(8),
-    };
+    const objects = buildObjectMap(makeGraveyardObject(7), makeGraveyardObject(8));
     expect(
       getCastableZoneViewerTarget(
         { type: "Priority", data: { player: 0 } },
@@ -485,98 +699,33 @@ describe("getOpponentIds", () => {
   });
 });
 
-// Issue #2889: single-player renders the raw, unredacted state, so a
-// Hideaway/Foretell face-down exile's real `name`/`printed_ref` sit on the
-// object regardless of viewer. This helper is the client-side half of the
-// engine's `hidden_facedown_exile_ids` look-permission gate
-// (crates/engine/src/game/visibility.rs, CR 406.3 + CR 702.75a + CR 702.143e).
 describe("isFaceDownExileCardVisibleToViewer", () => {
   function faceDownObject(overrides: Partial<GameObject> = {}): GameObject {
-    return {
+    return buildGameObjectWithCoreTypes(["Creature"], {
       id: 2,
       card_id: 200,
       owner: 1,
       controller: 1,
       zone: "Exile",
-      tapped: false,
       face_down: true,
-      flipped: false,
-      transformed: false,
-      damage_marked: 0,
-      dealt_deathtouch_damage: false,
-      attached_to: null,
-      attachments: [],
-      counters: {},
       name: "Ghalta, Primal Hunter",
-      power: null,
-      toughness: null,
-      loyalty: null,
-      card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] },
       mana_cost: { type: "Cost", shards: [], generic: 0 },
-      keywords: [],
-      abilities: [],
-      trigger_definitions: [],
-      replacement_definitions: [],
-      static_definitions: [],
-      color: [],
-      base_power: null,
-      base_toughness: null,
-      base_keywords: [],
-      base_color: [],
-      timestamp: 1,
       entered_battlefield_turn: null,
       ...overrides,
-    };
-  }
-
-  function stateWithSourceAndExiled(
-    source: GameObject,
-    exiled: GameObject,
-    kind: string,
-  ): GameState {
-    return {
-      objects: { [source.id]: source, [exiled.id]: exiled },
-      exile_links: [{ exiled_id: exiled.id, source_id: source.id, kind }],
-    } as unknown as GameState;
+    });
   }
 
   it("is false for a card that isn't face down", () => {
-    const obj = faceDownObject({ face_down: false });
-    expect(isFaceDownExileCardVisibleToViewer({ objects: {} } as GameState, obj, 1)).toBe(false);
+    const obj = faceDownObject({ face_down: false, display_visible_to_viewer: true });
+    expect(isFaceDownExileCardVisibleToViewer(buildGameState({ objects: {} }), obj, 1)).toBe(false);
   });
 
-  it("is true for the controller of the Hideaway permanent that exiled it", () => {
-    const source: GameObject = { ...faceDownObject(), id: 1, zone: "Battlefield", face_down: false };
-    const exiled = faceDownObject();
-    const state = stateWithSourceAndExiled(source, exiled, "HideawayLookable");
-    expect(isFaceDownExileCardVisibleToViewer(state, exiled, 1)).toBe(true);
-  });
+  it("uses only the engine-projected display bit", () => {
+    const visible = faceDownObject({ display_visible_to_viewer: true });
+    const hidden = faceDownObject({ display_visible_to_viewer: false, foretold: true });
+    const state = buildGameState({ objects: buildObjectMap(visible, hidden) });
 
-  it("is false for an opponent of the Hideaway permanent's controller", () => {
-    const source: GameObject = { ...faceDownObject(), id: 1, zone: "Battlefield", face_down: false };
-    const exiled = faceDownObject();
-    const state = stateWithSourceAndExiled(source, exiled, "HideawayLookable");
-    expect(isFaceDownExileCardVisibleToViewer(state, exiled, 0)).toBe(false);
-  });
-
-  it("is false for a plain TrackedBySource link even for the source's controller", () => {
-    // Bomat Courier ("(You can't look at it.)") tracks its face-down exile by
-    // source for later retrieval but grants no look-permission.
-    const source: GameObject = { ...faceDownObject(), id: 1, zone: "Battlefield", face_down: false };
-    const exiled = faceDownObject();
-    const state = stateWithSourceAndExiled(source, exiled, "TrackedBySource");
-    expect(isFaceDownExileCardVisibleToViewer(state, exiled, 1)).toBe(false);
-  });
-
-  it("is true for the owner of a foretold card", () => {
-    const exiled = faceDownObject({ owner: 0, controller: 0, foretold: true });
-    const state = { objects: { [exiled.id]: exiled }, exile_links: [] } as unknown as GameState;
-    expect(isFaceDownExileCardVisibleToViewer(state, exiled, 0)).toBe(true);
-  });
-
-  it("is false for an opponent of a foretold card's owner", () => {
-    const exiled = faceDownObject({ owner: 0, controller: 0, foretold: true });
-    const state = { objects: { [exiled.id]: exiled }, exile_links: [] } as unknown as GameState;
-    expect(isFaceDownExileCardVisibleToViewer(state, exiled, 1)).toBe(false);
+    expect(isFaceDownExileCardVisibleToViewer(state, visible, 1)).toBe(true);
+    expect(isFaceDownExileCardVisibleToViewer(state, hidden, 0)).toBe(false);
   });
 });

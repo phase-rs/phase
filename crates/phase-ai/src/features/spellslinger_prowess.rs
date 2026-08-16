@@ -8,8 +8,10 @@
 //! - `Keyword::Prowess` at `keywords.rs:311`. CR 702.108a: prowess triggered ability.
 //! - `TriggerMode::SpellCast` / `SpellCastOrCopy` / `SpellAbilityCast` /
 //!   `SpellAbilityCopy` at `triggers.rs:50-57`. CR 601.2i (cast) + CR 707.10 (copy).
-//! - `TriggerConstraint::NthSpellThisTurn { n, filter }` at `ability.rs:4484`.
-//!   CR 603.4: intervening-if clause. CR 603.1: triggered abilities.
+//! - `TriggerConstraint::NthSpellThisTurn { n, comparator, filter }` at
+//!   `ability.rs`. This is a CR 603.2 fire-time trigger-event constraint;
+//!   `Comparator::EQ` represents an exact ordinal and `GT` represents the
+//!   non-first-spell class. It is not a CR 603.4 intervening-if clause.
 //! - `TriggerDefinition.valid_card: Option<TargetFilter>` at `ability.rs:4522`.
 //! - `TriggerDefinition.valid_target: Option<TargetFilter>` at `ability.rs:4539`.
 //! - `TriggerDefinition.constraint: Option<TriggerConstraint>` at `ability.rs:4545`.
@@ -69,7 +71,8 @@ pub struct SpellslingerProwessFeature {
     /// with a valid_card filter that permits Instant/Sorcery (or unset).
     /// CR 601.2i + CR 603.1. Includes magecraft-shaped triggers.
     pub cast_payoff_count: u32,
-    /// Cast triggers with `TriggerConstraint::NthSpellThisTurn`. CR 603.4.
+    /// Cast triggers with the fire-time `TriggerConstraint::NthSpellThisTurn`.
+    /// CR 603.2.
     pub nth_spell_payoff_count: u32,
     /// `AbilityKind::Spell` abilities whose chain contains `Effect::CopySpell`.
     /// CR 707.10: to copy a spell means to put a copy onto the stack.
@@ -253,8 +256,10 @@ pub(crate) fn has_prowess_parts(keywords: &[Keyword]) -> bool {
 /// 2. `valid_target` is `None` or `Some(Controller)` — caster-scoped only.
 ///    Opponent-scoped triggers (Esper Sentinel shape) are NOT your payoffs.
 /// 3. `valid_card` is `None` (any spell) OR matches Instant/Sorcery via filter walk.
-pub(crate) fn is_cast_payoff_parts(triggers: &[TriggerDefinition]) -> bool {
-    triggers.iter().any(trigger_is_cast_payoff)
+pub(crate) fn is_cast_payoff_parts<'a>(
+    triggers: impl IntoIterator<Item = &'a TriggerDefinition>,
+) -> bool {
+    triggers.into_iter().any(trigger_is_cast_payoff)
 }
 
 fn trigger_is_cast_payoff(t: &TriggerDefinition) -> bool {
@@ -284,8 +289,10 @@ fn trigger_is_cast_payoff(t: &TriggerDefinition) -> bool {
 
 /// True if the face has an Nth-spell-this-turn cast trigger.
 /// CR 603.4: intervening-if clause. CR 603.1.
-pub(crate) fn is_nth_spell_payoff_parts(triggers: &[TriggerDefinition]) -> bool {
-    triggers.iter().any(|t| {
+pub(crate) fn is_nth_spell_payoff_parts<'a>(
+    triggers: impl IntoIterator<Item = &'a TriggerDefinition>,
+) -> bool {
+    triggers.into_iter().any(|t| {
         matches!(
             t.mode,
             TriggerMode::SpellCast
@@ -421,6 +428,7 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         }
     }
 
@@ -429,6 +437,7 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Player,
             damage_source: None,
+            excess: None,
         }
     }
 
@@ -440,6 +449,7 @@ mod tests {
                 ..TypedFilter::default()
             }),
             damage_source: None,
+            excess: None,
         }
     }
 
@@ -591,10 +601,14 @@ mod tests {
 
     #[test]
     fn detects_nth_spell_payoff() {
-        // SpellCast + NthSpellThisTurn. CR 603.4.
+        // SpellCast + fire-time NthSpellThisTurn. CR 603.2.
         let mut c = creature_face("Spectral Sailor Shape");
         let mut t = TriggerDefinition::new(TriggerMode::SpellCast);
-        t.constraint = Some(TriggerConstraint::NthSpellThisTurn { n: 2, filter: None });
+        t.constraint = Some(TriggerConstraint::NthSpellThisTurn {
+            n: 2,
+            comparator: engine::types::ability::Comparator::EQ,
+            filter: None,
+        });
         c.triggers.push(t);
         let f = detect(&[entry(c, 2)]);
         assert_eq!(f.nth_spell_payoff_count, 2);
@@ -634,11 +648,14 @@ mod tests {
             count: QuantityExpr::Fixed { value: 3 },
             destination: None,
             keep_count: Some(3),
+            keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
+            rest_order: engine::types::ability::DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         }));
         let f = detect(&[entry(c, 4)]);
@@ -656,11 +673,14 @@ mod tests {
             count: QuantityExpr::Fixed { value: 2 },
             destination: Some(Zone::Exile),
             keep_count: Some(2),
+            keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
+            rest_order: engine::types::ability::DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         }));
         let f = detect(&[entry(c, 4)]);

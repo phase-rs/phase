@@ -28,6 +28,11 @@ interface BattlefieldRowProps {
    *  scrollable parent present a fixed, readable size and scroll the overflow
    *  (used by the crowded-creature overview) instead of cramming the row. */
   fixedSize?: boolean;
+  /** Split multiplayer overview pane: containment beats the desktop legibility
+   *  floor. The full-width MIN_CARD_H (80px) forces two wrapped rows past a
+   *  third-width pane's short creature band, bleeding cards over the rows
+   *  above; a lower floor lets the measure-based fit actually fit. */
+  splitOverview?: boolean;
 }
 
 const ROW_JUSTIFY: Record<string, string> = {
@@ -66,7 +71,14 @@ function getCreatureScale(groupCount: number, display: "art_crop" | "full_card")
   return Math.max(min, 1 / Math.sqrt(1 + excess * 0.15));
 }
 
-export function BattlefieldRow({ groups, rowType, className, dividerBeforeIndex, fixedSize = false }: BattlefieldRowProps) {
+export function BattlefieldRow({
+  groups,
+  rowType,
+  className,
+  dividerBeforeIndex,
+  fixedSize = false,
+  splitOverview = false,
+}: BattlefieldRowProps) {
   const { t } = useTranslation("game");
   const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
   const isCompactHeight = useIsCompactHeight();
@@ -123,8 +135,12 @@ export function BattlefieldRow({ groups, rowType, className, dividerBeforeIndex,
   let rowStyle: React.CSSProperties | undefined;
   /** Minimum readable card height — below this, switch to multi-row wrapping.
    *  Lowered on compact-height (landscape phones) so creatures stay single-row
-   *  in the limited vertical space rather than wrapping into a tiny grid. */
-  const MIN_CARD_H = isCompactHeight ? 56 : 80;
+   *  in the limited vertical space rather than wrapping into a tiny grid.
+   *  Split panes drop lower still: `cardHFromHeight` already guarantees the
+   *  wrapped rows fit the band, and it's only the up-clamp to this floor that
+   *  can break containment — 44px matches the pane's mini-card scale, so the
+   *  clamp stops firing for any band tall enough to matter. */
+  const MIN_CARD_H = splitOverview ? 44 : isCompactHeight ? 56 : 80;
   /** Maximum creature card height — prevents oversized cards with few creatures */
   const MAX_CARD_H = isCompactHeight ? 90 : 150;
   let creatureWrap = false;

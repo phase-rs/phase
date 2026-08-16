@@ -4,51 +4,57 @@ use super::aggro_pressure::AggroPressurePolicy;
 use super::anthem_priority::AnthemPriorityPolicy;
 use super::anti_self_harm::AntiSelfHarmPolicy;
 use super::blight_value::BlightValuePolicy;
-use super::blink_payoff::BlinkPayoffPolicy;
 use super::board_development::BoardDevelopmentPolicy;
 use super::board_wipe_telegraph::BoardWipeTelegraphPolicy;
 use super::card_advantage::CardAdvantagePolicy;
 use super::chalice_avoidance::ChaliceAvoidancePolicy;
-use super::context::PolicyContext;
+use super::combat_withdrawal::CombatWithdrawalPolicy;
+use super::context::{PolicyContext, PriorsEnv};
 use super::copy_value::CopyValuePolicy;
+use super::crew_timing::CrewTimingPolicy;
+use super::cycling_discipline::CyclingDisciplinePolicy;
+use super::devotion::DevotionPolicy;
 use super::effect_timing::EffectTimingPolicy;
-use super::enchantments_payoff::EnchantmentsPayoffPolicy;
-use super::energy_payoff::EnergyPayoffPolicy;
-use super::equipment_payoff::EquipmentPayoffPolicy;
 use super::etb_value::EtbValuePolicy;
 use super::evasion_removal_priority::EvasionRemovalPriorityPolicy;
 use super::fetch_land_patience::FetchLandPatiencePolicy;
 use super::free_outlet_activation::FreeOutletActivationPolicy;
+use super::graveyard_types::GraveyardTypesPolicy;
 use super::hand_disruption::HandDisruptionPolicy;
 use super::hold_mana_up::HoldManaUpForInteractionPolicy;
 use super::interaction_reservation::InteractionReservationPolicy;
 use super::landfall_timing::LandfallTimingPolicy;
 use super::lethality_awareness::LethalityAwarenessPolicy;
 use super::life_total_resource::LifeTotalResourcePolicy;
-use super::lifegain_payoff::LifegainPayoffPolicy;
-use super::mill_payoff::MillPayoffPolicy;
+use super::loop_shortcut::LoopShortcutPolicy;
 use super::payment_selection::PaymentSelectionPolicy;
+use super::payoff::{
+    PayoffPolicy, ARTIFACT_SYNERGY, BLINK_PAYOFF, ENCHANTMENTS_PAYOFF, ENERGY_PAYOFF,
+    EQUIPMENT_PAYOFF, LIFEGAIN_PAYOFF, MILL_PAYOFF, REANIMATOR_PAYOFF,
+};
 use super::plus_one_counters::PlusOneCountersPolicy;
+use super::poison::PoisonClockPolicy;
 use super::ramp_timing::RampTimingPolicy;
 use super::reactive_self_protection::ReactiveSelfProtectionPolicy;
-use super::reanimator_payoff::ReanimatorPayoffPolicy;
 use super::recursion_awareness::RecursionAwarenessPolicy;
 use super::redundancy_avoidance::RedundancyAvoidancePolicy;
+use super::sacrifice_cost_mana_gate::SacrificeCostManaGatePolicy;
 use super::sacrifice_land_protection::SacrificeLandProtectionPolicy;
 use super::sacrifice_value::SacrificeValuePolicy;
+use super::self_cost_value::SelfCostValuePolicy;
 use super::separate_piles_timing::SeparatePilesTimingPolicy;
 use super::spellslinger_casting::SpellslingerCastingPolicy;
 use super::sweeper_timing::SweeperTimingPolicy;
 use super::tokens_wide::TokensWidePolicy;
 use super::tribal_lord_priority::TribalLordPriorityPolicy;
 use super::tutor::TutorPolicy;
+use super::x_cast_gate::XCastGatePolicy;
 use super::x_value::XValuePolicy;
 use crate::cast_facts::cast_facts_for_action;
-use crate::config::AiConfig;
 use crate::decision_kind::classify as classify_decision;
 use crate::features::DeckFeatures;
 use crate::planner::PolicyPrior;
-use engine::ai_support::{AiDecisionContext, CandidateAction};
+use engine::ai_support::CandidateAction;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
@@ -107,16 +113,24 @@ pub enum PolicyId {
     SpellslingerKeepablesMulligan,
     CombatTaxPayment,
     ReactiveSelfProtection,
+    /// CR 601.2f + CR 702.34a: a cast whose mandatory sacrifice cost — an
+    /// additional cost, or a flashback alternative cost — could only be paid by
+    /// spending mana sources the plan still needs.
+    SacrificeCostManaGate,
     SacrificeLandProtection,
+    SelfCostValue,
     ComboLineProgress,
     CedhKeepablesMulligan,
     FixedDeckKeepMulligan,
+    /// Universal mulligan card-count floor — see `policies::mulligan::card_floor`.
+    MulliganCardFloor,
     PlaneswalkerLoyalty,
     EquipmentPriority,
     SpellskitePriority,
     LandSequencing,
     ConditionGatedActivation,
     ControlChangeAwareness,
+    CyclingDiscipline,
     XValue,
     LandAnimation,
     MillTargeting,
@@ -125,6 +139,28 @@ pub enum PolicyId {
     ChaliceAvoidance,
     PaymentSelection,
     SeparatePilesTiming,
+    XCastGate,
+    LoopShortcut,
+    /// CR 700.5: mono-color devotion pip density.
+    Devotion,
+    /// CR 104.3d: the alternate poison win clock.
+    PoisonClock,
+    /// CR 207.2c + CR 205.2a: delirium / descend graveyard type-diversity.
+    GraveyardTypes,
+    CrewTiming,
+    CombatWithdrawal,
+    /// CR 608.2c: "return a land you control" self-bounce target choice.
+    SelfBounceTarget,
+    /// CR 601.2f: deploy a "spells you cast cost less" engine before the spells
+    /// it discounts.
+    CostReduction,
+    /// CR 121.1: reward drawing into an on-battlefield "whenever you draw" engine.
+    DrawPayoff,
+    /// CR 701.9: reward discarding into an on-battlefield "whenever you discard"
+    /// engine — disjoint from `HandDisruption`, which scores OPPONENT discard.
+    DiscardPayoff,
+    /// CR 702.122a: cast a Vehicle when the board can actually crew it.
+    VehicleDeployment,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -247,6 +283,35 @@ impl PolicyVerdict {
     }
 }
 
+/// Map a policy's wide analog signal into the critical band while **preserving
+/// order**, for policies whose natural range exceeds `CRITICAL_MAX` (e.g.
+/// `copy_value`, whose `+100` preferred-X anchor and copy-target penalty sums
+/// reach ~±125). Unlike routing a raw ±125 value straight through
+/// `PolicyVerdict::score` — which *saturates*, collapsing every magnitude past
+/// `STRONG_MAX` to a single `CRITICAL_MAX` and flattening the top of the
+/// distribution — this rescales:
+///   * magnitudes within `STRONG_MAX` pass through unchanged (below-band
+///     ordering stays exact), and
+///   * magnitudes in `(STRONG_MAX, raw_ceiling]` map linearly into
+///     `(STRONG_MAX, CRITICAL_MAX]`, so two distinct large signals stay
+///     distinguishable in the softmax prior instead of colliding at the ceiling.
+///
+/// `raw_ceiling` is the policy's own max expected magnitude; magnitudes beyond
+/// it saturate at `CRITICAL_MAX` (only the extreme tail, where ordering no
+/// longer matters). The result is always in `[-CRITICAL_MAX, CRITICAL_MAX]`, so
+/// it still routes through `PolicyVerdict::score` as identity to keep the single
+/// clamp authority. This is the `anti_self_harm` self-ceiling idea generalized
+/// to a policy whose range is too wide for a bare clamp to preserve.
+pub fn rescale_into_critical_band(raw: f64, raw_ceiling: f64) -> f64 {
+    let magnitude = raw.abs();
+    if magnitude <= STRONG_MAX {
+        return raw;
+    }
+    let ceiling = raw_ceiling.max(STRONG_MAX + f64::EPSILON);
+    let over = ((magnitude - STRONG_MAX) / (ceiling - STRONG_MAX)).clamp(0.0, 1.0);
+    raw.signum() * (STRONG_MAX + over * (CRITICAL_MAX - STRONG_MAX))
+}
+
 /// The clean `TacticalPolicy` trait — four required methods, zero defaults.
 ///
 /// Scaling discipline (CR-equivalent invariant for the AI layer):
@@ -284,11 +349,14 @@ impl Default for PolicyRegistry {
     fn default() -> Self {
         let policies: Vec<Box<dyn TacticalPolicy>> = vec![
             Box::new(AntiSelfHarmPolicy),
-            Box::new(super::artifact_synergy::ArtifactSynergyPolicy),
+            Box::new(PayoffPolicy::new(&ARTIFACT_SYNERGY)),
             Box::new(BoardDevelopmentPolicy),
             Box::new(EtbValuePolicy),
-            Box::new(EnchantmentsPayoffPolicy),
-            Box::new(EquipmentPayoffPolicy),
+            Box::new(DevotionPolicy),
+            Box::new(PoisonClockPolicy),
+            Box::new(GraveyardTypesPolicy),
+            Box::new(PayoffPolicy::new(&ENCHANTMENTS_PAYOFF)),
+            Box::new(PayoffPolicy::new(&EQUIPMENT_PAYOFF)),
             Box::new(CopyValuePolicy),
             Box::new(TutorPolicy),
             Box::new(HandDisruptionPolicy),
@@ -306,7 +374,7 @@ impl Default for PolicyRegistry {
             Box::new(RecursionAwarenessPolicy),
             Box::new(BoardWipeTelegraphPolicy),
             Box::new(LifeTotalResourcePolicy),
-            Box::new(LifegainPayoffPolicy),
+            Box::new(PayoffPolicy::new(&LIFEGAIN_PAYOFF)),
             Box::new(CardAdvantagePolicy),
             Box::new(LandfallTimingPolicy),
             Box::new(RampTimingPolicy),
@@ -323,25 +391,43 @@ impl Default for PolicyRegistry {
             Box::new(SpellslingerCastingPolicy),
             Box::new(super::combat_tax::CombatTaxPaymentPolicy),
             Box::new(ReactiveSelfProtectionPolicy),
+            Box::new(SacrificeCostManaGatePolicy),
             Box::new(SacrificeLandProtectionPolicy),
+            Box::new(SelfCostValuePolicy),
             Box::new(super::combo_line::ComboLinePolicy::new()),
             Box::new(super::planeswalker_loyalty::PlaneswalkerLoyaltyPolicy),
             Box::new(super::equipment_priority::EquipmentPriorityPolicy),
             Box::new(super::spellskite_priority::SpellskitePriorityPolicy),
             Box::new(super::land_sequencing::LandSequencingPolicy),
             Box::new(super::condition_gated_activation::ConditionGatedActivationPolicy),
+            Box::new(CyclingDisciplinePolicy),
             Box::new(XValuePolicy),
+            Box::new(XCastGatePolicy),
             Box::new(super::control_change_awareness::ControlChangeAwarenessPolicy),
             Box::new(super::land_animation::LandAnimationPolicy),
             Box::new(super::mill_targeting::MillTargetingPolicy),
-            Box::new(MillPayoffPolicy),
-            Box::new(EnergyPayoffPolicy),
+            Box::new(PayoffPolicy::new(&MILL_PAYOFF)),
+            Box::new(PayoffPolicy::new(&ENERGY_PAYOFF)),
             Box::new(ChaliceAvoidancePolicy),
             Box::new(PaymentSelectionPolicy),
+            Box::new(CrewTimingPolicy),
+            Box::new(CombatWithdrawalPolicy),
             Box::new(SeparatePilesTimingPolicy),
-            Box::new(ReanimatorPayoffPolicy),
-            Box::new(BlinkPayoffPolicy),
+            Box::new(PayoffPolicy::new(&REANIMATOR_PAYOFF)),
+            Box::new(PayoffPolicy::new(&BLINK_PAYOFF)),
+            Box::new(LoopShortcutPolicy),
+            Box::new(super::self_bounce_target::SelfBounceTargetPolicy),
+            Box::new(super::cost_reduction::CostReductionPolicy),
+            Box::new(super::draw_payoff::DrawPayoffPolicy),
+            Box::new(super::discard_payoff::DiscardPayoffPolicy),
+            Box::new(super::vehicle_deployment::VehicleDeploymentPolicy),
         ];
+        Self::from_policies(policies)
+    }
+}
+
+impl PolicyRegistry {
+    fn from_policies(policies: Vec<Box<dyn TacticalPolicy>>) -> Self {
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
         for (idx, policy) in policies.iter().enumerate() {
             for kind in policy.decision_kinds() {
@@ -350,9 +436,13 @@ impl Default for PolicyRegistry {
         }
         Self { policies, by_kind }
     }
-}
 
-impl PolicyRegistry {
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn for_tests(policies: Vec<Box<dyn TacticalPolicy>>) -> Self {
+        Self::from_policies(policies)
+    }
+
     /// Return a process-wide shared `PolicyRegistry`, constructed once on first
     /// access. Policies are stateless (`TacticalPolicy: Send + Sync`, no
     /// interior mutability by construction), so a single instance safely
@@ -401,27 +491,43 @@ impl PolicyRegistry {
             let scaled = match verdict {
                 PolicyVerdict::Reject { reason } => PolicyVerdict::Reject { reason },
                 PolicyVerdict::Score { delta, reason } => {
-                    let scaled_delta = delta * activation as f64;
+                    // Scaling invariant (issue #5473). A policy's RAW verdict is
+                    // bounded to the critical band (|delta| <= CRITICAL_MAX) by
+                    // the band helpers (`score`/`nudge`/`preference`/`strong`/
+                    // `critical`). The `activation` knob then amplifies it, and
+                    // activation LEGITIMATELY exceeds 1.0 — `arch_times_turn`
+                    // reaches ~2.6 (archetype_scale 2.0 x late_game_mult 1.3) —
+                    // so the *product* is not obligated to stay within the band
+                    // on its own. The debug_assert therefore guards the invariant
+                    // the policy actually controls: the PRE-scale delta. That
+                    // turns it into a true "routed through the band helpers?"
+                    // tripwire — a policy that hand-builds an out-of-band `Score`
+                    // literal (the old LandAnimation / ControlChangeAwareness /
+                    // CopyValue -100/+100 sentinels) trips it, while a legitimate
+                    // critical delta amplified past 15 by activation does not.
                     debug_assert!(
-                        scaled_delta.abs() <= CRITICAL_MAX,
-                        "policy {:?} scaled delta {} exceeds critical band ceiling {}",
+                        delta.abs() <= CRITICAL_MAX,
+                        "policy {:?} raw delta {} exceeds critical band ceiling {} — route through PolicyVerdict band helpers",
                         policy_id,
-                        scaled_delta,
+                        delta,
                         CRITICAL_MAX
                     );
-                    if scaled_delta.abs() > CRITICAL_MAX {
+                    if delta.abs() > CRITICAL_MAX {
                         tracing::warn!(
                             target: "phase_ai::decision_trace",
                             ?policy_id,
-                            scaled_delta,
-                            activation,
-                            "policy scaled delta exceeds critical band ceiling"
+                            delta,
+                            "policy raw delta exceeds critical band ceiling — route through band helpers"
                         );
                     }
-                    PolicyVerdict::Score {
-                        delta: scaled_delta,
-                        reason,
-                    }
+                    // Single authority for the POST-scale magnitude: re-band the
+                    // amplified product through `PolicyVerdict::score`, which
+                    // dispatches and clamps to CRITICAL_MAX using the exact helper
+                    // every policy already uses (no second clamp constant to
+                    // drift). This is identity for in-band contributions and
+                    // stops any out-of-band value from leaking into the softmax
+                    // priors in release builds, where the debug_assert is absent.
+                    PolicyVerdict::score(delta * activation as f64, reason)
                 }
             };
             out.push((policy_id, scaled));
@@ -451,15 +557,7 @@ impl PolicyRegistry {
         self.policies.iter().any(|p| p.id() == id)
     }
 
-    pub fn priors(
-        &self,
-        state: &GameState,
-        decision: &AiDecisionContext,
-        candidates: &[CandidateAction],
-        ai_player: PlayerId,
-        config: &AiConfig,
-        context: &crate::context::AiContext,
-    ) -> Vec<PolicyPrior> {
+    pub fn priors(&self, env: &PriorsEnv<'_>, candidates: &[CandidateAction]) -> Vec<PolicyPrior> {
         if candidates.is_empty() {
             return Vec::new();
         }
@@ -467,15 +565,16 @@ impl PolicyRegistry {
         let raw_scores: Vec<f64> = candidates
             .iter()
             .map(|candidate| {
-                let cast_facts = cast_facts_for_action(state, &candidate.action, ai_player);
+                let cast_facts = cast_facts_for_action(env.state, &candidate.action, env.ai_player);
                 self.score(&PolicyContext {
-                    state,
-                    decision,
+                    state: env.state,
+                    decision: env.decision,
                     candidate,
-                    ai_player,
-                    config,
-                    context,
+                    ai_player: env.ai_player,
+                    config: env.config,
+                    context: env.context,
                     cast_facts,
+                    search_depth: env.search_depth,
                 })
             })
             .collect();
@@ -494,7 +593,11 @@ impl PolicyRegistry {
             return candidates
                 .iter()
                 .cloned()
-                .map(|candidate| PolicyPrior { candidate, prior })
+                .map(|candidate| PolicyPrior {
+                    candidate,
+                    prior,
+                    payment_successor: None,
+                })
                 .collect();
         }
         let shifted: Vec<f64> = raw_scores
@@ -518,7 +621,11 @@ impl PolicyRegistry {
             return candidates
                 .iter()
                 .cloned()
-                .map(|candidate| PolicyPrior { candidate, prior })
+                .map(|candidate| PolicyPrior {
+                    candidate,
+                    prior,
+                    payment_successor: None,
+                })
                 .collect();
         }
 
@@ -529,6 +636,7 @@ impl PolicyRegistry {
             .map(|(candidate, prior)| PolicyPrior {
                 candidate,
                 prior: prior / total,
+                payment_successor: None,
             })
             .collect()
     }
@@ -537,6 +645,8 @@ impl PolicyRegistry {
 #[cfg(test)]
 mod shared_invariant_tests {
     use super::*;
+    use crate::config::AiConfig;
+    use crate::policies::context::SearchDepth;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::types::actions::GameAction;
     use engine::types::game_state::{GameState, WaitingFor};
@@ -616,10 +726,7 @@ mod shared_invariant_tests {
     fn candidate(action: GameAction, tactical_class: TacticalClass) -> CandidateAction {
         CandidateAction {
             action,
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), tactical_class),
         }
     }
 
@@ -648,14 +755,15 @@ mod shared_invariant_tests {
         let config = AiConfig::default();
         let context = crate::context::AiContext::empty(&config.weights);
 
-        let priors = prior_test_registry().priors(
-            &state,
-            &decision,
-            &candidates,
-            PlayerId(0),
-            &config,
-            &context,
-        );
+        let env = PriorsEnv {
+            state: &state,
+            decision: &decision,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            search_depth: SearchDepth::Lookahead,
+        };
+        let priors = prior_test_registry().priors(&env, &candidates);
 
         assert_eq!(priors.len(), 2);
         assert_eq!(priors[0].prior, 0.0);
@@ -673,18 +781,130 @@ mod shared_invariant_tests {
         let config = AiConfig::default();
         let context = crate::context::AiContext::empty(&config.weights);
 
-        let priors = prior_test_registry().priors(
-            &state,
-            &decision,
-            &candidates,
-            PlayerId(0),
-            &config,
-            &context,
-        );
+        let env = PriorsEnv {
+            state: &state,
+            decision: &decision,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            search_depth: SearchDepth::Lookahead,
+        };
+        let priors = prior_test_registry().priors(&env, &candidates);
 
         assert_eq!(priors.len(), 2);
         assert!(priors
             .iter()
             .all(|prior| (prior.prior - 0.5).abs() < f64::EPSILON));
+    }
+
+    /// Emits a critical-band verdict (`-CRITICAL_MAX`) with an activation knob
+    /// above 1.0 — mirroring `arch_times_turn`'s ~2.6 worst case (archetype_scale
+    /// 2.0 x late_game_mult 1.3). The seam must clamp the scaled product back to
+    /// the critical band rather than leak the amplified value.
+    struct HighActivationCriticalPolicy;
+
+    impl TacticalPolicy for HighActivationCriticalPolicy {
+        fn id(&self) -> PolicyId {
+            PolicyId::CopyValue
+        }
+
+        fn decision_kinds(&self) -> &'static [DecisionKind] {
+            &[DecisionKind::ActivateAbility]
+        }
+
+        fn activation(
+            &self,
+            _features: &DeckFeatures,
+            _state: &GameState,
+            _player: PlayerId,
+        ) -> Option<f32> {
+            Some(2.6)
+        }
+
+        fn verdict(&self, _ctx: &PolicyContext<'_>) -> PolicyVerdict {
+            PolicyVerdict::critical(-CRITICAL_MAX, PolicyReason::new("scaled_clamp"))
+        }
+    }
+
+    fn scaled_clamp_registry() -> PolicyRegistry {
+        let policies: Vec<Box<dyn TacticalPolicy>> = vec![Box::new(HighActivationCriticalPolicy)];
+        let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
+        by_kind.insert(DecisionKind::ActivateAbility, vec![0]);
+        PolicyRegistry { policies, by_kind }
+    }
+
+    /// Regression for issue #5473: a band-compliant critical verdict scaled by an
+    /// activation > 1.0 must clamp to `CRITICAL_MAX` at the seam — never leak the
+    /// amplified `-CRITICAL_MAX * 2.6 = -39` into the softmax priors (nor trip the
+    /// registry's critical-band `debug_assert`, which now guards the pre-scale
+    /// delta rather than the amplified product).
+    #[test]
+    fn scaled_delta_is_clamped_to_critical_band_when_activation_exceeds_one() {
+        let action = GameAction::ActivateAbility {
+            source_id: ObjectId(1),
+            ability_index: 0,
+        };
+        let cand = candidate(action, TacticalClass::Ability);
+        let decision = priority_decision(vec![cand.clone()]);
+        let state = GameState::new_two_player(7);
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &cand,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: SearchDepth::Root,
+        };
+
+        let verdicts = scaled_clamp_registry().verdicts(&ctx);
+        assert_eq!(verdicts.len(), 1, "the single activated policy must fire");
+        let PolicyVerdict::Score { delta, .. } = &verdicts[0].1 else {
+            panic!("expected a Score verdict, got {:?}", verdicts[0].1);
+        };
+        assert!(
+            (delta + CRITICAL_MAX).abs() < 1e-9,
+            "critical delta x activation 2.6 must clamp to -CRITICAL_MAX ({}), got {delta}",
+            -CRITICAL_MAX
+        );
+    }
+
+    /// Regression for the #5478 review (copy_value saturation): rescaling a wide
+    /// analog range must keep two distinct large signals distinguishable and
+    /// order-preserving, where a bare `score()` saturation collapses them both to
+    /// the ceiling.
+    #[test]
+    fn rescale_into_critical_band_preserves_order_where_saturation_collapses() {
+        let ceiling = 130.0;
+
+        // Below STRONG_MAX: exact identity, sign-preserving.
+        assert_eq!(rescale_into_critical_band(3.0, ceiling), 3.0);
+        assert_eq!(rescale_into_critical_band(-4.5, ceiling), -4.5);
+        assert_eq!(rescale_into_critical_band(0.0, ceiling), 0.0);
+
+        // The maintainer's case: -110 and -30 both saturate to -CRITICAL_MAX under
+        // a bare clamp; rescaling keeps them distinct and correctly ordered.
+        let a = rescale_into_critical_band(-110.0, ceiling);
+        let b = rescale_into_critical_band(-30.0, ceiling);
+        let c = rescale_into_critical_band(-8.0, ceiling);
+        assert!(a < b && b < c, "ordering must survive: {a} < {b} < {c}");
+        assert!(
+            (a - b).abs() > 1.0,
+            "distinct large signals must stay distinguishable, got {a} vs {b}"
+        );
+
+        // Everything stays within the critical band, and beyond the ceiling it
+        // saturates (only the extreme tail, where ordering no longer matters).
+        for raw in [-500.0, -130.0, -15.0, 15.0, 130.0, 500.0] {
+            let out = rescale_into_critical_band(raw, ceiling);
+            assert!(
+                out.abs() <= CRITICAL_MAX + 1e-9,
+                "{raw} -> {out} exceeds band"
+            );
+        }
+        assert!((rescale_into_critical_band(-500.0, ceiling) + CRITICAL_MAX).abs() < 1e-9);
     }
 }

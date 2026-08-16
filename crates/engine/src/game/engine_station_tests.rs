@@ -74,6 +74,15 @@ fn setup_station_scenario() -> (GameState, ObjectId, ObjectId, ObjectId) {
     (state, spacecraft_id, power_5, power_2)
 }
 
+fn grant_cant_tap(state: &mut GameState, id: ObjectId) {
+    let def = StaticDefinition::new(crate::types::statics::StaticMode::CantTap)
+        .affected(TargetFilter::SelfRef);
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.static_definitions.push(def.clone());
+    std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+    crate::game::layers::evaluate_layers(state);
+}
+
 #[test]
 fn station_activation_enters_station_target_state() {
     let (mut state, spacecraft_id, p5, p2) = setup_station_scenario();
@@ -102,6 +111,23 @@ fn station_activation_enters_station_target_state() {
         }
         other => panic!("Expected StationTarget, got {other:?}"),
     }
+}
+
+#[test]
+fn station_activation_excludes_cant_tap_creatures() {
+    let (mut state, spacecraft_id, p5, p2) = setup_station_scenario();
+    grant_cant_tap(&mut state, p5);
+    grant_cant_tap(&mut state, p2);
+
+    let err = apply_as_current(
+        &mut state,
+        GameAction::ActivateStation {
+            spacecraft_id,
+            creature_id: None,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, EngineError::ActionNotAllowed(_)));
 }
 
 #[test]

@@ -1,0 +1,166 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 856
+expression: "&lowered"
+---
+{
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "Discard",
+          "count": {
+            "type": "Fixed",
+            "value": 1
+          },
+          "target": {
+            "type": "Controller"
+          }
+        },
+        "cost": null,
+        "sub_ability": {
+          "kind": "Spell",
+          "effect": {
+            "type": "Draw",
+            "count": {
+              "type": "Fixed",
+              "value": 2
+            },
+            "target": {
+              "type": "Controller"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": null,
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        },
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": {
+        "type": "SelfRef"
+      },
+      "origin": null,
+      "destination": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "When this ~ enters, discard a card, then draw two cards.",
+      "constraint": null,
+      "condition": null,
+      "batched": false
+    },
+    {
+      "mode": "Phase",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "Discard",
+          "count": {
+            "type": "Ref",
+            "qty": {
+              "type": "HandSize",
+              "player": {
+                "type": "Controller"
+              }
+            }
+          },
+          "target": {
+            "type": "Controller"
+          }
+        },
+        "cost": null,
+        "sub_ability": {
+          "kind": "Spell",
+          "effect": {
+            "type": "Draw",
+            "count": {
+              "type": "Fixed",
+              "value": 2
+            },
+            "target": {
+              "type": "Controller"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": null,
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        },
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": null,
+      "origin": null,
+      "destination": null,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": "Upkeep",
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "At the beginning of your upkeep, discard your hand, then draw two cards.",
+      "constraint": {
+        "type": "OnlyDuringYourTurn"
+      },
+      "condition": null,
+      "batched": false
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": [],
+  "solveCondition": {
+    "type": "Condition",
+    "condition": {
+      "type": "QuantityComparison",
+      "lhs": {
+        "type": "Ref",
+        "qty": {
+          "type": "HandSize",
+          "player": {
+            "type": "Controller"
+          }
+        }
+      },
+      "comparator": "EQ",
+      "rhs": {
+        "type": "Fixed",
+        "value": 0
+      }
+    }
+  }
+}

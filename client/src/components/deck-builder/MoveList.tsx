@@ -5,6 +5,7 @@ import type { UnsupportedCard } from "../../services/deckCompatibility";
 import type { GroupAccent } from "./deckGrouping";
 
 import { CardEntryRow } from "./CardEntryRow";
+import type { CardHoverHandler } from "./hoverPreview";
 
 function totalCards(entries: DeckEntry[]): number {
   return entries.reduce((sum, e) => sum + e.count, 0);
@@ -18,7 +19,11 @@ export interface MoveListProps {
   /** Optional — when omitted, rows render without a `-` remove button. See
    *  `CardEntryRowProps.onRemove`. */
   onRemove?: (name: string, section: "main" | "sideboard") => void;
-  onCardHover?: (name: string | null) => void;
+  /** Forwarded to each row. See `CardEntryRowProps.onIncrement`. */
+  onIncrement?: (name: string, section: "main" | "sideboard") => void;
+  /** Forwarded to each row. See `CardEntryRowProps.canIncrement`. */
+  canIncrement?: (name: string) => boolean;
+  onCardHover?: CardHoverHandler;
   unsupportedMap?: Map<string, UnsupportedCard>;
   /** Render the section even when it has zero entries, showing `emptyHint`.
    *  Used for the always-visible sideboard target in the deck editor. */
@@ -50,6 +55,8 @@ export function MoveList({
   entries,
   onMove,
   onRemove,
+  onIncrement,
+  canIncrement,
   onCardHover,
   unsupportedMap,
   alwaysShow = false,
@@ -98,6 +105,8 @@ export function MoveList({
             section={section}
             onMove={onMove}
             onRemove={onRemove}
+            onIncrement={onIncrement}
+            canIncrement={canIncrement}
             onCardHover={onCardHover}
             unsupported={unsupportedMap?.get(entry.name)}
             onChooseArt={onChooseArt}

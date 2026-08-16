@@ -1,41 +1,12 @@
 import { strFromU8, unzipSync } from "fflate";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { GameState } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { buildGameState } from "../../test/factories/gameStateFactory.ts";
 import {
   exportGameStateDebugZip,
   serializeGameStateDebugSnapshot,
 } from "../gameStateExport.ts";
-
-function createGameState(overrides: Partial<GameState> = {}): GameState {
-  return {
-    turn_number: 7,
-    active_player: 0,
-    phase: "PreCombatMain",
-    players: [
-      { id: 0, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-      { id: 1, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-    ],
-    priority_player: 0,
-    objects: {},
-    next_object_id: 1,
-    battlefield: [],
-    stack: [],
-    exile: [],
-    rng_seed: 1,
-    combat: null,
-    waiting_for: { type: "Priority", data: { player: 0 } },
-    has_pending_cast: false,
-    lands_played_this_turn: 0,
-    max_lands_per_turn: 1,
-    priority_pass_count: 0,
-    pending_replacement: null,
-    layers_dirty: false,
-    next_timestamp: 1,
-    ...overrides,
-  } as GameState;
-}
 
 describe("gameStateExport", () => {
   afterEach(() => {
@@ -44,7 +15,7 @@ describe("gameStateExport", () => {
   });
 
   it("serializes the debug snapshot as minified JSON by default", () => {
-    const gameState = createGameState();
+    const gameState = buildGameState({ turn_number: 7 });
     useGameStore.setState({
       gameState,
       waitingFor: gameState.waiting_for,
@@ -64,7 +35,7 @@ describe("gameStateExport", () => {
   });
 
   it("writes a zip containing the minified JSON snapshot through the save picker", async () => {
-    const gameState = createGameState();
+    const gameState = buildGameState({ turn_number: 7 });
     let writtenBlob: Blob | null = null;
     const write = vi.fn(async (blob: Blob) => {
       writtenBlob = blob;

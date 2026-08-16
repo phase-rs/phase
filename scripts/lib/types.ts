@@ -39,6 +39,10 @@ export interface ReportItem {
   reported_at: string;
   author_name: string;
   cards: string[];
+  /** Cards named explicitly via `[[Card]]` / Scryfall links — a trusted subset
+   *  of `cards` with no single-word false positives. Optional for backward
+   *  compatibility with report-items.jsonl written before this field existed. */
+  explicitCards?: string[];
   mechanics: string[];
   summary: string;
   actual: string;
@@ -69,7 +73,15 @@ export interface TriageItem {
   thread_name: string;
   message_id: string;
   cards: string[];
+  /** Trusted `[[Card]]` / Scryfall-link subset of `cards`, forwarded from the
+   *  report item so publish-time oracle verification always accepts it. */
+  explicitCards?: string[];
   summary: string;
+  /** Full reported text. The summary is only its first sentence, so the issue
+   *  body must carry this or the reproduction detail never reaches GitHub. */
+  body?: string;
+  /** Screenshots and game-state saves attached to the report. */
+  attachments?: RawDiscordMessage["attachments"];
   extraction_confidence: number;
   source_url: string;
   parser_status: "fully_parsed" | "has_gaps" | "unknown_card" | "no_card";

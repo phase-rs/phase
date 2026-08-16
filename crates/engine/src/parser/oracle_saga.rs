@@ -15,6 +15,7 @@ use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
 use super::oracle_effect::parse_effect_chain;
+use super::oracle_ir::replacement::ReplacementIr;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_util::strip_reminder_text;
 
@@ -117,17 +118,23 @@ fn is_chapter_body_continuation(line: &str) -> bool {
     result.is_ok()
 }
 
+/// Return shape of [`parse_saga_chapters`]: source-line-tagged chapter triggers,
+/// the `(line, ETB replacement)` pair, and the set of consumed line indices.
+type SagaChaptersParse = (
+    Vec<(usize, TriggerDefinition)>,
+    (usize, ReplacementIr),
+    HashSet<usize>,
+);
+
 /// CR 714: Parse all chapter lines from a Saga's Oracle text.
 /// Returns (chapter_triggers, etb_replacement, consumed_line_indices).
-pub(crate) fn parse_saga_chapters(
-    lines: &[&str],
-    _card_name: &str,
-) -> (
-    Vec<TriggerDefinition>,
-    ReplacementDefinition,
-    HashSet<usize>,
-) {
-    let mut chapters: Vec<(Vec<u32>, String)> = Vec::new();
+pub(crate) fn parse_saga_chapters(lines: &[&str], _card_name: &str) -> SagaChaptersParse {
+    // Each chapter carries its source line index so `parse_oracle_ir` can emit its
+    // trigger(s) in printed source order (unit-4 c2). A multi-numeral chapter line
+    // (CR 714.2c: "I, II — [Effect]") yields one trigger per numeral, all on the
+    // SAME line; emitting them in numeral order gives ascending ordinals on the
+    // shared `(first_line, start_byte)` key, i.e. correct printed order.
+    let mut chapters: Vec<(Vec<u32>, String, usize)> = Vec::new();
     let mut consumed = HashSet::new();
 
     for (idx, &line) in lines.iter().enumerate() {
@@ -141,7 +148,7 @@ pub(crate) fn parse_saga_chapters(
         }
 
         if let Some((nums, effect)) = parse_chapter_line(&stripped) {
-            chapters.push((nums, effect));
+            chapters.push((nums, effect, idx));
             consumed.insert(idx);
         } else if is_chapter_body_continuation(&stripped) && !chapters.is_empty() {
             // Multi-line chapter body: bullet-list continuation of previous chapter
@@ -155,7 +162,7 @@ pub(crate) fn parse_saga_chapters(
     }
 
     let mut triggers = Vec::new();
-    for (nums, effect_text) in &chapters {
+    for (nums, effect_text, line_idx) in &chapters {
         for &n in nums {
             // CR 701.38 (Council's-dilemma / Will-of-the-council vote): a saga
             // chapter may itself be a vote (Trial of a Time Lord IV: "Starting
@@ -189,14 +196,28 @@ pub(crate) fn parse_saga_chapters(
                     counter_type: crate::types::counter::CounterType::Lore,
                     threshold: Some(n),
                 })
+                // CR 714.2: this trigger came from an actual chapter symbol, so
+                // record the numeral. Consumers that need "is this a chapter
+                // ability, and which one" read this rather than inferring it
+                // from the lore threshold above.
+                .saga_chapter(n)
                 .execute(execute)
                 .trigger_zones(vec![Zone::Battlefield])
                 .description(format!("Chapter {n}"));
-            triggers.push(trigger);
+            triggers.push((*line_idx, trigger));
         }
     }
 
     // CR 714.3a: As a Saga enters the battlefield, its controller puts a lore counter on it.
+    //
+    // Provenance convention for a SYNTHESIZED rule item: the source text is the
+    // definition's own description. CR 714.3a prints no line — the rule applies
+    // from the subtype alone — so there is no Oracle slice to cite. Naming the
+    // first chapter's line instead would be a lie the anchor already tempts us
+    // into: `etb_line` points there for ordering, but the chapter-I trigger owns
+    // that text. A synthetic label cannot be located in the Oracle text, which is
+    // the honest answer for an item that was never printed.
+    const ETB_SYNTHETIC_SOURCE: &str = "Saga ETB lore counter";
     let etb_replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
@@ -208,9 +229,16 @@ pub(crate) fn parse_saga_chapters(
         ))
         .valid_card(TargetFilter::SelfRef)
         .destination_zone(Zone::Battlefield)
-        .description("Saga ETB lore counter".to_string());
+        .description(ETB_SYNTHETIC_SOURCE.to_string());
+    let etb_replacement = ReplacementIr::from_definition(ETB_SYNTHETIC_SOURCE, etb_replacement);
 
-    (triggers, etb_replacement, consumed)
+    // CR 714.3a: the ETB lore-counter replacement has no printed line of its own;
+    // anchor it at the FIRST chapter's line so it emits at/near the front of the
+    // document (preserving today's `replacements[0]` position). Falls back to line
+    // 0 for a degenerate Saga with no parsed chapters.
+    let etb_line = chapters.first().map_or(0, |(_, _, idx)| *idx);
+
+    (triggers, (etb_line, etb_replacement), consumed)
 }
 
 /// Check if a line is a saga chapter (e.g. "I —", "II —", "III —").
@@ -292,6 +320,24 @@ fn promote_generic_effect_duration(effect: &mut Effect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// u4-c2 test shim: map the source-line-tagged preprocessor return back to the
+    /// bare-def shape the existing assertions read.
+    fn saga_test_chapters(
+        lines: &[&str],
+        name: &str,
+    ) -> (
+        Vec<TriggerDefinition>,
+        ReplacementDefinition,
+        std::collections::HashSet<usize>,
+    ) {
+        let (triggers, (_, etb), consumed) = parse_saga_chapters(lines, name);
+        (
+            triggers.into_iter().map(|(_, t)| t).collect(),
+            etb.definition,
+            consumed,
+        )
+    }
     use crate::types::ability::{
         ContinuousModification, ControllerRef, FilterProp, PtValue, TypeFilter,
     };
@@ -381,7 +427,7 @@ mod tests {
         let lines = vec![
             "I, II, III, IV — Stampede! — Other creatures you control get +1/+0 until end of turn.",
         ];
-        let (triggers, _etb, _consumed) = parse_saga_chapters(&lines, "Summon: Choco/Mog");
+        let (triggers, _etb, _consumed) = saga_test_chapters(&lines, "Summon: Choco/Mog");
         assert_eq!(triggers.len(), 4);
 
         for trigger in triggers {
@@ -416,7 +462,7 @@ mod tests {
         use crate::types::statics::StaticMode;
 
         let lines = vec!["II, III — Until your next turn, creatures can't attack you unless their controller pays {2} for each of those creatures."];
-        let (triggers, _etb, _consumed) = parse_saga_chapters(&lines, "Summon: Yojimbo");
+        let (triggers, _etb, _consumed) = saga_test_chapters(&lines, "Summon: Yojimbo");
         assert_eq!(triggers.len(), 2);
 
         for trigger in &triggers {
@@ -476,7 +522,7 @@ mod tests {
             "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)",
             "I — This Saga gains \"{T}: Add {C}.\"",
         ];
-        let (triggers, _etb, _consumed) = parse_saga_chapters(&lines, "Urza's Saga");
+        let (triggers, _etb, _consumed) = saga_test_chapters(&lines, "Urza's Saga");
         assert_eq!(triggers.len(), 1, "expected one chapter trigger");
         let exec = triggers[0]
             .execute
@@ -501,7 +547,7 @@ mod tests {
         let lines = vec![
             "II — This Saga gains \"{2}, {T}: Create a 0/0 colorless Construct artifact creature token with 'This token gets +1/+1 for each artifact you control.'\"",
         ];
-        let (triggers, _etb, _consumed) = parse_saga_chapters(&lines, "Urza's Saga");
+        let (triggers, _etb, _consumed) = saga_test_chapters(&lines, "Urza's Saga");
         assert_eq!(triggers.len(), 1);
         let exec = triggers[0].execute.as_ref().unwrap();
         match &*exec.effect {
@@ -524,7 +570,7 @@ mod tests {
         let lines = vec![
             "II — This Saga gains \"{2}, {T}: Create a 0/0 colorless Construct artifact creature token with 'This token gets +1/+1 for each artifact you control.'\"",
         ];
-        let (triggers, _etb, _consumed) = parse_saga_chapters(&lines, "Urza's Saga");
+        let (triggers, _etb, _consumed) = saga_test_chapters(&lines, "Urza's Saga");
         assert_eq!(triggers.len(), 1);
         let exec = triggers[0].execute.as_ref().unwrap();
         let Effect::GenericEffect {
@@ -548,6 +594,89 @@ mod tests {
         );
     }
 
+    /// CR 611.2b + CR 714.2b + CR 602.5: Roar of the Fifth People chapter II
+    /// grants the Saga a static ability whose text is "Creatures you control have
+    /// '{T}: Add {R}, {G}, or {W}.'". The nested single-quoted tap ability must
+    /// parse as a `GrantStaticAbility` on creatures you control — NOT a broken
+    /// activated ability on the Saga itself (#5978).
+    #[test]
+    fn roar_chapter_two_grants_creature_tap_mana_ability() {
+        use crate::game::mana_abilities::is_mana_ability;
+        use crate::types::ability::{
+            ContinuousModification, ControllerRef, ManaProduction, TypeFilter,
+        };
+        use crate::types::mana::ManaColor;
+
+        let lines = vec![
+            "II — This Saga gains \"Creatures you control have '{T}: Add {R}, {G}, or {W}.'\"",
+        ];
+        let (triggers, _etb, _consumed) = saga_test_chapters(&lines, "Roar of the Fifth People");
+        assert_eq!(triggers.len(), 1);
+        let exec = triggers[0].execute.as_ref().unwrap();
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } = &*exec.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", exec.effect);
+        };
+        assert_eq!(
+            duration.as_ref(),
+            Some(&Duration::UntilHostLeavesPlay),
+            "chapter-granted ability must persist while saga is in play"
+        );
+        let ContinuousModification::GrantStaticAbility { definition } =
+            &static_abilities[0].modifications[0]
+        else {
+            panic!(
+                "expected GrantStaticAbility for nested static grant, got {:?}",
+                static_abilities[0].modifications
+            );
+        };
+        let affected = definition
+            .affected
+            .as_ref()
+            .expect("inner static must scope creatures you control");
+        match affected {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            }
+            other => panic!("expected typed creature filter, got {other:?}"),
+        }
+        let ContinuousModification::GrantAbility {
+            definition: granted,
+        } = &definition
+            .modifications
+            .iter()
+            .find(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+            .expect("inner static must grant the tap mana ability")
+        else {
+            unreachable!();
+        };
+        assert!(
+            is_mana_ability(granted),
+            "granted ability must be a mana ability"
+        );
+        assert!(
+            matches!(&*granted.effect, Effect::Mana { .. }),
+            "granted ability must add mana, got {:?}",
+            granted.effect
+        );
+        if let Effect::Mana {
+            produced: ManaProduction::AnyOneColor { color_options, .. },
+            ..
+        } = &*granted.effect
+        {
+            assert!(color_options.contains(&ManaColor::Red));
+            assert!(color_options.contains(&ManaColor::Green));
+            assert!(color_options.contains(&ManaColor::White));
+        } else {
+            panic!("expected AnyOneColor mana production");
+        }
+    }
+
     /// CR 514.2: Roar of the Fifth People chapter IV explicitly says "until end
     /// of turn" — the explicit duration must NOT be promoted to
     /// `UntilHostLeavesPlay`. Regression guard for the promoter's
@@ -556,7 +685,7 @@ mod tests {
     fn explicit_until_end_of_turn_chapter_is_not_promoted() {
         let lines =
             vec!["IV — Dinosaurs you control gain double strike and trample until end of turn."];
-        let (triggers, _etb, _consumed) = parse_saga_chapters(&lines, "Roar of the Fifth People");
+        let (triggers, _etb, _consumed) = saga_test_chapters(&lines, "Roar of the Fifth People");
         assert_eq!(triggers.len(), 1);
         let exec = triggers[0].execute.as_ref().unwrap();
         // If the parser produced something other than a GenericEffect (e.g. a
@@ -580,7 +709,7 @@ mod tests {
         let lines = vec![
             "III — Search your library for an artifact card with mana cost {0} or {1}, put it onto the battlefield, then shuffle.",
         ];
-        let (triggers, _etb, _consumed) = parse_saga_chapters(&lines, "Urza's Saga");
+        let (triggers, _etb, _consumed) = saga_test_chapters(&lines, "Urza's Saga");
         assert_eq!(triggers.len(), 1);
         let exec = triggers[0].execute.as_ref().unwrap();
         let Effect::SearchLibrary { filter, .. } = &*exec.effect else {
@@ -633,8 +762,7 @@ mod tests {
         let lines = vec![
             "III — Exile this Saga, then return it to the battlefield transformed under your control.",
         ];
-        let (triggers, _etb, _consumed) =
-            parse_saga_chapters(&lines, "Fable of the Mirror-Breaker");
+        let (triggers, _etb, _consumed) = saga_test_chapters(&lines, "Fable of the Mirror-Breaker");
         assert_eq!(triggers.len(), 1);
         let exec = triggers[0].execute.as_ref().expect("chapter III execute");
         match &*exec.effect {
@@ -692,13 +820,14 @@ mod tests {
         let lines = vec![
             "I — Exile the top three cards of your library. Until the end of your next turn, you may play those cards.",
         ];
-        let (triggers, _etb, _consumed) = parse_saga_chapters(&lines, "The Legend of Roku");
+        let (triggers, _etb, _consumed) = saga_test_chapters(&lines, "The Legend of Roku");
         assert_eq!(triggers.len(), 1);
         let exec = triggers[0].execute.as_ref().expect("chapter I execute");
         match &*exec.effect {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 3 },
+                position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
             } => {}
             other => panic!("expected ExileTop(controller, 3), got {other:?}"),
@@ -735,7 +864,7 @@ mod tests {
         use crate::types::counter::CounterType;
 
         let lines = vec!["IV — Put two +1/+1 counters on each other Moogle you control."];
-        let (triggers, _etb, _consumed) = parse_saga_chapters(&lines, "Summon: Good King Mog XII");
+        let (triggers, _etb, _consumed) = saga_test_chapters(&lines, "Summon: Good King Mog XII");
         assert_eq!(triggers.len(), 1);
         let exec = triggers[0].execute.as_ref().expect("chapter IV execute");
         match &*exec.effect {

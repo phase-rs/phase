@@ -9,9 +9,10 @@ extracts just those (plus any faces sharing their `scryfall_oracle_id`, so
 multi-face cards keep their back faces) into a small committed fixture that
 `tests::integration::support::shared_card_db` loads instead.
 
-Scans both the integration tests under `crates/engine/tests` and the four
-inline-`#[cfg(test)]` `src/` files listed in `SRC_TEST_FILES`, which load the
-same fixture through `crate::test_support::shared_card_db`.
+Scans the integration tests under `crates/engine/tests`, source-side test
+modules under `crates/engine/src`, source files that load the same fixture
+through `crate::test_support::shared_card_db`, and Phase AI tests that load the
+fixture directly.
 
 Re-run after adding a test that references a new card:
 
@@ -24,25 +25,51 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EXPORT_PATH = REPO_ROOT / "client/public/card-data.json"
 TESTS_DIR = REPO_ROOT / "crates/engine/tests"
-FIXTURE_PATH = REPO_ROOT / "crates/engine/tests/fixtures/integration_cards.json"
+SRC_DIR = REPO_ROOT / "crates/engine/src"
+FIXTURE_PATH = REPO_ROOT / "crates/engine/tests/fixtures/integration_cards.json.gz"
 
-# Inline `#[cfg(test)]` unit tests in `src/` also load the fixture (via
-# `crate::test_support::shared_card_db`), so scan their card-name literals too.
-SRC_TEST_FILES = [
+# This fixture must exercise Witherbloom Apprentice and Sakashima of a
+# Thousand Faces through the raw-MTGJSON parser, not a hand-maintained
+# card-data export entry. Keep the set narrow: every other referenced card is
+# selected from the production export below.
+PARSER_BACKED_FIXTURE_CARDS = {"witherbloom apprentice", "sakashima of a thousand faces"}
+
+# A few non-test-named source files contain test-only card references or corpus
+# rows consumed by tests that load the curated fixture.
+ALWAYS_SCAN_SRC_FILES = [
     REPO_ROOT / "crates/engine/src/analysis/corpus_tests.rs",
+    REPO_ROOT / "crates/engine/src/analysis/corpus.rs",
     REPO_ROOT / "crates/engine/src/database/synthesis.rs",
     REPO_ROOT / "crates/engine/src/game/engine.rs",
     REPO_ROOT / "crates/engine/src/game/meld_tests.rs",
 ]
 
+# Phase AI owns a small number of real-card scenarios that load the engine
+# fixture directly, rather than through the engine test-support wrapper.
+FIXTURE_CONSUMER_TEST_FILES = [REPO_ROOT / "crates/phase-ai/src/search.rs"]
+
 # Double-quoted Rust string literal contents (handles \" escapes).
 STRING_LITERAL = re.compile(r'"((?:[^"\\]|\\.)*)"')
+
+
+def src_fixture_files() -> list[Path]:
+    """Source files whose test card-name literals should be fixture-backed."""
+    files = {path for path in ALWAYS_SCAN_SRC_FILES if path.exists()}
+    files.update(SRC_DIR.rglob("*tests.rs"))
+
+    for rs in SRC_DIR.rglob("*.rs"):
+        text = rs.read_text(encoding="utf-8", errors="ignore")
+        if "shared_card_db" in text:
+            files.add(rs)
+
+    return sorted(files)
 
 
 def referenced_card_keys(export: dict[str, object]) -> set[str]:
@@ -53,7 +80,11 @@ def referenced_card_keys(export: dict[str, object]) -> set[str]:
     file. Card-name literals are single-line, so this loses nothing.
     """
     keys: set[str] = set()
-    for rs in [*TESTS_DIR.rglob("*.rs"), *SRC_TEST_FILES]:
+    for rs in [
+        *TESTS_DIR.rglob("*.rs"),
+        *src_fixture_files(),
+        *FIXTURE_CONSUMER_TEST_FILES,
+    ]:
         text = rs.read_text(encoding="utf-8", errors="ignore")
         for line in text.splitlines():
             for raw in STRING_LITERAL.findall(line):
@@ -63,6 +94,24 @@ def referenced_card_keys(export: dict[str, object]) -> set[str]:
                 if key in export:
                     keys.add(key)
     return keys
+
+
+def canonical_gzip(data: bytes) -> bytes:
+    """Compress with the repository's byte-reproducible fixture format."""
+    return subprocess.run(
+        ["gzip", "-9", "-n", "-c"],
+        input=data,
+        stdout=subprocess.PIPE,
+        check=True,
+    ).stdout
+
+
+def decompress_fixture(path: Path) -> bytes:
+    return subprocess.run(
+        ["gzip", "-d", "-c", str(path)],
+        stdout=subprocess.PIPE,
+        check=True,
+    ).stdout
 
 
 def main() -> int:
@@ -75,6 +124,7 @@ def main() -> int:
     export: dict[str, object] = json.loads(EXPORT_PATH.read_text(encoding="utf-8"))
 
     referenced = referenced_card_keys(export)
+    export_referenced = referenced - PARSER_BACKED_FIXTURE_CARDS
 
     # Group keys by oracle id so a referenced front face pulls in its siblings.
     by_oracle: dict[str, list[str]] = {}
@@ -83,41 +133,65 @@ def main() -> int:
         if oid:
             by_oracle.setdefault(oid, []).append(key)
 
-    selected: set[str] = set(referenced)
-    for key in referenced:
+    selected: set[str] = set(export_referenced)
+    for key in export_referenced:
         value = export[key]
         oid = value.get("scryfall_oracle_id") if isinstance(value, dict) else None
         if oid:
             selected.update(by_oracle.get(oid, ()))
 
-    # `--check`: verify the committed fixture still covers every referenced card,
-    # without rewriting it. Exits non-zero (for CI / pre-commit) when stale.
+    fixture = {key: export[key] for key in sorted(selected)}
+    serialized = (json.dumps(fixture, separators=(",", ":"), ensure_ascii=False) + "\n").encode(
+        "utf-8"
+    )
+    compressed = canonical_gzip(serialized)
+
+    # `--check`: decompress and validate the semantic subset, then prove the
+    # checked-in archive is the exact canonical `gzip -9 -n` byte stream.
     if "--check" in sys.argv:
         if not FIXTURE_PATH.exists():
             sys.exit("error: fixture missing — run `python3 scripts/gen-test-fixture.py`")
-        current = set(json.loads(FIXTURE_PATH.read_text(encoding="utf-8")))
-        missing = selected - current
+        current_bytes = decompress_fixture(FIXTURE_PATH)
+        current = json.loads(current_bytes)
+        if not isinstance(current, dict):
+            sys.exit("error: fixture must decompress to a JSON object")
+        current_keys = set(current)
+        missing = selected - current_keys
         if missing:
             listed = "\n  ".join(sorted(missing))
             sys.exit(
                 f"error: fixture is stale — {len(missing)} card(s) not covered:\n  "
                 f"{listed}\nregenerate with `python3 scripts/gen-test-fixture.py`"
             )
-        print(f"ok: fixture covers all {len(selected)} referenced cards")
+        parser_backed = current_keys & PARSER_BACKED_FIXTURE_CARDS
+        if parser_backed:
+            listed = "\n  ".join(sorted(parser_backed))
+            sys.exit(
+                "error: parser-backed cards leaked into the export fixture:\n  "
+                f"{listed}\nregenerate with `python3 scripts/gen-test-fixture.py`"
+            )
+        if current != fixture:
+            sys.exit(
+                "error: fixture semantic values are stale — regenerate with "
+                "`python3 scripts/gen-test-fixture.py`"
+            )
+        if FIXTURE_PATH.read_bytes() != compressed:
+            sys.exit(
+                "error: fixture bytes are not canonical gzip -9 -n output — "
+                "regenerate with `python3 scripts/gen-test-fixture.py`"
+            )
+        print(f"ok: fixture covers all {len(selected)} referenced cards with canonical gzip bytes")
         return 0
 
-    fixture = {key: export[key] for key in sorted(selected)}
     FIXTURE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    # Compact separators keep the committed fixture small.
-    serialized = json.dumps(fixture, separators=(",", ":"), ensure_ascii=False)
-    FIXTURE_PATH.write_text(serialized + "\n", encoding="utf-8")
+    FIXTURE_PATH.write_bytes(compressed)
 
-    siblings = len(selected) - len(referenced)
+    siblings = len(selected) - len(export_referenced)
     print(
         f"wrote {len(selected)} cards "
-        f"({len(referenced)} referenced + {siblings} sibling faces) to "
+        f"({len(export_referenced)} export-referenced + {siblings} sibling faces) to "
         f"{FIXTURE_PATH.relative_to(REPO_ROOT)} "
-        f"({len(serialized) / 1024:.0f} KB)"
+        f"({len(compressed) / 1024:.0f} KB compressed)"
     )
     return 0
 

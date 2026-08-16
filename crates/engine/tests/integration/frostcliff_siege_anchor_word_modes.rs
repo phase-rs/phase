@@ -80,13 +80,16 @@ fn drive_siege_choice(
     siege: ObjectId,
     chosen_label: &str,
 ) {
+    let source = crate::support::exact_named_choice_source(runner.state(), siege);
     runner.state_mut().waiting_for = WaitingFor::NamedChoice {
+        free_entry: None,
         player: P0,
         choice_type: ChoiceType::Labeled {
             options: vec!["Jeskai".to_string(), "Temur".to_string()],
         },
         options: vec!["Jeskai".to_string(), "Temur".to_string()],
-        source_id: Some(siege),
+        source: Some(source),
+        persist_player: None,
     };
     runner
         .act(GameAction::ChooseOption {
@@ -512,10 +515,12 @@ fn cast_siege_from_hand(runner: &mut GameRunner, siege: ObjectId, chosen_label: 
     // is silently dropped on real ETB.
     match &runner.state().waiting_for {
         WaitingFor::NamedChoice {
+            free_entry: None,
             player,
             choice_type,
             options,
-            source_id,
+            source: Some(source),
+            ..
         } => {
             assert_eq!(
                 *player, P0,
@@ -531,9 +536,8 @@ fn cast_siege_from_hand(runner: &mut GameRunner, siege: ObjectId, chosen_label: 
                 "Jeskai and Temur must both be offered — got {options:?}"
             );
             assert_eq!(
-                *source_id,
-                Some(siege),
-                "the NamedChoice source_id must be the Siege whose replacement \
+                source.prompt.identity.reference.object_id, siege,
+                "the NamedChoice exact source must be the Siege whose replacement \
                  just fired (so chosen_attributes lands on the right object)"
             );
         }

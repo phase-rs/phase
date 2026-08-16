@@ -8,6 +8,7 @@ import {
   copyGameStateDebugSnapshot,
   exportGameStateDebugZip,
 } from "../../services/gameStateExport.ts";
+import { downloadCurrentReplay } from "../../services/replayExport.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -71,15 +72,18 @@ function currentPromptSummary({
   if (waitingFor.type === "GameOver") return t("help.prompt.gameOver");
 
   if (waitingFor.type === "MulliganDecision") {
-    return waitingFor.data.pending.some((entry) => entry.player === playerId)
-      ? t("help.prompt.mulliganDecide")
+    const entry = waitingFor.data.pending.find((e) => e.player === playerId);
+    if (entry) {
+      return entry.phase.type === "BottomCards"
+        ? t("help.prompt.mulliganBottom")
+        : t("help.prompt.mulliganDecide");
+    }
+    const someoneBottoming = waitingFor.data.pending.some(
+      (e) => e.phase.type === "BottomCards",
+    );
+    return someoneBottoming
+      ? t("help.prompt.mulliganWaitBottom")
       : t("help.prompt.mulliganWaitDecide");
-  }
-
-  if (waitingFor.type === "MulliganBottomCards") {
-    return waitingFor.data.pending.some((entry) => entry.player === playerId)
-      ? t("help.prompt.mulliganBottom")
-      : t("help.prompt.mulliganWaitBottom");
   }
 
   if (waitingFor.type === "OpeningHandBottomCards") {
@@ -241,6 +245,21 @@ export function HelpSheet() {
       });
   };
 
+  const handleExportReplay = () => {
+    downloadCurrentReplay()
+      .then((filename) => {
+        setStatus(
+          filename
+            ? t("help.status.replayExported", { filename })
+            : t("help.status.replayExportUnavailable"),
+        );
+      })
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        setStatus(t("help.status.replayExportFailed"));
+      });
+  };
+
   return (
     <AnimatePresence>
       {open && (
@@ -355,6 +374,14 @@ export function HelpSheet() {
                     className="rounded-lg border border-white/10 bg-white/8 px-3 py-2 text-sm font-semibold text-slate-100 transition hover:bg-white/12 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     {t("help.exportState")}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!gameState}
+                    onClick={handleExportReplay}
+                    className="rounded-lg border border-white/10 bg-white/8 px-3 py-2 text-sm font-semibold text-slate-100 transition hover:bg-white/12 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {t("help.exportReplay")}
                   </button>
                   <button
                     type="button"

@@ -59,7 +59,8 @@
     "passingLeft": "→ Pasando a la izquierda →",
     "passingRight": "← Pasando a la derecha ←",
     "connected": "Conectado",
-    "disconnected": "Desconectado"
+    "disconnected": "Desconectado",
+    "faceUpDraftCards": "Boca arriba: {{cards}}"
   },
   "setSelector": {
     "botDifficulty": "Dificultad de los bots",
@@ -77,17 +78,55 @@
   },
   "pack": {
     "confirmPick": "Confirmar elección",
+    "draftEffects": "Efectos de draft:",
     "waitingNext": "Esperando el siguiente sobre...",
     "cardsInPack": "{{count}} cartas en el sobre",
     "picking": "Eligiendo…",
     "autoPick": "Elección automática"
+  },
+  "sealedOpening": {
+    "title": "Abre tu pool de sellado",
+    "subtitle": "Abre seis sobres, uno a la vez.",
+    "packProgress": "Sobre {{current}} de {{total}}",
+    "openPack": "Abrir sobre",
+    "openPackArt": "Abrir ilustración del sobre",
+    "pulls": "Tus cartas",
+    "nextPack": "Siguiente sobre",
+    "viewPool": "Ver tu pool",
+    "poolTitle": "Tu pool de sellado",
+    "poolSubtitle": "Las {{count}} cartas, agrupadas por tipo.",
+    "buildDeck": "Construir mazo"
   },
   "pool": {
     "cardsDrafted": "{{count}} cartas drafteadas",
     "empty": "Aún no se ha drafteado ninguna carta",
     "sortColor": "Color",
     "sortType": "Tipo",
-    "sortCmc": "CMC"
+    "sortCmc": "CMC",
+    "groups": {
+      "white": "Blanco",
+      "blue": "Azul",
+      "black": "Negro",
+      "red": "Rojo",
+      "green": "Verde",
+      "multicolor": "Multicolor",
+      "colorless": "Incoloro",
+      "creature": "Criatura",
+      "instant": "Instantáneo",
+      "sorcery": "Conjuro",
+      "enchantment": "Encantamiento",
+      "artifact": "Artefacto",
+      "planeswalker": "Planeswalker",
+      "land": "Tierra",
+      "other": "Otro",
+      "manaValue0": "0 CMC",
+      "manaValue1": "1 CMC",
+      "manaValue2": "2 CMC",
+      "manaValue3": "3 CMC",
+      "manaValue4": "4 CMC",
+      "manaValue5": "5 CMC",
+      "manaValue6Plus": "6+ CMC"
+    }
   },
   "standings": {
     "title": "Clasificación — Ronda {{round}}",
@@ -104,9 +143,12 @@
     "mainDeck": "Mazo principal",
     "emptyDeckHint": "Haz clic en las cartas del grupo para añadirlas a tu mazo.",
     "addableCards": "Cartas añadibles",
+    "searchAddableCards": "Buscar cartas añadibles...",
     "autoLands": "Tierras automáticas",
     "suggestDeck": "Sugerir mazo",
     "submitDeck": "Enviar mazo",
+    "validationTitle": "El mazo necesita atención",
+    "submitFailed": "No se pudo enviar el mazo",
     "removeCard": "Quitar {{name}}",
     "addCard": "Añadir {{name}}",
     "cardCount": "/ {{min}} cartas",
@@ -125,6 +167,10 @@
     "quickDraft": {
       "title": "Draft Rápido",
       "description": "Draftea 3 sobres con 7 drafters de IA, construye un mazo de 40 cartas y luego juega una partida Bo1 contra uno de ellos."
+    },
+    "sealed": {
+      "title": "Sealed",
+      "description": "Abre seis sobres, revisa el pool completo y luego construye un mazo de 40 cartas para una partida al mejor de uno."
     },
     "cubeDraft": {
       "title": "Cube Draft",
@@ -156,6 +202,7 @@
   },
   "quickPhase": {
     "drafting": "Drafteando",
+    "opening": "Abriendo sobres",
     "deckbuilding": "Construcción de mazo",
     "matchRecord": "Partida {{number}} — {{wins}}V-{{losses}}D",
     "record": "{{wins}}V-{{losses}}D",
@@ -236,6 +283,7 @@
   "page": {
     "cubeDraftTitle": "Cube Draft",
     "quickDraftTitle": "Draft Rápido",
+    "sealedTitle": "Sellado",
     "setDraftTab": "Set Draft",
     "cubeTab": "Cube"
   },
@@ -261,6 +309,8 @@
     "kindPremierDesc": "Partidas de torneo al mejor de uno tras la construcción de mazo. Rondas más rápidas, sin banquillo entre juegos.",
     "kindTraditional": "Tradicional",
     "kindTraditionalDesc": "Partidas de torneo al mejor de tres tras la construcción de mazo, con banquillo entre juegos.",
+    "kindSealed": "Sellado",
+    "kindSealedDesc": "Abre seis sobres directamente en el pool de cada jugador y luego construye un mazo de torneo al mejor de uno.",
     "tournamentFormat": "Formato de torneo",
     "tournamentSwiss": "Suizo",
     "tournamentSwissDesc": "Todos siguen jugando durante tres rondas, incluso tras una derrota.",

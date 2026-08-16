@@ -4,15 +4,135 @@ use crate::types::ability::{
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use std::sync::Arc;
 
-use super::engine::EngineError;
+use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use super::printed_cards::apply_back_face_to_object;
+
+/// An engine-authored turn-face-up announcement for the Priority preflight.
+/// The permanent identity remains owned by the face-down authority until the
+/// Priority facade reconstructs the special-action primer.
+pub(in crate::game) struct PriorityTurnFaceUpAnnouncement {
+    object_id: ObjectId,
+}
+
+impl PriorityTurnFaceUpAnnouncement {
+    fn new(object_id: ObjectId) -> Self {
+        Self { object_id }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+}
+
+/// One finite Priority outcome from the turn-face-up special-action authority.
+/// `RequiresChosenX` deliberately has no action payload: mandatory progress
+/// must not guess a value for a player-chosen X cost.
+pub(in crate::game) enum PriorityTurnFaceUpCandidate {
+    Ready(PriorityTurnFaceUpAnnouncement),
+    RequiresChosenX,
+}
+
+/// Enumerates the current holder's face-up special-action outcomes in
+/// battlefield order. `turn_face_up_prepare` remains the single legality and
+/// cost authority; priority applies the reducer's action-specific cost
+/// adjustment and affordability check before offering a primer.
+pub(in crate::game) fn priority_turn_face_up_candidates(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityTurnFaceUpCandidate> {
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter_map(|object_id| {
+            let player = principal.semantic_holder();
+            let cost = turn_face_up_prepare(state, object_id, player).ok()?;
+            let cost = super::casting::apply_special_action_cost_reduction(
+                state,
+                player,
+                crate::types::mana::SpecialAction::TurnFaceUp,
+                cost,
+            );
+            super::casting::can_pay_special_action_mana_cost_after_auto_tap(
+                state,
+                player,
+                Some(object_id),
+                &cost,
+                crate::types::mana::SpecialAction::TurnFaceUp,
+            )
+            .then_some(())?;
+            Some(if super::casting_costs::cost_has_x(&cost) {
+                PriorityTurnFaceUpCandidate::RequiresChosenX
+            } else {
+                PriorityTurnFaceUpCandidate::Ready(PriorityTurnFaceUpAnnouncement::new(object_id))
+            })
+        })
+        .collect()
+}
+
+/// An engine-authored face-down play announcement for Priority preflight. The
+/// hand object and card identity remain private to the face-down authority
+/// until the Priority facade reconstructs the ordinary reducer primer.
+pub(in crate::game) struct PriorityPlayFaceDownAnnouncement {
+    object_id: ObjectId,
+    card_id: CardId,
+}
+
+impl PriorityPlayFaceDownAnnouncement {
+    fn new(object_id: ObjectId, card_id: CardId) -> Self {
+        Self { object_id, card_id }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+
+    pub(in crate::game) fn card_id(&self, _access: &PriorityAnnouncementFacadeAccess) -> CardId {
+        self.card_id
+    }
+}
+
+/// Enumerates the current active Priority holder's hand primers for the normal
+/// face-down-play reducer. The shared casting predicates exclude cards without
+/// morph/disguise and cards that cannot be cast face down in this window.
+pub(in crate::game) fn priority_play_face_down_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityPlayFaceDownAnnouncement> {
+    let player = principal.semantic_holder();
+    if state.active_player != player {
+        return Vec::new();
+    }
+    state
+        .players
+        .iter()
+        .find(|candidate| candidate.id == player)
+        .into_iter()
+        .flat_map(|candidate| candidate.hand.iter().copied())
+        .filter_map(|object_id| {
+            (super::casting::object_has_effective_face_down_keyword(state, object_id)
+                && super::casting::face_down_cast_is_permitted(state, player, object_id))
+            .then_some(())?;
+            state
+                .objects
+                .get(&object_id)
+                .map(|object| PriorityPlayFaceDownAnnouncement::new(object_id, object.card_id))
+        })
+        .collect()
+}
 
 /// Stores the original characteristics of a face-down card so they can be
 /// restored when the card is turned face up.
@@ -202,17 +322,27 @@ pub(crate) fn is_blocked_by_cant_be_turned_face_up(state: &GameState, object_id:
     false
 }
 
-/// CR 702.37c: Turning a face-down permanent face up restores its original characteristics.
+/// CR 702.37e / CR 702.168d / CR 701.40b: Validate a turn-face-up special action
+/// and derive the mana cost that must be paid before the permanent is flipped.
 ///
-/// Validates that the player controls the permanent and that it has morph/disguise
-/// cost data stored. Sets `face_down = false`, restores characteristics from
-/// stored `back_face`, and emits `GameEvent::TurnedFaceUp`.
-pub fn turn_face_up(
-    state: &mut GameState,
-    player: PlayerId,
+/// Shared front half of [`turn_face_up`]: checks controller, face-down state,
+/// battlefield zone, and the `CantBeTurnedFaceUp` static (CR 116.2b + CR 708.7),
+/// then extracts the cost to pay:
+/// - a morph/megamorph/disguise keyword's stored cost (CR 702.37e / CR 702.168d), or
+/// - a manifested creature card's mana cost (CR 701.40b).
+///
+/// CR 701.40b: a face-down permanent that is neither (no morph/disguise cost and
+/// not a creature card) can't be turned face up this way — returns `Err`.
+///
+/// Kept separate from the commit half so the paid `GameAction::TurnFaceUp`
+/// special-action handler can charge the returned cost through
+/// `pay_special_action_mana_cost` before `turn_face_up` flips the permanent,
+/// while the free direct callers (grant path, tests) reuse the same guards.
+pub(crate) fn turn_face_up_prepare(
+    state: &GameState,
     object_id: ObjectId,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EngineError> {
+    player: PlayerId,
+) -> Result<ManaCost, EngineError> {
     let obj = state
         .objects
         .get(&object_id)
@@ -250,31 +380,89 @@ pub fn turn_face_up(
 
     let back_face = obj
         .back_face
-        .clone()
+        .as_ref()
         .ok_or_else(|| EngineError::InvalidAction("No stored face data".to_string()))?;
 
-    // Check that the card actually has a morph or disguise cost
-    let has_morph_cost = back_face.keywords.iter().any(|k| {
-        matches!(
-            k,
-            Keyword::Morph(_) | Keyword::Megamorph(_) | Keyword::Disguise(_)
-        )
-    });
+    // CR 702.37e / CR 702.168d: the morph/megamorph/disguise cost is the cost
+    // paid to turn the permanent face up. CR 701.40b: a manifested creature card
+    // is turned up by paying its mana cost; a non-creature or no-mana-cost
+    // manifest can't be turned up this way.
+    back_face
+        .keywords
+        .iter()
+        .find_map(|k| match k {
+            Keyword::Morph(c) | Keyword::Megamorph(c) => Some(c.clone()),
+            Keyword::Disguise(crate::types::keywords::DisguiseCost::Mana(c)) => Some(c.clone()),
+            Keyword::Disguise(crate::types::keywords::DisguiseCost::Reduced {
+                cost,
+                reduction,
+            }) => {
+                let condition_met = reduction.condition.as_ref().is_none_or(|condition| {
+                    crate::game::restrictions::evaluate_condition(
+                        state, player, object_id, condition,
+                    )
+                });
+                let count = if condition_met {
+                    crate::game::quantity::resolve_quantity(
+                        state,
+                        &reduction.count,
+                        player,
+                        object_id,
+                    )
+                    .max(0) as u32
+                } else {
+                    0
+                };
+                let mut cost = cost.clone();
+                if let ManaCost::Cost { generic, .. } = &mut cost {
+                    *generic = generic.saturating_sub(reduction.amount_per.saturating_mul(count));
+                }
+                Some(cost)
+            }
+            _ => None,
+        })
+        .or_else(|| {
+            if back_face
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature)
+                && !matches!(back_face.mana_cost, ManaCost::NoCost)
+            {
+                Some(back_face.mana_cost.clone())
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            EngineError::InvalidAction("Card cannot be turned face up (no morph cost)".to_string())
+        })
+}
 
-    // For manifest: creature cards can be turned face up by paying mana cost
-    // (handled separately -- here we just need morph/disguise keywords OR
-    // we allow turning up if the card has a mana cost and is a creature)
-    let is_manifested_creature = !has_morph_cost
-        && back_face
-            .card_types
-            .core_types
-            .contains(&CoreType::Creature);
+/// CR 702.37c: Turning a face-down permanent face up restores its original characteristics.
+///
+/// Validates that the player controls the permanent and that it has morph/disguise
+/// cost data stored. Sets `face_down = false`, restores characteristics from
+/// stored `back_face`, and emits `GameEvent::TurnedFaceUp`.
+pub fn turn_face_up(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    // All validation + cost derivation lives in `turn_face_up_prepare` so the
+    // paid `GameAction::TurnFaceUp` special-action route and the free direct
+    // callers agree on legality. The derived cost is charged by the special-action
+    // handler before it calls this commit half; the free callers discard it.
+    turn_face_up_prepare(state, object_id, player)?;
 
-    if !has_morph_cost && !is_manifested_creature {
-        return Err(EngineError::InvalidAction(
-            "Card cannot be turned face up (no morph cost)".to_string(),
-        ));
-    }
+    // `turn_face_up_prepare` guaranteed the stored face is present; re-clone it
+    // for the commit. The immutable borrow ends before `next_timestamp` below
+    // (which takes `&mut self`).
+    let back_face = state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.back_face.clone())
+        .ok_or_else(|| EngineError::InvalidAction("No stored face data".to_string()))?;
 
     // CR 613.7f: a permanent receives a new timestamp when it turns face up.
     // (Turning face DOWN in place is unreachable in the engine today — only
@@ -427,26 +615,6 @@ pub fn manifest(
     )
 }
 
-/// CR 701.58a: Cloak puts the top card of library onto the battlefield face
-/// down as a 2/2 creature **with ward {2}**. Like manifest, a cloaked creature
-/// card can later be turned face up for its mana cost.
-pub fn cloak(
-    state: &mut GameState,
-    player: PlayerId,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EngineError> {
-    let object_id = top_library_object(state, player)?;
-    manifest_card(
-        state,
-        player,
-        object_id,
-        object_id,
-        crate::types::ability::FaceDownProfile::cloaked_2_2(),
-        None,
-        events,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::printed_cards::snapshot_object_face;
@@ -510,6 +678,141 @@ mod tests {
         assert!(obj.keywords.is_empty());
         assert!(obj.abilities.is_empty());
         assert!(obj.color.is_empty());
+    }
+
+    #[test]
+    fn priority_omits_an_unpayable_turn_face_up_action() {
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+        let id = setup_morph_creature(&mut state, player);
+        play_face_down(&mut state, player, id, &mut Vec::new()).expect("play morph face down");
+        let principal = crate::game::engine::priority_principal_for_preflight(&state)
+            .expect("the synchronized priority window has a principal");
+
+        assert!(
+            priority_turn_face_up_candidates(&state, &principal).is_empty(),
+            "Priority must not announce a turn-face-up action whose final cost cannot be paid"
+        );
+    }
+
+    #[test]
+    fn priority_applies_turn_face_up_cost_reductions_before_affordability() {
+        use crate::types::ability::StaticDefinition;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::mana::SpecialAction;
+        use crate::types::statics::{CostModifyMode, StaticMode};
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+        let id = setup_morph_creature(&mut state, player);
+        play_face_down(&mut state, player, id, &mut Vec::new()).expect("play morph face down");
+        let reducer = create_object(
+            &mut state,
+            CardId(2),
+            player,
+            "Turn-up Reducer".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&reducer).unwrap().static_definitions =
+            vec![StaticDefinition::new(StaticMode::ReduceActionCost {
+                action: SpecialAction::TurnFaceUp,
+                mode: CostModifyMode::Reduce,
+                amount: 3,
+            })]
+            .into();
+        let principal = crate::game::engine::priority_principal_for_preflight(&state)
+            .expect("the synchronized priority window has a principal");
+
+        assert!(matches!(
+            priority_turn_face_up_candidates(&state, &principal).as_slice(),
+            [PriorityTurnFaceUpCandidate::Ready(_)]
+        ));
+    }
+
+    #[test]
+    fn priority_omits_hand_cards_without_a_face_down_keyword() {
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+        create_object(
+            &mut state,
+            CardId(3),
+            player,
+            "Ordinary Creature".to_string(),
+            Zone::Hand,
+        );
+        let principal = crate::game::engine::priority_principal_for_preflight(&state)
+            .expect("the synchronized priority window has a principal");
+
+        assert!(
+            priority_play_face_down_announcements(&state, &principal).is_empty(),
+            "Priority must not announce ordinary hand cards as face-down casts"
+        );
+    }
+
+    /// CR 702.168d + CR 118.7a: Fugitive Codebreaker's disguise discount is
+    /// evaluated when the special action is taken and cannot reduce the red pip.
+    #[test]
+    fn disguise_turn_face_up_cost_counts_instant_and_sorcery_cards() {
+        use crate::types::ability::{CostReduction, CountScope, QuantityRef, TypeFilter, ZoneRef};
+        use crate::types::keywords::DisguiseCost;
+        use crate::types::mana::ManaCostShard;
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let id = setup_morph_creature(&mut state, player);
+        state.objects.get_mut(&id).unwrap().keywords =
+            vec![Keyword::Disguise(DisguiseCost::Reduced {
+                cost: ManaCost::Cost {
+                    generic: 5,
+                    shards: vec![ManaCostShard::Red],
+                },
+                reduction: Box::new(CostReduction {
+                    mode: crate::types::statics::CostModifyMode::Reduce,
+                    amount_per: 1,
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneCardCount {
+                            zone: ZoneRef::Graveyard,
+                            card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
+                            filter: None,
+                            scope: CountScope::Controller,
+                        },
+                    },
+                    condition: None,
+                }),
+            })];
+        for (offset, card_type) in [CoreType::Instant, CoreType::Sorcery, CoreType::Creature]
+            .into_iter()
+            .enumerate()
+        {
+            let gy = create_object(
+                &mut state,
+                CardId(20 + offset as u64),
+                player,
+                format!("GY{offset}"),
+                Zone::Graveyard,
+            );
+            state.objects.get_mut(&gy).unwrap().card_types.core_types = vec![card_type];
+        }
+        play_face_down(&mut state, player, id, &mut Vec::new()).unwrap();
+        let cost = turn_face_up_prepare(&state, id, player).expect("disguise can turn face up");
+        assert!(matches!(
+            cost,
+            ManaCost::Cost { generic: 3, shards }
+                if shards.as_slice() == [ManaCostShard::Red]
+        ));
     }
 
     /// CR 616.1 + CR 708.3 discriminating test (fail-first): a face-down morph
@@ -627,6 +930,70 @@ mod tests {
         assert!(
             obj.back_face.is_some(),
             "real face snapshot stored so turn-face-up can restore it"
+        );
+    }
+
+    /// §10.1 NO-OVER-SUPPRESSION guard (NOT a revert-tripwire): the CR 708.3/708.2a
+    /// entry guard suppresses only the ENTERING object's OWN self-replacement
+    /// (`is_entering`, i.e. `rid.source == entering object`). An EXTERNAL source's
+    /// enters-tapped replacement has `is_entering == false` and must STILL apply to
+    /// a face-down 2/2 (a face-down permanent is still a creature entering the
+    /// battlefield). Install ONE type-agnostic external "enters tapped" `Moved`
+    /// replacement (Frozen Aether class, `valid_card == None`) on a DIFFERENT
+    /// permanent — single direction, so no CR 616.1 collision/prompt — then play a
+    /// morph creature face down and assert it enters TAPPED.
+    ///
+    /// This passes WITH and WITHOUT the guard: it guards against a naive
+    /// "skip all replacements on face-down entry" broadening, not against guard
+    /// absence. The discriminator for the fix is
+    /// `warden_played_face_down_gains_zero_counters` (0 → 2 on revert).
+    #[test]
+    fn external_enters_tapped_still_applies_to_face_down_entry() {
+        use crate::game::game_object::GameObject;
+        use crate::types::ability::{ReplacementDefinition, TargetFilter};
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+
+        let oid = ObjectId(9000);
+        let mut src = GameObject::new(
+            oid,
+            CardId(900),
+            PlayerId(1),
+            "Frozen Aether".to_string(),
+            Zone::Battlefield,
+        );
+        src.replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                crate::types::ability::Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: crate::types::ability::EffectScope::Single,
+                    state: crate::types::ability::TapStateChange::Tap,
+                },
+            ))
+            .destination_zone(Zone::Battlefield)
+            .description("Frozen Aether".to_string())]
+        .into();
+        state.objects.insert(oid, src);
+        state.battlefield.push_back(oid);
+
+        let id = setup_morph_creature(&mut state, player);
+        let mut events = Vec::new();
+        play_face_down(&mut state, player, id, &mut events).unwrap();
+
+        let obj = &state.objects[&id];
+        assert_eq!(
+            obj.zone,
+            Zone::Battlefield,
+            "reach-guard: the face-down entry was delivered (single-direction write, no prompt)"
+        );
+        assert!(obj.face_down, "reach-guard: entered FACE DOWN (CR 708.3)");
+        assert!(
+            obj.tapped,
+            "external (is_entering == false) enters-tapped replacement still applies to the \
+             face-down 2/2 — the guard suppresses only the entrant's OWN self-replacement"
         );
     }
 
@@ -1026,6 +1393,39 @@ mod tests {
         assert!(!obj.face_down);
         assert_eq!(obj.name, "Manifest Target");
         assert_eq!(obj.power, Some(5));
+    }
+
+    #[test]
+    fn manifested_creature_with_no_mana_cost_cannot_be_turned_face_up() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+
+        let id = create_object(
+            &mut state,
+            CardId(10),
+            player,
+            "No Cost Creature".to_string(),
+            Zone::Library,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.power = Some(5);
+        obj.toughness = Some(5);
+        obj.card_types = CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec![],
+        };
+        obj.mana_cost = ManaCost::NoCost;
+        obj.base_mana_cost = ManaCost::NoCost;
+
+        let mut events = Vec::new();
+        manifest(&mut state, player, &mut events).unwrap();
+
+        let result = turn_face_up(&mut state, player, id, &mut events);
+        assert!(
+            result.is_err(),
+            "a manifested creature with no mana cost cannot be turned face up"
+        );
     }
 
     /// Regression test for GitHub issue #2024: Controller can look at their

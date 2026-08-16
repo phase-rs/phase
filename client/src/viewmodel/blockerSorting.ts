@@ -12,7 +12,7 @@ import type { GroupedPermanent } from "./battlefieldProps";
 export function sortCreaturesForBlockers(
   playerCreatures: GroupedPermanent[],
   opponentCreatures: GroupedPermanent[],
-  blockerAssignments: Map<ObjectId, ObjectId>,
+  blockerAssignments: ReadonlyMap<ObjectId, ReadonlySet<ObjectId>>,
 ): GroupedPermanent[] {
   if (blockerAssignments.size === 0) return playerCreatures;
 
@@ -43,7 +43,12 @@ export function sortCreaturesForBlockers(
   blockerGroups.sort((a, b) => {
     const colA = getMinAttackerColumn(a, blockerAssignments, attackerColumn);
     const colB = getMinAttackerColumn(b, blockerAssignments, attackerColumn);
-    return colA - colB;
+    // Two blockers whose assigned attacker has no opponent column (e.g. aimed at
+    // a planeswalker/player, so absent from `attackerColumn`) both yield
+    // `Infinity`; `Infinity - Infinity` is NaN — a comparator must never return
+    // NaN (its ordering is then implementation-defined). Short-circuit equal
+    // columns so equal/off-row blockers keep their original relative order.
+    return colA === colB ? 0 : colA - colB;
   });
 
   return [...blockerGroups, ...nonBlockerGroups];
@@ -52,13 +57,13 @@ export function sortCreaturesForBlockers(
 /** Get the minimum attacker column for any blocker in this group. */
 function getMinAttackerColumn(
   group: GroupedPermanent,
-  blockerAssignments: Map<ObjectId, ObjectId>,
+  blockerAssignments: ReadonlyMap<ObjectId, ReadonlySet<ObjectId>>,
   attackerColumn: Map<ObjectId, number>,
 ): number {
   let min = Infinity;
   for (const id of group.ids) {
-    const attackerId = blockerAssignments.get(id);
-    if (attackerId !== undefined) {
+    const attackerIds = blockerAssignments.get(id);
+    for (const attackerId of attackerIds ?? []) {
       const col = attackerColumn.get(attackerId) ?? Infinity;
       if (col < min) min = col;
     }

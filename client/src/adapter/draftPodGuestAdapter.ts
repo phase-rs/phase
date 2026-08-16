@@ -12,7 +12,8 @@
 
 import type { DraftPlayerView, SeatPublicView } from "./draft-adapter";
 import { P2PDraftGuest, type DraftGuestEvent } from "./p2p-draft-guest";
-import type { DraftMatchLaunch, DraftPauseReason } from "../network/draftProtocol";
+import type { DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from "../network/draftProtocol";
+import type { DraftIntergameCommand, DraftIntergameCommandAck } from "../services/intergameCommandLedger";
 import { joinRoom, type JoinResult } from "../network/connection";
 import { loadDraftGuestSession } from "../services/draftPersistence";
 
@@ -48,11 +49,13 @@ export type DraftPodGuestEvent =
       matchId: string;
     }
   | { type: "matchResult"; matchId: string; winnerSeat: number | null }
+  | { type: "matchSettlementAcknowledged"; matchId: string; receiptId: string; revision: number }
   | { type: "timerSync"; remainingMs: number }
   | { type: "matchStart"; launch: DraftMatchLaunch }
   | { type: "bo3SideboardPrompt"; matchId: string; gameNumber: number; score: { p0_wins: number; p1_wins: number; draws: number }; loserSeat: number | null; timerMs: number }
   | { type: "bo3ChoosePlayDraw"; matchId: string; gameNumber: number; score: { p0_wins: number; p1_wins: number; draws: number }; timerMs: number }
   | { type: "bo3GameStart"; matchId: string; gameNumber: number; firstPlayerSeat: number }
+  | { type: "bo3AuthorizedCommand"; command: DraftIntergameCommand; acknowledgement: DraftIntergameCommandAck }
   | { type: "bo3ScoreUpdate"; matchId: string; scoreA: number; scoreB: number }
   | { type: "kicked"; reason: string }
   | { type: "hostLeft"; reason: string }
@@ -226,6 +229,14 @@ export class DraftPodGuestAdapter {
           winnerSeat: event.winnerSeat,
         });
         break;
+      case "matchSettlementAcknowledged":
+        this.emit({
+          type: "matchSettlementAcknowledged",
+          matchId: event.matchId,
+          receiptId: event.receiptId,
+          revision: event.revision,
+        });
+        break;
       case "timerSync":
         this.emit({ type: "timerSync", remainingMs: event.remainingMs });
         break;
@@ -281,6 +292,9 @@ export class DraftPodGuestAdapter {
           firstPlayerSeat: event.firstPlayerSeat,
         });
         break;
+      case "bo3AuthorizedCommand":
+        this.emit({ type: "bo3AuthorizedCommand", command: event.command, acknowledgement: event.acknowledgement });
+        break;
       case "bo3ScoreUpdate":
         this.emit({
           type: "bo3ScoreUpdate",
@@ -325,24 +339,38 @@ export class DraftPodGuestAdapter {
     await this.guest.submitPick(cardInstanceId);
   }
 
+  async submitPickWithDraftEffect(
+    effectCardInstanceId: string,
+    cardInstanceIds: string[],
+  ): Promise<void> {
+    if (!this.guest) throw new Error("Guest not initialized");
+    await this.guest.submitPickWithDraftEffect(effectCardInstanceId, cardInstanceIds);
+  }
+
   async submitDeck(mainDeck: string[]): Promise<void> {
     if (!this.guest) throw new Error("Guest not initialized");
     await this.guest.submitDeck(mainDeck);
   }
 
-  sendMatchResult(matchId: string, winnerSeat: number | null): void {
-    if (!this.guest) return;
-    this.guest.sendMatchResult(matchId, winnerSeat);
+  sendMatchSettlement(settlement: DraftMatchSettlement): void {
+    this.guest?.sendMatchSettlement(settlement);
   }
 
-  sendSideboardSubmit(matchId: string, mainDeck: string[], sideboard: Array<{ name: string; count: number }>): void {
-    if (!this.guest) return;
-    this.guest.sendSideboardSubmit(matchId, mainDeck, sideboard);
+  handleMatchBetweenGames(
+    matchId: string,
+    gameNumber: number,
+    score: { p0_wins: number; p1_wins: number; draws: number },
+    loserSeat: number | null,
+  ): void {
+    this.guest?.sendBetweenGames(matchId, gameNumber, score, loserSeat);
   }
 
-  sendPlayDrawChoice(matchId: string, playFirst: boolean): void {
-    if (!this.guest) return;
-    this.guest.sendPlayDrawChoice(matchId, playFirst);
+  submitAuthorized(command: DraftIntergameCommand): void {
+    this.guest?.sendAuthorizedIntergameCommand(command);
+  }
+
+  acknowledgeAuthorized(acknowledgement: DraftIntergameCommandAck, receiptId: string): void {
+    this.guest?.sendIntergameReceipt(acknowledgement, receiptId);
   }
 
   // ── Cleanup ────────────────────────────────────────────────────────

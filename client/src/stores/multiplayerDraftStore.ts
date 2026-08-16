@@ -21,11 +21,12 @@ import type {
   SeatPublicView,
   StandingEntry,
 } from "../adapter/draft-adapter";
-import type { EngineAdapter, GameEvent, GameLogEntry, MatchScore, SubmitResult } from "../adapter/types";
-import type { DraftMatchLaunch, DraftPauseReason } from "../network/draftProtocol";
+import type { EngineAdapter, GameAction, GameEvent, GameLogEntry, MatchScore, SubmitResult } from "../adapter/types";
+import type { DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from "../network/draftProtocol";
+import type { AISeatBinding } from "../game/controllers/aiController";
 import { createGameLoopController, type GameLoopController } from "../game/controllers/gameLoopController";
 import { processRemoteUpdate } from "../game/dispatch";
-import { legalResultState, useGameStore } from "./gameStore";
+import { useGameStore } from "./gameStore";
 import {
   DraftPodHostAdapter,
   type DraftPodHostConfig,
@@ -40,11 +41,25 @@ import {
 } from "../adapter/draftPodGuestAdapter";
 import {
   clearActiveDraftPod,
+  clearDraftSettlementOutbox,
+  loadDraftIntergameCommands,
   loadActiveDraftPod,
+  loadDraftSettlementOutbox,
   saveActiveDraftPod,
+  saveDraftIntergameCommands,
+  saveDraftSettlementOutbox,
   type ActiveDraftPodMeta,
   type ActiveDraftPodPhase,
 } from "../services/draftPersistence";
+import {
+  commandAcknowledgement,
+  consumeIntergamePermit,
+  draftIntergameDigest,
+  IntergameCommandController,
+  type DraftIntergameCommand,
+  type DraftIntergameCommandAck,
+  type DraftIntergameCommandPayload,
+} from "../services/intergameCommandLedger";
 import { FORMAT_DEFAULTS } from "./multiplayerStore";
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -127,6 +142,8 @@ interface MultiplayerDraftActions {
   startDraft: (botFillEmptySeats?: boolean) => Promise<void>;
   /** Both: submit a pick. */
   submitPick: (cardInstanceId: string) => Promise<void>;
+  /** Both: submit a pick using a drafted card's draft-time effect. */
+  submitPickWithDraftEffect: (effectCardInstanceId: string, cardInstanceIds: string[]) => Promise<void>;
   /** Both: select a card (UI highlight before confirming pick). */
   selectCard: (cardInstanceId: string | null) => void;
   /** Both: confirm the currently selected card as pick. */
@@ -157,8 +174,8 @@ interface MultiplayerDraftActions {
   reportMatchResult: (matchId: string, winnerSeat: number | null) => Promise<void>;
   /** Both: report the active game result using the current draft match pairing. */
   reportActiveMatchGameResult: (gameWinner: number | null) => Promise<void>;
-  /** Both: concede the active draft match and report the opponent as winner. */
-  reportActiveMatchConcession: () => Promise<void>;
+  /** Settles a bound match concession for the authenticated game seat. */
+  reportActiveMatchConcession: (concedingGamePlayer?: number) => Promise<void>;
   /** Host: advance to the next round (Casual mode). */
   advanceRound: () => void;
   /** Host: override a match result (Casual mode). */
@@ -171,6 +188,10 @@ interface MultiplayerDraftActions {
   choosePlayDraw: (matchId: string, playFirst: boolean) => void;
   /** Both: handle between-games prompt from match adapter. */
   handleBetweenGamesPrompt: (prompt: { matchId: string; gameNumber: number; score: MatchScore; loserSeat: number | null; timerMs: number }) => void;
+  /** Durable ingress; raw sideboard/play-draw transport is intentionally not exposed. */
+  submitIntergameCommand: (payload: DraftIntergameCommandPayload) => Promise<void>;
+  /** Executes only a pod-issued authorization after re-checking its immutable ack. */
+  submitAuthorized: (command: DraftIntergameCommand, acknowledgement: DraftIntergameCommandAck) => Promise<void>;
 }
 
 // ── Module-level adapter refs ──────────────────────────────────────────
@@ -178,8 +199,17 @@ interface MultiplayerDraftActions {
 let activeHostAdapter: DraftPodHostAdapter | null = null;
 let activeGuestAdapter: DraftPodGuestAdapter | null = null;
 let activeMatchController: GameLoopController | null = null;
-const reportedMatchResultIds = new Set<string>();
+const intergameControllers = new Map<string, IntergameCommandController>();
 const DRAFT_MATCH_FORMAT_CONFIG = FORMAT_DEFAULTS.Limited;
+
+function intergameAction(payload: DraftIntergameCommandPayload): GameAction {
+  switch (payload.type) {
+    case "SubmitSideboard":
+      return { type: "SubmitSideboard", data: { main: payload.main, sideboard: payload.sideboard } };
+    case "ChoosePlayDraw":
+      return { type: "ChoosePlayDraw", data: { play_first: payload.playFirst } };
+  }
+}
 
 const RARITY_SCORE: Record<string, number> = {
   mythic: 4,
@@ -247,24 +277,23 @@ function chooseAutoPickCard(view: DraftPlayerView | null): string | null {
   return bestCard.instance_id;
 }
 
-function opponentSeatForLaunch(launch: DraftMatchLaunch): number {
-  return launch.type === "Bot" ? launch.botSeat : launch.opponentSeat;
+function seatForLaunchGamePlayer(launch: DraftMatchLaunch, gamePlayer: number): number {
+  switch (launch.type) {
+    case "HumanHost":
+      return gamePlayer === 0 ? launch.localSeat : launch.opponentSeat;
+    case "HumanGuest":
+      return gamePlayer === 1 ? launch.localSeat : launch.opponentSeat;
+    case "Bot":
+      return gamePlayer === 0 ? launch.localSeat : launch.botSeat;
+  }
 }
 
 function winnerSeatForLaunch(launch: DraftMatchLaunch, gameWinner: number | null): number | null {
-  if (gameWinner === null) return null;
-  return gameWinner === 0 ? launch.localSeat : opponentSeatForLaunch(launch);
-}
-
-function guestWinnerSeatForLaunch(launch: DraftMatchLaunch, gameWinner: number | null): number | null {
-  if (gameWinner === null) return null;
-  return gameWinner === 0 ? opponentSeatForLaunch(launch) : launch.localSeat;
+  return gameWinner === null ? null : seatForLaunchGamePlayer(launch, gameWinner);
 }
 
 function winnerSeatForGameResult(launch: DraftMatchLaunch, gameWinner: number | null): number | null {
-  if (gameWinner === null) return null;
-  const localGamePlayerId = launch.type === "HumanGuest" ? 1 : 0;
-  return gameWinner === localGamePlayerId ? launch.localSeat : opponentSeatForLaunch(launch);
+  return gameWinner === null ? null : seatForLaunchGamePlayer(launch, gameWinner);
 }
 
 function disposeMatchController(): void {
@@ -272,40 +301,60 @@ function disposeMatchController(): void {
   activeMatchController = null;
 }
 
+async function retryDraftSettlement(launch: DraftMatchLaunch, role: DraftRole): Promise<void> {
+  if (launch.binding.matchAuthoritySeat !== launch.localSeat) return;
+  const settlement = await loadDraftSettlementOutbox(launch.binding);
+  if (!settlement) return;
+  if (role === "host" && activeHostAdapter) {
+    await activeHostAdapter.submitMatchSettlement(settlement);
+    await clearDraftSettlementOutbox(launch.binding);
+  } else if (role === "guest" && activeGuestAdapter) {
+    activeGuestAdapter.sendMatchSettlement(settlement);
+  }
+}
+
+/** The engine-side AI seat for a Bot draft match (the local player is game
+ *  player 0, the bot is 1). Single authority shared by the live game-loop
+ *  controller and the Resolve All batch drain, so the drain can never play
+ *  the bot at a different difficulty than the controller driving it. */
+export const DRAFT_BOT_AI_SEAT: AISeatBinding = { playerId: 1, difficulty: "Medium" };
+
 async function installMatchRuntime(
   gameId: string,
   adapter: EngineAdapter,
   initResult: SubmitResult,
   controllerMode: "ai" | "online",
 ): Promise<void> {
-  const state = await adapter.getState();
-  const legalResult = await adapter.getLegalActions();
+  // Fetched after this match's engine is up, so the snapshot is
+  // newest-by-construction under the global seq counter: it always passes the
+  // commit gate, and it inherently drops any commit still in flight from the
+  // previous game of a Bo3 (whose stamps are strictly lower).
+  const snapshot = await adapter.getSnapshot();
   const initLogEntries: GameLogEntry[] = (initResult.log_entries ?? []).map((entry, i) => ({
     ...entry,
     seq: i,
   }));
 
-  useGameStore.setState({
-    gameId,
-    gameMode: "draft-match",
-    adapter,
-    gameState: state,
-    waitingFor: state.waiting_for,
-    ...legalResultState(legalResult),
-    events: [] as GameEvent[],
-    eventHistory: [] as GameEvent[],
-    logHistory: initLogEntries,
-    nextLogSeq: initLogEntries.length,
-    stateHistory: [],
-    turnCheckpoints: [],
-    lobbyProgress: null,
+  useGameStore.getState().commitEngineSnapshot(snapshot, {
+    extraState: {
+      gameId,
+      gameMode: "draft-match",
+      adapter,
+      events: [] as GameEvent[],
+      eventHistory: [] as GameEvent[],
+      logHistory: initLogEntries,
+      nextLogSeq: initLogEntries.length,
+      stateHistory: [],
+      turnCheckpoints: [],
+      lobbyProgress: null,
+    },
   });
 
   disposeMatchController();
   activeMatchController = createGameLoopController({
     mode: controllerMode,
-    difficulty: "Medium",
-    aiSeats: controllerMode === "ai" ? [{ playerId: 1, difficulty: "Medium" }] : undefined,
+    difficulty: DRAFT_BOT_AI_SEAT.difficulty,
+    aiSeats: controllerMode === "ai" ? [DRAFT_BOT_AI_SEAT] : undefined,
     playerCount: 2,
   });
   activeMatchController.start();
@@ -389,7 +438,14 @@ function activePhaseForDraftViewStatus(status: DraftPlayerView["status"]): Activ
   }
 }
 
-/** Dispose the active match adapter (P2PHostAdapter or P2PGuestAdapter). */
+/**
+ * Dispose the active match adapter (P2PHostAdapter or P2PGuestAdapter).
+ *
+ * Documented exemption from the `commitEngineSnapshot` single-writer invariant:
+ * this is a teardown clear, not a live-game commit. It has no snapshot to gate
+ * on, and any subsequent live commit arrives newest-by-construction (a fresh
+ * post-init fetch), so it cannot be resurrected by a stale pair.
+ */
 function disposeMatchAdapter(set: SetFn): void {
   const state = useMultiplayerDraftStore.getState();
   disposeMatchController();
@@ -408,6 +464,7 @@ function disposeMatchAdapter(set: SetFn): void {
         waitingFor: null,
         legalActions: [],
         autoPassRecommended: false,
+        endContinuousEffectOffers: [],
         spellCosts: {},
         legalActionsByObject: {},
         stateHistory: [],
@@ -527,6 +584,20 @@ export const useMultiplayerDraftStore = create<
     }
   },
 
+  submitPickWithDraftEffect: async (effectCardInstanceId, cardInstanceIds) => {
+    const { role } = get();
+    if (role === "host" && activeHostAdapter) {
+      const view = await activeHostAdapter.submitPickWithDraftEffect(
+        effectCardInstanceId,
+        cardInstanceIds,
+      );
+      set({ view, selectedCard: null });
+    } else if (role === "guest" && activeGuestAdapter) {
+      await activeGuestAdapter.submitPickWithDraftEffect(effectCardInstanceId, cardInstanceIds);
+      set({ selectedCard: null });
+    }
+  },
+
   selectCard: (cardInstanceId) => {
     set({ selectedCard: cardInstanceId });
   },
@@ -624,6 +695,15 @@ export const useMultiplayerDraftStore = create<
           2, // 1v1 match
           DRAFT_MATCH_FORMAT_CONFIG,
           matchPairing.matchConfig,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          {
+            onConcede: (concedingGamePlayer) => get().reportActiveMatchConcession(concedingGamePlayer),
+          },
         );
 
         let resolveRoomFull!: () => void;
@@ -635,10 +715,10 @@ export const useMultiplayerDraftStore = create<
             resolveRoomFull();
           }
           if (event.type === "stateChanged") {
-            void processRemoteUpdate(event.state, event.events, event.legalResult);
+            void processRemoteUpdate(event.snapshot, event.events, event.logEntries);
           }
           if (event.type === "stateChanged") {
-            const wf = event.state?.waiting_for;
+            const wf = event.snapshot.state?.waiting_for;
             if (!wf) return;
 
             if (wf.type === "GameOver") {
@@ -663,6 +743,13 @@ export const useMultiplayerDraftStore = create<
                   loserSeat,
                   matchPairing.localSeat,
                   matchPairing.opponentSeat,
+                );
+              } else {
+                activeGuestAdapter?.handleMatchBetweenGames(
+                  matchPairing.matchId,
+                  gameNumber,
+                  score,
+                  loserSeat,
                 );
               }
               // Also transition the host's own UI to betweenGames
@@ -704,19 +791,25 @@ export const useMultiplayerDraftStore = create<
           peer,
           conn.peer,
           conn,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          true,
         );
 
         matchAdapter.onEvent((event) => {
           if (event.type === "stateChanged") {
-            void processRemoteUpdate(event.state, event.events, event.legalResult);
+            void processRemoteUpdate(event.snapshot, event.events, event.logEntries);
           }
           if (event.type === "stateChanged") {
-            const wf = event.state?.waiting_for;
+            const wf = event.snapshot.state?.waiting_for;
             if (!wf) return;
 
             if (wf.type === "GameOver") {
               // Guest reports as backup (host's report is authoritative)
-              const winnerSeat = guestWinnerSeatForLaunch(matchPairing, wf.data.winner);
+              const winnerSeat = winnerSeatForLaunch(matchPairing, wf.data.winner);
               void get().reportMatchResult(matchPairing.matchId, winnerSeat);
             }
             // BetweenGamesSideboard: guest receives sideboard prompt via draft pod channel
@@ -724,7 +817,7 @@ export const useMultiplayerDraftStore = create<
           }
           if (event.type === "gameOver") {
             // Connection failure — report as match loss
-            const winnerSeat = guestWinnerSeatForLaunch(matchPairing, event.winner);
+            const winnerSeat = winnerSeatForLaunch(matchPairing, event.winner);
             void get().reportMatchResult(matchPairing.matchId, winnerSeat);
           }
         });
@@ -756,19 +849,24 @@ export const useMultiplayerDraftStore = create<
   },
 
   reportMatchResult: (matchId, winnerSeat) => {
-    const { role } = get();
-    if (reportedMatchResultIds.has(matchId)) return Promise.resolve();
-    if (role === "host" && activeHostAdapter) {
-      reportedMatchResultIds.add(matchId);
-      return activeHostAdapter.overrideMatchResult(matchId, winnerSeat).catch((err) => {
-        reportedMatchResultIds.delete(matchId);
-        throw err;
-      });
-    } else if (role === "guest" && activeGuestAdapter) {
-      reportedMatchResultIds.add(matchId);
-      activeGuestAdapter.sendMatchResult(matchId, winnerSeat);
-    }
-    return Promise.resolve();
+    const { role, matchPairing } = get();
+    if (!matchPairing || matchPairing.matchId !== matchId) return Promise.resolve();
+    if (matchPairing.binding.matchAuthoritySeat !== matchPairing.localSeat) return Promise.resolve();
+    return (async () => {
+      const existing = await loadDraftSettlementOutbox(matchPairing.binding);
+      const settlement: DraftMatchSettlement = existing ?? {
+        binding: matchPairing.binding,
+        receiptId: crypto.randomUUID(),
+        winnerSeat,
+      };
+      await saveDraftSettlementOutbox(settlement);
+      if (role === "host" && activeHostAdapter) {
+        await activeHostAdapter.submitMatchSettlement(settlement);
+        await clearDraftSettlementOutbox(matchPairing.binding);
+      } else if (role === "guest" && activeGuestAdapter) {
+        activeGuestAdapter.sendMatchSettlement(settlement);
+      }
+    })();
   },
 
   reportActiveMatchGameResult: async (gameWinner) => {
@@ -780,10 +878,13 @@ export const useMultiplayerDraftStore = create<
     );
   },
 
-  reportActiveMatchConcession: async () => {
+  reportActiveMatchConcession: async (concedingGamePlayer = 0) => {
     const { matchPairing, reportMatchResult } = get();
     if (!matchPairing) return;
-    await reportMatchResult(matchPairing.matchId, opponentSeatForLaunch(matchPairing));
+    await reportMatchResult(
+      matchPairing.matchId,
+      seatForLaunchGamePlayer(matchPairing, concedingGamePlayer === 0 ? 1 : 0),
+    );
   },
 
   advanceRound: () => {
@@ -802,23 +903,72 @@ export const useMultiplayerDraftStore = create<
   },
 
   submitSideboard: (matchId, mainDeck, sideboard) => {
-    const { role } = get();
-    if (role === "host" && activeHostAdapter) {
-      // Host submits to own P2PDraftHost via DraftPodHostAdapter forwarder (seat 0).
-      activeHostAdapter.handleSideboardSubmit(0, matchId, mainDeck, sideboard);
-    } else if (role === "guest" && activeGuestAdapter) {
-      activeGuestAdapter.sendSideboardSubmit(matchId, mainDeck, sideboard);
-    }
-    set({ sideboardSubmitted: true });
+    void matchId;
+    const counts = new Map<string, number>();
+    for (const name of mainDeck) counts.set(name, (counts.get(name) ?? 0) + 1);
+    void get().submitIntergameCommand({
+      type: "SubmitSideboard",
+      main: [...counts].map(([name, count]) => ({ name, count })),
+      sideboard,
+    });
   },
 
   choosePlayDraw: (matchId, playFirst) => {
-    const { role } = get();
-    if (role === "host" && activeHostAdapter) {
-      // Host as loser chooses play/draw via DraftPodHostAdapter forwarder (seat 0).
-      activeHostAdapter.handlePlayDrawChosen(0, matchId, playFirst);
-    } else if (role === "guest" && activeGuestAdapter) {
-      activeGuestAdapter.sendPlayDrawChoice(matchId, playFirst);
+    void matchId;
+    void get().submitIntergameCommand({ type: "ChoosePlayDraw", playFirst });
+  },
+
+  submitIntergameCommand: async (payload) => {
+    const state = get();
+    const launch = state.matchPairing;
+    const gameNumber = state.sideboardPrompt?.gameNumber ?? state.playDrawPrompt?.gameNumber;
+    if (!launch || gameNumber === undefined || state.seatIndex === null) return;
+    let controller = intergameControllers.get(launch.matchId);
+    if (!controller) {
+      controller = new IntergameCommandController(await loadDraftIntergameCommands(launch.matchId));
+      controller.recover();
+      intergameControllers.set(launch.matchId, controller);
+    }
+    const command = controller.hold({
+      commandId: crypto.randomUUID(), matchId: launch.matchId, gameNumber,
+      seat: state.seatIndex, payload, launchPayload: launch, launchDigest: draftIntergameDigest(launch),
+    });
+    await saveDraftIntergameCommands(launch.matchId, controller.snapshot());
+    if (state.role === "host") activeHostAdapter?.submitAuthorized(state.seatIndex, command);
+    else activeGuestAdapter?.submitAuthorized(command);
+    if (payload.type === "SubmitSideboard") set({ sideboardSubmitted: true });
+  },
+
+  submitAuthorized: async (command, acknowledgement) => {
+    const state = get();
+    const launch = state.matchPairing;
+    if (!launch || command.matchId !== launch.matchId || command.launchDigest !== draftIntergameDigest(launch)) return;
+    let controller = intergameControllers.get(command.matchId);
+    if (!controller) {
+      controller = new IntergameCommandController(await loadDraftIntergameCommands(command.matchId));
+      controller.recover();
+      intergameControllers.set(command.matchId, controller);
+    }
+    const known = controller.snapshot().find((candidate) => candidate.commandId === command.commandId);
+    if (known?.status === "Pending") controller.authorize(command.commandId, acknowledgement);
+    else if (!known && command.status === "Authorized") {
+      controller = new IntergameCommandController([...controller.snapshot(), command]);
+      intergameControllers.set(command.matchId, controller);
+    }
+    const permit = controller.begin(command.commandId, acknowledgement);
+    if (!permit || !consumeIntergamePermit(permit, acknowledgement)) return;
+    const adapter = state.matchAdapter as EngineAdapter | null;
+    if (!adapter) return;
+    // Re-check immediately before crossing the host, guest, native, or WASM sink.
+    const actor = launch.type === "HumanGuest" ? 1 : 0;
+    await adapter.submitAction(intergameAction(command.payload), actor);
+    const receipted = controller.receipt(command.commandId, acknowledgement, crypto.randomUUID());
+    if (!receipted) return;
+    await saveDraftIntergameCommands(command.matchId, controller.snapshot());
+    if (state.role === "host") {
+      activeHostAdapter?.submitAuthorized(state.seatIndex!, receipted);
+    } else {
+      activeGuestAdapter?.acknowledgeAuthorized(commandAcknowledgement(receipted), receipted.receiptId!);
     }
   },
 
@@ -841,7 +991,6 @@ export const useMultiplayerDraftStore = create<
   leave: async (preserveSession = false) => {
     // Dispose match adapter first (game P2P connection)
     disposeMatchAdapter(set);
-    reportedMatchResultIds.clear();
 
     if (activeHostAdapter) {
       await activeHostAdapter.dispose({ preserveSession });
@@ -859,7 +1008,6 @@ export const useMultiplayerDraftStore = create<
 
   reset: () => {
     disposeMatchAdapter(set);
-    reportedMatchResultIds.clear();
     set(initialState);
   },
 }));
@@ -954,10 +1102,12 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       break;
     case "lobbyFull":
       break;
-    case "draftStarted":
-      set({ view: event.view, phase: "drafting" });
-      saveDraftPodProgress("drafting", event.view);
+    case "draftStarted": {
+      const activePhase = activePhaseForDraftViewStatus(event.view.status);
+      set({ view: event.view, phase: phaseForDraftViewStatus(event.view.status) });
+      if (activePhase) saveDraftPodProgress(activePhase, event.view);
       break;
+    }
     case "draftComplete":
       set({ phase: "deckbuilding" });
       saveDraftPodProgress("deckbuilding");
@@ -978,6 +1128,7 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       break;
     case "matchStart":
       set({ matchPairing: event.launch, phase: "matchInProgress" });
+      void retryDraftSettlement(event.launch, "host");
       break;
     case "roundAdvanced":
       disposeMatchAdapter(set);
@@ -1047,6 +1198,9 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
         sideboardSubmitted: false,
       });
       break;
+    case "bo3AuthorizedCommand":
+      void useMultiplayerDraftStore.getState().submitAuthorized(event.command, event.acknowledgement);
+      break;
   }
 }
 
@@ -1108,7 +1262,15 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
         matchPairing: event.launch,
         phase: "matchInProgress",
       });
+      void retryDraftSettlement(event.launch, "guest");
       break;
+    case "matchSettlementAcknowledged": {
+      const binding = useMultiplayerDraftStore.getState().matchPairing?.binding;
+      if (binding?.matchId === event.matchId && binding.revision === event.revision) {
+        void clearDraftSettlementOutbox(binding);
+      }
+      break;
+    }
     case "kicked":
       set({ phase: "kicked", error: event.reason });
       break;
@@ -1154,6 +1316,9 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
         playDrawPrompt: null,
         sideboardSubmitted: false,
       });
+      break;
+    case "bo3AuthorizedCommand":
+      void useMultiplayerDraftStore.getState().submitAuthorized(event.command, event.acknowledgement);
       break;
     case "bo3ScoreUpdate":
       // Informational — standings update comes via viewUpdated

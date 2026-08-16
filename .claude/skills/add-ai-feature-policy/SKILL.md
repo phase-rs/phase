@@ -74,6 +74,27 @@ All scoring scalars come from `AiConfig::policy_penalties` / `PolicyPenalties` w
 | **No bool fields.** Use existing typed enums (`ControllerRef`, `Comparator`, `TurnOrder`, etc.). | Booleans aren't composable; an enum is self-documenting. | If you need a "your-vs-opponent" distinction, use `ControllerRef::You/Opponent`. If you need on-play vs on-draw, use the existing `TurnOrder`. |
 | **Use `crate::ability_chain::collect_chain_effects`.** | Single source of truth for ability-chain walking. | Never re-implement `collect_chain_effects`. If you need to walk a `ResolvedAbility` chain in a policy, use `policies/context.rs::collect_ability_effects` (handles `sub_ability` chain). |
 | **No `git add -A` or `git add .`.** | Pre-existing untracked files at the repo root (e.g., `parser-batch-plan.md`) get accidentally committed. | Use explicit `git add path1 path2 ...`. |
+| **No unguarded board-wide / affordability engine calls in `activation()`/`verdict()`.** | Policies run per-candidate at every AI search node; a board-wide sweep there is a wall-clock landmine that `cargo ai-gate` cannot see. | Order predicates cheap-to-expensive: card-local AST checks first, `max_x_value` / `find_legal_targets` / mana sweeps last and only once the class is confirmed. See the **Performance** section. |
+
+---
+
+## Performance — `verdict()` runs in the AI search inner loop
+
+`PolicyRegistry::verdicts()` (`registry.rs:375-433`) runs **every** policy whose `decision_kinds()` matches the candidate's `DecisionKind`, calling `activation()` then `verdict()`, **for every candidate action, at every node the AI search expands.** On a large late-game board that is thousands of `verdict()` calls per decision. Treat `verdict()` and everything it transitively calls as an inner-loop function — the same discipline you would apply to code inside the engine's search.
+
+**The trap that shipped (`x_cast_gate`, commit `3de827350d`).** `XCastGatePolicy::verdict()` calls `engine::game::max_x_value` per candidate. `max_x_value` (`casting_costs.rs:7592`) walks the whole battlefield calling `feasible_mana_capacity` per permanent, and for a spell adds a per-X `concrete_cost_for_x` cost-orchestration loop — a board-wide affordability sweep. Run per candidate per search node on a turn-41 board, it regressed the Court of Grace decision from ~2.1s to ~5.7s (isolated A/B). The policy was rules-correct and passed `cargo ai-gate` with 0 win-rate flips; the entire cost was wall-clock.
+
+Rules:
+
+1. **Order predicates cheap-to-expensive; short-circuit on card-local AST before anything board-wide.** Check the candidate's own `ManaCost` / `AbilityCost` / effect chain (a handful of `matches!` over one card's AST) first, and reach for a board-wide or affordability engine call only after the card-local checks prove the candidate is even a member of the class you gate. `x_cast_gate` correctly gates `max_x_value` behind an `{X}`-shard check — but any predicate that ANDs a board-wide call with a card-local one must run the card-local one FIRST. AND is commutative, so the ordering is free latency. (For `x_cast_gate` specifically, the card-local `no_op_at_x_zero` payoff walk should precede the board-wide `max_x_value` — it spares the sweep for every `{X}` card whose payoff has a fixed residual or does not scale with X.)
+
+2. **These engine calls are board-wide or state-cloning — never call them unguarded in `activation()`/`verdict()`:** `max_x_value` / `feasible_mana_capacity` (affordability sweep), `find_legal_targets` (self-heals to a full scan), any `SimulationFilter`-cloning path, and mana-availability sweeps (the pass-priority mana clone storm and declare-attackers mana sweep are documented quadratic hot paths). Prefer a `*_for_simulation` variant where one exists. If you must call one, gate it behind the cheapest structural discriminator and push it as late in the predicate as the logic allows.
+
+3. **`activation()` is the free opt-out; use it.** It receives only `(features, state, player)` — not the candidate — so it cannot inspect the specific card, but it CAN switch the whole policy off for decks/states the policy never fires on (`if features.<feat>.commitment < FLOOR { None }`). A policy that returns `Some(1.0)` unconditionally (an `activation-constant` backstop, like `x_cast_gate`) pays full `verdict()` cost on every matching candidate — acceptable only when `verdict()` itself short-circuits cheaply per rule 1.
+
+4. **`cargo ai-gate` is blind to latency, and `cargo ai-perf-gate` is blind to un-instrumented calls.** `ai-gate` measures win-rate only. `ai-perf-gate` (`crates/phase-ai/src/bin/ai_perf_gate.rs`) field-wise sums engine `PerfCounterSnapshot` fields (`crates/engine/src/game/perf_counters.rs`) against `crates/phase-ai/baselines/perf-baseline.json` — but it only sees paths that bump a counter. `max_x_value` / `feasible_mana_capacity` bump none, so BOTH gates missed the regression above; a manual wall-clock A/B caught it. Therefore, if your policy adds a board-wide/affordability engine call that is not already counter-instrumented, EITHER add a `PerfCounterSnapshot` field for it (and refresh the perf baseline) so `ai-perf-gate` can see it, OR run and attach a wall-clock A/B on a large late-game board showing no material regression. A 0-flip `ai-gate` is necessary but NOT sufficient.
+
+5. **Wall-clock / deadline guards are inert under `ai-gate` — a 0-diff is *expected*, not a no-op signal.** If any code you add gates on `self.deadline.expired()`, measurement mode nulls the deadline (`Deadline::none()`), so the guard is a dead branch during `ai-gate` and the run is byte-identical by construction. Never refresh baselines to absorb a divergence from a deadline-only change — a divergence there is a bug (a guard fired on a live path), not a baseline event. See `ai-duel`'s **Measurement And Gates** section for the mechanism and the `with_deadline`-on-a-non-measurement-config test requirement.
 
 ---
 
@@ -222,9 +243,25 @@ For a feature named `<feat>` with `<Feat>Feature` struct and policies `<Feat>Pol
 | `crates/phase-ai/src/policies/registry.rs` | Add `PolicyId::<Feat>` (and `<Feat>Mulligan`) variants. Import `super::<feat>::<Feat>Policy`. Add `Box::new(<Feat>Policy)` to `PolicyRegistry::default`'s vec. |
 | `crates/phase-ai/src/policies/mulligan/<feat>_keepables.rs` | NEW (if a mulligan policy is in scope). |
 | `crates/phase-ai/src/policies/mulligan/mod.rs` | Add module + `pub use` + `Box::new(<Feat>Mulligan)` to `MulliganRegistry::default`'s vec. |
+| `crates/phase-ai/src/config.rs` | Add the policy's scoring scalar(s) to `PolicyPenalties`, **and register each new field** in `ACTIVE_POLICY_PENALTY_FIELDS` or `UNTUNED_POLICY_PENALTY_FIELDS`. Not optional — a test enforces it. See Section 7a. |
 | `crates/phase-ai/src/plan/curves.rs` | OPTIONAL: add tempo-class branch in `tempo_class_for` (carefully ordered — see Section 8). Add expected-curve adjustments in `expected_lands_for`/`expected_mana_for`/`expected_threats_for` if archetype shifts the curve. Plan data is consumed by mulligan bottoming and curve expectations; do not add zombie plan fields. |
 
 The `no_name_matching` lint at `features/tests/no_name_matching.rs` automatically scans both `src/features/` and `src/policies/` — no manual exemption needed unless your file names appear in the lint's allow-list (unlikely).
+
+---
+
+## 7a. `PolicyPenalties` registration — ACTIVE vs UNTUNED
+
+Every scoring scalar you add to `PolicyPenalties` **must** be listed in exactly one of two sets in `crates/phase-ai/src/config.rs`. This is enforced, not advisory:
+
+- `every_policy_penalty_is_tuning_registered_or_explicitly_untuned` (`config.rs:1342`) serializes `PolicyPenalties::default()` and asserts **set equality** between its field names and `ACTIVE_POLICY_PENALTY_FIELDS ∪ UNTUNED_POLICY_PENALTY_FIELDS`. A new field in neither set — or a stale name in either set — turns `cargo nextest run -p phase-ai` red (Tilt `test-ai`; CI runs it workspace-wide via the `cargo nextest run --profile ci … --workspace` step in `.github/workflows/ci.yml`). The same test requires every `UNTUNED_` entry's reason string to be non-empty.
+
+**Which set?** `ACTIVE_POLICY_PENALTY_FIELDS` (`config.rs:617`) *is* the CMA-ES parameter vector: `ai_tune` builds the `--group penalties` parameter names from it (`bin/ai_tune.rs:102`) and `policy_penalties_from_params` deserializes the optimizer's output back over exactly those fields, clamped to `[-15.0, 15.0]` (`bin/ai_tune.rs:222`). Anything listed there is a **free variable the optimizer will overwrite**.
+
+- **`ACTIVE_`** — soft heuristics whose magnitude is a preference (nudge/preference/strong band). Only after a paired-seed `cargo ai-gate` calibration; that's what every current `UNTUNED_` reason is waiting for.
+- **`UNTUNED_`** (`config.rs:658`, `(field, reason)` pairs) — the default, and the **mandatory** home for any game-deciding scalar whose value is load-bearing for correctness rather than taste (a `critical`-band win-detector weight, e.g. a CR 104.2a "last player standing" crown term). Listing such a scalar in `ACTIVE_` licenses CMA-ES to tune a win detector into noise.
+
+When in doubt, ship in `UNTUNED_` with a reason. Promotion is a one-line move backed by an ai-gate report; demotion after the optimizer has already smeared the value is not.
 
 ---
 
@@ -314,6 +351,7 @@ Every feature MUST have:
 
 **Measurement evidence:**
 - New-policy PRs attach a `rtk cargo ai-gate` paired-seed report. No flips is acceptable for narrow policies, but the run must exist.
+- If the policy calls any board-wide or affordability engine function (`max_x_value`, `find_legal_targets`, mana-availability / `SimulationFilter` sweeps), ALSO attach `cargo ai-perf-gate` (or a wall-clock A/B on a large late-game board). `ai-gate` measures win-rate only and is structurally blind to per-decision latency; `ai-perf-gate` is blind to any call that bumps no `PerfCounterSnapshot` field. See the **Performance** section.
 
 ---
 

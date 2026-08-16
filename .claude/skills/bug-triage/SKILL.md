@@ -20,10 +20,13 @@ bun scripts/sync-bug-reports.ts extract
 bun scripts/sync-bug-reports.ts triage     # also emits triage/triage-delta.jsonl
 bun scripts/sync-bug-reports.ts render
 
-# Review ONLY the delta — the reports new since the last fetch. NEVER scan the
-# full triage-items.jsonl looking for "what's new"; that is how reports get
-# missed. `triage` prints the delta + a "reports to resolve" list (every
-# non-skip item).
+# Full-drain queue — REQUIRED unless the user explicitly asks for latest-delta-only.
+# `pending` is the durable unpublished backlog; it is not a diagnostic optional extra.
+bun scripts/sync-bug-reports.ts pending --limit=500
+
+# Review the delta as the authoritative latest-fetch slice. Never infer
+# latest work from the full triage-items.jsonl; this review is in addition to
+# the default `pending` backlog drain.
 bun scripts/sync-bug-reports.ts delta      # re-emit delta without re-classifying
 
 # CRITICAL — the script does NOT dedup against GitHub and does NOT pre-judge
@@ -34,7 +37,8 @@ bun scripts/sync-bug-reports.ts delta      # re-emit delta without re-classifyin
 # (`needs_human_review`, or a `create_issue` thread you did not publish) must
 # still be resolved inline — see *Delta Completion Invariant* below.
 
-# Publish: for each --thread, CREATE a new GH issue from the triage item AND
+# Publish: for each --thread, CREATE a new GH issue from the triage item,
+# include machine-readable Discord thread/message ids in the issue body, AND
 # react 👀 + post a tracking link inside the originating Discord thread.
 # IMPORTANT: `publish` ALWAYS creates a NEW issue (resolveIssue(..., "created"))
 # — it has NO reconcile / write-back-only mode, despite older doc claims. The
@@ -45,6 +49,9 @@ bun scripts/sync-bug-reports.ts delta      # re-emit delta without re-classifyin
 # a duplicate. Use the manual write-back procedure below instead.
 bun scripts/sync-bug-reports.ts publish --thread=<id>[,<id>...] --dry-run   # preview without side effects
 bun scripts/sync-bug-reports.ts publish --thread=<id>[,<id>...]             # create GH issue + Discord write-back
+# If a previous publish created the GH issue but Discord write-back failed,
+# rerun the same publish command. It repairs the missing reaction/reply from
+# published_threads instead of creating a duplicate issue.
 
 # Check a specific card's parser status
 jq '.["card name"]' client/public/card-data.json
@@ -64,6 +71,66 @@ gh issue view <N> --repo phase-rs/phase --json subIssues,title,body
 
 # Browse closed trackers (retrospective archive)
 gh issue list --repo phase-rs/phase --label "collector" --state closed --limit 50 --json number,title,closedAt
+```
+
+## Publish Scope — Default Is Full Backlog Drain
+
+**Default scope.** When the user asks to run bug triage, publish GitHub issues,
+or otherwise does not explicitly restrict the request, resolve both the latest
+delta **and** every thread from `pending`. Delta-only is permitted only for an
+explicit request such as “triage the latest fetch only.”
+
+The delta prevents historical reports from being reprocessed; `pending` finds
+the distinct failure mode where a real report was never recorded in
+`published_threads`. Do not treat a clean delta as a terminal condition.
+
+1. Run fetch → extract → triage → render, then snapshot `triage-delta.jsonl`.
+2. Run `bun scripts/sync-bug-reports.ts pending --limit=500` and record the
+   total. For every listed thread, read its live Discord history, apply the
+   Handled-tag gate, deduplicate, and publish/link/mark it in the same manner
+   as a delta thread.
+3. Work in small, sequential publish batches. `publish` rechecks the live
+   `Handled` tag, so use it for any new issue after the operator decides it is
+   not a duplicate.
+4. Finish only when `pending` prints `pending (shown):  0 of 0`.
+
+At session start, fetch one paginated, all-state GitHub issue inventory with
+`number`, `title`, `body`, `url`, and `state`; build local lookups by
+`phase-discord-thread-id` and `report_id`. Consult that inventory for every
+thread, including closed issues. Use GitHub Search only for the remaining
+plausible semantic duplicates, reuse results across threads, and never make
+one Search API request per backlog thread.
+
+Create the delta snapshot before performing any delta audit:
+
+```bash
+DELTA_SNAPSHOT=$(mktemp /tmp/bug-triage-delta.XXXXXX)
+cp triage/triage-delta.jsonl "$DELTA_SNAPSHOT"
+shasum -a 256 "$DELTA_SNAPSHOT"
+jq -s '[.[] | select(.proposed_action != "skip") | .thread_id] | unique | length' \
+  "$DELTA_SNAPSHOT"
+```
+
+### Classifier False-Negative Gate
+
+Before publishing a delta snapshot, audit its `skip` items grouped by thread.
+A short starter message, attachment-only message, or follow-up classification
+does not make the **thread** non-bug. Read the complete thread whenever its
+title or combined messages describe a failure. Reclassify that thread inline
+as NEW, DUP-OF, APPEND-TO, or MARK-HANDLED; do not silently leave it outside
+the cycle because one message was labelled `skip`.
+
+Add every skip-classified thread reclassified as NEW, DUP-OF, or APPEND-TO to
+the cycle resolution set. Final close-out and counts use the union of snapshot
+non-skip threads and these reclassified false negatives.
+
+```bash
+# Show the complete context for each skip-classified delta thread before
+# accepting the classifier's verdict.
+jq -r 'select(.proposed_action == "skip") | .thread_id' \
+  "$DELTA_SNAPSHOT" | sort -u | while read tid; do
+    bun scripts/sync-bug-reports.ts read --thread="$tid"
+  done
 ```
 
 ## Delta Completion Invariant — Every Non-Skip Item, Same Cycle
@@ -146,6 +213,68 @@ jq -r 'select(.proposed_action != "create_issue"
 
 This MUST print nothing before you call the cycle done.
 
+### Snapshot + GitHub Reconciliation — Required Before Declaring Success
+
+`published_threads` is a write-back ledger, not independent evidence that an
+issue exists or that it belongs to the current Discord report. Triage artifacts
+are also regenerated by other operators, so never audit a moving
+`triage-delta.jsonl` and then report the result as final.
+
+At the start of every publish pass, copy the delta to a session-local snapshot
+and record its SHA-256 and its non-skip unique-thread count. Set
+`DELTA_SNAPSHOT` to that path; use **that snapshot** for all selections,
+false-negative audits, and close-out checks. Immediately before calling the
+cycle done, re-hash the live delta; if it changed, take a new snapshot and
+repeat the audit for the new reports.
+
+For every non-skip thread in the snapshot with `issue_number > 0`, independently
+verify the mapped GitHub issue (not a pull request) contains the exact hidden
+`phase-discord-thread-id: <thread_id>` metadata. A missing mapping, an issue
+body without that metadata, or a mapping to a PR is an orphan: deduplicate it
+against GitHub and then file/link it with the required Discord write-back. Do
+not use a count of `published_threads` entries as proof.
+
+The final operator report must state all five counts: snapshot non-skip threads,
+backlog threads discovered by `pending`, new GitHub issues,
+reconciled/mark-handled threads, and GitHub-metadata mismatches. A successful
+pass always ends with **zero** orphan threads, **zero** metadata mismatches,
+and `pending (shown):  0 of 0`. Archived/deleted threads are exceptions only
+to Discord write-back: independently validate the existing issue, then run:
+
+```bash
+bun scripts/sync-bug-reports.ts mark-handled --thread=<id> \
+  --notes='tracked by #N; Discord archived/deleted, write-back impossible'
+```
+
+Document the exception in the operator report.
+
+### Discord `Handled` Tag — Hard Pre-Publish Gate
+
+Before filing **any** thread from the snapshot, read its live Discord
+`applied_tags` and resolve the parent forum channel's tag IDs. A thread tagged
+`Handled` has already been taken care of by the maintainer: record it as a
+`mark-handled` sentinel with reason `Discord Handled tag`; do **not** create a
+GitHub issue, do not react, and do not post a tracking link. This check is
+mandatory even when the heuristic says `create_issue` or `needs_human_review`.
+
+If a tag is applied after the snapshot but before publication, it wins. Re-read
+the tag immediately before each publish call. If an issue was filed before the
+tag check, remove its Discord metadata, close it as an accidental publication,
+delete the bot tracking reply/reaction, and replace the ledger entry with the
+`mark-handled` sentinel.
+
+### One Publisher at a Time
+
+Never start a second `publish` invocation until the first has printed its
+`Publish complete` summary, its process has exited, and the GitHub-metadata
+audit has passed for that batch. `published_threads` is a read-modify-write
+file, so overlapping invocations can both read an unrecorded thread and create
+duplicate issues. Publish in small batches, verify each batch against GitHub,
+then start the next batch. If any duplicate is found, stop all publishing,
+retain the first-created issue, remove Discord metadata from the duplicate
+before closing it (to prevent close automation from archiving the live report),
+repair the Discord tracking link, and restart the audit from a fresh snapshot.
+
 **Why subagents alone are not sufficient:** subagents are fine for the
 *decisions* (DUP vs NEW vs MARK-HANDLED), but the GH `create` + Discord
 write-back calls have side effects that must succeed end-to-end in the same
@@ -177,7 +306,8 @@ have not actually written back to.
 ### Two paths — pick by whether a GH issue already exists
 
 **Path A — no GH issue exists yet for the thread.** Use `publish`. It creates
-the issue, posts the 👀 + link, and records `published_threads` with the real
+the issue with explicit `phase-discord-thread-id` / `phase-discord-message-id`
+metadata, posts the 👀 + link, and records `published_threads` with the real
 message ids — all in one step. Nothing else to do.
 
 ```bash
@@ -252,6 +382,40 @@ gh issue edit <N> --repo phase-rs/phase --remove-label "status:fixed-unreleased"
 gh issue close <N> --repo phase-rs/phase --comment "Verified in gameplay. Closing."
 gh issue edit <N> --repo phase-rs/phase --remove-label "status:needs-runtime-verify" --add-label "status:verified"
 ```
+
+### Discord Close Follow-Up Automation
+
+`.github/workflows/discord-issue-close-followup.yml` runs whenever a
+`source:discord` GitHub issue is closed. It reads the Discord thread id from
+the issue body and posts back into that Discord thread, then **archives the
+thread to mark the report resolved** — closing the loop so the reporter is
+told the outcome and the thread stops showing as open.
+
+The message wording depends on `issue.state_reason`:
+
+- **Closed as completed** (a fix shipped):
+  > #N tracking this report was closed: <issue-url>
+  > Please test the fix in the latest build. If it's still broken, open a **new thread** in #bugreports — this thread is now resolved.
+- **Closed for any other reason** (`not_planned`, `duplicate`) — neutral, no retest ask:
+  > #N tracking this report was closed: <issue-url>
+  > This thread is now resolved. If you have new information, please open a **new thread** in #bugreports.
+
+The parser accepts the hidden `phase-discord-thread-id` metadata comment, the
+visible `**Discord thread id:**` field, and the older
+`discord: <thread>/<message>` footer, so older script-created issues still work
+when they contain that footer. If the thread is archived, the script unarchives
+it before posting, then re-archives it afterward.
+
+**Ops preconditions:**
+- Repository secret `DISCORD_BOT_TOKEN` — required to post.
+- Repository/org Actions variable `DISCORD_BUGREPORTS_CHANNEL_ID` (optional) —
+  when set, the "#bugreports" ask renders as a clickable `<#id>` channel
+  mention; unset falls back to the plain text `#bugreports`. **Create this
+  variable manually** (Settings → Secrets and variables → Actions → Variables).
+- The bot must have **MANAGE_THREADS** in the #bugreports channel to archive
+  threads. Archiving is best-effort: if the permission is missing the follow-up
+  message still posts and the workflow logs a warning instead of failing (so it
+  never double-posts on a rerun).
 
 ### Mandatory Pre-Implementation Plan Review Gate — Independent Review ROUNDS Until Clean
 
@@ -649,10 +813,16 @@ Also at this step: audit open `collector` trackers. When a resync pass closes ch
 ```bash
 bun scripts/sync-bug-reports.ts fetch
 ```
-If new messages exist, re-run extract → triage → render. Then review **`triage/triage-delta.jsonl`** — and ONLY that file. It contains exactly the triage items from the latest fetch window (messages with `fetched_at > prev_fetch_at`). Do not re-process every historical Discord thread as new work, and do not hand-filter `triage-items.jsonl` by snowflake/timestamp guesses — that is how orphaned reports get missed. The raw store and dashboards regenerate from the full message archive for determinism, but GitHub issue work is delta-based:
+If new messages exist, re-run extract → triage → render and review
+**`triage/triage-delta.jsonl`** for the latest-fetch window; do not hand-filter
+`triage-items.jsonl` by snowflake/timestamp guesses. Regardless of whether the
+fetch found new messages, unless the user explicitly requested delta-only
+triage, drain `pending` to zero as required by *Publish Scope — Default Is Full
+Backlog Drain*. The raw store and dashboards regenerate from the full message
+archive for determinism:
 - The `triage` command prints the delta breakdown + a **"reports to resolve" list**: every non-skip delta item. Each must be filed (`publish --thread=`), linked/deduped to an existing issue, or `mark-handled`. Never ignore one.
 - Use Discord cursors in `triage/sync-state.json` and the `fetch` command's "New messages fetched" count to decide whether there is new Discord input.
-- Treat `report_id` (`discord:<thread_id>:<message_id>:<item_index>`) as the stable idempotency key. The script does NOT dedup against GitHub — **you** are the arbiter. Before creating work, search GitHub issues/comments for that report id or thread/message URL.
+- Treat `report_id` (`discord:<thread_id>:<message_id>:<item_index>`) as the stable idempotency key. The script does NOT dedup against GitHub — **you** are the arbiter. Consult the session's all-state local GitHub inventory for the report id or thread/message URL; use Search only for unresolved plausible semantic duplicates.
 - Your manual dedupe checks MUST include closed issues: use `--state all`, not `--state open`. Closed `status:fixed-unreleased`, `stale`, `duplicate`, and `wont-fix` issues are still authoritative triage records and must prevent duplicate creation.
 - When you confirm a delta report already has a GitHub issue (open or closed), do not refile it — `mark-handled --notes="dup of #N"` (closed) or link/comment it (open). Recreate only if the Discord thread contains a newer unmatched `report_id`.
 - Existing GitHub issues, comments, labels, and sub-issue parentage are the persistent triage state. Update those records instead of rediscovering or refiling old reports.
@@ -760,6 +930,20 @@ commands generate the `.jsonl` files; `triage/llm-triage-items.jsonl`,
 | `triage/sync-state.json` | Incremental fetch cursors + `published_threads` map | `fetch` / `publish` | yes |
 | `triage/dashboard.md` | Generated dashboard | `render` | yes |
 | `triage/triage-dashboard.md` | Triage-classified dashboard (only when triage data exists) | `render` | yes |
+
+### Card detection in `extract`
+
+`extract` finds card names three ways (see `scripts/lib/cardNames.ts`): a raw
+substring scan (noisy — yields single-word false positives like "x"/"life"),
+plus explicit `[[Card Name]]` brackets and Scryfall card URLs resolved against a
+punctuation-normalized index. Normalization collapses `. . .`, `//`, commas, and
+hyphens so `[[welcome to...]]` and the slug `welcome-to-jurassic-park` both match
+the card-data key `welcome to . . .`; a double-faced combined name resolves to
+both face keys. Report items carry an optional `explicitCards` field — the
+trusted bracket/URL subset of `cards` — which `publish` always includes in the
+issue's verified-oracle section (bypassing the false-positive filter). The field
+is optional, so `triage` still reads `report-items.jsonl` written before it
+existed; a fresh `extract` rewrites the file and repopulates it.
 
 ## Label Taxonomy
 

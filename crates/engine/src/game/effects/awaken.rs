@@ -45,6 +45,21 @@ use crate::types::keywords::Keyword;
 /// game) — set on the sub-ability's `duration` field because `Effect::Animate`
 /// itself carries no duration and `animate::resolve` reads `ability.duration`
 /// (defaulting to `UntilEndOfTurn` when absent).
+///
+/// AI COUPLING — read before changing this payload. The Awaken branch of
+/// `casting::prepare_spell_cast_with_variant_override_inner` appends
+/// this rider to the bound spine, so it is SYNTHESIZED content that reaches the
+/// bind without ever being written to a `GameObject` ability field.
+/// `ai_support::targeted_exchange::root_may_yield_adverse_exchange` is a
+/// clone-free precondition that reads only the source's STORED ability lists and
+/// skips the AI's adverse-exchange preview when it finds no adverse shape there —
+/// it therefore cannot see anything this function builds. That is sound ONLY
+/// because the payload below is fixed: `Effect::PutCounter` chained to
+/// `Effect::Animate`, neither of which either judge (`find_fight_leaf`,
+/// `is_target_sourced_self_damage`) can reject on. Introducing `Effect::Fight` or
+/// `Effect::DealDamage`/`DamageAll { damage_source: Some(DamageSource::Target) }`
+/// here silently drops a `Reject` with no failing test — add a fall-open rail to
+/// that guard in the SAME change. See clause (b2)(ii) of its doc comment.
 fn build_awaken_rider(count: u32) -> AbilityDefinition {
     let land_you_control = TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You));
 
@@ -196,6 +211,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 5 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         )
         .sub_ability(inner);

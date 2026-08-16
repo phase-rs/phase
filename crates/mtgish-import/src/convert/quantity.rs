@@ -720,7 +720,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
             },
         },
 
-        // CR 609.3: "the number of permanents tapped this way" — the
+        // CR 608.2c: "the number of permanents tapped this way" — the
         // sub_ability chain tracks the tapped set; the count is read via
         // TrackedSetSize. Mirrors the native parser's "tapped this way"
         // mapping (oracle_quantity.rs:577).
@@ -728,7 +728,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
             qty: QuantityRef::TrackedSetSize,
         },
 
-        // CR 609.3: "the amount of damage dealt this way" / "the amount of
+        // CR 608.2c: "the amount of damage dealt this way" / "the amount of
         // damage prevented this way" — sub-ability chain anaphor for the
         // preceding damage/prevention effect. Routed through the per-event
         // `EventContextAmount` channel (the same channel the native parser
@@ -740,7 +740,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
             qty: QuantityRef::EventContextAmount,
         },
 
-        // CR 609.3: "the number of cards drawn this way" / "the number of
+        // CR 608.2c: "the number of cards drawn this way" / "the number of
         // counters removed this way" / "the number of cards discarded /
         // exiled / milled this way" — preceding-effect numeric anaphors,
         // surfaced as EventContextAmount via the chain's amount channel.
@@ -804,23 +804,29 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
             qty: QuantityRef::ChosenNumber,
         },
 
-        // CR 105 + CR 109.1: "the number of colors among [permanents]" —
-        // distinct colors across the matching permanent set. Composes with
-        // the permanents-filter converter; mirrors the parser's CDA mapping
-        // (oracle_quantity.rs DistinctColorsAmongPermanents).
+        // CR 105.1 + CR 105.2: "the number of colors among [permanents]" —
+        // distinct colors across the matching permanent set. Composes with the
+        // permanents-filter converter; mirrors the parser's CDA mapping. The
+        // engine slot is parameterized on `CardTypeSetSource` (the shared
+        // population axis), and a live object census is the `Objects` arm.
         GameNumber::NumColorsAmongPermanents(filter) => QuantityExpr::Ref {
-            qty: QuantityRef::DistinctColorsAmongPermanents {
-                filter: convert_permanents(filter)?,
+            qty: QuantityRef::DistinctColorsAmong {
+                source: CardTypeSetSource::Objects {
+                    filter: convert_permanents(filter)?,
+                },
             },
         },
-        // CR 105 + CR 109.1: "the number of colors of [permanent]" — the
+        // CR 105.1 + CR 105.2: "the number of colors of [permanent]" — the
         // single-permanent specialization. Engine slot is the same
-        // `DistinctColorsAmongPermanents { filter }` taking a one-permanent
-        // TargetFilter; the resolver counts distinct W/U/B/R/G across the
-        // resolved set (CR 105.1 — gold/multicolor/colorless are not colors).
+        // `DistinctColorsAmong { source: Objects { filter } }` taking a
+        // one-permanent TargetFilter; the resolver counts distinct W/U/B/R/G
+        // across the resolved set (CR 105.2 — gold/multicolor/colorless are not
+        // colors).
         GameNumber::NumColorsOfPermanent(perm) => QuantityExpr::Ref {
-            qty: QuantityRef::DistinctColorsAmongPermanents {
-                filter: convert_permanent(perm)?,
+            qty: QuantityRef::DistinctColorsAmong {
+                source: CardTypeSetSource::Objects {
+                    filter: convert_permanent(perm)?,
+                },
             },
         },
 
@@ -942,7 +948,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
             qty: QuantityRef::EventContextAmount,
         },
 
-        // CR 608.2c + CR 609.3: "the number of [filter] permanents destroyed
+        // CR 608.2c: "the number of [filter] permanents destroyed
         // this way" — routes through the tracked set populated by the preceding
         // DestroyAll effect. When the filter restricts the tracked set, emit
         // FilteredTrackedSetSize so only matching members are counted. Otherwise

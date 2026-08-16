@@ -14,8 +14,8 @@
 //!      `Effect::RevealUntil`'s filter dispatch.
 //!
 //! The fix is purely parser-composition — every runtime primitive
-//! (`ReplacementMode::Optional`, `Effect::Choose(Labeled)`,
-//! `Effect::RevealUntil`, `FilterProp::IsChosenLandOrNonlandKind`,
+//! (`ReplacementMode::Optional`, `Effect::Choose(CardPredicate)`,
+//! `Effect::RevealUntil`, `FilterProp::MatchesLastChosenCardPredicate`,
 //! random-order bottom placement via `shuffle_to_bottom`) already exists.
 //!
 //! These tests drive the real engine pipeline through `GameAction`s:
@@ -49,7 +49,7 @@ fn scenario_with_abundance_and_library(
     // Use `add_real_card` for library cards so they get full card data
     // (core types, oracle text, etc.). `add_card_to_library_top` creates
     // anonymous objects with no types — which would make the
-    // `IsChosenLandOrNonlandKind` filter reject every Land as a non-Land.
+    // `MatchesLastChosenCardPredicate` filter reject every Land as a non-Land.
     // `add_real_card` `push_back`s onto the library; the engine treats
     // `library.front()` (position 0) as the top (see `cascade.rs:60` /
     // `casting.rs:1151`), so the first element pushed ends up on top.

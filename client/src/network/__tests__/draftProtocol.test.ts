@@ -10,8 +10,8 @@ import type { DraftP2PMessage } from "../draftProtocol";
 
 describe("draftProtocol", () => {
   describe("DRAFT_PROTOCOL_VERSION", () => {
-    it("is version 4", () => {
-      expect(DRAFT_PROTOCOL_VERSION).toBe(4);
+    it("is version 10", () => {
+      expect(DRAFT_PROTOCOL_VERSION).toBe(10);
     });
   });
 
@@ -26,6 +26,38 @@ describe("draftProtocol", () => {
       expect(msg.type).toBe("draft_pick");
     });
 
+    it("accepts a draft-effect pick message", () => {
+      const msg = validateDraftMessage({
+        type: "draft_pick_with_draft_effect",
+        effectCardInstanceId: "cogwork-1",
+        cardInstanceIds: ["card-001", "card-002"],
+      });
+      expect(msg).toMatchObject({
+        type: "draft_pick_with_draft_effect",
+        effectCardInstanceId: "cogwork-1",
+        cardInstanceIds: ["card-001", "card-002"],
+      });
+    });
+
+    it.each([
+      { effectCardInstanceId: null, cardInstanceIds: ["card-001", "card-002"] },
+      { effectCardInstanceId: {}, cardInstanceIds: ["card-001", "card-002"] },
+      { effectCardInstanceId: "", cardInstanceIds: ["card-001", "card-002"] },
+      { effectCardInstanceId: "x".repeat(257), cardInstanceIds: ["card-001", "card-002"] },
+      { effectCardInstanceId: "cogwork-1", cardInstanceIds: null },
+      { effectCardInstanceId: "cogwork-1", cardInstanceIds: {} },
+      { effectCardInstanceId: "cogwork-1", cardInstanceIds: ["card-001"] },
+      { effectCardInstanceId: "cogwork-1", cardInstanceIds: ["card-001", "card-002", "card-003"] },
+      { effectCardInstanceId: "cogwork-1", cardInstanceIds: ["card-001", "card-001"] },
+      { effectCardInstanceId: "cogwork-1", cardInstanceIds: [null, "card-002"] },
+      { effectCardInstanceId: "cogwork-1", cardInstanceIds: ["x".repeat(257), "card-002"] },
+    ])("rejects malformed draft-effect pick payloads", (payload) => {
+      expect(() => validateDraftMessage({
+        type: "draft_pick_with_draft_effect",
+        ...payload,
+      })).toThrow("Invalid draft-effect pick");
+    });
+
     it("accepts valid draft_welcome message", () => {
       const msg = validateDraftMessage({
         type: "draft_welcome",
@@ -36,6 +68,45 @@ describe("draftProtocol", () => {
         draftCode: "draft-abc",
       });
       expect(msg.type).toBe("draft_welcome");
+    });
+
+    it("normalizes missing face-up draft arrays in received player views", () => {
+      const msg = validateDraftMessage({
+        type: "draft_state_update",
+        view: {
+          seats: [{ seat_index: 1, display_name: "Alex" }],
+        },
+      });
+
+      expect(msg.type).toBe("draft_state_update");
+      if (msg.type === "draft_state_update") {
+        expect(msg.view.draft_effects).toEqual([]);
+        expect(msg.view.seats[0].face_up_draft_cards).toEqual([]);
+      }
+    });
+
+    it.each([null, {}])("rejects present non-array draft_effects values", (draftEffects) => {
+      expect(() => validateDraftMessage({
+        type: "draft_state_update",
+        view: { draft_effects: draftEffects, seats: [] },
+      })).toThrow("draft_effects must be an array");
+    });
+
+    it.each([null, {}])("rejects present non-array seats values", (seats) => {
+      expect(() => validateDraftMessage({
+        type: "draft_state_update",
+        view: { draft_effects: [], seats },
+      })).toThrow("seats must be an array");
+    });
+
+    it.each([null, {}])("rejects present non-array face-up draft cards", (faceUpCards) => {
+      expect(() => validateDraftMessage({
+        type: "draft_state_update",
+        view: {
+          draft_effects: [],
+          seats: [{ face_up_draft_cards: faceUpCards }],
+        },
+      })).toThrow("face_up_draft_cards must be an array");
     });
 
     it("rejects missing type field", () => {
@@ -58,6 +129,7 @@ describe("draftProtocol", () => {
       "draft_join",
       "draft_reconnect",
       "draft_pick",
+      "draft_pick_with_draft_effect",
       "draft_submit_deck",
       "draft_welcome",
       "draft_reconnect_ack",
@@ -68,6 +140,8 @@ describe("draftProtocol", () => {
       "draft_kicked",
       "draft_pairing",
       "draft_match_result",
+      "draft_match_settlement",
+      "draft_match_settlement_ack",
       "draft_paused",
       "draft_resumed",
       "draft_lobby_update",
@@ -76,14 +150,26 @@ describe("draftProtocol", () => {
       "draft_request_advance",
       "draft_match_start",
       "draft_bo3_sideboard_prompt",
+      "draft_bo3_between_games",
       "draft_bo3_sideboard_submit",
+      "draft_bo3_intergame_command",
+      "draft_bo3_intergame_authorized",
+      "draft_bo3_intergame_receipt",
       "draft_bo3_play_draw_prompt",
       "draft_bo3_play_draw_choice",
       "draft_bo3_game_start",
       "draft_bo3_score_update",
       "draft_bo3_match_complete",
     ])("accepts message type '%s'", (msgType) => {
-      const msg = validateDraftMessage({ type: msgType });
+      const msg = validateDraftMessage(
+        msgType === "draft_pick_with_draft_effect"
+          ? {
+              type: msgType,
+              effectCardInstanceId: "cogwork-1",
+              cardInstanceIds: ["card-001", "card-002"],
+            }
+          : { type: msgType },
+      );
       expect(msg.type).toBe(msgType);
     });
   });
@@ -102,8 +188,8 @@ describe("draftProtocol", () => {
     it("round-trips a large message (gzip path)", async () => {
       // Build a message large enough to trigger compression
       const longView = {
-        status: "Drafting",
-        kind: "Premier",
+        status: "Deckbuilding",
+        kind: "Sealed",
         current_pack_number: 1,
         pick_number: 3,
         pass_direction: "Left",
@@ -117,7 +203,120 @@ describe("draftProtocol", () => {
           cmc: i % 7,
           type_line: "Creature - Human Wizard",
         })),
-        pool: [],
+        pool: [
+          {
+            instance_id: "pack-1-card-1",
+            name: "First Pull",
+            set_code: "TST",
+            collector_number: "101",
+            rarity: "common",
+            colors: ["W"],
+            cmc: 1,
+            type_line: "Creature — Test",
+          },
+          {
+            instance_id: "pack-2-card-1",
+            name: "Second Pull",
+            set_code: "TST",
+            collector_number: "102",
+            rarity: "uncommon",
+            colors: ["U"],
+            cmc: 2,
+            type_line: "Instant",
+          },
+        ],
+        draft_effects: [],
+        pool_groups: {
+          color_groups: [
+            { kind: "white", total: 1, cards: [{ card: {
+              instance_id: "pack-1-card-1",
+              name: "First Pull",
+              set_code: "TST",
+              collector_number: "101",
+              rarity: "common",
+              colors: ["W"],
+              cmc: 1,
+              type_line: "Creature — Test",
+            }, count: 1 }] },
+            { kind: "blue", total: 1, cards: [{ card: {
+              instance_id: "pack-2-card-1",
+              name: "Second Pull",
+              set_code: "TST",
+              collector_number: "102",
+              rarity: "uncommon",
+              colors: ["U"],
+              cmc: 2,
+              type_line: "Instant",
+            }, count: 1 }] },
+          ],
+          type_groups: [
+            { kind: "creature", total: 1, cards: [{ card: {
+              instance_id: "pack-1-card-1",
+              name: "First Pull",
+              set_code: "TST",
+              collector_number: "101",
+              rarity: "common",
+              colors: ["W"],
+              cmc: 1,
+              type_line: "Creature — Test",
+            }, count: 1 }] },
+            { kind: "instant", total: 1, cards: [{ card: {
+              instance_id: "pack-2-card-1",
+              name: "Second Pull",
+              set_code: "TST",
+              collector_number: "102",
+              rarity: "uncommon",
+              colors: ["U"],
+              cmc: 2,
+              type_line: "Instant",
+            }, count: 1 }] },
+          ],
+          cmc_groups: [
+            { kind: "mana_value1", total: 1, cards: [{ card: {
+              instance_id: "pack-1-card-1",
+              name: "First Pull",
+              set_code: "TST",
+              collector_number: "101",
+              rarity: "common",
+              colors: ["W"],
+              cmc: 1,
+              type_line: "Creature — Test",
+            }, count: 1 }] },
+            { kind: "mana_value2", total: 1, cards: [{ card: {
+              instance_id: "pack-2-card-1",
+              name: "Second Pull",
+              set_code: "TST",
+              collector_number: "102",
+              rarity: "uncommon",
+              colors: ["U"],
+              cmc: 2,
+              type_line: "Instant",
+            }, count: 1 }] },
+          ],
+          color_counts: { white: 1, blue: 1, black: 0, red: 0, green: 0 },
+        },
+        sealed_packs: [
+          [{
+            instance_id: "pack-1-card-1",
+            name: "First Pull",
+            set_code: "TST",
+            collector_number: "101",
+            rarity: "common",
+            colors: ["W"],
+            cmc: 1,
+            type_line: "Creature — Test",
+          }],
+          [{
+            instance_id: "pack-2-card-1",
+            name: "Second Pull",
+            set_code: "TST",
+            collector_number: "102",
+            rarity: "uncommon",
+            colors: ["U"],
+            cmc: 2,
+            type_line: "Instant",
+          }],
+        ],
         seats: [],
         cards_per_pack: 14,
         pack_count: 3,
@@ -135,6 +334,10 @@ describe("draftProtocol", () => {
 
       const decoded = await decodeDraftWireMessage(encoded);
       expect(decoded).toEqual(msg);
+      if (decoded.type === "draft_state_update") {
+        expect(decoded.view.sealed_packs).toEqual(longView.sealed_packs);
+        expect(decoded.view.pool_groups).toEqual(longView.pool_groups);
+      }
     });
 
     it("round-trips a deck-carrying draft match start message", async () => {
@@ -158,6 +361,16 @@ describe("draftProtocol", () => {
             ai_decks: [],
           },
           matchConfig: { match_type: "Bo1" },
+          binding: {
+            podId: "draft-1",
+            matchId: "round-1-table-1",
+            round: 1,
+            sessionKey: "session-1",
+            lease: "lease-1",
+            nonce: "nonce-1",
+            revision: 0,
+            matchAuthoritySeat: 0,
+          },
         },
       };
 

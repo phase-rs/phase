@@ -32,6 +32,7 @@
 import { debugLog } from "./debugLog";
 import { useGameStore } from "../stores/gameStore";
 import { loadCheckpoints } from "../services/gamePersistence";
+import { trackEvent } from "../services/telemetry";
 import { AdapterError, AdapterErrorCode, type GameState } from "../adapter/types";
 
 /**
@@ -187,6 +188,16 @@ export function notifyEngineSlow(reason: string): void {
  */
 export async function routePanic(reason: string, panic?: string): Promise<void> {
   const rehydrated = await attemptStateRehydrate().catch(() => false);
+  // Telemetry fires on both branches regardless of the toast's session
+  // suppression — it answers "how often / which build / which mode".
+  const { gameMode, gameState } = useGameStore.getState();
+  trackEvent("engine_panic", {
+    fatal: !rehydrated,
+    reason,
+    panic,
+    game_mode: gameMode,
+    turn: gameState?.turn_number ?? null,
+  });
   if (rehydrated) {
     for (const fn of nonFatalPanicListeners) fn({ reason, panic });
     return;

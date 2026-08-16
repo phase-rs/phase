@@ -156,3 +156,13 @@ fn my_card_does_the_thing() {
   Paraphrased text can take a different parser branch than the real card, so
   the test goes green while the actual card stays broken until card-data is
   regenerated (see `project_parser_fix_inert_until_data_regen`).
+- **Regenerate the integration fixture when your parser change touches a card
+  it contains.** `add_real_card` reads the committed
+  `crates/engine/tests/fixtures/integration_cards.json` snapshot.
+  `python3 scripts/gen-test-fixture.py --check` verifies **coverage only — that every
+  referenced card is PRESENT (a key-set comparison). It never compares the stored parse
+  VALUES against a fresh export.** So a parser change that alters a fixture card's parse
+  leaves the fixture stale while the gate stays green: the integration test then asserts
+  against the *old* parse and proves nothing about the code you shipped. If your change
+  alters how any fixture card parses, re-run `python3 scripts/gen-test-fixture.py` (no
+  `--check`) and commit the regenerated fixture in the same PR.

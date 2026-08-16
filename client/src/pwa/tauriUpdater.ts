@@ -8,12 +8,14 @@
 
 import type { Update } from "@tauri-apps/plugin-updater";
 
-import { isTauri } from "../services/sidecar";
+import { isTauri } from "../services/platform";
 import { isMultiplayerGameLive, whenMultiplayerGameEnds } from "./multiplayerGuard";
 import { markPendingAutoUpdate } from "./updateMarker";
 import {
+  claimUpdateStatus,
   clearUpdateError,
   pushUpdateDebug,
+  releaseUpdateStatus,
   setDownloadProgress,
   setUpdateError,
   setUpdateStatus,
@@ -35,15 +37,29 @@ let inFlight: Promise<void> | null = null;
  */
 let deferredUnsub: (() => void) | null = null;
 
+function setTauriUpdateStatus(next: "checking" | "downloading" | "activating" | "deferred", ownsStatus: boolean): void {
+  if (ownsStatus) setUpdateStatus(next);
+}
+
+function finishTauriUpdateStatus(ownsStatus: boolean): void {
+  if (!ownsStatus) return;
+  setUpdateStatus("idle");
+  releaseUpdateStatus("tauri");
+}
+
+function setTauriDownloadProgress(value: number, ownsStatus: boolean): void {
+  if (ownsStatus) setDownloadProgress(value);
+}
+
 function formatError(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
   if (typeof error === "string" && error) return error;
   return "Unknown error";
 }
 
-async function runInstall(update: Update): Promise<void> {
-  setUpdateStatus("downloading");
-  setDownloadProgress(0);
+async function runInstall(update: Update, ownsStatus: boolean): Promise<void> {
+  setTauriUpdateStatus("downloading", ownsStatus);
+  setTauriDownloadProgress(0, ownsStatus);
 
   let totalBytes = 0;
   let receivedBytes = 0;
@@ -53,19 +69,19 @@ async function runInstall(update: Update): Promise<void> {
       if (event.event === "Started") {
         totalBytes = event.data.contentLength ?? 0;
         pushUpdateDebug(`Tauri update download started (${totalBytes || "unknown"} bytes).`);
-        setDownloadProgress(0);
+        setTauriDownloadProgress(0, ownsStatus);
         return;
       }
       if (event.event === "Progress") {
         receivedBytes += event.data.chunkLength;
         if (totalBytes > 0) {
-          setDownloadProgress((receivedBytes / totalBytes) * 100);
+          setTauriDownloadProgress((receivedBytes / totalBytes) * 100, ownsStatus);
         }
         return;
       }
       if (event.event === "Finished") {
-        setDownloadProgress(100);
-        setUpdateStatus("activating");
+        setTauriDownloadProgress(100, ownsStatus);
+        setTauriUpdateStatus("activating", ownsStatus);
         pushUpdateDebug("Tauri update download finished; relaunching.");
       }
     });
@@ -74,9 +90,9 @@ async function runInstall(update: Update): Promise<void> {
     const { relaunch } = await import("@tauri-apps/plugin-process");
     await relaunch();
   } catch (error: unknown) {
-    setUpdateStatus("idle");
-    setDownloadProgress(0);
-    setUpdateError(`Tauri update install failed: ${formatError(error)}`);
+    if (ownsStatus) setUpdateError(`Tauri update install failed: ${formatError(error)}`);
+    setTauriDownloadProgress(0, ownsStatus);
+    finishTauriUpdateStatus(ownsStatus);
     console.warn("[phase.rs] Tauri update install failed.", error);
   }
 }
@@ -99,7 +115,8 @@ async function performCheck(reason: "startup" | "interval" | "manual"): Promise<
   }
 
   const run = (async () => {
-    setUpdateStatus("checking");
+    const ownsStatus = claimUpdateStatus("tauri");
+    setTauriUpdateStatus("checking", ownsStatus);
     pushUpdateDebug(`Tauri update check started (${reason}).`);
 
     let update: Update | null = null;
@@ -107,14 +124,14 @@ async function performCheck(reason: "startup" | "interval" | "manual"): Promise<
       const { check } = await import("@tauri-apps/plugin-updater");
       update = await check();
     } catch (error: unknown) {
-      setUpdateStatus("idle");
-      setUpdateError(`Tauri update check failed: ${formatError(error)}`);
+      if (ownsStatus) setUpdateError(`Tauri update check failed: ${formatError(error)}`);
+      finishTauriUpdateStatus(ownsStatus);
       console.warn("[phase.rs] Tauri update check failed.", error);
       return;
     }
 
     if (!update) {
-      setUpdateStatus("idle");
+      finishTauriUpdateStatus(ownsStatus);
       pushUpdateDebug("Tauri update check finished with no new version.");
       return;
     }
@@ -122,24 +139,24 @@ async function performCheck(reason: "startup" | "interval" | "manual"): Promise<
     pushUpdateDebug(
       `Tauri update available: v${update.version} (current v${update.currentVersion}).`,
     );
-    clearUpdateError();
+    if (ownsStatus) clearUpdateError();
 
     if (isMultiplayerGameLive()) {
       pushUpdateDebug(
         "Tauri update available during multiplayer game; deferring install until game ends.",
         "warn",
       );
-      setUpdateStatus("deferred");
+      setTauriUpdateStatus("deferred", ownsStatus);
       const pending = update;
       deferredUnsub = whenMultiplayerGameEnds(() => {
         deferredUnsub = null;
         pushUpdateDebug("Multiplayer game ended; applying deferred Tauri update.");
-        void runInstall(pending);
+        void runInstall(pending, ownsStatus);
       });
       return;
     }
 
-    await runInstall(update);
+    await runInstall(update, ownsStatus);
   })();
 
   inFlight = run.finally(() => {
@@ -190,6 +207,7 @@ export function registerTauriUpdater(): void {
       manualCheck = null;
       deferredUnsub?.();
       deferredUnsub = null;
+      releaseUpdateStatus("tauri");
     },
     { once: true },
   );

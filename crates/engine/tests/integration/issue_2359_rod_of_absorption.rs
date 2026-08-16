@@ -248,7 +248,7 @@ fn rod_activation_free_casts_exiled_spells_and_sacrifices_rod() {
     let idx = rod_activated_index(runner.state(), rod);
     // CR 601.2b: a free cast forces X = 0; the activation's own {X} is announced
     // here as 2 (paid from the pool), capping the exiled cards' total MV ≤ 2.
-    // CR 609.3: accept the "you may cast …" optional so the grant resolves.
+    // CR 608.2d: accept the "you may cast …" optional so the grant resolves.
     runner.activate(rod, idx).x(2).accept_optional().resolve();
 
     // CR 701.21 / CR 118.9: Rod was sacrificed as part of the cost — it must be

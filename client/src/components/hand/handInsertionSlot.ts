@@ -9,6 +9,23 @@ export interface HandSlotRect {
 }
 
 /**
+ * The DOM selector that defines the reorder index space: every element it
+ * matches inside the hand container becomes one `HandSlotRect`, so a card it
+ * matches is a card the player can drop another card next to.
+ *
+ * It is deliberately NOT `[data-card-hover]`. That attribute means
+ * "inspectable" — it is what `usePreviewDismiss`'s `:hover` poll and `uiStore`'s
+ * deferred clear test for — and the castable exile/graveyard wings carry it so
+ * their preview survives a hover. Reusing it here would silently admit the wings
+ * into the reorder index space, shifting every slot and arrow position by the
+ * wing count while `computeReorderedHand` still indexes `player.hand`.
+ *
+ * Named here, beside the functions that consume the rects, so the two concerns
+ * cannot be re-merged by editing a string literal at a call site.
+ */
+export const HAND_REORDER_SELECTOR = "[data-hand-card]";
+
+/**
  * Fraction of a card's width that the *visible* slot between the two flanking
  * cards should open to once they slide apart. The drop target reads as a real
  * gap you could drop a card into, not a hairline.
@@ -65,6 +82,38 @@ export function computeReorderedHand<Id>(
   const [moved] = order.splice(fromIdx, 1);
   order.splice(targetSlot, 0, moved);
   return order;
+}
+
+/**
+ * True when `order` names exactly the cards in `hand` — same length and same
+ * multiset of ids (element order is free; that is the whole point of a reorder).
+ *
+ * The engine accepts `ReorderHand` only when the submitted order is a
+ * permutation of the CURRENT hand, and otherwise rejects the action
+ * ("ReorderHand: expected N ids, got M"). A drag computes its order against the
+ * hand as it looked when the gesture was set up, so a card drawn, discarded, or
+ * cast mid-drag leaves that order stale — dispatching it surfaces the engine's
+ * rejection as a spurious user-facing error (issue #5913).
+ *
+ * Callers validate against the freshest hand they can read and drop a stale
+ * reorder rather than recomputing it: the drop slot was chosen against the old
+ * layout, so replaying it onto a changed hand could place the card somewhere the
+ * player never pointed at. Hand order is purely cosmetic (CR 402.3), so
+ * discarding the gesture is strictly safer than guessing.
+ *
+ * Generic over the id type so it is exercisable with plain numbers in tests and
+ * `ObjectId`s in production.
+ */
+export function isHandPermutation<Id>(order: readonly Id[], hand: readonly Id[]): boolean {
+  if (order.length !== hand.length) return false;
+  const remaining = new Map<Id, number>();
+  for (const id of hand) remaining.set(id, (remaining.get(id) ?? 0) + 1);
+  for (const id of order) {
+    const count = remaining.get(id);
+    if (count === undefined || count === 0) return false;
+    remaining.set(id, count - 1);
+  }
+  return true;
 }
 
 export function computeHandInsertionSlot(

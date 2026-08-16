@@ -1,0 +1,206 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 1310
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Unimplemented",
+        "name": "unknown",
+        "description": "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll."
+      },
+      "cost": null,
+      "sub_ability": null,
+      "duration": null,
+      "description": "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.",
+      "target_prompt": null,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "SetClassLevel",
+        "level": 2
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": {
+          "type": "Cost",
+          "shards": [
+            "Red"
+          ],
+          "generic": 1
+        }
+      },
+      "sub_ability": null,
+      "duration": null,
+      "description": "{1}{R}: Level 2",
+      "target_prompt": null,
+      "activation_restrictions": [
+        {
+          "type": "AsSorcery"
+        },
+        {
+          "type": "ClassLevelIs",
+          "data": {
+            "level": 1
+          }
+        }
+      ],
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "SetClassLevel",
+        "level": 3
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": {
+          "type": "Cost",
+          "shards": [
+            "Red"
+          ],
+          "generic": 2
+        }
+      },
+      "sub_ability": null,
+      "duration": null,
+      "description": "{2}{R}: Level 3",
+      "target_prompt": null,
+      "activation_restrictions": [
+        {
+          "type": "AsSorcery"
+        },
+        {
+          "type": "ClassLevelIs",
+          "data": {
+            "level": 2
+          }
+        }
+      ],
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "RolledDie",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "GenericEffect",
+          "static_abilities": [
+            {
+              "mode": "Continuous",
+              "affected": {
+                "type": "ParentTarget"
+              },
+              "modifications": [
+                {
+                  "type": "AddPower",
+                  "value": 2
+                },
+                {
+                  "type": "AddToughness",
+                  "value": 0
+                },
+                {
+                  "type": "AddKeyword",
+                  "keyword": "Menace"
+                }
+              ],
+              "condition": null,
+              "affected_zone": null,
+              "effect_zone": null,
+              "active_zones": [],
+              "characteristic_defining": false,
+              "description": "get +2/+0 and gains menace"
+            }
+          ],
+          "duration": "UntilEndOfTurn",
+          "target": {
+            "type": "Typed",
+            "type_filters": [
+              "Creature"
+            ],
+            "controller": "You",
+            "properties": []
+          }
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": "UntilEndOfTurn",
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": null,
+      "origin": null,
+      "destination": null,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": {
+        "type": "Controller"
+      },
+      "valid_source": null,
+      "description": "Whenever you roll one or more dice, target creature you control gets +2/+0 and gains menace until end of turn.",
+      "constraint": null,
+      "condition": {
+        "type": "ClassLevelGE",
+        "level": 2
+      },
+      "batched": true
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "affected": {
+        "type": "Typed",
+        "type_filters": [
+          "Creature"
+        ],
+        "controller": "You",
+        "properties": []
+      },
+      "modifications": [
+        {
+          "type": "AddKeyword",
+          "keyword": "Haste"
+        }
+      ],
+      "condition": {
+        "type": "ClassLevelGE",
+        "level": 3
+      },
+      "affected_zone": null,
+      "effect_zone": null,
+      "active_zones": [],
+      "characteristic_defining": false,
+      "description": "Creatures you control have haste."
+    }
+  ],
+  "replacements": [],
+  "extractedKeywords": []
+}

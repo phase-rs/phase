@@ -42,9 +42,8 @@ expression: "&lowered"
     {
       "kind": "CastWithoutManaCost",
       "condition": {
-        "type": "YouControlSubtypeCountAtLeast",
-        "subtype": "commander",
-        "count": 1
+        "type": "ControlsCommander",
+        "ownership": "Any"
       }
     }
   ]

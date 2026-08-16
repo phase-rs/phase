@@ -74,6 +74,8 @@ Read https://raw.githubusercontent.com/phase-rs/phase/main/docs/AI-CONTRIBUTOR.m
 and follow it end-to-end to implement {a card I name, or pick one for me}.
 Use the $engine-implementer skill. Use high thinking. Don't stop for my input.
 Open a PR when done.
+Use the repository's .github/PULL_REQUEST_TEMPLATE.md for the PR body and fill
+every section.
 ```
 
 Full procedure, two tracks (developer / non-developer), and copy-paste prompts for LLM UIs without web fetch: [docs/AI-CONTRIBUTOR.md](docs/AI-CONTRIBUTOR.md).
@@ -163,6 +165,7 @@ Docker uses environment variables for the common options:
 | `PHASE_LOBBY_ONLY` | `--lobby-only` | false | Matchmaking broker mode |
 | `PHASE_LOG_JSON` | `--log-json` | false | Emit JSON logs |
 | `PHASE_LOG_DIR` | `--log-dir` | stdout | Write logs to files |
+| `PHASE_ADMIN_TOKEN` | — | unset | Bearer token for `/admin/*` endpoints (environment variable only; no CLI flag). Unset ⇒ admin routes disabled (404). Send as `Authorization: Bearer <token>`. |
 
 You can also pass server flags after the image name:
 

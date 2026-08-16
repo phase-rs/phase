@@ -1,14 +1,33 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import type { PrintingEntry } from "../scryfall.ts";
 
 const REPO_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../../..",
 );
+
+function withTempDir(run: (dir: string) => void, prefix = "scryfall-") {
+  const dir = mkdtempSync(path.join(tmpdir(), prefix));
+  try {
+    run(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 function makeLocalDataMap(
   cards: Record<string, { name: string; mana_cost?: string; cmc?: number; type_line?: string; oracle_id?: string }>,
@@ -218,6 +237,84 @@ describe("fetchCardData", () => {
   });
 });
 
+describe("fetchCardData — combined multi-face names", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // A two-face card keyed the way the export does it: by front-face name and by
+  // the spaced display name, but NOT by the glued combined form.
+  function makeDfcDataMap(): Response {
+    const dfc = {
+      oracle_id: "peter-oracle",
+      face_names: ["peter parker", "the amazing spider-man"],
+      faces: [
+        { normal: "https://img.example/peter-front.jpg", art_crop: "https://img.example/peter-front-art.jpg" },
+        { normal: "https://img.example/peter-back.jpg", art_crop: "https://img.example/peter-back-art.jpg" },
+      ],
+      layout: "transform",
+      name: "Peter Parker // The Amazing Spider-Man",
+      mana_cost: "{1}{W}",
+      cmc: 2,
+      type_line: "Legendary Creature — Human Hero",
+      colors: ["W"],
+      color_identity: ["W"],
+      keywords: [],
+    };
+    const map: Record<string, unknown> = {
+      "peter parker": dfc,
+      "peter parker // the amazing spider-man": dfc,
+      // A single-faced card whose own printed name contains "//" (issue #4790).
+      "sp//dr, piloted by peni": {
+        oracle_id: "spdr-oracle",
+        face_names: ["sp//dr, piloted by peni"],
+        faces: [{ normal: "https://img.example/spdr.jpg", art_crop: "https://img.example/spdr-art.jpg" }],
+        name: "SP//dr, Piloted by Peni",
+        mana_cost: "{3}{W}{U}",
+        cmc: 5,
+        type_line: "Legendary Artifact Creature — Spider Hero",
+        colors: ["W", "U"],
+        color_identity: ["W", "U"],
+        keywords: [],
+      },
+    };
+    return new Response(JSON.stringify(map), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  it("resolves a hand-typed glued double-faced name via the front face", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeDfcDataMap());
+
+    const { fetchCardData } = await loadScryfallModule();
+    const card = await fetchCardData("Peter Parker//The Amazing Spider-Man");
+
+    expect(card.name).toBe("Peter Parker // The Amazing Spider-Man");
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves the canonical spaced double-faced name directly", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeDfcDataMap());
+
+    const { fetchCardData } = await loadScryfallModule();
+    const card = await fetchCardData("Peter Parker // The Amazing Spider-Man");
+
+    expect(card.name).toBe("Peter Parker // The Amazing Spider-Man");
+  });
+
+  it("does not mis-split a single-faced card whose name contains \"//\" (issue #4790)", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeDfcDataMap());
+
+    const { fetchCardData } = await loadScryfallModule();
+    const card = await fetchCardData("SP//dr, Piloted by Peni");
+
+    // Its own name is a primary key, so the exact match wins before any split.
+    expect(card.name).toBe("SP//dr, Piloted by Peni");
+    expect(card.type_line).toContain("Spider Hero");
+  });
+});
+
 describe("fetchCardImageUrl", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -235,6 +332,103 @@ describe("fetchCardImageUrl", () => {
 
     expect(url).toBe("https://img.example/Lightning%20Bolt.jpg");
     expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to a real local printing when canonical image data is Scryfall's soon placeholder", async () => {
+    const oracleId = "war-room-oracle";
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            [oracleId]: {
+              oracle_id: oracleId,
+              face_names: ["war room"],
+              faces: [
+                {
+                  normal: "https://errors.scryfall.com/soon.jpg",
+                  art_crop: "https://errors.scryfall.com/soon.jpg",
+                },
+              ],
+              layout: "normal",
+              name: "War Room",
+              mana_cost: "",
+              cmc: 0,
+              type_line: "Land",
+              colors: [],
+              color_identity: [],
+              keywords: [],
+            },
+            "war room": {
+              oracle_id: oracleId,
+              face_names: ["war room"],
+              faces: [
+                {
+                  normal: "https://errors.scryfall.com/soon.jpg",
+                  art_crop: "https://errors.scryfall.com/soon.jpg",
+                },
+              ],
+              layout: "normal",
+              name: "War Room",
+              mana_cost: "",
+              cmc: 0,
+              type_line: "Land",
+              colors: [],
+              color_identity: [],
+              keywords: [],
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            [oracleId]: [
+              {
+                id: "future-placeholder",
+                set: "soc",
+                set_name: "Secrets of Strixhaven Commander",
+                collector_number: "422",
+                released_at: "2026-04-24",
+                border_color: "black",
+                frame_effects: [],
+                full_art: false,
+                faces: [
+                  {
+                    normal: "https://errors.scryfall.com/soon.jpg",
+                    art_crop: "https://errors.scryfall.com/soon.jpg",
+                  },
+                ],
+              },
+              {
+                id: "real-printing",
+                set: "cmm",
+                set_name: "Commander Masters",
+                collector_number: "1054",
+                released_at: "2023-08-04",
+                border_color: "black",
+                frame_effects: [],
+                full_art: false,
+                faces: [
+                  {
+                    normal: "https://cards.scryfall.io/normal/front/w/r/war-room.jpg",
+                    art_crop: "https://cards.scryfall.io/art_crop/front/w/r/war-room.jpg",
+                  },
+                ],
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+
+    const { fetchCardImageAssetByOracleId, fetchCardImageUrl } = await loadScryfallModule();
+    const url = await fetchCardImageUrl("War Room", 0, "normal");
+    const oracleAsset = await fetchCardImageAssetByOracleId(oracleId, "War Room", "normal");
+
+    expect(url).toBe("https://cards.scryfall.io/normal/front/w/r/war-room.jpg");
+    expect(oracleAsset.src).toBe("https://cards.scryfall.io/normal/front/w/r/war-room.jpg");
+    expect(global.fetch).toHaveBeenCalledTimes(2);
   });
 
   it("throws when card image is not in local data (no API fallback)", async () => {
@@ -309,15 +503,6 @@ describe("fetchCardImageAssetByOracleId — reversible cards (issue #2031)", () 
 
 describe("Scryfall generation scripts — reversible cards (issue #2031)", () => {
   const oracleId = "ea9709b6-4c37-4d5a-b04d-cd4c42e4f9dd";
-
-  function withTempDir(run: (dir: string) => void) {
-    const dir = mkdtempSync(path.join(tmpdir(), "scryfall-gen-"));
-    try {
-      run(dir);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }
 
   it("keys image data by face oracle_id when reversible cards omit root oracle_id", () => {
     withTempDir((dir) => {
@@ -636,5 +821,684 @@ describe("rateLimitedFetch (token/search API)", () => {
 
     expect(url).toBe("https://img.example/goblin.jpg");
     expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("image size derivation", () => {
+  // The five-path-segment shape every real `cards.scryfall.io` URL has. The
+  // mainline `makeLocalDataMap` fixture is deliberately NOT used here: it emits
+  // `https://img.example/<Name>.jpg`, a one-segment URL that is not derivable,
+  // so every assertion below would pass vacuously against it.
+  const SLUG = "front/w/r/war-room.jpg";
+  const sized = (size: string, query = "") =>
+    `https://cards.scryfall.io/${size}/${SLUG}${query}`;
+  const SIZES = ["small", "normal", "large", "art_crop"] as const;
+
+  it("derives every size from every other size", async () => {
+    const { deriveImageUrl, imageUrlSize } = await loadScryfallModule();
+
+    for (const from of SIZES) {
+      expect(imageUrlSize(sized(from))).toBe(from);
+      for (const to of SIZES) {
+        const input = sized(from);
+        const derived = deriveImageUrl(input, to);
+        expect(derived).toBe(sized(to));
+        // Non-vacuity: a broken guard that returned its input unchanged would
+        // otherwise satisfy every same-size case and look green.
+        if (from !== to) expect(derived).not.toBe(input);
+      }
+    }
+  });
+
+  it("preserves the query string", async () => {
+    const { deriveImageUrl } = await loadScryfallModule();
+
+    const input = sized("normal", "?1783905318");
+    const derived = deriveImageUrl(input, "small");
+    expect(derived).toBe(
+      "https://cards.scryfall.io/small/front/w/r/war-room.jpg?1783905318",
+    );
+    expect(derived).not.toBe(input);
+  });
+
+  it("derives back faces", async () => {
+    const { deriveImageUrl } = await loadScryfallModule();
+
+    const input = "https://cards.scryfall.io/normal/back/w/r/war-room.jpg?1783905318";
+    const derived = deriveImageUrl(input, "small");
+    expect(derived).toBe(
+      "https://cards.scryfall.io/small/back/w/r/war-room.jpg?1783905318",
+    );
+    expect(derived).not.toBe(input);
+  });
+
+  it("returns non-derivable input unchanged, without throwing", async () => {
+    const { CARD_BACK_URL, deriveImageUrl, imageUrlSize } = await loadScryfallModule();
+
+    const nonDerivable = [
+      // Every face-down card renders through `useCardImage("")`.
+      "",
+      // `OpponentHand.test.tsx` mocks bare filenames — `new URL()` throws on these.
+      "Focused Opponent Card.png",
+      // Four path segments, so the card back never gets a ladder.
+      CARD_BACK_URL,
+      // One segment. Must stay byte-identical or `isPlaceholderImageUrl`'s `===`
+      // stops gating the printing-fallback chain.
+      "https://errors.scryfall.com/soon.jpg",
+      // Six segments.
+      "https://cards.scryfall.io/normal/front/w/r/extra/war-room.jpg",
+      // Five segments but an unrecognized size.
+      "https://cards.scryfall.io/png/front/w/r/war-room.png",
+    ];
+
+    for (const input of nonDerivable) {
+      expect(deriveImageUrl(input, "small")).toBe(input);
+      expect(imageUrlSize(input)).toBeNull();
+    }
+    expect(imageUrlSize(null)).toBeNull();
+    expect(imageUrlSize(undefined)).toBeNull();
+  });
+});
+
+describe("local face size resolution", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const NORMAL = "https://cards.scryfall.io/normal/front/w/r/war-room.jpg?1783905318";
+  const SMALL = "https://cards.scryfall.io/small/front/w/r/war-room.jpg?1783905318";
+  const ART_CROP = "https://cards.scryfall.io/art_crop/front/w/r/war-room.jpg?1783905318";
+
+  function makeSizedDataMap(key: string, name: string): Response {
+    return new Response(
+      JSON.stringify({
+        [key]: {
+          oracle_id: key,
+          face_names: [name.toLowerCase()],
+          faces: [{ normal: NORMAL, art_crop: ART_CROP }],
+          layout: "normal",
+          name,
+          mana_cost: "",
+          cmc: 0,
+          type_line: "Land",
+          colors: [],
+          color_identity: [],
+          keywords: [],
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
+  it("serves a real small asset from the stored normal URL", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeSizedDataMap("war room", "War Room"));
+
+    const { fetchCardImageUrl } = await loadScryfallModule();
+    const url = await fetchCardImageUrl("War Room", 0, "small");
+
+    expect(url).toBe(SMALL);
+    expect(url).not.toBe(NORMAL);
+  });
+
+  it("collapses large to normal", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeSizedDataMap("war room", "War Room"));
+
+    const { fetchCardImageUrl } = await loadScryfallModule();
+
+    expect(await fetchCardImageUrl("War Room", 0, "large")).toBe(NORMAL);
+  });
+
+  it("serves art_crop untouched", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeSizedDataMap("war room", "War Room"));
+
+    const { fetchCardImageUrl } = await loadScryfallModule();
+
+    expect(await fetchCardImageUrl("War Room", 0, "art_crop")).toBe(ART_CROP);
+  });
+
+  it("serves a real small asset for local token images", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeSizedDataMap("token:goblin", "Goblin"));
+
+    const { fetchTokenImageUrl } = await loadScryfallModule();
+    const url = await fetchTokenImageUrl("Goblin", "small");
+
+    expect(url).toBe(SMALL);
+    expect(url).not.toBe(NORMAL);
+    // The local hit must short-circuit the Scryfall search API entirely.
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("serves a real small asset from printings, and still rejects placeholders", async () => {
+    const { resolvePrintingImageUrl } = await loadScryfallModule();
+    const printing = {
+      id: "real-printing",
+      set: "cmm",
+      set_name: "Commander Masters",
+      collector_number: "1054",
+      released_at: "2023-08-04",
+      border_color: "black",
+      frame_effects: [],
+      full_art: false,
+      faces: [{ normal: NORMAL, art_crop: ART_CROP }],
+    };
+
+    const small = resolvePrintingImageUrl(printing, 0, "small");
+    expect(small).toBe(SMALL);
+    expect(small).not.toBe(NORMAL);
+    expect(resolvePrintingImageUrl(printing, 0, "large")).toBe(NORMAL);
+
+    const placeholder = {
+      ...printing,
+      faces: [{
+        normal: "https://errors.scryfall.com/soon.jpg",
+        art_crop: "https://errors.scryfall.com/soon.jpg",
+      }],
+    };
+    expect(resolvePrintingImageUrl(placeholder, 0, "small")).toBeNull();
+  });
+});
+
+describe("scryfall-fetch mv-failure recovery (PR #6775 review)", () => {
+  const LIB_PATH = path
+    .join(REPO_ROOT, "scripts/lib/scryfall-fetch.sh")
+    .replace(/\\/g, "/");
+
+  // Runs `scryfall_download` in a sourced shell where `curl` and `mv` are
+  // shadowed by shell functions. Function-shadowing (not a `cp` reassignment
+  // of SCRYFALL_CURL) is required: SCRYFALL_CURL's real curl invocation is
+  // array-expanded ("${SCRYFALL_CURL[@]}" -o "$tmp" "$url"), so a stub must be
+  // a same-named function to intercept it, not a value substituted in for the
+  // array's first word. The shared finalizer captures mv stderr while it
+  // decides whether another writer produced a valid destination, so the
+  // anti-vacuity marker for mv is recorded through a shell variable rather
+  // than stderr text. The validator is different: the real source
+  // deliberately runs it inside a subshell (`( "$validator" "$file" )`, see
+  // scryfall_download's header comment) to keep a caller-supplied
+  // validator's shell-variable writes from leaking back into this library's
+  // scope. That isolation is intentional and stays in place — but it means
+  // a shell-variable marker for the validator would read back as "never
+  // called" even when it was. A subshell isolates variable writes, not file
+  // writes, so the validator stub instead records its own invocation as a
+  // marker *file* under `dir`.
+  function runMvFailureScript(
+    dir: string,
+    opts: {
+      validator?: string;
+      destContent?: string; // undefined => destination absent
+      curlPayload?: string;
+      mvSucceeds?: boolean;
+    },
+  ): {
+    out: string;
+    dest: string;
+    stderr: string;
+    validatorCalls: number;
+  } {
+    const dest = path.join(dir, "dest.json").replace(/\\/g, "/");
+    const payload = path.join(dir, "fixture-payload.json").replace(/\\/g, "/");
+    const marker = path.join(dir, "validator-called").replace(/\\/g, "/");
+    const stderr = path.join(dir, "scryfall.stderr").replace(/\\/g, "/");
+    writeFileSync(payload, opts.curlPayload ?? JSON.stringify({ ok: true }));
+    if (opts.destContent !== undefined) {
+      writeFileSync(dest, opts.destContent);
+    }
+
+    const validatorArg = opts.validator ? ` "${opts.validator}"` : "";
+    // The marker file (not a shell variable — see the class comment above)
+    // proves the caller-supplied validator was actually invoked, not just
+    // that a validator arg was passed: a stub that hardcodes "validator arg
+    // present -> fail" without ever calling through would leave no marker
+    // behind, and the invocation count below would remain zero.
+    const validatorDef = opts.validator
+      ? `${opts.validator}() { echo 1 >> "${marker}"; jq -e '.data' "$1" >/dev/null 2>&1; }\n`
+      : "";
+    const mvDef = opts.mvSucceeds
+      ? "" // no override: the real `mv` binary runs, and succeeds.
+      : 'mv() { MV_CALLED=1; return 1; }\n';
+
+    const finalScript = `
+set -uo pipefail
+source "${LIB_PATH}"
+SCRYFALL_CURL=(curl)
+curl() {
+  local out=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -o) out="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  cp "${payload}" "$out"
+}
+${mvDef}${validatorDef}scryfall_download "https://example.invalid/data.json" "${dest}"${validatorArg} 2> "${stderr}"
+echo "RC=$?"
+echo "MV_CALLED=\${MV_CALLED:-0}"
+# BSD wc -l left-pads its count ("       0") where GNU wc -l does not, so strip
+# the padding here to keep the TMP_COUNT= assertions exact on macOS and Linux.
+echo "TMP_COUNT=$(ls -1 "${dest}".* 2>/dev/null | wc -l | tr -d '[:space:]')"
+`;
+
+    const out = execFileSync("bash", ["-c", finalScript], {
+      cwd: REPO_ROOT,
+      stdio: "pipe",
+      timeout: 20_000,
+    }).toString();
+    const validatorCalls = existsSync(marker)
+      ? readFileSync(marker, "utf8").trim().split("\n").length
+      : 0;
+    return {
+      out,
+      dest,
+      stderr: readFileSync(stderr, "utf8"),
+      validatorCalls,
+    };
+  }
+
+  it("case 1: mv fails, destination exists and passes the default validator -> rc 0, tmp cleaned, destination byte-identical to before", () => {
+    withTempDir((dir) => {
+      const before = JSON.stringify({ ok: true, marker: "pre-existing" });
+      const { out, dest } = runMvFailureScript(dir, { destContent: before });
+
+      expect(out).toContain("MV_CALLED=1");
+      expect(out).toContain("RC=0");
+      expect(out).toMatch(/TMP_COUNT=0/);
+      expect(readFileSync(dest, "utf8")).toBe(before);
+    });
+  });
+
+  it("case 2: mv fails, destination absent -> rc 1, tmp cleaned", () => {
+    withTempDir((dir) => {
+      const { out, dest, stderr } = runMvFailureScript(dir, {});
+
+      expect(out).toContain("MV_CALLED=1");
+      expect(out).toContain("RC=1");
+      expect(out).toMatch(/TMP_COUNT=0/);
+      expect(stderr).toContain("scryfall: could not rename");
+      expect(() => readFileSync(dest, "utf8")).toThrow();
+    });
+  });
+
+  it("case 3: mv fails, destination is invalid JSON -> rc 1, tmp cleaned", () => {
+    withTempDir((dir) => {
+      const before = "not-json{";
+      const { out, dest, stderr } = runMvFailureScript(dir, {
+        destContent: before,
+      });
+
+      expect(out).toContain("MV_CALLED=1");
+      expect(out).toContain("RC=1");
+      expect(out).toMatch(/TMP_COUNT=0/);
+      expect(stderr).toContain("scryfall: could not rename");
+      // Untouched: the recovery path must never overwrite a bad destination
+      // with the freshly-downloaded (but un-mv'd) tmp content either.
+      expect(readFileSync(dest, "utf8")).toBe(before);
+    });
+  });
+
+  it("case 4: mv fails, destination is valid JSON but fails the caller-supplied validator -> rc 1, validator actually invoked", () => {
+    withTempDir((dir) => {
+      // Syntactically valid JSON, but missing the `.data` field the
+      // caller-supplied validator requires — must NOT be accepted merely
+      // because it parses.
+      const before = JSON.stringify({ foo: "bar" });
+      const { out, validatorCalls } = runMvFailureScript(dir, {
+        destContent: before,
+        // The download itself must PASS the caller validator (it is checked
+        // on the tmp file before the mv) so this case reaches the mv-failure
+        // recovery branch and fails there, on the destination's shape.
+        curlPayload: JSON.stringify({ data: [{ fresh: true }] }),
+        validator: "scryfall_test_validate_has_data",
+      });
+
+      expect(out).toContain("MV_CALLED=1");
+      expect(out).toContain("RC=1");
+      // The tmp gate and the failed-rename recovery check both run the
+      // caller-supplied validator. Pinning two calls proves this failed on
+      // the destination's shape rather than merely at the pre-mv gate.
+      expect(validatorCalls).toBe(2);
+    });
+  });
+
+  it("case 4b (positive control for case 4): mv fails, destination is valid JSON and PASSES the caller-supplied validator -> rc 0, destination unchanged", () => {
+    withTempDir((dir) => {
+      const before = JSON.stringify({ data: [{ foo: "bar" }] });
+      const { out, dest, validatorCalls } = runMvFailureScript(dir, {
+        destContent: before,
+        // Same pre-mv gate consideration as case 4: the download must pass
+        // the caller validator for the recovery branch to be reached at all.
+        curlPayload: JSON.stringify({ data: [{ fresh: true }] }),
+        validator: "scryfall_test_validate_has_data",
+      });
+
+      expect(out).toContain("MV_CALLED=1");
+      expect(out).toContain("RC=0");
+      expect(readFileSync(dest, "utf8")).toBe(before);
+      // Both acceptance points must use the caller-supplied validator.
+      expect(validatorCalls).toBe(2);
+    });
+  });
+
+  it("case 5: mv succeeds -> normal path, destination written from the download, no recovery marker", () => {
+    withTempDir((dir) => {
+      const payload = JSON.stringify({ ok: true, fresh: true });
+      const { out, dest } = runMvFailureScript(dir, {
+        mvSucceeds: true,
+        curlPayload: payload,
+      });
+
+      expect(out).not.toContain("MV_CALLED=1");
+      expect(out).toContain("RC=0");
+      expect(readFileSync(dest, "utf8")).toBe(payload);
+    });
+  });
+
+  it("case 5b: freshly-downloaded content fails the caller-supplied validator -> rc 1, destination never written", () => {
+    withTempDir((dir) => {
+      // Valid JSON (passes the transport-level scryfall_validate_json
+      // default gate that always runs on the fresh tmp file) but missing the
+      // `.data` field the caller-supplied validator requires. The caller
+      // validator gates the tmp file BEFORE the mv, so the bad body must
+      // never land at the destination where a later non-validating reader
+      // (scryfall_fetch_bulk's other callers) would trust it.
+      const payload = JSON.stringify({ ok: true, fresh: true });
+      const { out, dest, validatorCalls } = runMvFailureScript(dir, {
+        mvSucceeds: true,
+        curlPayload: payload,
+        validator: "scryfall_test_validate_has_data",
+      });
+
+      expect(out).not.toContain("MV_CALLED=1");
+      expect(validatorCalls).toBe(1);
+      expect(out).toContain("RC=1");
+      expect(existsSync(dest)).toBe(false);
+      // No orphaned tmp file either.
+      expect(out).toMatch(/TMP_COUNT=0/);
+    });
+  });
+
+  // Runs gen-scryfall-sets.sh hermetically: a stub `curl` on PATH only ever
+  // serves file:// URLs (our fixture) and fails fast — no live-network
+  // fallback — for anything else, so a regression that stops reading the
+  // SCRYFALL_SETS_FILE/URL/OUTPUT seams can never hit the live
+  // https://api.scryfall.com/sets endpoint from these tests.
+  function runSetsScript(dir: string, cachedContent: string): Record<string, unknown> {
+    const binDir = path.join(dir, "bin");
+    mkdirSync(binDir);
+    const stubPath = path.join(binDir, "curl");
+    writeFileSync(
+      stubPath,
+      `#!/usr/bin/env bash
+out=""
+url=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    http*|file://*) url="$1"; shift ;;
+    *) shift ;;
+  esac
+done
+case "$url" in
+  file://*)
+    src="\${url#file://}"
+    case "$src" in
+      /?:*) src="\${src#/}" ;;
+    esac
+    cp "$src" "$out"
+    exit 0
+    ;;
+  *)
+    echo "stub-curl: refusing non-file:// URL: $url" >&2
+    exit 1
+    ;;
+esac
+`,
+    );
+    chmodSync(stubPath, 0o755);
+
+    const badCache = path.join(dir, "sets.json");
+    writeFileSync(badCache, cachedContent);
+    const validFixture = path.join(dir, "fixture-sets.json");
+    writeFileSync(
+      validFixture,
+      JSON.stringify({
+        data: [
+          {
+            code: "abc",
+            name: "A Boring Cardboard",
+            icon_svg_uri: "https://img.example/abc.svg",
+            released_at: "2024-01-01",
+          },
+        ],
+      }),
+    );
+    const output = path.join(dir, "scryfall-sets.json");
+
+    let threw: unknown;
+    try {
+      execFileSync("bash", [path.join(REPO_ROOT, "scripts/gen-scryfall-sets.sh")], {
+        // A temp cwd keeps a misbehaving run (seams unread, real relative
+        // "data/scryfall" + "client/public/scryfall-sets.json" paths used
+        // instead) from writing into the actual repo checkout.
+        cwd: dir,
+        env: {
+          ...process.env,
+          PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+          SCRYFALL_SETS_FILE: badCache,
+          SCRYFALL_SETS_URL: pathToFileURL(validFixture).href,
+          SCRYFALL_SETS_OUTPUT: output,
+        },
+        stdio: "pipe",
+        timeout: 20_000,
+      });
+    } catch (err) {
+      threw = err;
+    }
+
+    if (threw !== undefined) {
+      // Assert *why* it failed, not just *that* it failed — a broken stub,
+      // missing bash, or a PATH that doesn't propagate through MSYS would
+      // also throw. The only regression this branch should ever report is
+      // "seams unread, so the script reached for its hardcoded
+      // https://api.scryfall.com URL and our stub curl refused it"; any
+      // other failure cause fails loudly on the assertion below instead.
+      const err = threw as { stderr?: Buffer | string; stdout?: Buffer | string };
+      const stderrText = err.stderr?.toString() ?? "";
+      expect(stderrText).toContain("stub-curl: refusing non-file:// URL");
+    }
+
+    expect(threw).toBeUndefined();
+    return JSON.parse(readFileSync(output, "utf8"));
+  }
+
+  it("case 6: gen-scryfall-sets.sh discards an invalid cached sets file and refetches from SCRYFALL_SETS_URL", () => {
+    withTempDir((dir) => {
+      const generated = runSetsScript(dir, "not-json{");
+      expect(generated.abc).toMatchObject({ name: "A Boring Cardboard" });
+    });
+  });
+
+  it.each([
+    ["empty data array", JSON.stringify({ data: [] })],
+    ["non-array data", JSON.stringify({ data: "oops" })],
+  ])(
+    "case 6b (%s): a cached sets file that is valid JSON but fails the .data array-shape check is discarded and refetched",
+    (_label, cachedContent) => {
+      withTempDir((dir) => {
+        // jq -e '.data' alone is truthy for any non-null value: {"data":"oops"}
+        // would crash the map() transform, and {"data":[]} would be cached as
+        // a permanently-empty scryfall-sets.json behind the OUTPUT early-exit.
+        // Both must be treated exactly like a corrupt cache: discard, refetch.
+        const generated = runSetsScript(dir, cachedContent);
+        expect(generated.abc).toMatchObject({ name: "A Boring Cardboard" });
+      });
+    },
+  );
+});
+
+describe("localized card art", () => {
+  // Real five-segment `cards.scryfall.io` shape. As with the size-derivation
+  // suite above, the `makeLocalDataMap` fixture is deliberately NOT reused: its
+  // one-segment `https://img.example/<Name>.jpg` URLs are not localizable, so
+  // every assertion here would pass vacuously against them.
+  const EN_ID = "0dbac7ce-a6fa-466e-b6ba-173cf2dec98e";
+  const DE_ID = "345a1cf0-e4de-42a9-9c72-ed16826b9067";
+  const UNMAPPED_ID = "11111111-2222-3333-4444-555555555555";
+
+  const cardUrl = (id: string, size = "normal", face = "front", query = "") =>
+    `https://cards.scryfall.io/${size}/${face}/${id[0]}/${id[1]}/${id}.jpg${query}`;
+
+  const printing = (id: string, query = ""): PrintingEntry => ({
+    id,
+    set: "mid",
+    set_name: "Innistrad: Midnight Hunt",
+    collector_number: "7",
+    released_at: "2021-09-24",
+    border_color: "black",
+    frame_effects: [],
+    full_art: false,
+    faces: [
+      { normal: cardUrl(id, "normal", "front", query), art_crop: cardUrl(id, "art_crop") },
+      { normal: cardUrl(id, "normal", "back", query), art_crop: cardUrl(id, "art_crop", "back") },
+    ],
+  });
+
+  function stubLocaleArt(map: Record<string, string>) {
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(map), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("swaps the image to the localized printing, keeping the chosen printing", async () => {
+    const mod = await loadScryfallModule();
+    stubLocaleArt({ [EN_ID]: DE_ID });
+    await mod.loadLocaleArt("de");
+
+    const resolved = mod.resolvePrintingImageUrl(printing(EN_ID), 0, "normal");
+
+    expect(resolved).toBe(cardUrl(DE_ID));
+    // Non-vacuity: a no-op `localizeImageUrl` would return the English URL.
+    expect(resolved).not.toBe(cardUrl(EN_ID));
+  });
+
+  it("keeps English art when the printing has no localized sibling", async () => {
+    const mod = await loadScryfallModule();
+    stubLocaleArt({ [EN_ID]: DE_ID });
+    await mod.loadLocaleArt("de");
+
+    // Reach guard FIRST: prove the map actually loaded and the lookup runs.
+    // Without this, a failed fetch (empty map) would make the real assertion
+    // below pass for entirely the wrong reason.
+    expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "normal")).toBe(cardUrl(DE_ID));
+
+    expect(mod.resolvePrintingImageUrl(printing(UNMAPPED_ID), 0, "normal")).toBe(
+      cardUrl(UNMAPPED_ID),
+    );
+  });
+
+  it("localizes the back face and the art crop", async () => {
+    const mod = await loadScryfallModule();
+    stubLocaleArt({ [EN_ID]: DE_ID });
+    await mod.loadLocaleArt("de");
+
+    // A localized Scryfall id addresses the whole printing; front/back is a path
+    // segment, so one mapping covers both faces of a DFC.
+    expect(mod.resolvePrintingImageUrl(printing(EN_ID), 1, "normal")).toBe(
+      cardUrl(DE_ID, "normal", "back"),
+    );
+    expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "art_crop")).toBe(
+      cardUrl(DE_ID, "art_crop"),
+    );
+  });
+
+  it("is a no-op for English", async () => {
+    const mod = await loadScryfallModule();
+    stubLocaleArt({ [EN_ID]: DE_ID });
+    await mod.loadLocaleArt("de");
+    expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "normal")).toBe(cardUrl(DE_ID));
+
+    // Assert the *gate*, not just the reset. `useCardImage` skips the load
+    // entirely when this reports ready, so an unconditionally-ready English
+    // would strand the German map installed and keep serving German art —
+    // `loadLocaleArt("en")` below would never run in production.
+    expect(mod.isLocaleArtReady("en")).toBe(false);
+
+    // Switching back to English must drop the map, not keep serving German art.
+    await mod.loadLocaleArt("en");
+    expect(mod.isLocaleArtReady("en")).toBe(true);
+    expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "normal")).toBe(cardUrl(EN_ID));
+  });
+
+  it("never rewrites the card back or the placeholder", async () => {
+    const mod = await loadScryfallModule();
+    // Map the placeholder's and card back's own ids too, so the guard is doing
+    // the work rather than a lookup simply missing.
+    stubLocaleArt({ [EN_ID]: DE_ID, soon: DE_ID, "0aeebaf5-8c7d-4636-9e82-8c27447861f7": DE_ID });
+    await mod.loadLocaleArt("de");
+    expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "normal")).toBe(cardUrl(DE_ID));
+
+    // `deriveImageUrl` is the exported probe for the same `splitSizedImageUrl`
+    // guard `localizeImageUrl` relies on; a URL it rejects is one localization
+    // also leaves alone. The placeholder must stay byte-identical or
+    // `isPlaceholderImageUrl`'s `===` stops gating the printing fallback.
+    for (const input of [mod.CARD_BACK_URL, "https://errors.scryfall.com/soon.jpg"]) {
+      expect(mod.imageUrlSize(input)).toBeNull();
+      expect(mod.deriveImageUrl(input, "small")).toBe(input);
+    }
+  });
+
+  it("reports readiness and tolerates a missing locale file", async () => {
+    const mod = await loadScryfallModule();
+    expect(mod.isLocaleArtReady("en")).toBe(true);
+    expect(mod.isLocaleArtReady("de")).toBe(false);
+
+    global.fetch = vi.fn().mockResolvedValue(new Response("", { status: 404 }));
+    await mod.loadLocaleArt("de");
+
+    // A 404 still counts as resolved — otherwise `useCardImage` would refetch on
+    // every render. Every card simply keeps its English art.
+    expect(mod.isLocaleArtReady("de")).toBe(true);
+    expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "normal")).toBe(cardUrl(EN_ID));
+  });
+
+  it("dedupes concurrent loads of one locale into a single fetch", async () => {
+    const mod = await loadScryfallModule();
+    let settle: ((r: Response) => void) | undefined;
+    const fetchMock = vi.fn(
+      () => new Promise<Response>((resolve) => {
+        settle = resolve;
+      }),
+    );
+    global.fetch = fetchMock as unknown as typeof global.fetch;
+
+    // Both callers start while the request is still in flight. Several tiles
+    // mounting at once is the normal case, so the second must join the pending
+    // promise rather than opening its own request.
+    const first = mod.loadLocaleArt("de");
+    const second = mod.loadLocaleArt("de");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    settle!(
+      new Response(JSON.stringify({ [EN_ID]: DE_ID }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const [mapA, mapB] = await Promise.all([first, second]);
+
+    // Same Map instance, so the body was parsed once and both callers observe
+    // one shared map rather than two equal copies.
+    expect(mapA).toBe(mapB);
+    expect(mapA.get(EN_ID)).toBe(DE_ID);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Reach guard: the deduped map is the one that actually got installed, so
+    // the identity assertions above are not describing a map nobody uses.
+    expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "normal")).toBe(cardUrl(DE_ID));
   });
 });

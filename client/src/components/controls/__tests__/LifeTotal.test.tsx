@@ -19,17 +19,17 @@ import {
   GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS,
   type AnimationStep,
 } from "../../../animation/types.ts";
-import type { GameState } from "../../../adapter/types.ts";
 import { useAnimationStore } from "../../../stores/animationStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
+import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
 import { LifeTotal } from "../LifeTotal.tsx";
 
 function setLife(playerId: number, life: number) {
   useGameStore.setState((s) => {
-    const prev = (s.gameState ?? { players: [{ life: 20 }, { life: 20 }] }) as GameState;
+    const prev = s.gameState ?? buildGameState();
     const players = prev.players.map((p, i) => (i === playerId ? { ...p, life } : p));
-    return { gameState: { ...prev, players } as GameState };
+    return { gameState: { ...prev, players } };
   });
 }
 
@@ -84,7 +84,7 @@ describe("LifeTotal", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     useGameStore.setState({
-      gameState: { players: [{ life: 20 }, { life: 20 }] } as unknown as GameState,
+      gameState: buildGameState(),
     });
     useAnimationStore.setState({ activeStep: null });
     usePreferencesStore.setState({ animationSpeedMultiplier: 1 });

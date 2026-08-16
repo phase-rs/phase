@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import type {
   CounterMoveChoice,
+  CounterRemoveChoice,
   CounterType,
   GameObject,
   ObjectId,
@@ -16,6 +17,7 @@ import { gameButtonClass } from "../ui/buttonStyles.ts";
 import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
 
 type MoveCountersDistribution = Extract<WaitingFor, { type: "MoveCountersDistribution" }>;
+type RemoveCountersChoice = Extract<WaitingFor, { type: "RemoveCountersChoice" }>;
 
 function objectLabel(
   objectId: ObjectId,
@@ -33,14 +35,27 @@ function counterKey(counterType: CounterType): string {
 }
 
 export function MoveCountersDistributionModal({
-  data,
+  waitingFor,
 }: {
-  data: MoveCountersDistribution["data"];
+  waitingFor: MoveCountersDistribution | RemoveCountersChoice;
 }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
+  // CR 107.1c: "remove any number of counters" (Rhys, Tetravus) reuses this modal
+  // in no-destination mode — the counters are shed from a single source rather
+  // than relocated. The source stands in as the one "slot" so the per-type
+  // stepper UI is shared verbatim with the move path (which MUST NOT regress).
+  const isRemoval = waitingFor.type === "RemoveCountersChoice";
+  const data = waitingFor.data;
+  // Narrow on the discriminant (not the `isRemoval` alias) so TS resolves the
+  // move-only `destinations` field. Removal mode uses the single source as its
+  // one pseudo-destination slot.
+  const destinations: ObjectId[] =
+    waitingFor.type === "RemoveCountersChoice"
+      ? [waitingFor.data.source_id]
+      : waitingFor.data.destinations;
   const availableCounters = useMemo(
     () =>
       data.available
@@ -114,6 +129,18 @@ export function MoveCountersDistributionModal({
 
   const handleConfirm = useCallback(() => {
     if (invalid) return;
+    if (isRemoval) {
+      // CR 107.1c: per-type totals only — no destination axis. The empty
+      // selection (remove nothing) is a legal submission.
+      const selections: CounterRemoveChoice[] = availableCounters
+        .map(({ key, counterType }) => ({
+          counter_type: counterType,
+          count: Object.values(amounts[key] ?? {}).reduce((sum, count) => sum + count, 0),
+        }))
+        .filter((selection) => selection.count > 0);
+      dispatch({ type: "ChooseCountersToRemove", data: { selections } });
+      return;
+    }
     const selections: CounterMoveChoice[] = availableCounters.flatMap(({ key, counterType }) =>
       Object.entries(amounts[key] ?? {})
         .map(([destinationId, count]) => ({
@@ -124,19 +151,31 @@ export function MoveCountersDistributionModal({
         .filter((selection) => selection.count > 0),
     );
     dispatch({ type: "ChooseCounterMoveDistribution", data: { selections } });
-  }, [amounts, availableCounters, dispatch, invalid]);
+  }, [amounts, availableCounters, dispatch, invalid, isRemoval]);
 
   const counterLabel =
     data.counter_type && availableCounters.length === 1 ? availableCounters[0].label : "counters";
 
   return (
     <ChoiceOverlay
-      title={t("counterMoveDistribution.title", { counter: counterLabel })}
-      subtitle={t("counterMoveDistribution.subtitle", {
-        source: objectLabel(data.source_id, objects),
-        count: max,
-        remaining,
-      })}
+      title={
+        isRemoval
+          ? t("counterRemoval.title", { counter: counterLabel })
+          : t("counterMoveDistribution.title", { counter: counterLabel })
+      }
+      subtitle={
+        isRemoval
+          ? t("counterRemoval.subtitle", {
+              source: objectLabel(data.source_id, objects),
+              count: max,
+              remaining,
+            })
+          : t("counterMoveDistribution.subtitle", {
+              source: objectLabel(data.source_id, objects),
+              count: max,
+              remaining,
+            })
+      }
       footer={<ConfirmButton onClick={handleConfirm} disabled={invalid} />}
     >
       <div className="mb-4 space-y-3">
@@ -149,7 +188,7 @@ export function MoveCountersDistributionModal({
                 <span>{label}</span>
                 <span>{remainingForType}</span>
               </div>
-              {data.destinations.map((destinationId) => {
+              {destinations.map((destinationId) => {
                 const amount = amounts[key]?.[destinationId] ?? 0;
                 return (
                   <div
@@ -158,7 +197,9 @@ export function MoveCountersDistributionModal({
                     className="flex items-center justify-between gap-3 rounded-lg bg-gray-800/60 p-3"
                   >
                     <span className="text-sm font-medium text-gray-200">
-                      {objectLabel(destinationId, objects)}
+                      {isRemoval
+                        ? t("counterRemoval.removeLabel")
+                        : objectLabel(destinationId, objects)}
                     </span>
                     <div className="flex items-center gap-2">
                       <button

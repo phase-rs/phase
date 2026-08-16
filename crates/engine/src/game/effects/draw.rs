@@ -4,12 +4,129 @@ use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::static_abilities::prohibition_scope_matches_player;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
-use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
-use crate::types::proposed_event::ProposedEvent;
+use crate::types::events::{GameEvent, PlayerActionKind};
+use crate::types::game_state::{DrawSequenceOrigin, GameState, PendingDrawDelivery};
+use crate::types::identifiers::ObjectId;
+use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
 use crate::types::statics::StaticMode;
 #[cfg(test)]
 use crate::types::zones::Zone;
+
+/// CR 121.1 + CR 704.5b + CR 614.6: would drawing a card actually put a card into
+/// `player_id`'s hand right now, emitting a `GameEvent::CardDrawn`? False when:
+/// - a `CantDraw` static applies or a `PerTurnDrawLimit` is exhausted (no draw
+///   permitted); or
+/// - the library is empty — an empty-library draw only records an attempted
+///   draw (CR 704.5b) and delivers no card; or
+/// - the replacement pipeline removes the draw before it happens (CR 614.6) —
+///   prevented, substituted with a non-Draw chain, or rescaled to zero.
+///
+/// In each case the draw fires no "whenever you draw" trigger. Every leg delegates
+/// to the authority that owns it rather than re-deriving it: `allowed_draw_count`
+/// for draw restrictions, `select_cards_to_draw` for library delivery, and
+/// `replacement::proposed_draw_survives_replacement` — which shares its
+/// applicability and substitution classifiers with the live pipeline — for the
+/// replacement leg. The individual draw is modeled as the same
+/// `ProposedEvent::Draw` shape `draw_through_replacement_with_applied` proposes,
+/// so the preflight and the resolver ask the identical question.
+///
+/// The single engine authority an AI draw-payoff preflight consults so it never
+/// credits a no-op draw.
+pub fn can_draw_at_least_one(state: &GameState, player_id: crate::types::player::PlayerId) -> bool {
+    let allowed = allowed_draw_count(state, player_id, 1);
+    if select_cards_to_draw(state, player_id, allowed as usize).is_empty() {
+        return false;
+    }
+    // CR 121.2: the individual draw the payoff would ride on — the same event
+    // shape `draw_through_replacement_with_applied` proposes for one card.
+    let proposed = ProposedEvent::Draw {
+        player_id,
+        count: 1,
+        applied: HashSet::new(),
+    };
+    replacement::proposed_draw_survives_replacement(state, &proposed)
+}
+
+/// Exact delivery fact for one fully specified draw instruction.
+///
+/// This is deliberately a tactical, engine-internal result rather than state
+/// carried over the wire: library contents, draw restrictions, replacement
+/// candidates, and any continuation choice are all facts of the supplied state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrawDeliveryPreview {
+    /// The cloned instruction retired normally and its draw-sequence frame
+    /// recorded this many actual Library-to-Hand deliveries.
+    Exact { delivered: u32 },
+    /// The instruction parked at a player-owned decision, including a choice
+    /// raised by a mandatory replacement's continuation.
+    Unknown,
+}
+
+/// Preview the exact delivery count of one draw instruction without mutating
+/// the supplied game state.
+///
+/// CR 121.2 + CR 121.2b: a multi-card instruction is a sequence of individual
+/// draws and may partially complete, so the completed frame's accumulated
+/// delivery—not the requested count—is the only exact result.
+///
+/// CR 121.6b + CR 614.11a: replacement work must finish before the sequence
+/// resumes. A replacement continuation may therefore park on an ordinary
+/// prompt (for example `SearchChoice`) even when the replacement itself was
+/// mandatory; that remains `Unknown` rather than an assumed zero delivery.
+///
+/// CR 614.6: a fully settled prevention or non-draw substitution is instead
+/// `Exact { delivered: 0 }`. CR 614.11 requires reaching replacement processing
+/// even with an empty library, so this function must not short-circuit on
+/// library size. CR 616.1 likewise makes competing-replacement ordering
+/// `Unknown`, never an engine-selected branch.
+pub fn preview_draw_delivery(
+    state: &GameState,
+    player: crate::types::player::PlayerId,
+    requested: u32,
+) -> DrawDeliveryPreview {
+    let mut preview_state = state.clone();
+    let mut events = Vec::new();
+
+    match start_draw_sequence_with_origin_outcome(
+        &mut preview_state,
+        player,
+        requested,
+        HashSet::new(),
+        DrawSequenceOrigin::Plain,
+        &mut events,
+    ) {
+        DrawSequenceOutcome::Completed { delivered, .. }
+            if matches!(
+                preview_state.waiting_for,
+                crate::types::game_state::WaitingFor::Priority { .. }
+            ) =>
+        {
+            DrawDeliveryPreview::Exact { delivered }
+        }
+        DrawSequenceOutcome::Completed { .. } | DrawSequenceOutcome::Parked(_) => {
+            DrawDeliveryPreview::Unknown
+        }
+    }
+}
+
+/// Private completion carrier for the draw-sequence owner. Live callers retain
+/// the historical [`ReplacementResult`] API; the preview alone needs the
+/// instruction-owned accumulated count before the completed frame is retired.
+enum DrawSequenceOutcome {
+    Completed {
+        result: ReplacementResult,
+        delivered: u32,
+    },
+    Parked(ReplacementResult),
+}
+
+impl DrawSequenceOutcome {
+    fn into_replacement_result(self) -> ReplacementResult {
+        match self {
+            Self::Completed { result, .. } | Self::Parked(result) => result,
+        }
+    }
+}
 
 pub(crate) fn allowed_draw_count(
     state: &GameState,
@@ -135,13 +252,16 @@ pub fn resolve(
         _ => (1, ability.controller),
     };
 
-    // CR 614.1a: Route draw through replacement pipeline (e.g. Dredge, Abundance).
-    match draw_through_replacement(
+    // CR 121.2: Route through the draw-sequence stack so a multi-card draw
+    // (num_cards > 1) performs that many individual card draws, each offered
+    // replacement independently, instead of the whole count being replaced or
+    // drawn as one atomic batch.
+    match start_draw_sequence_with_replacement_applied(
         state,
         drawing_player,
         num_cards,
+        ability.replacement_applied.clone(),
         events,
-        apply_draw_after_replacement,
     ) {
         ReplacementResult::Execute(_) | ReplacementResult::Prevented => {}
         ReplacementResult::NeedsChoice(_) => return Ok(()),
@@ -150,48 +270,306 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
 }
 
-/// CR 614.6 + CR 614.11 + CR 704.3: Single authority for the
-/// "propose Draw → replace → apply → drain post-replacement continuation"
-/// sequence. Every site that proposes a `ProposedEvent::Draw` MUST call this
-/// helper — otherwise a substituted mandatory-post-effect (Jace WinTheGame,
-/// Abundance reveal-until) leaks past the resolution step and drains against
-/// the wrong player on a later priority pass.
+/// CR 121.2: Begin one draw instruction — "if a player is instructed to draw
+/// multiple cards, that player performs that many individual card draws."
 ///
-/// `apply_executed` is invoked on the `Execute` arm with the (possibly
-/// pre-zeroed by `apply_single_replacement`) replaced event, so callers can
-/// layer their own bookkeeping — miracle tracking (`effects/draw.rs`,
-/// `effects/connive.rs`, `effects/gift_delivery.rs`), draw-step
-/// `has_drawn_this_turn` flag (`turns.rs`), or the chain's discard step
-/// (connive). The continuation drain runs immediately after `apply_executed`
-/// returns, inside the same resolution step so SBAs (CR 704.5b
-/// draw-from-empty-library loss) and priority never fall between the
-/// (possibly pre-zeroed) draw and its substitute.
+/// Pushes a [`DrawSequenceFrame`] and immediately drives it. The frame is the
+/// durable record of the instruction: it survives a pause (a per-unit replacement
+/// choice) so the remaining individual draws resume against exactly this
+/// instruction and not some other draw that started in the meantime.
+pub(crate) fn start_draw_sequence(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) -> replacement::ReplacementResult {
+    start_draw_sequence_with_origin(
+        state,
+        player,
+        count,
+        HashSet::new(),
+        DrawSequenceOrigin::Plain,
+        events,
+    )
+}
+
+/// CR 614.5 + CR 121.2: Begin a draw instruction with replacements that have
+/// already applied to its originating event. A replacement's continuation can
+/// itself instruct a player to draw; every individual draw in that instruction
+/// must retain the originating event's applied set so the same replacement is
+/// not offered again after a pause or a multi-card sequence.
+fn start_draw_sequence_with_replacement_applied(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    count: u32,
+    applied: HashSet<AppliedReplacementKey>,
+    events: &mut Vec<GameEvent>,
+) -> replacement::ReplacementResult {
+    start_draw_sequence_with_origin(
+        state,
+        player,
+        count,
+        applied,
+        DrawSequenceOrigin::Plain,
+        events,
+    )
+}
+
+/// CR 121.2 + CR 121.6b: Begin a draw instruction with its completion origin.
+/// The origin is retained across any per-unit replacement choice so the frame's
+/// completion runs the correct post-draw tail after the final unit settles.
+pub(crate) fn start_draw_sequence_with_origin(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    count: u32,
+    applied: HashSet<AppliedReplacementKey>,
+    origin: DrawSequenceOrigin,
+    events: &mut Vec<GameEvent>,
+) -> replacement::ReplacementResult {
+    start_draw_sequence_with_origin_outcome(state, player, count, applied, origin, events)
+        .into_replacement_result()
+}
+
+fn start_draw_sequence_with_origin_outcome(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    count: u32,
+    applied: HashSet<AppliedReplacementKey>,
+    origin: DrawSequenceOrigin,
+    events: &mut Vec<GameEvent>,
+) -> DrawSequenceOutcome {
+    let frame_id = state.push_draw_sequence_with_origin(player, count, applied, origin);
+    resume_draw_sequence_outcome(state, frame_id, events)
+}
+
+/// CR 121.6b: The single post-pause driver for a draw instruction — "if an effect
+/// replaces a draw within a sequence of card draws, the replacement effect is
+/// completed before resuming the sequence."
 ///
-/// On `NeedsChoice`, sets `state.waiting_for` to the replacement-choice
-/// prompt before returning so callers only need to bail. On `Prevented`,
-/// `apply_executed` is not called.
-pub(crate) fn draw_through_replacement(
+/// Drives `frame_id`'s remaining individual draws to completion. On a pause the
+/// frame stays on the stack with its cursor already advanced past the in-flight
+/// unit, so the resume that follows the player's choice picks up exactly where it
+/// left off; the paused unit is settled by the choice itself, not replayed here.
+///
+/// CR 608.2c: on completion the frame's running total is committed to
+/// `state.last_effect_count` exactly once — the value a later "that many" clause
+/// on the same card reads ("Draw two cards, then discard that many"), which must
+/// be the true total across the WHOLE instruction rather than the last unit's
+/// count. A unit whose draw was replaced by something else (Dredge) contributes
+/// 0; one doubled by a count modifier (Teferi's Ageless Insight) contributes its
+/// post-replacement count.
+///
+/// The terminal `Execute(ProposedEvent::Draw { count: 0, .. })` is a completion
+/// sentinel, reusing the engine's existing zero-count draw shape (already produced
+/// by `Effect::Draw { count: 0 }`), not a new event shape.
+///
+/// `frame_id` must be the active frame. It cannot be an outer frame with a nested
+/// instruction still above it (CR 616.1g) — that resume must wait for the inner
+/// instruction to complete.
+pub(crate) fn resume_draw_sequence(
+    state: &mut GameState,
+    frame_id: crate::types::game_state::DrawSequenceFrameId,
+    events: &mut Vec<GameEvent>,
+) -> replacement::ReplacementResult {
+    resume_draw_sequence_outcome(state, frame_id, events).into_replacement_result()
+}
+
+fn resume_draw_sequence_outcome(
+    state: &mut GameState,
+    frame_id: crate::types::game_state::DrawSequenceFrameId,
+    events: &mut Vec<GameEvent>,
+) -> DrawSequenceOutcome {
+    loop {
+        let pending_delivery = state
+            .active_draw_sequence_if(frame_id)
+            .and_then(|frame| frame.pending_delivery.take());
+        if let Some(pending_delivery) = pending_delivery {
+            let Some(delivered) =
+                resume_pending_draw_delivery(state, Some(frame_id), pending_delivery, events)
+            else {
+                return DrawSequenceOutcome::Parked(ReplacementResult::NeedsChoice(
+                    state
+                        .waiting_for
+                        .acting_player()
+                        .unwrap_or(state.active_player),
+                ));
+            };
+            let Some(frame) = state.active_draw_sequence_if(frame_id) else {
+                return DrawSequenceOutcome::Parked(ReplacementResult::NeedsChoice(
+                    state
+                        .waiting_for
+                        .acting_player()
+                        .unwrap_or(state.active_player),
+                ));
+            };
+            frame.accumulated += delivered;
+        }
+
+        // Take the next owed unit off the cursor BEFORE attempting it, so a park
+        // mid-attempt leaves the frame recording the units AFTER this one. The
+        // in-flight unit is settled by the replacement choice that parked it.
+        let Some(frame) = state.active_draw_sequence_if(frame_id) else {
+            debug_assert!(
+                false,
+                "resume_draw_sequence({frame_id:?}) is not the active draw frame — a nested \
+                 instruction is still above it, or the frame was already popped"
+            );
+            return DrawSequenceOutcome::Parked(ReplacementResult::Prevented);
+        };
+        if frame.remaining == 0 {
+            break;
+        }
+        frame.remaining -= 1;
+        let player = frame.player;
+        let applied = frame.applied.clone();
+
+        let mut unit_drawn: u32 = 0;
+        let result = draw_through_replacement_with_applied(
+            state,
+            player,
+            1,
+            applied,
+            events,
+            |state, event, events| {
+                unit_drawn = apply_draw_after_replacement(state, event, events);
+            },
+        );
+        match result {
+            ReplacementResult::Execute(_) | ReplacementResult::Prevented => {
+                if state.active_draw_sequence().is_some_and(|frame| {
+                    frame.frame_id == frame_id && frame.pending_delivery.is_some()
+                }) {
+                    return DrawSequenceOutcome::Parked(ReplacementResult::NeedsChoice(
+                        state
+                            .waiting_for
+                            .acting_player()
+                            .unwrap_or(state.active_player),
+                    ));
+                }
+                // The unit's delivery may itself have pushed a nested instruction.
+                // Credit this exact frame by identity, but never resume it while
+                // the nested frame remains active.
+                if let Some(frame) = state.draw_sequence_frame_mut(frame_id) {
+                    frame.accumulated += unit_drawn;
+                }
+                if state
+                    .active_draw_sequence()
+                    .is_none_or(|frame| frame.frame_id != frame_id)
+                {
+                    return DrawSequenceOutcome::Parked(ReplacementResult::NeedsChoice(
+                        state
+                            .waiting_for
+                            .acting_player()
+                            .unwrap_or(state.active_player),
+                    ));
+                }
+            }
+            // The frame stays parked on the stack; the choice resumes it.
+            ReplacementResult::NeedsChoice(waiting_player) => {
+                return DrawSequenceOutcome::Parked(ReplacementResult::NeedsChoice(waiting_player));
+            }
+        }
+    }
+
+    let Some(frame) = state.pop_active_draw_sequence(frame_id) else {
+        debug_assert!(false, "draw frame {frame_id:?} vanished before completion");
+        return DrawSequenceOutcome::Parked(ReplacementResult::Prevented);
+    };
+    state.last_effect_count = Some(frame.accumulated as i32);
+    // Record the drawing player exactly once per
+    // settled draw INSTRUCTION — the emission granularity is the whole draw, not
+    // the per-card unit that `apply_draw_after_replacement` settles. `frame.player`
+    // is the concrete drawer, so during a `player_scope: Opponent` fan-out (Cut a
+    // Deal) each scoped opponent's own instruction records that opponent, without
+    // relying on `ability.controller` rebinding. Gated on `frame.accumulated > 0`
+    // so an instruction that delivered no card (empty library, or every unit
+    // replaced away) records nothing because that player did not draw. The generic
+    // post-effect scan in `effects/mod.rs` folds this
+    // event into `player_actions_this_way` (a set — dedups the drawer for a
+    // multi-card draw) and `player_actions_this_turn` (a Vec — now one entry per
+    // draw event, not per card).
+    if frame.accumulated > 0 {
+        events.push(GameEvent::PlayerPerformedAction {
+            player_id: frame.player,
+            action: PlayerActionKind::Draw,
+            look_count: None,
+            scry_bottom_count: None,
+            scry_top_count: None,
+        });
+    }
+    match frame.origin {
+        DrawSequenceOrigin::Plain => {
+            // Intentionally no `EffectResolved { Draw }`: no trigger matcher consumes
+            // `EffectKind::Draw` today, so wiring that event is out of scope here.
+        }
+        DrawSequenceOrigin::ConniveTail { conniver, count } => {
+            super::connive::apply_connive_tail(state, *conniver, count, events);
+        }
+        DrawSequenceOrigin::ScryCompletion { source_id } => {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::Scry,
+                source_id,
+                subject: None,
+            });
+        }
+    }
+
+    // CR 615.5: A `Draw` with a chained follow-up leaves that follow-up in the
+    // normal pending-continuation slot. Keep this paused drain resident until
+    // that chain runs: its `PostReplacementSourceController` read still needs
+    // the prevented-event context. A draw without a parked follow-up is the
+    // terminal action of this dispatch and can retire the exact top entry now.
+    // Nested replacement dispatches retain their own stack entries, so this
+    // never pops an outer paused event context.
+    if state.active_ability_continuation().is_none() {
+        let completed = state
+            .take_completed_multi_draw_frame()
+            .expect("completed multi-draw frame must remain top-owned");
+        // The promoted continuation is now the paused drain's direct child;
+        // it must read the resident event context before its own completion
+        // retires that drain.
+        if completed.is_some() && state.active_ability_continuation().is_none() {
+            state.finish_active_paused_post_replacement_dispatch();
+        }
+    }
+
+    DrawSequenceOutcome::Completed {
+        result: ReplacementResult::Execute(ProposedEvent::Draw {
+            player_id: frame.player,
+            count: 0,
+            applied: HashSet::new(),
+        }),
+        delivered: frame.accumulated,
+    }
+}
+
+/// CR 614.5: Propose a draw while preserving replacements already applied to
+/// the instruction that produced it. The public wrapper starts a fresh draw;
+/// draw sequences use this authority to resume replacement continuations.
+fn draw_through_replacement_with_applied(
     state: &mut GameState,
     player_id: crate::types::player::PlayerId,
     count: u32,
+    applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
     apply_executed: impl FnOnce(&mut GameState, ProposedEvent, &mut Vec<GameEvent>),
 ) -> replacement::ReplacementResult {
     let proposed = ProposedEvent::Draw {
         player_id,
         count,
-        applied: HashSet::new(),
+        applied,
     };
     let result = replacement::replace_event(state, proposed, events);
     match &result {
         ReplacementResult::Execute(event) => {
             apply_executed(state, event.clone(), events);
-            if state.post_replacement_continuation.is_some() {
+            if state.has_post_replacement_drain() {
                 let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
                     state, None, None, None, events,
                 );
@@ -211,11 +589,22 @@ pub(crate) fn draw_through_replacement(
 /// Extracted from `resolve`'s Execute arm so the same logic can be invoked by
 /// `handle_replacement_choice` when a player accepts a draw-replacement choice.
 /// Caller is responsible for emitting `EffectResolved`.
+///
+/// Returns the number of cards actually delivered by this call. CR 608.2c: this
+/// function does NOT write `state.last_effect_count` itself — the draw sequence
+/// accumulates the returned counts across every unit of the instruction into its
+/// [`DrawSequenceFrame`] and commits the TRUE total once, when the whole
+/// instruction completes, so a chained "discard that many" reads the real total
+/// rather than just the last unit's count ("later text on the card may modify the
+/// meaning of earlier text"). Callers outside the sequence driver that invoke this
+/// directly for a single, non-sequenced event (the two unit tests below,
+/// `scry.rs`'s delegation arm, `handle_replacement_choice`'s resume path) may
+/// ignore the return value — Rust does not require consuming it.
 pub fn apply_draw_after_replacement(
     state: &mut GameState,
     event: ProposedEvent,
     events: &mut Vec<GameEvent>,
-) {
+) -> u32 {
     let ProposedEvent::Draw {
         player_id,
         count,
@@ -226,7 +615,7 @@ pub fn apply_draw_after_replacement(
             false,
             "apply_draw_after_replacement called with non-Draw ProposedEvent"
         );
-        return;
+        return 0;
     };
 
     let allowed_count = allowed_draw_count(state, player_id, count);
@@ -234,140 +623,197 @@ pub fn apply_draw_after_replacement(
     // `select_cards_to_draw` authority so a `DrawFromBottom` static is honored.
     let cards_to_draw = select_cards_to_draw(state, player_id, allowed_count as usize);
 
-    // CR 704.5b: If library has fewer cards than requested, mark the player.
-    // CR 121.4: Partial draws are legal — draw what's available.
-    if allowed_count > 0 && cards_to_draw.len() < allowed_count as usize {
-        if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
-            player.drew_from_empty_library = true;
+    // CR 704.5b: If library has fewer cards than requested, the ledger edit for
+    // this settled draw owns the player's empty-library fact. CR 121.4: partial
+    // draws are legal — draw what's available.
+    let attempted_empty_library = allowed_count > 0 && cards_to_draw.len() < allowed_count as usize;
+    let mut pending_delivery = PendingDrawDelivery {
+        player: player_id,
+        current: ObjectId(0),
+        current_settled: false,
+        remaining: cards_to_draw,
+        applied,
+        attempted_empty_library,
+    };
+    let Some(current) = pending_delivery.remaining.first().copied() else {
+        if pending_delivery.attempted_empty_library {
+            crate::game::ledger::resolve_and_apply_cards_drawn(state, player_id, None, true)
+                .expect("empty-library draw bookkeeping must have a live player and journal cause");
         }
-    }
+        return 0;
+    };
+    pending_delivery.current = current;
+    pending_delivery.remaining.remove(0);
+    resume_pending_draw_delivery(
+        state,
+        current_draw_frame_id(state),
+        pending_delivery,
+        events,
+    )
+    .unwrap_or(0)
+}
 
-    // CR 609.3: Record the actually-drawn count so chained sub-abilities like
-    // "draw cards equal to N, then discard that many" can resolve their
-    // dynamic count via `EventContextAmount`'s `last_effect_count` fallback.
-    // Mirrors the convention used by `change_zone.rs`, `sacrifice.rs`, etc.
-    let drawn_count = cards_to_draw.len() as i32;
-    state.last_effect_count = Some(drawn_count);
+fn current_draw_frame_id(
+    state: &GameState,
+) -> Option<crate::types::game_state::DrawSequenceFrameId> {
+    state.active_draw_sequence().map(|frame| frame.frame_id)
+}
 
-    for obj_id in cards_to_draw {
-        // CR 121.1 (PLAN Risk #5, tranche 4): drawing IS a Library → Hand zone
-        // change, so the per-card delivery routes through the unified pipeline
-        // (`move_object` via `ZoneMoveRequest::draw`) with the inner `Moved`
-        // consult ENABLED — a future "cards you would draw go to exile instead"
-        // redirect must see this move. The raw `zones::move_to_zone` bypass that
-        // previously lived here was the exact debt the pipeline exists to
-        // eliminate; "consults nothing in the current pool" did not justify a
-        // permanent bypass that a future `Moved` def would silently miss.
-        //
-        // CR 614.5 dedup guard: a replacement effect gets only one opportunity to
-        // affect an event "or any modified events that may replace that event".
-        // The outer `ReplacementEvent::Draw` pass already ran (upstream of this
-        // delivery), and its applied-`ReplacementId` set rides in `applied`.
-        // Seeding it into the inner `Moved` consult (`ZoneMoveRequest::draw(obj_id,
-        // applied.clone())`) stops a def that matches BOTH the Draw class and the
-        // Moved class from firing twice — `find_applicable_replacements` skips any
-        // rid already in the seeded set (`already_applied`). One `applied` snapshot
-        // per draw event; cloned per card because each delivered card is a
-        // distinct zone-change event.
-        let _ = crate::game::zone_pipeline::move_object(
-            state,
-            crate::game::zone_pipeline::ZoneMoveRequest::draw(obj_id, applied.clone()),
-            events,
-        );
-        // CR 616.1 + OQ#1 (audit-justified non-interactivity; delivery
-        // post-condition): no production `Moved` def can match a Library → Hand
-        // move today (every destination-unconstrained `Moved` def is `valid_card:
-        // SelfRef`-bound to a battlefield host; the only `valid_card: None` class
-        // — Rest in Peace / Leyline "put into a graveyard → exile" — is
-        // destination-gated to Graveyard), so a draw cannot surface a CR 616.1
-        // ordering choice and no `pending_batch_deliveries` resume is wired.
-        //
-        // The assert catches the MECHANICAL non-delivery bug: if the card is
-        // still in the library, the move stranded — `move_object` returned a
-        // swallowed `NeedsChoice` (the tranche-3 hazard: parked
-        // `pending_replacement` overwritten by the next card, truncating SBAs)
-        // or otherwise failed — yet `CardDrawn` + the draw counters fire below as
-        // if it were delivered. A legitimate future redirect (card → graveyard /
-        // exile) is intentionally NOT asserted against: forbidding it here would
-        // break the very consult the migration enables. The OPEN question a
-        // future migrator must settle when a real to-Hand/redirect `Moved` def is
-        // added: whether a move-level-redirected card still counts as "drawn" (the
-        // `CardDrawn` emission + counter increments below currently assume yes),
-        // and — if the redirect can be interactive — route this loop through
-        // `move_objects_simultaneously_then` + a `BatchCompletion` (OQ#1: extend
-        // the shared batch machinery, never add a per-flow pause).
-        debug_assert!(
-            state
-                .objects
-                .get(&obj_id)
-                .is_none_or(|o| o.zone != crate::types::zones::Zone::Library),
-            "draw delivery stranded the card in the library — move_object returned \
-             a swallowed NeedsChoice or otherwise failed to deliver, yet CardDrawn \
-             and the draw counters fire below"
-        );
-        // CR 121.1 + CR 504.1: Increment per-step + per-turn counters BEFORE
-        // emitting the event so the ordinal embedded in `CardDrawn` reflects
-        // this draw (1-indexed). Triggers/replacements that gate on "first
-        // draw of the draw step" read this ordinal.
-        let (nth_in_turn, nth_in_step) =
-            if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
-                player.cards_drawn_this_turn = player.cards_drawn_this_turn.saturating_add(1);
-                player.cards_drawn_this_step = player.cards_drawn_this_step.saturating_add(1);
-                (player.cards_drawn_this_turn, player.cards_drawn_this_step)
-            } else {
-                (1, 1)
-            };
-        events.push(GameEvent::CardDrawn {
-            player_id,
-            object_id: obj_id,
-            nth_in_turn,
-            nth_in_step,
-        });
-        super::drawn_this_turn_choice::record_drawn_card(state, player_id, obj_id);
-        record_first_draw_and_enqueue_miracle(state, player_id, obj_id);
+/// Deliver the selected suffix of one individual draw.
+///
+/// A `Moved` choice parks the exact current card and its still-unattempted
+/// suffix in the active draw frame. The replacement-choice reducer returns to
+/// [`resume_draw_sequence`] after it delivers that current zone change, at
+/// which point this function performs the ledger edit and continues normally.
+fn resume_pending_draw_delivery(
+    state: &mut GameState,
+    frame_id: Option<crate::types::game_state::DrawSequenceFrameId>,
+    mut pending: PendingDrawDelivery,
+    events: &mut Vec<GameEvent>,
+) -> Option<u32> {
+    let mut delivered = 0;
+    loop {
+        if !pending.current_settled {
+            match crate::game::zone_pipeline::move_object(
+                state,
+                crate::game::zone_pipeline::ZoneMoveRequest::draw(
+                    pending.current,
+                    pending.applied.clone(),
+                ),
+                events,
+            ) {
+                crate::game::zone_pipeline::ZoneMoveResult::Done => {
+                    pending.current_settled = true;
+                }
+                crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+                | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                    let Some(frame_id) = frame_id else {
+                        debug_assert!(
+                            false,
+                            "a draw delivery choice requires an active draw frame"
+                        );
+                        return None;
+                    };
+                    pending.current_settled = true;
+                    state
+                        .draw_sequence_frame_mut(frame_id)
+                        .expect("the parked draw delivery's frame must remain live")
+                        .pending_delivery = Some(pending);
+                    return None;
+                }
+            }
+        }
+        if state
+            .objects
+            .get(&pending.current)
+            .is_some_and(|object| object.zone != crate::types::zones::Zone::Library)
+        {
+            record_drawn_card(
+                state,
+                pending.player,
+                pending.current,
+                &mut pending.attempted_empty_library,
+                events,
+            );
+            delivered += 1;
+        }
+
+        let Some(next) = pending.remaining.first().copied() else {
+            if pending.attempted_empty_library {
+                crate::game::ledger::resolve_and_apply_cards_drawn(
+                    state,
+                    pending.player,
+                    None,
+                    true,
+                )
+                .expect("empty-library draw bookkeeping must have a live player and journal cause");
+            }
+            return Some(delivered);
+        };
+        pending.current = next;
+        pending.remaining.remove(0);
+        pending.current_settled = false;
     }
 }
 
-/// CR 702.94a + CR 603.11: Shared first-draw hook — record the drawn
-/// `ObjectId` as `player`'s first-of-turn if absent, and if the drawn card has
-/// `Keyword::Miracle(cost)`, enqueue a `MiracleOffer` for the priority-entry
-/// flush to surface as `WaitingFor::MiracleReveal`. Subsequent draws do NOT
-/// overwrite the first-draw entry and do NOT enqueue more offers (the static
-/// ability only functions for the first-drawn card per CR 702.94a).
-pub(crate) fn record_first_draw_and_enqueue_miracle(
+/// Record one settled card draw after its Library → Hand delivery reaches a
+/// terminal result.
+fn record_drawn_card(
+    state: &mut GameState,
+    player_id: crate::types::player::PlayerId,
+    obj_id: crate::types::identifiers::ObjectId,
+    attempted_empty_library: &mut bool,
+    events: &mut Vec<GameEvent>,
+) {
+    let drawn_object = crate::types::identifiers::ObjectIncarnationRef::from_object(
+        state
+            .objects
+            .get(&obj_id)
+            .expect("settled draw object remains live for its ledger edit"),
+    );
+    let established_first_draw = crate::game::ledger::resolve_and_apply_cards_drawn(
+        state,
+        player_id,
+        Some(drawn_object),
+        std::mem::take(attempted_empty_library),
+    )
+    .expect("settled draw bookkeeping must have a live player and journal cause");
+    let player = state
+        .players
+        .iter()
+        .find(|player| player.id == player_id)
+        .expect("settled draw player remains live after its ledger edit");
+    let (nth_in_turn, nth_in_step) = (player.cards_drawn_this_turn, player.cards_drawn_this_step);
+    events.push(GameEvent::CardDrawn {
+        player_id,
+        object_id: obj_id,
+        nth_in_turn,
+        nth_in_step,
+    });
+    if established_first_draw {
+        enqueue_miracle_offer_for_first_draw(state, player_id, obj_id);
+    }
+}
+
+/// CR 702.94a + CR 603.11: Continuation-only first-draw hook. The ledger edit
+/// has already recorded `object_id` as this player's first card drawn this
+/// turn; this function only enqueues the deferred miracle offer.
+fn enqueue_miracle_offer_for_first_draw(
     state: &mut GameState,
     player: crate::types::player::PlayerId,
     object_id: crate::types::identifiers::ObjectId,
 ) {
-    // Only the FIRST draw of the turn per player establishes the miracle
-    // eligibility condition. `or_insert_with` returns a `&mut V` indicating
-    // whether the entry was freshly set; compare against `object_id` to know.
-    let is_first = !state.first_card_drawn_this_turn.contains_key(&player);
-    state
-        .first_card_drawn_this_turn
-        .entry(player)
-        .or_insert(object_id);
-    if !is_first {
-        return;
-    }
-    // CR 702.94a: Static ability functions from hand — check the drawn object's
-    // keywords. Reads the concrete `Keyword::Miracle(ManaCost)` payload; if
-    // layers remove miracle before draw resolution the offer simply never
-    // queues. `obj.keywords` is the printed+granted keyword set visible on the
-    // object while it's in the owner's hand.
+    debug_assert_eq!(
+        state.first_card_drawn_this_turn.get(&player),
+        Some(&object_id),
+        "first-draw continuation must follow the matching ledger edit"
+    );
     let Some(obj) = state.objects.get(&object_id) else {
         return;
     };
     if obj.owner != player {
         return;
     }
-    let miracle_cost = obj.keywords.iter().find_map(|k| match k {
-        crate::types::keywords::Keyword::Miracle(cost) => Some(cost.clone()),
-        _ => None,
-    });
+    // CR 702.94a: Static ability functions from hand — check the drawn object's
+    // effective keywords (printed + continuous grants like Molecule Man's hand
+    // miracle). `effective_off_zone_keywords` is the object-scoped authority for
+    // non-battlefield zones; if layers remove miracle before draw resolution the
+    // offer simply never queues.
+    let miracle_cost =
+        crate::game::off_zone_characteristics::effective_off_zone_keywords(state, object_id)
+            .into_iter()
+            .find_map(|k| match k {
+                crate::types::keywords::Keyword::Miracle(cost) => Some(cost),
+                _ => None,
+            });
     let Some(cost) = miracle_cost else {
         return;
     };
+    // CR 601.2f + CR 118.9c: concretize the granted miracle cost against the
+    // card's own mana cost at offer-enqueue time (Aminatou's `SelfManaCostReduced
+    // { 4 }` → MV−4). The offer stores a concrete `ManaCost::Cost`, so the cast
+    // substitution and payment paths never see an unresolved placeholder.
+    let cost = crate::game::keywords::resolve_keyword_mana_cost(state, object_id, &cost);
     state
         .pending_miracle_offers
         .push(crate::types::game_state::MiracleOffer {
@@ -551,17 +997,22 @@ mod tests {
             Zone::Battlefield,
         );
         let teferi_obj = state.objects.get_mut(&teferi).unwrap();
-        teferi_obj.replacement_definitions = vec![ReplacementDefinition::new(
-            ReplacementEvent::Draw,
-        )
-        .execute(AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::Draw {
-                count: QuantityExpr::Fixed { value: 2 },
-                target: TargetFilter::Controller,
-            },
-        ))]
-        .into();
+        // CR 121.6b: Teferi's antecedent is SINGULAR — "if you would draw a card …
+        // draw two cards instead" — so it replaces one individual draw, and is
+        // `IndividualDraw` despite being a doubler colloquially. This matches what
+        // the real card carries in the corpus; a hand-built fixture that disagreed
+        // with its own card would be testing a shape that does not exist.
+        teferi_obj.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::Draw)
+                .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 2 },
+                        target: TargetFilter::Controller,
+                    },
+                ))]
+            .into();
 
         for card_id in 2..=4 {
             create_object(
@@ -874,6 +1325,70 @@ mod tests {
         assert_eq!(offer.object_id, first);
     }
 
+    /// CR 702.94a: Miracle granted by a continuous hand static (Molecule Man)
+    /// must queue an offer even when the drawn card has no printed miracle.
+    #[test]
+    fn miracle_granted_by_hand_static_queues_offer_on_first_draw() {
+        use crate::game::layers::evaluate_layers;
+        use crate::types::ability::{ContinuousModification, StaticDefinition};
+        use crate::types::ability::{FilterProp, TargetFilter, TypeFilter, TypedFilter};
+        use crate::types::card_type::CoreType;
+        use crate::types::keywords::Keyword;
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::StaticMode;
+        use std::sync::Arc;
+
+        let mut state = GameState::new_two_player(42);
+        let grant_static = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Non(Box::new(TypeFilter::Land)))
+                    .controller(crate::types::ability::ControllerRef::You)
+                    .properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+            ))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Miracle(ManaCost::NoCost),
+            }]);
+
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Molecule Man".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let src = state.objects.get_mut(&source).unwrap();
+            src.card_types.core_types.push(CoreType::Creature);
+            src.base_card_types = src.card_types.clone();
+            src.static_definitions.push(grant_static.clone());
+            src.base_static_definitions = Arc::new(vec![grant_static]);
+        }
+
+        let drawn = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Nonland Spell".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&drawn).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        evaluate_layers(&mut state);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &make_ability(1), &mut events).unwrap();
+
+        assert_eq!(state.pending_miracle_offers.len(), 1);
+        assert_eq!(state.pending_miracle_offers[0].object_id, drawn);
+        assert!(state.pending_miracle_offers[0]
+            .cost
+            .is_without_paying_mana());
+    }
+
     /// CR 702.94a: A card without Miracle as the first-drawn card does NOT
     /// queue an offer, even if later drawn cards have Miracle.
     #[test]
@@ -1049,9 +1564,14 @@ mod tests {
 #[cfg(test)]
 mod tranche4_draw_pipeline_tests {
     use super::*;
+    use crate::game::engine::apply_as_current;
     use crate::game::scenario::{GameScenario, P0};
     use crate::parser::oracle_replacement::parse_replacement_line;
-    use crate::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TargetFilter};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, QuantityExpr, ReplacementDefinition, ReplacementMode,
+        TargetFilter,
+    };
+    use crate::types::actions::GameAction;
     use crate::types::identifiers::ObjectId;
     use crate::types::proposed_event::ReplacementId;
     use crate::types::replacements::ReplacementEvent;
@@ -1184,7 +1704,9 @@ mod tranche4_draw_pipeline_tests {
         // Drive the apply path with the rid PRE-SEEDED into the Draw event's
         // applied set — modelling a def that already fired at the Draw level.
         let mut applied = std::collections::HashSet::new();
-        applied.insert(rid);
+        applied.insert(crate::types::proposed_event::AppliedReplacementKey::object(
+            rid.source, rid.index,
+        ));
         let mut events = Vec::new();
         apply_draw_after_replacement(
             &mut state,
@@ -1272,5 +1794,161 @@ mod tranche4_draw_pipeline_tests {
              here means the consult did not run (raw-bypass or exempt-Draw regression)."
         );
         assert!(state.players[0].graveyard.contains(&drawn));
+    }
+
+    /// A per-card Moved replacement choice parks the selected card before its
+    /// bookkeeping. Its delivery must settle before the driver records
+    /// `CardDrawn` or resumes the instruction.
+    #[test]
+    fn draw_bookkeeping_waits_for_a_parked_moved_replacement_choice() {
+        let mut sc = GameScenario::new();
+        let source = sc.add_creature(P0, "Optional draw redirect", 0, 0).id();
+        let drawn = sc.add_card_to_library_top(P0, "Mountain");
+        let mut state = sc.state;
+        state
+            .objects
+            .get_mut(&source)
+            .expect("replacement source remains on the battlefield")
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .valid_card(TargetFilter::Any)
+                    .description("May replace a drawn card's move.".to_string()),
+            );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &draw_one_ability(), &mut events)
+            .expect("the draw parks on the optional Moved replacement");
+        let crate::types::game_state::WaitingFor::ReplacementChoice { player, .. } =
+            state.waiting_for.clone()
+        else {
+            panic!("the inner Library → Hand move must park on a replacement choice");
+        };
+        assert_eq!(state.objects[&drawn].zone, Zone::Library);
+        assert_eq!(state.players[0].cards_drawn_this_turn, 0);
+        assert!(
+            !events.iter().any(
+                |event| matches!(event, GameEvent::CardDrawn { object_id, .. } if *object_id == drawn)
+            ),
+            "the parked card must not be recorded as drawn while it remains in the library"
+        );
+
+        state.priority_player = player;
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
+            .expect("declining the optional redirect settles the original draw");
+
+        assert_eq!(state.objects[&drawn].zone, Zone::Hand);
+        assert_eq!(state.players[0].cards_drawn_this_turn, 1);
+    }
+}
+
+/// CR 121.1 + CR 608.2c + CR 109.5: The `PlayerPerformedAction { Draw }` ledger
+/// emission fires once per settled draw INSTRUCTION, at draw-sequence completion
+/// (`resume_draw_sequence_outcome`). These tests drive the REAL production driver
+/// (`start_draw_sequence`), which internally delivers a multi-card draw
+/// unit-by-unit (count = 1 per card) — the exact shape production uses — and
+/// assert the emission granularity is per instruction, not per card. A direct
+/// `apply_draw_after_replacement` call with `count: 2` is deliberately NOT used:
+/// production never settles a multi-card draw in a single such call, so it would
+/// exercise a shape the engine doesn't drive.
+#[cfg(test)]
+mod draw_this_way_ledger_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0};
+
+    fn drew_action_events(events: &[GameEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    GameEvent::PlayerPerformedAction {
+                        action: PlayerActionKind::Draw,
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
+
+    fn card_drawn_events(events: &[GameEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::CardDrawn { .. }))
+            .count()
+    }
+
+    /// CR 121.1 + CR 608.2c: A TWO-card draw driven by the production sequence
+    /// (`start_draw_sequence(.., 2, ..)`) delivers two cards (two `CardDrawn`
+    /// events) but records the drawing player with exactly ONE
+    /// `PlayerPerformedAction { Draw }` — the emission is per settled draw
+    /// instruction, not per card. Revert-failing anchor: moving the emit back
+    /// into the per-unit `apply_draw_after_replacement` makes `drew_action_events`
+    /// == 2 (one per card) and fails the final assertion. This is the emission
+    /// side of ruling #2 ("if an opponent drew more than one card this way … you
+    /// still draw only one card for that player"); the `player_actions_this_way`
+    /// `HashSet` is the second line of defence, validated end-to-end in the
+    /// `cut_a_deal_draw_this_way_count` integration suite.
+    #[test]
+    fn multi_card_instruction_records_player_once_via_sequence() {
+        let mut sc = GameScenario::new();
+        sc.add_card_to_library_top(P0, "Island");
+        sc.add_card_to_library_top(P0, "Mountain");
+        let mut state = sc.state;
+
+        let mut events = Vec::new();
+        start_draw_sequence(&mut state, P0, 2, &mut events);
+
+        assert_eq!(
+            card_drawn_events(&events),
+            2,
+            "the two-card instruction must deliver two cards (per-card CardDrawn)"
+        );
+        assert_eq!(
+            drew_action_events(&events),
+            1,
+            "but the draw-action ledger event must fire exactly once per instruction, \
+             not once per card (CR 608.2c ruling #2)"
+        );
+    }
+
+    /// CR 121.1: A draw instruction that delivers no card (empty library — no top
+    /// card enters the hand, so no draw occurs) emits no
+    /// `PlayerPerformedAction { Draw }`, so a player who doesn't draw is never
+    /// counted (CR 608.2c ruling #1). This is the `frame.accumulated > 0` gate.
+    #[test]
+    fn empty_library_instruction_records_nothing_via_sequence() {
+        let sc = GameScenario::new();
+        let mut state = sc.state;
+
+        let mut events = Vec::new();
+        start_draw_sequence(&mut state, P0, 1, &mut events);
+
+        assert_eq!(
+            card_drawn_events(&events),
+            0,
+            "empty library delivers no card"
+        );
+        assert_eq!(
+            drew_action_events(&events),
+            0,
+            "a draw that delivers nothing must not record the player (CR 608.2c ruling #1)"
+        );
+    }
+
+    /// CR 121.1: Baseline — a normal one-card draw instruction records the drawing
+    /// player once, so ordinary draws still populate the ledger.
+    #[test]
+    fn single_card_instruction_records_player_once_via_sequence() {
+        let mut sc = GameScenario::new();
+        sc.add_card_to_library_top(P0, "Plains");
+        let mut state = sc.state;
+
+        let mut events = Vec::new();
+        start_draw_sequence(&mut state, P0, 1, &mut events);
+
+        assert_eq!(card_drawn_events(&events), 1);
+        assert_eq!(drew_action_events(&events), 1);
     }
 }

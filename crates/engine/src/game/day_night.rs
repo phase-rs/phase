@@ -157,6 +157,7 @@ mod tests {
             power: Some(4),
             toughness: Some(4),
             loyalty: None,
+            printed_loyalty: None,
             defense: None,
             card_types: CardType {
                 supertypes: vec![],
@@ -177,6 +178,7 @@ mod tests {
             casting_restrictions: vec![],
             casting_options: vec![],
             layout_kind: None,
+            parse_warnings: vec![],
         });
         id
     }

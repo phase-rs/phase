@@ -4,13 +4,20 @@ import { useTranslation } from "react-i18next";
 import type { ObjectId } from "../../adapter/types.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
-import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
+import { useCanActForWaitingState, usePlayerId, waitingPlayer } from "../../hooks/usePlayerId.ts";
 import { cardImageLookup } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
-import { COUNTER_COLORS, formatCounterTooltip, formatCounterType } from "../../viewmodel/cardProps.ts";
+import {
+  collectObjectActions,
+  deriveActivationAffordances,
+  resolveObjectActivation,
+} from "../../viewmodel/cardActionChoice.ts";
+import { COUNTER_COLORS, formatCounterType } from "../../viewmodel/cardProps.ts";
+import { getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
 import { CardImage } from "../card/CardImage.tsx";
+import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 
 interface Props {
   objectId: ObjectId;
@@ -18,6 +25,18 @@ interface Props {
    *  ratio. Caller controls so the dialog can pick a size that suits its
    *  available width budget without DialogAttachmentCard guessing. */
   widthPx: number;
+  /** Close the enclosing AttachmentsDialog. Called after any interaction that
+   *  advances engine state to a prompt the player resolves on the BOARD rather
+   *  than in this dialog — target-select (the enchant/equip target is a
+   *  battlefield object, not a dialog card) and activation (e.g. Equip
+   *  transitions to `EquipTarget`, which needs the board visible). The
+   *  multi-ability picker is the one exception: it floats above independently,
+   *  so the dialog closes only after the picker itself dispatches.
+   *
+   *  Optional: the non-interactive `AurasHoverPreview` (a `pointer-events-none`
+   *  glance panel) renders these cards purely for display, so no interaction —
+   *  hence no dismiss — is ever possible there and it omits the callback. */
+  onDismiss?: () => void;
 }
 
 /**
@@ -41,24 +60,24 @@ interface Props {
  *     would be blank anyway. Reading directly from gameStore.waitingFor /
  *     legalActionsByObject is the right source here.
  */
-export function DialogAttachmentCard({ objectId, widthPx }: Props) {
+export function DialogAttachmentCard({ objectId, widthPx, onDismiss }: Props) {
   const { t } = useTranslation("game");
   const playerId = usePlayerId();
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
 
-  // Target eligibility: pulled directly from the engine's WaitingFor state.
-  // Mirrors the same predicate `PlayerHud` uses for the player-as-target
-  // case (PlayerHud.tsx isValidTarget calc), specialized to Object targets.
+  // Target eligibility: pulled directly from the engine's WaitingFor state via
+  // the same authority the battlefield uses (`GameBoard` seeds
+  // `validTargetObjectIds` from `getWaitingForObjectChoiceIds`, and
+  // `PermanentCard` dispatches `ChooseTarget` on a click). A player-attached
+  // Aura (Curse cycle) has no host permanent, so it renders only here — reading
+  // a narrower prompt set than the board made it unreachable for every
+  // object-choice prompt other than plain targeting. CR 707.9: Copy Enchantment
+  // asks for an enchantment to copy via `CopyTargetChoice`, and an attached
+  // Curse is an enchantment permanent (CR 303.4a), so it must be clickable.
   const isValidTarget = useGameStore((s) => {
     const wf = s.waitingFor;
-    if (
-      wf?.type !== "TargetSelection"
-      && wf?.type !== "TriggerTargetSelection"
-    ) return false;
-    if (wf.data.player !== playerId) return false;
-    return (wf.data.selection?.current_legal_targets ?? []).some(
-      (t) => "Object" in t && t.Object === objectId,
-    );
+    if (waitingPlayer(wf) !== playerId) return false;
+    return getWaitingForObjectChoiceIds(wf).includes(objectId);
   });
 
   // Activation: collect every legal action the engine has registered against
@@ -66,25 +85,39 @@ export function DialogAttachmentCard({ objectId, widthPx }: Props) {
   // triggered) but the engine surfaces them through the same per-object
   // legal-action map that PermanentCard consumes on the battlefield.
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
+  const waitingFor = useGameStore((s) => s.waitingFor);
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const canActForWaitingState = useCanActForWaitingState();
   const objectActions = useMemo(
     () => (legalActionsByObject ? collectObjectActions(legalActionsByObject, objectId) : []),
     [legalActionsByObject, objectId],
   );
-  const isActivatable = objectActions.length > 0;
+  // THE single authority — the same affordance sets the battlefield ring reads,
+  // so this dialog can never offer an activation the board would refuse. It
+  // replaces an `objectActions.length > 0` test that had no WaitingFor gate and
+  // no seat gate.
+  const affordances = useMemo(
+    () =>
+      deriveActivationAffordances(waitingFor, canActForWaitingState, legalActionsByObject, objects),
+    [waitingFor, canActForWaitingState, legalActionsByObject, objects],
+  );
+  const isActivatable =
+    affordances.activatableObjectIds.has(objectId)
+    || affordances.manaTappableObjectIds.has(objectId);
 
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
-  const setEnchantmentsDialogPlayer = useUiStore((s) => s.setEnchantmentsDialogPlayer);
 
   const { handlers, firedRef } = useCardHover(objectId);
+
+  // CR 122.1 + CR 306.5c: the engine's counter-display projection is the single authority —
+  // it already dropped zero FINITE rows, split the loyalty total out of the pill strip, and
+  // ordered the pills, so nothing is filtered or sorted here. Called ABOVE the `!obj` early
+  // return: a hook below it would be conditional and break render order (`tsc` cannot see it).
+  const counters = pillsOf(useCounterDisplay(objectId));
 
   if (!obj) return null;
 
   const lookup = cardImageLookup(obj);
-  // Non-loyalty counters only — loyalty applies to planeswalkers, never Auras.
-  const counters = Object.entries(obj.counters).filter(
-    (entry): entry is [string, number] =>
-      entry[0] !== "loyalty" && entry[1] != null && entry[1] > 0,
-  );
 
   const sizeVars: CSSProperties = {
     "--card-w": `${widthPx}px`,
@@ -101,17 +134,37 @@ export function DialogAttachmentCard({ objectId, widthPx }: Props) {
       // Auto-close on target select: the user's intent was decisive ("I
       // picked this target"). The engine moves to the next prompt; leaving
       // the dialog mounted would obscure that next prompt for no reason.
-      setEnchantmentsDialogPlayer(null);
+      onDismiss?.();
       return;
     }
     if (isActivatable) {
-      if (objectActions.length === 1) {
-        dispatchAction(objectActions[0]);
-      } else {
-        // Multi-ability picker takes over; our dialog stays mounted so the
-        // user can see what they activated against (the modal stacks above
-        // via DialogHost z-ordering — both signals trigger `wrapped`).
-        setPendingAbilityChoice({ objectId, actions: objectActions });
+      // #506: the lone-action auto-dispatch decision belongs to the shared
+      // authority, never re-implemented here. `onDismiss` fires on both outcomes
+      // exactly as before — the board must be reachable for whatever the
+      // activation asks next (Equip → `EquipTarget`), and the multi-ability
+      // picker floats independently above this dialog.
+      const verdict = resolveObjectActivation(objectActions, obj, affordances, objectId);
+      switch (verdict.kind) {
+        case "dispatch":
+          dispatchAction(verdict.action);
+          onDismiss?.();
+          return;
+        case "choose":
+          setPendingAbilityChoice({ objectId, actions: verdict.actions });
+          onDismiss?.();
+          return;
+        case "none":
+          // Reachable only through the render→click staleness window: the cyan
+          // ring was painted from a bucket this click no longer sees. Doing
+          // nothing — and NOT dismissing — is correct, and is what the old
+          // if/else chain did.
+          return;
+        default: {
+          // CLAUDE.md "exhaustive match without wildcard fallbacks": a new
+          // ObjectActivation variant is a compile error here, never a silent drop.
+          const _exhaustive: never = verdict;
+          return _exhaustive;
+        }
       }
     }
   };
@@ -159,16 +212,22 @@ export function DialogAttachmentCard({ objectId, widthPx }: Props) {
         </div>
       )}
       {counters.length > 0 && (
-        <div className="absolute right-1 top-1 z-20 flex flex-col gap-0.5">
-          {counters.map(([type, count]) => (
-            <span
-              key={type}
-              title={formatCounterTooltip(type, count)}
-              className={`rounded px-1 text-[10px] font-bold text-white ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
-            >
-              {formatCounterType(type)} x{count}
-            </span>
-          ))}
+        <div className="absolute right-1 top-1 z-[60] flex flex-col gap-0.5">
+          {counters.map((row) => {
+            const type = row.counter;
+            // CR 732.2a / CR 701.34a: an accepted counter-growth loop pumps this counter
+            // unboundedly — render ∞ instead of the (still-finite) real count.
+            const unbounded = isUnbounded(row);
+            return (
+              <CounterTooltip key={type} type={type} count={row.count} isUnbounded={unbounded}>
+                <span
+                  className={`rounded px-1 text-[10px] font-bold text-white ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
+                >
+                  {formatCounterType(type)} {unbounded ? "∞" : `x${row.count}`}
+                </span>
+              </CounterTooltip>
+            );
+          })}
         </div>
       )}
     </div>

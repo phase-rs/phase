@@ -3,6 +3,7 @@ use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
+use crate::types::resolved_commands::ResolvedPlayerEdit;
 use crate::types::statics::StaticMode;
 
 /// CR 702.179f: Effects that refer to speed treat "no speed" as 0.
@@ -32,14 +33,26 @@ pub fn set_speed(
     new_speed: Option<u8>,
     events: &mut Vec<GameEvent>,
 ) {
-    let Some(player_state) = state.players.iter_mut().find(|p| p.id == player) else {
+    let Some(old_speed) = state
+        .players
+        .iter()
+        .find(|candidate| candidate.id == player)
+        .map(|candidate| candidate.speed)
+    else {
         return;
     };
-    let old_speed = player_state.speed;
     if old_speed == new_speed {
         return;
     }
-    player_state.speed = new_speed;
+    state
+        .resolve_and_apply_player_edit(
+            player,
+            ResolvedPlayerEdit::Speed {
+                old: old_speed,
+                new: new_speed,
+            },
+        )
+        .expect("live player speed transition must apply");
     events.push(GameEvent::SpeedChanged {
         player,
         old_speed,
@@ -109,10 +122,20 @@ pub fn decrease_speed(
 
 /// CR 702.179a: Start your engines checks whether a player controls a permanent with the keyword.
 pub fn controls_start_your_engines(state: &GameState, player: PlayerId) -> bool {
-    state.battlefield.iter().any(|id| {
+    controls_start_your_engines_in(state, player, &state.battlefield_phased_in_ids())
+}
+
+/// CR 702.179a: Snapshot-backed Start your engines predicate for SBA evaluation.
+pub fn controls_start_your_engines_in(
+    state: &GameState,
+    player: PlayerId,
+    battlefield_snapshot: &[ObjectId],
+) -> bool {
+    battlefield_snapshot.iter().any(|id| {
         state.objects.get(id).is_some_and(|obj| {
             // CR 702.26b: a phased-out permanent is treated as though it does not exist.
-            obj.controller == player
+            obj.zone == crate::types::zones::Zone::Battlefield
+                && obj.controller == player
                 && obj.is_phased_in()
                 && obj.has_keyword(&Keyword::StartYourEngines)
         })

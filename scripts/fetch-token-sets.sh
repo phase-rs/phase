@@ -23,10 +23,13 @@ fi
 mapfile -t CODES < <(
   # tokenSetCode can name a legacy token pseudo-set that MTGJSON no longer
   # publishes as its own file; the parent set file already carries data.tokens.
+  # tr strips the \r that Windows jq appends to every line — a code with a
+  # trailing \r malforms the download URL (curl exit 3: "URL rejected") for
+  # every set, and the resulting .missing markers then mask the retries.
   jq -r '(reduce .data[].code as $code ({}; .[$code] = true)) as $known_codes
     | .data[]
     | select(.tokenSetCode != null and .tokenSetCode != "")
-    | .code, (.tokenSetCode | select($known_codes[.]))' "$SET_LIST" | sort -u
+    | .code, (.tokenSetCode | select($known_codes[.]))' "$SET_LIST" | tr -d '\r' | sort -u
 )
 
 if [ "${#CODES[@]}" -eq 0 ]; then

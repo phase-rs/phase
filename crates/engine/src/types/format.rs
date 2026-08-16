@@ -1,4 +1,6 @@
-use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::database::legality::LegalityFormat;
 use crate::types::player::PlayerId;
@@ -83,7 +85,9 @@ pub enum SideboardPolicy {
     Unlimited,
 }
 
-/// Per-card override to the default constructed copy limit.
+/// A deck-construction copy ceiling for one card name: either unbounded or
+/// capped at `n`. Used at both levels of the rule — the format's default
+/// (see [`GameFormat::default_deck_copy_limit`]) and a card's printed override.
 ///
 /// CR 100.2a sets the default constructed limit to four of any card with a
 /// particular English name (basic lands excepted). A handful of cards print an
@@ -124,6 +128,47 @@ pub enum FormatTopology {
     },
 }
 
+/// Configuration for the limited range of influence option.
+///
+/// The engine does not implement limited-range rules yet. This type preserves
+/// the full per-seat configuration shape so external boundaries can reject it
+/// explicitly until the corresponding game-rule support exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RangeOfInfluenceConfig {
+    /// The number of seats away that each player can influence by default.
+    /// Zero is valid and means a player can influence only themself.
+    pub default_range: u8,
+    /// Per-seat exceptions to [`Self::default_range`].
+    #[serde(default)]
+    pub player_overrides: BTreeMap<PlayerId, u8>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RangeOfInfluenceConfigWire {
+    Current(RangeOfInfluenceConfig),
+    Legacy(u8),
+}
+
+fn deserialize_range_of_influence<'de, D>(
+    deserializer: D,
+) -> Result<Option<Box<RangeOfInfluenceConfig>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<RangeOfInfluenceConfigWire>::deserialize(deserializer).map(|range| {
+        range.map(|range| {
+            Box::new(match range {
+                RangeOfInfluenceConfigWire::Current(config) => config,
+                RangeOfInfluenceConfigWire::Legacy(default_range) => RangeOfInfluenceConfig {
+                    default_range,
+                    player_overrides: BTreeMap::new(),
+                },
+            })
+        })
+    })
+}
+
 /// Configuration for a game format, describing player counts, starting life, deck rules, etc.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FormatConfig {
@@ -131,11 +176,19 @@ pub struct FormatConfig {
     pub starting_life: i32,
     pub min_players: u8,
     pub max_players: u8,
+    /// CR 100.5: the format's **minimum** deck size. There is no maximum deck
+    /// size for non-Commander decks, so a 61-card Standard deck is legal and
+    /// this must be compared with `<`, never `==`.
+    ///
+    /// The command-zone formats are the exception: CR 903.5a makes 100 both the
+    /// minimum and the maximum, so an exact comparison is correct there — but
+    /// only there, and only when gated on `command_zone`.
     pub deck_size: u16,
     pub singleton: bool,
     pub command_zone: bool,
     pub commander_damage_threshold: Option<u8>,
-    pub range_of_influence: Option<u8>,
+    #[serde(default, deserialize_with = "deserialize_range_of_influence")]
+    pub range_of_influence: Option<Box<RangeOfInfluenceConfig>>,
     pub team_based: bool,
     /// CR 904.2a / CR 904.6: In default Archenemy, the single-player team is
     /// designated as the archenemy and takes the first turn.
@@ -239,6 +292,54 @@ impl GameFormat {
             | GameFormat::Archenemy
             | GameFormat::Planechase
             | GameFormat::Limited => SideboardPolicy::Unlimited,
+        }
+    }
+
+    /// CR 100.2a / CR 100.2b / CR 903.5b: Per-format default copy limit for a
+    /// single card name, before per-card overrides and the basic-land
+    /// exemption are applied.
+    ///
+    /// - `UpTo(4)` — CR 100.2a: constructed decks may contain no more than four
+    ///   of any card with a particular English name. Planechase and Archenemy
+    ///   build a constructed deck plus a supplementary deck (CR 100.2d), so
+    ///   they inherit the same limit.
+    /// - `UpTo(1)` — CR 903.5b: the Commander singleton rule, shared by every
+    ///   command-zone singleton variant.
+    /// - `Unlimited` — CR 100.2b: a limited deck may contain as many duplicates
+    ///   of a card as the product provides. Free-for-All and Two-Headed Giant
+    ///   are casual variants that restrict no card pool, and Momir supplies a
+    ///   fixed deck (CR 100.2a's limit never applies to a deck players do not
+    ///   construct).
+    ///
+    /// This is the format half of the copy rule only. `max_deck_copies` in
+    /// `game::deck_validation` is the single authority that combines it with
+    /// the basic-land exemption and a card's printed [`DeckCopyLimit`]
+    /// override; callers wanting "how many copies of this card are legal"
+    /// must use that, never this method alone.
+    pub fn default_deck_copy_limit(self) -> DeckCopyLimit {
+        match self {
+            GameFormat::Standard
+            | GameFormat::Pioneer
+            | GameFormat::Modern
+            | GameFormat::Premodern
+            | GameFormat::Legacy
+            | GameFormat::Vintage
+            | GameFormat::Historic
+            | GameFormat::Timeless
+            | GameFormat::Pauper
+            | GameFormat::Planechase
+            | GameFormat::Archenemy => DeckCopyLimit::UpTo(4),
+            GameFormat::Commander
+            | GameFormat::PauperCommander
+            | GameFormat::DuelCommander
+            | GameFormat::TinyLeaders
+            | GameFormat::Oathbreaker
+            | GameFormat::Brawl
+            | GameFormat::HistoricBrawl => DeckCopyLimit::UpTo(1),
+            GameFormat::Limited
+            | GameFormat::FreeForAll
+            | GameFormat::TwoHeadedGiant
+            | GameFormat::Momir => DeckCopyLimit::Unlimited,
         }
     }
 
@@ -449,7 +550,7 @@ impl GameFormat {
                 format: GameFormat::HistoricBrawl,
                 label: "Historic Brawl",
                 short_label: "HBR",
-                description: "60-card eternal singleton",
+                description: "100-card eternal singleton",
                 group: FormatGroup::Commander,
                 default_config: FormatConfig::historic_brawl(),
             },
@@ -569,6 +670,39 @@ impl FormatConfig {
                     "archenemy_player must be less than player_count ({player_count})"
                 ));
             }
+        }
+        if let Some(range) = &self.range_of_influence {
+            let max_radius = player_count / 2;
+            if range.default_range > max_radius {
+                return Err(format!(
+                    "range_of_influence.default_range must be at most {max_radius} for {player_count} players"
+                ));
+            }
+            for (&player, &radius) in &range.player_overrides {
+                if player.0 >= player_count {
+                    return Err(format!(
+                        "range_of_influence.player_overrides contains seat {} outside player_count ({player_count})",
+                        player.0
+                    ));
+                }
+                if radius > max_radius {
+                    return Err(format!(
+                        "range_of_influence.player_overrides[{}] must be at most {max_radius} for {player_count} players",
+                        player.0
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Rejects limited-range configuration until the engine implements its rules.
+    pub fn reject_unimplemented_range_of_influence(&self) -> Result<(), String> {
+        if self.range_of_influence.is_some() {
+            return Err(
+                "range_of_influence is not supported until limited-range rules are implemented"
+                    .to_string(),
+            );
         }
         Ok(())
     }
@@ -767,10 +901,13 @@ impl FormatConfig {
         }
     }
 
-    /// Historic Brawl: same rules as Brawl but with the broader Historic card pool.
+    /// Historic Brawl: Brawl's structural rules with the broader Historic card
+    /// pool and a 100-card deck (Arena's 100-card Brawl, formerly "Historic
+    /// Brawl" — distinct from 60-card Standard Brawl).
     pub fn historic_brawl() -> Self {
         FormatConfig {
             format: GameFormat::HistoricBrawl,
+            deck_size: 100,
             ..Self::brawl()
         }
     }
@@ -1005,6 +1142,20 @@ mod tests {
     }
 
     #[test]
+    fn format_config_brawl_deck_sizes() {
+        // Standard Brawl is 60 cards; Historic Brawl (Arena's 100-card Brawl)
+        // is 100. Both share the remaining structural rules.
+        let brawl = FormatConfig::brawl();
+        assert_eq!(brawl.deck_size, 60);
+        let historic = FormatConfig::historic_brawl();
+        assert_eq!(historic.deck_size, 100);
+        assert_eq!(historic.starting_life, brawl.starting_life);
+        assert!(historic.singleton);
+        assert!(historic.command_zone);
+        assert_eq!(historic.commander_damage_threshold, Some(21));
+    }
+
+    #[test]
     fn format_config_free_for_all() {
         let config = FormatConfig::free_for_all();
         assert_eq!(config.starting_life, 20);
@@ -1177,6 +1328,86 @@ mod tests {
             let deserialized: FormatConfig = serde_json::from_str(&json).unwrap();
             assert_eq!(config, deserialized);
         }
+    }
+
+    #[test]
+    fn range_of_influence_config_round_trips_with_player_overrides() {
+        let config = RangeOfInfluenceConfig {
+            default_range: 0,
+            player_overrides: BTreeMap::from([(PlayerId(1), 1), (PlayerId(3), 2)]),
+        };
+
+        let json = serde_json::to_value(&config).expect("range config serializes");
+        assert_eq!(json["default_range"], 0);
+        assert_eq!(json["player_overrides"]["1"], 1);
+        assert_eq!(json["player_overrides"]["3"], 2);
+        assert_eq!(
+            serde_json::from_value::<RangeOfInfluenceConfig>(json)
+                .expect("range config deserializes"),
+            config
+        );
+    }
+
+    #[test]
+    fn range_of_influence_config_defaults_missing_overrides_to_empty() {
+        let config: RangeOfInfluenceConfig =
+            serde_json::from_str(r#"{"default_range":0}"#).expect("range config deserializes");
+
+        assert_eq!(config.default_range, 0);
+        assert!(config.player_overrides.is_empty());
+    }
+
+    #[test]
+    fn legacy_scalar_range_of_influence_deserializes_and_remains_rejected() {
+        let mut serialized = serde_json::to_value(FormatConfig::standard())
+            .expect("format config serializes before legacy rewrite");
+        serialized["range_of_influence"] = serde_json::json!(1);
+
+        let config: FormatConfig =
+            serde_json::from_value(serialized).expect("legacy scalar range config deserializes");
+
+        assert_eq!(
+            config.range_of_influence,
+            Some(Box::new(RangeOfInfluenceConfig {
+                default_range: 1,
+                player_overrides: BTreeMap::new(),
+            }))
+        );
+        assert!(config
+            .reject_unimplemented_range_of_influence()
+            .expect_err("legacy enabled range must reach the normal feature gate")
+            .contains("not supported"));
+    }
+
+    #[test]
+    fn range_of_influence_validation_uses_actual_seating() {
+        let mut config = FormatConfig::commander();
+        config.range_of_influence = Some(Box::new(RangeOfInfluenceConfig {
+            default_range: 0,
+            player_overrides: BTreeMap::from([(PlayerId(1), 1), (PlayerId(3), 2)]),
+        }));
+        assert!(config.validate_for_player_count(4).is_ok());
+
+        config.range_of_influence.as_mut().unwrap().player_overrides =
+            BTreeMap::from([(PlayerId(4), 0)]);
+        assert!(config
+            .validate_for_player_count(4)
+            .expect_err("an override must name an occupied seat")
+            .contains("outside player_count"));
+
+        config.range_of_influence.as_mut().unwrap().player_overrides =
+            BTreeMap::from([(PlayerId(1), 3)]);
+        assert!(config
+            .validate_for_player_count(4)
+            .expect_err("an override cannot exceed the table radius")
+            .contains("player_overrides[1]"));
+
+        config.range_of_influence.as_mut().unwrap().player_overrides = BTreeMap::new();
+        config.range_of_influence.as_mut().unwrap().default_range = 3;
+        assert!(config
+            .validate_for_player_count(4)
+            .expect_err("a range cannot exceed the table radius")
+            .contains("at most 2"));
     }
 
     #[test]

@@ -5,7 +5,7 @@ import type { ParsedDeck } from "../deckParser";
 import { evaluateDeckCompatibility } from "../deckCompatibility";
 import { buildLegalAiDeckCatalog, filterByBracket, type AiDeckCandidate } from "../aiDeckCatalog";
 import { buildDeckCatalog } from "../deckCatalog";
-import { getCachedFeed, listSubscriptions } from "../feedService";
+import { getCachedFeed, getDeckFeedOrigin, listSubscriptions } from "../feedService";
 import { getSharedAdapter } from "../../adapter/wasm-adapter";
 import { loadPreconDeckMap } from "../../hooks/useDecks";
 import { FEED_DECK_ORIGINS_KEY, STORAGE_KEY_PREFIX } from "../../constants/storage";
@@ -35,6 +35,7 @@ vi.mock("../feedService", () => ({
     commander: deck.commander,
   })),
   getCachedFeed: vi.fn(),
+  getDeckFeedOrigin: vi.fn(),
   listSubscriptions: vi.fn(),
 }));
 
@@ -72,6 +73,7 @@ beforeEach(() => {
   localStorage.clear();
   vi.mocked(listSubscriptions).mockReturnValue([]);
   vi.mocked(getCachedFeed).mockReturnValue(null);
+  vi.mocked(getDeckFeedOrigin).mockReturnValue(null);
   vi.mocked(loadPreconDeckMap).mockResolvedValue(null);
   vi.mocked(evaluateDeckCompatibility).mockImplementation(async (parsed) =>
     compatibility(parsed.main[0]?.name !== "Illegal Starter")
@@ -82,6 +84,33 @@ beforeEach(() => {
 });
 
 describe("buildLegalAiDeckCatalog", () => {
+  it("keeps catalog compatibility checks serial so setup cannot flood the engine worker", async () => {
+    saveDeck("First", deck("First Card"));
+    saveDeck("Second", deck("Second Card"));
+    saveDeck("Third", deck("Third Card"));
+    let activeChecks = 0;
+    let maximumActiveChecks = 0;
+    vi.mocked(evaluateDeckCompatibility).mockImplementation(async () => {
+      activeChecks += 1;
+      maximumActiveChecks = Math.max(maximumActiveChecks, activeChecks);
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      activeChecks -= 1;
+      return compatibility(true);
+    });
+
+    const catalog = await buildLegalAiDeckCatalog({
+      selectedFormat: "Standard",
+      selectedMatchType: "Bo1",
+    });
+
+    expect(maximumActiveChecks).toBe(1);
+    expect(catalog.candidates.map((candidate) => candidate.id)).toEqual([
+      "saved:First",
+      "saved:Second",
+      "saved:Third",
+    ]);
+  });
+
   it("includes legal saved Pauper Commander user decks", async () => {
     saveDeck("PDH Legal", deck("Command Tower", "Murmuring Mystic"));
 

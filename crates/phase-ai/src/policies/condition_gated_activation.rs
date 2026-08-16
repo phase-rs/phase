@@ -191,10 +191,7 @@ mod tests {
                 source_id,
                 ability_index: 0,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Ability,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::Priority { player: AI },
@@ -210,6 +207,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         ConditionGatedActivationPolicy.verdict(&ctx)
     }
@@ -270,10 +268,7 @@ mod tests {
         let state = GameState::new_two_player(42);
         let candidate = CandidateAction {
             action: GameAction::PassPriority,
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Pass,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Pass),
         };
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::Priority { player: AI },
@@ -289,6 +284,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         assert_score(
             ConditionGatedActivationPolicy.verdict(&ctx),

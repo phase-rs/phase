@@ -1,4 +1,4 @@
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 function jsonResponse(data: unknown): Response {
@@ -119,6 +119,11 @@ describe("useCardImage", () => {
       findPrintingById: vi.fn(),
       getCardPrintings: vi.fn().mockResolvedValue([]),
       isCardImageRotatedSync: vi.fn().mockReturnValue(false),
+      // Report the art locale as already resolved so the hook's background
+      // loader short-circuits — this test is about token fallback, not
+      // localization.
+      isLocaleArtReady: vi.fn().mockReturnValue(true),
+      loadLocaleArt: vi.fn().mockResolvedValue(new Map()),
       resolveFaceIndexSync: vi.fn().mockReturnValue(null),
       resolveOracleIdSync: vi.fn().mockReturnValue(null),
       resolvePrintingImageUrl: vi.fn(),
@@ -146,5 +151,54 @@ describe("useCardImage", () => {
       subtypes: undefined,
       toughness: null,
     });
+  });
+
+  it("never returns the previous card's image after a rapid request change", async () => {
+    let resolveFirst: ((asset: { src: string; isRotated: boolean }) => void) | undefined;
+    let resolveSecond: ((asset: { src: string; isRotated: boolean }) => void) | undefined;
+    const fetchCardImageAsset = vi.fn((name: string) =>
+      new Promise<{ src: string; isRotated: boolean }>((resolve) => {
+        if (name === "First Card") resolveFirst = resolve;
+        else resolveSecond = resolve;
+      })
+    );
+    vi.doMock("../../services/scryfall.ts", () => ({
+      fetchCardImageAsset,
+      fetchCardImageAssetByOracleId: vi.fn(),
+      fetchTokenImageByRef: vi.fn(),
+      fetchTokenImageUrl: vi.fn(),
+      findPrintingById: vi.fn(),
+      getCardPrintings: vi.fn().mockResolvedValue([]),
+      isCardImageFlipLayoutSync: vi.fn().mockReturnValue(false),
+      isCardImageRotatedSync: vi.fn().mockReturnValue(false),
+      // See the note on the token-fallback mock above: the art locale is
+      // reported ready so the background loader never runs here.
+      isLocaleArtReady: vi.fn().mockReturnValue(true),
+      loadLocaleArt: vi.fn().mockResolvedValue(new Map()),
+      pickOldestPrinting: vi.fn(),
+      resolveFaceIndexSync: vi.fn().mockReturnValue(null),
+      resolveOracleIdSync: vi.fn().mockReturnValue(null),
+      resolvePrintingImageUrl: vi.fn(),
+    }));
+
+    const { useCardImage } = await import("../useCardImage");
+    const { result, rerender } = renderHook(
+      ({ name }) => useCardImage(name),
+      { initialProps: { name: "First Card" } },
+    );
+
+    await act(async () => {
+      resolveFirst?.({ src: "first.png", isRotated: false });
+    });
+    expect(result.current.src).toBe("first.png");
+
+    rerender({ name: "Second Card" });
+    expect(result.current.src).toBeNull();
+    expect(result.current.isLoading).toBe(true);
+
+    await act(async () => {
+      resolveSecond?.({ src: "second.png", isRotated: false });
+    });
+    expect(result.current.src).toBe("second.png");
   });
 });

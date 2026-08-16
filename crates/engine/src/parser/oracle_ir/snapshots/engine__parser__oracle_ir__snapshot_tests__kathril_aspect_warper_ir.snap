@@ -1,0 +1,295 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 327,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "When ~ enters, put a flying counter on any creature you control if a creature card in your graveyard has flying. Repeat this process for first strike, double strike, deathtouch, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance. Then put a +1/+1 counter on ~ for each counter put on a creature this way."
+      },
+      "node": {
+        "Trigger": {
+          "Parsed": {
+            "condition": "ChangesZone",
+            "partial_def": {
+              "mode": "ChangesZone",
+              "execute": null,
+              "valid_card": {
+                "type": "SelfRef"
+              },
+              "origin": null,
+              "destination": "Battlefield",
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "phase": null,
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": null,
+              "constraint": null,
+              "condition": null,
+              "batched": false
+            },
+            "body": {
+              "EffectChain": {
+                "clauses": [
+                  {
+                    "id": 0,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 1
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 0,
+                        "end_byte": 96,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 0
+                      },
+                      "fragment": "put a flying counter on any creature you control if a creature card in your graveyard has flying"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": null
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "PutCounter",
+                        "counter_type": "flying",
+                        "count": {
+                          "type": "Fixed",
+                          "value": 1
+                        },
+                        "target": {
+                          "type": "Typed",
+                          "type_filters": [
+                            "Creature"
+                          ],
+                          "controller": "You",
+                          "properties": []
+                        }
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": "Sentence",
+                    "condition": {
+                      "type": "QuantityCheck",
+                      "lhs": {
+                        "type": "Ref",
+                        "qty": {
+                          "type": "ObjectCount",
+                          "filter": {
+                            "type": "Typed",
+                            "type_filters": [
+                              "Creature"
+                            ],
+                            "controller": "You",
+                            "properties": [
+                              {
+                                "type": "InZone",
+                                "zone": "Graveyard"
+                              },
+                              {
+                                "type": "WithKeyword",
+                                "value": "Flying"
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      "comparator": "GE",
+                      "rhs": {
+                        "type": "Fixed",
+                        "value": 1
+                      }
+                    },
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  },
+                  {
+                    "id": 1,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 2
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 98,
+                        "end_byte": 236,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 1
+                      },
+                      "fragment": "Repeat this process for first strike, double strike, deathtouch, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance"
+                    },
+                    "disposition": {
+                      "ReplicatePerKeyword": {
+                        "keywords": [
+                          "FirstStrike",
+                          "DoubleStrike",
+                          "Deathtouch",
+                          "Hexproof",
+                          "Indestructible",
+                          "Lifelink",
+                          "Menace",
+                          "Reach",
+                          "Trample",
+                          "Vigilance"
+                        ],
+                        "kind": "CounterPlacement"
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "Unimplemented",
+                        "name": "repeat_process_for_keywords_placeholder",
+                        "description": null
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": "Sentence",
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  },
+                  {
+                    "id": 2,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 3
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 243,
+                        "end_byte": 311,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 2
+                      },
+                      "fragment": "put a +1/+1 counter on ~ for each counter put on a creature this way"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": null
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "PutCounter",
+                        "counter_type": "P1P1",
+                        "count": {
+                          "type": "Ref",
+                          "qty": {
+                            "type": "TrackedSetSize"
+                          }
+                        },
+                        "target": {
+                          "type": "SelfRef"
+                        }
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": null,
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  }
+                ],
+                "kind": "Spell",
+                "continuation_kind": null,
+                "player_scope_rewrite": "Apply",
+                "chain_rounding": null,
+                "actor": null,
+                "in_trigger": true,
+                "repeat_until": null
+              }
+            },
+            "modifiers": {
+              "optional": false,
+              "unless_pay": null,
+              "intervening_if": null,
+              "trigger_subject": {
+                "type": "SelfRef"
+              },
+              "first_time_limit": null,
+              "constraint": null,
+              "has_up_to": false,
+              "effect_lower": "put a flying counter on any creature you control if a creature card in your graveyard has flying. repeat this process for first strike, double strike, deathtouch, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance. then put a +1/+1 counter on ~ for each counter put on a creature this way.",
+              "relative_player_scope": null
+            },
+            "source_text": "When ~ enters, put a flying counter on any creature you control if a creature card in your graveyard has flying. Repeat this process for first strike, double strike, deathtouch, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance. Then put a +1/+1 counter on ~ for each counter put on a creature this way.",
+            "die_results": []
+          }
+        }
+      }
+    }
+  ],
+  "source_text": "When Kathril enters, put a flying counter on any creature you control if a creature card in your graveyard has flying. Repeat this process for first strike, double strike, deathtouch, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance. Then put a +1/+1 counter on Kathril for each counter put on a creature this way.",
+  "card_name": "Kathril, Aspect Warper"
+}

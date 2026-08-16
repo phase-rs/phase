@@ -5,6 +5,7 @@
 //! through `lobby_broker::validate_lobby_message`, so client-supplied names,
 //! codes, passwords, and tokens must be bounded before clone-heavy work.
 
+use draft_core::types::DraftKind;
 use lobby_broker::validation::{
     validate_optional_token, validate_required_label, validate_token, MAX_DISPLAY_NAME_LEN,
     MAX_DRAFT_SET_CODE_LEN, MAX_GAME_CODE_LEN, MAX_PASSWORD_LEN, MAX_PLAYER_COUNT,
@@ -19,12 +20,16 @@ pub fn guard_create_draft_with_settings(
     password: &Option<String>,
     timer_seconds: Option<u32>,
     pod_size: u8,
+    kind: DraftKind,
 ) -> Result<(), String> {
     validate_required_label("display_name", display_name, MAX_DISPLAY_NAME_LEN)?;
     validate_token("set_code", set_code, MAX_DRAFT_SET_CODE_LEN)?;
     validate_optional_token("password", password.as_deref(), MAX_PASSWORD_LEN)?;
-    if pod_size == 0 || pod_size > MAX_PLAYER_COUNT {
-        return Err(format!("pod_size must be between 1 and {MAX_PLAYER_COUNT}"));
+    let minimum_pod_size = if kind == DraftKind::Quick { 1 } else { 2 };
+    if !(minimum_pod_size..=MAX_PLAYER_COUNT).contains(&pod_size) {
+        return Err(format!(
+            "pod_size must be between {minimum_pod_size} and {MAX_PLAYER_COUNT}"
+        ));
     }
     if let Some(secs) = timer_seconds {
         if secs > MAX_TIMER_SECONDS {
@@ -60,6 +65,7 @@ pub fn guard_draft_action(draft_code: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use draft_core::types::DraftKind;
     use lobby_broker::validation::MAX_GAME_CODE_LEN;
 
     use super::{
@@ -69,13 +75,28 @@ mod tests {
 
     #[test]
     fn create_draft_accepts_valid_fields() {
-        assert!(guard_create_draft_with_settings("Alice", "TST", &None, None, 4).is_ok());
+        assert!(guard_create_draft_with_settings(
+            "Alice",
+            "TST",
+            &None,
+            None,
+            4,
+            DraftKind::Premier
+        )
+        .is_ok());
     }
 
     #[test]
     fn create_draft_rejects_oversized_display_name() {
-        let err =
-            guard_create_draft_with_settings(&"a".repeat(21), "TST", &None, None, 4).unwrap_err();
+        let err = guard_create_draft_with_settings(
+            &"a".repeat(21),
+            "TST",
+            &None,
+            None,
+            4,
+            DraftKind::Premier,
+        )
+        .unwrap_err();
         assert!(err.contains("display_name"));
     }
 

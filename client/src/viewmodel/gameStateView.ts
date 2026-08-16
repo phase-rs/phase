@@ -2,10 +2,12 @@ import type {
   GameAction,
   GameObject,
   GameState,
+  ObjectCounterDisplay,
   ObjectId,
   PlayerId,
   WaitingFor,
 } from "../adapter/types";
+import type { MultiplayerBoardLayout } from "../stores/preferencesStore";
 import {
   groupByName,
   partitionByType,
@@ -58,6 +60,41 @@ export function isOneOnOne(gameState: GameState | null): boolean {
   return getSeatCount(gameState) === 2;
 }
 
+export function isSplitBoardActive(
+  layout: MultiplayerBoardLayout,
+  seatCount: number,
+): boolean {
+  return layout === "split" && seatCount > 2;
+}
+
+export function shouldRenderFocusedOpponentTopRow(
+  layout: MultiplayerBoardLayout,
+  seatCount: number,
+): boolean {
+  return !isSplitBoardActive(layout, seatCount);
+}
+
+export function getVisibleBoardPlayerIds(
+  gameState: GameState | null,
+  viewerId: PlayerId,
+  focusedOpponent: PlayerId | null,
+  layout: MultiplayerBoardLayout,
+): PlayerId[] {
+  if (!gameState) return [];
+
+  const opponents = getOpponentIds(gameState, viewerId);
+  if (isOneOnOne(gameState)) {
+    return opponents[0] == null ? [viewerId] : [viewerId, opponents[0]];
+  }
+
+  if (isSplitBoardActive(layout, getSeatCount(gameState))) {
+    return [viewerId, ...opponents];
+  }
+
+  const focusedId = resolveFocusedOpponent(focusedOpponent, opponents);
+  return focusedId == null ? [viewerId] : [viewerId, focusedId];
+}
+
 export function getPlayerZoneIds(
   gameState: GameState | null,
   zone: "graveyard" | "exile" | "library",
@@ -69,77 +106,53 @@ export function getPlayerZoneIds(
   }
   if (zone === "library") {
     // library[0] = top of library (engine convention from zones.rs). Returns
-    // the full ordered library; the library viewer filters to the cards the
-    // engine has revealed to the viewer (isLibraryCardRevealedToViewer) so
-    // unrevealed cards are never shown.
+    // the full ordered library; the library viewer consumes each object's
+    // engine-projected display visibility before rendering it.
     return gameState.players[playerId]?.library ?? [];
   }
   return gameState.exile.filter((id) => gameState.objects[id]?.owner === playerId);
 }
 
 /**
- * Whether the engine has revealed a given library card's identity to `viewerId`.
- *
- * Mirrors the engine's library visibility (`crates/engine/src/game/visibility.rs`)
- * using the explicit reveal sets — NEVER the card name. In single-player the
- * client renders the raw, unredacted state (the `showAiHand` debug toggle depends
- * on it), so `name !== "Hidden Card"` is always true and cannot be used to infer
- * visibility; doing so leaks every opponent library card. This is the same
- * pattern `OpponentHand` uses for opponent hand cards.
- *
- * Deliberately excludes `public_revealed_cards`: the engine does not un-redact
- * library cards by that persistent memory set (a card revealed once and put back
- * must not leak its new position).
+ * Whether the engine has projected a library card's identity for this viewer.
+ * The display layer reads the per-object projection; it does not reconstruct
+ * visibility from reveal, look, or product-knowledge state.
  */
 export function isLibraryCardRevealedToViewer(
   gameState: GameState | null,
   objectId: ObjectId,
-  viewerId: PlayerId,
+  _viewerId: PlayerId,
 ): boolean {
-  if (!gameState) return false;
-  // CR 701.20b: publicly revealed top cards (RevealTop, "play with the top card
-  // revealed") are visible to every player.
-  if (gameState.revealed_cards?.includes(objectId)) return true;
-  // CR 701.20e: a private "look at the top card" (Mishra's Bauble at an
-  // opponent's library; your own scry look) surfaces the peeked ids only to the
-  // looking player.
-  return (
-    gameState.private_look_player === viewerId &&
-    (gameState.private_look_ids?.includes(objectId) ?? false)
-  );
+  return gameState?.objects[objectId]?.display_visible_to_viewer ?? false;
 }
 
 /**
  * Whether a face-down card sitting in the shared Exile zone is visible to
  * `viewerId`.
  *
- * Mirrors the engine's `hidden_facedown_exile_ids` gate
- * (`crates/engine/src/game/visibility.rs`, CR 406.3 + CR 702.75a +
- * CR 702.143e): a foretold card's owner may look at it, and the controller of
- * the permanent that Hideaway-exiled a card may look at it. Every other
- * face-down exile — including a plain `TrackedBySource` link that grants no
- * look-permission (Bomat Courier, Necropotence, Asmodeus) — stays hidden.
- *
- * Like `isLibraryCardRevealedToViewer` above, this exists because single-player
- * renders the raw, unredacted state: `obj.face_down` alone can't distinguish
- * "hidden from this viewer" from "visible to this viewer", and the object's
- * `name`/`printed_ref` carry the real identity regardless of viewer. Used by
- * the exile `ZoneViewer` to keep an opponent's Hideaway-exiled card (or a
- * non-owner's foretold exile) from leaking its name or image.
+ * The rules permissions (Foretell, Hideaway, and face-down look effects) are
+ * resolved by Rust before this value reaches the client.
  */
 export function isFaceDownExileCardVisibleToViewer(
+  _gameState: GameState | null,
+  obj: GameObject,
+  _viewerId: PlayerId,
+): boolean {
+  return obj.face_down && (obj.display_visible_to_viewer ?? false);
+}
+
+/**
+ * Whether `viewerId` may see the identity of `obj` for the card-report picker.
+ *
+ * Rust resolves every zone and reveal rule into `display_visible_to_viewer`.
+ * Conservative: hides on an omitted projection, never leaks.
+ */
+export function isObjectReportableToViewer(
   gameState: GameState | null,
   obj: GameObject,
-  viewerId: PlayerId,
+  _viewerId: PlayerId,
 ): boolean {
-  if (!gameState || !obj.face_down) return false;
-  if (obj.foretold && obj.owner === viewerId) return true;
-  return (gameState.exile_links ?? []).some(
-    (link) =>
-      link.exiled_id === obj.id &&
-      link.kind === "HideawayLookable" &&
-      gameState.objects[link.source_id]?.controller === viewerId,
-  );
+  return gameState != null && (obj.display_visible_to_viewer ?? false);
 }
 
 export function getWaitingForObjectChoiceIds(
@@ -192,6 +205,7 @@ export type BoardChoiceIntent =
   | "return"
   | "exile"
   | "tap"
+  | "untap"
   | "crew"
   | "saddle"
   | "station"
@@ -203,19 +217,26 @@ export type BoardChoiceSelection =
   | { type: "single"; immediate: true }
   | { type: "exactCount"; count: number; immediate?: boolean }
   | { type: "rangeCount"; min: number; max: number }
-  | { type: "totalPowerAtLeast"; power: number }
+  // `contributions` maps an eligible object id to the power it contributes
+  // toward the threshold. Supplied by the engine for Crew (CR 702.122a), where
+  // "as though its power were N greater" / "using its toughness" make the
+  // contribution differ from printed power; when absent (Ward-sacrifice total
+  // power), the summation falls back to raw power.
+  | { type: "totalPowerAtLeast"; power: number; contributions?: Record<ObjectId, number> }
   // CR 107.1c + CR 701.21a (Slaughter the Strong): keep any subset whose
   // combined power is at most `power`; selecting beyond it blocks confirm.
   | { type: "totalPowerAtMost"; power: number };
 
 export type BoardChoiceResponse =
   | { type: "SelectCards" }
+  | { type: "ChooseUntap"; objectId: ObjectId }
   | { type: "CrewVehicle"; vehicleId: ObjectId }
   | { type: "ActivateStation"; spacecraftId: ObjectId }
   | { type: "SaddleMount"; mountId: ObjectId }
   | { type: "ChooseRingBearer" }
   | { type: "HarmonizeTap" }
-  | { type: "ChooseKeptCreatures" };
+  | { type: "ChooseKeptCreatures" }
+  | { type: "ChooseKeptPermanents" };
 
 export interface BoardChoiceView {
   player: PlayerId;
@@ -225,12 +246,36 @@ export interface BoardChoiceView {
   response: BoardChoiceResponse;
   sourceId?: ObjectId;
   skipAction?: GameAction;
+  skipLabel?: "keepTapped";
   cancelAction?: GameAction;
+}
+
+/**
+ * Zip the engine's parallel `eligible_creatures` / `contributions` arrays into a
+ * lookup from object id to its adjusted crew/saddle contribution. The engine
+ * emits them index-aligned (CR 702.122a / 702.171a); a length mismatch falls
+ * back to an empty map so the caller degrades to raw power rather than misreads.
+ */
+function zipContributions(
+  eligibleCreatures: ObjectId[],
+  contributions?: number[],
+): Record<ObjectId, number> {
+  const map: Record<ObjectId, number> = {};
+  if (!contributions || eligibleCreatures.length !== contributions.length) {
+    return map;
+  }
+  eligibleCreatures.forEach((id, index) => {
+    map[id] = contributions[index];
+  });
+  return map;
 }
 
 function payCostSourceId(data: Extract<WaitingFor, { type: "PayCost" }>["data"]): ObjectId | undefined {
   if (data.resume.type === "ManaAbility") {
     return (data.resume.ManaAbility as { source_id?: ObjectId } | undefined)?.source_id;
+  }
+  if (data.resume.type === "Resolution") {
+    return undefined;
   }
   return (data.resume.Spell as { object_id?: ObjectId } | undefined)?.object_id;
 }
@@ -269,6 +314,8 @@ export function getBoardChoiceView(
         intent = "return";
       } else if (waitingFor.data.destination === "Exile") {
         intent = "exile";
+      } else if (waitingFor.data.effect_kind === "Untap") {
+        intent = "untap";
       }
       if (!intent) return null;
       const minCount = waitingFor.data.up_to === true ? waitingFor.data.min_count ?? 0 : waitingFor.data.count;
@@ -293,6 +340,39 @@ export function getBoardChoiceView(
         response: { type: "ChooseKeptCreatures" },
         sourceId: waitingFor.data.source_id,
       };
+    // CR 101.4 + CR 701.21a: exact keeper-cardinality selection. The engine
+    // supplies the legal pool and authoritative count; the board is display
+    // only and submits the typed choice action below.
+    case "KeepExactPermanentsChoice":
+      return {
+        player: waitingFor.data.player,
+        objectIds: waitingFor.data.eligible,
+        intent: "keep",
+        selection: { type: "exactCount", count: waitingFor.data.required_count },
+        response: { type: "ChooseKeptPermanents" },
+        sourceId: waitingFor.data.source_id,
+      };
+    case "ChooseUntapSubset":
+      return {
+        player: waitingFor.data.player,
+        objectIds: waitingFor.data.group,
+        intent: "untap",
+        selection: { type: "rangeCount", min: 0, max: waitingFor.data.max },
+        response: { type: "SelectCards" },
+      };
+    case "UntapChoice": {
+      const objectId = waitingFor.data.candidates[0];
+      if (objectId == null) return null;
+      return {
+        player: waitingFor.data.player,
+        objectIds: [objectId],
+        intent: "untap",
+        selection: { type: "single", immediate: true },
+        response: { type: "ChooseUntap", objectId },
+        skipAction: { type: "ChooseUntap", data: { object_id: objectId, untap: false } },
+        skipLabel: "keepTapped",
+      };
+    }
     case "PayCost": {
       if (!isBattlefieldCostChoice(waitingFor, objects)) return null;
       switch (waitingFor.data.kind.type) {
@@ -356,16 +436,31 @@ export function getBoardChoiceView(
         player: waitingFor.data.player,
         objectIds: waitingFor.data.eligible_creatures,
         intent: "crew",
-        selection: { type: "totalPowerAtLeast", power: waitingFor.data.crew_power },
+        selection: {
+          type: "totalPowerAtLeast",
+          power: waitingFor.data.crew_power,
+          contributions: zipContributions(
+            waitingFor.data.eligible_creatures,
+            waitingFor.data.contributions,
+          ),
+        },
         response: { type: "CrewVehicle", vehicleId: waitingFor.data.vehicle_id },
         sourceId: waitingFor.data.vehicle_id,
+        cancelAction: { type: "CancelCast" },
       };
     case "SaddleMount":
       return {
         player: waitingFor.data.player,
         objectIds: waitingFor.data.eligible_creatures,
         intent: "saddle",
-        selection: { type: "totalPowerAtLeast", power: waitingFor.data.saddle_power },
+        selection: {
+          type: "totalPowerAtLeast",
+          power: waitingFor.data.saddle_power,
+          contributions: zipContributions(
+            waitingFor.data.eligible_creatures,
+            waitingFor.data.contributions,
+          ),
+        },
         response: { type: "SaddleMount", mountId: waitingFor.data.mount_id },
         sourceId: waitingFor.data.mount_id,
       };
@@ -446,6 +541,8 @@ export function buildBoardChoiceAction(
   switch (choice.response.type) {
     case "SelectCards":
       return { type: "SelectCards", data: { cards: selectedIds } };
+    case "ChooseUntap":
+      return { type: "ChooseUntap", data: { object_id: choice.response.objectId, untap: true } };
     case "CrewVehicle":
       return {
         type: "CrewVehicle",
@@ -467,6 +564,8 @@ export function buildBoardChoiceAction(
       return { type: "HarmonizeTap", data: { creature_id: selectedIds[0] } };
     case "ChooseKeptCreatures":
       return { type: "ChooseKeptCreatures", data: { kept: selectedIds } };
+    case "ChooseKeptPermanents":
+      return { type: "ChooseKeptPermanents", data: { kept: selectedIds } };
   }
 }
 
@@ -486,8 +585,14 @@ export function boardChoiceSelectedPower(
   // the total, so a 5/-1 pair fits a cap of 4. Crew/Saddle-style
   // `totalPowerAtLeast` contributes positive power only.
   const clampNegative = choice.selection.type === "totalPowerAtLeast";
+  // CR 702.122a / 702.171a: for Crew/Saddle the engine supplies each creature's
+  // adjusted contribution (Pilot tokens' "+2 greater", Giant Ox's toughness).
+  // Prefer it over printed power so the UI gates on the same value the engine
+  // validates; fall back to raw power when the engine sent no contributions.
+  const contributions =
+    choice.selection.type === "totalPowerAtLeast" ? choice.selection.contributions : undefined;
   return selectedIds.reduce((sum, id) => {
-    const power = objects?.[id]?.power ?? 0;
+    const power = contributions?.[id] ?? objects?.[id]?.power ?? 0;
     return sum + (clampNegative ? Math.max(power, 0) : power);
   }, 0);
 }
@@ -648,12 +753,25 @@ export function buildPlayerBattlefieldView(
       (id): id is ObjectId => id != null,
     ),
   );
-  return buildPlayerBattlefieldViewFromObjects(playerObjects, ringBearerIds);
+  // CR 732.2a: engine-authored ∞-pile membership (accepted object-growth loop).
+  // Read exactly like ring_bearer — the adapter attaches `derived` onto gameState.
+  const unboundedPileIds = new Set(gameState.derived?.unbounded_pile ?? []);
+  // CR 122.1: the engine's complete counter-display projection is part of the group IDENTITY —
+  // two permanents that render different counter rows must not share a representative. Read
+  // exactly like `unbounded_pile` above.
+  return buildPlayerBattlefieldViewFromObjects(
+    playerObjects,
+    ringBearerIds,
+    unboundedPileIds,
+    gameState.derived?.counter_display,
+  );
 }
 
 export function buildPlayerBattlefieldViewFromObjects(
   playerObjects: GameObject[],
   ringBearerIds: ReadonlySet<ObjectId> = new Set(),
+  unboundedPileIds: ReadonlySet<ObjectId> = new Set(),
+  counterDisplay: Record<string, ObjectCounterDisplay> | undefined,
 ): PlayerBattlefieldView {
   const partition = partitionByType(playerObjects);
   const objectMap = new Map(playerObjects.map((object) => [object.id, object]));
@@ -663,11 +781,11 @@ export function buildPlayerBattlefieldViewFromObjects(
       .filter(Boolean) as GameObject[];
 
   return {
-    creatures: groupByName(resolveObjects(partition.creatures), ringBearerIds),
-    lands: groupByName(resolveObjects(partition.lands), ringBearerIds),
-    support: groupByName(resolveObjects(partition.support), ringBearerIds),
-    planeswalkers: groupByName(resolveObjects(partition.planeswalkers), ringBearerIds),
-    other: groupByName(resolveObjects(partition.other), ringBearerIds),
+    creatures: groupByName(resolveObjects(partition.creatures), ringBearerIds, unboundedPileIds, counterDisplay),
+    lands: groupByName(resolveObjects(partition.lands), ringBearerIds, unboundedPileIds, counterDisplay),
+    support: groupByName(resolveObjects(partition.support), ringBearerIds, unboundedPileIds, counterDisplay),
+    planeswalkers: groupByName(resolveObjects(partition.planeswalkers), ringBearerIds, unboundedPileIds, counterDisplay),
+    other: groupByName(resolveObjects(partition.other), ringBearerIds, unboundedPileIds, counterDisplay),
   };
 }
 

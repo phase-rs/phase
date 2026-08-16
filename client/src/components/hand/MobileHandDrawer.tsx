@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
+import { spellCostDisplay } from "../../viewmodel/costLabel.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -17,10 +18,12 @@ import {
 } from "../../viewmodel/cardActionChoice.ts";
 import { useCardOrganizer } from "../modal/cardChoice/useCardOrganizer.ts";
 import { CardOrganizerToolbar } from "../modal/cardChoice/CardOrganizerToolbar.tsx";
+import { StormCopyBadge } from "./StormCopyBadge.tsx";
 
 // Stable empty lookup so an undefined `objects` (pre-game) never busts the
 // organizer's filter memo with a fresh `{}` each render.
 const EMPTY_OBJECTS: Record<string, GameObject> = {};
+const EMPTY_STORM_COUNTS: Record<string, number> = {};
 
 export function MobileHandDrawer() {
   const { t } = useTranslation("game");
@@ -29,6 +32,9 @@ export function MobileHandDrawer() {
   const playerId = usePerspectivePlayerId();
   const player = useGameStore((s) => s.gameState?.players[playerId]);
   const objects = useGameStore((s) => s.gameState?.objects);
+  const prospectiveStormCounts = useGameStore(
+    (s) => s.gameState?.derived?.prospective_storm_counts ?? EMPTY_STORM_COUNTS,
+  );
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
@@ -199,6 +205,7 @@ export function MobileHandDrawer() {
                     manaCost={obj.mana_cost}
                     isPlayable={isPlayable}
                     hasPriority={hasPriority}
+                    stormCopyCount={prospectiveStormCounts[String(obj.id)]}
                     onPlay={playCard}
                     onDebugOpen={handleDebugOpen}
                   />
@@ -218,6 +225,7 @@ interface DrawerCardProps {
   manaCost: ManaCost;
   isPlayable: boolean;
   hasPriority: boolean;
+  stormCopyCount?: number;
   onPlay: (objectId: number) => void;
   onDebugOpen: (objectId: number, x: number, y: number) => void;
 }
@@ -228,6 +236,7 @@ const DrawerCard = memo(function DrawerCard({
   manaCost,
   isPlayable,
   hasPriority,
+  stormCopyCount,
   onPlay,
   onDebugOpen,
 }: DrawerCardProps) {
@@ -235,9 +244,7 @@ const DrawerCard = memo(function DrawerCard({
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
   const effectiveCost = useGameStore((s) => s.spellCosts[String(objectId)]);
   const { src } = useCardImage(cardName, { size: "normal" });
-  const displayCost = effectiveCost ?? manaCost;
-  const isReduced = effectiveCost?.type === "Cost" && manaCost.type === "Cost"
-    && (effectiveCost.generic < manaCost.generic || effectiveCost.shards.length < manaCost.shards.length);
+  const { displayCost, isReduced } = spellCostDisplay(effectiveCost, manaCost);
 
   // Mouse hover (desktop) + long-press (touch) both open the card preview, and
   // the hook tags the element with `data-card-hover` so usePreviewDismiss's
@@ -292,7 +299,14 @@ const DrawerCard = memo(function DrawerCard({
       ) : (
         <div className="h-full w-full bg-gray-700" />
       )}
-      <ManaCostPips cost={displayCost} isReduced={isReduced} className="absolute right-[4%] top-[2%]" />
+      {/* @container overlay sized to the card so the pips scale in cqi with the
+          drawer card's width instead of a fixed px size. */}
+      <div className="pointer-events-none absolute inset-0 @container">
+        <ManaCostPips cost={displayCost} isReduced={isReduced} size="fluid" />
+      </div>
+      {stormCopyCount !== undefined && (
+        <StormCopyBadge count={stormCopyCount} variant="drawer" />
+      )}
     </button>
   );
 });

@@ -304,6 +304,7 @@ fn setup_breeches_runtime(seed: u64) -> (GameState, ObjectId, ObjectId) {
         controller: PlayerId(0),
         object_id: spell,
         card_id: CardId(3),
+        cast_mana_value: None,
     });
 
     let parsed = parse_breeches();
@@ -315,26 +316,9 @@ fn setup_breeches_runtime(seed: u64) -> (GameState, ObjectId, ObjectId) {
 
     let trigger_event = state.current_trigger_event.clone();
     let mut events = Vec::new();
-    push_pending_trigger_to_stack(
-        &mut state,
-        PendingTrigger {
-            source_id: breeches,
-            controller: PlayerId(0),
-            condition: None,
-            ability,
-            timestamp: 0,
-            target_constraints: Vec::new(),
-            distribute: None,
-            trigger_event,
-            modal: None,
-            mode_abilities: vec![],
-            description: None,
-            may_trigger_origin: None,
-            subject_match_count: None,
-            die_result: None,
-        },
-        &mut events,
-    );
+    let mut pending = PendingTrigger::ordinary(breeches, PlayerId(0), None, Box::new(ability), 0);
+    pending.trigger_event = trigger_event;
+    push_pending_trigger_to_stack(&mut state, pending, &mut events);
 
     (state, spell, breeches)
 }
@@ -577,10 +561,11 @@ fn breeches_lost_flip_damage_goes_on_stack_and_uses_spell_mana_value() {
 /// assert the reflexive neither fired on the lost flip nor lingered to fire on
 /// the later won flip.
 ///
-/// Revert-discriminating: without the `reflexive_coin_flip_resolved_without_match`
-/// discard, the one-shot `WhenNextEvent` would survive the lost flip and fire on
-/// the subsequent won flip — `state.delayed_triggers` would be non-empty after
-/// the lost flip and the won flip would push a spurious reflexive trigger.
+/// Revert-discriminating: without the general reflexive-discard rule (an
+/// unmatched `Reflexive` `WhenNextEvent` discarded on its creation-batch check),
+/// the one-shot would survive the lost flip and fire on the subsequent won flip —
+/// `state.delayed_triggers` would be non-empty after the lost flip and the won
+/// flip would push a spurious reflexive trigger.
 #[test]
 fn nonmatching_reflexive_coin_flip_trigger_is_discarded_not_left_pending() {
     use engine::game::triggers::check_delayed_triggers;
@@ -614,15 +599,18 @@ fn nonmatching_reflexive_coin_flip_trigger_is_discarded_not_left_pending() {
     let condition = DelayedTriggerCondition::WhenNextEvent {
         trigger: Box::new(trigger_def),
         or_trigger: None,
-        lifetime: engine::types::ability::DelayedTriggerLifetime::ThisTurn,
+        // CR 603.12: a reflexive coin-flip trigger carries the `Reflexive`
+        // lifetime (the parser emits it via `build_reflexive_coin_flip_trigger`);
+        // the general reflexive-discard rule keys on this lifetime.
+        lifetime: engine::types::ability::DelayedTriggerLifetime::Reflexive,
     };
-    state.delayed_triggers.push(DelayedTrigger {
+    state.delayed_triggers.push(DelayedTrigger::new(
         condition,
-        ability: build_resolved_from_def(&won_inner, source, PlayerId(0)),
-        controller: PlayerId(0),
-        source_id: source,
-        one_shot: true,
-    });
+        Box::new(build_resolved_from_def(&won_inner, source, PlayerId(0))),
+        PlayerId(0),
+        source,
+        true,
+    ));
 
     let life_before = state.players[0].life;
 

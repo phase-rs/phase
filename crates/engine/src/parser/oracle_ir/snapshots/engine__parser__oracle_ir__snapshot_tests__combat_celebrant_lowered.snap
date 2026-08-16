@@ -1,0 +1,110 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Exerted",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "SetTapState",
+          "target": {
+            "type": "Typed",
+            "type_filters": [
+              "Creature"
+            ],
+            "controller": "You",
+            "properties": [
+              {
+                "type": "Another"
+              }
+            ]
+          },
+          "scope": {
+            "type": "All"
+          },
+          "state": {
+            "type": "Untap"
+          }
+        },
+        "cost": null,
+        "sub_ability": {
+          "kind": "Spell",
+          "effect": {
+            "type": "AdditionalPhase",
+            "target": {
+              "type": "Controller"
+            },
+            "phase": "BeginCombat",
+            "after": "EndCombat",
+            "followed_by": [],
+            "count": {
+              "type": "Fixed",
+              "value": 1
+            },
+            "attacker_restriction": null
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": null,
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        },
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": {
+        "type": "SelfRef"
+      },
+      "origin": null,
+      "destination": null,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "If ~ hasn't been exerted this turn, you may exert it as it attacks. When you do, untap all other creatures you control and after this phase, there is an additional combat phase.",
+      "constraint": null,
+      "condition": null,
+      "batched": false
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": [],
+  "parseWarnings": [
+    {
+      "type": "SwallowedClause",
+      "detector": "Duration_ThisTurn",
+      "description": "If this creature hasn't been exerted this turn, you may exert it as it attacks. When you do, untap all other creatures you control and after",
+      "line_index": 0,
+      "unit_span": {
+        "first_line": 0,
+        "last_line": 0,
+        "start_byte": 0,
+        "end_byte": 252,
+        "precision": "Exact",
+        "ordinal_within_span": 0
+      },
+      "items": [
+        0
+      ]
+    }
+  ]
+}

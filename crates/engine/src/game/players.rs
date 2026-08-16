@@ -3,6 +3,7 @@ use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
 use crate::types::game_state::LinkedExileSnapshot;
 use crate::types::identifiers::ObjectId;
+use crate::types::phase::TurnDirection;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -12,6 +13,55 @@ pub fn is_alive(state: &GameState, player: PlayerId) -> bool {
         .players
         .iter()
         .any(|p| p.id == player && !p.is_eliminated)
+}
+
+/// May this seat be CHOSEN AT ALL — whether the choice is a target (CR 115.1) or not
+/// (CR 115.10a)? The EXISTENCE half only.
+///
+/// CR 800.4: "multiplayer games can continue after one or more players have left the
+/// game" — a departed seat is no longer one of CR 102.1's "people in the game", so it is
+/// not choosable by anything.
+///
+/// CR 702.26b as an explicit MIRROR, never as authority: 702.26b is PERMANENT phasing
+/// ("a phased-out permanent is treated as though it does not exist"); the engine's
+/// PLAYER-level phased-out flag mirrors that wording. The MIRROR label is load-bearing —
+/// 702.26b is not a rule about players and must not be read as one.
+///
+/// NOTE the CR set deliberately does NOT include CR 800.4a: that rule governs a departed
+/// player's OBJECTS, control effects and priority — not the legality of a choice.
+///
+/// TARGETED choices need MORE than this: see [`crate::game::targeting::player_is_legal_target`],
+/// which adds the targeting-only exclusions. CR 115.10a is the boundary — a seat that is
+/// merely *chosen* (CR 701.34a proliferate, CR 701.30b clash, CR 702.132a assist) is not a
+/// target, so those exclusions must NOT be applied here. Applying them would refuse a
+/// legal choice, which is exactly the over-veto class this split exists to prevent.
+///
+/// This is the choke point for the CHOICE-ENUMERATION class: every seam that materializes
+/// a list of seats offered to a player to pick from routes through this function (directly
+/// or through [`choosable_opponents`]), so the enumerating sides cannot drift apart.
+pub fn player_exists_for_choice(state: &GameState, player: PlayerId) -> bool {
+    is_alive(state, player)
+        && !state
+            .players
+            .iter()
+            .any(|p| p.id == player && p.is_phased_out())
+}
+
+/// CR 607.2d / CR 607.2m (by analogy): true iff `player`'s durable per-player
+/// `chosen_attributes` records a `ChosenAttribute::Label` equal to `label`
+/// (case-insensitive). Single authority consulted by every "player who last
+/// chose <anchor>" read site — `TargetFilter::PlayerWhoChoseLabel` (land-drop
+/// static), `FilterProp::ControllerChoseLabel` (creature anthem), and the
+/// `SwapChosenLabels` chaos effect — so the anchor-label predicate is defined
+/// exactly once. Case-insensitive so parser canonicalization never desyncs.
+pub fn player_last_chose_label(state: &GameState, player: PlayerId, label: &str) -> bool {
+    state.players.iter().any(|p| {
+        p.id == player
+            && p.chosen_attributes.iter().any(|a| {
+                matches!(a, crate::types::ability::ChosenAttribute::Label(l)
+                    if l.eq_ignore_ascii_case(label))
+            })
+    })
 }
 
 /// CR 102.1 / CR 500.1: Next living player in seat (turn) order.
@@ -67,6 +117,37 @@ pub fn previous_player(state: &GameState, current: PlayerId) -> PlayerId {
     current
 }
 
+/// CR 103.1: Seat index reached by walking `offset` seats from `start_idx` in
+/// the current turn-order direction. `Normal` walks forward (clockwise, the
+/// CR 103.1 default); `Reversed` walks backward (Temple of Atropos, Aeon Engine,
+/// Time Distortion). This is the SINGLE authority for turn-order direction —
+/// physical seating (`neighbor`/`next_player`/`previous_player`) is deliberately
+/// NOT routed through it, since "the player to your left" is fixed regardless of
+/// turn direction (Pramikon, Sky Rampart). The `Reversed` arithmetic matches the
+/// backward walk in `previous_player`.
+pub(crate) fn turn_order_index(
+    start_idx: usize,
+    offset: usize,
+    len: usize,
+    dir: TurnDirection,
+) -> usize {
+    match dir {
+        TurnDirection::Normal => (start_idx + offset) % len,
+        TurnDirection::Reversed => (start_idx + len - (offset % len)) % len,
+    }
+}
+
+/// CR 101.4 / CR 103.1: Next living player to take a turn, in the current
+/// turn-order direction. `Normal` == [`next_player`]; `Reversed` ==
+/// [`previous_player`]. Use this for turn-order progression; use `next_player` /
+/// `previous_player` directly only for fixed physical-seating queries.
+pub fn next_player_in_turn_order(state: &GameState, current: PlayerId) -> PlayerId {
+    match state.turn_direction {
+        TurnDirection::Normal => next_player(state, current),
+        TurnDirection::Reversed => previous_player(state, current),
+    }
+}
+
 /// CR 102.1 + CR 103.1: Single authority for seating-neighbor resolution.
 ///
 /// Resolves the living player seated immediately to `controller`'s left or
@@ -80,6 +161,31 @@ pub fn neighbor(state: &GameState, controller: PlayerId, direction: SeatDirectio
     }
 }
 
+/// CR 102.2 + CR 508.1c: The nearest *opponent* in the given seating direction,
+/// skipping living teammates. In a free-for-all every other seat is an opponent
+/// so this equals [`neighbor`], but in team formats (Two-Headed Giant, CR 810)
+/// an adjacent teammate is not the "nearest opponent" — the walk continues past
+/// them to the first living opponent in that direction.
+///
+/// Walks the seat ring one living player at a time via [`neighbor`]; returns
+/// `None` only if the walk returns to `controller` without finding an opponent
+/// (e.g. `controller` is the sole living player). Termination is guaranteed:
+/// each step advances deterministically around the finite living-seat ring.
+pub fn nearest_opponent(
+    state: &GameState,
+    controller: PlayerId,
+    direction: SeatDirection,
+) -> Option<PlayerId> {
+    let mut candidate = neighbor(state, controller, direction);
+    while candidate != controller {
+        if is_opponent(state, controller, candidate) {
+            return Some(candidate);
+        }
+        candidate = neighbor(state, candidate, direction);
+    }
+    None
+}
+
 /// CR 102.2 / CR 102.3: Opponents in two-player and multiplayer games.
 ///
 /// Returns all living players not on the given player's team, in seat order.
@@ -89,6 +195,27 @@ pub fn opponents(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
         .iter()
         .copied()
         .filter(|&id| is_opponent(state, player, id) && is_alive(state, id))
+        .collect()
+}
+
+/// CR 115.10a: the opponents of `player` that may be CHOSEN — [`opponents`] narrowed by
+/// [`player_exists_for_choice`].
+///
+/// Opponent-hood itself is whatever [`opponents`] says (CR 102.2 in a two-player game,
+/// CR 102.3 in a game between teams; a free-for-all has no single defining rule and the
+/// engine's authority is `topology::is_opponent`). This function adds no relation — only
+/// the existence conjunct.
+///
+/// This is a SIBLING of [`opponents`], never a conjunct pushed INTO it. `opponents` is the
+/// seat-RELATION authority, consumed across the whole engine by combat, targeting,
+/// visibility and replacement — each governed by its own CR section — so widening it
+/// would silently change every one of them. Same two-layer split as
+/// [`crate::game::targeting::player_is_legal_target`] vs [`player_exists_for_choice`]: the
+/// CHOICE seam gets the conjunct, the RELATION seam does not.
+pub fn choosable_opponents(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
+    opponents(state, player)
+        .into_iter()
+        .filter(|&id| player_exists_for_choice(state, id))
         .collect()
 }
 
@@ -167,11 +294,20 @@ pub fn apnap_order_from(
     // compile error here rather than a silent fall-back to APNAP.
     let start_player = match starting_with {
         Some(ControllerRef::You) => controller,
+        // CR 101.4 + CR 109.4: a resolution-time snapshot names the anchor
+        // outright, so it anchors AT that id. Folding it into the default arm
+        // below would silently order from the active player whenever the
+        // snapshotted player is not the active one — the exact case the variant
+        // exists to represent. Unlike its dynamic siblings there is nothing to
+        // resolve and no context to be missing, so there is no reason to fail
+        // closed here.
+        Some(ControllerRef::SpecificPlayer { id }) => id,
         None
         | Some(
             ControllerRef::Opponent
             | ControllerRef::ScopedPlayer
             | ControllerRef::TargetPlayer
+            | ControllerRef::TargetOpponent
             | ControllerRef::ParentTargetController
             | ControllerRef::ParentTargetOwner
             | ControllerRef::DefendingPlayer
@@ -179,7 +315,9 @@ pub fn apnap_order_from(
             | ControllerRef::ChosenPlayer { .. }
             | ControllerRef::TriggeringPlayer
             // CR 303.4b: Enchanted-player scope is not enumerable. Fail closed.
-            | ControllerRef::EnchantedPlayer,
+            | ControllerRef::EnchantedPlayer
+            // CR 102.1: the active player is exactly this default anchor.
+            | ControllerRef::ActivePlayer,
         ) => state.active_player,
     };
 
@@ -194,7 +332,8 @@ pub fn apnap_order_from(
 
     let mut result = Vec::new();
     for offset in 0..len {
-        let idx = (start_idx + offset) % len;
+        // CR 101.4 + CR 103.1: APNAP follows the current turn-order direction.
+        let idx = turn_order_index(start_idx, offset, len, state.turn_direction);
         let candidate = seat_order[idx];
         // CR 800.4f: A player who has left the game does not pay costs or
         // make choices on objects' behalf; skip eliminated players.
@@ -234,7 +373,9 @@ pub fn linked_exile_cards_for_source(
                 (obj.zone == Zone::Exile).then(|| LinkedExileSnapshot {
                     exiled_id: link.exiled_id,
                     owner: obj.owner,
-                    mana_value: obj.mana_cost.mana_value(),
+                    // CR 202.3d + CR 709.4b: the exiled card is off the stack, so
+                    // a split card records its combined mana value.
+                    mana_value: obj.effective_mana_value(),
                 })
             })
         })
@@ -345,6 +486,39 @@ pub fn team_poison_total(state: &GameState, player: PlayerId) -> u32 {
 
 #[cfg(test)]
 mod tests {
+
+    /// CR 101.4 + CR 109.4: a snapshotted anchor orders from ITS OWN player, not
+    /// from the active player.
+    ///
+    /// The fixture deliberately makes the snapshotted player NON-ACTIVE — that is
+    /// the only configuration in which the bug is visible, since folding
+    /// `SpecificPlayer` into the default arm returns the active player and a
+    /// same-player fixture would pass either way.
+    #[test]
+    fn specific_player_anchor_orders_from_the_snapshotted_player() {
+        let mut state = make_state(3, FormatConfig::free_for_all());
+        state.active_player = PlayerId(0);
+
+        let anchored = apnap_order_from(
+            &state,
+            Some(ControllerRef::SpecificPlayer { id: PlayerId(2) }),
+            PlayerId(0),
+        );
+        assert_eq!(
+            anchored.first(),
+            Some(&PlayerId(2)),
+            "the snapshotted (non-active) player anchors the order"
+        );
+
+        // Paired guard: the default anchor really is the active player, so the
+        // assertion above is not passing for an unrelated reason.
+        let default_anchored = apnap_order_from(&state, None, PlayerId(0));
+        assert_eq!(
+            default_anchored.first(),
+            Some(&PlayerId(0)),
+            "with no anchor the order still starts at the active player"
+        );
+    }
     use super::*;
     use crate::types::format::FormatConfig;
 
@@ -357,6 +531,106 @@ mod tests {
             p.is_eliminated = true;
         }
         state.eliminated_players.push(player);
+    }
+
+    // --- turn-order direction (CR 103.1) ---
+
+    #[test]
+    fn turn_order_index_walks_backward_when_reversed() {
+        // Seat ring of 4: from index 1, offset 1.
+        assert_eq!(turn_order_index(1, 1, 4, TurnDirection::Normal), 2);
+        assert_eq!(turn_order_index(1, 1, 4, TurnDirection::Reversed), 0);
+        // Wrap: from index 0 backward one seat → 3.
+        assert_eq!(turn_order_index(0, 1, 4, TurnDirection::Reversed), 3);
+        // offset 0 is the start seat regardless of direction.
+        assert_eq!(turn_order_index(2, 0, 4, TurnDirection::Normal), 2);
+        assert_eq!(turn_order_index(2, 0, 4, TurnDirection::Reversed), 2);
+    }
+
+    #[test]
+    fn next_player_in_turn_order_follows_direction() {
+        let mut state = make_state(4, FormatConfig::free_for_all());
+        // Normal: next of P1 is P2; Reversed: next of P1 is P0.
+        assert_eq!(next_player_in_turn_order(&state, PlayerId(1)), PlayerId(2));
+        state.turn_direction = TurnDirection::Reversed;
+        assert_eq!(next_player_in_turn_order(&state, PlayerId(1)), PlayerId(0));
+        // Physical seating (neighbor) is unaffected by turn direction.
+        assert_eq!(
+            neighbor(&state, PlayerId(1), SeatDirection::Left),
+            PlayerId(2),
+            "left neighbor is fixed regardless of turn direction"
+        );
+    }
+
+    #[test]
+    fn apnap_order_reverses_with_turn_direction() {
+        let mut state = make_state(4, FormatConfig::free_for_all());
+        state.active_player = PlayerId(0);
+        assert_eq!(
+            apnap_order(&state),
+            vec![PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)],
+        );
+        state.turn_direction = TurnDirection::Reversed;
+        assert_eq!(
+            apnap_order(&state),
+            vec![PlayerId(0), PlayerId(3), PlayerId(2), PlayerId(1)],
+            "CR 101.4: APNAP follows the reversed turn order",
+        );
+    }
+
+    // --- nearest_opponent ---
+
+    #[test]
+    fn nearest_opponent_equals_neighbor_in_free_for_all() {
+        // Individual seats: every other player is an opponent, so the nearest
+        // opponent is just the adjacent seat.
+        let state = make_state(4, FormatConfig::free_for_all());
+        for dir in [SeatDirection::Left, SeatDirection::Right] {
+            assert_eq!(
+                nearest_opponent(&state, PlayerId(0), dir),
+                Some(neighbor(&state, PlayerId(0), dir)),
+                "free-for-all nearest opponent is the adjacent seat ({dir:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn nearest_opponent_skips_teammate_in_two_headed_giant() {
+        // 2HG: teams {P0,P1} and {P2,P3}, seat order [P0,P1,P2,P3]. P0's left
+        // neighbor P1 is a TEAMMATE; the nearest opponent to the left is P2.
+        let state = make_state(4, FormatConfig::two_headed_giant());
+        assert!(
+            !is_opponent(&state, PlayerId(0), PlayerId(1)),
+            "P1 is P0's teammate in 2HG"
+        );
+        assert_eq!(
+            neighbor(&state, PlayerId(0), SeatDirection::Left),
+            PlayerId(1),
+            "the adjacent left seat is the teammate"
+        );
+        assert_eq!(
+            nearest_opponent(&state, PlayerId(0), SeatDirection::Left),
+            Some(PlayerId(2)),
+            "nearest opponent skips the teammate to the first opponent P2"
+        );
+        assert_eq!(
+            nearest_opponent(&state, PlayerId(0), SeatDirection::Right),
+            Some(PlayerId(3)),
+            "to the right, P3 is the first opponent"
+        );
+    }
+
+    #[test]
+    fn nearest_opponent_none_when_sole_survivor() {
+        let mut state = make_state(4, FormatConfig::free_for_all());
+        for p in [PlayerId(1), PlayerId(2), PlayerId(3)] {
+            eliminate(&mut state, p);
+        }
+        assert_eq!(
+            nearest_opponent(&state, PlayerId(0), SeatDirection::Left),
+            None,
+            "no living opponent in any direction → None"
+        );
     }
 
     // --- is_alive ---

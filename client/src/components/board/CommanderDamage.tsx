@@ -9,6 +9,7 @@ import { commanderDamageEntriesFor } from "../../viewmodel/commanderColumn.ts";
 
 interface CommanderDamageProps {
   playerId: PlayerId;
+  compact?: boolean;
 }
 
 /**
@@ -19,6 +20,10 @@ interface CommanderDamageProps {
  */
 const DEFAULT_COMMANDER_DAMAGE_LETHAL = 21;
 
+function shortCommanderName(name: string): string {
+  return name.split(",")[0].split(" //")[0].trim();
+}
+
 /**
  * Pure renderer for engine-authored commander-damage grouping. The
  * grouping logic lives in `crates/engine/src/game/derived_views.rs`
@@ -28,7 +33,7 @@ const DEFAULT_COMMANDER_DAMAGE_LETHAL = 21;
  * the adapter attaches from the wire-format `ClientGameState.derived`
  * envelope on every state snapshot.
  */
-export function CommanderDamage({ playerId }: CommanderDamageProps) {
+export function CommanderDamage({ playerId, compact = false }: CommanderDamageProps) {
   const { t } = useTranslation("game");
   const gameState = useGameStore((s) => s.gameState);
   const playerNames = useMultiplayerStore((s) => s.playerNames);
@@ -46,7 +51,7 @@ export function CommanderDamage({ playerId }: CommanderDamageProps) {
 
   return (
     <div
-      className="flex flex-col gap-1"
+      className={compact ? "flex flex-col gap-0.5" : "flex flex-col gap-1"}
       data-testid={`commander-damage-${playerId}`}
     >
       {entriesForVictim.map(({ attacker, views }) => {
@@ -60,26 +65,35 @@ export function CommanderDamage({ playerId }: CommanderDamageProps) {
         return (
           <div
             key={`from-${attacker}`}
-            className="flex min-w-0 flex-col gap-1 border-l-2 pl-1"
+            className={
+              compact
+                ? "flex min-w-0 flex-col gap-0.5 border-l pl-0.5"
+                : "flex min-w-0 flex-col gap-1 border-l-2 pl-1"
+            }
             style={{ borderLeftColor: attackerSeatColor }}
             title={t("player.commanderDamageFrom", { source: attackerLabel, damage: total, threshold })}
           >
             {showAttackerLabel && (
               <span
-                className="flex items-center gap-1 text-[9px] font-semibold uppercase tracking-[0.12em]"
+                className={compact
+                  ? "flex items-center gap-0.5 text-[8px] font-semibold uppercase tracking-wide"
+                  : "flex items-center gap-1 text-[9px] font-semibold uppercase tracking-[0.12em]"}
                 style={{ color: attackerSeatColor }}
               >
                 <span
                   aria-hidden
-                  className="h-1.5 w-1.5 shrink-0 rounded-full"
+                  className={compact ? "h-1 w-1 shrink-0 rounded-full" : "h-1.5 w-1.5 shrink-0 rounded-full"}
                   style={{ backgroundColor: attackerSeatColor }}
                 />
-                <span className="max-w-[7rem] truncate">{attackerLabel}</span>
+                <span className={compact ? "max-w-[4rem] truncate" : "max-w-[7rem] truncate"}>
+                  {attackerLabel}
+                </span>
               </span>
             )}
             {views.map((view) => {
               const obj = gameState?.objects[view.commander];
               const name = obj?.name ?? `#${view.commander}`;
+              const displayName = compact ? shortCommanderName(name) : name;
               const isLethal = view.damage >= threshold;
               const isWarning = view.damage >= threshold * 0.75;
               const progress = Math.min(100, Math.max(0, (view.damage / threshold) * 100));
@@ -103,16 +117,23 @@ export function CommanderDamage({ playerId }: CommanderDamageProps) {
               return (
                 <div
                   key={`${view.commander}`}
-                  className={`w-[8.75rem] overflow-hidden rounded-md border px-2 py-1 text-[10px] shadow-md ${tone.card}`}
+                  className={`${
+                    compact
+                      ? "w-[4.75rem] rounded border px-1 py-0.5 text-[9px] shadow-sm"
+                      : "w-[8.75rem] rounded-md border px-2 py-1 text-[10px] shadow-md"
+                  } overflow-hidden ${tone.card}`}
                   title={t("player.commanderDamageFrom", { source: name, damage: view.damage, threshold })}
                 >
-                  <div className="flex min-w-0 items-center justify-between gap-2">
-                    <span className="min-w-0 truncate font-semibold leading-none">{name}</span>
-                    <span className={`inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full px-1 text-[10px] font-black leading-none tabular-nums ${tone.count}`}>
+                  <div className={`flex min-w-0 items-center justify-between ${compact ? "gap-1" : "gap-2"}`}>
+                    <span className="min-w-0 truncate font-semibold leading-none">{displayName}</span>
+                    <span className={`inline-flex shrink-0 items-center justify-center rounded-full font-black leading-none tabular-nums ${
+                      compact ? "h-3.5 min-w-3.5 px-0.5 text-[9px]" : "h-4 min-w-4 px-1 text-[10px]"
+                    } ${tone.count}`}
+                    >
                       {view.damage}
                     </span>
                   </div>
-                  <div className="mt-1 h-1 overflow-hidden rounded-full bg-black/35">
+                  <div className={`${compact ? "mt-0.5 h-0.5" : "mt-1 h-1"} overflow-hidden rounded-full bg-black/35`}>
                     <div
                       aria-hidden
                       className={`h-full rounded-full ${tone.bar}`}

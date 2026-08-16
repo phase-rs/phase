@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DeckList } from "../DeckList";
@@ -17,6 +17,8 @@ describe("DeckList commander section", () => {
       <DeckList
         deck={emptyDeck}
         onRemoveCard={vi.fn()}
+        onIncrementCard={vi.fn()}
+        canIncrementCard={() => true}
         onMoveCard={vi.fn()}
         onImport={vi.fn()}
         commanders={["Krenko, Mob Boss"]}
@@ -38,6 +40,8 @@ describe("DeckList commander section", () => {
       <DeckList
         deck={emptyDeck}
         onRemoveCard={vi.fn()}
+        onIncrementCard={vi.fn()}
+        canIncrementCard={() => true}
         onMoveCard={vi.fn()}
         onImport={vi.fn()}
         cardDataCache={new Map()}
@@ -55,6 +59,8 @@ describe("DeckList import modal", () => {
       <DeckList
         deck={emptyDeck}
         onRemoveCard={vi.fn()}
+        onIncrementCard={vi.fn()}
+        canIncrementCard={() => true}
         onMoveCard={vi.fn()}
         onImport={onImport}
         cardDataCache={new Map()}
@@ -68,9 +74,9 @@ describe("DeckList import modal", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: /^parse$/i }));
 
-    await waitFor(() => {
-      expect(screen.getByText(/couldn't find any cards/i)).toBeInTheDocument();
-    });
+    expect(
+      await screen.findByText(/couldn't find any cards/i),
+    ).toBeInTheDocument();
     expect(onImport).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: /^parse$/i })).toBeInTheDocument();
   });

@@ -4,16 +4,19 @@ use std::sync::LazyLock;
 use crate::game::combat::AttackTarget;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::functioning_abilities::{
-    battlefield_active_statics, game_active_statics, game_functioning_statics,
+    battlefield_active_statics, game_active_statics, game_functioning_statics, static_kind_present,
 };
+use crate::game::game_object::GameObject;
 use crate::game::layers::{evaluate_condition, evaluate_condition_with_recipient};
-use crate::types::ability::{ContinuousModification, Duration, TargetFilter, TypedFilter};
+use crate::types::ability::{
+    ContinuousModification, ControllerRef, StaticDefinition, TargetFilter, TypedFilter,
+};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::statics::{
     CombatAloneAction, CombatAloneRequirement, CostPaymentProhibition, CrewAction,
-    CrewContributionKind, ProhibitionScope, StaticMode,
+    CrewContributionKind, ProhibitionScope, StaticMode, StaticModeKind,
 };
 
 /// Handler function type for static ability modes.
@@ -67,6 +70,9 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::CantAttack, handle_rule_mod);
     registry.insert(StaticMode::CantBlock, handle_rule_mod);
     registry.insert(StaticMode::CantAttackOrBlock, handle_rule_mod);
+    // CR 508.1c: The directional attack restriction is a passive rule-modifying
+    // marker; enforcement lives in `combat.rs`'s attacker-declaration gate.
+    registry.insert(StaticMode::AttackOnlyNeighbor, handle_rule_mod);
     registry.insert(StaticMode::CantBeTargeted, handle_rule_mod);
     // Note: CantBeCast is a data-carrying variant — runtime enforcement is in
     // casting.rs::is_blocked_by_cant_be_cast(). Coverage support is via is_data_carrying_static().
@@ -99,6 +105,7 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // Note: ReduceAbilityCost runtime checks are in game/keywords.rs::apply_ability_cost_reduction().
     registry.insert(StaticMode::CantGainLife, handle_rule_mod);
     registry.insert(StaticMode::CantLoseLife, handle_rule_mod);
+    registry.insert(StaticMode::UnspentManaLossCausesLifeLoss, handle_rule_mod);
     registry.insert(StaticMode::MustAttack, handle_rule_mod);
     registry.insert(StaticMode::MustBlock, handle_rule_mod);
     // Note: CantDraw is a data-carrying variant — runtime enforcement is in
@@ -122,6 +129,10 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
 
     // CR 509.1b: CantBeBlocked — creature cannot be blocked.
     registry.insert(StaticMode::CantBeBlocked, handle_cant_be_blocked);
+    // CR 509.1b: CantBeBlockedUnlessAllBlock — creature can't be blocked unless
+    // all creatures defending player controls block it (Tromokratis). Runtime
+    // enforcement is in combat.rs declare-blockers validation.
+    registry.insert(StaticMode::CantBeBlockedUnlessAllBlock, handle_rule_mod);
     // CR 702.16: Protection prevents targeting, blocking, damage, and attachment.
     registry.insert(StaticMode::Protection, handle_protection);
 
@@ -169,14 +180,28 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // overrides the phase-in turn-based action. Runtime enforcement lives in
     // phasing.rs (untap-step TBA) and effects/phase_out.rs (explicit PhaseIn).
     registry.insert(StaticMode::CantPhaseIn, handle_rule_mod);
-    // CR 509.1c: MustBeBlocked — this creature must be blocked if able.
-    registry.insert(StaticMode::MustBeBlocked, handle_rule_mod);
-    // CR 509.1c: MustBeBlockedByAll — every creature able to block this creature
-    // must do so ("All creatures able to block ~ do so"; enforced in combat.rs).
-    registry.insert(StaticMode::MustBeBlockedByAll, handle_rule_mod);
+    // CR 509.1c: MustBeBlocked is now a parameterized, data-carrying variant
+    // (`by: Option<TargetFilter>`) — it cannot be an exact HashMap key, so it is
+    // NOT registry-keyed (mirrors CantBeBlockedBy). Coverage support is via
+    // coverage::is_data_carrying_static; runtime enforcement is direct-match in
+    // combat.rs declare-blockers validation.
+    // CR 509.1c: MustBeBlockedByAll is now a parameterized, data-carrying variant
+    // (`blockers: Option<TargetFilter>` — None = all creatures (Lure), Some =
+    // only matching creatures (Talruum Piper flying, Marble Priest Walls)) — it
+    // cannot be an exact HashMap key, so it is NOT registry-keyed (mirrors
+    // MustBeBlocked). Coverage support is via coverage::is_data_carrying_static;
+    // runtime enforcement is direct-match in combat.rs declare-blockers validation.
     // CR 701.15b: Goaded — this creature must attack and avoid the goading
     // player if able. Runtime enforcement lives in combat.rs.
     registry.insert(StaticMode::Goaded, handle_rule_mod);
+    // CR 508.1d + CR 701.15b: MustAttackAwayFromSource — the goad requirement
+    // pair without the designation (Kardur, Doomscourge; Maximum Carnage I).
+    // Nullary, so it is registry-keyable (unlike the data-carrying
+    // `MustAttackDefender`). Runtime enforcement lives in combat.rs. The registry
+    // key is ALSO what keeps `coverage::unimplemented_mechanics` quiet for every
+    // creature this grafts onto — it is load-bearing for the client, not
+    // decoration.
+    registry.insert(StaticMode::MustAttackAwayFromSource, handle_rule_mod);
     // CR 506.5 + CR 508.1c + CR 509.1b: CombatAlone — parameterized "alone"
     // restriction. Runtime enforcement lives in combat.rs.
     registry.insert(
@@ -387,7 +412,16 @@ pub(crate) fn prohibition_scope_matches_player(
         return false;
     };
     match scope {
-        ProhibitionScope::Opponents => player != source_obj.controller,
+        // CR 102.2 / CR 102.3: "each opponent" is team-aware. In a multiplayer team
+        // game (e.g. Two-Headed Giant) a player's opponents are only players NOT on
+        // their team, so a naive `player != source_obj.controller` inequality wrongly
+        // treats a teammate as an opponent (barring them from casting). Route through
+        // the team-aware authority; in a two-player / FFA `IndividualSeats` topology
+        // `is_opponent` reduces to `!=`, so 2-player and free-for-all behavior is
+        // byte-identical. Mirrors the affected-filter fix in `static_filter_matches`.
+        ProhibitionScope::Opponents => {
+            crate::game::players::is_opponent(state, source_obj.controller, player)
+        }
         ProhibitionScope::AllPlayers => true,
         ProhibitionScope::Controller => player == source_obj.controller,
         // CR 303.4e: For an Aura attached to an object ("enchanted creature's
@@ -439,6 +473,11 @@ pub(crate) fn triggered_cause_sacrifice_or_exile_muzzled(
     if acting_player != ability.controller {
         return false;
     }
+    // CR 604.1: O(1) presence gate — no CantCauseSacrificeOrExile static means no muzzle.
+    if !static_kind_present(state, StaticModeKind::CantCauseSacrificeOrExile) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     for (bf_obj, def) in crate::game::functioning_abilities::battlefield_active_statics(state) {
         let StaticMode::CantCauseSacrificeOrExile { ref cause } = def.mode else {
             continue;
@@ -560,7 +599,10 @@ fn handle_flashback(
     }]
 }
 
-/// Handler for Shroud -- permanent cannot be the target of spells or abilities.
+/// CR 702.18a: Shroud — surfaces a RuleModification marker for registry/
+/// coverage consumers. Permanent-scope shroud is enforced via
+/// `Keyword::Shroud` on the object; player-scope shroud (`StaticMode::Shroud`
+/// on a player-affected static) is enforced by [`player_cannot_be_targeted_by`].
 fn handle_shroud(
     _state: &GameState,
     _mode: &StaticMode,
@@ -572,10 +614,11 @@ fn handle_shroud(
 }
 
 /// CR 702.11: Hexproof — surfaces a RuleModification marker so downstream
-/// coverage/registry consumers see the grant. Runtime targeting for
-/// permanent-scope hexproof flows through `Keyword::Hexproof` on the object
-/// (granted via `ContinuousModification::AddKeyword` paths); the player-scope
-/// marker mirrors `handle_shroud`.
+/// coverage/registry consumers see the grant. Permanent-scope hexproof flows
+/// through `Keyword::Hexproof` on the object (`AddKeyword` paths). Player-scope
+/// hexproof (`StaticMode::Hexproof` on a player-affected static — Crystal
+/// Barricade / Sigarda's player half) is enforced by
+/// [`player_cannot_be_targeted_by`] (CR 702.11c).
 fn handle_hexproof(
     _state: &GameState,
     _mode: &StaticMode,
@@ -676,75 +719,109 @@ pub fn check_static_ability(
     // Perf: this is the O(N) whole-battlefield sweep that combat/untap legality
     // loops hoist an existence gate in front of (see
     // `functioning_abilities::any_functioning_static_mode`).
+    // CR 604.1: static abilities are always on; when the O(1) presence index reports
+    // zero statics of this discriminant, no fall-through scan can match — return false.
+    if !static_kind_present(state, mode.kind()) {
+        return false;
+    }
     crate::game::perf_counters::record_static_full_scan();
     // CR 114.4: Abilities of emblems function in the command zone.
     // Check both battlefield objects and command zone emblems. The functioning
     // gate is applied before context-specific condition evaluation below.
-    for (obj, def) in game_functioning_statics(state) {
-        if def.mode != mode {
-            continue;
-        }
+    game_functioning_statics(state).any(|(obj, def)| {
+        def.mode == mode && static_ability_match_applies(state, &mode, context, obj, def)
+    })
+}
 
-        // Check affected filter if present (typed TargetFilter)
-        if let Some(ref affected) = def.affected {
-            if !static_filter_matches(state, context, affected, obj.id) {
-                continue;
-            }
+/// CR 604.1: the shared per-`(obj, def)` applicability predicate — the single
+/// authority both `check_static_ability` (early-return bool driver) and
+/// `check_static_ability_sources` (full-scan collector driver) consume. Returns
+/// true exactly where the original `check_static_ability` loop reached
+/// `return true` for a matching-mode definition. Callers pre-check
+/// `def.mode == *mode`.
+fn static_ability_match_applies(
+    state: &GameState,
+    mode: &StaticMode,
+    context: &StaticCheckContext,
+    obj: &GameObject,
+    def: &StaticDefinition,
+) -> bool {
+    // Check affected filter if present (typed TargetFilter)
+    if let Some(ref affected) = def.affected {
+        if !static_filter_matches(state, context, affected, obj.id) {
+            return false;
         }
-
-        if !static_condition_matches_context(state, obj.id, obj.controller, def, context) {
-            continue;
-        }
-
-        // CR 508.1d: Scoped attack prohibitions (Eriette, Propaganda-family flat
-        // restrictions) only apply when the declared target matches `attack_defended`.
-        // When no target is in context (eligibility queries), skip scoped statics so
-        // the creature remains able to attack other players.
-        if matches!(
-            def.mode,
-            StaticMode::CantAttack | StaticMode::CantAttackOrBlock
-        ) {
-            if let Some(defended) = def.attack_defended.as_ref() {
-                if !super::restrictions::attack_target_matches_defended_scope(
-                    state,
-                    context.attack_target.as_ref(),
-                    defended,
-                    obj.controller,
-                    obj.owner,
-                ) {
-                    continue;
-                }
-            }
-        }
-
-        // CR 101.2 + CR 109.5: per-affected-player applicability gate. Evaluated
-        // against the affected object's controller (the player whose creature/spell
-        // is restricted), distinct from the source-relative `condition` gate above.
-        // Used by "each opponent who [did X] this turn can't [Y]" prohibitions
-        // (Angelic Arbiter's attack clause).
-        if let Some(ref cond) = def.per_player_condition {
-            let affected_player = context
-                .target_id
-                .and_then(|id| state.objects.get(&id))
-                .map(|o| o.controller)
-                .or(context.player_id);
-            match affected_player {
-                Some(p) => {
-                    if !crate::game::restrictions::evaluate_condition(state, p, obj.id, cond) {
-                        continue;
-                    }
-                }
-                // No affected player in context -> cannot evaluate a per-player
-                // gate; fail closed (skip this static) so an under-specified query
-                // never over-applies the prohibition.
-                None => continue,
-            }
-        }
-
-        return true;
     }
 
-    false
+    if !static_condition_matches_context(state, obj.id, obj.controller, def, context) {
+        return false;
+    }
+
+    // CR 508.1d: Scoped attack prohibitions (Eriette, Propaganda-family flat
+    // restrictions) only apply when the declared target matches `attack_defended`.
+    // When no target is in context (eligibility queries), skip scoped statics so
+    // the creature remains able to attack other players.
+    if matches!(mode, StaticMode::CantAttack | StaticMode::CantAttackOrBlock) {
+        if let Some(defended) = def.attack_defended.as_ref() {
+            if !super::restrictions::attack_target_matches_defended_scope(
+                state,
+                context.attack_target.as_ref(),
+                defended,
+                obj.controller,
+                obj.owner,
+            ) {
+                return false;
+            }
+        }
+    }
+
+    // CR 101.2 + CR 109.5: per-affected-player applicability gate. Evaluated
+    // against the affected object's controller (the player whose creature/spell
+    // is restricted), distinct from the source-relative `condition` gate above.
+    // Used by "each opponent who [did X] this turn can't [Y]" prohibitions
+    // (Angelic Arbiter's attack clause).
+    if let Some(ref cond) = def.per_player_condition {
+        let affected_player = context
+            .target_id
+            .and_then(|id| state.objects.get(&id))
+            .map(|o| o.controller)
+            .or(context.player_id);
+        match affected_player {
+            Some(p) => {
+                if !crate::game::restrictions::evaluate_condition(state, p, obj.id, cond) {
+                    return false;
+                }
+            }
+            // No affected player in context -> cannot evaluate a per-player
+            // gate; fail closed (skip this static) so an under-specified query
+            // never over-applies the prohibition.
+            None => return false,
+        }
+    }
+
+    true
+}
+
+/// CR 604.1: sorted-agnostic carriers of every functioning static of `mode`
+/// applying to `context`. Same per-`(obj, def)` predicate as
+/// `check_static_ability` (`static_ability_match_applies`); this is the
+/// full-scan collector driver, on the display/payload path only. The
+/// `static_kind_present` fast-empty gate is preserved.
+pub fn check_static_ability_sources(
+    state: &GameState,
+    mode: StaticMode,
+    context: &StaticCheckContext,
+) -> Vec<ObjectId> {
+    if !static_kind_present(state, mode.kind()) {
+        return Vec::new();
+    }
+    crate::game::perf_counters::record_static_full_scan();
+    game_functioning_statics(state)
+        .filter(|(obj, def)| {
+            def.mode == mode && static_ability_match_applies(state, &mode, context, obj, def)
+        })
+        .map(|(obj, _)| obj.id)
+        .collect()
 }
 
 /// CR 611.1 + CR 611.3: Scan `state.transient_continuous_effects` for an effect
@@ -769,15 +846,13 @@ pub(crate) fn transient_grants_static_mode_to_player(
         if affected_id != player_id {
             continue;
         }
-        if let Duration::ForAsLongAs { ref condition } = tce.duration {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
-        }
-        if let Some(ref condition) = tce.condition {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
+        // CR 611.2b + CR 611.3a: every gate of a resolution-created effect must
+        // hold for it to apply; `transient_gate_conditions` is the authority over
+        // which those are.
+        if !crate::game::layers::transient_gate_conditions(tce)
+            .all(|condition| evaluate_condition(state, condition, tce.controller, tce.source_id))
+        {
+            continue;
         }
         let grants_mode = tce.modifications.iter().any(|m| {
             matches!(m, ContinuousModification::AddStaticMode { mode: m_mode } if m_mode == mode)
@@ -817,15 +892,13 @@ pub(crate) fn transient_grants_static_mode_to_object(
         ) {
             continue;
         }
-        if let Duration::ForAsLongAs { ref condition } = tce.duration {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
-        }
-        if let Some(ref condition) = tce.condition {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
+        // CR 611.2b + CR 611.3a: every gate of a resolution-created effect must
+        // hold for it to apply; `transient_gate_conditions` is the authority over
+        // which those are.
+        if !crate::game::layers::transient_gate_conditions(tce)
+            .all(|condition| evaluate_condition(state, condition, tce.controller, tce.source_id))
+        {
+            continue;
         }
         let grants_mode = tce.modifications.iter().any(|m| {
             matches!(m, ContinuousModification::AddStaticMode { mode: m_mode } if m_mode == mode)
@@ -855,22 +928,12 @@ pub(crate) fn transient_grants_static_mode_to_object(
 /// deliberately skips); (2) any filter-scoped transient grant; and (3) a printed
 /// static (parity with the `CantUntap` intrinsic path, future-proofing).
 pub(crate) fn object_has_active_cant_phase_in(state: &GameState, object_id: ObjectId) -> bool {
-    let condition_holds = |duration: &Duration,
-                           condition: &Option<crate::types::ability::StaticCondition>,
-                           controller: PlayerId,
-                           source_id: ObjectId|
-     -> bool {
-        if let Duration::ForAsLongAs { condition } = duration {
-            if !evaluate_condition(state, condition, controller, source_id) {
-                return false;
-            }
-        }
-        if let Some(condition) = condition {
-            if !evaluate_condition(state, condition, controller, source_id) {
-                return false;
-            }
-        }
-        true
+    // CR 611.2b + CR 611.3a: every gate of a resolution-created effect must
+    // hold for it to apply; `transient_gate_conditions` is the authority over
+    // which those are.
+    let condition_holds = |tce: &crate::types::game_state::TransientContinuousEffect| {
+        crate::game::layers::transient_gate_conditions(tce)
+            .all(|condition| evaluate_condition(state, condition, tce.controller, tce.source_id))
     };
 
     // (1) SpecificObject-pinned transient grant — the Pandorica lock.
@@ -884,7 +947,7 @@ pub(crate) fn object_has_active_cant_phase_in(state: &GameState, object_id: Obje
                     }
                 )
             })
-            && condition_holds(&tce.duration, &tce.condition, tce.controller, tce.source_id)
+            && condition_holds(tce)
     });
     if pinned {
         return true;
@@ -1034,6 +1097,11 @@ pub fn player_life_payment_colors(
         ..Default::default()
     };
     let mut colors = LifePaymentColors::EMPTY;
+    // CR 604.1: O(1) presence gate — no PayLifeAsColoredMana static means no grant.
+    if !static_kind_present(state, StaticModeKind::PayLifeAsColoredMana) {
+        return colors;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     // CR 604.1 + CR 702.26b: `battlefield_active_statics` owns the
     // phased-out / command-zone / condition gate.
     for (obj, def) in battlefield_active_statics(state) {
@@ -1078,7 +1146,29 @@ pub fn build_cost_permission_context(
 ///
 /// Checks both battlefield permanents and spell-applied transient effects
 /// (e.g., a sorcery that grants all players CantWinTheGame this turn).
+///
+/// CR 810.8a: "If an effect says that a player can't win the game, that
+/// player's team can't win the game" (the Platinum Angel / Angel's Grace
+/// example: neither player on the opposing team can win while the clause
+/// affects one of them). So in 2HG this is true for `player_id` if EITHER
+/// `player_id` itself or their teammate has the grant — mirrors the
+/// `player_has_cant_gain_life` / `player_has_cant_lose_life` teammate fold
+/// below (CR 810.9g/810.9h siblings) and `sba::player_has_cant_lose`'s
+/// identical CR 810.8a fold on the can't-lose side.
 pub fn player_has_cant_win(state: &GameState, player_id: PlayerId) -> bool {
+    cant_win_active_for(state, player_id)
+        || (super::topology::has_two_headed_giant_shared_resources(state)
+            && super::players::teammates(state, player_id)
+                .into_iter()
+                .any(|teammate| cant_win_active_for(state, teammate)))
+}
+
+/// Single-player check underlying `player_has_cant_win`: does `player_id`
+/// itself (battlefield permanent, command-zone emblem, or spell-applied
+/// transient effect) have an active `CantWinTheGame` grant? Does NOT fold in
+/// teammates — callers needing the CR 810.8a team-wide answer must go through
+/// `player_has_cant_win`.
+fn cant_win_active_for(state: &GameState, player_id: PlayerId) -> bool {
     check_static_ability(
         state,
         StaticMode::CantWinTheGame,
@@ -1141,6 +1231,20 @@ pub fn player_has_cant_lose_life(state: &GameState, player_id: PlayerId) -> bool
                 .any(|teammate| life_lock_active_for(state, teammate, StaticMode::CantLoseLife)))
 }
 
+/// CR 106.4 + CR 119.3 + CR 604.1: Whether losing unspent mana causes this
+/// player to lose the same amount of life. This is an existence query so
+/// multiple active Yurlok-class statics do not multiply the result.
+pub fn player_unspent_mana_loss_causes_life_loss(state: &GameState, player_id: PlayerId) -> bool {
+    check_static_ability(
+        state,
+        StaticMode::UnspentManaLossCausesLifeLoss,
+        &StaticCheckContext {
+            player_id: Some(player_id),
+            ..Default::default()
+        },
+    )
+}
+
 /// CR 702.11b + CR 702.11e: Check if `player_id` may target creatures as though
 /// they didn't have hexproof, including "hexproof from [quality]" variants
 /// (CR 702.11e: an "as though it didn't have hexproof" effect also defeats
@@ -1154,35 +1258,48 @@ pub fn player_has_cant_lose_life(state: &GameState, player_id: PlayerId) -> bool
 /// widen the bypass to every target `player_id` chooses. Those are evaluated
 /// per-target by [`target_ignores_hexproof`].
 pub fn player_ignores_hexproof(state: &GameState, player_id: PlayerId) -> bool {
-    let player_scoped_grant = game_functioning_statics(state).any(|(obj, def)| {
-        matches!(def.mode, StaticMode::IgnoreHexproof)
-            && def.affected.is_none()
-            && static_condition_matches_context(
-                state,
-                obj.id,
-                obj.controller,
-                def,
-                &StaticCheckContext {
-                    player_id: Some(player_id),
-                    ..Default::default()
-                },
-            )
-    });
+    // CR 702.11b + CR 702.11e existence gate: with no functioning `IgnoreHexproof`
+    // static on the board, no player-scoped hexproof-bypass grant is possible, so skip the
+    // O(battlefield) scan entirely (the O(1) presence index is precise post-flush; before
+    // the first flush it is conservatively all-present and this falls through to the exact
+    // scan below). Verdict-identical to the un-gated `.any()` for all inputs.
+    let player_scoped_grant = static_kind_present(state, StaticModeKind::IgnoreHexproof) && {
+        crate::game::perf_counters::record_static_full_scan();
+        game_functioning_statics(state).any(|(obj, def)| {
+            matches!(def.mode, StaticMode::IgnoreHexproof)
+                && def.affected.is_none()
+                && static_condition_matches_context(
+                    state,
+                    obj.id,
+                    obj.controller,
+                    def,
+                    &StaticCheckContext {
+                        player_id: Some(player_id),
+                        ..Default::default()
+                    },
+                )
+        })
+    };
     player_scoped_grant
         || transient_grants_static_mode_to_player(state, player_id, &StaticMode::IgnoreHexproof)
 }
 
-/// CR 702.11b + CR 702.11e: Whether a FUNCTIONING `IgnoreHexproof` static whose
-/// `condition` currently holds and which is scoped by an object `affected` filter
-/// makes `target_id` targetable as though it had no hexproof (CR 702.11e extends
-/// the bypass to hexproof-from-quality). Nowhere to Run — "Creatures your
-/// opponents control can be the targets of spells and abilities as though they
-/// didn't have hexproof." The card carries no "you control" qualifier on the
-/// spells or abilities, so the bypass applies to ANY targeting player: it is
-/// keyed solely on the would-be target matching the static's `affected` filter
-/// (evaluated from the static's own source), independent of the targeting
-/// source's controller — hexproof (CR 702.11b) only ever blocks opponents, so
-/// removing it for the matched permanents opens them to every player.
+/// CR 702.11b + CR 702.11e + CR 609.4: Whether a FUNCTIONING `IgnoreHexproof`
+/// static whose `condition` currently holds and which is scoped by an object
+/// `affected` filter makes `target_id` targetable, by a spell or ability
+/// `source_controller` controls, as though it had no hexproof (CR 702.11e
+/// extends the bypass to hexproof-from-quality).
+///
+/// The static's `bypass_beneficiary` decides which players the bypass serves:
+///   - `None` (Nowhere to Run — "... can be the targets of spells and abilities
+///     as though they didn't have hexproof", no "you control" qualifier): the
+///     bypass applies to ANY targeting player. Hexproof (CR 702.11b) only ever
+///     blocks the affected creature's opponents, so removing it opens the
+///     matched permanents to every player.
+///   - `Some(ControllerRef::You)` (Glaring Spotlight — "... spells and abilities
+///     YOU CONTROL as though they didn't have hexproof"): the bypass serves only
+///     the static controller's spells and abilities, so `source_controller` must
+///     be that controller (CR 109.5). Any other player stays blocked by hexproof.
 ///
 /// CR 604.1 + CR 613.1: mirrors [`player_ignores_hexproof`] — uses
 /// `game_functioning_statics` (so a source whose abilities are suppressed, or a
@@ -1193,7 +1310,19 @@ pub fn player_ignores_hexproof(state: &GameState, player_id: PlayerId) -> bool {
 /// than skipped. Object-scoped (`affected = Some`) only; the player-scoped
 /// Detection Tower form (`affected = None`) is handled by
 /// [`player_ignores_hexproof`].
-pub fn target_ignores_hexproof(state: &GameState, target_id: ObjectId) -> bool {
+pub fn target_ignores_hexproof(
+    state: &GameState,
+    target_id: ObjectId,
+    source_controller: PlayerId,
+) -> bool {
+    // CR 702.11b + CR 702.11e existence gate: with no functioning `IgnoreHexproof`
+    // static on the board, no object-scoped hexproof-bypass grant is possible — skip the O(battlefield)
+    // scan. Precise post-flush; conservatively all-present before the first flush, where it
+    // falls through to the exact scan below. Verdict-identical to the un-gated `.any()`.
+    if !static_kind_present(state, StaticModeKind::IgnoreHexproof) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     game_functioning_statics(state).any(|(source_obj, def)| {
         matches!(def.mode, StaticMode::IgnoreHexproof)
             && def.affected.as_ref().is_some_and(|filter| {
@@ -1204,6 +1333,13 @@ pub fn target_ignores_hexproof(state: &GameState, target_id: ObjectId) -> bool {
                     &FilterContext::from_source(state, source_obj.id),
                 )
             })
+            // CR 609.4 + CR 109.5: honor the "you control" beneficiary qualifier.
+            && ignore_hexproof_beneficiary_allows(
+                state,
+                def.bypass_beneficiary.as_ref(),
+                source_obj.controller,
+                source_controller,
+            )
             && static_condition_matches_context(
                 state,
                 source_obj.id,
@@ -1217,6 +1353,32 @@ pub fn target_ignores_hexproof(state: &GameState, target_id: ObjectId) -> bool {
     })
 }
 
+/// CR 609.4 + CR 109.5: Whether an object-scoped `IgnoreHexproof` static with the
+/// given `bypass_beneficiary` grants its bypass to a spell or ability controlled
+/// by `source_controller`, given the static's controller is `static_controller`.
+///
+/// `None` = unrestricted (Nowhere to Run) → every player benefits. A
+/// `ControllerRef` is resolved relative to the static controller (CR 109.5):
+/// `You` = the static controller only; `Opponent` = that controller's opponents.
+/// No printed hexproof-bypass targets any other beneficiary scope, so every other
+/// `ControllerRef` fails closed — it never widens the bypass beyond what the card
+/// grants.
+fn ignore_hexproof_beneficiary_allows(
+    state: &GameState,
+    beneficiary: Option<&ControllerRef>,
+    static_controller: PlayerId,
+    source_controller: PlayerId,
+) -> bool {
+    match beneficiary {
+        None => true,
+        Some(ControllerRef::You) => source_controller == static_controller,
+        Some(ControllerRef::Opponent) => {
+            crate::game::players::is_opponent(state, static_controller, source_controller)
+        }
+        Some(_) => false,
+    }
+}
+
 /// CR 118.3 + CR 119.4b + CR 601.2h + CR 602.2b: Check whether a static
 /// ability prohibits `player_id` from paying life as a cost.
 ///
@@ -1224,6 +1386,11 @@ pub fn target_ignores_hexproof(state: &GameState, target_id: ObjectId) -> bool {
 /// also prevents damage/life-loss events. Paying 0 life remains legal under
 /// CR 119.4b and is handled by callers before consulting this predicate.
 pub fn player_cant_pay_life_as_cost(state: &GameState, player_id: PlayerId) -> bool {
+    // CR 604.1: O(1) presence gate — no CantPayCost static means no prohibition.
+    if !static_kind_present(state, StaticModeKind::CantPayCost) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     battlefield_active_statics(state).any(|(source_obj, def)| {
         matches!(
             &def.mode,
@@ -1246,6 +1413,11 @@ pub fn player_cant_sacrifice_as_cost(
     player_id: PlayerId,
     object_id: ObjectId,
 ) -> bool {
+    // CR 604.1: O(1) presence gate — no CantPayCost static means no prohibition.
+    if !static_kind_present(state, StaticModeKind::CantPayCost) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
     battlefield_active_statics(state).any(|(source_obj, def)| {
         let StaticMode::CantPayCost {
             who,
@@ -1293,15 +1465,13 @@ pub fn player_has_protection_from_everything(state: &GameState, player_id: Playe
             continue;
         }
         // CR 611.2b: ForAsLongAs durations re-evaluate their condition each cycle.
-        if let crate::types::ability::Duration::ForAsLongAs { ref condition } = tce.duration {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
-        }
-        if let Some(ref condition) = tce.condition {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
+        // CR 611.2b + CR 611.3a: every gate of a resolution-created effect must
+        // hold for it to apply; `transient_gate_conditions` is the authority over
+        // which those are.
+        if !crate::game::layers::transient_gate_conditions(tce)
+            .all(|condition| evaluate_condition(state, condition, tce.controller, tce.source_id))
+        {
+            continue;
         }
         let grants_everything = tce.modifications.iter().any(|m| {
             matches!(
@@ -1318,11 +1488,86 @@ pub fn player_has_protection_from_everything(state: &GameState, player_id: Playe
     false
 }
 
+/// CR 702.11c: Whether `player_id` currently has hexproof as a player.
+///
+/// True when a functioning `StaticMode::Hexproof` static's `affected` filter
+/// matches the player (Battlefield/command-zone grantors — Sigarda's player
+/// half, "You have hexproof.") or when a transient continuous effect grants
+/// `AddStaticMode { Hexproof }` to that player specifically. Does **not**
+/// inspect permanent-scope `Keyword::Hexproof` (that is the object target path
+/// in `targeting::can_target`).
+pub fn player_has_hexproof(state: &GameState, player_id: PlayerId) -> bool {
+    check_static_ability(
+        state,
+        StaticMode::Hexproof,
+        &StaticCheckContext {
+            player_id: Some(player_id),
+            ..Default::default()
+        },
+    ) || transient_grants_static_mode_to_player(state, player_id, &StaticMode::Hexproof)
+}
+
+/// CR 702.18a: Whether `player_id` currently has shroud as a player.
+///
+/// Symmetric to [`player_has_hexproof`] for `StaticMode::Shroud` / transient
+/// `AddStaticMode { Shroud }` grants. Permanent-scope shroud stays on the
+/// object keyword path.
+pub fn player_has_shroud(state: &GameState, player_id: PlayerId) -> bool {
+    check_static_ability(
+        state,
+        StaticMode::Shroud,
+        &StaticCheckContext {
+            player_id: Some(player_id),
+            ..Default::default()
+        },
+    ) || transient_grants_static_mode_to_player(state, player_id, &StaticMode::Shroud)
+}
+
+/// CR 702.11c + CR 702.18a + CR 702.16b: Single authority for whether a player
+/// may be chosen as a target of the spell/ability identified by `source_id`.
+///
+/// `source_controller` is the authoritative controller of the spell or ability
+/// performing the targeting (CR 601.2a / CR 115.1), which may differ from
+/// `state.objects[source_id].controller` when control has changed or the source
+/// object record is not the targeting actor. Invoked by every player-candidate
+/// enumeration in `targeting` (typed player filters, `Any`/`add_players`, and
+/// specific-player pins). Composes:
+/// - Shroud — blocks **every** source (CR 702.18a), including the player's own;
+/// - Hexproof — blocks only **opponents'** sources (CR 702.11c);
+/// - Protection — quality match against the source (CR 702.16b / CR 702.16j).
+///
+/// Detection Tower–class `IgnoreHexproof` does **not** bypass player hexproof:
+/// CR 702.11e speaks to choosing a *creature* as though it lacked hexproof.
+pub fn player_cannot_be_targeted_by(
+    state: &GameState,
+    player_id: PlayerId,
+    source_id: ObjectId,
+    source_controller: PlayerId,
+) -> bool {
+    // CR 702.18a: shroud on a player — can't be the target of spells or abilities
+    // from any player.
+    if player_has_shroud(state, player_id) {
+        return true;
+    }
+    // CR 702.11c: hexproof on a player — can't be the target of spells or
+    // abilities opponents control. CR 102.2 / CR 102.3: "opponent" is team-aware
+    // (2HG teammates are not opponents), so reuse `players::is_opponent` rather
+    // than a bare `ctrl != player_id` inequality that would treat teammates as
+    // opponents.
+    if player_has_hexproof(state, player_id)
+        && crate::game::players::is_opponent(state, player_id, source_controller)
+    {
+        return true;
+    }
+    // CR 702.16b + CR 702.16j: protection from the source.
+    player_protection_from(state, player_id, Some(source_id))
+}
+
 /// CR 702.16: Single authority for player-scoped protection enforcement.
 ///
 /// Returns `true` if `player_id` has protection from `source` (identified by
-/// `source` ObjectId). Consulted by targeting (CR 702.16b) and damage
-/// prevention (CR 702.16e + CR 615.1).
+/// `source` ObjectId). Consulted by targeting (via [`player_cannot_be_targeted_by`],
+/// CR 702.16b) and damage prevention (CR 702.16e + CR 615.1).
 ///
 /// Short-circuits on `player_has_protection_from_everything` (the transient-
 /// effect `Everything` authority, CR 702.16j), then scans battlefield/command-
@@ -1334,6 +1579,27 @@ pub fn player_protection_from(
     player_id: PlayerId,
     source: Option<ObjectId>,
 ) -> bool {
+    player_protection_from_object(
+        state,
+        player_id,
+        source.and_then(|id| state.objects.get(&id)),
+    )
+}
+
+/// CR 702.16 + CR 614.12: [`player_protection_from`] against an explicitly
+/// supplied source object.
+///
+/// Every source-side read in this authority is a characteristic read (card type
+/// for CR 702.16 + CR 205.2, controller for CR 702.16k), so a source that is not
+/// yet the object stored under its id — a meld or liminal ENTRANT, whose id still
+/// holds the pre-entry component — must be read from its projection instead of
+/// from `state.objects`. `None` means "no concrete source object", for which only
+/// the CR 702.16j `Everything` short-circuit can fire.
+pub fn player_protection_from_object(
+    state: &GameState,
+    player_id: PlayerId,
+    source: Option<&crate::game::game_object::GameObject>,
+) -> bool {
     use crate::game::keywords::source_matches_card_type;
     use crate::types::ability::ControllerRef;
     use crate::types::keywords::ProtectionTarget;
@@ -1342,67 +1608,74 @@ pub fn player_protection_from(
     if player_has_protection_from_everything(state, player_id) {
         return true;
     }
-    let Some(source_id) = source else {
+    let Some(source_obj) = source else {
         return false;
     };
     let context = StaticCheckContext {
         player_id: Some(player_id),
         ..Default::default()
     };
-    // CR 114.4: Abilities of emblems function in the command zone.
-    for (src_obj, def) in game_functioning_statics(state) {
-        let StaticMode::PlayerProtection(ref target) = def.mode else {
-            continue;
-        };
-        if let Some(ref affected) = def.affected {
-            if !static_filter_matches(state, &context, affected, src_obj.id) {
+    // CR 702.16: O(1) presence gate on the battlefield/command-zone PlayerProtection
+    // authority ONLY. The `Everything` transient-effect authority is handled by the
+    // short-circuit above (a separate authority the index does not fold), so wrap the
+    // loop rather than early-returning.
+    if static_kind_present(state, StaticModeKind::PlayerProtection) {
+        crate::game::perf_counters::record_static_full_scan();
+        // CR 114.4: Abilities of emblems function in the command zone.
+        for (src_obj, def) in game_functioning_statics(state) {
+            let StaticMode::PlayerProtection(ref target) = def.mode else {
+                continue;
+            };
+            if let Some(ref affected) = def.affected {
+                if !static_filter_matches(state, &context, affected, src_obj.id) {
+                    continue;
+                }
+            }
+            if !static_condition_matches_context(
+                state,
+                src_obj.id,
+                src_obj.controller,
+                def,
+                &context,
+            ) {
                 continue;
             }
-        }
-        if !static_condition_matches_context(state, src_obj.id, src_obj.controller, def, &context) {
-            continue;
-        }
-        let protects = match target {
-            // CR 702.16j: handled by the short-circuit above.
-            ProtectionTarget::Everything => false,
-            // CR 702.16 + CR 205.2: protection from the card type
-            // chosen as the granting permanent (e.g. Serra's Emissary) entered.
-            ProtectionTarget::ChosenCardType => state.objects.get(&source_id).is_some_and(|src| {
-                src_obj
+            let protects = match target {
+                // CR 702.16j: handled by the short-circuit above.
+                ProtectionTarget::Everything => false,
+                // CR 702.16 + CR 205.2: protection from the card type
+                // chosen as the granting permanent (e.g. Serra's Emissary) entered.
+                ProtectionTarget::ChosenCardType => src_obj
                     .chosen_card_type()
                     .and_then(|ct| ct.protection_quality_str())
-                    .is_some_and(|quality| source_matches_card_type(src, quality))
-            }),
-            // CR 702.16k: "Protection from [a player]" at the player level — the
-            // protected player has protection from each object the specified
-            // player(s) control. "Each of your opponents" (CR 702.16i) → the
-            // `Opponent` scope: any source NOT controlled by the protected
-            // player is an opponent's object in 1v1 and free-for-all. Mirrors the
-            // object-level arm in `game/keywords.rs::source_matches_protection_target`.
-            ProtectionTarget::FromPlayer(scope) => {
-                state
-                    .objects
-                    .get(&source_id)
-                    .is_some_and(|src| match scope {
-                        ControllerRef::Opponent => src.controller != player_id,
-                        ControllerRef::You => src.controller == player_id,
-                        // Target/chosen player refs have no static context here —
-                        // fail closed (the parser never emits them for protection).
-                        _ => false,
-                    })
+                    .is_some_and(|quality| source_matches_card_type(source_obj, quality)),
+                // CR 702.16k: "Protection from [a player]" at the player level — the
+                // protected player has protection from each object the specified
+                // player(s) control. "Each of your opponents" (CR 702.16i) → the
+                // `Opponent` scope: any source NOT controlled by the protected
+                // player is an opponent's object in 1v1 and free-for-all. Mirrors the
+                // object-level arm in `game/keywords.rs::source_matches_protection_target`.
+                ProtectionTarget::FromPlayer(scope) => match scope {
+                    ControllerRef::Opponent => source_obj.controller != player_id,
+                    ControllerRef::You => source_obj.controller == player_id,
+                    // Target/chosen player refs have no static context here —
+                    // fail closed (the parser never emits them for protection).
+                    _ => false,
+                },
+                // Truly inert at the player level — no card grants these qualities to
+                // a player; object-level grants of these qualities flow through the
+                // `AddKeyword(Protection)` continuous path, not `PlayerProtection`.
+                ProtectionTarget::ChosenColor
+                | ProtectionTarget::ChosenPlayer
+                | ProtectionTarget::Color(_)
+                | ProtectionTarget::Multicolored
+                | ProtectionTarget::Quality(_)
+                | ProtectionTarget::CardType(_)
+                | ProtectionTarget::Filter(_) => false,
+            };
+            if protects {
+                return true;
             }
-            // Truly inert at the player level — no card grants these qualities to
-            // a player; object-level grants of these qualities flow through the
-            // `AddKeyword(Protection)` continuous path, not `PlayerProtection`.
-            ProtectionTarget::ChosenColor
-            | ProtectionTarget::Color(_)
-            | ProtectionTarget::Multicolored
-            | ProtectionTarget::Quality(_)
-            | ProtectionTarget::CardType(_)
-            | ProtectionTarget::Filter(_) => false,
-        };
-        if protects {
-            return true;
         }
     }
     false
@@ -1428,28 +1701,66 @@ pub fn player_protection_from(
 /// constructing `StaticMode::Other(name.to_string())` on every call would
 /// allocate in potentially hot paths (damage resolution, sacrifice loops).
 fn check_static_other_by_name(state: &GameState, name: &str, context: &StaticCheckContext) -> bool {
-    // CR 114.4: Abilities of emblems function in the command zone.
-    // Functioning gate is applied before context-specific condition evaluation.
-    for (source_obj, def) in game_functioning_statics(state) {
-        match &def.mode {
-            StaticMode::Other(s) if s == name => {}
-            _ => continue,
-        }
-        if let Some(ref affected) = def.affected {
-            if !static_filter_matches(state, context, affected, source_obj.id) {
+    // CR 604.1: O(1) presence gate on the battlefield/command-zone `Other` static
+    // authority ONLY. The `transient_grants_other_static_to_context` fall-through below
+    // is a separate authority the index does not fold, so wrap the loop rather than
+    // early-returning.
+    if static_kind_present(state, StaticModeKind::Other) {
+        crate::game::perf_counters::record_static_full_scan();
+        // CR 114.4: Abilities of emblems function in the command zone.
+        // Functioning gate is applied before context-specific condition evaluation.
+        for (source_obj, def) in game_functioning_statics(state) {
+            match &def.mode {
+                StaticMode::Other(s) if s == name => {}
+                _ => continue,
+            }
+            if let Some(ref affected) = def.affected {
+                if !static_filter_matches(state, context, affected, source_obj.id) {
+                    continue;
+                }
+            }
+            if !static_condition_matches_context(
+                state,
+                source_obj.id,
+                source_obj.controller,
+                def,
+                context,
+            ) {
                 continue;
             }
+            // CR 101.2 + CR 109.5 + CR 115.10: per-affected-player applicability
+            // gate — the same read `check_static_ability` performs for typed
+            // prohibition modes. An `Other` static carrying a per-player
+            // relative-count predicate (Ward of Bones: "each opponent who controls
+            // more lands than you can't play lands" → `CantPlayLand` +
+            // `per_player_condition`) applies to the queried player ONLY when that
+            // predicate holds for them. Evaluated against the affected player
+            // (target-owner, else the queried `player_id`) with `ScopedPlayer`
+            // bound to them and "you" to the source's controller. Fail closed when
+            // no affected player is in context so an under-specified query never
+            // over-applies the prohibition.
+            if let Some(ref cond) = def.per_player_condition {
+                let affected_player = context
+                    .target_id
+                    .and_then(|id| state.objects.get(&id))
+                    .map(|o| o.controller)
+                    .or(context.player_id);
+                match affected_player {
+                    Some(p) => {
+                        if !crate::game::restrictions::evaluate_condition(
+                            state,
+                            p,
+                            source_obj.id,
+                            cond,
+                        ) {
+                            continue;
+                        }
+                    }
+                    None => continue,
+                }
+            }
+            return true;
         }
-        if !static_condition_matches_context(
-            state,
-            source_obj.id,
-            source_obj.controller,
-            def,
-            context,
-        ) {
-            continue;
-        }
-        return true;
     }
     transient_grants_other_static_to_context(state, name, context)
 }
@@ -1491,15 +1802,13 @@ fn transient_grants_other_static_to_context(
             continue;
         }
         // CR 611.2b: ForAsLongAs durations re-evaluate their condition each cycle.
-        if let Duration::ForAsLongAs { ref condition } = tce.duration {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
-        }
-        if let Some(ref condition) = tce.condition {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
+        // CR 611.2b + CR 611.3a: every gate of a resolution-created effect must
+        // hold for it to apply; `transient_gate_conditions` is the authority over
+        // which those are.
+        if !crate::game::layers::transient_gate_conditions(tce)
+            .all(|condition| evaluate_condition(state, condition, tce.controller, tce.source_id))
+        {
+            continue;
         }
         let grants_named_other = tce.modifications.iter().any(|m| {
             matches!(
@@ -1652,14 +1961,23 @@ pub(crate) fn static_filter_matches(
                         crate::types::ability::ControllerRef::You => {
                             source_controller == Some(player_id)
                         }
-                        crate::types::ability::ControllerRef::Opponent => {
-                            source_controller.is_some() && source_controller != Some(player_id)
-                        }
+                        // CR 102.2 / CR 102.3: "each opponent" is team-aware. In a
+                        // multiplayer team game (e.g. Two-Headed Giant) a player's
+                        // opponents are only players NOT on their team, so a naive
+                        // `source_controller != player_id` inequality wrongly treats a
+                        // teammate as an opponent. Route through the team-aware
+                        // authority; in a two-player game `is_opponent` reduces to `!=`.
+                        crate::types::ability::ControllerRef::Opponent => source_controller
+                            .is_some_and(|sc| {
+                                crate::game::players::is_opponent(state, sc, player_id)
+                            }),
                         // CR 109.4: Static abilities have no ability-target context
                         // in which to resolve a target player. Fail closed — the
                         // parser never emits this variant for static filters.
                         crate::types::ability::ControllerRef::ScopedPlayer => false,
-                        crate::types::ability::ControllerRef::TargetPlayer => false,
+                        // CR 109.4: TargetOpponent fails closed identically here.
+                        crate::types::ability::ControllerRef::TargetPlayer
+                        | crate::types::ability::ControllerRef::TargetOpponent => false,
                         crate::types::ability::ControllerRef::ParentTargetController => false,
                         crate::types::ability::ControllerRef::ParentTargetOwner => false,
                         crate::types::ability::ControllerRef::DefendingPlayer => false,
@@ -1672,6 +1990,16 @@ pub(crate) fn static_filter_matches(
                         crate::types::ability::ControllerRef::TriggeringPlayer => false,
                         // CR 303.4b: Enchanted-player scope has no static context. Fail closed.
                         crate::types::ability::ControllerRef::EnchantedPlayer => false,
+                        // CR 102.1: the active player, resolvable directly from
+                        // `state.active_player`.
+                        crate::types::ability::ControllerRef::ActivePlayer => {
+                            state.active_player == player_id
+                        }
+                        // CR 109.4 + CR 611.2: a snapshotted id, resolvable
+                        // directly (mirrors the ActivePlayer arm above).
+                        crate::types::ability::ControllerRef::SpecificPlayer { id } => {
+                            *id == player_id
+                        }
                     };
                 }
                 return true;
@@ -1688,6 +2016,15 @@ pub(crate) fn static_filter_matches(
             // fails open and locks every player whenever any creature carries a
             // granted `CantGainLife`.
             TargetFilter::SpecificObject { .. } | TargetFilter::SelfRef => return false,
+            // CR 607.2d / CR 607.2m (by analogy): a player-scoped static restricted
+            // to "players who last chose <anchor>" (Two Streams Facility's
+            // land-drop grant) admits ONLY the players whose durable per-player
+            // choice records that label. This explicit arm MUST precede the
+            // fail-open `_ => return true` below — otherwise the grant would leak
+            // to every player regardless of their anchor.
+            TargetFilter::PlayerWhoChoseLabel { label } => {
+                return crate::game::players::player_last_chose_label(state, player_id, label)
+            }
             _ => return true,
         }
     }
@@ -1708,10 +2045,13 @@ pub fn additional_land_drops(state: &GameState, player: PlayerId) -> u8 {
 
     let mut total: u8 = 0;
 
-    // CR 702.26b + CR 604.1: `battlefield_active_statics` owns the phased-out
-    // / command-zone / condition gate, so Azusa phased out correctly stops
-    // granting land drops.
-    for (obj, def) in battlefield_active_statics(state) {
+    // CR 702.26b + CR 604.1 + CR 311.2 / CR 312.2: `game_active_statics` chains
+    // command-zone sources through `active_static_definitions`, whose command
+    // gate admits an active plane's opt-in land-drop static (Two Streams
+    // Facility) alongside battlefield permanents — while still owning the
+    // phased-out (Azusa) and per-static condition gates, so a phased-out or
+    // condition-failing land-drop grant still stops correctly.
+    for (obj, def) in game_active_statics(state) {
         // CR 305.2: Determine the additional land count from the variant.
         let count = match def.mode {
             StaticMode::MayPlayAdditionalLand => 1,
@@ -1759,15 +2099,13 @@ fn transient_additional_land_drops(state: &GameState, player: PlayerId) -> u8 {
             continue;
         }
         // CR 611.2b: ForAsLongAs durations re-evaluate their condition each cycle.
-        if let Duration::ForAsLongAs { ref condition } = tce.duration {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
-        }
-        if let Some(ref condition) = tce.condition {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
+        // CR 611.2b + CR 611.3a: every gate of a resolution-created effect must
+        // hold for it to apply; `transient_gate_conditions` is the authority over
+        // which those are.
+        if !crate::game::layers::transient_gate_conditions(tce)
+            .all(|condition| evaluate_condition(state, condition, tce.controller, tce.source_id))
+        {
+            continue;
         }
         for m in &tce.modifications {
             if let ContinuousModification::AddStaticMode { mode } = m {
@@ -1854,6 +2192,93 @@ mod tests {
             ..Default::default()
         };
         assert!(check_static_ability(&state, StaticMode::CantAttack, &ctx));
+    }
+
+    /// Unit 2, site #1: `check_static_ability` gates its O(N) whole-battlefield
+    /// scan behind the O(1) `StaticModePresence` index. On a large board with zero
+    /// functioning statics of the queried mode (index precise after a layers flush),
+    /// the call must run ZERO recorded full scans and return `false`. Reverting the
+    /// `if !static_kind_present(..) { return false }` gate makes the
+    /// `record_static_full_scan()` on the fall-through path fire, flipping the
+    /// counter assertion. The anchor half proves the counter is wired: with a
+    /// matching static present, the scan runs exactly once.
+    #[test]
+    fn check_static_ability_gate_zero_scans() {
+        let mut state = setup();
+        // Large vanilla board, no CantAttack static anywhere. Capture the first
+        // creature (controlled by P0) as the query target.
+        let mut target = None;
+        for i in 0..600u64 {
+            let id = create_object(
+                &mut state,
+                CardId(1000 + i),
+                PlayerId(0),
+                format!("Bear {i}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            if target.is_none() {
+                target = Some(id);
+            }
+        }
+        let target = target.unwrap();
+        // Flush makes the presence index PRECISE (CantAttack absent => gate short-circuits).
+        crate::game::layers::evaluate_layers(&mut state);
+
+        let ctx = StaticCheckContext {
+            target_id: Some(target),
+            ..Default::default()
+        };
+        crate::game::perf_counters::reset();
+        let blocked = check_static_ability(&state, StaticMode::CantAttack, &ctx);
+        let scans = crate::game::perf_counters::snapshot().static_full_scans;
+
+        assert!(
+            !blocked,
+            "no CantAttack static means the check returns false"
+        );
+        assert_eq!(
+            scans, 0,
+            "the O(1) presence gate must skip the whole-battlefield scan (revert-failing)"
+        );
+
+        // Non-vacuous anchor: install a matching static (source controlled by P1,
+        // affecting opponents' creatures => matches the P0 target), reflush, and
+        // confirm the fall-through scan runs exactly once and the check now matches.
+        let source = create_object(
+            &mut state,
+            CardId(9999),
+            PlayerId(1),
+            "Pacifism Source".to_string(),
+            Zone::Battlefield,
+        );
+        let affected =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantAttack).affected(affected));
+        crate::game::layers::evaluate_layers(&mut state);
+
+        crate::game::perf_counters::reset();
+        let blocked = check_static_ability(&state, StaticMode::CantAttack, &ctx);
+        let scans = crate::game::perf_counters::snapshot().static_full_scans;
+        assert!(
+            blocked,
+            "the installed CantAttack static must match the P0 target on fall-through"
+        );
+        assert_eq!(
+            scans, 1,
+            "present index falls through to exactly one recorded scan"
+        );
     }
 
     #[test]
@@ -2726,6 +3151,203 @@ mod tests {
         );
     }
 
+    /// CR 702.11c: A functioning player-scope `StaticMode::Hexproof` makes its
+    /// controller illegal as an opponent's target, but not as their own.
+    #[test]
+    fn player_cannot_be_targeted_by_respects_player_hexproof() {
+        let mut state = setup();
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "You Have Hexproof".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&grantor).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::Hexproof).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            ]
+            .into();
+        crate::game::layers::flush_layers(&mut state);
+
+        let opponent_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Source".to_string(),
+            Zone::Battlefield,
+        );
+        let own_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Own Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        assert!(
+            player_has_hexproof(&state, PlayerId(0)),
+            "controller must report player hexproof"
+        );
+        assert!(
+            !player_has_hexproof(&state, PlayerId(1)),
+            "opponent is not hexproof"
+        );
+        assert!(
+            player_cannot_be_targeted_by(&state, PlayerId(0), opponent_source, PlayerId(1)),
+            "opponent may not target the hexproof player"
+        );
+        assert!(
+            !player_cannot_be_targeted_by(&state, PlayerId(0), own_source, PlayerId(0)),
+            "hexproof player may still be targeted by their own spells"
+        );
+    }
+
+    /// CR 702.11c + CR 601.2a: Player hexproof must key off the spell/ability
+    /// controller passed by targeting, not `state.objects[source_id].controller`.
+    #[test]
+    fn player_cannot_be_targeted_by_uses_authoritative_source_controller() {
+        let mut state = setup();
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "You Have Hexproof".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&grantor).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::Hexproof).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            ]
+            .into();
+        crate::game::layers::flush_layers(&mut state);
+
+        // Object record says P1 controls the source permanent, but the ability
+        // controller passed into targeting is P0 (authoritative).
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Misrecorded Controller".to_string(),
+            Zone::Battlefield,
+        );
+
+        assert!(
+            !player_cannot_be_targeted_by(&state, PlayerId(0), source, PlayerId(0)),
+            "hexproof must not block when authoritative source_controller is the hexproof player"
+        );
+        assert!(
+            player_cannot_be_targeted_by(&state, PlayerId(0), source, PlayerId(1)),
+            "hexproof must block when authoritative source_controller is an opponent"
+        );
+    }
+
+    /// CR 702.11c + CR 102.2 / CR 102.3: In 2HG, a teammate is not an opponent,
+    /// so player hexproof must not block a teammate source while still blocking
+    /// the opposing team.
+    #[test]
+    fn player_cannot_be_targeted_by_hexproof_allows_2hg_teammate() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        // 2HG seats: P0+P1 one team, P2+P3 the other. Grant hexproof to P0.
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "You Have Hexproof".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&grantor).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::Hexproof).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            ]
+            .into();
+        crate::game::layers::flush_layers(&mut state);
+
+        let teammate_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Teammate Source".to_string(),
+            Zone::Battlefield,
+        );
+        let opposing_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(2),
+            "Opposing Team Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        assert!(
+            player_has_hexproof(&state, PlayerId(0)),
+            "P0 must still report player hexproof in 2HG"
+        );
+        assert!(
+            !player_cannot_be_targeted_by(&state, PlayerId(0), teammate_source, PlayerId(1)),
+            "2HG teammate must still be able to target the hexproof player"
+        );
+        assert!(
+            player_cannot_be_targeted_by(&state, PlayerId(0), opposing_source, PlayerId(2)),
+            "opposing-team source must still be blocked by player hexproof"
+        );
+    }
+
+    /// CR 702.18a: Player shroud blocks targeting from every controller.
+    #[test]
+    fn player_cannot_be_targeted_by_respects_player_shroud() {
+        let mut state = setup();
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "You Have Shroud".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&grantor).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::Shroud).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            ]
+            .into();
+        crate::game::layers::flush_layers(&mut state);
+
+        let opponent_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Source".to_string(),
+            Zone::Battlefield,
+        );
+        let own_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Own Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        assert!(player_has_shroud(&state, PlayerId(0)));
+        assert!(player_cannot_be_targeted_by(
+            &state,
+            PlayerId(0),
+            opponent_source,
+            PlayerId(1),
+        ));
+        assert!(
+            player_cannot_be_targeted_by(&state, PlayerId(0), own_source, PlayerId(0)),
+            "shroud blocks the player's own targeting too"
+        );
+    }
+
     #[test]
     fn triggered_sacrifice_or_exile_muzzle_blocks_creature_tokens() {
         use crate::types::ability::{Effect, FilterProp, ResolvedAbility, TypedFilter};
@@ -2805,6 +3427,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -2815,7 +3438,10 @@ mod tests {
             PlayerId(0),
         ));
 
-        state.resolving_stack_entry = None;
+        crate::game::stack::finish_resolving_stack_entry(
+            &mut state,
+            crate::game::lifecycle::DelayedTerminalDisposition::Resolved,
+        );
         assert!(!triggered_cause_sacrifice_or_exile_muzzled(
             &state,
             &ability,

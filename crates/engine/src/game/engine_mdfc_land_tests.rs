@@ -45,6 +45,7 @@ fn make_back_face(
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types,
         mana_cost: ManaCost::default(),
@@ -61,6 +62,7 @@ fn make_back_face(
         casting_restrictions: Vec::new(),
         casting_options: Vec::new(),
         layout_kind,
+        parse_warnings: vec![],
     }
 }
 
@@ -544,6 +546,80 @@ fn spell_mdfc_castable_when_only_back_face_affordable() {
             GameAction::CastSpell { object_id, .. } if *object_id == obj_id
         )),
         "Expected a CastSpell candidate for the spell MDFC"
+    );
+}
+
+#[test]
+fn spell_mdfc_offers_only_the_affordable_face_after_cast_choice() {
+    use crate::types::mana::ManaType;
+    let mut state = setup_game_at_main_phase();
+    let (obj_id, card_id) = create_spell_mdfc_in_hand(&mut state);
+    add_pool_mana(
+        &mut state,
+        PlayerId(0),
+        &[
+            ManaType::White,
+            ManaType::Blue,
+            ManaType::Black,
+            ManaType::Red,
+            ManaType::Green,
+        ],
+    );
+
+    let result = apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: obj_id,
+            card_id,
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::ModalFaceChoice { .. }
+    ));
+
+    let actions = crate::ai_support::legal_actions(&state);
+    assert!(actions.contains(&GameAction::ChooseModalFace { back_face: true }));
+    assert!(
+        !actions.contains(&GameAction::ChooseModalFace { back_face: false }),
+        "the unaffordable front face must not be offered after the cast begins: {actions:?}"
+    );
+}
+
+#[test]
+fn spell_mdfc_does_not_offer_unaffordable_back_face_after_cast_choice() {
+    use crate::types::mana::ManaType;
+    let mut state = setup_game_at_main_phase();
+    let (obj_id, card_id) = create_spell_mdfc_in_hand(&mut state);
+    add_pool_mana(
+        &mut state,
+        PlayerId(0),
+        &[ManaType::White, ManaType::Green, ManaType::Green],
+    );
+
+    let result = apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: obj_id,
+            card_id,
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::ModalFaceChoice { .. }
+    ));
+
+    let actions = crate::ai_support::legal_actions(&state);
+    assert!(actions.contains(&GameAction::ChooseModalFace { back_face: false }));
+    assert!(
+        !actions.contains(&GameAction::ChooseModalFace { back_face: true }),
+        "the unaffordable back face must not be offered after the cast begins: {actions:?}"
     );
 }
 

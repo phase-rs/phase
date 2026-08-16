@@ -1,11 +1,12 @@
-use crate::game::targeting::resolve_event_context_target;
+use crate::game::targeting::{extract_source_from_event, resolve_event_context_target};
 use crate::types::ability::{
-    DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect, EffectError, EffectKind,
-    ReplacementCondition, ReplacementDefinition, ResolvedAbility, RestrictionExpiry, TargetFilter,
-    TargetRef,
+    AbilityDefinition, DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect, EffectError,
+    EffectKind, ReplacementCondition, ReplacementDefinition, ResolvedAbility, RestrictionExpiry,
+    TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::identifiers::ObjectId;
 use crate::types::replacements::ReplacementEvent;
 
 pub(crate) fn expiry_from_duration(
@@ -43,7 +44,117 @@ fn replacement_with_ability_expiry(
     }
     stamp_for_as_long_as_controlled_gate(&mut replacement, ability);
     freeze_damage_modification_x(&mut replacement, ability);
+    freeze_parent_copy_target(&mut replacement, ability);
     replacement
+}
+
+/// CR 603.2 + CR 603.3b + CR 117.3b: Concretize
+/// `TRIGGERING_SPELL_PLACEHOLDER` — the parse-time sentinel
+/// `parse_whenever_you_cast_enters_with_trigger` embeds inside a floating
+/// (`TargetFilter::None`) replacement's `valid_card` — to the SPECIFIC spell
+/// object referenced by the currently-resolving triggered ability's own
+/// originating event (Runadi, Behemoth Caller and the Wildgrowth Archaic
+/// cousin family — issue #6492 review).
+///
+/// Without this, a bare type/mana-value filter would let a DIFFERENT
+/// qualifying creature — cast by the active player during the CR 117.3b
+/// priority window between this trigger resolving and the originally-cast
+/// spell resolving — consume the one-shot install first, leaving the intended
+/// entrant uncountered. `state.current_trigger_event` is exactly this
+/// ability's own trigger event (set by `push_resolving_trigger_context` for
+/// the duration of its resolution — see `game/triggers.rs`), so
+/// `extract_source_from_event` yields the specific cast spell's `ObjectId`.
+///
+/// If the event carries no extractable source, this fails CLOSED — matching
+/// no object via the `ObjectId(0)` sentinel (never a real permanent) — rather
+/// than silently widening back to the bare filter, which would reopen the
+/// exact bug this binding exists to close.
+///
+/// No-op for every other floating-replacement install (Kaya's until-EOT token
+/// doubler, Rankle and Torbran's damage-modification shields): none of them
+/// ever embed the placeholder, so the walk finds nothing to replace.
+fn bind_replacement_to_trigger_source(replacement: &mut ReplacementDefinition, state: &GameState) {
+    let Some(valid_card) = replacement.valid_card.as_mut() else {
+        return;
+    };
+    if !target_filter_contains_placeholder(valid_card) {
+        return;
+    }
+    let bound = state
+        .current_trigger_event
+        .as_ref()
+        .and_then(extract_source_from_event)
+        .unwrap_or(ObjectId(0));
+    concretize_triggering_spell_placeholder(valid_card, bound);
+}
+
+fn target_filter_contains_placeholder(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::SpecificObject { id } => {
+            *id == crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(target_filter_contains_placeholder)
+        }
+        TargetFilter::Not { filter } => target_filter_contains_placeholder(filter),
+        _ => false,
+    }
+}
+
+fn concretize_triggering_spell_placeholder(filter: &mut TargetFilter, bound: ObjectId) {
+    match filter {
+        TargetFilter::SpecificObject { id }
+            if *id == crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER =>
+        {
+            *id = bound;
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            for f in filters.iter_mut() {
+                concretize_triggering_spell_placeholder(f, bound);
+            }
+        }
+        TargetFilter::Not { filter } => concretize_triggering_spell_placeholder(filter, bound),
+        _ => {}
+    }
+}
+
+// CR 614.12a + CR 707.2: If the resolving spell chose the object to copy, bind
+// that object into the delayed enter-as-copy replacement when the shield is
+// created so the later entry event does not ask for a new copy source.
+fn freeze_parent_copy_target(replacement: &mut ReplacementDefinition, ability: &ResolvedAbility) {
+    let Some(copy_source) = ability.targets.iter().find_map(|target| match target {
+        TargetRef::Object(id) => Some(*id),
+        TargetRef::Player(_) => None,
+    }) else {
+        return;
+    };
+    if let Some(execute) = replacement.execute.as_mut() {
+        concretize_parent_copy_target(execute, copy_source);
+    }
+}
+
+fn concretize_parent_copy_target(
+    def: &mut AbilityDefinition,
+    copy_source: crate::types::identifiers::ObjectId,
+) {
+    // CR 614.12a + CR 707.2: a Mystic Reflection-style replacement chooses the
+    // copied object when the spell resolves, before the later battlefield-entry
+    // replacement applies. Freeze that parent target into the installed shield
+    // so the later enter event does not prompt for a new copy source.
+    if let Effect::BecomeCopy { target, .. } = def.effect.as_mut() {
+        if matches!(target, TargetFilter::ParentTarget) {
+            *target = TargetFilter::SpecificObject { id: copy_source };
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        concretize_parent_copy_target(sub, copy_source);
+    }
+    if let Some(else_ability) = def.else_ability.as_mut() {
+        concretize_parent_copy_target(else_ability, copy_source);
+    }
+    for mode in def.mode_abilities.iter_mut() {
+        concretize_parent_copy_target(mode, copy_source);
+    }
 }
 
 /// CR 611.2b: Translate a "for as long as you control ~" duration on the
@@ -197,7 +308,8 @@ pub fn resolve(
     // Slaughter's "If a source you control would deal damage this turn,
     // it deals that much damage plus 1 instead.").
     if matches!(target, TargetFilter::None) {
-        let replacement = replacement_with_ability_expiry(replacement, ability);
+        let mut replacement = replacement_with_ability_expiry(replacement, ability);
+        bind_replacement_to_trigger_source(&mut replacement, state);
         state.pending_damage_replacements.push(replacement);
         attached += 1;
     } else {
@@ -217,9 +329,19 @@ pub fn resolve(
                     // CR 611.2b lapse, so base never accumulates a stale runtime
                     // rider. printed_cards.rs is the only intrinsic base-write
                     // precedent; there is no additive-runtime base-push
-                    // precedent, so this exception is documented here. This
-                    // gate-scoping keeps transient riders (die-exile, Crafty
-                    // Cutpurse, end-of-turn) live-only and untouched.
+                    // precedent, so this exception is documented here.
+                    // A turn-bound die-exile rider must also survive a layer
+                    // reset: a damaged creature can gain/lose characteristics
+                    // or enter combat before it dies. Cleanup prunes this
+                    // narrowly scoped base copy at end of turn.
+                    // A host-lifetime rider (CR 702.84a "if it would leave the
+                    // battlefield, exile it instead", stamped
+                    // `UntilHostLeavesPlay`) is the same class: it must survive
+                    // every CR 613.1 reseed so the redirect still fires after the
+                    // returned permanent gains/loses characteristics, and its
+                    // base+live copies are pruned together the instant the host
+                    // leaves the battlefield (`prune_controller_controls_source_on_leave`,
+                    // CR 400.7) so it never revives on a same-ObjectId re-entry.
                     //
                     // Acknowledged out-of-scope edges (NOT fixed here): (1) Cleave
                     // re-baselining only touches spells on the stack (casting.rs)
@@ -229,10 +351,20 @@ pub fn resolve(
                     // base+live replacement defs, CR 708.2a) would end the lock
                     // early — an under-prune, strictly safer than a revival; rare
                     // corner, out of scope.
-                    let install_to_base = matches!(
-                        replacement.condition,
-                        Some(ReplacementCondition::ControllerControlsSource { .. })
-                    );
+                    let durable_die_exile =
+                        crate::game::printed_cards::is_runtime_target_die_exile_replacement(
+                            &replacement,
+                        );
+                    let host_lifetime =
+                        crate::game::printed_cards::is_runtime_host_lifetime_replacement(
+                            &replacement,
+                        );
+                    let install_to_base = durable_die_exile
+                        || host_lifetime
+                        || matches!(
+                            replacement.condition,
+                            Some(ReplacementCondition::ControllerControlsSource { .. })
+                        );
                     if let Some(obj) = state.objects.get_mut(&obj_id) {
                         if install_to_base {
                             std::sync::Arc::make_mut(&mut obj.base_replacement_definitions)
@@ -252,6 +384,7 @@ pub fn resolve(
                         replacement.damage_target_filter =
                             Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
                                 player: DamageTargetPlayerScope::Specific(player),
+                                permanent_type: None,
                             });
                     }
                     state.pending_damage_replacements.push(replacement);
@@ -265,6 +398,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::AddTargetReplacement,
             source_id: ability.source_id,
+            subject: None,
         });
     }
 
@@ -278,7 +412,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, DamageModification, DamageTargetPlayerScope, Duration,
-        ReplacementDefinition, RestrictionExpiry, TargetFilter,
+        ReplacementDefinition, RestrictionExpiry, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -426,6 +560,73 @@ mod tests {
     }
 
     #[test]
+    fn global_enter_as_copy_replacement_freezes_parent_target_copy_source() {
+        let mut state = GameState::new_two_player(42);
+        let copy_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Chosen Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&copy_source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature);
+
+        let mut replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .valid_card(TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
+                ],
+            })
+            .destination_zone(Zone::Battlefield)
+            .execute(AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::BecomeCopy {
+                    target: TargetFilter::ParentTarget,
+                    recipient: TargetFilter::SelfRef,
+                    duration: None,
+                    mana_value_limit: None,
+                    additional_modifications: Vec::new(),
+                },
+            ));
+        replacement.consume_on_apply = true;
+        replacement.expiry = Some(RestrictionExpiry::EndOfTurn);
+
+        let ability = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(replacement),
+                target: TargetFilter::None,
+            },
+            vec![TargetRef::Object(copy_source)],
+            ObjectId(0),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let installed = state
+            .pending_damage_replacements
+            .last()
+            .expect("global replacement shield must be installed");
+        let execute = installed.execute.as_ref().expect("copy execute");
+        let Effect::BecomeCopy { target, .. } = &*execute.effect else {
+            panic!("expected BecomeCopy execute, got {:?}", execute.effect);
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::SpecificObject { id: copy_source },
+            "the chosen creature must be captured before the later entry event"
+        );
+    }
+
+    #[test]
     fn pushes_damage_replacement_for_triggering_player() {
         let mut state = GameState::new_two_player(42);
         state.current_trigger_event = Some(GameEvent::DamageDealt {
@@ -459,7 +660,8 @@ mod tests {
         assert_eq!(
             pending.damage_target_filter,
             Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
-                player: DamageTargetPlayerScope::Specific(PlayerId(1))
+                player: DamageTargetPlayerScope::Specific(PlayerId(1)),
+                permanent_type: None,
             })
         );
         assert_eq!(

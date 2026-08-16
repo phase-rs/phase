@@ -38,6 +38,9 @@ fn abandon_as_enters_choice_for_scenario_setup(
         return false;
     }
     state.deferred_entry_events.clear();
+    // The abandoned as-enters prompt owns any token battlefield entry parked by this setup, and
+    // nothing will reach a realization point for it once the prompt is dropped.
+    state.pending_token_battlefield_entry = None;
     state.waiting_for = WaitingFor::Priority { player: controller };
     true
 }

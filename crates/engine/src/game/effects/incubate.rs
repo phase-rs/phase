@@ -96,7 +96,8 @@ pub fn resolve(
     // token (escalates to a full pass if it sources effects, carries
     // counters, etc.).
     crate::game::layers::mark_layers_entered(state, obj_id);
-    crate::game::restrictions::record_battlefield_entry(state, obj_id);
+    // CR 608.2i battlefield-entry bookkeeping is done by `record_zone_change` below —
+    // recording it here too would double-count `battlefield_entries_this_turn`.
     crate::game::restrictions::record_token_created(state, obj_id);
 
     // CR 603.6a: The Incubator token enters the battlefield as a zone change
@@ -109,26 +110,29 @@ pub fn resolve(
     // triggers (issue #4238). Mirrors
     // `token.rs::apply_create_token_after_replacement_with_created_ids` and
     // `conjure.rs`'s identical fix for the same bug class.
-    let zone_change_record = state
-        .objects
-        .get(&obj_id)
-        .expect("incubator token was just created")
-        .snapshot_for_zone_change(obj_id, None, Zone::Battlefield);
-    state
-        .zone_changes_this_turn
-        .push(zone_change_record.clone());
-    events.push(GameEvent::ZoneChanged {
-        object_id: obj_id,
-        from: None,
-        to: Zone::Battlefield,
-        record: Box::new(zone_change_record),
-    });
+    //
+    // CR 400.7 + CR 608.2i + CR 603.2c: route the record and the emit through
+    // `zones::record_and_emit_entry_from_no_zone` — the single `from: None → Battlefield`
+    // authority, which assigns this turn's zone-change index through
+    // `restrictions::record_zone_change` and writes it back onto the record it emits.
+    // That one call writes BOTH ledgers, which is why both rules are cited here: the CR 400.7
+    // zone-change row (whose length IS the index allocator) and — because `to_zone` is
+    // `Battlefield` — the CR 608.2i battlefield-entry row, via `record_battlefield_entry`. The
+    // latter is the look-back journal that a permanent which has since left still counts in, so
+    // re-recording either ledger at this call site would double-count it.
+    // `snapshot_for_zone_change` leaves that index at its `0` placeholder, and the batched
+    // zone-change replay guard (`triggers.rs`) dedups on `(definition_ref, turn_zone_change_index)`
+    // read off the EVENT, so an unrouted record aliases this Incubator onto occurrence `0` and a
+    // `batched: true` ETB trigger that already fired for another entry this turn is swallowed.
+    crate::game::zones::record_and_emit_entry_from_no_zone(state, obj_id, events)
+        .expect("incubator token was just created");
 
     super::token::inject_predefined_token_abilities(state, obj_id);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Incubate,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -137,8 +141,10 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{Effect, QuantityExpr};
-    use crate::types::identifiers::ObjectId;
+    use crate::types::ability::{
+        Effect, QuantityExpr, QuantityRef, TargetFilter, ThisWayCause, TypeFilter, TypedFilter,
+    };
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
 
     fn make_incubate_ability(count: QuantityExpr) -> ResolvedAbility {
@@ -148,6 +154,98 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    #[test]
+    fn sunfall_incubates_once_for_each_creature_exiled_this_way() {
+        let mut state = GameState::new_two_player(42);
+        for index in 0..3 {
+            let id = zones::create_object(
+                &mut state,
+                CardId(200 + index),
+                PlayerId((index % 2) as u8),
+                format!("Creature {index}"),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+
+        let mut setup_events = Vec::new();
+        resolve(
+            &mut state,
+            &make_incubate_ability(QuantityExpr::Fixed { value: 1 }),
+            &mut setup_events,
+        )
+        .expect("setup Incubator resolves");
+        let transformed_incubator = state
+            .battlefield
+            .iter()
+            .copied()
+            .find(|id| state.objects[id].name == "Incubator")
+            .expect("setup creates an Incubator");
+        crate::game::transform::transform_permanent(
+            &mut state,
+            transformed_incubator,
+            &mut setup_events,
+        )
+        .expect("setup Incubator transforms");
+        assert_eq!(
+            state.objects[&transformed_incubator].name, "Phyrexian Token",
+            "the setup token must be a transformed creature before Sunfall resolves"
+        );
+
+        let incubate = ResolvedAbility::new(
+            Effect::Incubate {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::FilteredTrackedSetSize {
+                        filter: Box::new(TargetFilter::Typed(TypedFilter::new(
+                            TypeFilter::Creature,
+                        ))),
+                        caused_by: Some(ThisWayCause::Exiled),
+                    },
+                },
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let sunfall = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                random_order: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(incubate);
+
+        crate::game::effects::resolve_ability_chain(&mut state, &sunfall, &mut Vec::new(), 0)
+            .expect("Sunfall resolves");
+        assert_eq!(
+            state.exile.len(),
+            4,
+            "all three creatures and the transformed Incubator are exiled"
+        );
+        let incubator = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .find(|object| object.name == "Incubator")
+            .expect("Sunfall creates an Incubator");
+        assert_eq!(
+            incubator.counters.get(&CounterType::Plus1Plus1).copied(),
+            Some(4),
+            "the Incubator must get one counter for each creature exiled"
+        );
     }
 
     #[test]
@@ -238,7 +336,7 @@ mod tests {
                 .any(|e| matches!(e, GameEvent::ZoneChanged { .. })),
             "ZoneChanged must not fire before the paused counter replacement resolves"
         );
-        assert!(state.pending_counter_additions.is_some());
+        assert!(state.active_counter_additions().is_some());
 
         // Resolve the player's replacement-ordering choice for the paused AddCounter.
         let result = continue_replacement(&mut state, 0, &mut events);

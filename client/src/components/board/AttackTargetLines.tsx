@@ -2,11 +2,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
+import type { MultiplayerBoardLayout } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { objectAnchorSelector } from "../../utils/objectAnchorSelector.ts";
-import { getOpponentIds, isOneOnOne, resolveFocusedOpponent } from "../../viewmodel/gameStateView.ts";
+import { getVisibleBoardPlayerIds, isOneOnOne } from "../../viewmodel/gameStateView.ts";
 import {
   arcPath,
   useAttackerArrowPositions,
@@ -61,7 +62,11 @@ function AttackArrowPath({ arrow, isMinimal }: { arrow: AttackArrowData; isMinim
  *
  *  Player-target arrows only draw in multiplayer (>2 players); in 1v1 the
  *  player attack is implicit and drawing would be visual noise. */
-export function AttackTargetLines() {
+export function AttackTargetLines({
+  effectiveMultiplayerBoardLayout,
+}: {
+  effectiveMultiplayerBoardLayout: MultiplayerBoardLayout;
+}) {
   const gameState = useGameStore((s) => s.gameState);
   const combat = gameState?.combat ?? null;
   const objects = gameState?.objects;
@@ -71,13 +76,15 @@ export function AttackTargetLines() {
   const isMinimal = vfxQuality === "minimal";
 
   const isMultiplayer = gameState != null && !isOneOnOne(gameState);
-  const liveOpponents = useMemo(() => getOpponentIds(gameState, localPlayerId), [gameState, localPlayerId]);
-  const effectiveFocusedOpponent = resolveFocusedOpponent(focusedOpponent, liveOpponents);
-
-  const isControllerOnScreen = useMemo(() => {
-    return (controllerId: PlayerId) =>
-      controllerId === localPlayerId || controllerId === effectiveFocusedOpponent;
-  }, [localPlayerId, effectiveFocusedOpponent]);
+  const visiblePlayerIds = useMemo(
+    () => new Set(getVisibleBoardPlayerIds(
+      gameState,
+      localPlayerId,
+      focusedOpponent,
+      effectiveMultiplayerBoardLayout,
+    )),
+    [effectiveMultiplayerBoardLayout, focusedOpponent, gameState, localPlayerId],
+  );
 
   const blockedAttackerIds = useMemo<Set<number>>(() => {
     if (!combat) return new Set();
@@ -126,16 +133,16 @@ export function AttackTargetLines() {
     if (!isMultiplayer || !objects) return arrows;
     return arrows.filter((a) => {
       const controller = objects[a.attackerId]?.controller;
-      return controller == null || isControllerOnScreen(controller);
+      return controller == null || visiblePlayerIds.has(controller);
     });
-  }, [arrows, isMultiplayer, objects, isControllerOnScreen]);
+  }, [arrows, isMultiplayer, objects, visiblePlayerIds]);
 
   const positions = useAttackerArrowPositions(onScreenArrows);
 
   const hudIndicators = useHudAttackIndicators(
     arrows,
     objects ?? null,
-    isControllerOnScreen,
+    visiblePlayerIds,
     isMultiplayer,
     blockedAttackerIds,
   );
@@ -190,7 +197,7 @@ export function AttackTargetLines() {
 function useHudAttackIndicators(
   arrows: AttackerArrow[],
   objects: Record<string, { controller: PlayerId }> | null,
-  isControllerOnScreen: (id: PlayerId) => boolean,
+  visiblePlayerIds: ReadonlySet<PlayerId>,
   isMultiplayer: boolean,
   blockedAttackerIds: Set<number>,
 ): AttackArrowData[] {
@@ -203,7 +210,7 @@ function useHudAttackIndicators(
     for (const a of arrows) {
       const controller = objects[a.attackerId]?.controller;
       if (controller == null) continue;
-      if (isControllerOnScreen(controller)) continue;
+      if (visiblePlayerIds.has(controller)) continue;
       result.push({
         attackingPlayerId: controller,
         target: a.target,
@@ -212,7 +219,7 @@ function useHudAttackIndicators(
       });
     }
     return result;
-  }, [arrows, isMultiplayer, objects, isControllerOnScreen]);
+  }, [arrows, isMultiplayer, objects, visiblePlayerIds]);
 
   const prevCountRef = useRef(0);
 

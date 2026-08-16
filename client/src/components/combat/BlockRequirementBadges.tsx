@@ -3,7 +3,8 @@ import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
 import type { ObjectId } from "../../adapter/types.ts";
-import { useBlockRequirements, type BlockRequirement } from "./useBlockRequirements.ts";
+import { useGameStore } from "../../stores/gameStore.ts";
+import { useBlockRequirements } from "./useBlockRequirements.ts";
 
 interface Anchor {
   x: number;
@@ -58,26 +59,16 @@ function useAttackerAnchors(attackerIds: ObjectId[]): Map<ObjectId, Anchor> {
   return anchors;
 }
 
-function badgeTone(status: BlockRequirement["status"]): string {
-  switch (status) {
-    case "satisfied":
-      return "border-emerald-300/60 bg-emerald-950/85 text-emerald-100";
-    case "incomplete":
-      return "border-amber-300/70 bg-amber-950/90 text-amber-100 animate-pulse";
-    case "pending":
-      return "border-rose-300/50 bg-rose-950/85 text-rose-100";
-  }
-}
-
 /**
  * Floating "needs N blockers" badge over each attacker with a minimum-blocker
  * requirement (menace / "blocked by N or more"). Renders only while the local
- * player is assigning blockers. Pure display of engine-provided requirements vs
- * the player's in-progress assignments (see `useBlockRequirements`).
+ * player is assigning blockers. It displays engine-provided requirements only;
+ * the engine validates the submitted declaration.
  */
 export function BlockRequirementBadges() {
   const { t } = useTranslation("game");
   const { byAttacker } = useBlockRequirements();
+  const objects = useGameStore((s) => s.gameState?.objects);
   const attackerIds = Array.from(byAttacker.keys());
   const anchors = useAttackerAnchors(attackerIds);
 
@@ -88,16 +79,18 @@ export function BlockRequirementBadges() {
       {Array.from(byAttacker.values()).map((req) => {
         const anchor = anchors.get(req.attackerId);
         if (!anchor) return null;
-        const label =
-          req.status === "satisfied"
-            ? t("combat.blockSatisfiedBadge", { required: req.required })
-            : req.status === "incomplete"
-              ? t("combat.blockProgressBadge", { assigned: req.assigned, required: req.required })
-              : t("combat.blockNeedsBadge", { required: req.required });
-        const title =
-          req.status === "incomplete"
-            ? t("combat.blockIncompleteAttacker", { assigned: req.assigned, required: req.required })
-            : t("combat.menaceRequirement", { count: req.required });
+        const label = t("combat.blockNeedsBadge", { required: req.required });
+        const baseTitle = t("combat.menaceRequirement", { count: req.required });
+        // Display-only source attribution: suppress the self-source (Menace's
+        // carrier is the attacker itself → bare badge) and skip ids that no
+        // longer resolve (departed-source guard), mirroring AttackRequirementBadges.
+        const names = req.sources
+          .filter((id) => id !== req.attackerId)
+          .map((id) => objects?.[String(id)]?.name)
+          .filter((n): n is string => !!n);
+        const title = names.length
+          ? `${baseTitle} ${t("preview.fromSource", { source: names.join(", ") })}`
+          : baseTitle;
         return (
           <div
             key={req.attackerId}
@@ -106,7 +99,7 @@ export function BlockRequirementBadges() {
           >
             <span
               title={title}
-              className={`flex items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] font-bold tabular-nums shadow-[0_4px_12px_rgba(0,0,0,0.5)] backdrop-blur-sm ${badgeTone(req.status)}`}
+              className="flex items-center gap-1 whitespace-nowrap rounded-full border border-rose-300/50 bg-rose-950/85 px-2 py-0.5 text-[11px] font-bold tabular-nums text-rose-100 shadow-[0_4px_12px_rgba(0,0,0,0.5)] backdrop-blur-sm"
             >
               {/* Two-pronged "menace" glyph — a single attacker needing multiple blockers. */}
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.6} className="h-3 w-3">

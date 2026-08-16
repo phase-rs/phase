@@ -405,6 +405,7 @@ fn atomic_creature(name: &str, mana_cost: &str, keyword: &str, oracle: &str) -> 
             scryfall_id: Some(format!("{name}-face")),
         },
         foreign_data: Vec::new(),
+        related_cards: crate::database::mtgjson::SetRelatedCards::default(),
     }
 }
 
@@ -461,6 +462,7 @@ fn atomic_with_types(
             scryfall_id: Some(format!("{name}-face")),
         },
         foreign_data: Vec::new(),
+        related_cards: crate::database::mtgjson::SetRelatedCards::default(),
     }
 }
 

@@ -162,3 +162,41 @@ fn ashaya_creature_etb_triggers_landfall() {
 
     outcome.assert_hand_drawn(P0, 1);
 }
+
+/// CR 613.1 + CR 613.1d + CR 613.4a: Ashaya's own CDA counts a population its
+/// own layer-4 effect feeds. Layers apply in order (CR 613.1), so "power and
+/// toughness equal to the number of lands you control" (layer 7a, CR 613.4a) is
+/// computed over a board on which "nontoken creatures you control are Forest
+/// lands" (layer 4, CR 613.1d) has already run — an entering nontoken creature
+/// raises Ashaya's P/T even though nothing that entered was printed as a land.
+///
+/// Regression: found by differential verification against a full re-evaluation
+/// during development. The entry-
+/// incremental flush escalation gate probed the ENTERING object for membership
+/// in "lands you control" using its pre-layer characteristics — a creature, not
+/// a land — concluded the count was unperturbed, took the incremental arm, and
+/// left Ashaya's P/T stale where a full re-evaluation raises it.
+#[test]
+fn ashaya_power_counts_a_creature_that_its_own_static_turns_into_a_land() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let ashaya_id = scenario
+        .add_creature_from_oracle(P0, "Ashaya, Soul of the Wild", 0, 0, ASHAYA)
+        .id();
+    let entering_creature = scenario
+        .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
+    let mut runner = scenario.build();
+
+    runner.cast(entering_creature).resolve();
+
+    let after = &runner.state().objects[&ashaya_id];
+    assert_eq!(
+        (after.power, after.toughness),
+        (Some(2), Some(2)),
+        "both Ashaya and the entering Bears are Forest lands, so the CDA counts 2"
+    );
+}

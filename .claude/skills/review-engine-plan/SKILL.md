@@ -67,6 +67,40 @@ Review the plan as an architectural gate. Reject the plan if any required dimens
    - Include permissions, costs, choice provenance, tracked sets, duration snapshots, source/controller/owner shifts, and serialization/protocol/card-data boundaries when those are touched.
    - Require negative tests for semantically adjacent sibling variants that are plausibly affected, or a concrete explanation for why a sibling is unreachable/out of scope.
 
+12. **Sizing section** (severity depends on context)
+   - Verify a Sizing section exists and is consistent with the plan body: a plan whose body names N independently tested behaviors must not report fewer units.
+   - Blocking **only when the review's spawn inputs declare a phase-fit context** (the `/engine-implementer` and `/implement-task` pipelines). For any other consumer of this skill — standalone planner runs, `/batch-mechanics`, contributor plan reviews — a missing Sizing section is a non-blocking note, never a rejection; the "reject if any required dimension is missing" rule is not extended to Sizing outside phase-fit context.
+
+## Modes
+
+Ordinary mode is everything above. Three additional modes activate when the caller's spawn inputs name them; each scopes this file's mandatory language here, in this file — a spawn prompt never overrides this text.
+
+### Charter mode (spawn inputs: a phase charter + the originating plan/task)
+
+Review the decomposition, not per-phase detail. Checklist:
+
+- **Seam green-tree safety** — every phase boundary leaves the tree compiling and tests green (strict-failure tags are the sanctioned way to hold coverage waiting between phases).
+- **Each phase independently reviewable and shippable against its charter entry** — this does not mean every phase carries a full end-to-end test: a phase verification plan written `DEFERRED(phase n)` with a named landing phase is accepted; a deferred verification with no named landing phase is rejected.
+- **Deferral lists complete and phase-attributed** — everything the full task needs that a phase omits names the phase that lands it.
+- **Linear ordering respects dependencies** — infrastructure before consumer.
+- **Recursive gate check** — no individual phase itself trips the T1∧T2 conjunction defined in `/engine-implementer`.
+- **Premise verification present** — charter mode preserves engine-planner Step 0.
+- **Scope entries are literal paths or directories, no globs** — the orchestrator's frozen `SCOPE_PATHS` representation and T2 directory expansion consume concrete paths (as does `/implement-task`'s snapshot pathspec machinery).
+
+Checks that do not apply to a charter: 6 (nom compliance), 9 (verification matrix), 11 (scope matrix), and check 3's full end-to-end trace requirement — those apply later, to each phase plan under phase-plan mode. A charter's feasibility exit (a report that no green-tree seam exists) is reviewed on its named evidence: every candidate split point named, each shown to leave the tree non-compiling or tests red.
+
+### Phase-plan mode (spawn inputs: charter + phase index + that phase's deferral allowlist)
+
+Review one phase's plan given the charter. All ordinary checks apply to the phase's own claims, with this scoping: deferral-listed items are exempt unless the phase plan forecloses or contradicts them — **deferred ≠ gap; foreclosure = gap**.
+
+- **Row-level rule for check 9:** a Verification Matrix row written `DEFERRED(phase n)` with a named landing phase is accepted; a deferred row with no named landing phase is rejected.
+- **Pattern-coverage scoping for check 1:** "reject one-card plans" is assessed against the **charter's** class attribution, not the phase's own diff — a dependency-seam infrastructure phase covers zero cards by itself by construction; its class coverage lives in the charter and lands with the consumer phase.
+- **Check 12 is inherent and blocking in this mode:** a phase plan without a Sizing section, or one inconsistent with its body, is a blocking finding — the section is the measured input for the orchestrator's per-phase re-adjudication.
+
+### Sizing-audit mode (spawn input: a plan + its sizing addendum)
+
+Check **only** Sizing consistency against the plan body (check 12's substance, nothing else). Used by `/engine-implementer` for pre-existing plans on both of its input paths — for an already review-clean plan because re-running the other checks would be redundant, and for a pre-existing draft because the addendum must be audited before the phase-fit gate adjudicates, which is earlier than any full review round.
+
 ## Review Loop
 
 Return every gap to the planner. Require a revised full plan, then re-review the entire revised plan with fresh context. Repeat until a full round returns clean or the caller stops the process.

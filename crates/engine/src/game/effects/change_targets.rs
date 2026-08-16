@@ -45,8 +45,31 @@ pub fn resolve(
             EffectError::MissingParam("ChangeTargets: targeted entry not on stack".to_string())
         })?;
 
+    let Some(stack_ability) = state.stack[stack_entry_index].ability().cloned() else {
+        // Permanent spell with no ability — nothing to retarget.
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    };
+    let current_targets = stack_ability.targets.clone();
+    if current_targets.is_empty() {
+        // CR 115.7: Retargeting changes existing targets of the target spell or
+        // ability. A stack entry with no current targets has no retarget choice
+        // to make, so the effect resolves as a no-op rather than opening an
+        // impossible selection state.
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
+
     if let Some(filter) = forced_to {
-        // CR 115.7: Forced retarget — resolve the new target from the filter,
+        // CR 115.7a/b: Forced retarget — resolve the new target from the filter,
         // but only apply it if the targeted stack entry could legally target it.
         let legal_new_targets = legal_new_targets_for_stack_entry(state, stack_entry_index);
         let new_targets = find_legal_targets(state, filter, ability.controller, ability.source_id);
@@ -54,29 +77,44 @@ pub fn resolve(
             .into_iter()
             .find(|target| legal_new_targets.contains(target))
         {
-            if let Some(stack_ability) = state.stack[stack_entry_index].ability_mut() {
-                stack_ability.targets = vec![new_target];
+            // CR 115.7b: "change a target" replaces exactly ONE of the targeted
+            // stack entry's targets; every other declared target stays in place.
+            // For a multi-role mana ability (`ManaTargetRole::Both`, two declared
+            // target slots per CR 601.2c) that means replacing only the slot the
+            // new target is legal for — never collapsing the whole target list to
+            // `vec![new_target]`, which would delete the untouched slot.
+            let updated =
+                forced_retarget_targets(state, &stack_ability, &current_targets, new_target);
+            let changed = updated
+                .iter()
+                .zip(current_targets.iter())
+                .find(|(updated, current)| {
+                    stack_ability.retarget_target_requires_pin_refresh(current, updated, state)
+                })
+                .and_then(|(target, _)| match target {
+                    TargetRef::Object(id) => state
+                        .objects
+                        .get(id)
+                        .map(crate::types::identifiers::ObjectIncarnationRef::from_object),
+                    TargetRef::Player(_) => None,
+                });
+            if let Some(stack_ability_mut) = state.stack[stack_entry_index].ability_mut() {
+                stack_ability_mut.targets = updated;
+                if let Some(pin) = changed {
+                    stack_ability_mut.update_selected_target_incarnation(pin);
+                }
             }
         }
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
 
     // Interactive retarget: present choices to the player.
     // CR 115.7a: The current targets of the targeted spell/ability become the starting point.
-    let Some(stack_ability) = state.stack[stack_entry_index].ability().cloned() else {
-        // Permanent spell with no ability — nothing to retarget.
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::from(&ability.effect),
-            source_id: ability.source_id,
-        });
-        return Ok(());
-    };
-    let current_targets = stack_ability.targets.clone();
-
     // CR 115.7: Enumerate legal new targets by re-evaluating the stack entry's
     // own targeting restriction against the current game state.
     //
@@ -97,6 +135,69 @@ pub fn resolve(
     };
     // EffectResolved is emitted by the engine handler after RetargetSpell action is submitted.
     Ok(())
+}
+
+/// CR 115.7a + CR 115.7b: Compute the targeted stack entry's full new target
+/// list after a forced single-target retarget, replacing exactly ONE slot and
+/// preserving every other declared target in place.
+///
+/// CR 601.2c: A multi-role mana ability (`ManaTargetRole::Both`) declares two
+/// independent instances of "target" — a recipient slot and a count-source slot
+/// — surfaced positionally by `role.surfaced_filters()`. The slot to replace is
+/// the first whose filter legally accepts the candidate AND whose current target
+/// actually DIFFERS from it: CR 115.7a requires a change to *another* legal
+/// target, so a slot already holding `new_target` is not a change and is skipped
+/// in favor of one that can genuinely change. This mirrors the interactive
+/// assignment seam `ability_utils::retarget_slot_violation` (which zips the same
+/// `surfaced_filters()` against submitted targets) on slot identity.
+///
+/// A single-target spell/ability (`mana_multi_role == None`, one target at slot
+/// 0) replaces index 0 — byte-for-byte identical to the previous
+/// `vec![new_target]`. If no slot qualifies (none can change to another legal
+/// target), every target is left unchanged, per CR 115.7a.
+fn forced_retarget_targets(
+    state: &GameState,
+    stack_ability: &ResolvedAbility,
+    current_targets: &[TargetRef],
+    new_target: TargetRef,
+) -> Vec<TargetRef> {
+    // CR 115.7a + CR 115.7b: "change a target" replaces exactly ONE target with
+    // ANOTHER legal target and leaves the others unchanged. For a multi-role
+    // mana ability (independent recipient / count-source slots) pick the first
+    // surfaced slot whose filter legally accepts the candidate AND whose current
+    // target actually DIFFERS from it — changing a target to itself is not a
+    // change (CR 115.7a), so a slot already holding `new_target` must be skipped
+    // in favor of a different slot that can genuinely change. If no slot
+    // qualifies, every target is left unchanged (CR 115.7a: "If a target can't
+    // be changed to another legal target, the original target is unchanged.").
+    // Single-role / non-mana nodes have exactly one slot (index 0), matching the
+    // pre-role behavior.
+    let slot = match crate::types::ability::mana_multi_role(&stack_ability.effect) {
+        Some(role) => role
+            .surfaced_filters()
+            .enumerate()
+            .find_map(|(i, (_slot, filter))| {
+                let changes = current_targets.get(i).is_some_and(|cur| *cur != new_target);
+                let legal = !crate::game::targeting::validate_targets_for_ability(
+                    state,
+                    std::slice::from_ref(&new_target),
+                    filter,
+                    stack_ability,
+                )
+                .is_empty();
+                (changes && legal).then_some(i)
+            }),
+        None => Some(0),
+    };
+    match slot {
+        Some(i) if i < current_targets.len() => {
+            let mut targets = current_targets.to_vec();
+            targets[i] = new_target;
+            targets
+        }
+        // CR 115.7a: no slot can legally change to another target → unchanged.
+        _ => current_targets.to_vec(),
+    }
 }
 
 /// Extract the target filter from an effect variant, if it has a standard `target` field.
@@ -134,6 +235,39 @@ fn legal_new_targets_for_stack_ability(
             stack_ability.controller,
             stack_ability.source_id,
         );
+    }
+
+    // CR 115.7 + CR 601.2c: A multi-role mana declares its recipient AND its
+    // count source as independent instances of "target"; both are legally
+    // retargetable. The standard branch below reads `Effect::target_filter()`,
+    // which returns only the FIRST DECLARED role filter and RETURNS
+    // UNCONDITIONALLY — so it must not run first here, or the second role would
+    // be silently unretargetable. Build the pool over ALL surfaced role filters
+    // instead. Placed like the Aura branch above for the same reason: this
+    // node's real target restriction is not the one the generic accessor
+    // reports.
+    //
+    // The pool is necessarily FLAT (`Vec<TargetRef>`, no slot structure), so it
+    // is a SUPERSET pre-filter for the UI/AI. Per-slot CR 115.7a legality is
+    // enforced at the assignment seam by `retarget_slot_violation`
+    // (`engine.rs::apply_retarget`). Single-role manas take
+    // `mana_multi_role == None` and are served entirely by the standard branch,
+    // exactly as before.
+    if let Some(role) = crate::types::ability::mana_multi_role(&stack_ability.effect) {
+        let options: Vec<TargetRef> = role
+            .surfaced_filters()
+            .flat_map(|(_slot, filter)| {
+                find_legal_targets(
+                    state,
+                    filter,
+                    stack_ability.controller,
+                    stack_ability.source_id,
+                )
+            })
+            .collect();
+        if !options.is_empty() {
+            return options;
+        }
     }
 
     // CR 115.7: Standard targeted spell/ability — re-evaluate its own declared
@@ -257,7 +391,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(3),
-                ability: Some(aura_spell_ability),
+                ability: Some(Box::new(aura_spell_ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -365,7 +499,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(3),
-                ability: Some(aura_spell_ability),
+                ability: Some(Box::new(aura_spell_ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -418,7 +552,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(4),
-                ability: Some(bb_ability),
+                ability: Some(Box::new(bb_ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -519,7 +653,7 @@ mod tests {
             controller: PlayerId(1),
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
-                ability: Some(tap_ability),
+                ability: Some(Box::new(tap_ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -575,6 +709,67 @@ mod tests {
             .map(|a| a.targets.clone())
             .expect("spell remains on stack with targets");
         assert_eq!(new_targets, vec![TargetRef::Player(PlayerId(1))]);
+    }
+
+    /// CR 115.7: Retarget effects operate on the existing targets of the target
+    /// spell or ability. If the chosen stack entry has no targets, Deflecting
+    /// Swat resolves as a no-op instead of opening an impossible
+    /// `RetargetChoice` with zero slots.
+    #[test]
+    fn choose_new_targets_on_targetless_spell_resolves_without_choice() {
+        let mut state = GameState::new_two_player(42);
+
+        let targetless_spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Targetless Spell".into(),
+            Zone::Stack,
+        );
+        let targetless_ability =
+            ResolvedAbility::new(Effect::NoOp, vec![], targetless_spell, PlayerId(1));
+        state.stack.push_back(StackEntry {
+            id: targetless_spell,
+            source_id: targetless_spell,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: Some(Box::new(targetless_ability)),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let deflecting_swat = ResolvedAbility::new(
+            Effect::ChangeTargets {
+                target: TargetFilter::Any,
+                scope: RetargetScope::All,
+                forced_to: None,
+            },
+            vec![TargetRef::Object(targetless_spell)],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &deflecting_swat, &mut events).unwrap();
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::RetargetChoice { .. }),
+            "targetless spell must not open RetargetChoice"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, GameEvent::EffectResolved { .. })),
+            "targetless retarget should resolve as a no-op"
+        );
+        let targets = state
+            .stack
+            .front()
+            .and_then(|entry| entry.ability())
+            .map(|ability| ability.targets.clone())
+            .expect("targetless spell remains on stack");
+        assert!(targets.is_empty());
     }
 
     /// CR 115.7b: "Change a target ... to this permanent" still has to obey
@@ -633,7 +828,7 @@ mod tests {
             controller: PlayerId(1),
             kind: StackEntryKind::Spell {
                 card_id: CardId(3),
-                ability: Some(destroy_ability),
+                ability: Some(Box::new(destroy_ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },

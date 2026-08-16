@@ -1,13 +1,16 @@
 use serde::Serialize;
 
+use crate::parser::oracle_nom::enters_under::ControlClausePossessor;
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BounceSelection,
-    CastingPermission, ControllerRef, CopyRetargetPermission, CounterSourceRider, DoorLockOp,
-    Duration, Effect, FaceDownProfile, LibraryPosition, ManaProduction, ManaSpendRestriction,
-    ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr,
-    SearchDestinationSplit, SearchSelectionConstraint, SpellStackToGraveyardReplacement,
-    StaticCondition, StaticDefinition, TargetFilter,
+    CastingPermission, ChosenCounterCountCondition, ControlWindow, ControllerRef,
+    CopyRetargetPermission, CounterAdjustment, CounterSourceRider, DigRestOrder, DoorLockOp,
+    Duration, Effect, EffectScope, FaceDownProfile, ForceBlockAttackerRef, LibraryPosition,
+    ManaProduction, ManaSpendRestriction, ManaTargetRole, ModalSelectionConstraint,
+    OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit,
+    SearchSelectionConstraint, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
+    SubAbilityLink, TargetFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -23,6 +26,20 @@ pub(crate) struct ParsedEffectClause {
     pub(crate) effect: Effect,
     pub(crate) duration: Option<Duration>,
     /// Compound "and" remainder parsed into a sub_ability chain.
+    ///
+    /// **#13 / gate-9 residual (DEFERRED, not closed by Unit 5).** This holds a
+    /// fully-lowered `AbilityDefinition` with NO clause identity of its own. It is
+    /// constructed deep in imperative/subject parsing (e.g. `imperative.rs`), long
+    /// before the enclosing clause reaches `ClauseIrBuilder`, so no `ClauseId` is
+    /// in scope at construction. The enclosing `ClauseIr` IS addressed (it carries
+    /// a `ClauseId` + `OracleUnitSource`), so this nested def is covered
+    /// transitively by its parent clause's id — but it has no INDEPENDENT clause
+    /// identity. Minting one requires U6's `ClauseId`-keyed assembly arena
+    /// (Plan 01 §6, line 823), which owns the nested sub-clause id-space; a bespoke
+    /// nested id-space here would preempt that decision. The `rg 'ClauseIr {'`
+    /// removal gate does not cover this field (it holds an `AbilityDefinition`, not
+    /// a `ClauseIr`), so this doc comment is the honest marker: independent
+    /// sub-clause identity upgrades in U6.
     pub(crate) sub_ability: Option<Box<AbilityDefinition>>,
     /// CR 601.2d: When set, this effect requires distribution among targets at cast time.
     pub(crate) distribute: Option<DistributionUnit>,
@@ -165,7 +182,28 @@ pub(crate) enum ClauseAst {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct SubjectPhraseAst {
-    pub(crate) affected: TargetFilter,
+    /// CR 608.2c ("read the whole text and apply the rules of English to the
+    /// text"): the subject the predicate applies to, or `None` when the
+    /// sentence printed a subject the subject grammar could not bind.
+    ///
+    /// **`Option`, not a permissive default (issue #6965).** Both sites that
+    /// re-derive a subject phrase used to substitute `TargetFilter::Any` when
+    /// [`super::SubjectApplication`] could not be produced. `TargetFilter::Any`
+    /// matches unconditionally (`game/filter.rs`), so a parse FAILURE emitted a
+    /// BOARD-WIDE effect — the grant landed on every permanent, lands and
+    /// artifacts included, while coverage still reported the card as supported.
+    /// Encoding the unbound state in the type makes that fail-open
+    /// unrepresentable: every consumer must say what it does with `None`.
+    /// `lower_subject_predicate_ast`'s `ImperativeFallback` arm — the only
+    /// predicate kind that applies the subject filter — is the only consumer
+    /// that treats `None` as a coverage GAP, failing closed to
+    /// `Effect::unimplemented`. The other readers
+    /// (`sync_subject_into_nested_shuffle_sub`, `inject_subject_target`) reach
+    /// it through `target.or(affected)` and treat `None` as "nothing to
+    /// rebind", returning early. `None` is therefore reachable in all three —
+    /// do not assume otherwise when editing them. Same shape, same reason, as
+    /// [`EntersUnderSpec::UnboundAnaphor`].
+    pub(crate) affected: Option<TargetFilter>,
     pub(crate) target: Option<TargetFilter>,
     pub(crate) multi_target: Option<MultiTargetSpec>,
     pub(crate) inherits_parent: bool,
@@ -200,26 +238,70 @@ pub(crate) enum PredicateAst {
     },
 }
 
+/// CR 110.2a (docs/MagicCompRules.txt:618): the resolved battlefield-entry
+/// controller for a zone change, as the IR carries it.
+///
+/// Three states, not two: `Default` (no explicit controller override in the
+/// IR; lowering carries it as `None` to the existing resolver), `Override` (a
+/// bound controller), and `UnboundAnaphor` — a control clause that WAS printed
+/// but whose antecedent the parser cannot name. The third state is what keeps a
+/// dropped `"under their control"` from silently degrading into the existing
+/// fallback representation; the lowering sites turn it into an honest
+/// `Effect::unimplemented` instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+pub(crate) enum EntersUnderSpec {
+    #[default]
+    Default,
+    Override(ControllerRef),
+    /// Carries the possessor so a lowering site with no text in scope
+    /// (`lower_put_ast`) can still emit a verbatim printed fragment.
+    UnboundAnaphor(ControlClausePossessor),
+}
+
+impl EntersUnderSpec {
+    /// The bound controller, or `None` for both no-override and an unbound
+    /// anaphor. Callers that can fail closed MUST check
+    /// [`Self::unbound_possessor`] first — this method deliberately collapses
+    /// the two `None` cases so the guard has to be written explicitly.
+    pub(crate) fn as_controller_ref(&self) -> Option<ControllerRef> {
+        match self {
+            EntersUnderSpec::Override(r) => Some(r.clone()),
+            EntersUnderSpec::Default | EntersUnderSpec::UnboundAnaphor(_) => None,
+        }
+    }
+
+    /// `Some(possessor)` exactly when a control clause was printed but could not
+    /// be bound — the fail-closed signal.
+    pub(crate) fn unbound_possessor(&self) -> Option<ControlClausePossessor> {
+        match self {
+            EntersUnderSpec::UnboundAnaphor(p) => Some(*p),
+            EntersUnderSpec::Default | EntersUnderSpec::Override(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum ContinuationAst {
     SearchDestination {
         destination: Zone,
         /// CR 701.23a: When true, the searched card enters the battlefield tapped.
         enter_tapped: bool,
-        /// CR 110.2a: Some(You) when the card enters "under your control"; None keeps the ChangeZone default (owner's control).
-        enters_under: Option<ControllerRef>,
+        /// CR 110.2a (docs/MagicCompRules.txt:618): the battlefield-entry
+        /// controller for the searched card. `Default` lowers through the
+        /// existing no-override carrier; `UnboundAnaphor` fails closed.
+        enters_under: EntersUnderSpec,
         /// CR 701.23a: When true, the searched card is revealed before it moves.
         reveal: bool,
-        /// When true, the found card enters "attached to" the search source.
-        /// Adds forward_result on the ChangeZone and chains an Attach sub_ability.
-        attach_to_source: bool,
+        /// When `Some`, the found card enters attached to this host filter.
+        /// Adds `forward_result` on the ChangeZone and chains an Attach sub_ability.
+        attach_host: Option<TargetFilter>,
     },
     RevealHandFilter {
         card_filter: Option<TargetFilter>,
         choice_optional: bool,
     },
     ManaRestriction {
-        restriction: ManaSpendRestriction,
+        restrictions: Vec<ManaSpendRestriction>,
         grants: Vec<crate::types::mana::ManaSpellGrant>,
     },
     /// CR 106.6: "that spell can't be countered" — adds grants to the preceding
@@ -244,7 +326,10 @@ pub(crate) enum ContinuationAst {
     /// CR 707.10c: "You may choose new targets for the copy/copies." after a
     /// CopySpell (possibly wrapped in a CreateDelayedTrigger) — patches
     /// `retarget = MayChooseNewTargets` on the inner Effect::CopySpell.
-    CopyMayRetarget,
+    /// `all_copies` is the plural "the copies" form: it patches every copy the
+    /// source ability makes (Increasing Vengeance's primary + conditional
+    /// second copy), where the singular "the copy" form binds only the nearest.
+    CopyMayRetarget { all_copies: bool },
     /// "create a ... token and suspect it" → chain Suspect { target: LastCreated }
     SuspectLastCreated,
     /// CR 701.15a + CR 701.15b: "The token(s) (is|are) goaded [duration]" after token
@@ -259,6 +344,23 @@ pub(crate) enum ContinuationAst {
     /// CR 701.19c: "It can't be regenerated" / "They can't be regenerated" — sets
     /// `cant_regenerate: true` on the preceding Destroy/DestroyAll effect.
     CantRegenerate,
+    /// CR 116.2c + CR 608.2c: "You may pay {W} to end this effect." — later text
+    /// modifying the continuous effect an EARLIER clause of the same chain
+    /// created (CR 608.2c: "later text may modify earlier text"). Stamps
+    /// `end_cost` on the bound `Effect::GenericEffect` antecedent.
+    ///
+    /// Fully absorbed: it emits no def of its own, because CR 116.2c grants a
+    /// later SPECIAL ACTION rather than performing anything on resolution. The
+    /// mandatory `Effect::PayCost` this replaces was flatly wrong at runtime —
+    /// it force-paid the cost the moment the ability resolved.
+    EndEffectCost { cost: crate::types::mana::ManaCost },
+    /// CR 120.4a + CR 608.2c + CR 702: "Excess damage is dealt to that
+    /// creature's controller instead" patches the preceding `DealDamage`; an
+    /// optional source-keyword gate covers Ram Through's "If the creature you
+    /// control has trample" prefix without making the damage itself conditional.
+    ExcessDamageToController {
+        source_keyword_condition: Option<crate::types::keywords::KeywordKind>,
+    },
     /// "Choose one/N of them" / "An opponent chooses one/N of those cards" after a ChangeZone
     /// to exile → ChooseFromZone { count, zone: Exile, chooser }.
     ChooseFromExile {
@@ -284,9 +386,14 @@ pub(crate) enum ContinuationAst {
         chosen_destination: Zone,
         rest_destination: Zone,
     },
-    /// "Put those cards on top ..." after a search/dig/choice producer.
+    /// "Put those cards/the chosen cards on top ..." after a search/dig/choice
+    /// producer.
     /// Count is supplied by the already-selected target set.
     PutChosenCardsAtLibraryPosition { position: LibraryPosition },
+    /// CR 701.23a + CR 608.2c: "exile the rest" after a multi-zone search.
+    /// The searched player's cards in the searched zones, excluding the cards
+    /// selected by the SearchLibrary choice, are moved to exile.
+    ExileSearchRemainder,
     /// CR 702.170c-d: "It/that card/they become plotted" after an exile effect.
     BecomesPlotted,
     /// CR 702.143d: "It/that card/they become foretold" after an exile effect.
@@ -300,6 +407,10 @@ pub(crate) enum ContinuationAst {
     PutRest {
         destination: Zone,
         reorder_all: bool,
+        /// CR 400.5 + CR 608.2c: Only exact "in a random order" text
+        /// randomizes the unchosen library remainder.
+        #[serde(default, skip_serializing_if = "DigRestOrder::is_preserve")]
+        rest_order: DigRestOrder,
     },
     /// CR 701.20e + CR 608.2c: "Put up to N [filter] from among them onto the battlefield/into
     /// your hand" after Dig — patches the Dig's keep_count, filter, destination, and rest_destination.
@@ -318,6 +429,10 @@ pub(crate) enum ContinuationAst {
         /// "put two of them into your hand and the rest on the bottom of your library".
         /// When None, a subsequent PutRest continuation handles rest_destination.
         rest_destination: Option<Zone>,
+        /// CR 400.5 + CR 608.2c: Only exact "in a random order" text sets
+        /// `Random`; every other accepted form preserves existing behavior.
+        #[serde(default)]
+        rest_order: DigRestOrder,
         /// CR 110.2a: Controller override for the kept cards' battlefield entry
         /// ("... onto the battlefield ... under your control"). `None` leaves
         /// them under their owner's control.
@@ -332,6 +447,10 @@ pub(crate) enum ContinuationAst {
         /// from-among put-step.
         #[serde(default)]
         enter_tapped: bool,
+        /// CR 508.4: Kept cards enter attacking when the from-among clause
+        /// says "onto the battlefield ... attacking".
+        #[serde(default)]
+        enters_attacking: bool,
         /// CR 701.20a vs 701.20e: True when the from-among clause's stripped verb
         /// was "reveal" (a public action) rather than "put"/"choose" (a private
         /// look). Promotes the patched Dig to `reveal: true` even when the kept
@@ -360,6 +479,11 @@ pub(crate) enum ContinuationAst {
         counter_type: CounterType,
         count: QuantityExpr,
     },
+    /// CR 608.2h + CR 111.3: "Its power is equal to this creature's power and
+    /// its toughness is equal to this creature's toughness" after a token
+    /// creation clause — source-defined token P/T printed as a separate
+    /// sentence.
+    TokenSourcePowerToughness { power: PtValue, toughness: PtValue },
     /// "After that turn, that player takes an extra turn." after a controlled-turn effect.
     GrantExtraTurnAfterControlledTurn,
     /// CR 701.20a: "Put that card [onto the battlefield / into your hand]" after RevealUntil —
@@ -396,7 +520,7 @@ pub(crate) enum ContinuationAst {
     /// and Destroy the Evidence where "those cards" refers to all cards revealed
     /// during the RevealUntil resolution, not only the non-matching ones.
     RevealUntilAllToZone { destination: Zone },
-    /// CR 406.3 + CR 701.16a: "[then] exile it/them [face down]" after a private
+    /// CR 406.3 + CR 701.20e: "[then] exile it/them [face down]" after a private
     /// `Dig` (the "look at the top N cards of <player>'s library" look step).
     /// Rewrites the preceding `Dig` into an `Effect::ExileTop` so the looked-at
     /// card(s) actually leave the library — the Gonti, Canny Acquisitor impulse
@@ -420,7 +544,17 @@ pub(crate) enum ContinuationAst {
     /// flow, then chains a `HideawayConceal` sub-ability to turn the chosen card
     /// face down and link it to the source. Gated on the exile-the-dug-card
     /// continuation, so genuine pure-peek Digs (Delver of Secrets) are untouched.
-    ExileOneOfThemFaceDown,
+    ExileOneOfThemFaceDown {
+        /// CR 122.1: A "... face down with <count> <type> counter(s) on it"
+        /// rider (The Dragon-Kami Reborn: "Exile one of them face down with a
+        /// hatching counter on it"). Threaded into the fused exile as a
+        /// `PutCounter { target: ParentTarget }` sub-ability chain appended
+        /// after the conceal, so the player-selected dug card — NOT the trigger
+        /// source — receives the counters. Empty for the bare "exile one of
+        /// them face down" form (Gonti, Lord of Luxury).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enter_with_counters: Vec<(CounterType, QuantityExpr)>,
+    },
     /// CR 608.2c + CR 701.21a: absorbs the explicit/bare sacrifice-rest clause
     /// following a choose-and-sacrifice-rest effect, optionally narrowing the
     /// final sacrifice sweep ("all other nonland permanents they control").
@@ -438,8 +572,40 @@ pub(crate) enum ContinuationAst {
 pub(crate) enum PutCount {
     All,
     AnyNumber,
-    Up(u32),
-    Exactly(u32),
+    /// "up to N" — the bound is a `QuantityExpr` so dynamic keep counts
+    /// ("put up to X cards ...") carry through to `Effect::Dig.keep_count_expr`.
+    Up(QuantityExpr),
+    /// "exactly N" — dynamic form ("put X cards from among them", Stargaze).
+    Exactly(QuantityExpr),
+}
+
+impl PutCount {
+    /// `Up` with a literal bound — the common fixed-count call site.
+    pub(crate) fn up(n: u32) -> Self {
+        Self::Up(QuantityExpr::Fixed { value: n as i32 })
+    }
+
+    /// `Exactly` with a literal bound.
+    pub(crate) fn exactly(n: u32) -> Self {
+        Self::Exactly(QuantityExpr::Fixed { value: n as i32 })
+    }
+
+    /// CR 701.20e: Lower a `PutCount` to an `Effect::Dig` keep specification:
+    /// `(keep_count, keep_count_expr, up_to)`. Fixed bounds stay on the
+    /// `keep_count` u32 path (identical lowering to the pre-widen code); a
+    /// dynamic bound routes to `keep_count_expr` and leaves `keep_count` None
+    /// so the resolver reads the expression. `u32::MAX` is the unbounded
+    /// sentinel the resolver clamps to the number of seen cards.
+    pub(crate) fn to_dig_keep(&self) -> (Option<u32>, Option<QuantityExpr>, bool) {
+        match self {
+            PutCount::All => (Some(u32::MAX), None, false),
+            PutCount::AnyNumber => (Some(u32::MAX), None, true),
+            PutCount::Up(QuantityExpr::Fixed { value }) => (Some(*value as u32), None, true),
+            PutCount::Up(e) => (None, Some(e.clone()), true),
+            PutCount::Exactly(QuantityExpr::Fixed { value }) => (Some(*value as u32), None, false),
+            PutCount::Exactly(e) => (None, Some(e.clone()), false),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -460,17 +626,73 @@ pub(crate) enum ImperativeFamilyAst {
     Explore,
     /// CR 702.162a: Connive.
     Connive,
-    /// CR 509.1g: Block this turn if able.
-    ForceBlock,
-    /// CR 508.1d: Attack a required player this turn/combat if able. The
-    /// `required_player` filter selects whom the forced attacker must attack —
-    /// `TargetFilter::Controller` for "attacks you", or
+    /// CR 701.70a + CR 608.2c: Recruit — draw, discard, then create the
+    /// contingent Soldier token when the card discarded by this instruction was
+    /// nonland. This remains a parser IR node because lowering must build the
+    /// three-step, direct-child chain rather than introduce a card-specific
+    /// runtime effect.
+    Recruit,
+    /// CR 205.1a + CR 205.1b + CR 613.1d + CR 110.2a + CR 122.1: `assimilate
+    /// <target phrase>` (Borg Queen, Perfection Manifest — Star Trek Commander).
+    ///
+    /// The keyword action's definition is supplied ONLY by reminder text, which
+    /// is stripped before the parser runs, so it is encoded here rather than
+    /// parsed: "Put it onto the battlefield under your control with a +1/+1
+    /// counter. It's a Borg artifact creature and loses all other creature
+    /// types."
+    ///
+    /// Like `Recruit`, this remains a parser IR node because lowering must build
+    /// a two-step, direct-child chain (`ChangeZone` + a `Duration::Permanent`
+    /// `GenericEffect` bound to the parent target) rather than introduce a
+    /// card-specific runtime effect. The chain it lowers to is the SAME shape
+    /// the reanimate-then-retype class already produces from spelled-out Oracle
+    /// text (Ashen Powder's move + Rise from the Grave's type rider).
+    ///
+    /// CR 205.1b: "becomes a '[creature type or types] artifact creature'"
+    /// RETAINS all prior card types, supertypes, and non-creature subtypes and
+    /// REPLACES only the creature types — so the lowering emits additive
+    /// `AddType`s plus a creature-set-scoped subtype replacement, never
+    /// `SetCardTypes`.
+    ///
+    /// CR 611.2e: because the definition uses the "is [characteristic]" form
+    /// ("It's a Borg artifact creature"), the rule requires the type change to
+    /// apply SIMULTANEOUSLY with the permanent entering the battlefield. The
+    /// engine installs it after entry via the shared `ChangeZone` +
+    /// `GenericEffect` continuation, so an ETB trigger keying on the new
+    /// characteristics does not see them. This is a PRE-EXISTING, CLASS-WIDE
+    /// deviation shared with Rise from the Grave and Grave Betrayal (both also
+    /// the "is" form); Puppeteer Clique's "It gains haste" is the "gains" form
+    /// and is correct. Not introduced here, and out of scope to fix.
+    ///
+    /// `assimilate` has NO CR 701.x keyword-action number: the set is
+    /// unreleased and `docs/MagicCompRules.txt` has zero matches for it. Do not
+    /// invent one, and do not reuse Recruit's `CR 701.70a` — that number is
+    /// Recruit's, not assimilate's.
+    Assimilate {
+        /// The card the keyword action moves — "target creature card from an
+        /// opponent's graveyard" (CR 115.2: a non-battlefield-zone target).
+        target: TargetFilter,
+    },
+    /// CR 509.1c: Block this turn/combat if able.
+    ForceBlock {
+        attacker: Option<ForceBlockAttackerRef>,
+        duration: Duration,
+    },
+    /// CR 508.1d + CR 506.3: Attack a required DEFENDER this turn/combat if
+    /// able. The `required_defender` filter selects whom the forced attacker
+    /// must attack — `TargetFilter::Controller` for "attacks you",
     /// `ControllerRef::ChosenPlayer { index }` for "attacks that player" (the
     /// opponent chosen by a preceding "choose an opponent" instruction in the
-    /// same resolution, e.g. Ruhan of the Fomori).
+    /// same resolution, e.g. Ruhan of the Fomori), or `TargetFilter::SelfRef`
+    /// for a permanent defender ("attack ~ if able" — Gideon Jura, whose
+    /// required defender is the planeswalker itself).
     ForceAttack {
-        duration: Duration,
-        required_player: TargetFilter,
+        /// `None` is the WINDOWLESS form ("attack ~ if able" — Gideon Jura),
+        /// whose span is stated by an enclosing clause ("During target
+        /// opponent's next turn, …") and applied by the clause machinery.
+        /// `Some` carries the window the predicate states for itself.
+        duration: Option<Duration>,
+        required_defender: TargetFilter,
     },
     /// CR 701.15a: Goad target creature.
     Goad,
@@ -498,6 +720,10 @@ pub(crate) enum ImperativeFamilyAst {
         player_a: TargetFilter,
         player_b: TargetFilter,
     },
+    /// CR 119.7 + CR 119.8: The controller redistributes any number of players' life
+    /// totals (Reverse the Sands, The Doctor's Tomb). Field-less: "any number of
+    /// players" is self-gathered at resolution, so there are no target slots.
+    RedistributeLifeTotals,
     /// CR 509.1c: Must be blocked this turn if able.
     MustBeBlocked,
     Investigate,
@@ -505,20 +731,42 @@ pub(crate) enum ImperativeFamilyAst {
     Populate,
     /// CR 701.30: Clash with an opponent.
     Clash,
+    /// CR 701.4a: Behold a [quality] — reveal-or-choose keyword action. Carries
+    /// the beheld quality as a subtype/type filter.
+    Behold(TargetFilter),
     /// CR 701.48a: Learn.
     Learn,
+    /// CR 106.1b + CR 602.2b: "note the type of mana spent to pay this
+    /// activation cost" (Jeweled Amulet). Field-less: there is nothing to
+    /// select — the payment already happened, so the effect is a pure
+    /// readback recorded at resolution. Scoped to the singular-type wording;
+    /// Ice Cauldron's "note the type AND AMOUNT..." sibling is intentionally
+    /// left unmatched (see `parse_imperative_family_ast`).
+    NoteManaSpent,
     /// CR 701.40a: Manifest the top card(s) of library.
     Manifest {
         target: TargetFilter,
         count: QuantityExpr,
+        /// CR 110.2a: Direct imperative manifest defaults to the instruction's
+        /// controller; subject-predicate forms leave this unset so the subject's
+        /// library owner controls the manifested card.
+        enters_under: Option<ControllerRef>,
     },
     /// CR 701.62a: Manifest dread.
     ManifestDread,
-    /// CR 701.58a: Cloak the top card(s) of a library — face-down 2/2 with
-    /// ward {2}, turnable face up for its mana cost if it's a creature card.
+    /// CR 701.58a: Cloak card(s) — face-down 2/2 with ward {2}, turnable face up
+    /// for its mana cost if it's a creature card. `from_zone` is the source
+    /// discriminant: `None` cloaks the top `count` cards of `target`'s library
+    /// (Cryptic Coat, Ransom Note); `Some(zone)` cloaks a card the controller
+    /// chooses from that zone (Vannifar's "cloak a card from your hand"), which
+    /// lowers to a `ChooseFromZone` parent + `Cloak { object_source }` sub-chain.
     Cloak {
         target: TargetFilter,
         count: QuantityExpr,
+        from_zone: Option<Zone>,
+        /// CR 110.2a: The instruction subject who cloaks — the controller on
+        /// entry for the cloaked card(s). Mirrors `Manifest.enters_under`.
+        enters_under: Option<ControllerRef>,
     },
     /// CR 406.3 + CR 701.20a: Turn an exiled face-down card face up via a
     /// resolving effect (not the morph special action). The Imprint "flip"
@@ -812,7 +1060,7 @@ pub(crate) enum TargetedImperativeAst {
     },
     Sacrifice {
         target: TargetFilter,
-        /// CR 701.16a: Number of permanents to sacrifice. Defaults to
+        /// CR 701.21a: Number of permanents to sacrifice. Defaults to
         /// `QuantityExpr::Fixed { value: 1 }` for the common "sacrifice a X"
         /// case; "sacrifice N X" / "sacrifice half the permanents they
         /// control" carry the parsed dynamic count.
@@ -845,6 +1093,17 @@ pub(crate) enum TargetedImperativeAst {
     /// CR 701.3: Return to hand (bounce).
     Return {
         target: TargetFilter,
+        /// CR 115.1d + CR 601.2c: Variable object count for a non-targeted
+        /// "return up to N cards from your graveyard to your hand" (Ill-Gotten
+        /// Gains) or "return that many cards from your graveyard to your hand"
+        /// (dynamic count) — mirrors [`TargetedImperativeAst::Tap`]. `None` for
+        /// the common single-object "return a card from your graveyard to your
+        /// hand". Carried onto `ParsedEffectClause.multi_target` at lowering;
+        /// the runtime's `EffectZoneChoice` picker already resolves bounded
+        /// at-resolution bounce counts generically (Wrenn and Six precedent),
+        /// so no game-logic change is needed — only the parser previously
+        /// dropped the quantifier before it ever reached that machinery.
+        multi_target: Option<MultiTargetSpec>,
         /// CR 115.1 + Whitemane Lion ruling: Captured at parse time from the
         /// `TargetSyntax` discriminator. `Descriptor` Oracle text without
         /// "target" (e.g. "return a creature you control to its owner's hand")
@@ -870,10 +1129,13 @@ pub(crate) enum TargetedImperativeAst {
         origin: Option<Zone>,
         /// CR 712.2: "return ... transformed" (DFC entering with back face up)
         enter_transformed: bool,
-        /// CR 110.2a: Controller override on ETB. `Some(ref)` routes the object
-        /// to the player resolved from `ref`. `None` leaves the object under
-        /// its owner's control. Lowered 1:1 onto `Effect::ChangeZone.enters_under`.
-        enters_under: Option<ControllerRef>,
+        /// CR 110.2a (docs/MagicCompRules.txt:618): the battlefield-entry
+        /// controller. `Override(r)` routes the object to the player resolved
+        /// from `r`; `Default` lowers through the existing no-override carrier;
+        /// `UnboundAnaphor` marks a printed control clause whose antecedent
+        /// could not be named, and the lowering site turns it into an honest
+        /// `Effect::unimplemented` rather than a silently-wrong controller.
+        enters_under: EntersUnderSpec,
         /// CR 614.1: "tapped" — enters tapped.
         enter_tapped: bool,
         /// CR 508.4: "tapped and attacking" — enters attacking.
@@ -886,12 +1148,32 @@ pub(crate) enum TargetedImperativeAst {
         /// a Forest land."). Lowered to a default vanilla-2/2 `face_down_profile`,
         /// refined by a trailing "It's a <type>" `FaceDownProfileSpec`.
         face_down: bool,
+        /// CR 701.3a + CR 303.4f/i: Optional "attached to <host>" rider on the
+        /// return (Gift of Immortality, Next of Kin, Lynde). When set, lowering
+        /// nests `Effect::Attach { SelfRef → host }` under the ChangeZone with
+        /// `forward_result` so the Aura enters attached and skips the CR 303.4f
+        /// host-choice consult.
+        attach_host: Option<TargetFilter>,
     },
     /// CR 400.6: Return to a specific non-hand, non-battlefield zone (zone change).
     ReturnToZone {
         target: TargetFilter,
         origin: Option<Zone>,
         destination: Zone,
+        /// CR 107.1c: "return any number of [filter] cards" — zero-or-more
+        /// resolution-time zone selection (Grave Sifter class).
+        up_to: bool,
+        /// CR 115.1d + CR 601.2c: Variable object count for a non-targeted
+        /// "return up to N cards from your graveyard to your hand"
+        /// (Ill-Gotten Gains) or "return that many cards …" (dynamic count).
+        /// `None` for the common single-object "return a card from your
+        /// graveyard to your hand" and for the unrelated unbounded `up_to`
+        /// shape above (Grave Sifter class), which keeps using its own flag.
+        /// Carried onto `ParsedEffectClause.multi_target` at lowering,
+        /// mirroring `ZoneCounterImperativeAst::Exile`'s `multi_target` (#5649
+        /// / Forage precedent) — `Effect::ChangeZone` has no count slot of its
+        /// own, so the quantity rides the clause's `MultiTargetSpec` instead.
+        multi_target: Option<MultiTargetSpec>,
     },
     /// CR 400.7 + CR 608.2c: Mass return to a non-default zone. Lowers to
     /// `ChangeZoneAll` so the resolver scans every matching object instead of
@@ -900,9 +1182,10 @@ pub(crate) enum TargetedImperativeAst {
         target: TargetFilter,
         origin: Option<Zone>,
         destination: Zone,
-        /// CR 110.2a: Controller override for mass returns to the battlefield.
-        /// `None` preserves default controller assignment.
-        enters_under: Option<ControllerRef>,
+        /// CR 110.2a (docs/MagicCompRules.txt:618): the battlefield-entry
+        /// controller for mass returns. `Default` preserves default controller
+        /// assignment; `UnboundAnaphor` fails closed at the lowering site.
+        enters_under: EntersUnderSpec,
         enter_tapped: bool,
         /// CR 122.1 + CR 122.1h: Counters placed on each returned object as it
         /// enters the battlefield (e.g. "return each creature card from your
@@ -925,10 +1208,21 @@ pub(crate) enum TargetedImperativeAst {
         /// True for the untargeted mass form ("gain control of all/each …"),
         /// lowered to `Effect::GainControlAll`; false for targeted GainControl.
         all: bool,
+        /// CR 115.1d + CR 601.2c: Variable target count for "gain control of up to N target
+        /// …" (The Super Hero Civil War's "up to two target creatures with total
+        /// mana value 6 or less"; Jace, Ingenious Mind-Mage's "up to three target
+        /// creatures"). `None` for the common single-target "gain control of
+        /// target creature". Carried onto `ParsedEffectClause.multi_target` at
+        /// lowering so the targeting system surfaces N optional slots — without
+        /// it the count collapsed to one and only a single creature could be
+        /// chosen (issue #6205). Mirrors the same field on `Tap`/`Untap`.
+        multi_target: Option<MultiTargetSpec>,
     },
     ControlNextTurn {
         target: TargetFilter,
         grant_extra_turn_after: bool,
+        /// CR 723.1 / CR 723.2: full-turn vs next-combat-phase control window.
+        window: ControlWindow,
     },
     /// Earthbend: animate target land into a creature with haste (emits Earthbend event).
     Earthbend {
@@ -991,7 +1285,7 @@ pub(crate) enum SearchCreationImperativeAst {
     },
     Dig {
         count: QuantityExpr,
-        /// CR 701.20a vs CR 701.16a: True = revealed (public), false = looked at (private).
+        /// CR 701.20a vs CR 701.20e: True = revealed (public), false = looked at (private).
         reveal: bool,
         player: TargetFilter,
     },
@@ -1036,20 +1330,40 @@ pub(crate) enum SearchCreationImperativeAst {
         extra_filters: Vec<TargetFilter>,
     },
     /// CR 400.7 + CR 701.23 + CR 701.24: "Search [possessive] graveyard, hand,
-    /// and library for all cards with that name and exile them."
-    /// Lowered to `Effect::ChangeZoneAll` with multi-zone origin
-    /// (`InAnyZone[Graveyard, Hand, Library]`) + `SameNameAsParentTarget` filter,
-    /// scoped to the player named by the possessive zone phrase. "Any number of
-    /// cards" / "a card" variants are excluded — they require SearchChoice.
+    /// and library for `<quantifier>` cards with that name and exile them."
+    /// The `quantifier` axis selects the lowering:
+    /// - `All` → `Effect::ChangeZoneAll` (mandatory mass exile) with multi-zone
+    ///   origin (`InAnyZone[Graveyard, Hand, Library]`) + `SameNameAsParentTarget`.
+    /// - `AnyNumber` / `UpTo(n)` → interactive `Effect::SearchLibrary` (CR 701.23b:
+    ///   the searcher may fail to find), `count: UpTo`, `SameNameAsParentTarget`.
+    ///
+    /// Both are scoped to the player named by the possessive zone phrase (`owner`).
     MultiZoneSameNameExile {
         owner: ControllerRef,
+        quantifier: MultiZoneExileQuantifier,
     },
+}
+
+/// CR 107.1c + CR 701.23b: How many name-matched cards a multi-zone same-name
+/// exile removes. `All` is the mandatory mass-exile form ("all cards");
+/// `AnyNumber` ("any number of cards") and `UpTo(n)` ("up to N cards") are the
+/// interactive forms where the searcher chooses a subset (and may find none).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) enum MultiZoneExileQuantifier {
+    All,
+    AnyNumber,
+    UpTo(u32),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum UtilityImperativeAst {
     Prevent {
         text: String,
+        /// CR 608.2c: true when an earlier clause in the same effect chain
+        /// selected a target this clause's anaphor can bind to. Captured from
+        /// `ctx.parent_target_available` at the one construction site where
+        /// `ParseContext` is live (issue #1094).
+        parent_target_available: bool,
     },
     Regenerate {
         text: String,
@@ -1060,6 +1374,18 @@ pub(crate) enum UtilityImperativeAst {
         retarget: CopyRetargetPermission,
     },
     Transform {
+        target: TargetFilter,
+        /// CR 701.27a vs CR 115.10a: `Single` is the legacy targeted/anaphoric
+        /// transform; `All` is the non-targeting mass transform ("transform all
+        /// Humans"). Mirrors `Effect::Transform`'s `scope` axis.
+        scope: EffectScope,
+    },
+    /// CR 710.4: the Kamigawa flip-card instruction ("flip this creature" /
+    /// "flip it" / "flip <name>"). A sibling of [`UtilityImperativeAst::Transform`]
+    /// rather than a parameterization of it because CR 701.27a and CR 710 are
+    /// different game actions with different copiable-value semantics
+    /// (CR 710.1c holds color and mana cost fixed).
+    FlipPermanent {
         target: TargetFilter,
     },
     Attach {
@@ -1173,6 +1499,13 @@ pub(crate) enum ChooseImperativeAst {
         target_a: TargetFilter,
         target_b: TargetFilter,
     },
+    /// CR 608.2d + CR 122.1: "choose a counter on it / that permanent" — pick one
+    /// of the distinct counter kinds present on the anaphoric object (The Caves
+    /// of Androzani II/III). Lowered to `Effect::ChooseCounterKind`. `target` is
+    /// the anaphor (`ParentTarget` for the per-iteration object).
+    CounterKind {
+        target: TargetFilter,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1184,13 +1517,16 @@ pub(crate) enum PutImperativeAst {
         origin: Option<Zone>,
         destination: Zone,
         target: TargetFilter,
-        /// CR 110.2a: Controller override on ETB. `Some(ref)` routes the object
-        /// to the player resolved from `ref`. `None` leaves the object under
-        /// its owner's control. Lowered 1:1 onto `Effect::ChangeZone.enters_under`.
-        enters_under: Option<ControllerRef>,
+        /// CR 110.2a (docs/MagicCompRules.txt:618): the battlefield-entry
+        /// controller. `Override(r)` routes the object to the player resolved
+        /// from `r`; `Default` lowers through the existing no-override carrier;
+        /// `UnboundAnaphor` marks a printed control clause whose antecedent
+        /// could not be named, and the lowering site turns it into an honest
+        /// `Effect::unimplemented` rather than a silently-wrong controller.
+        enters_under: EntersUnderSpec,
         /// CR 603.6d: "enters tapped" — enters the battlefield tapped.
         enter_tapped: bool,
-        /// CR 701.28c: "transformed" — enters with its back face up.
+        /// CR 712.14a: "transformed" — enters with its back face up.
         enter_transformed: bool,
         /// CR 508.4: "tapped and attacking [<player_phrase>]" — the moved
         /// object enters the battlefield as an attacking creature (without
@@ -1214,7 +1550,9 @@ pub(crate) enum PutImperativeAst {
         origin: Option<Zone>,
         destination: Zone,
         target: TargetFilter,
-        enters_under: Option<ControllerRef>,
+        /// CR 110.2a (docs/MagicCompRules.txt:618): the battlefield-entry
+        /// controller for the moved population. `UnboundAnaphor` fails closed.
+        enters_under: EntersUnderSpec,
         enter_tapped: bool,
         /// CR 401.4: Specific library placement for mass library moves.
         /// `Some` suppresses the default library shuffle and places each moved
@@ -1234,6 +1572,15 @@ pub(crate) enum PutImperativeAst {
         /// the rest zone. `None` for non-partition forms.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rest_destination: Option<Zone>,
+        /// CR 401.4: Library placement for the "rest" pile when the complement
+        /// returns to the library ("… and the rest on the bottom of your
+        /// library in a random order" — The Fourteenth Doctor — or "… in any
+        /// order" — Garruk, Caller of Beasts / Goblin Ringleader et al.).
+        /// Independent of `library_position` (which governs the PRIMARY move)
+        /// because the two piles may target different positions. `None` when the
+        /// rest does not go to a specific library position.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rest_library_position: Option<LibraryPosition>,
     },
     TopOfLibrary,
     BottomOfLibrary,
@@ -1266,6 +1613,17 @@ pub(crate) enum PutImperativeAst {
         count: QuantityExpr,
         profile: Option<FaceDownProfile>,
         enters_under: Option<ControllerRef>,
+    },
+    /// CR 401.4 + CR 608.2c: "put the cards {in|from} <possessive> hand on the
+    /// bottom/top of <possessive> library [in any order]" — the whole-hand
+    /// reposition (Teferi's Puzzle Box). The mover's entire hand moves to the
+    /// named library `position` at once; CR 401.4 lets the owner arrange the
+    /// simultaneously-placed cards in any order. Lowered to
+    /// `Effect::ChangeZoneAll { origin: Hand, destination: Library,
+    /// library_position: Some(position) }` with NO trailing shuffle — a shuffle
+    /// would scatter the cards the effect just placed on the bottom/top.
+    HandToLibraryPosition {
+        position: LibraryPosition,
     },
 }
 
@@ -1332,10 +1690,15 @@ pub(crate) enum CostResourceImperativeAst {
     Mana {
         produced: ManaProduction,
         restrictions: Vec<ManaSpendRestriction>,
-        /// CR 115.1 + CR 115.7: Player target for mana effects whose count
-        /// references a target player (e.g. Jeska's Will mode 1 — "Add {R} for
-        /// each card in target opponent's hand"). `None` for the common case.
-        target: Option<TargetFilter>,
+        /// CR 601.2c: Role-scoped player targets for this mana production
+        /// (recipient and/or count source). This is a TRANSPORT field on the
+        /// cost-resource intermediate AST — it carries whatever role
+        /// `try_parse_add_mana_effect_with_context` stamped, unchanged, and
+        /// `lower_cost_resource_ast` puts it back on `Effect::Mana`. It must
+        /// mirror `Effect::Mana::target`'s type exactly: re-deciding or
+        /// flattening the role here would silently drop a count source on the
+        /// cost-resource path.
+        target: Option<ManaTargetRole>,
     },
     Damage {
         amount: QuantityExpr,
@@ -1369,10 +1732,20 @@ pub(crate) enum ZoneCounterImperativeAst {
         /// ("exile a card … with N <type> counters on it"). Empty for the
         /// common no-counter case. Mirrors `Effect::ChangeZone.enter_with_counters`.
         enter_with_counters: Vec<(CounterType, QuantityExpr)>,
+        /// CR 700.4 (#5649): a counted graveyard exile — "exile <N> cards from
+        /// your graveyard" (Nefarious Lich: "exile that many cards … instead").
+        /// `Effect::ChangeZone` carries no count, so the quantity rides the
+        /// clause's `MultiTargetSpec` (mirroring Forage), threaded at lowering by
+        /// `lower_imperative_family_ast`. `None` for the ordinary single-object
+        /// exile.
+        multi_target: Option<MultiTargetSpec>,
     },
     ExileTop {
         player: TargetFilter,
         count: QuantityExpr,
+        /// CR 401.2 + CR 701.13a: the library's ordered top or bottom edge
+        /// selects the cards this exile instruction moves.
+        position: LibraryPosition,
         /// CR 406.3: Mirrors `Effect::ExileTop.face_down` — set when the
         /// Oracle text terminates with "face down" (Necropotence / Bomat
         /// Courier / Asmodeus class).
@@ -1400,6 +1773,15 @@ pub(crate) enum ZoneCounterImperativeAst {
         count: QuantityExpr,
         target: TargetFilter,
     },
+    /// CR 122.1 + CR 122.6: "put an additional counter of that kind on <anaphor>"
+    /// — add `count` counters of the kind chosen by a preceding
+    /// `ChooseCounterKind` (The Caves of Androzani II/III). Lowered to
+    /// `Effect::PutChosenCounter`.
+    PutChosenCounter {
+        target: TargetFilter,
+        count: QuantityExpr,
+        target_condition: Option<ChosenCounterCountCondition>,
+    },
     /// CR 122.1: "Put a X counter, a Y counter[, and a Z counter] on TARGET" —
     /// a list of typed counters placed on one shared target. Lowered to a
     /// `PutCounter` chain where the first entry carries the resolved target
@@ -1423,6 +1805,14 @@ pub(crate) enum ZoneCounterImperativeAst {
         count: QuantityExpr,
         target: TargetFilter,
     },
+    /// CR 122.1 + CR 608.2d (Clockspinning sentence 2): "Remove that counter ...
+    /// or put another of those counters on it." The single target object is
+    /// established by the preceding `TargetOnly` clause; this clause only records
+    /// the operation set the controller may choose among at resolution. Lowers to
+    /// `Effect::ChooseCounterAdjustment` (which has no target slot of its own).
+    ChooseCounterAdjustment {
+        adjustment: CounterAdjustment,
+    },
     /// CR 122.5 / CR 122.8: Transfer counters from source to target.
     MoveCounters {
         source: TargetFilter,
@@ -1432,6 +1822,13 @@ pub(crate) enum ZoneCounterImperativeAst {
         selection: crate::types::ability::CounterMoveSelection,
         target: TargetFilter,
     },
+    /// CR 122.1 + CR 603.2c: "put the same number and kind of counters" / "put
+    /// one of each of those kinds of counters" — reproduce the triggering
+    /// event's counters onto `target`. Lowered to `Effect::ReproduceEventCounters`.
+    ReproduceEventCounters {
+        target: TargetFilter,
+        per_kind_count: crate::types::ability::EventCounterReproductionCount,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1439,6 +1836,26 @@ pub(crate) enum ClauseBoundary {
     Sentence,
     Then,
     Comma,
+}
+
+/// CR 608.2c: the SINGLE translation from the printed boundary that precedes a
+/// clause to the link the clause carries to the one before it. A `Sentence`
+/// boundary marks the next printed instruction (`SequentialSibling`); a
+/// `Comma`/`Then`/absent boundary marks a within-clause `ContinuationStep`.
+///
+/// Two passes need this mapping and MUST agree: `assemble_effect_chain` stamps
+/// `AbilityDefinition::sub_link` with it, and the referent walk
+/// (`parser::oracle_effect::chain_prior_referent_is_created_token`) predicts,
+/// while still in `ClauseIr` space, whether the clauses it walks past will be
+/// continuation steps. Keeping the match here is what makes those two the same
+/// rule rather than two copies of it.
+pub(crate) fn sub_link_after_boundary(boundary: Option<ClauseBoundary>) -> SubAbilityLink {
+    match boundary {
+        Some(ClauseBoundary::Sentence) => SubAbilityLink::SequentialSibling,
+        Some(ClauseBoundary::Then) | Some(ClauseBoundary::Comma) | None => {
+            SubAbilityLink::ContinuationStep
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1479,6 +1896,22 @@ pub(crate) fn parsed_clause(effect: Effect) -> ParsedEffectClause {
     }
 }
 
+/// A `.parsed` placeholder for a clause whose real semantics live in its
+/// `ClauseDisposition` (e.g. a `Special` action), not in its effect. Distinct
+/// from `Effect::unimplemented`: it carries no fragment (`description: None`)
+/// because it marks an intentional structural non-effect, not an unparsed gap —
+/// a `Some(fragment)` here would leak into the coverage report as a false parse
+/// gap. `name` is a stable snake_case pattern-class key.
+pub(crate) fn placeholder_parsed_clause(name: &str) -> ParsedEffectClause {
+    // Structural placeholder for a disposition-carried clause; the None fragment is
+    // load-bearing (a Some(_) would surface as a false parse gap in coverage).
+    // allow-noncombinator: intentional Effect::Unimplemented placeholder, not parse dispatch.
+    parsed_clause(Effect::Unimplemented {
+        name: name.to_string(),
+        description: None,
+    })
+}
+
 pub(crate) fn with_clause_duration(
     mut clause: ParsedEffectClause,
     duration: Duration,
@@ -1510,8 +1943,25 @@ pub(crate) fn with_clause_duration(
         }
         Effect::BecomeCopy {
             duration: ref mut effect_duration,
+            recipient,
             ..
         } => {
+            // CR 611.2b + CR 301.5: a leading "for as long as ~ remains
+            // attached to it" binds a singular become-copy to the attachment
+            // host. The duration is stripped before the body is parsed, so
+            // this is the first point where both the copy and its final
+            // duration are available.
+            if matches!(
+                &duration,
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::RecipientMatchesFilter {
+                        filter: TargetFilter::AttachedTo,
+                    },
+                }
+            ) && *recipient == TargetFilter::SelfRef
+            {
+                *recipient = TargetFilter::AttachedTo;
+            }
             *effect_duration = Some(duration);
         }
         _ => {}
@@ -1592,6 +2042,11 @@ pub(crate) enum OracleBlockAst {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ModeAst {
     pub(crate) raw: String,
+    /// Verbatim mode text before any structural distribution rewrite.
+    pub(crate) source_text: String,
+    /// Absolute Oracle line for a collected block bullet. Inline `; or` modes
+    /// have no independent printed line.
+    pub(crate) source_line: Option<usize>,
     pub(crate) label: Option<String>,
     pub(crate) body: String,
     /// Per-mode additional cost (Spree). None for standard `\u{2022}` modes.
@@ -1617,6 +2072,21 @@ pub(crate) struct ModalHeaderAst {
     /// CR 700.2 + CR 107.3m: Dynamic max ("choose up to X —") — `Some` carries
     /// the cost {X} reference resolved live at runtime; `None` for fixed caps.
     pub(crate) dynamic_max_choices: Option<crate::types::ability::QuantityExpr>,
+    /// CR 608.2c: Triggered modal headers of the form "you may choose N"
+    /// (Shadrix Silverquill) make the entire triggered ability optional — the
+    /// controller may decline to choose any modes. Distinct from "you may choose
+    /// up to N", which only lowers `min_choices` to 0 while the trigger remains
+    /// mandatory.
+    pub(crate) optionality: ModalOptionality,
+}
+
+/// CR 608.2c: Whether a modal header makes its enclosing triggered ability
+/// optional. This remains distinct from a modal's `min_choices`, which models
+/// how many modes a mandatory ability may select.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) enum ModalOptionality {
+    Mandatory,
+    MayDecline,
 }
 
 // --- ActivatedConstraintAst (moved from oracle.rs) ---

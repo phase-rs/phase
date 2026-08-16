@@ -1,8 +1,15 @@
 {
   "concedeDialog": {
     "title": "Spiel aufgeben?",
-    "message": "Dein Gegner wird zum Sieger erklärt.",
-    "concede": "Aufgeben"
+    "game": {
+      "label": "Dieses Spiel aufgeben",
+      "ordinaryMessage": "Dein Gegner gewinnt dieses Spiel.",
+      "matchMessage": "Du gibst nur das aktuelle Spiel auf. Ist das Match noch nicht entschieden, folgt das Sideboarden oder das nächste Spiel."
+    },
+    "match": {
+      "label": "Gesamtes Match aufgeben",
+      "message": "Du gibst das Match auf. Dein Gegner gewinnt das Match und es werden keine weiteren Spiele gespielt."
+    }
   },
   "takebackDialog": {
     "requestedTitle": "{{name}} beantragt eine Rücknahme",
@@ -53,16 +60,18 @@
     "matchScore": "Partiestand {{p0}}-{{p1}}{{draws}}. Verschiebe Karten zwischen Haupt und Sideboard und reiche dann ein.",
     "draws_one": " ({{count}} Unentschieden)",
     "draws_other": " ({{count}} Unentschieden)",
-    "main": "Haupt ({{count}}/{{total}})",
+    "main": "Haupt ({{count}}, min. {{min}})",
     "sideboard": "Sideboard ({{count}})",
+    "sideboardCapped": "Sideboard ({{count}}/{{max}})",
     "moveFromSideboard": "Karten aus dem Sideboard verschieben.",
     "moveFromMain": "Karten aus dem Hauptdeck verschieben.",
-    "matchesRegistered": "Hauptdeck entspricht der registrierten Größe ({{total}}).",
-    "submitDisabled": "Hauptdeck hat {{count}} / {{total}} — Einreichen deaktiviert.",
     "resetAria": "Auf registriertes Deck zurücksetzen",
     "reset": "Zurücksetzen",
     "submitAria": "Deck für das nächste Spiel einreichen",
-    "submitDeck": "Deck einreichen"
+    "submitDeck": "Deck einreichen",
+    "readyToSubmit": "Deck ist legal — bereit zum Einreichen.",
+    "belowMinimum": "Hauptdeck benötigt mindestens {{min}} Karten — aktuell {{count}}.",
+    "overSideboardCap": "Sideboard hat {{count}} Karten — maximal {{max}}."
   },
   "brokerOfflinePrompt": {
     "title": "Lobby-Server nicht erreichbar",
@@ -110,6 +119,7 @@
     "subtitle": "Wähle eine Region oder verbinde dich mit einer selbst gehosteten Instanz.",
     "noneLabel": "Keiner (nur P2P)",
     "directCodes": "direkte Codes",
+    "official": "Offiziell",
     "selfHosted": "Selbst gehostet",
     "customUrlPlaceholder": "wss://dein-server.beispiel/ws",
     "test": "Testen",

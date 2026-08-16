@@ -1,13 +1,16 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  AlternativeAdditionalCostDescription,
   GameObject,
-  GameState,
   ManaCost,
   WaitingFor,
 } from "../../../adapter/types.ts";
+import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
+import { buildGameObjectWithCoreTypes, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
+import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
 import { AlternativeCostModal } from "../AlternativeCostModal.tsx";
 
 const dispatchMock = vi.fn();
@@ -15,40 +18,17 @@ const dispatchMock = vi.fn();
 const RED_COST: ManaCost = { type: "Cost", shards: ["Red"], generic: 0 };
 
 function makeObject(id: number, name: string): GameObject {
-  return {
+  return buildGameObjectWithCoreTypes(["Sorcery"], {
     id,
     card_id: id,
-    owner: 0,
-    controller: 0,
     zone: "Hand",
-    tapped: false,
-    face_down: false,
-    flipped: false,
-    transformed: false,
-    damage_marked: 0,
-    dealt_deathtouch_damage: false,
-    attached_to: null,
-    attachments: [],
-    counters: {},
     name,
-    power: null,
-    toughness: null,
-    loyalty: null,
-    card_types: { supertypes: [], core_types: ["Sorcery"], subtypes: [] },
     mana_cost: RED_COST,
-    keywords: [],
-    abilities: [],
-    trigger_definitions: [],
-    replacement_definitions: [],
-    static_definitions: [],
     color: ["Red"],
-    base_power: null,
-    base_toughness: null,
-    base_keywords: [],
     base_color: ["Red"],
     timestamp: 1,
     entered_battlefield_turn: null,
-  } as unknown as GameObject;
+  });
 }
 
 type AltKeyword = Extract<
@@ -56,7 +36,10 @@ type AltKeyword = Extract<
   { type: "AlternativeCastChoice" }
 >["data"]["keyword"]["type"];
 
-function setSpectacleChoice(keyword: AltKeyword) {
+function setSpectacleChoice(
+  keyword: AltKeyword,
+  alternativeAdditionalCostDescription: AlternativeAdditionalCostDescription | null = null,
+) {
   const waitingFor: WaitingFor = {
     type: "AlternativeCastChoice",
     data: {
@@ -67,35 +50,36 @@ function setSpectacleChoice(keyword: AltKeyword) {
       normal_cost: { type: "Cost", shards: ["Red"], generic: 3 },
       alternative_cost: RED_COST,
       alternative_additional_cost: null,
+      alternative_additional_cost_description: alternativeAdditionalCostDescription,
     },
   };
 
-  const gameState = {
+  const gameState = buildGameState({
     active_player: 0,
-    objects: {
-      52: makeObject(52, "Light Up the Stage"),
-    },
+    objects: buildObjectMap(makeObject(52, "Light Up the Stage")),
     priority_player: 0,
     turn_decision_controller: 0,
     waiting_for: waitingFor,
-  } as unknown as GameState;
+  });
 
   useGameStore.setState({
     gameState,
     waitingFor,
     dispatch: dispatchMock,
     gameMode: "ai",
-  } as unknown as Partial<ReturnType<typeof useGameStore.getState>>);
+  });
 }
 
 describe("AlternativeCostModal", () => {
   beforeEach(() => {
     dispatchMock.mockReset();
     dispatchMock.mockResolvedValue(undefined);
+    usePreferencesStore.setState({ language: "en" });
   });
 
   afterEach(() => {
     cleanup();
+    usePreferencesStore.setState({ language: "en" });
   });
 
   // Regression for issue #2939: the engine emits `keyword.type === "Spectacle"`
@@ -145,4 +129,27 @@ describe("AlternativeCostModal", () => {
       ).toBeInTheDocument();
     },
   );
+
+  it("renders Emerge's engine-provided sacrifice description", () => {
+    setSpectacleChoice("Emerge", {
+      type: "EmergeSacrifice",
+      quality: { type: "Artifact" },
+    });
+    render(<AlternativeCostModal />);
+
+    expect(screen.getByText(/sacrificing an artifact/i)).toBeInTheDocument();
+  });
+
+  it("localizes Emerge's typed sacrifice quality", async () => {
+    usePreferencesStore.setState({ language: "es" });
+    setSpectacleChoice("Emerge", {
+      type: "EmergeSacrifice",
+      quality: { type: "Artifact" },
+    });
+    render(<AlternativeCostModal />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/sacrificando un artefacto/i)).toBeInTheDocument();
+    });
+  });
 });

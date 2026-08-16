@@ -389,6 +389,7 @@ fn real_hideaway_card_synthesizes_etb_trigger() {
             scryfall_id: Some("windbrisk-heights-face".to_string()),
         },
         foreign_data: Vec::new(),
+        related_cards: crate::database::mtgjson::SetRelatedCards::default(),
     };
 
     let face = crate::database::synthesis::build_oracle_face(&atomic, None);

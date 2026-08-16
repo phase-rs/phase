@@ -244,7 +244,7 @@ fn match_haunted_creature_dies_only_for_the_haunted_creature() {
     assert!(match_haunted_creature_dies(
         &dies_event,
         &dummy,
-        haunting_card,
+        &super::trigger_matchers::test_trigger_source_context(&state, haunting_card),
         &state
     ));
 
@@ -258,7 +258,7 @@ fn match_haunted_creature_dies_only_for_the_haunted_creature() {
     assert!(!match_haunted_creature_dies(
         &other_event,
         &dummy,
-        haunting_card,
+        &super::trigger_matchers::test_trigger_source_context(&state, haunting_card),
         &state
     ));
 }
@@ -295,7 +295,12 @@ fn match_haunted_creature_dies_uses_last_known_information() {
         .expect("haunted creature's ZoneChanged event");
     let dummy = TriggerDefinition::new(TriggerMode::HauntedCreatureDies);
     assert!(
-        match_haunted_creature_dies(&dies_event, &dummy, haunting_card, &state),
+        match_haunted_creature_dies(
+            &dies_event,
+            &dummy,
+            &super::trigger_matchers::test_trigger_source_context(&state, haunting_card),
+            &state,
+        ),
         "the dies check must read the record's LKI, not the graveyard object's current types"
     );
 }
@@ -507,6 +512,7 @@ fn atomic(name: &str, types: &[&str], type_line: &str, oracle: &str) -> AtomicCa
             scryfall_id: Some(format!("{name}-face")),
         },
         foreign_data: Vec::new(),
+        related_cards: crate::database::mtgjson::SetRelatedCards::default(),
     }
 }
 
