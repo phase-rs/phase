@@ -187,6 +187,7 @@ fn cast_the_black_arrow(target: ArrowTarget, prevent_damage: bool) -> (Zone, u32
             "Dragon Shield".into(),
             Zone::Stack,
         );
+        // CR 615.1: Prevention effects apply as damage events happen.
         let prevention = ResolvedAbility::new(
             Effect::PreventDamage {
                 amount: PreventionAmount::All,
