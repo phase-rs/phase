@@ -744,11 +744,6 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::SetPriorityYield { .. }
         | GameAction::SetMayTriggerAutoChoice { .. }
         | GameAction::SetTriggerOrderTemplate { .. }
-        // Resolve All consent carries only a bounded resolution cap, epoch,
-        // representative id, and finite decision enum.
-        | GameAction::BeginResolveAll { .. }
-        | GameAction::RespondResolveAllConsent { .. }
-        | GameAction::RevokeResolveAllConsent { .. }
         // CR 732.2b/c: a typed enum + a single `u32` — nothing unbounded.
         | GameAction::RespondToShortcut { .. }
         // CR 732.2a-c: opaque epoch/route/breakpoint ids and a typed response
