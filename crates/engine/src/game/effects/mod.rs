@@ -3409,6 +3409,7 @@ fn quantity_ref_counts_population_matching(
         | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
         | QuantityRef::LifeLostThisTurn { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::UnspentMana { .. }
