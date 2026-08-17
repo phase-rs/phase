@@ -371,10 +371,10 @@ pub(crate) fn resolve_keyword_mana_cost(
     }
 }
 
-/// CR 602.1a + CR 702.141a: Resolve `SelfManaCost` / `SelfManaValue` placeholders
-/// anywhere in an activated ability's cost tree before legality or payment.
-/// The mana payment path treats those placeholders as free, so every activation
-/// fetch must concretize them against the source object (Sliver Gravemother class).
+/// CR 601.2f + CR 602.1a: Resolve `SelfManaCost` / `SelfManaValue` placeholders
+/// anywhere in an `AbilityCost` tree before affordability or payment. The mana
+/// payment path treats those placeholders as free, so every payable cost must
+/// concretize them against its source object (Kentaro and Sliver Gravemother classes).
 pub(crate) fn resolve_self_mana_in_ability_cost(
     state: &GameState,
     source_id: ObjectId,
@@ -542,6 +542,13 @@ pub fn source_matches_protection_target(
             .chosen_card_type()
             .and_then(|ct| ct.protection_quality_str())
             .is_some_and(|quality| source_matches_card_type(source, quality)),
+        // CR 702.16k: Resolve "the chosen player" from the protected
+        // permanent's persisted choice. Protection covers objects that player
+        // controls and objects they own that no other player controls; CR
+        // 109.4 + CR 108.4a make controller-or-owner the shared authority.
+        ProtectionTarget::ChosenPlayer => protected
+            .chosen_player()
+            .is_some_and(|player| source.controller_or_owner() == player),
         // CR 702.16j: "Protection from everything" — protection from each object
         // regardless of the source's characteristic values.
         ProtectionTarget::Everything => true,

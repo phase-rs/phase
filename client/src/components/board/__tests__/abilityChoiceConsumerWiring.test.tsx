@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameAction, GameObject, GameState } from "../../../adapter/types.ts";
+import type { ViewerInteraction } from "../../../adapter/generated/interaction";
 import { dispatchAction, dispatchInteraction } from "../../../game/dispatch.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
@@ -140,7 +141,21 @@ function seed(legalActionsByObject: Record<string, GameAction[]>) {
     waitingFor: gameState.waiting_for,
     legalActions: [],
     legalActionsByObject,
-    viewerInteraction: null,
+    // Membership is engine-published on every projection, prompt or not, and the
+    // fan renders exactly that list — so the fixture has to carry it, with no
+    // pick attached (this row's clicks come from the legal-action buckets).
+    viewerInteraction: {
+      waitingForKind: { simultaneous: null, terminal: false, code: "choose" },
+      authorizedSubmitters: [0],
+      canSubmit: true,
+      autoPassRecommended: false,
+      opportunities: [],
+      attachmentFans: {},
+      attachmentViews: {
+        [HOST_ID]: { hostId: HOST_ID, cards: [{ objectId: FREED_ID, submission: null }] },
+      },
+      availability: { type: "inputRequired" },
+    } as unknown as ViewerInteraction,
   });
   // `enchantmentsDialogPlayer` is the OTHER input to `hasUiDialog`. Left
   // non-null it would raise the overlay on its own and the overlay assert

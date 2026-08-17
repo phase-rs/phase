@@ -748,18 +748,25 @@ pub(crate) fn parse_suppress_triggers(tp: &TextPair<'_>, text: &str) -> Option<S
         (vec![SuppressedTriggerEvent::EntersBattlefield], after_tb)
     };
     let after_dying_lower = after_dying.to_lowercase();
-    let after_verb = nom_tag_lower(
-        after_dying,
-        &after_dying_lower,
-        "don't cause abilities to trigger",
-    )?;
-    // Allow only terminal punctuation (period or empty).
-    if !matches!(after_verb.trim(), "" | ".") {
-        return None;
-    }
+    let after_verb = nom_tag_lower(after_dying, &after_dying_lower, "don't cause abilities")?;
+    let trigger_source_filter =
+        if let Some(rest) = nom_tag_lower(after_verb, &after_verb.to_lowercase(), " of ") {
+            let (filter, remainder) = parse_type_phrase(rest);
+            if matches!(filter, TargetFilter::SelfRef)
+                || !matches!(remainder.trim(), "to trigger" | "to trigger.")
+            {
+                return None;
+            }
+            Some(filter)
+        } else if matches!(after_verb.trim(), "to trigger" | "to trigger.") {
+            None
+        } else {
+            return None;
+        };
     Some(
         StaticDefinition::new(StaticMode::SuppressTriggers {
             source_filter,
+            trigger_source_filter,
             events,
         })
         .description(text.to_string()),
@@ -2314,6 +2321,7 @@ fn usable_disjunctive_permission_filter(filter: &TargetFilter) -> bool {
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::GrantingObject

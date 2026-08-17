@@ -13,8 +13,9 @@ use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     CostResume, GameState, ManaAbilityCostCursor, ManaAbilityCostParent,
     ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume, ManaChoice,
-    ManaChoiceContext, ManaChoicePrompt, PayCostKind, PayableResource, PendingCostMoveResume,
-    PendingManaAbility, ProductionOverride, WaitingFor,
+    ManaChoiceContext, ManaChoicePrompt, ManaColorChoiceResume, ManaTriggerFixedPointResume,
+    PayCostKind, PayableResource, PendingCostMoveResume, PendingManaAbility, ProductionOverride,
+    WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaCost, ManaPool, ManaType, PaymentContext};
@@ -314,8 +315,48 @@ pub fn is_triggered_mana_ability(
     // above for the deliberately-not-yet-widened `AbilityActivated` axis.
     matches!(
         trigger_event,
-        Some(GameEvent::TappedForMana { .. } | GameEvent::ManaAdded { .. })
+        Some(
+            GameEvent::TappedForMana { .. }
+                | GameEvent::ManaAbilityProduced { .. }
+                | GameEvent::ManaAdded { .. }
+        )
     )
+}
+
+/// CR 605.1b + CR 605.4a: the **resolver-facing** counterpart of
+/// [`is_triggered_mana_ability`].
+///
+/// [`is_triggered_mana_ability`] is the *acceptance-time* gate: it answers
+/// "does this classification-time graph qualify?" and is deliberately raw —
+/// any target anywhere in the graph makes it false. That is the right question
+/// once, when an occurrence is accepted.
+///
+/// It is the wrong question during resolution. `resolve_ability_chain` may
+/// materialize an engine resolution-context referent (a `chosen_players`
+/// member surfacing through `ControllerRef::ChosenPlayer`, for instance) into
+/// the overloaded `ResolvedAbility.targets` vector. That referent is not a
+/// CR 115.1d announcement target — `build_target_slots` surfaces no slot for
+/// it — so the already-accepted ability does not stop being a triggered mana
+/// ability partway through its own resolution. CR 605.4a keeps the occurrence
+/// stackless and owned by the immediate fixed point.
+///
+/// So: while the accepted-occurrence marker is live, the classification
+/// decision has already been made and is simply read back. Outside such an
+/// occurrence there is no marker and this delegates to the raw classifier with
+/// the ambient `current_trigger_event`, which is exactly baseline. Ordinary
+/// callers — including the compatibility `resolve_triggered_mana_ability_inline`
+/// wrapper, which deliberately installs no marker — are unaffected.
+pub(crate) fn is_resolving_triggered_mana(state: &GameState, ability: &ResolvedAbility) -> bool {
+    if let Some(node) = state.active_accepted_triggered_mana_node {
+        debug_assert_eq!(
+            Some(node),
+            state.active_rules_execution_node,
+            "an accepted triggered-mana occurrence marker must name the ambient rules-execution \
+             node; a mismatch means a scope was entered or restored without its partner"
+        );
+        return true;
+    }
+    is_triggered_mana_ability(ability, state.current_trigger_event.as_ref())
 }
 
 /// True iff every reachable link (via `sub_ability` and `else_ability` per
@@ -441,7 +482,9 @@ pub fn resolve_triggered_mana_ability_inline(
     let node = source.map(|source| {
         let caused_by = match trigger_event {
             Some(
-                GameEvent::ManaAdded { source_id, .. } | GameEvent::TappedForMana { source_id, .. },
+                GameEvent::ManaAdded { source_id, .. }
+                | GameEvent::TappedForMana { source_id, .. }
+                | GameEvent::ManaAbilityProduced { source_id, .. },
             ) => state
                 .resolved_rules_journal
                 .latest_mana_producer_for_source(*source_id),
@@ -565,6 +608,13 @@ pub(super) fn resolve_mana_ability_excluding(
     // its historical default-output semantics even when a cost move pauses.
     // The cursor serializes that resolution mode with the exact outer resume.
     let cost_event_start = events.len();
+    // CR 603.2 + CR 603.3b: Prepare a fresh child-facing snapshot of the live
+    // synchronous parent carrying that parent frame's current unscanned suffix,
+    // including every earlier sibling that already completed synchronously. The
+    // live parent cursor is never mutated, so a synchronous child drops this
+    // snapshot without duplicating the root's eventual scan.
+    let prepared_parent =
+        parent.map(|parent| parent_snapshot_with_current_cost_events(parent, events));
     let waiting_for = continue_mana_ability_cost_payment(
         state,
         pending,
@@ -573,7 +623,7 @@ pub(super) fn resolve_mana_ability_excluding(
             excluded_sources,
             sub_cost_demand,
             ManaAbilityCostResolutionMode::AutoResolved,
-            parent,
+            prepared_parent.as_ref(),
         ),
         events,
         cost_event_start,
@@ -641,6 +691,7 @@ fn produce_mana_from_ability(
         },
     );
     let mut produced_for_tap_event = Vec::new();
+    let mut produced_for_ability_events = Vec::new();
     for recipient in recipients {
         let mut scoped = resolved_for_quantity.clone();
         scoped.set_original_controller_recursive(player);
@@ -689,6 +740,9 @@ fn produce_mana_from_ability(
         // resolution. Its payload is the full aggregate produced by the
         // ability, including scoped recipients that exclude the activator.
         produced_for_tap_event.extend(produced_mana.iter().copied());
+        if !produced_mana.is_empty() {
+            produced_for_ability_events.push((recipient, produced_mana.clone()));
+        }
         for &mana_type in &produced_mana {
             mana_payment::produce_mana_with_attributes_from_source_quality(
                 state,
@@ -724,6 +778,19 @@ fn produce_mana_from_ability(
                 obj.chosen_attributes.push(ChosenAttribute::Color(color));
             }
         }
+    }
+
+    // CR 605.1b: Emit one aggregate event per receiving player for every
+    // mana-ability resolution, including abilities without a tap cost. Its
+    // output vector lets triggered mana abilities inspect each player's share
+    // of a multi-recipient resolution exactly once.
+    for (recipient, produced) in produced_for_ability_events {
+        events.push(GameEvent::ManaAbilityProduced {
+            player_id: recipient,
+            source_id,
+            produced,
+            trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
+        });
     }
 
     // CR 106.12a: an "is tapped for mana" trigger fires once per resolution of
@@ -932,23 +999,35 @@ fn complete_mana_ability_activation(
 /// `Some(ManaChoicePrompt::AnyCombination)` when each produced mana unit has
 /// an independent color choice. Returns `None` when production is fully
 /// determined (Fixed, Colorless, single-option AnyOneColor).
+/// `color_ability` retains the original target context for dynamic color
+/// discovery; `count_ability` may be scoped to the count-source target for
+/// quantity resolution.
 pub(crate) fn mana_choice_prompt(
     effect: &Effect,
     state: &GameState,
     source_id: ObjectId,
-    ability: Option<&ResolvedAbility>,
+    color_ability: Option<&ResolvedAbility>,
+    count_ability: Option<&ResolvedAbility>,
 ) -> Option<ManaChoicePrompt> {
     let Effect::Mana { produced, .. } = effect else {
         return None;
     };
     match produced {
         ManaProduction::AnyOneColor { color_options, .. } if color_options.len() > 1 => {
-            Some(ManaChoicePrompt::SingleColor {
+            // CR 106.5: An ability that would produce mana of an undefined type
+            // produces no mana, so it needs no color choice.
+            let produces_mana = count_ability
+                .map(|ability| {
+                    !super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
+                        .is_empty()
+                })
+                .unwrap_or(true);
+            produces_mana.then(|| ManaChoicePrompt::SingleColor {
                 options: color_options.iter().map(mana_color_to_type).collect(),
             })
         }
         ManaProduction::AnyCombination { color_options, .. } if color_options.len() > 1 => {
-            let ability = ability?;
+            let ability = count_ability?;
             let count =
                 super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
                     .len();
@@ -973,12 +1052,23 @@ pub(crate) fn mana_choice_prompt(
             // CR 106.1: Player chooses one of the colors among matching permanents they
             // control.
             let options = super::effects::mana::distinct_colors_among_permanents(
-                state, ability, source_id, filter,
+                state,
+                color_ability,
+                source_id,
+                filter,
             )
             .into_iter()
             .map(|color| mana_color_to_type(&color))
             .collect::<Vec<_>>();
-            if options.len() > 1 {
+            // CR 106.5: An ability that would produce mana of an undefined type
+            // produces no mana, so it needs no color choice.
+            let produces_mana = count_ability
+                .map(|ability| {
+                    !super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
+                        .is_empty()
+                })
+                .unwrap_or(true);
+            if options.len() > 1 && produces_mana {
                 Some(ManaChoicePrompt::SingleColor { options })
             } else {
                 None
@@ -996,6 +1086,23 @@ pub(crate) fn mana_choice_prompt(
         ManaProduction::ChosenColor {
             fixed_alternative, ..
         } => {
+            if fixed_alternative.is_some() {
+                // CR 106.5: A fixed alternative makes production resolvable
+                // before the color choice. If it resolves to no mana, no color
+                // choice is needed. Pure chosen-color production must retain
+                // its prompt because that choice can determine its count.
+                let produces_mana = count_ability
+                    .map(|ability| {
+                        !super::effects::mana::resolve_mana_types_for_ability(
+                            produced, state, ability,
+                        )
+                        .is_empty()
+                    })
+                    .unwrap_or(true);
+                if !produces_mana {
+                    return None;
+                }
+            }
             let chosen = super::effects::mana::chosen_color_for_mana(state, source_id);
             match (fixed_alternative, chosen) {
                 // CR 106.1: "Add {fixed} or one mana of the chosen color" — once
@@ -1038,7 +1145,15 @@ pub(crate) fn mana_choice_prompt(
                 owner,
                 source_id,
             );
-            if options.len() > 1 {
+            // CR 106.5: An ability that would produce mana of an undefined type
+            // produces no mana, so it needs no color choice.
+            let produces_mana = count_ability
+                .map(|ability| {
+                    !super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
+                        .is_empty()
+                })
+                .unwrap_or(true);
+            if options.len() > 1 && produces_mana {
                 Some(ManaChoicePrompt::SingleColor { options })
             } else {
                 None
@@ -1051,7 +1166,15 @@ pub(crate) fn mana_choice_prompt(
         ManaProduction::AnyInCommandersColorIdentity { .. } => {
             let owner = state.objects.get(&source_id).map(|obj| obj.controller)?;
             let identity = super::commander::commander_color_identity(state, owner);
-            if identity.len() > 1 {
+            // CR 106.5: An ability that would produce mana of an undefined type
+            // produces no mana, so it needs no color choice.
+            let produces_mana = count_ability
+                .map(|ability| {
+                    !super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
+                        .is_empty()
+                })
+                .unwrap_or(true);
+            if identity.len() > 1 && produces_mana {
                 Some(ManaChoicePrompt::SingleColor {
                     options: identity.iter().map(mana_color_to_type).collect(),
                 })
@@ -1067,7 +1190,15 @@ pub(crate) fn mana_choice_prompt(
         ManaProduction::OpponentLandColors { .. } => {
             let owner = state.objects.get(&source_id).map(|obj| obj.controller)?;
             let options = super::mana_sources::opponent_land_color_options(state, owner);
-            if options.len() > 1 {
+            // CR 106.5: An ability that would produce mana of an undefined type
+            // produces no mana, so it needs no color choice.
+            let produces_mana = count_ability
+                .map(|ability| {
+                    !super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
+                        .is_empty()
+                })
+                .unwrap_or(true);
+            if options.len() > 1 && produces_mana {
                 Some(ManaChoicePrompt::SingleColor { options })
             } else {
                 None
@@ -1079,14 +1210,15 @@ pub(crate) fn mana_choice_prompt(
         // AnyCombination prompt only when the object has more than one color; 0 or
         // 1 color needs no prompt (CR 106.5 empty → no mana; single auto-picks).
         ManaProduction::AnyCombinationOfObjectColors { scope, .. } => {
-            let options = super::effects::mana::object_colors_for_scope(state, ability, *scope)
-                .iter()
-                .map(mana_color_to_type)
-                .collect::<Vec<_>>();
+            let options =
+                super::effects::mana::object_colors_for_scope(state, color_ability, *scope)
+                    .iter()
+                    .map(mana_color_to_type)
+                    .collect::<Vec<_>>();
             if options.len() <= 1 {
                 return None;
             }
-            let ability = ability?;
+            let ability = count_ability?;
             let count =
                 super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
                     .len();
@@ -1159,6 +1291,10 @@ pub fn handle_choose_mana_color(
     let node = pending
         .rules_execution_node
         .unwrap_or_else(|| state.begin_activated_mana_journal_node(pending.source_id));
+    // CR 605.4a: the choice action's own live-collection start. The already-paid
+    // cost range was collected by the frame that returned this prompt; this
+    // action owns only what production/completion emits from here.
+    let choice_action_start = events.len();
     state.with_rules_execution_node(node, |state| {
         produce_mana_from_ability(
             state,
@@ -1178,6 +1314,26 @@ pub fn handle_choose_mana_color(
             events,
         );
     });
+
+    // CR 603.2 + CR 605.3c + CR 605.4a: the second typed half of the colour
+    // seam. The frame this choice completes is a completed mana frame with an
+    // empty durable ledger, so it runs the SAME collection helper before
+    // returning its resume owner — and before `batch_activate_mana_siblings`
+    // begins the next sibling, each of which performs the same helper on its own
+    // finish path. That is the CR 605.4a pre-pass between siblings, in place of
+    // one aggregate scan after the loop.
+    if let Some(pause) = collect_completed_mana_frame_events(
+        state,
+        Vec::new(),
+        events,
+        choice_action_start,
+        ManaTriggerFixedPointResume::Root {
+            player: pending.player,
+            resume: Box::new(pending.resume.clone()),
+        },
+    ) {
+        return Ok(pause);
+    }
 
     Ok(resume_waiting_for(pending.player, pending.resume.clone()))
 }
@@ -2031,6 +2187,42 @@ fn mana_ability_definition(
         .ok_or_else(|| EngineError::InvalidAction("Mana ability no longer exists".to_string()))
 }
 
+/// CR 603.2 + CR 603.3b: Build the child-facing snapshot of a live synchronous
+/// parent frame. Only this clone's ledger gains the parent's current unscanned
+/// suffix; the live parent cursor keeps its own `cost_event_start` and its
+/// events remain in the reducer vector, so a synchronous child that drops the
+/// snapshot cannot duplicate the root's eventual scan. Preparation runs at every
+/// child entry, so a later pausing sibling inherits the parent prefix plus all
+/// earlier synchronously completed siblings in chronological order.
+fn parent_snapshot_with_current_cost_events(
+    parent: &ManaAbilityCostParent,
+    events: &[GameEvent],
+) -> ManaAbilityCostParent {
+    debug_assert!(
+        matches!(
+            parent.lifecycle,
+            ManaAbilityCostParentLifecycle::Synchronous
+        ),
+        "only a live synchronous parent may be augmented; a suspended parent's prefix is already durable"
+    );
+    debug_assert!(
+        parent.current_action_event_start <= events.len(),
+        "parent event marker must index the live reducer event vector"
+    );
+    let mut prepared = parent.clone();
+    if matches!(
+        parent.lifecycle,
+        ManaAbilityCostParentLifecycle::Synchronous
+    ) {
+        let start = parent.current_action_event_start.min(events.len());
+        prepared
+            .cursor
+            .deferred_cost_events
+            .extend_from_slice(&events[start..]);
+    }
+    prepared
+}
+
 fn mana_ability_cost_cursor(
     cost: &Option<AbilityCost>,
     excluded_sources: &HashSet<ObjectId>,
@@ -2056,13 +2248,10 @@ fn mana_ability_cost_cursor(
         next_sacrificed: 0,
         selected_exile_remaining: None,
         selected_sacrifice_remaining: None,
-        // CR 603.2 + CR 603.3b: A nested child takes over every unscanned
-        // event already owned by its suspended parent.  It appends only newly
-        // emitted events if it pauses, then hands the one batch back on
-        // completion; no ancestor batch is copied twice.
-        deferred_cost_events: parent.map_or_else(Vec::new, |parent| {
-            parent.cursor.deferred_cost_events.clone()
-        }),
+        // CR 603.2 + CR 603.3b: A nested child starts with an empty frame-local
+        // ledger. Its parent snapshot retains every ancestor-owned event
+        // opaquely until a suspended child moves its own events upward.
+        deferred_cost_events: Vec::new(),
         current_action_deferred_start: 0,
         parent: parent.cloned().map(Box::new),
     }
@@ -2102,6 +2291,19 @@ fn suspend_mana_ability_parent_chain(parent: Option<&mut ManaAbilityCostParent>)
     }
 }
 
+/// Only a pre-delivery replacement-ordering pause may replace the active prompt
+/// with `ReplacementChoice`. A post-delivery substitute can keep a replacement
+/// record while it waits on its own prompt, so it has no ordering player and
+/// must remain visible.
+fn pause_pre_delivery_mana_cost_replacement_choice(
+    state: &mut GameState,
+    choice_player: Option<PlayerId>,
+) {
+    if let Some(choice_player) = choice_player.filter(|_| state.pending_replacement.is_some()) {
+        super::costs::pause_cost_payment_for_replacement_choice(state, choice_player);
+    }
+}
+
 fn pause_mana_ability_cost_payment(
     state: &mut GameState,
     pre_delivery_choice_player: Option<PlayerId>,
@@ -2126,19 +2328,7 @@ fn pause_mana_ability_cost_payment(
         pending: Box::new(pending),
         cursor,
     });
-    // `NeedsChoice` also reports a post-delivery replacement continuation.
-    // That continuation has already consumed `pending_replacement` and installed
-    // its own live prompt, which must remain visible while the typed cursor is
-    // parked. Pre-delivery CR 616.1 ordering is the only case that needs a
-    // synthesized ReplacementChoice.
-    if state.pending_replacement.is_some() {
-        super::costs::pause_cost_payment_for_replacement_choice(
-            state,
-            pre_delivery_choice_player.expect(
-                "a pending replacement must identify the player ordering the interrupted mana cost",
-            ),
-        );
-    }
+    pause_pre_delivery_mana_cost_replacement_choice(state, pre_delivery_choice_player);
 }
 
 fn mana_ability_cursor_after_current_component(
@@ -2174,6 +2364,19 @@ fn ensure_mana_ability_selection_cursor_consumed(
         ));
     }
     Ok(())
+}
+
+/// CR 603.2 + CR 603.3b: Move one suspended child's frame-local trigger-event
+/// ledger into its parent without replacing the parent's earlier events.
+fn append_suspended_child_cost_events(
+    parent: &mut ManaAbilityCostCursor,
+    child: &mut ManaAbilityCostCursor,
+    current: &[GameEvent],
+) {
+    parent
+        .deferred_cost_events
+        .extend(std::mem::take(&mut child.deferred_cost_events));
+    parent.deferred_cost_events.extend_from_slice(current);
 }
 
 fn advance_mana_ability_selection_cursor(
@@ -2568,15 +2771,19 @@ fn pay_mana_ability_cost_component(
                 .skip(cursor.next_sacrificed);
             // CR 605.3b + CR 605.3c: A nested source that pauses while
             // funding this Mana component must retain this exact parent cursor.
-            // The child cursor inherits the parent's existing deferred batch
-            // when it is constructed.  Do not also copy this action's events
-            // into the parent: if the child pauses, its own cursor appends them
-            // exactly once and becomes the temporary settlement authority.
+            // The child's frame-local deferred ledger starts empty; ancestor
+            // events stay opaque in this parent snapshot until upward handoff.
             let parent_cursor = cursor.clone();
             let parent = ManaAbilityCostParent {
                 pending: Box::new(pending.clone()),
                 cursor: Box::new(parent_cursor),
                 lifecycle: ManaAbilityCostParentLifecycle::Synchronous,
+                // CR 603.2 + CR 603.3b: Record where this parent frame's own
+                // unscanned events begin so each nested child entry can prepare
+                // a snapshot carrying that prefix plus any earlier synchronous
+                // sibling. The live cursor and its `cost_event_start` are not
+                // modified.
+                current_action_event_start: cost_event_start,
             };
             let prior_waiting_for = state.waiting_for.clone();
             let component_progress = match pay_mana_ability_cost_with_choices(
@@ -2646,7 +2853,7 @@ fn pay_mana_ability_cost_component(
 fn finish_mana_ability_cost_payment(
     state: &mut GameState,
     mut pending: PendingManaAbility,
-    cursor: ManaAbilityCostCursor,
+    mut cursor: ManaAbilityCostCursor,
     events: &mut Vec<GameEvent>,
     cost_event_start: usize,
 ) -> Result<WaitingFor, EngineError> {
@@ -2655,9 +2862,32 @@ fn finish_mana_ability_cost_payment(
         ManaAbilityCostResolutionMode::AutoResolved
     );
     let has_deferred_cost_events = !cursor.deferred_cost_events.is_empty();
+    let is_ultimate_root = cursor.parent.is_none();
+    // CR 605.3b + CR 605.4a: The `AutoResolved` direct resolver
+    // (`resolve_mana_ability_excluding`) is not an action's completed root mana
+    // frame — it is the synchronous auto-tap/probe entry, whose events belong to
+    // the OUTER cost owner already on the Rust call stack and whose caller
+    // restores its own `waiting_for`. It keeps its historical default-output
+    // semantics: with an empty durable ledger it performs no collection at all,
+    // exactly as baseline. Only a frame that already owns replacement-paused
+    // events settles from this path.
+    let settles_completed_frame =
+        is_ultimate_root && (has_deferred_cost_events || !resolves_automatically);
+    if matches!(
+        cursor.parent.as_deref(),
+        Some(ManaAbilityCostParent {
+            lifecycle: ManaAbilityCostParentLifecycle::Synchronous,
+            ..
+        })
+    ) {
+        debug_assert!(
+            cursor.deferred_cost_events.is_empty(),
+            "a synchronous mana child cannot own deferred ancestor events"
+        );
+    }
     let parent = cursor
         .parent
-        .clone()
+        .take()
         .filter(|parent| matches!(parent.lifecycle, ManaAbilityCostParentLifecycle::Suspended));
     let ability_def = mana_ability_definition(state, &pending)?;
     if !resolves_automatically && pending.color_override.is_none() {
@@ -2674,6 +2904,7 @@ fn finish_mana_ability_cost_payment(
             state,
             pending.source_id,
             Some(&resolved_for_prompt),
+            Some(&resolved_for_prompt),
         ) {
             if matches!(choice, ManaChoicePrompt::SingleColor { .. })
                 && cost_resolves_without_choice(&ability_def.cost)
@@ -2681,32 +2912,42 @@ fn finish_mana_ability_cost_payment(
                 pending.batch_siblings =
                     batch_eligible_siblings(state, pending.player, pending.source_id, &ability_def);
             }
+            let choice_player = pending.player;
+            let context = ManaChoiceContext::ManaAbility(Box::new(pending));
             let resume = WaitingFor::ChooseManaColor {
-                player: pending.player,
-                choice,
-                context: ManaChoiceContext::ManaAbility(Box::new(pending)),
+                player: choice_player,
+                choice: choice.clone(),
+                context: context.clone(),
             };
-            if has_deferred_cost_events {
-                settle_mana_ability_cost_events(
+            if settles_completed_frame {
+                // CR 603.2 + CR 603.3b + CR 605.3b + CR 605.4a: A mana-color
+                // choice returns before the ordinary post-action pipeline
+                // runs, so the already-paid cost range needs its one normal
+                // trigger collection here — through the SAME typed
+                // completed-frame seam the durable-ledger root uses, whether
+                // or not that ledger is empty. The empty-ledger shape used to
+                // fall through to a bare `process_triggers`, which dispatched
+                // an ordinary cost observer separately from the frame's own
+                // synthetic reflexive.
+                debug_assert!(cursor.parent.is_none());
+                if let Some(pause) = collect_completed_mana_frame_events(
                     state,
                     cursor.deferred_cost_events,
                     events,
                     cost_event_start,
-                );
+                    ManaTriggerFixedPointResume::ColorChoice(Box::new(ManaColorChoiceResume {
+                        player: choice_player,
+                        choice,
+                        context,
+                    })),
+                ) {
+                    return Ok(pause);
+                }
                 if let Some(order_wf) =
                     super::triggers::preserve_order_triggers_resume(state, resume.clone())
                 {
                     return Ok(order_wf);
                 }
-            } else if events.len() > cost_event_start {
-                // CR 603.2 + CR 603.3b + CR 605.3b: A mana-color choice
-                // returns before the ordinary post-action pipeline runs.
-                // Its already-paid cost events therefore need their one
-                // normal trigger collection here. Replacement-paused events
-                // are deliberately excluded: their typed cursor owns them
-                // until `settle_mana_ability_cost_events` above.
-                let cost_events = events[cost_event_start..].to_vec();
-                super::triggers::process_triggers(state, &cost_events);
             }
             return Ok(resume);
         }
@@ -2738,13 +2979,15 @@ fn finish_mana_ability_cost_payment(
     super::triggers::resolve_tap_mana_triggers_inline(state, events, production_events_start);
     if let Some(parent) = parent {
         let mut parent_cursor = *parent.cursor;
-        // CR 603.2 + CR 603.3b: The child now owns the complete old batch;
-        // append its current action exactly once, then transfer that batch to
-        // the parent before it retries its still-unpaid Mana component.
-        parent_cursor.deferred_cost_events = cursor.deferred_cost_events;
-        parent_cursor
-            .deferred_cost_events
-            .extend_from_slice(&events[cost_event_start..]);
+        // CR 603.2 + CR 603.3b: Move the suspended child's frame-local batch
+        // upward without replacing the ancestor's earlier ledger. Append the
+        // child's current action exactly once before retrying the parent's
+        // still-unpaid Mana component.
+        append_suspended_child_cost_events(
+            &mut parent_cursor,
+            &mut cursor,
+            &events[cost_event_start..],
+        );
         let parent_event_start = events.len();
         return continue_mana_ability_cost_payment(
             state,
@@ -2754,45 +2997,68 @@ fn finish_mana_ability_cost_payment(
             parent_event_start,
         );
     }
+    // CR 603.2 + CR 603.3b + CR 605.3b + CR 605.4a: EVERY completed root mana
+    // frame settles through the one typed seam, whether or not its durable
+    // ledger holds replacement-paused events and whatever it resumes to — and it
+    // settles **before** `resume_mana_ability_root`, not after.
+    //
+    // Baseline had two bypasses here. The durable-ledger branch called the
+    // typed seam; a `ManaPayment`/`UnlessPayment` resume with an empty ledger
+    // called `process_triggers` directly (because the post-action pipeline is
+    // guarded by `waiting_for == Priority` and would otherwise drop every
+    // already-paid cost observer — Scavenger's Talent, Korvold, Mayhem Devil,
+    // ...; #5963); and a `Priority` resume with an empty ledger fell through to
+    // the pipeline's own generic scan. The first bypass could dispatch an
+    // ordinary cost observer separately from this frame's synthetic reflexive;
+    // the second could let the pipeline rediscover events the frame already
+    // owns. The typed seam closes both: it journals every live occurrence it
+    // claims into `consumed_before_priority_trigger_events`, so the pipeline's
+    // scan is narrowed by the journal rather than by excluding the `Priority`
+    // resume, and nothing double-fires (e.g. Kilo's becomes-tapped proliferate
+    // under a standalone Relic activation).
+    //
+    // Settlement-before-resume is what makes CR 605.4a hold at a durable-ledger
+    // root: this frame's accepted triggered mana must be spendable BY the thing
+    // it resumes into (the automatic payment finalizer, the unless-payment
+    // poll, the pay-to-end permission), exactly as it already is at the colour
+    // and `TapLandForMana` roots. It is also the only ordering at which
+    // `pending.resume` still exists, so the frame can name its own root in
+    // `ManaTriggerFixedPointResume::Root` for an accepted pause instead of the
+    // `Parent` variant, which is factually wrong for a parentless root.
+    if settles_completed_frame {
+        debug_assert!(cursor.parent.is_none());
+        if let Some(pause) = settle_mana_ability_cost_events(
+            state,
+            std::mem::take(&mut cursor.deferred_cost_events),
+            events,
+            cost_event_start,
+            ManaTriggerFixedPointResume::Root {
+                player: pending.player,
+                resume: Box::new(pending.resume.clone()),
+            },
+        ) {
+            return Ok(pause);
+        }
+    }
+
     let resume = resume_mana_ability_root(state, pending.player, pending.resume, events)?;
     if super::casting::mana_ability_cost_payment_is_paused(state) {
-        defer_cost_events_into_active_mana_root(
-            state,
-            cursor.deferred_cost_events,
-            &events[cost_event_start..],
-        );
+        debug_assert!(is_ultimate_root);
+        // A settled frame has nothing left to hand upward: its ledger was taken
+        // and its live occurrences are already journaled, so re-deferring them
+        // into the next root would let that root's durable segment — which the
+        // journal does NOT filter — collect them a second time.
+        if !settles_completed_frame {
+            defer_cost_events_into_active_mana_root(
+                state,
+                cursor.deferred_cost_events,
+                &events[cost_event_start..],
+            );
+        }
         return Ok(resume);
     }
 
-    if has_deferred_cost_events {
-        settle_mana_ability_cost_events(
-            state,
-            cursor.deferred_cost_events,
-            events,
-            cost_event_start,
-        );
-        return Ok(
-            super::triggers::preserve_order_triggers_resume(state, resume.clone())
-                .unwrap_or(resume),
-        );
-    }
-
-    // CR 603.2 + CR 603.3b + CR 605.3b: A direct (non-paused) mana-ability
-    // action normally reaches the ordinary post-action trigger pipeline, which
-    // remains its settlement authority. But that pipeline only runs for a
-    // `Priority` resume (it is guarded by `waiting_for == Priority`). A mana
-    // ability activated during mana payment or an unless-cost payment resumes
-    // to `ManaPayment`/`UnlessPayment`, which the pipeline skips — so its
-    // already-paid cost events (sacrifice, discard, exile) would never be
-    // scanned and every observer would be dropped (Scavenger's Talent, Korvold,
-    // Mayhem Devil, ...; #5963). Scan them here, the single settlement
-    // authority, exactly as the `ChooseManaColor` branch above already does for
-    // an interrupted mana-color choice. A `Priority` resume stays EXCLUDED so
-    // the pipeline remains the sole scan site and nothing double-fires (e.g.
-    // Kilo's becomes-tapped proliferate under a standalone Relic activation).
-    if !matches!(resume, WaitingFor::Priority { .. }) && events.len() > cost_event_start {
-        let cost_events = events[cost_event_start..].to_vec();
-        super::triggers::process_triggers(state, &cost_events);
+    if settles_completed_frame {
         return Ok(
             super::triggers::preserve_order_triggers_resume(state, resume.clone())
                 .unwrap_or(resume),
@@ -2808,32 +3074,71 @@ fn finish_mana_ability_cost_payment(
 /// events are scanned here even when the nominal resume is Priority.
 fn settle_mana_ability_cost_events(
     state: &mut GameState,
+    deferred: Vec<GameEvent>,
+    events: &mut Vec<GameEvent>,
+    current_start: usize,
+    outer_resume: ManaTriggerFixedPointResume,
+) -> Option<WaitingFor> {
+    debug_assert!(
+        !matches!(outer_resume, ManaTriggerFixedPointResume::Parent),
+        "a parentless root must name its own resume, never the Parent variant"
+    );
+    collect_completed_mana_frame_events(state, deferred, events, current_start, outer_resume)
+}
+
+/// CR 603.2 + CR 603.3b + CR 605.4a: prepare the exact durable-plus-unconsumed-live
+/// batch for one completed mana frame and drive it through the single
+/// classifier/dispatcher fixed point.
+///
+/// Used for **every** completed mana frame, whether or not its durable ledger is
+/// empty, so the no-ledger direct/colour/`TapLandForMana` shapes stop falling
+/// through to a separate aggregate scan.
+///
+/// The historical inline output of the durable segment appears once in the
+/// logical batch and once only as a public copy in the returned event vector;
+/// the copies are excluded from the live logical segment while their live
+/// occurrences are still journaled, so the durable tail and the copied public
+/// tail are never concatenated into the trigger batch twice.
+pub(crate) fn collect_completed_mana_frame_events(
+    state: &mut GameState,
     mut deferred: Vec<GameEvent>,
     events: &mut Vec<GameEvent>,
     current_start: usize,
-) {
+    outer_resume: ManaTriggerFixedPointResume,
+) -> Option<WaitingFor> {
     let deferred_original_len = deferred.len();
     super::triggers::resolve_tap_mana_triggers_inline(state, &mut deferred, 0);
+    let historical_copy_start = events.len();
     events.extend(deferred[deferred_original_len..].iter().cloned());
+    let historical_copy_end = events.len();
     super::triggers::resolve_tap_mana_triggers_inline(state, events, current_start);
-    deferred.extend_from_slice(&events[current_start..]);
-    if !deferred.is_empty() {
-        super::triggers::process_triggers(state, &deferred);
-    }
-    // The typed cursor has already collected the events emitted by this action.
-    // Claim their exact occurrences through the normal post-action authority so
-    // a Priority resume cannot scan the same events a second time.
-    let occurrences = events
-        .iter()
-        .enumerate()
-        .skip(current_start)
+
+    // One chronological logical batch: the durable segment exactly once, then
+    // every live event this frame owns that an earlier synchronous child or a
+    // completed resume prefix has not already claimed.
+    let consumed = state.consumed_before_priority_trigger_events.clone();
+    let live_indices: Vec<usize> = (current_start..events.len())
+        .filter(|index| !(historical_copy_start..historical_copy_end).contains(index))
+        .filter(|index| {
+            let occurrence = super::triggers::trigger_event_occurrence(events, *index);
+            !consumed
+                .iter()
+                .any(|claimed| claimed.event == events[*index] && claimed.occurrence == occurrence)
+        })
+        .collect();
+    let mut batch = deferred;
+    batch.extend(live_indices.iter().map(|index| events[*index].clone()));
+
+    let live_end = events.len();
+    let pause = super::triggers::collect_mana_action_trigger_batch(state, &batch, outer_resume);
+
+    // Only after the combined collection result is durably owned: claim every
+    // exact live occurrence this frame is responsible for, by full-action index.
+    let occurrences = (current_start..live_end)
         .map(
-            |(index, event)| crate::game::triggers::ConsumedTriggerEventOccurrence {
-                event: event.clone(),
-                occurrence: events[..index]
-                    .iter()
-                    .filter(|prior| *prior == event)
-                    .count(),
+            |index| crate::game::triggers::ConsumedTriggerEventOccurrence {
+                event: events[index].clone(),
+                occurrence: super::triggers::trigger_event_occurrence(events, index),
             },
         )
         .collect();
@@ -2846,6 +3151,7 @@ fn settle_mana_ability_cost_events(
     .expect(
         "mana-ability cost-settlement consumed-before-priority trigger journal cause must be live",
     );
+    pause
 }
 
 /// CR 603.2 + CR 603.3b: A parent payment can immediately pause again after
@@ -2870,8 +3176,55 @@ fn defer_cost_events_into_active_mana_root(
     cursor
         .deferred_cost_events
         .extend_from_slice(&current[..inherited_current_len]);
+    cursor.current_action_deferred_start = cursor.deferred_cost_events.len();
     cursor.deferred_cost_events.extend(local_events);
-    cursor.current_action_deferred_start = 0;
+}
+
+/// CR 605.4a: convert one completed fixed point's typed outer continuation back
+/// into the suspended mana frame's own wait, exactly once.
+///
+/// This is the resumed-occurrence counterpart of the tails
+/// `finish_mana_ability_cost_payment` and `handle_choose_mana_color` run
+/// synchronously, and it mirrors them exactly — including the paused-payment
+/// early exit and the `preserve_order_triggers_resume` wrap. It never re-defers
+/// a cost-event ledger: the frame that installed this continuation already took
+/// its ledger and journaled its live occurrences before pausing.
+pub(crate) fn resume_settled_mana_frame(
+    state: &mut GameState,
+    outer_resume: ManaTriggerFixedPointResume,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<WaitingFor>, EngineError> {
+    match outer_resume {
+        // A nested child frame's suspended parent cursor is the authority; no
+        // wait is reconstructed here.
+        ManaTriggerFixedPointResume::Parent => Ok(None),
+        ManaTriggerFixedPointResume::Root { player, resume } => {
+            let resumed = resume_mana_ability_root(state, player, *resume, events)?;
+            if super::casting::mana_ability_cost_payment_is_paused(state) {
+                return Ok(Some(resumed));
+            }
+            Ok(Some(
+                super::triggers::preserve_order_triggers_resume(state, resumed.clone())
+                    .unwrap_or(resumed),
+            ))
+        }
+        ManaTriggerFixedPointResume::ColorChoice(choice) => {
+            let ManaColorChoiceResume {
+                player,
+                choice,
+                context,
+            } = *choice;
+            let resume = WaitingFor::ChooseManaColor {
+                player,
+                choice,
+                context,
+            };
+            Ok(Some(
+                super::triggers::preserve_order_triggers_resume(state, resume.clone())
+                    .unwrap_or(resume),
+            ))
+        }
+    }
 }
 
 pub(crate) fn resume_mana_ability_root(
@@ -4423,11 +4776,113 @@ pub(crate) fn resume_waiting_for(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::Arc;
 
     use super::*;
 
     use crate::game::test_fixtures::mana_fixture_roles;
+
+    /// **CR 605.4a — the acceptance decision is THREADED, not re-derived.**
+    ///
+    /// `is_triggered_mana_ability` answers CR 605.1b about a
+    /// *classification-time* graph, and it is deliberately raw: a target
+    /// anywhere makes it false. `is_resolving_triggered_mana` answers a
+    /// different question at a different time — "is the occurrence currently
+    /// executing an accepted triggered mana ability?" — because
+    /// `resolve_ability_chain` may materialize an engine resolution-context
+    /// referent into the overloaded `targets` vector partway through the very
+    /// resolution whose status is being asked about. CR 605.4a says that
+    /// occurrence stays stackless; re-asking the raw predicate would say
+    /// otherwise and hand the body to the ordinary prompt path.
+    ///
+    /// Rows:
+    ///
+    /// * **(a) no marker, qualifying graph** ⇒ true, delegated;
+    /// * **(b) no marker, targeted graph** ⇒ false, delegated. (a)+(b) are the
+    ///   two-sided reach guard that the delegation is real rather than a
+    ///   constant;
+    /// * **(c) no marker, wrong firing event** ⇒ false, so the ambient
+    ///   `current_trigger_event` is genuinely consulted;
+    /// * **(d) marker live, targeted graph** ⇒ **true** — the delta. This is
+    ///   exactly the clone shape (b) rejects, so the two rows differ only by
+    ///   the marker;
+    /// * **(e) marker cleared again** ⇒ (b)'s answer returns, proving the
+    ///   marker is scope-shaped rather than sticky.
+    ///
+    /// REVERT-PROBE: delete the marker short-circuit so the helper always
+    /// delegates ⇒ (d) flips to false while (a), (b), (c) and (e) still pass.
+    /// The inverse probe — returning `true` whenever the marker is `None` — is
+    /// caught by (b) and (c).
+    #[test]
+    fn the_accepted_occurrence_marker_is_the_resolution_time_classification_authority() {
+        use crate::types::ability::{ManaProduction, QuantityExpr};
+        use crate::types::resolved_commands::{RulesExecutionNodeRef, SettlementNodeOrdinal};
+
+        let mana_effect = || Effect::Mana {
+            produced: ManaProduction::Colorless {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        };
+        let untargeted = ResolvedAbility::new(mana_effect(), vec![], ObjectId(1), PlayerId(0));
+        // The post-injection clone: identical body, but the resolver has
+        // written a context referent into the overloaded `targets` vector.
+        let injected = ResolvedAbility::new(
+            mana_effect(),
+            vec![crate::types::ability::TargetRef::Player(PlayerId(1))],
+            ObjectId(1),
+            PlayerId(0),
+        );
+
+        let mut state = GameState::new_two_player(42);
+        state.current_trigger_event = Some(GameEvent::ManaAdded {
+            player_id: PlayerId(0),
+            mana_type: ManaType::Colorless,
+            source_id: ObjectId(1),
+            tap_state: ManaTapState::default(),
+        });
+
+        // (a) + (b): both truth values are reachable through delegation.
+        assert!(
+            is_resolving_triggered_mana(&state, &untargeted),
+            "(a) with no accepted occurrence live this must BE the raw classifier"
+        );
+        assert!(
+            !is_resolving_triggered_mana(&state, &injected),
+            "(b) CR 605.1b at classification time: a target in the graph rejects"
+        );
+
+        // (c) the ambient firing event is genuinely part of the delegation.
+        let restore_event = state.current_trigger_event.take();
+        assert!(
+            !is_resolving_triggered_mana(&state, &untargeted),
+            "(c) CR 605.1b(b): no qualifying firing event, no triggered mana ability"
+        );
+        state.current_trigger_event = restore_event;
+
+        // (d) THE DELTA: inside an accepted occurrence the same rejected clone
+        // is still the accepted occurrence's own body.
+        let node = RulesExecutionNodeRef::TriggeredMana(SettlementNodeOrdinal(1));
+        state.active_rules_execution_node = Some(node);
+        state.active_accepted_triggered_mana_node = Some(node);
+        assert!(
+            is_resolving_triggered_mana(&state, &injected),
+            "(d) CR 605.4a: a resolution-context referent injected AFTER acceptance \
+             does not make an already-accepted occurrence begin using the stack"
+        );
+
+        // (e) the marker is scope-shaped: restoring it restores (b)'s answer.
+        state.active_accepted_triggered_mana_node = None;
+        state.active_rules_execution_node = None;
+        assert!(
+            !is_resolving_triggered_mana(&state, &injected),
+            "(e) outside the occurrence the raw classification-time answer returns"
+        );
+    }
 
     /// Matrix rows 15c + 20 — CR 605.1a classification is unchanged. This reader
     /// also bypasses `Effect::target_filter()`.
@@ -4485,18 +4940,19 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityKind, AbilityTag, ActivationRestriction, Comparator,
         ContinuousModification, ControllerRef, CopyRetargetPermission, DelayedTriggerCondition,
-        DevotionColors, Duration, Effect, FilterProp, LinkedExileScope, ManaContribution,
-        ManaProduction, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr,
-        QuantityRef, SacrificeCost, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter,
-        TypedFilter, REMOVE_COUNTER_COST_ANY_NUMBER,
+        DevotionColors, Duration, Effect, EffectKind, FilterProp, LinkedExileScope,
+        ManaContribution, ManaProduction, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope,
+        QuantityExpr, QuantityRef, SacrificeCost, StaticDefinition, TargetFilter,
+        TriggerDefinition, TypeFilter, TypedFilter, REMOVE_COUNTER_COST_ANY_NUMBER,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
-    use crate::types::game_state::{ExileLink, ExileLinkKind};
-    use crate::types::identifiers::CardId;
+    use crate::types::game_state::{ExileLink, ExileLinkKind, PendingReplacement};
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::{
         ManaColor, ManaCost, ManaCostShard, ManaRestriction, ManaType, ManaUnit,
     };
+    use crate::types::proposed_event::{ProposedEvent, ReplacementId};
     use crate::types::statics::{CostPaymentProhibition, ProhibitionScope, StaticMode};
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
@@ -4513,6 +4969,125 @@ mod tests {
             },
         )
         .cost(AbilityCost::Tap)
+    }
+
+    #[test]
+    fn post_delivery_mana_cost_pause_preserves_its_live_prompt() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_replacement = Some(PendingReplacement {
+            proposed: ProposedEvent::Draw {
+                player_id: PlayerId(0),
+                count: 1,
+                applied: HashSet::new(),
+            },
+            sacrifice_provenance: None,
+            candidates: vec![ReplacementId {
+                source: ObjectId(7),
+                index: 0,
+            }],
+            search_found_candidates: Vec::new(),
+            depth: 0,
+            is_optional: false,
+            library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
+            excess_recipient: None,
+            lifelink_bonus: 0,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+        });
+        let live_prompt = WaitingFor::DiscardChoice {
+            player: PlayerId(0),
+            count: 1,
+            cards: Vec::new(),
+            source_id: ObjectId(7),
+            effect_kind: EffectKind::Discard,
+            up_to: false,
+            unless_filter: None,
+            discard_frame: None,
+        };
+        state.waiting_for = live_prompt.clone();
+
+        pause_pre_delivery_mana_cost_replacement_choice(&mut state, None);
+        assert_eq!(
+            state.waiting_for, live_prompt,
+            "a post-delivery substitute has no ordering player and retains its live prompt"
+        );
+
+        pause_pre_delivery_mana_cost_replacement_choice(&mut state, Some(PlayerId(0)));
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::ReplacementChoice {
+                    player: PlayerId(0),
+                    candidate_count: 1,
+                    ..
+                }
+            ),
+            "an explicit pre-delivery ordering player still opens the replacement choice"
+        );
+    }
+
+    #[test]
+    fn targetless_mana_reflexive_produces_mana_now_and_waits_on_stack() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+        let source = create_object(
+            &mut state,
+            CardId(9901),
+            player,
+            "Rubble Rouser fixture".to_string(),
+            Zone::Battlefield,
+        );
+        let mut reflexive = AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: None,
+            },
+        );
+        reflexive.condition = Some(AbilityCondition::WhenYouDo);
+        reflexive.player_scope = Some(PlayerFilter::Opponent);
+        let mana = make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Green],
+            contribution: ManaContribution::Base,
+        })
+        .sub_ability(reflexive);
+        Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities).push(mana);
+        let opponent_life = state.players[1].life;
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            },
+        )
+        .expect("activate targetless reflexive mana ability");
+
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
+        assert_eq!(state.players[1].life, opponent_life);
+        assert_eq!(state.stack.len(), 1);
+        assert!(matches!(
+            state.stack[0].kind,
+            crate::types::game_state::StackEntryKind::TriggeredAbility { .. }
+        ));
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+
+        let mut safety = 4;
+        while !state.stack.is_empty() && safety > 0 {
+            crate::game::engine::apply_as_current(
+                &mut state,
+                crate::types::actions::GameAction::PassPriority,
+            )
+            .expect("pass priority to resolve reflexive");
+            safety -= 1;
+        }
+        assert_eq!(state.players[1].life, opponent_life - 2);
     }
 
     #[test]
@@ -4579,6 +5154,27 @@ mod tests {
             } if *source_id == source
                 && *produced == recipient_colors
         )));
+        let mut recipient_events: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ManaAbilityProduced {
+                    player_id,
+                    source_id,
+                    produced,
+                    ..
+                } if *source_id == source => Some((*player_id, produced.clone())),
+                _ => None,
+            })
+            .collect();
+        recipient_events.sort_by_key(|(player, _)| *player);
+        assert_eq!(
+            recipient_events,
+            vec![
+                (PlayerId(1), vec![recipient_colors[0]]),
+                (PlayerId(2), vec![recipient_colors[1]]),
+            ],
+            "each recipient receives one distinct aggregate ManaAbilityProduced event"
+        );
     }
 
     fn gemstone_caverns_mana_ability() -> AbilityDefinition {
@@ -5608,8 +6204,10 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_order: crate::types::ability::DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source,
             }
         }
@@ -10720,7 +11318,7 @@ mod tests {
         Arc::make_mut(&mut state.objects.get_mut(&nykthos).unwrap().abilities)
             .push(ability.clone());
 
-        let prompt = mana_choice_prompt(&ability.effect, &state, nykthos, None)
+        let prompt = mana_choice_prompt(&ability.effect, &state, nykthos, None, None)
             .expect("chosen-color mana should prompt for a color");
         assert!(matches!(prompt, ManaChoicePrompt::SingleColor { .. }));
 
@@ -10736,6 +11334,55 @@ mod tests {
         .unwrap();
 
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 2);
+    }
+
+    #[test]
+    fn fixed_or_chosen_color_prompt_requires_positive_production() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(8110),
+            PlayerId(0),
+            "Fixed or Chosen Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        for (count, expected_prompt) in [(0, false), (1, true)] {
+            let ability = ResolvedAbility::new(
+                Effect::Mana {
+                    produced: ManaProduction::ChosenColor {
+                        count: QuantityExpr::Fixed { value: count },
+                        contribution: ManaContribution::Base,
+                        fixed_alternative: Some(ManaColor::Green),
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+
+            assert_eq!(
+                mana_choice_prompt(
+                    &ability.effect,
+                    &state,
+                    source,
+                    Some(&ability),
+                    Some(&ability),
+                )
+                .is_some(),
+                expected_prompt,
+                "CR 106.5: fixed-or-chosen mana count {count} must {} a color prompt",
+                if expected_prompt {
+                    "reach"
+                } else {
+                    "not reach"
+                },
+            );
+        }
     }
 
     /// Issue #460 + CR 106.12a: Vorinclex's `TapsForMana` trigger must fire
@@ -13119,5 +13766,254 @@ mod tests {
         // A non-Chosen (Random) FromHand discard is not a mid-activation card
         // selection: the gate returns None even though the sole detector matched it.
         assert!(discard_cost_choice(&state, PlayerId(0), source, &Some(random_leg)).is_none());
+    }
+
+    fn ledger_event(source_id: u64) -> GameEvent {
+        GameEvent::EffectResolved {
+            kind: crate::types::ability::EffectKind::NoOp,
+            source_id: ObjectId(source_id),
+            subject: None,
+        }
+    }
+
+    #[test]
+    fn nested_mana_cursor_starts_with_empty_frame_local_ledger() {
+        let mut parent_cursor = mana_ability_cost_cursor(
+            &None,
+            &HashSet::new(),
+            None,
+            ManaAbilityCostResolutionMode::AutoResolved,
+            None,
+        );
+        parent_cursor.deferred_cost_events.push(ledger_event(1));
+        let parent = ManaAbilityCostParent {
+            pending: Box::new(pending_for(ObjectId(10))),
+            cursor: Box::new(parent_cursor),
+            lifecycle: ManaAbilityCostParentLifecycle::Synchronous,
+            current_action_event_start: 0,
+        };
+
+        let child = mana_ability_cost_cursor(
+            &None,
+            &HashSet::new(),
+            None,
+            ManaAbilityCostResolutionMode::AutoResolved,
+            Some(&parent),
+        );
+
+        assert!(child.deferred_cost_events.is_empty());
+        assert_eq!(
+            child
+                .parent
+                .as_deref()
+                .expect("child must retain its parent snapshot")
+                .cursor
+                .deferred_cost_events,
+            [ledger_event(1)]
+        );
+    }
+
+    #[test]
+    fn suspended_child_ledger_extends_parent_without_loss_or_overwrite() {
+        let mut parent = mana_ability_cost_cursor(
+            &None,
+            &HashSet::new(),
+            None,
+            ManaAbilityCostResolutionMode::AutoResolved,
+            None,
+        );
+        parent.deferred_cost_events = vec![ledger_event(1), ledger_event(2)];
+        let mut child = mana_ability_cost_cursor(
+            &None,
+            &HashSet::new(),
+            None,
+            ManaAbilityCostResolutionMode::AutoResolved,
+            None,
+        );
+        child.deferred_cost_events = vec![ledger_event(3)];
+
+        append_suspended_child_cost_events(&mut parent, &mut child, &[ledger_event(4)]);
+
+        assert_eq!(
+            parent.deferred_cost_events,
+            [
+                ledger_event(1),
+                ledger_event(2),
+                ledger_event(3),
+                ledger_event(4)
+            ]
+        );
+        assert!(child.deferred_cost_events.is_empty());
+    }
+
+    #[test]
+    fn repeated_pause_transfer_preserves_local_suffix_boundary() {
+        let mut active_cursor = mana_ability_cost_cursor(
+            &None,
+            &HashSet::new(),
+            None,
+            ManaAbilityCostResolutionMode::AutoResolved,
+            None,
+        );
+        active_cursor.deferred_cost_events = vec![ledger_event(5), ledger_event(8)];
+        active_cursor.current_action_deferred_start = 1;
+        let mut state = GameState::new_two_player(42);
+        state.pending_cost_move_resume = Some(PendingCostMoveResume::ManaAbilityPayment {
+            pending: Box::new(pending_for(ObjectId(10))),
+            cursor: active_cursor,
+        });
+
+        defer_cost_events_into_active_mana_root(
+            &mut state,
+            vec![ledger_event(1), ledger_event(2)],
+            &[ledger_event(7), ledger_event(8)],
+        );
+
+        let Some(PendingCostMoveResume::ManaAbilityPayment { cursor, .. }) =
+            state.pending_cost_move_resume.as_ref()
+        else {
+            panic!("expected active mana root");
+        };
+        assert_eq!(
+            cursor.deferred_cost_events,
+            [
+                ledger_event(5),
+                ledger_event(1),
+                ledger_event(2),
+                ledger_event(7),
+                ledger_event(8)
+            ]
+        );
+        assert_eq!(cursor.current_action_deferred_start, 4);
+    }
+
+    fn synchronous_parent_at(start: usize, ledger: Vec<GameEvent>) -> ManaAbilityCostParent {
+        let mut cursor = mana_ability_cost_cursor(
+            &None,
+            &HashSet::new(),
+            None,
+            ManaAbilityCostResolutionMode::AutoResolved,
+            None,
+        );
+        cursor.deferred_cost_events = ledger;
+        ManaAbilityCostParent {
+            pending: Box::new(pending_for(ObjectId(10))),
+            cursor: Box::new(cursor),
+            lifecycle: ManaAbilityCostParentLifecycle::Synchronous,
+            current_action_event_start: start,
+        }
+    }
+
+    /// CR 603.2 + CR 603.3b: The prepared child-facing snapshot owns the live
+    /// parent frame's current unscanned suffix, while the live parent cursor is
+    /// never mutated. A synchronous child that drops the snapshot therefore
+    /// leaves exactly one representation of those events — the reducer vector.
+    #[test]
+    fn prepared_parent_snapshot_carries_current_suffix_without_mutating_live_parent() {
+        let parent = synchronous_parent_at(0, Vec::new());
+        let events = vec![ledger_event(1), ledger_event(2)];
+
+        let prepared = parent_snapshot_with_current_cost_events(&parent, &events);
+
+        assert_eq!(
+            prepared.cursor.deferred_cost_events,
+            [ledger_event(1), ledger_event(2)],
+            "prepared snapshot must carry the parent's current unscanned suffix"
+        );
+        assert!(
+            parent.cursor.deferred_cost_events.is_empty(),
+            "the live parent cursor must not be mutated by preparation"
+        );
+
+        let child = mana_ability_cost_cursor(
+            &None,
+            &HashSet::new(),
+            None,
+            ManaAbilityCostResolutionMode::AutoResolved,
+            Some(&prepared),
+        );
+        assert!(
+            child.deferred_cost_events.is_empty(),
+            "a nested child's top-level ledger starts empty"
+        );
+        assert_eq!(
+            child
+                .parent
+                .as_deref()
+                .expect("child retains its prepared parent")
+                .cursor
+                .deferred_cost_events,
+            [ledger_event(1), ledger_event(2)]
+        );
+    }
+
+    /// CR 603.2 + CR 603.3b: Preparation runs at every child entry from the
+    /// unchanged ephemeral parent, so a later child sees the parent's own prefix
+    /// plus every earlier synchronously completed sibling exactly once. Extending
+    /// a previously prepared snapshot instead would double-append the prefix.
+    #[test]
+    fn later_child_snapshot_includes_earlier_synchronous_sibling_events_once() {
+        let parent = synchronous_parent_at(0, Vec::new());
+        let mut events = vec![ledger_event(1)];
+
+        let first = parent_snapshot_with_current_cost_events(&parent, &events);
+        assert_eq!(first.cursor.deferred_cost_events, [ledger_event(1)]);
+
+        // The first child completed synchronously and emitted its own event.
+        events.push(ledger_event(2));
+        let second = parent_snapshot_with_current_cost_events(&parent, &events);
+
+        assert_eq!(
+            second.cursor.deferred_cost_events,
+            [ledger_event(1), ledger_event(2)],
+            "a later child prepares from the unchanged ephemeral parent, not from an earlier snapshot"
+        );
+    }
+
+    /// CR 603.2 + CR 603.3b: The parent frame's own `cost_event_start` is the
+    /// marker, so a parent that already scanned an earlier prefix contributes
+    /// only its unscanned suffix to the child snapshot.
+    #[test]
+    fn prepared_parent_snapshot_starts_at_the_parent_frame_marker() {
+        let parent = synchronous_parent_at(1, Vec::new());
+        let events = vec![ledger_event(1), ledger_event(2), ledger_event(3)];
+
+        let prepared = parent_snapshot_with_current_cost_events(&parent, &events);
+
+        assert_eq!(
+            prepared.cursor.deferred_cost_events,
+            [ledger_event(2), ledger_event(3)]
+        );
+    }
+
+    /// CR 603.2 + CR 603.3b: A pause makes the prepared prefix durable, so the
+    /// ephemeral marker is never consulted again and is deliberately not
+    /// serialized. Round-tripping a suspended parent keeps the prefix while the
+    /// marker resets to its default.
+    #[test]
+    fn suspended_parent_prefix_survives_serde_while_marker_is_skipped() {
+        let mut parent = synchronous_parent_at(0, Vec::new());
+        parent = parent_snapshot_with_current_cost_events(&parent, &[ledger_event(1)]);
+        parent.lifecycle = ManaAbilityCostParentLifecycle::Suspended;
+        parent.current_action_event_start = 7;
+
+        let json = serde_json::to_string(&parent).expect("serialize suspended parent");
+        assert!(
+            !json.contains("current_action_event_start"),
+            "the ephemeral marker must not be serialized: {json}"
+        );
+        let restored: ManaAbilityCostParent =
+            serde_json::from_str(&json).expect("deserialize suspended parent");
+
+        assert_eq!(
+            restored.cursor.deferred_cost_events,
+            [ledger_event(1)],
+            "the durable prefix must survive suspension"
+        );
+        assert_eq!(restored.current_action_event_start, 0);
+        assert!(matches!(
+            restored.lifecycle,
+            ManaAbilityCostParentLifecycle::Suspended
+        ));
     }
 }

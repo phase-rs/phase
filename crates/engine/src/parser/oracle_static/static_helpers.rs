@@ -495,6 +495,7 @@ pub(crate) fn try_parse_impose_additional_cost(
             // CR 102.1: active-player scope is not emitted for cost statics;
             // fall back to an untyped card filter (same as TriggeringPlayer).
             Some(ControllerRef::ActivePlayer) => TargetFilter::Typed(TypedFilter::card()),
+            Some(ControllerRef::SpecificPlayer { .. }) => TargetFilter::Typed(TypedFilter::card()),
             None => TargetFilter::Typed(TypedFilter::card()),
         }
     };
@@ -884,6 +885,7 @@ pub(crate) fn try_parse_cost_modification(
             // CR 102.1: active-player scope is not emitted for cost statics;
             // fall back to an untyped card filter (same as TriggeringPlayer).
             Some(ControllerRef::ActivePlayer) => TargetFilter::Typed(TypedFilter::card()),
+            Some(ControllerRef::SpecificPlayer { .. }) => TargetFilter::Typed(TypedFilter::card()),
             None => TargetFilter::Typed(TypedFilter::card()),
         }
     };
@@ -1035,15 +1037,35 @@ fn peel_leading_cost_modifier_condition<'a>(
     }
 }
 
+/// Structural pre-check for the "it targets [stack object] that targets […]"
+/// cost-reduction condition (CR 601.2f + CR 115.9b).
+///
+/// This gate must never be NARROWER than the grammar it guards
+/// (`parse_it_targets_that_targets_spell_filter`): a phrase the gate rejects
+/// silently skips the whole nested-target branch, leaving `spell_filter` unset
+/// and the cost reduction UNCONDITIONAL. So the ability alternative delegates
+/// the kind spelling to `nom_target::parse_ability_kind` — the same single
+/// authority the filter builder uses — rather than keeping yet another private
+/// list. CR 113.3b / CR 113.3c: "a triggered ability that targets …" is an
+/// ability phrase just as much as the bare noun is.
+///
+/// The gate stays a separate cheap pre-check rather than becoming
+/// `parse_it_targets_that_targets_spell_filter(..).is_some()`, because the
+/// branch it guards deliberately FAILS CLOSED (returns `None` for the whole
+/// static line) when the shape matches but the details do not parse.
 fn is_nested_stack_target_condition(cond_text: &str) -> bool {
     preceded(
         tag::<_, _, OracleError<'_>>("it targets "),
         preceded(
             opt(alt((tag("a "), tag("an "), tag("one or more ")))),
             alt((
-                tag("spell or ability that targets "),
-                tag("spell that targets "),
-                tag("ability that targets "),
+                value((), tag("spell or ability that targets ")),
+                value((), tag("spell that targets ")),
+                // CR 113.3b / CR 113.3c: the ability noun may carry a kind
+                // qualifier ("a triggered ability that targets …"). Shared axis
+                // authority, tried ahead of the bare noun.
+                value((), (nom_target::parse_ability_kind, tag(" that targets "))),
+                value((), tag("ability that targets ")),
             )),
         ),
     )
@@ -1170,19 +1192,42 @@ fn parse_it_targets_that_targets_spell_filter(cond_text: &str) -> Option<TargetF
             TargetFilter::StackSpell,
             tag::<_, _, OracleError<'_>>("a spell"),
         ),
+        // CR 113.3b / CR 113.3c + CR 601.2f: the ability-kind spelling narrows
+        // which stack abilities satisfy the cost-reduction condition. Article +
+        // the shared axis authority — never a private spelling list. (No printed
+        // card reaches the narrowing arms today; Not of This World uses
+        // "a spell or ability", handled above. Delegating closes the axis
+        // prospectively at zero corpus risk.)
+        map(
+            preceded(
+                alt((
+                    tag::<_, _, OracleError<'_>>("an "),
+                    tag::<_, _, OracleError<'_>>("a "),
+                )),
+                nom_target::parse_ability_kind,
+            ),
+            |kind| TargetFilter::StackAbility {
+                controller: None,
+                tag: None,
+                kind,
+            },
+        ),
+        // CR 113.3b / CR 113.3c: bare "an ability" names NO kind, so both kinds
+        // are legal and `kind: None` is the correct reading — this is the same
+        // category as the "a spell or ability" arm above, not a dropped axis.
+        // It is a LOCAL literal on purpose: `parse_ability_kind` must not grow a
+        // bare-"ability" arm, because it also feeds the disjunction driver where
+        // a kindless leg would over-match (see its doc comment).
+        // Ordered AFTER the delegation. The two are prefix-disjoint
+        // ("an ability" cannot be confused with "an activated ability"), so this
+        // is for determinism and for keeping the alt readable longest-first.
         value(
             TargetFilter::StackAbility {
                 controller: None,
                 tag: None,
                 kind: None,
             },
-            alt((
-                tag::<_, _, OracleError<'_>>("an activated or triggered ability"),
-                tag("a triggered or activated ability"),
-                tag("a triggered ability"),
-                tag("an activated ability"),
-                tag("an ability"),
-            )),
+            tag::<_, _, OracleError<'_>>("an ability"),
         ),
     ))
     .parse(i)

@@ -253,6 +253,31 @@ describe("ArtCropCard", () => {
     );
   });
 
+  it("renders a face-down permanent's projected identity", () => {
+    mockUseCardImage.mockReturnValue({
+      src: "card.png",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+    const permanent = {
+      ...transformedPermanent(),
+      face_down: true,
+      display_visible_to_viewer: true,
+      name: "Hidden Sorcery",
+      transformed: false,
+      back_face: null,
+    };
+
+    useGameStore.setState({
+      gameState: { objects: { [permanent.id]: permanent } } as never,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    expect(screen.getByAltText("Hidden Sorcery")).toBeInTheDocument();
+  });
+
   it("keeps loyalty and P/T readable for planeswalkers and creature planeswalkers", () => {
     mockUseCardImage.mockReturnValue({
       src: "card.png",

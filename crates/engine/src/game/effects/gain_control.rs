@@ -311,7 +311,18 @@ pub fn resolve_give(
     Ok(())
 }
 
-fn give_control_object_targets(
+/// CR 611.2c: the objects whose controller this effect changes, fixed when the
+/// control-change continuous effect begins.
+///
+/// SINGLE AUTHORITY: `resolve_give` hands control over exactly this list, and
+/// `effects::affected_objects_from_events` publishes exactly this list as the
+/// chain tracked set. The `ControllerChanged` event is deliberately NOT the
+/// authority: `resolve_give` emits it only when the controller actually changed,
+/// while CR 608.2c makes "those creatures" name the objects the earlier text
+/// named — Domineering Will's "up to three target nonattacking creatures … Untap
+/// those creatures" must untap a target the recipient already controlled, which
+/// produces no event.
+pub(crate) fn give_control_object_targets(
     state: &GameState,
     ability: &ResolvedAbility,
     filter: &TargetFilter,

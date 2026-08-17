@@ -66,6 +66,7 @@ pub struct ActiveInteractionSlot {
 pub enum SimultaneousDecisionKind {
     Mulligan,
     OpeningBottom,
+    ResolveAllConsent,
 }
 
 /// Stable protocol classification of an engine prompt. This deliberately
@@ -512,6 +513,7 @@ pub enum InteractionActionCode {
     SelectTargets,
     ChooseTarget,
     ChooseReplacement,
+    ChooseEntryController,
     OrderTriggers,
     CancelCast,
     Equip,
@@ -968,10 +970,18 @@ pub enum InteractionResponseSpec {
         max: u32,
         confirm: ConfirmSemantics,
     },
+    /// CR 732.2a: the loop-shortcut declaration. `count` is the picker's window and
+    /// `preview` is what the count it states actually DOES, per axis — see
+    /// [`InteractionShortcutPreview`] for why the count travels with the magnitudes.
+    ///
+    /// The doc lives on the VARIANT rather than on `preview`: ts_rs emits field docs into
+    /// the generated bindings as JSDoc but drops variant docs, and a comment block in the
+    /// middle of a union keeps that file from being one declaration per line.
     Shortcut {
         count: InteractionShortcutCountSpec,
         points: Vec<InteractionShortcutPoint>,
         allow_decline: bool,
+        preview: Option<InteractionShortcutPreview>,
         confirm: ConfirmSemantics,
     },
     ShortcutReply {
@@ -996,6 +1006,72 @@ pub enum InteractionResponseSpec {
 pub enum InteractionShortcutCountSpec {
     Fixed { min: u32, max: u32, suggested: u32 },
     UntilLethal,
+}
+
+/// The display family one shortcut-preview magnitude belongs to — the projection-layer code
+/// for `game::derived_views::UnboundedFamily`, mapped by an exhaustive `match` in
+/// `game::interaction`.
+///
+/// A code rather than a mirror of `analysis::resource::ResourceAxis`, for this module's own
+/// stated reason: `ResourceAxis` carries `PlayerId`, `ManaType`, `CounterClass`,
+/// `ObjectClass` and `TriggerKind` payloads, and generating those would be the "second
+/// generated copy of the existing engine wire graph" this file exists to avoid. The client
+/// already labels these eleven families (glyph + i18n key per family), so a code is
+/// everything a renderer needs.
+///
+/// No CR governs a display grouping — the grouping authority is `derived_views::family_of`,
+/// and this enum tracks it variant-for-variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionShortcutPreviewFamily {
+    Mana,
+    Life,
+    Damage,
+    Mill,
+    Counters,
+    Tokens,
+    Cards,
+    Casts,
+    Combats,
+    Turns,
+    Triggers,
+}
+
+/// One axis of what a declared shortcut count finishes with: a signed magnitude, already
+/// multiplied out by the engine.
+///
+/// `amount` is the FINISHED total, not a per-cycle rate, and it is signed — a drain loop
+/// states its victim's life as negative. `player` is the seat the magnitude lands on for the
+/// per-seat families (life, damage, mill, and the poison term of counters) and `None` for the
+/// whole-game ones (mana, tokens, cards, casts, combats, turns, triggers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionShortcutPreviewEntry {
+    pub family: InteractionShortcutPreviewFamily,
+    pub player: Option<u8>,
+    pub amount: i32,
+}
+
+/// CR 732.2a: the engine-computed consequence of repeating a certified loop a stated number
+/// of times — "the predictable results of the sequence of choices", published as numbers.
+///
+/// `count` is carried WITH the entries, and that pairing is the point: every magnitude here
+/// is stated for exactly this count and for no other, so a renderer can never attach these
+/// numbers to a different one. The engine multiplies; the display layer reads.
+///
+/// Absent (`None` on the spec) when the offer states no per-period signature to multiply, or
+/// states no finite count to multiply it by.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionShortcutPreview {
+    pub count: u32,
+    pub entries: Vec<InteractionShortcutPreviewEntry>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1114,6 +1190,47 @@ pub struct InteractionAttachmentFan {
     pub children: Vec<InteractionAttachmentFanChild>,
 }
 
+/// One card in a host's attachment view, with the engine's own submission when
+/// a one-step pick was published for it and `None` when it was not.
+///
+/// `None` is not "unavailable": it means this projection publishes no direct
+/// pick, and the card's remaining affordances stay on the normal interaction
+/// surface. Membership does not depend on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionAttachmentViewCard {
+    #[cfg_attr(feature = "interaction-bindings", ts(type = "number"))]
+    pub object_id: u64,
+    pub submission: Option<InteractionSubmission>,
+}
+
+/// Viewer-scoped membership of one host's attachment subtree: what is attached
+/// to this object, in the order the engine lays it out, whatever the viewer may
+/// currently do about it.
+///
+/// This is deliberately a different question from [`InteractionAttachmentFan`],
+/// which publishes the picks the viewer is *authorized to submit right now*. An
+/// attached permanent is an object on the battlefield (CR 301.5 / CR 303.4), so
+/// its membership follows visibility, not authorization — it must survive an
+/// opponent's turn, a prompt that owns the waiting state, and a terminal game.
+/// Consumers render and count this list; they must never rebuild it by scanning
+/// `attachments`, which carries authority-only relationship data.
+///
+/// Every card here is validated in both directions (the host lists the child and
+/// the child points back at the host) and read only from the filtered
+/// projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionAttachmentView {
+    #[cfg_attr(feature = "interaction-bindings", ts(type = "number"))]
+    pub host_id: u64,
+    pub cards: Vec<InteractionAttachmentViewCard>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
 #[serde(
@@ -1152,6 +1269,14 @@ pub struct ViewerInteraction {
         ts(type = "Record<number, InteractionAttachmentFan>")
     )]
     pub attachment_fans: BTreeMap<u64, InteractionAttachmentFan>,
+    /// What is attached to each visible object, keyed by that object. Published
+    /// on every projection, including the ones that carry no opportunity at all.
+    #[serde(default)]
+    #[cfg_attr(
+        feature = "interaction-bindings",
+        ts(type = "Record<number, InteractionAttachmentView>")
+    )]
+    pub attachment_views: BTreeMap<u64, InteractionAttachmentView>,
     pub availability: InteractionAvailability,
 }
 

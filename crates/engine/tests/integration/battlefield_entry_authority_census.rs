@@ -245,6 +245,10 @@
 use std::path::Path;
 
 use super::loop_shortcut_offer_writer_census::{cfg_test_scoped_lines, rs_files};
+// The comment rule is NOT this file's any more: it moved to `src/source_census.rs`, which the
+// crate's own unit-test censuses share through a plain `mod` and this binary reaches through a
+// `#[path]` declaration in `main.rs`. One implementation, both venues.
+use super::source_census::{code, code_span};
 
 /// The bare anchor, ASSEMBLED AT RUNTIME so this file can never count its own text — the doctrine
 /// `loop_shortcut_offer_writer_census` files against its own superseded round-2 anchor.
@@ -580,13 +584,18 @@ struct Hit {
 ///
 /// The shared walker for BOTH anchors. Keeping one copy is what guarantees the two pins agree on
 /// the comment rule, on the brace scan, and on the `cfg_test_scoped_lines` scope resolver.
+///
+/// The needle is required in the line's CODE half ([`code_span`]), not merely in the line: a
+/// whole-line-only exclusion counts a needle written after a trailing `//` as a construction.
+/// Strictly more specific — `code_span` only ever removes comment text, and leaves a `//` that
+/// follows a `"` in the code half.
 fn classify_anchor(src: &str, file: &str, needle: &str, keep: impl Fn(&str) -> bool) -> Vec<Hit> {
     let scoped = cfg_test_scoped_lines(src);
     let lines: Vec<&str> = src.lines().collect();
     lines
         .iter()
         .enumerate()
-        .filter(|(_, line)| line.contains(needle) && !line.trim_start().starts_with("//"))
+        .filter(|(_, line)| code(line).contains(needle))
         .filter_map(|(n, _)| {
             let body = literal_body(&lines, n, needle);
             keep(&body).then(|| Hit {
@@ -606,8 +615,9 @@ fn classify_anchor(src: &str, file: &str, needle: &str, keep: impl Fn(&str) -> b
 /// branch is what a spelling-based detector misses: `let from = None;` + `from,` constructs exactly
 /// the same event.
 ///
-/// The comment-line exclusion (`!line.trim_start().starts_with("//")`) is reused verbatim from
-/// `loop_shortcut_offer_writer_census::classify`'s measured rule: a comment writes no event, and a
+/// The comment exclusion is shared with `loop_shortcut_offer_writer_census::classify` and
+/// `loop_shortcut_seat_pin_census::sites_in_source` — all three now route it through
+/// [`code_span`], so the rule is whole-line AND trailing: a comment writes no event, and a
 /// comment-blind anchor makes the tripwire fire on prose.
 fn classify(src: &str, file: &str) -> Vec<Hit> {
     classify_anchor(src, file, &anchor(), |body| {
@@ -675,6 +685,13 @@ fn call_tail(lines: &[&str], row: usize, from: usize) -> String {
     let mut row = row;
     let mut rest: &str = &lines[row][from..];
     loop {
+        // DELIBERATELY NOT ROUTED THROUGH `source_census::code`, measured rather than overlooked.
+        // Routing it lets `call_tail` read THROUGH a `/* … */` sitting between the field and its
+        // call, which turns arm 5(vi)'s UNREADABLE tail into a readable `.extend(` and drops that
+        // arm from `(1, 1)` to `(0, 0)` — RUN, not reasoned. Arm 5(vi)'s contract is "a tail this
+        // function cannot read is COUNTED", and it is not this change's to redefine. The shared
+        // rule governs which text is a NEEDLE SITE; this function reads a TAIL, and the two
+        // questions come apart exactly here.
         let trimmed = rest.trim_start();
         if !trimmed.is_empty() && !trimmed.starts_with("//") {
             return trimmed.chars().take(24).collect();
@@ -752,44 +769,6 @@ fn is_ambiguous_mutator(tail: &str) -> bool {
     .any(|verb| tail.starts_with(verb))
 }
 
-/// The byte range of `line` that is CODE: a LEADING `/* … */` comment and a TRAILING `//` comment
-/// are excluded from the container search.
-///
-/// Both exclusions only ever REMOVE text, and each is guarded so that it cannot remove code:
-///
-/// * The leading form fires only when the TRIMMED line starts with `/*`, and drops exactly up to
-///   and including the first `*/` — so `/*count=*/ state.last_created_token_ids.push(id)` keeps its
-///   call (arm 5(viii)).
-/// * The trailing form fires only when no `"` precedes the `//` in the remaining code — so
-///   `let u = "http://x"; state.last_created_token_ids.push(id);` keeps its call (arm 5(viii)).
-///
-/// The offsets are returned rather than a substring because [`call_tail`] indexes back into the
-/// ORIGINAL line, and because the `/* … */` tail form of arm 5(vi) must still reach the classifier.
-///
-/// Whatever survives both guards — a `//` after a quote, a `/* … */` opened mid-line, a string
-/// literal quoting the defect, or the interior lines of a multi-line block comment — is still
-/// scanned, and would ADD a hit. That direction is fail-CLOSED (spurious red, never a missed
-/// publish); it is listed in this file's residuals. What is closed here are the two shapes this
-/// change's own prose is most likely to take.
-fn code_span(line: &str) -> (usize, usize) {
-    let trimmed = line.trim_start();
-    let mut lo = 0usize;
-    if trimmed.starts_with("/*") {
-        let start = line.len() - trimmed.len();
-        lo = match line[start..].find("*/") {
-            Some(end) => start + end + 2,
-            None => line.len(),
-        };
-    }
-    let mut hi = line.len();
-    if let Some(slash) = line[lo..].find("//") {
-        if !line[lo..lo + slash].contains('"') {
-            hi = lo + slash;
-        }
-    }
-    (lo, hi)
-}
-
 /// Classify every access to either anaphora container in `src` whose TAIL satisfies `keep`.
 ///
 /// The third anchor's walker, parameterised by the tail predicate so that
@@ -807,14 +786,14 @@ fn classify_container_tails(src: &str, file: &str, keep: fn(&str) -> bool) -> Ve
     let lines: Vec<&str> = src.lines().collect();
     let mut hits = Vec::new();
     for (n, line) in lines.iter().enumerate() {
-        if line.trim_start().starts_with("//") {
-            continue;
-        }
+        // ONE comment rule, the shared one: a whole-line comment has an EMPTY code span, so the
+        // `starts_with("//")` test this used to carry beside it was a second policy saying the
+        // same thing — and a second place to get it wrong.
         let (lo, hi) = code_span(line);
-        let code = &line[lo..hi];
+        let code_part = &line[lo..hi];
         for needle in ANAPHORA_CONTAINERS {
             let mut from = 0usize;
-            while let Some(at) = code[from..].find(needle) {
+            while let Some(at) = code_part[from..].find(needle) {
                 from += at + needle.len();
                 if keep(&call_tail(&lines, n, lo + from)) {
                     hits.push(Hit {
@@ -909,13 +888,22 @@ const FN_PREFIX_ALLOW_SET: [&str; 5] = [
 /// signature's continuation (`) -> Option<…> {`) carries no bare `fn` token, so it is not collected.
 ///
 /// `Err` carries the extend-the-allow-set message for an unrecognised prefix.
+///
+/// TOKENS COME FROM THE CODE HALF ([`code_span`]), as everywhere else in this binary: a trailing
+/// comment naming `fn` on a column-0 code line would otherwise contribute a bare `fn` token and
+/// resolve to an unrecognised prefix — loud rather than silent, but still the wrong answer. The
+/// COLUMN-0 test deliberately stays on the ORIGINAL line: `code_span` skips a leading
+/// `/* … */`, and testing the trimmed remainder for column 0 would drop a real header that
+/// happens to carry one.
 fn top_level_fn_headers(src: &str) -> Result<Vec<(usize, String)>, String> {
     let mut out = Vec::new();
     for (n, line) in src.lines().enumerate() {
-        if line.starts_with([' ', '\t']) || line.trim_start().starts_with("//") {
+        if line.starts_with([' ', '\t']) {
             continue;
         }
-        let tokens: Vec<&str> = line.split_whitespace().collect();
+        // A whole-line comment yields an empty code half and therefore no `fn` token, so the
+        // shared rule subsumes the comment test that used to sit in the condition above.
+        let tokens: Vec<&str> = code(line).split_whitespace().collect();
         let Some(at) = tokens.iter().position(|token| *token == "fn") else {
             continue;
         };
@@ -1254,12 +1242,20 @@ fn every_single_id_anaphora_publish_lives_in_an_authority() {
          Ambiguous hits = {ambiguous_production:#?}"
     );
 
+    // Issue #5904 moved TWO of these from `counters.rs` to `token_copy.rs` without changing
+    // the total, which is exactly the shape this pin's own instructions ask for. The
+    // `ContinueCopyTokenCreation` resume arm's `if let Some(pending) = active_copy_token_mut()
+    // { pending.created_ids.extend(..) } else { last_created_token_ids.extend(..) }` pair was
+    // about to be COPIED verbatim into the new `ContinueCopyTokenEntryAfterAuraHost` resume,
+    // so it was lifted into `token_copy::extend_copy_batch_created_ids` instead and both arms
+    // now call it. Same five calls, same bulk arguments (`status.created_ids`, a `Vec`), one
+    // fewer place to write the destination-selection rule wrong. `counters.rs` therefore drops
+    // out of this multiset entirely; its absence is now a claim, not an omission.
     assert_eq!(
         production_multiset(&ambiguous_production),
         vec![
-            ("engine/src/game/effects/counters.rs".to_string(), 2),
             ("engine/src/game/effects/token.rs".to_string(), 1),
-            ("engine/src/game/effects/token_copy.rs".to_string(), 2),
+            ("engine/src/game/effects/token_copy.rs".to_string(), 4),
         ],
         "per-file argument-ambiguous mutator multiset moved. All five of these are bulk \
          republishes today — `.extend(status.created_ids)` and `.extend(state.\

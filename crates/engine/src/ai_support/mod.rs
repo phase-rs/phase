@@ -38,7 +38,7 @@ use crate::types::zones::Zone;
 pub(crate) use candidates::power_threshold_witness;
 pub use candidates::{
     candidate_actions, candidate_actions_broad, candidate_actions_exact,
-    candidate_actions_with_probe, ActionMetadata, CandidateAction, TacticalClass,
+    candidate_actions_with_probe, retarget_actions, ActionMetadata, CandidateAction, TacticalClass,
 };
 pub use combat_withdrawal::{
     combat_withdrawal_fact_for_current_target, CombatWithdrawalFact, CombatWithdrawalTargetRole,
@@ -249,6 +249,20 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
 }
 
 fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
+    // Ready intentionally has no current acting player, but an active consent
+    // grantor may still revoke. The candidate pipeline retains the frozen actor
+    // and its SimulationFilter checks that authority before admitting it.
+    if let GameAction::RevokeResolveAllConsent {
+        epoch,
+        representative,
+    } = action
+    {
+        if crate::game::turn_control::resolve_all_granted_submitter(state, *epoch, *representative)
+            .is_some()
+        {
+            return false;
+        }
+    }
     // CR 103.5 / TL:R 906.6a: For simultaneous-decision states
     // `acting_player()` is None when multiple players are pending. The
     // Priority-branch check below only fires for the Priority variant, so we
@@ -1013,6 +1027,12 @@ fn resolve_mana_option_for_trigger_probe(
             produced: vec![option.mana_type],
             tap_state: ManaTapState::FromTap,
         });
+        events.push(GameEvent::ManaAbilityProduced {
+            player_id: player,
+            source_id: option.object_id,
+            produced: vec![option.mana_type],
+            trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
+        });
     }
 
     triggers::events_would_queue_non_mana_trigger(&mut probe, &events)
@@ -1215,6 +1235,7 @@ fn classify_flat_priority_action(action: &GameAction) -> FlatPriorityActionClass
         | GameAction::SelectTargets { .. }
         | GameAction::ChooseTarget { .. }
         | GameAction::ChooseReplacement { .. }
+        | GameAction::ChooseEntryController { .. }
         | GameAction::OrderTriggers { .. }
         | GameAction::CancelCast
         | GameAction::Equip { .. }
@@ -1309,7 +1330,10 @@ fn classify_flat_priority_action(action: &GameAction) -> FlatPriorityActionClass
         | GameAction::DeclareShortcut { .. }
         | GameAction::RespondToShortcut { .. }
         | GameAction::DeclineShortcut
-        | GameAction::PrecastCopyShortcut { .. } => FlatPriorityActionClass::Other,
+        | GameAction::PrecastCopyShortcut { .. }
+        | GameAction::BeginResolveAll { .. }
+        | GameAction::RespondResolveAllConsent { .. }
+        | GameAction::RevokeResolveAllConsent { .. } => FlatPriorityActionClass::Other,
     }
 }
 
@@ -1770,7 +1794,8 @@ fn beneficial_mana_tap_trigger_hold(
                     // same predicates the trigger resolver uses. `taps_for_mana_card_matches`
                     // ignores `taps_for_mana_produced`, so a produced-mana filter is
                     // treated as matching (over-approx, err-to-hold).
-                    crate::types::triggers::TriggerMode::TapsForMana => {
+                    crate::types::triggers::TriggerMode::TapsForMana
+                    | crate::types::triggers::TriggerMode::ManaAbilityProduced => {
                         crate::game::trigger_matchers::taps_for_mana_card_matches(
                             trigger,
                             state,
@@ -2321,7 +2346,7 @@ pub fn mana_payment_shortcut_actions(
 }
 
 /// Returns `legal_actions_full` scoped to a specific viewer. Empty tuple if
-/// `viewer` is not the player currently expected to act.
+/// `viewer` has no current action authority.
 ///
 /// CR 117.1 — "which player can take actions at any given time is determined by
 /// a system of priority. The player with priority may cast spells, activate
@@ -2332,8 +2357,12 @@ pub fn mana_payment_shortcut_actions(
 /// This is the single engine-side authority for "what does player X need to
 /// know" and exists to keep game-logic gating out of transport adapters. The
 /// P2P multiplayer host broadcasts a filtered state + legal-actions payload
-/// per guest; only the acting guest needs a populated legal-actions map.
+/// per guest; the Resolve All consent protocol additionally exposes each
+/// frozen grantor's own revocation while a different representative is queued.
 pub fn legal_actions_for_viewer(state: &GameState, viewer: PlayerId) -> LegalActionsFull {
+    if let Some(actions) = resolve_all_actions_for_viewer(state, viewer) {
+        return (actions, HashMap::new(), HashMap::new());
+    }
     // CR 103.5: For simultaneous-decision states (MulliganDecision,
     // OpeningHandBottomCards), every pending player has a
     // legal action set, so guests in a multiplayer mulligan can see and submit
@@ -2354,6 +2383,47 @@ pub fn legal_actions_for_viewer(state: &GameState, viewer: PlayerId) -> LegalAct
     } else {
         (Vec::new(), HashMap::new(), HashMap::new())
     }
+}
+
+fn resolve_all_actions_for_viewer(state: &GameState, viewer: PlayerId) -> Option<Vec<GameAction>> {
+    let epoch = match &state.waiting_for {
+        WaitingFor::ResolveAllConsent { epoch, .. } | WaitingFor::ResolveAllReady { epoch } => {
+            *epoch
+        }
+        _ => return None,
+    };
+    let run = state
+        .resolve_all_consent_run
+        .as_ref()
+        .filter(|run| run.epoch == epoch)?;
+    let mut actions = Vec::new();
+    if let WaitingFor::ResolveAllConsent { representative, .. } = &state.waiting_for {
+        if run.authorized_submitter_for(*representative) == Some(viewer) {
+            actions.extend([
+                GameAction::RespondResolveAllConsent {
+                    epoch,
+                    decision: crate::types::actions::ResolveAllConsentDecision::Grant,
+                },
+                GameAction::RespondResolveAllConsent {
+                    epoch,
+                    decision: crate::types::actions::ResolveAllConsentDecision::Decline,
+                },
+            ]);
+        }
+    }
+    actions.extend(run.participants.iter().filter_map(|participant| {
+        (participant.granted
+            && crate::game::turn_control::resolve_all_granted_submitter(
+                state,
+                epoch,
+                participant.representative,
+            ) == Some(viewer))
+        .then_some(GameAction::RevokeResolveAllConsent {
+            epoch,
+            representative: participant.representative,
+        })
+    }));
+    Some(actions)
 }
 
 /// Non-fatal diagnostic describing a wedged decision point.
@@ -6015,6 +6085,7 @@ mod tests {
         // A "choose a player" prompt (CR 601.2b) with NO offered options — the
         // engine can produce no legal `ChooseOption`, so no submitter can act.
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(0),
             choice_type: ChoiceType::Labeled { options: vec![] },
             options: vec![],
@@ -6713,6 +6784,17 @@ mod tests {
             );
         }
         set_dummy_pending_cast(&mut state);
+        let pending_spell = state
+            .pending_cast
+            .as_ref()
+            .expect("dummy pending cast exists")
+            .object_id;
+        state
+            .objects
+            .get_mut(&pending_spell)
+            .expect("dummy spell exists")
+            .keywords
+            .push(Keyword::Delve);
         state.waiting_for = WaitingFor::ManaPayment {
             player: PlayerId(0),
             convoke_mode: Some(ConvokeMode::Delve),

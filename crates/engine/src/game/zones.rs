@@ -576,6 +576,7 @@ pub(crate) fn apply_zone_exit_cleanup(
                 || matches!(
                     link.kind,
                     crate::types::game_state::ExileLinkKind::UntilSourceLeaves { .. }
+                        | crate::types::game_state::ExileLinkKind::UntilOpponentBecomesMonarch { .. }
                         | crate::types::game_state::ExileLinkKind::Haunt
                         | crate::types::game_state::ExileLinkKind::CraftMaterial
                 )
@@ -965,11 +966,59 @@ pub fn apply_resolved_zone_change(
 }
 
 /// CR 400.7: Move an object to a new zone. An object that moves to a new zone becomes a new object.
+///
+/// Plain-entry convenience wrapper: delegates to
+/// [`move_to_zone_with_entry_flags`] with `enter_transformed = false`, so
+/// every existing call site that does not instruct an effect-driven
+/// transformed entry is unchanged. Only the plain-fallback branch of
+/// `deliver_replaced_zone_change` threads the flag through the
+/// `with_entry_flags` form.
 pub fn move_to_zone(
+    state: &mut GameState,
+    object_id: ObjectId,
+    to: Zone,
+    events: &mut Vec<GameEvent>,
+) {
+    move_to_zone_with_entry_flags(state, object_id, to, events, false);
+}
+
+/// CR 400.7: Move an object to a new zone. An object that moves to a new zone becomes a new object.
+///
+/// `enter_transformed` (CR 712.14a) is the transient, single-authority "enters
+/// with its back face up" intent carried LIVE from the post-replacement
+/// `ProposedEvent::ZoneChange.enter_transformed` into the battlefield-entry
+/// guard below. It is a synchronous parameter for this one delivery — never a
+/// stored/written `GameState` field.
+///
+/// WHY a parameter rather than a transient `obj.transformed` marker: CR 712.8a
+/// (zones.rs:291-298) reverts a transformed permanent to its front face on any
+/// non-battlefield zone exit, and the post-move transform itself
+/// (zone_pipeline.rs:3670, `transform_permanent`, CR 712.14a) executes the same
+/// face swap when the object reaches the battlefield. A pre-move transient
+/// `transformed` flag would survive into that authoritative swap and
+/// double-corrupt the face (CR 712.8a exit revert + post-move transform both
+/// mutating `back_face`/the live face). The parameter carries the intent without
+/// touching object state. (The `modal_back_face` revert at zones.rs:301-310 is
+/// a SEPARATE MDFC mechanism and is not implicated.)
+///
+/// SF1 asymmetry: a single-faced object (`back_face.is_none()`) instructed to
+/// enter transformed can never enter that way — CR 712.14a (2nd sentence)
+/// requires a back face, and the object's FRONT-face core types must NOT be
+/// consulted as a fallback for the CR 307.4 / CR 400.4a eligibility check. The
+/// asymmetric guard below therefore returns before any core-type consult.
+///
+/// A3 (no post-move re-assert): unlike the face-down entry profile's
+/// re-assertion authority (`apply_face_down_entry_profile` in zone_pipeline.rs),
+/// a transformed entry needs no analogous re-assert after the move.
+/// `transform_permanent` (zone_pipeline.rs:3687) is the SINGLE authoritative
+/// post-move face swap and already runs on `to == Zone::Battlefield`, so the
+/// guard here only gates eligibility — it never mutates the face.
+pub(crate) fn move_to_zone_with_entry_flags(
     state: &mut GameState,
     object_id: ObjectId,
     mut to: Zone,
     events: &mut Vec<GameEvent>,
+    enter_transformed: bool,
 ) {
     // CR 111.8: A token that has left the battlefield can't move to another zone
     // or come back onto the battlefield — "if such a token would change zones, it
@@ -996,7 +1045,7 @@ pub fn move_to_zone(
             state
                 .liminal_entries
                 .get(&object_id)
-                .map(|entry| entry.object.clone())
+                .map(|entry| entry.object.projected().clone())
         })
         .flatten();
     let liminal_attack_target = (to == Zone::Battlefield)
@@ -1027,13 +1076,36 @@ pub fn move_to_zone(
             if is_blocked_from_entering_battlefield(state, obj) {
                 return;
             }
+            // CR 712.14a (2nd sentence) + CR 712.8e: a transformed entry reads
+            // the BACK face's card types for the CR 307.4 / CR 400.4a
+            // eligibility check (CR 712.8e: "read from its back face"). A
+            // single-faced object instructed to enter transformed has no back
+            // face, so it can never enter that way — and its FRONT face's
+            // permanent types must NOT be consulted as a fallback (CR 712.14a
+            // 2nd sentence). This asymmetric guard precedes any core-type
+            // consult so the front face is never used for a transformed entry.
+            if enter_transformed && obj.back_face.is_none() {
+                return; // CR 712.14a: no back face -> remain in previous zone
+            }
+            let entry_core_types = if enter_transformed {
+                // CR 712.14a + CR 712.8e: eligibility reads the back face's core
+                // types. `back_face` is guaranteed `Some` after the guard above;
+                // the `unwrap_or_default()` empty-slice is an unreachable
+                // safeguard (present only so the borrow stays total).
+                obj.back_face
+                    .as_ref()
+                    .map(|b| b.card_types.core_types.as_slice())
+                    .unwrap_or_default()
+            } else {
+                obj.card_types.core_types.as_slice()
+            };
             // CR 304.4 / CR 307.4 / CR 400.4a: Instants and sorceries can't enter
             // the battlefield. Skip for face-down (morph/manifest) and objects with
-            // a permanent type (MDFC back faces).
+            // a permanent type (DFC/MDFC back faces).
             if !obj.face_down
-                && (obj.card_types.core_types.contains(&CoreType::Instant)
-                    || obj.card_types.core_types.contains(&CoreType::Sorcery))
-                && !obj.card_types.core_types.iter().any(|ct| {
+                && (entry_core_types.contains(&CoreType::Instant)
+                    || entry_core_types.contains(&CoreType::Sorcery))
+                && !entry_core_types.iter().any(|ct| {
                     matches!(
                         ct,
                         // CR 110.4: Permanent types
@@ -3666,6 +3738,220 @@ mod tests {
 
         // Should enter because it has a permanent type (Creature)
         assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+    }
+
+    /// CR 712.14a + CR 712.8e: a DFC whose FRONT face is a Sorcery (non-permanent)
+    /// can still enter the battlefield when it is instructed to enter TRANSFORMED
+    /// (back face up) — eligibility reads the BACK face's core types (a Creature,
+    /// a permanent type, CR 110.4), so the CR 307.4 / CR 400.4a reject is bypassed.
+    ///
+    /// REVERT-CATCHER: flips red if the entry-face rewrite (reading the back
+    /// face for a transformed entry) is removed — the front Sorcery type would
+    /// then trip the instant/sorcery guard and the DFC would stay in hand.
+    #[test]
+    fn transform_entry_sorcery_front_creature_back_allowed_via_flag() {
+        use crate::game::game_object::BackFaceData;
+        use crate::types::card_type::CardType;
+
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Esper Origins".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Sorcery],
+                subtypes: vec![],
+            };
+            obj.base_card_types = obj.card_types.clone();
+            obj.back_face = Some(BackFaceData {
+                name: "Summon: Esper Maduin".to_string(),
+                power: None,
+                toughness: None,
+                loyalty: None,
+                printed_loyalty: None,
+                defense: None,
+                card_types: CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Creature],
+                    subtypes: vec![],
+                },
+                mana_cost: crate::types::mana::ManaCost::default(),
+                keywords: vec![],
+                abilities: vec![],
+                trigger_definitions: Default::default(),
+                replacement_definitions: Default::default(),
+                static_definitions: Default::default(),
+                color: vec![],
+                printed_ref: None,
+                modal: None,
+                additional_cost: None,
+                strive_cost: None,
+                casting_restrictions: vec![],
+                casting_options: vec![],
+                layout_kind: None,
+                parse_warnings: vec![],
+            });
+        }
+
+        let mut events = Vec::new();
+        move_to_zone_with_entry_flags(&mut state, id, Zone::Battlefield, &mut events, true);
+
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Battlefield,
+            "CR 712.14a + CR 712.8e: a transformed entry reads the back face's \
+             Creature (permanent, CR 110.4) type and is permitted by CR 400.4a"
+        );
+    }
+
+    /// CR 307.4 / CR 400.4a negative reach-guard: the SAME Sorcery//Creature DFC
+    /// entering through the PUBLIC `move_to_zone` (enter_transformed = false) is
+    /// rejected — its FRONT Sorcery face falls to the instant/sorcery guard. This
+    /// proves the transformed-entry carve-out is conditioned on `enter_transformed`
+    /// and is never unconditional.
+    #[test]
+    fn transform_entry_sorcery_front_rejected_without_flag() {
+        use crate::game::game_object::BackFaceData;
+        use crate::types::card_type::CardType;
+
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Esper Origins".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Sorcery],
+                subtypes: vec![],
+            };
+            obj.base_card_types = obj.card_types.clone();
+            obj.back_face = Some(BackFaceData {
+                name: "Summon: Esper Maduin".to_string(),
+                power: None,
+                toughness: None,
+                loyalty: None,
+                printed_loyalty: None,
+                defense: None,
+                card_types: CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Creature],
+                    subtypes: vec![],
+                },
+                mana_cost: crate::types::mana::ManaCost::default(),
+                keywords: vec![],
+                abilities: vec![],
+                trigger_definitions: Default::default(),
+                replacement_definitions: Default::default(),
+                static_definitions: Default::default(),
+                color: vec![],
+                printed_ref: None,
+                modal: None,
+                additional_cost: None,
+                strive_cost: None,
+                casting_restrictions: vec![],
+                casting_options: vec![],
+                layout_kind: None,
+                parse_warnings: vec![],
+            });
+        }
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Battlefield, &mut events);
+
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Hand,
+            "CR 307.4 / CR 400.4a: without enter_transformed the front Sorcery \
+             face cannot enter the battlefield"
+        );
+        assert!(state.players[0].hand.contains(&id));
+    }
+
+    /// CR 712.14a (2nd sentence) — SF1 asymmetric branch, DIRECT reach-guard: a
+    /// SINGLE-FACED permanent-front object (`back_face = None`) instructed to
+    /// enter transformed can NEVER enter, even though its front face is a
+    /// creature. `move_to_zone_with_entry_flags(..., true)` drives the wrapper
+    /// directly, bypassing the zone_pipeline single-faced early-return (so only
+    /// this guard's SF1 branch is exercised).
+    ///
+    /// REVERT-CATCHER for SF1: if the asymmetric guard were removed or regressed
+    /// to a front-face fallback, this single-faced Creature-with-flag=true call
+    /// would land in Battlefield and this test flips red.
+    #[test]
+    fn transform_entry_single_faced_permanent_front_rejected_with_flag() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Single-Faced".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        // back_face intentionally left None (single-faced; the GameState default).
+
+        let mut events = Vec::new();
+        move_to_zone_with_entry_flags(&mut state, id, Zone::Battlefield, &mut events, true);
+
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Hand,
+            "CR 712.14a (2nd sentence): a single-faced object cannot enter transformed"
+        );
+        assert!(state.players[0].hand.contains(&id));
+    }
+
+    /// CR 712.14a + CR 400.4a positive reach-guard pairing the SF1 rejection: the
+    /// SAME single-faced permanent-front fixture entering through the PUBLIC
+    /// `move_to_zone` (enter_transformed = false) lands in Battlefield. Proves the
+    /// rejection above is conditioned on `enter_transformed`, NOT on
+    /// single-facedness — a bare single-faced Creature on a plain entry has no
+    /// instant/sorcery type on the entry face, so CR 400.4a passes.
+    #[test]
+    fn transform_entry_single_faced_permanent_front_allowed_without_flag() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Single-Faced".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        // back_face intentionally left None (single-faced).
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Battlefield, &mut events);
+
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Battlefield,
+            "CR 400.4a: a single-faced Creature on a plain entry is a permanent and \
+             enters normally"
+        );
     }
 
     #[test]

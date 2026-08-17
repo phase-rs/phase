@@ -7,8 +7,8 @@ use crate::types::ability::{
     DamageModification, DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope,
     Duration, Effect, EffectScope, ManaSpendPermission, PermissionGrantee,
     PostReplacementContinuation, PreventionAmount, QuantityExpr, QuantityModification,
-    ReplacementCondition, ReplacementDefinition, ReplacementMode, ResolvedAbility, ShieldKind,
-    TapStateChange, TargetFilter, TargetRef,
+    RedirectionLifetime, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    ResolvedAbility, ShieldKind, TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -102,10 +102,7 @@ const GRANTED_BLOODTHIRST_INDEX: usize = usize::MAX - 8;
 /// controller; if an effect asks for a card's controller, use its owner
 /// instead. Command-zone emblems keep their controller under CR 109.4c.
 pub(crate) fn replacement_source_player(obj: &GameObject) -> PlayerId {
-    match obj.zone {
-        Zone::Battlefield | Zone::Stack | Zone::Command => obj.controller,
-        Zone::Library | Zone::Hand | Zone::Graveyard | Zone::Exile => obj.owner,
-    }
+    obj.controller_or_owner()
 }
 
 fn compleated_replacement_id(object_id: ObjectId) -> ReplacementId {
@@ -218,7 +215,7 @@ fn commander_hand_or_library_return_object(
     state
         .liminal_entries
         .get(&object_id)
-        .map(|entry| &entry.object)
+        .map(|entry| entry.object.projected())
         .or_else(|| state.objects.get(&object_id))
 }
 
@@ -858,6 +855,13 @@ pub(crate) fn pending_replacement_option_count(
 /// because step-end mana handlers are not attached to a single object — they
 /// are scanned per-player per-phase-transition.
 pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> WaitingFor {
+    // CR 614.12a: This prompt is raised while applying a replacement, but it
+    // is not an ordering choice. Callers throughout the zone pipeline use this
+    // common helper after `ReplacementResult::NeedsChoice`; preserve the
+    // already-surfaced pre-entry controller prompt instead of overwriting it.
+    if let WaitingFor::EntryControllerChoice { .. } = &state.waiting_for {
+        return state.waiting_for.clone();
+    }
     // CR 616.1 / CR 614: each option carries its source object so the frontend
     // can show which object (or rule-based virtual replacement) creates it,
     // mirroring the `PendingTriggerSummary` payload for CR 603.3b trigger
@@ -1008,7 +1012,9 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
 pub fn park_waiting_for(state: &mut GameState, player: PlayerId) {
     if matches!(
         state.waiting_for,
-        WaitingFor::CopyTargetChoice { .. } | WaitingFor::ReturnAsAuraTarget { .. }
+        WaitingFor::CopyTargetChoice { .. }
+            | WaitingFor::ReturnAsAuraTarget { .. }
+            | WaitingFor::EntryControllerChoice { .. }
     ) || super::engine_resolution_choices::handles(&state.waiting_for)
     {
         return;
@@ -1674,6 +1680,7 @@ fn discard_applier(
             cause: None,
             attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -1816,13 +1823,109 @@ fn redirect_chosen_object_for_rid(state: &GameState, rid: ReplacementId) -> Opti
     }
 }
 
-/// CR 614.9: Read back the `redirect_target` filter stored on the matched
-/// replacement. Mirrors `redirect_chosen_object_for_rid`'s repl-lookup shape,
-/// but `TargetFilter` (unlike the `Copy` `ShieldKind`) is not `Copy`, so the
-/// stored filter is cloned. Used by the continuous `ShieldKind::Prevention`
-/// path to detect a `TargetFilter::SelfRef` redirect (Palisade Giant, Veteran
-/// Bodyguard, Weathered Bodyguards) and reuse the shared redirection mechanics.
-fn redirect_target_for_rid(state: &GameState, rid: ReplacementId) -> Option<TargetFilter> {
+/// CR 614.9 vs CR 615.1a: what a `ShieldKind::Prevention` shield actually does.
+///
+/// The durable redirection spine stores its recipient in
+/// `ReplacementDefinition::redirect_target` on a shield whose `ShieldKind` is
+/// still `Prevention`, so "does this shield prevent?" is NOT answerable from the
+/// shield kind alone. This enum is the answer, and [`prevention_shield_route`]
+/// is its single authority — consulted by BOTH the CR 615.12 suppression gate
+/// (`is_damage_prevention_replacement`) and the apply-time route
+/// (`damage_done_applier`'s Branch 2), so the two can never disagree about
+/// whether a given shield prevents or redirects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreventionShieldRoute {
+    /// CR 614.9: a recognized `redirect_target` plus an amount the redirection
+    /// mechanics own — the damage MOVES to this recipient. CR 615.12 ("damage
+    /// can't be prevented") must NOT suppress this: nothing is prevented.
+    Redirect(DamageRedirectTarget),
+    /// CR 615: an ordinary prevention shield — the damage is PREVENTED, and
+    /// CR 615.12 suppresses it. Also the route for the two non-redirecting
+    /// shapes that legitimately reach this gate: a `SpecificObject` recipient
+    /// (owned by the effect-created one-shot path, Branch 1b) and the
+    /// `AllBut`/`Next` amounts the redirection mechanics do not own.
+    Prevent,
+    /// CR 614.9: a `redirect_target` with NO mapping onto a
+    /// [`DamageRedirectTarget`]. Fails CLOSED in every build profile — the
+    /// replacement does not apply at all. Neither fallback is acceptable:
+    /// redirecting needs a recipient we do not have, and preventing would DELETE
+    /// the damage this spine exists to MOVE.
+    Unmapped,
+}
+
+/// CR 614.9: Map a DURABLE redirection shield's stored `redirect_target` filter
+/// onto the recipient authority `redirect_damage_event` consumes.
+///
+/// Every meaningful arm is written out. The only producer of this field on a
+/// `ShieldKind::Prevention` shield is the parser's
+/// `parse_durable_redirect_recipient_filter`; a recipient added there without a
+/// mapping here lands in the residual arm and FAILS CLOSED rather than silently
+/// degrading a CR 614.9 redirection into a CR 615 prevention (damage deleted
+/// rather than moved) — the exact defect the anchored redirection spine exists
+/// to eliminate. The parser-facing regression below covers the currently
+/// supported phrasings; this match remains the release-mode fail-closed boundary
+/// for any future parser expansion.
+fn durable_redirect_route_for_filter(filter: &TargetFilter) -> PreventionShieldRoute {
+    match filter {
+        // "...is dealt to ~ instead" — the shield host itself.
+        TargetFilter::SelfRef => {
+            PreventionShieldRoute::Redirect(DamageRedirectTarget::SourceObject)
+        }
+        // CR 303.4b + CR 301.5a: "...is dealt to enchanted/equipped creature
+        // instead" — the host the shield's source is attached to.
+        TargetFilter::AttachedTo => {
+            PreventionShieldRoute::Redirect(DamageRedirectTarget::AttachedToSource)
+        }
+        // CR 614.9: a concrete object recipient belongs exclusively to the
+        // EFFECT-CREATED path — `create_damage_replacement::resolve` writes
+        // `SpecificObject { id }` alongside a `ShieldKind::Redirection` (of
+        // either `RedirectionLifetime`), and `redirect_chosen_object_for_rid` is
+        // its reader. Such a shield is claimed by Branch 1b and never reaches
+        // this Prevention-shield gate; routing it to `Redirect` here would
+        // resurrect a consumed one-shot as a durable shield.
+        TargetFilter::SpecificObject { .. } => PreventionShieldRoute::Prevent,
+        _ => PreventionShieldRoute::Unmapped,
+    }
+}
+
+/// CR 614.9 + CR 615.1a: the SINGLE authority for whether a
+/// `ShieldKind::Prevention` shield prevents, redirects, or must fail closed.
+///
+/// Takes the definition rather than looking it up: `is_damage_prevention_replacement`
+/// (on `find_applicable_replacements`' per-candidate loop, i.e. the damage hot
+/// path) already holds it, and borrows the stored filter rather than cloning, so
+/// the CR 615.12 gate adds neither a second map lookup nor an allocation.
+fn prevention_shield_route_for_def(
+    repl: &ReplacementDefinition,
+    amount: PreventionAmount,
+) -> PreventionShieldRoute {
+    // CR 615.1a: no recipient stored — an ordinary "prevent" shield.
+    let Some(filter) = repl.redirect_target.as_ref() else {
+        return PreventionShieldRoute::Prevent;
+    };
+    match durable_redirect_route_for_filter(filter) {
+        // CR 615.7: `redirect_damage_event` treats `PreventionAmount::AllBut` as
+        // `unreachable!()` — an invariant of `ShieldKind::Redirection`, not of
+        // `ShieldKind::Prevention`, which legitimately uses `AllBut` for Temple
+        // Altisaur. Only `All` is owned by the redirection mechanics; every other
+        // amount stays on the CR 615 prevention arms, and therefore stays
+        // suppressible by CR 615.12.
+        PreventionShieldRoute::Redirect(_) if !matches!(amount, PreventionAmount::All) => {
+            PreventionShieldRoute::Prevent
+        }
+        route => route,
+    }
+}
+
+/// `ReplacementId`-keyed wrapper over [`prevention_shield_route_for_def`] for the
+/// apply-time call site, which has only the `Copy` `ShieldKind` in scope. A
+/// missing definition cannot redirect, so it routes to `Prevent` (the pre-existing
+/// behavior for an unresolvable rid).
+fn prevention_shield_route(
+    state: &GameState,
+    rid: ReplacementId,
+    amount: PreventionAmount,
+) -> PreventionShieldRoute {
     let repl = if rid.source == ObjectId(0) {
         state.pending_damage_replacements.get(rid.index)
     } else {
@@ -1831,19 +1934,22 @@ fn redirect_target_for_rid(state: &GameState, rid: ReplacementId) -> Option<Targ
             .get(&rid.source)
             .and_then(|obj| obj.replacement_definitions.get(rid.index))
     };
-    repl.and_then(|repl| repl.redirect_target.clone())
+    repl.map_or(PreventionShieldRoute::Prevent, |repl| {
+        prevention_shield_route_for_def(repl, amount)
+    })
 }
 
-/// CR 614.9: Resolve and apply a damage redirection. Shared by the one-shot
-/// `ShieldKind::Redirection` path (always consumes the shield afterward) and
-/// the continuous `ShieldKind::Prevention` + `redirect_target` path (never
-/// consumes `PreventionAmount::All` shields — that continuous, re-firing
-/// lifecycle is governed by the host permanent's presence, not by depletion).
-/// `consume_after_redirect` reflects which `ShieldKind` invariant governs this
-/// shield's lifecycle at its call site — a fixed, hard-coded literal at both of
-/// this function's two call sites, never a value threaded from parsed Oracle
-/// text or player choice, so a bool is the idiomatic choice over a
-/// purpose-built enum with no third state to grow into.
+/// CR 614.9: Resolve and apply a damage redirection. Shared by the
+/// `ShieldKind::Redirection` path (whose own `lifetime` decides consumption) and
+/// the durable `ShieldKind::Prevention` + `redirect_target` path (a printed,
+/// object-hosted static, whose re-firing lifecycle is governed by the host
+/// permanent's presence rather than by depletion, so it always passes
+/// [`RedirectionLifetime::Continuous`]).
+///
+/// `lifetime` is the CR 614.5-vs-CR 611.2a axis, carried as the typed enum rather
+/// than a bool because it is no longer a hard-coded literal at every call site:
+/// the `ShieldKind::Redirection` call site reads it off the shield, which the
+/// parser stamped from the Oracle grammar.
 #[allow(clippy::too_many_arguments)]
 fn redirect_damage_event(
     state: &mut GameState,
@@ -1855,13 +1961,30 @@ fn redirect_damage_event(
     damage_amount: u32,
     is_combat: bool,
     applied: HashSet<AppliedReplacementKey>,
-    consume_after_redirect: bool,
+    lifetime: RedirectionLifetime,
     events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
+    // CR 614.5: only a single-opportunity shield spends itself on this event.
+    let consume_after_redirect = lifetime.is_one_opportunity();
     // CR 614.7a: A source that would deal 0 damage deals no damage at all —
     // there is no damage event to redirect. Pass through and do not consume the
     // shield (no opportunity was spent).
     if damage_amount == 0 {
+        return ApplyResult::Modified(ProposedEvent::Damage {
+            source_id,
+            target,
+            amount: damage_amount,
+            is_combat,
+            applied,
+        });
+    }
+
+    // CR 615.7: a finite shield must deplete by each point it prevents. A
+    // `Continuous` redirection has no depletion lifecycle, so this otherwise
+    // representable pair would redirect `Next(n)` from every event forever in
+    // release builds. Refuse the malformed replacement before resolving a
+    // recipient or mutating its shield: leave the proposed damage untouched.
+    if matches!(redirect_amount, PreventionAmount::Next(_)) && !consume_after_redirect {
         return ApplyResult::Modified(ProposedEvent::Damage {
             source_id,
             target,
@@ -1884,9 +2007,10 @@ fn redirect_damage_event(
             // CR 614.5: The one-shot opportunity is spent on this event whether
             // or not the redirection succeeds — consume the shield in both the
             // success and the "does nothing" (illegal recipient per CR 614.9)
-            // outcomes. Continuous `ShieldKind::Prevention` + `redirect_target`
-            // shields pass `consume_after_redirect: false` and re-fire for every
-            // damage event within their lifetime.
+            // outcomes. `RedirectionLifetime::Continuous` shields (the durable
+            // `ShieldKind::Prevention` + `redirect_target` statics and the
+            // duration-bound Heroic Sacrifice class) are never consumed and
+            // re-fire for every damage event within their lifetime.
             if consume_after_redirect {
                 consume_prevention_shield(state, rid, None);
             }
@@ -1917,6 +2041,9 @@ fn redirect_damage_event(
             unreachable!("PreventionAmount::AllBut is never assigned to a ShieldKind::Redirection")
         }
         PreventionAmount::Next(n) => {
+            // The invalid continuous pair returned above. A remaining `Next(n)`
+            // is therefore a one-opportunity shield and must deplete by the
+            // redirected amount (CR 615.7).
             let redirected_amount = damage_amount.min(n);
             let remaining_amount = damage_amount.saturating_sub(redirected_amount);
             if consume_after_redirect {
@@ -1928,6 +2055,7 @@ fn redirect_damage_event(
                         rid,
                         recipient,
                         PreventionAmount::Next(n - redirected_amount),
+                        lifetime,
                     );
                 }
             }
@@ -2173,7 +2301,7 @@ fn damage_done_applier(
         return ApplyResult::Modified(event);
     }
 
-    // Branch 1b: CR 614.9 — one-shot redirection shield. Whole-event
+    // Branch 1b: CR 614.9 — effect-created redirection shield. Whole-event
     // redirections replace the damage event's recipient; amount-capped
     // redirections split the event, route the redirected portion through the
     // same replacement/damage application path, and leave any remainder on the
@@ -2181,6 +2309,7 @@ fn damage_done_applier(
     if let Some(ShieldKind::Redirection {
         recipient,
         amount: redirect_amount,
+        lifetime,
     }) = shield_kind_for_rid(state, rid)
     {
         if let ProposedEvent::Damage {
@@ -2191,8 +2320,12 @@ fn damage_done_applier(
             applied,
         } = event
         {
-            // CR 614.9: one-shot redirection shields always consume their single
-            // opportunity after the redirect resolves (or does nothing).
+            // CR 614.5 vs CR 611.2a: the shield's OWN stamped lifetime decides
+            // consumption. "The next time…"/"the next N damage…" shields spend
+            // their single opportunity here (whether or not the redirect did
+            // anything); a `Continuous` shield created by "until end of turn, all
+            // damage … is dealt to <recipient> instead" (Heroic Sacrifice) keeps
+            // applying until cleanup prunes it.
             return redirect_damage_event(
                 state,
                 rid,
@@ -2203,7 +2336,7 @@ fn damage_done_applier(
                 damage_amount,
                 is_combat,
                 applied,
-                true,
+                lifetime,
                 events,
             );
         }
@@ -2240,39 +2373,58 @@ fn damage_done_applier(
         } = event
         {
             // CR 614.9: Continuous "all damage that would be dealt to you ... is
-            // dealt to this creature instead" statics (Palisade Giant, Veteran
-            // Bodyguard, Weathered Bodyguards) parse to a `ShieldKind::Prevention`
-            // shield carrying `redirect_target: Some(SelfRef)`. This is a
-            // *redirection* (CR 614.9), not a prevention (CR 615) — route it
-            // through the shared redirection mechanics with
-            // `consume_after_redirect: false` so the continuous shield re-fires
+            // dealt to <recipient> instead" statics parse to a
+            // `ShieldKind::Prevention` shield carrying a `redirect_target` filter —
+            // `SelfRef` for the self-recipient class (Palisade Giant, Ancient
+            // Adamantoise, Empyrial Archangel, Protector of the Crown, Veteran
+            // Bodyguard, Weathered Bodyguards, Martyrs of Korlis) and `AttachedTo`
+            // for the attachment-host class (Pariah, Pariah's Shield, With Great
+            // Power . . .). This is a *redirection* (CR 614.9), not a prevention
+            // (CR 615) — route it through the shared redirection mechanics with
+            // `RedirectionLifetime::Continuous` so the durable shield re-fires
             // for every damage event within its lifetime, and skip the
             // DamagePrevented / `combat_prevention_tally` bookkeeping entirely
-            // (no damage is prevented — it is dealt to a new recipient). The
-            // `matches!(amount, PreventionAmount::All)` conjunct is required:
-            // `redirect_damage_event`'s body treats `PreventionAmount::AllBut` as
-            // `unreachable!()` (an invariant of `ShieldKind::Redirection`, not of
-            // `ShieldKind::Prevention`, which legitimately uses `AllBut` for
-            // Temple Altisaur), so any `AllBut`/`Next` prevention shield — even a
-            // hypothetical future one carrying a `redirect_target` — falls
-            // through to the ordinary prevention arms below rather than reaching
-            // that dead code.
-            if redirect_target_for_rid(state, rid) == Some(TargetFilter::SelfRef)
-                && matches!(amount, PreventionAmount::All)
-            {
-                return redirect_damage_event(
-                    state,
-                    rid,
-                    DamageRedirectTarget::SourceObject,
-                    PreventionAmount::All,
-                    source_id,
-                    target,
-                    dmg,
-                    is_combat,
-                    applied,
-                    false,
-                    events,
-                );
+            // (no damage is prevented — it is dealt to a new recipient).
+            //
+            // `prevention_shield_route` is the SAME authority the CR 615.12
+            // suppression gate (`is_damage_prevention_replacement`) consults, so
+            // a shield can never be classified as prevention there and applied as
+            // a redirection here. It also owns the amount gate: `AllBut`/`Next`
+            // shields route to `Prevent` and fall through to the ordinary
+            // prevention arms below.
+            match prevention_shield_route(state, rid, amount) {
+                PreventionShieldRoute::Redirect(recipient) => {
+                    return redirect_damage_event(
+                        state,
+                        rid,
+                        recipient,
+                        PreventionAmount::All,
+                        source_id,
+                        target,
+                        dmg,
+                        is_combat,
+                        applied,
+                        RedirectionLifetime::Continuous,
+                        events,
+                    );
+                }
+                // CR 614.9: fail CLOSED. The shield carries a recipient this
+                // build cannot map, so it can neither redirect (no recipient) nor
+                // fall through to the CR 615 arms (which would DELETE the damage
+                // rather than move it). Return the event unmodified so the damage
+                // is dealt exactly as proposed — the only outcome that loses no
+                // damage. `mark_applied(rid)` already ran before this applier, so
+                // declining here cannot re-enter the same shield.
+                PreventionShieldRoute::Unmapped => {
+                    return ApplyResult::Modified(ProposedEvent::Damage {
+                        source_id,
+                        target,
+                        amount: dmg,
+                        is_combat,
+                        applied,
+                    });
+                }
+                PreventionShieldRoute::Prevent => {}
             }
 
             let prevented_amount;
@@ -2506,11 +2658,16 @@ fn consume_prevention_shield(
     }
 }
 
+/// CR 615.7: Deplete a `Next(n)` redirection shield's remaining amount in place.
+/// `lifetime` is carried through unchanged — depletion is an amount edit, never a
+/// lifetime change, so a shield can never silently switch between the CR 614.5
+/// one-opportunity and CR 611.2a continuous classes here.
 fn update_redirection_shield(
     state: &mut GameState,
     rid: ReplacementId,
     recipient: crate::types::ability::DamageRedirectTarget,
     amount: PreventionAmount,
+    lifetime: RedirectionLifetime,
 ) {
     let repl = if rid.source == ObjectId(0) {
         state.pending_damage_replacements.get_mut(rid.index)
@@ -2522,7 +2679,11 @@ fn update_redirection_shield(
     };
 
     if let Some(repl) = repl {
-        repl.shield_kind = ShieldKind::Redirection { recipient, amount };
+        repl.shield_kind = ShieldKind::Redirection {
+            recipient,
+            amount,
+            lifetime,
+        };
     }
 }
 
@@ -5397,15 +5558,34 @@ fn is_damage_prevention_replacement(
         return false;
     }
 
-    // Check for ShieldKind::Prevention or description-based prevention patterns
-    // CR 615: Prevention shields created by prevent_damage.rs. CR 615.3: the
-    // one-shot `PreventionOneShot` shield (Awe Strike) is likewise a prevention.
-    matches!(
-        repl.shield_kind,
-        ShieldKind::Prevention { .. } | ShieldKind::PreventionOneShot
-    )
+    // CR 615: Prevention shields created by prevent_damage.rs.
+    //
+    // CR 614.9 + CR 615.1a: a Prevention-SHAPED shield that carries a
+    // `redirect_target` is a CR 614.9 REDIRECTION, not a CR 615 prevention — its
+    // Oracle grammar never says "prevent" (CR 615.1a), and no damage is prevented
+    // when it applies (the damage is dealt to a new recipient). CR 615.12
+    // therefore must NOT suppress it; classifying it as prevention here made
+    // Pariah, Pariah's Shield, With Great Power . . ., Palisade Giant and Ancient
+    // Adamantoise silently stop redirecting under any "damage can't be prevented"
+    // effect. `prevention_shield_route` is the SAME authority
+    // `damage_done_applier`'s Branch 2 consults, so this gate and the apply-time
+    // route cannot drift apart (an `Unmapped` shield stays classified as
+    // prevention here and fails closed there — either way it does nothing).
+    if let ShieldKind::Prevention { amount } = repl.shield_kind {
+        return !matches!(
+            prevention_shield_route_for_def(repl, amount),
+            PreventionShieldRoute::Redirect(_)
+        );
+    }
+
+    // CR 615.3: a source-qualified one-shot shield prevents damage rather than
+    // redirecting it, so "damage can't be prevented" suppresses it as well.
+    if matches!(repl.shield_kind, ShieldKind::PreventionOneShot) {
+        return true;
+    }
+
     // Legacy: description-based prevention from parsed replacement definitions
-    || repl.description.as_ref().is_some_and(|d| {
+    repl.description.as_ref().is_some_and(|d| {
         let lower = d.to_lowercase();
         lower.contains("prevent") && lower.contains("damage")
     })
@@ -5451,6 +5631,7 @@ fn matches_damage_target_filter(
         DamageTargetFilter::PlayerOrPermanentsControlledBy {
             player,
             permanent_type,
+            source_scope,
         } => match target {
             TargetRef::Player(pid) => {
                 player_scope_matches(player, *pid, repl_controller, repl_source, state)
@@ -5459,12 +5640,30 @@ fn matches_damage_target_filter(
             // the scoped player AND, when `permanent_type` is set, of that card
             // type (Comeuppance protects "planeswalkers you control", not every
             // permanent you control).
-            TargetRef::Object(oid) => state.objects.get(oid).is_some_and(|obj| {
-                player_scope_matches(player, obj.controller, repl_controller, repl_source, state)
-                    && permanent_type
-                        .as_ref()
-                        .is_none_or(|ct| obj.card_types.core_types.contains(ct))
-            }),
+            //
+            // CR 109.1: the "OTHER" article (Palisade Giant, Ancient Adamantoise,
+            // The Wanderer) excludes the replacement's own source object from the
+            // permanent leg. CR 614.5 already stops a self-recipient shield from
+            // re-entering itself, but this exclusion is what keeps the shield out
+            // of the CR 616.1 candidate list in the first place — so a second
+            // applicable replacement is not made to compete with a self-no-op.
+            // For a shield installed by an instant/sorcery, `repl_source` is the
+            // sentinel `ObjectId(0)`, which matches no permanent, so the
+            // exclusion is correctly inert there.
+            TargetRef::Object(oid) => {
+                (!source_scope.is_exclude() || *oid != repl_source)
+                    && state.objects.get(oid).is_some_and(|obj| {
+                        player_scope_matches(
+                            player,
+                            obj.controller,
+                            repl_controller,
+                            repl_source,
+                            state,
+                        ) && permanent_type
+                            .as_ref()
+                            .is_none_or(|ct| obj.card_types.core_types.contains(ct))
+                    })
+            }
         },
         DamageTargetFilter::CreatureOnly => match target {
             TargetRef::Player(_) => false,
@@ -5540,6 +5739,7 @@ fn replacement_condition_quantity_ctx(
         trigger_source: None,
         recipient: None,
         scoped_player,
+        damage_source: None,
     }
 }
 
@@ -5600,6 +5800,9 @@ fn replacement_active_player_matches(
         Some(ControllerRef::TriggeringPlayer) => false,
         Some(ControllerRef::EnchantedPlayer) => false,
         Some(ControllerRef::ActivePlayer) => false,
+        // CR 109.4 + CR 611.2: a snapshot id IS resolvable — the active player
+        // satisfies the requirement exactly when they are that player.
+        Some(ControllerRef::SpecificPlayer { id }) => state.active_player == id,
         None => true,
     }
 }
@@ -5738,6 +5941,10 @@ fn evaluate_replacement_condition(
                 // controller-relative role (You/Opponent); `ActivePlayer` is not
                 // one, and the parser does not emit it here. Fail closed.
                 Some(ControllerRef::ActivePlayer) => false,
+                // CR 109.4 + CR 611.2: the turn gate expects a controller-relative
+                // role (You/Opponent); a snapshot id is not one, and the parser
+                // never emits it here. Fail closed (mirrors ActivePlayer).
+                Some(ControllerRef::SpecificPlayer { .. }) => false,
                 None => true,
             };
             if !turn_ok {
@@ -5788,6 +5995,10 @@ fn evaluate_replacement_condition(
                 // controller-relative role (You/Opponent); `ActivePlayer` is not
                 // one, and the parser does not emit it here. Fail closed.
                 Some(ControllerRef::ActivePlayer) => false,
+                // CR 109.4 + CR 611.2: the turn gate expects a controller-relative
+                // role (You/Opponent); a snapshot id is not one, and the parser
+                // never emits it here. Fail closed (mirrors ActivePlayer).
+                Some(ControllerRef::SpecificPlayer { .. }) => false,
                 None => true,
             };
             if !turn_ok {
@@ -5969,6 +6180,7 @@ fn evaluate_replacement_condition(
                 // CR 102.1: no replacement condition scopes its event source to the
                 // active player here. Fail closed (mirrors the siblings above).
                 | ControllerRef::ActivePlayer => false,
+                | ControllerRef::SpecificPlayer { .. } => false,
             }
         }
         ReplacementCondition::EffectCausedDiscard => matches!(
@@ -6193,6 +6405,7 @@ fn apply_state_level_gates(
                 | crate::types::ability::ControllerRef::TriggeringPlayer
                 | crate::types::ability::ControllerRef::EnchantedPlayer
                 | crate::types::ability::ControllerRef::ActivePlayer => false,
+                crate::types::ability::ControllerRef::SpecificPlayer { .. } => false,
             };
             if !matches {
                 return false;
@@ -6311,7 +6524,7 @@ fn object_replacement_candidate_applies(
     let liminal_obj = liminal_entry_ref(event)
         .filter(|entry_ref| *entry_ref == rid.source)
         .and_then(|entry_ref| state.liminal_entries.get(&entry_ref))
-        .map(|entry| &entry.object);
+        .map(|entry| entry.object.projected());
     let Some(obj) = liminal_obj.or_else(|| state.objects.get(&rid.source)) else {
         return false;
     };
@@ -6607,6 +6820,7 @@ fn object_replacement_candidate_applies(
                 // CR 102.1: token-owner scope is not scoped to the active player
                 // here; fail closed (mirrors the siblings above).
                 | crate::types::ability::ControllerRef::ActivePlayer => false,
+                | crate::types::ability::ControllerRef::SpecificPlayer { .. } => false,
             };
             if !matches {
                 return false;
@@ -6854,6 +7068,7 @@ fn legacy_object_replacement_candidates(
             candidates.extend(
                 entry
                     .object
+                    .projected()
                     .replacement_definitions
                     .iter_all()
                     .enumerate()
@@ -6903,6 +7118,7 @@ fn indexed_object_replacement_candidates_from_index(
             candidates.extend(
                 entry
                     .object
+                    .projected()
                     .replacement_definitions
                     .iter_all()
                     .enumerate()
@@ -7769,6 +7985,7 @@ fn extract_etb_counters_from_effect(
                 trigger_source: None,
                 recipient: None,
                 scoped_player: None,
+                damage_source: None,
             };
             let n = match count {
                 QuantityExpr::Fixed { value } => (*value).max(0) as u32,
@@ -7801,6 +8018,7 @@ fn extract_etb_counters_from_effect(
                     trigger_source: None,
                     recipient: None,
                     scoped_player: None,
+                    damage_source: None,
                 };
                 let n =
                     crate::game::quantity::resolve_quantity_with_ctx(state, count, controller, ctx)
@@ -7947,10 +8165,8 @@ fn event_modifiers_for_ability(
 /// `ControllerRef::Opponent` ("enters under the control of an opponent of your
 /// choice") is resolved here rather than via the canonical `controller_ref_player`,
 /// which returns `None` for `Opponent` (ambiguous when more than one opponent
-/// exists). In a two-player game this is the sole opponent — fully correct. In
-/// multiplayer it picks the first opponent in seat order; a full controller choice
-/// is a follow-up. Either way the permanent enters under an opponent's control
-/// rather than its owner's, satisfying CR 110.2a.
+/// exists). The multi-opponent case pauses in `entry_controller_choice`; this
+/// fallback is therefore only the no-choice (zero/one eligible opponent) path.
 fn resolve_self_enters_under_controller(
     state: &GameState,
     object_id: ObjectId,
@@ -7958,9 +8174,11 @@ fn resolve_self_enters_under_controller(
 ) -> Option<PlayerId> {
     let entering_controller = state.objects.get(&object_id)?.controller;
     match cref {
-        ControllerRef::Opponent => crate::game::players::opponents(state, entering_controller)
-            .into_iter()
-            .next(),
+        ControllerRef::Opponent => {
+            crate::game::players::choosable_opponents(state, entering_controller)
+                .into_iter()
+                .next()
+        }
         other => crate::game::filter::controller_ref_player(
             state,
             object_id,
@@ -8196,7 +8414,7 @@ fn apply_single_replacement(
         state
             .liminal_entries
             .get(&rid.source)
-            .map(|entry| &entry.object)
+            .map(|entry| entry.object.projected())
             .or_else(|| state.objects.get(&rid.source))
             .and_then(|obj| obj.replacement_definitions.get(rid.index))
     };
@@ -8434,6 +8652,68 @@ fn apply_single_replacement(
                         | (ProposedEvent::Scry { .. }, Effect::Scry { .. })
                         | (ProposedEvent::Proliferate { .. }, Effect::Proliferate)
                         | (ProposedEvent::LifeGain { .. }, Effect::GainLife { .. })
+                        // CR 614.6 + CR 701.17a: `mill_applier` folds the execute's
+                        // resolved count into the substituted Mill event, and
+                        // `apply_mill_after_replacement` mills the event's own
+                        // `player_id`. After the `sub_ability` escape above, a Mill
+                        // execute is a bare `Effect::Mill` with no residual work, so
+                        // a continuation could only re-run the mill — and because
+                        // `ProposedEvent::Mill::affected_object_id()` is `None`, the
+                        // stash binds to `rid.source`, resolving the execute's
+                        // `TargetFilter::Controller` to the REPLACEMENT's controller
+                        // instead of the affected player.
+                        //
+                        // PREMISES this arm depends on. Suppressing is safe only
+                        // because the applier's fold is total over what a
+                        // continuation would have done, and the fold reads ONLY the
+                        // count:
+                        //
+                        //   1. COUNT is statically resolvable. Every form
+                        //      `parse_mill_replacement_count` emits is rooted in
+                        //      `QuantityRef::EventContextAmount`, so
+                        //      `resolve_event_replacement_quantity` never returns
+                        //      `None` for it. A count form that is NOT statically
+                        //      resolvable must re-check this arm.
+                        //   2. `mill_applier` IGNORES the execute's `target` and
+                        //      `destination` — it passes the EVENT's `player_id` and
+                        //      `destination` through. Every production Mill execute
+                        //      is `TargetFilter::Controller` / `Zone::Graveyard`, so
+                        //      the fold loses nothing today. A Mill execute targeting
+                        //      anyone but the affected player must re-check this arm:
+                        //      the fold would silently drop that target, and the
+                        //      continuation this arm suppresses is the only thing
+                        //      that would have honoured it.
+                        //   3. The def is read solely via `state.objects.get(&rid
+                        //      .source)`, with no `ObjectId(0)` sentinel branch. A
+                        //      FLOATING Mill def would fail that lookup, stay
+                        //      UNFOLDED, and still be suppressed here — a silent
+                        //      no-op. Unreachable today (no production path pushes a
+                        //      Mill def into `pending_damage_replacements`), which is
+                        //      why "suppressed implies folded" holds in practice but
+                        //      is not entailed by premise 1 alone.
+                        //
+                        // WHERE A MILL DEFINITION CAN ORIGINATE. `ReplacementEvent
+                        // ::Mill` definitions come from exactly one production
+                        // producer today, `parse_mill_count_replacement`. (This is a
+                        // claim about MILL definitions only — `ReplacementDefinition`
+                        // itself has many production producers, e.g.
+                        // `database/synthesis.rs`, `effects/create_damage_replacement
+                        // .rs`, and `Deserialize`.) The other door one could appear
+                        // through is the Forge translator: add a `"Mill"` arm to
+                        // `database/forge/replacement.rs::translate_replacement_event`
+                        // (16 arms today, no `Mill`) and its caller
+                        // `translate_replacement` would build the definition,
+                        // resolving the execute from `ReplaceWith$` via
+                        // `resolver.resolve_ability`. That door is the wider one: an
+                        // SVar-resolved execute can carry both an unresolvable count
+                        // and a `sub_ability` rider.
+                        | (ProposedEvent::Mill { .. }, Effect::Mill { .. })
+                        // CR 614.1a: these specialized appliers already perform
+                        // their exact, unchained execute body inline. Parking it
+                        // would create an un-dispatchable sibling drain for every
+                        // affected event (issue #5676).
+                        | (ProposedEvent::CoinFlip { .. }, Effect::FlipCoins { .. })
+                        | (ProposedEvent::Damage { .. }, Effect::RemoveAllDamage { .. })
                         // CR 614.1a + CR 111.1: Full token substitution
                         // (Divine Visitation) is performed inline by
                         // `create_token_applier`; stashing the same
@@ -8558,6 +8838,15 @@ fn apply_single_replacement(
                 // enters under its owner's control first). Resolve the carried
                 // `ControllerRef` against the entering object's own controller.
                 if let Some(cref) = modifiers.controller_override.as_ref() {
+                    let selected_entry_controller =
+                        new_event.applied_set().iter().find_map(|key| match key {
+                            AppliedReplacementKey::EntryControllerChoice {
+                                source,
+                                index,
+                                controller,
+                            } if *source == rid.source && *index == rid.index => Some(*controller),
+                            _ => None,
+                        });
                     if let ProposedEvent::ZoneChange {
                         object_id,
                         to: Zone::Battlefield,
@@ -8565,7 +8854,9 @@ fn apply_single_replacement(
                         ..
                     } = &mut new_event
                     {
-                        if let Some(pid) =
+                        if let Some(selected_controller) = selected_entry_controller {
+                            *controller_override = Some(selected_controller);
+                        } else if let Some(pid) =
                             resolve_self_enters_under_controller(state, *object_id, cref)
                         {
                             *controller_override = Some(pid);
@@ -9271,7 +9562,7 @@ fn replacement_definition_for_id(
     state
         .liminal_entries
         .get(&rid.source)
-        .map(|entry| &entry.object)
+        .map(|entry| entry.object.projected())
         .or_else(|| state.objects.get(&rid.source))
         .and_then(|obj| obj.replacement_definitions.get(rid.index))
         // CR 121.2: an instruction to draw multiple cards is performed as that many
@@ -9292,6 +9583,72 @@ fn replacement_definition_for_id(
                 def.validate_draw_scope().unwrap_err()
             );
         })
+}
+
+/// CR 614.12a: determine whether a mandatory self-entry controller replacement
+/// needs a pre-entry opponent choice. The candidate set is captured once, before
+/// any physical zone move; the answer is written onto the same `ZoneChange` and
+/// resumed through the ordinary replacement pipeline.
+fn entry_controller_choice(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    rid: ReplacementId,
+) -> Option<(PlayerId, Vec<PlayerId>)> {
+    if proposed.already_applied(&rid) {
+        return None;
+    }
+    let ProposedEvent::ZoneChange {
+        object_id,
+        to: Zone::Battlefield,
+        ..
+    } = proposed
+    else {
+        return None;
+    };
+    let replacement = replacement_definition_for_id(state, rid)?;
+    if replacement_mode_is_optional(&replacement.mode)
+        || !matches!(
+            replacement.enters_under.as_ref(),
+            Some(ControllerRef::Opponent)
+        )
+    {
+        return None;
+    }
+    let chooser = state.objects.get(object_id)?.controller;
+    let candidates = crate::game::players::choosable_opponents(state, chooser);
+    (candidates.len() >= 2).then_some((chooser, candidates))
+}
+
+/// CR 614.12a: park an as-enters controller choice without applying its
+/// replacement yet. Keeping the selected `ReplacementId` and exact proposed
+/// event in the normal pending record means the answer resumes the established
+/// CR 616.1 loop rather than reconstructing a zone move.
+fn park_entry_controller_choice(
+    state: &mut GameState,
+    proposed: ProposedEvent,
+    depth: u16,
+    rid: ReplacementId,
+    player: PlayerId,
+    candidates: Vec<PlayerId>,
+) -> ReplacementResult {
+    state.pending_replacement = Some(PendingReplacement {
+        proposed,
+        sacrifice_provenance: None,
+        candidates: vec![rid],
+        search_found_candidates: Vec::new(),
+        depth,
+        is_optional: false,
+        library_placement: None,
+        exile_controller: None,
+        exile_duration: None,
+        exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
+        excess_recipient: None,
+        lifelink_bonus: 0,
+        may_cost_paid: false,
+        may_cost_remaining: None,
+    });
+    state.waiting_for = WaitingFor::EntryControllerChoice { player, candidates };
+    ReplacementResult::NeedsChoice(player)
 }
 
 fn pipeline_loop(
@@ -9348,6 +9705,9 @@ fn pipeline_loop(
                     // CR 701.24a: set by the W3 library-placement arm after parking
                     // (the pipeline doesn't know the caller's placement here).
                     library_placement: None,
+                    exile_controller: None,
+                    exile_duration: None,
+                    exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
                     // CR 120.4a: set by `apply_damage_to_target` right after this
                     // park returns NeedsChoice (the ctx rider isn't known here).
                     excess_recipient: None,
@@ -9358,6 +9718,18 @@ fn pipeline_loop(
                     may_cost_remaining: None,
                 });
                 return ReplacementResult::NeedsChoice(affected);
+            }
+
+            if let Some((player, entry_candidates)) = entry_controller_choice(state, &proposed, rid)
+            {
+                return park_entry_controller_choice(
+                    state,
+                    proposed,
+                    depth,
+                    rid,
+                    player,
+                    entry_candidates,
+                );
             }
 
             proposed.mark_applied(rid);
@@ -9389,6 +9761,9 @@ fn pipeline_loop(
                 is_optional: false,
                 // CR 701.24a: set by the W3 library-placement arm after parking.
                 library_placement: None,
+                exile_controller: None,
+                exile_duration: None,
+                exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
                 // CR 120.4a: set by `apply_damage_to_target` right after this park
                 // returns NeedsChoice (the ctx rider isn't known here).
                 excess_recipient: None,
@@ -9643,7 +10018,23 @@ fn continue_replacement_impl(
         let reparked_depth = pending.depth;
         let reparked_library_placement = pending.library_placement.clone();
         let reparked_sacrifice_provenance = pending.sacrifice_provenance;
-        let mut proposed = pending.proposed;
+        let mut proposed = pending.proposed.clone();
+        if chosen_index == 0 {
+            if let Some((player, entry_candidates)) = entry_controller_choice(state, &proposed, rid)
+            {
+                // The optional accept decision is already made. Re-park the
+                // same replacement as mandatory so the entry-controller answer
+                // applies it exactly once without re-offering accept/decline.
+                pending.candidates = vec![rid];
+                pending.is_optional = false;
+                state.pending_replacement = Some(pending);
+                state.waiting_for = WaitingFor::EntryControllerChoice {
+                    player,
+                    candidates: entry_candidates,
+                };
+                return ReplacementResult::NeedsChoice(player);
+            }
+        }
         proposed.mark_applied(rid);
         // CR 614.1a: the "first time you would create … each turn" window is
         // per-player; it is consumed by `record_token_created` when the resulting
@@ -9704,6 +10095,9 @@ fn continue_replacement_impl(
                     depth: reparked_depth,
                     is_optional: true,
                     library_placement: reparked_library_placement,
+                    exile_controller: None,
+                    exile_duration: None,
+                    exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
                     // CR 120.4a: this MayCost re-park path is a zone-change /
                     // permanent-entry accept, never a damage hit, so no excess
                     // rider applies here.
@@ -9915,7 +10309,17 @@ fn continue_replacement_impl(
         return ReplacementResult::NeedsChoice(affected);
     }
 
-    let mut proposed = pending.proposed;
+    let mut proposed = pending.proposed.clone();
+    if let Some((player, entry_candidates)) = entry_controller_choice(state, &proposed, rid) {
+        pending.candidates = vec![rid];
+        pending.is_optional = false;
+        state.pending_replacement = Some(pending);
+        state.waiting_for = WaitingFor::EntryControllerChoice {
+            player,
+            candidates: entry_candidates,
+        };
+        return ReplacementResult::NeedsChoice(player);
+    }
     proposed.mark_applied(rid);
     // CR 614.1a: per-player "first time each turn" window is consumed by
     // `record_token_created` on the created tokens; no per-source bookkeeping here.
@@ -9955,8 +10359,8 @@ mod tests {
         AbilityCost, AbilityDefinition, AbilityKind, CastManaObjectScope, CastManaSpentMetric,
         ChosenAttribute, Comparator, ControllerRef, Effect, EffectScope, FilterProp,
         OriginConstraint, PlayerFilter, PtValue, QuantityExpr, QuantityModification, QuantityRef,
-        ReplacementDefinition, ReplacementMode, ReplacementPlayerScope, TapStateChange,
-        TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        ReplacementDefinition, ReplacementMode, ReplacementPlayerScope, SourceExclusion,
+        TapStateChange, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -9973,6 +10377,134 @@ mod tests {
 
     fn make_repl(event: ReplacementEvent) -> ReplacementDefinition {
         ReplacementDefinition::new(event)
+    }
+
+    /// CR 614.9: the durable-redirection recipient mapping covers the supported
+    /// parser recipient phrasings.
+    /// An unmapped recipient makes the shield fail closed (the damage is dealt
+    /// as proposed instead of being moved), which is safe but silently drops the
+    /// card's whole ability — so the mapping must never have a hole.
+    ///
+    /// The cases exercise the real grammar rather than constructing
+    /// `TargetFilter`s directly. Keep this table synchronized with parser
+    /// additions; the runtime residual arm remains the release-mode safety
+    /// boundary if a new parser recipient is not yet mapped here.
+    #[test]
+    fn durable_redirect_route_maps_supported_parser_recipients() {
+        use crate::parser::oracle_replacement::parse_durable_redirect_recipient_filter;
+
+        // Every recipient phrasing the "... is dealt to <recipient> instead"
+        // tail accepts, in the normalized (`~`-substituted, lowercased) form the
+        // spine sees. Each must route to `Redirect`.
+        let phrasings = [
+            ("~", DamageRedirectTarget::SourceObject),
+            ("equipped creature", DamageRedirectTarget::AttachedToSource),
+            ("enchanted creature", DamageRedirectTarget::AttachedToSource),
+        ];
+        for (phrase, expected) in phrasings {
+            let (rest, filter) = parse_durable_redirect_recipient_filter(phrase)
+                .unwrap_or_else(|_| panic!("the spine's recipient slot must accept {phrase:?}"));
+            assert!(
+                rest.is_empty(),
+                "{phrase:?} must be fully consumed by the recipient slot, left {rest:?}"
+            );
+            assert_eq!(
+                durable_redirect_route_for_filter(&filter),
+                PreventionShieldRoute::Redirect(expected),
+                "{phrase:?} parsed to {filter:?}, which has no redirection mapping — it would \
+                 fail closed and silently drop the card's redirection"
+            );
+        }
+
+        // Owned by the ONE-SHOT path (`redirect_chosen_object_for_rid`), which
+        // reads it off a `ShieldKind::Redirection` shield — never this gate. Not
+        // parser-producible here, so it is asserted directly.
+        assert_eq!(
+            durable_redirect_route_for_filter(&TargetFilter::SpecificObject { id: ObjectId(7) }),
+            PreventionShieldRoute::Prevent,
+            "a captured chosen object belongs to the one-shot redirection shield"
+        );
+
+        // The fail-closed residual arm, asserted rather than assumed: an
+        // unmapped recipient must NOT reach the CR 615 prevention arms, where it
+        // would delete the damage instead of moving it.
+        assert_eq!(
+            durable_redirect_route_for_filter(&TargetFilter::Any),
+            PreventionShieldRoute::Unmapped,
+            "an unmapped recipient must fail closed, not degrade into a CR 615 prevention"
+        );
+    }
+
+    #[test]
+    fn continuous_next_redirection_fails_closed_without_spending_the_shield() {
+        // CR 615.7: a finite "next N damage" shield depletes by each point it
+        // prevents. Pairing it with a continuous redirection has no valid
+        // depletion lifecycle, so the runtime must leave the damage untouched
+        // rather than redirecting N damage from every later event.
+        let mut state = GameState::new_two_player(42);
+        let mut source = GameObject::new(
+            ObjectId(10),
+            CardId(1),
+            PlayerId(1),
+            "Damage source".to_string(),
+            Zone::Battlefield,
+        );
+        source.card_types.core_types = vec![CoreType::Creature];
+        let mut chosen = GameObject::new(
+            ObjectId(20),
+            CardId(2),
+            PlayerId(0),
+            "Chosen recipient".to_string(),
+            Zone::Battlefield,
+        );
+        chosen.card_types.core_types = vec![CoreType::Creature];
+        state.objects.insert(ObjectId(10), source);
+        state.objects.insert(ObjectId(20), chosen);
+        state.battlefield.push_back(ObjectId(10));
+        state.battlefield.push_back(ObjectId(20));
+        state.pending_damage_replacements.push(
+            ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .redirection_shield(
+                    DamageRedirectTarget::ChosenObjectTarget,
+                    PreventionAmount::Next(2),
+                    RedirectionLifetime::Continuous,
+                )
+                .redirect_target(TargetFilter::SpecificObject { id: ObjectId(20) }),
+        );
+
+        let mut events = Vec::new();
+        let result = replace_event(
+            &mut state,
+            ProposedEvent::Damage {
+                source_id: ObjectId(10),
+                target: TargetRef::Player(PlayerId(0)),
+                amount: 3,
+                is_combat: false,
+                applied: HashSet::new(),
+            },
+            &mut events,
+        );
+
+        assert!(matches!(
+            result,
+            ReplacementResult::Execute(ProposedEvent::Damage {
+                target: TargetRef::Player(PlayerId(0)),
+                amount: 3,
+                ..
+            })
+        ));
+        assert!(matches!(
+            state.pending_damage_replacements[0].shield_kind,
+            ShieldKind::Redirection {
+                amount: PreventionAmount::Next(2),
+                lifetime: RedirectionLifetime::Continuous,
+                ..
+            }
+        ));
+        assert!(
+            !state.pending_damage_replacements[0].is_consumed,
+            "rejecting the malformed pair must not consume or mutate its shield"
+        );
     }
 
     fn search_found_execute(destination: Zone) -> AbilityDefinition {
@@ -10673,7 +11205,9 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             LiminalEntry {
-                object: liminal,
+                object: crate::types::game_state::LiminalEntrant::Token(
+                    crate::types::game_state::TokenProjection::materialize(liminal),
+                ),
                 name: "Liminal Copy".to_string(),
                 source_id: ObjectId(999),
                 controller: PlayerId(0),
@@ -11248,6 +11782,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -12270,6 +12805,9 @@ mod tests {
             depth: 0,
             is_optional: true,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,
@@ -12329,6 +12867,9 @@ mod tests {
                 depth: 0,
                 is_optional: true,
                 library_placement: None,
+                exile_controller: None,
+                exile_duration: None,
+                exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
                 excess_recipient: None,
                 lifelink_bonus: 0,
                 may_cost_paid: false,
@@ -12409,6 +12950,9 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,
@@ -13467,6 +14011,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -13660,6 +14205,123 @@ mod tests {
             !candidates.is_empty(),
             "Non-prevention damage replacements should not be blocked"
         );
+    }
+
+    /// CR 614.9 + CR 615.12: "damage can't be prevented" suppresses PREVENTION
+    /// effects only. A durable redirection (Palisade Giant, Ancient Adamantoise,
+    /// Pariah, Pariah's Shield, With Great Power . . .) is stored as a
+    /// `ShieldKind::Prevention` shield carrying a `redirect_target`, but it
+    /// prevents nothing — it moves the damage — so it must keep applying.
+    ///
+    /// Discriminating: reverting the `redirect_target` guard in
+    /// `is_damage_prevention_replacement` re-classifies this shield as a
+    /// prevention, `find_applicable_replacements` drops it, and the redirect
+    /// assertion below fails with an empty candidate list.
+    #[test]
+    fn restriction_does_not_block_durable_redirect_shields() {
+        use crate::types::ability::{
+            GameRestriction, PreventionAmount, ReplacementDefinition, RestrictionExpiry,
+        };
+
+        // Palisade Giant's shape: "all damage that would be dealt to you and
+        // other permanents you control is dealt to ~ instead".
+        let giant = ObjectId(1);
+        let redirect_repl = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .prevention_shield(PreventionAmount::All)
+            .redirect_target(TargetFilter::SelfRef);
+        let mut state = test_state_with_object(giant, Zone::Battlefield, vec![redirect_repl]);
+        // CR 614.9: the recipient must still be a creature on the battlefield, or
+        // the redirection legitimately does nothing.
+        state
+            .objects
+            .get_mut(&giant)
+            .expect("fixture object")
+            .card_types
+            .core_types = vec![crate::types::card_type::CoreType::Creature];
+        state
+            .restrictions
+            .push(GameRestriction::DamagePreventionDisabled {
+                source: ObjectId(99),
+                expiry: RestrictionExpiry::EndOfTurn,
+                scope: None, // Global
+            });
+
+        let proposed = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+
+        let registry = build_replacement_registry();
+        let candidates = find_applicable_replacements(&state, &proposed, &registry);
+        assert!(
+            !candidates.is_empty(),
+            "CR 615.12 suppresses prevention, not CR 614.9 redirection — the shield must survive"
+        );
+
+        // Reach guard + behavior: the surviving candidate must actually MOVE the
+        // damage onto the Giant, not merely be offered. An `is_empty()` check
+        // alone would still pass if the shield were applied as a prevention.
+        let rid = candidates[0];
+        let mut events = Vec::new();
+        let result = damage_done_applier(proposed, rid, &mut state, &mut events);
+        match result {
+            ApplyResult::Modified(ProposedEvent::Damage { target, amount, .. }) => {
+                assert_eq!(
+                    target,
+                    TargetRef::Object(giant),
+                    "CR 614.9: the damage is dealt to the redirection host instead"
+                );
+                assert_eq!(amount, 3, "CR 615.12: a redirection prevents no damage");
+            }
+            other => panic!("expected the damage to be redirected, got {other:?}"),
+        }
+    }
+
+    /// CR 614.9: a durable shield whose `redirect_target` has no mapping FAILS
+    /// CLOSED — the damage is dealt as proposed. It must never fall through to
+    /// the CR 615 prevention arms, which would delete the damage entirely.
+    ///
+    /// Discriminating: routing `Unmapped` to the prevention arms instead makes
+    /// this return `ApplyResult::Prevented`.
+    #[test]
+    fn unmapped_durable_redirect_recipient_fails_closed_instead_of_preventing() {
+        use crate::types::ability::{PreventionAmount, ReplacementDefinition};
+
+        let host = ObjectId(1);
+        // `TargetFilter::Any` is not a recipient the spine can produce; it stands
+        // in for a future parser recipient added without a mapping.
+        let repl = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .prevention_shield(PreventionAmount::All)
+            .redirect_target(TargetFilter::Any);
+        let mut state = test_state_with_object(host, Zone::Battlefield, vec![repl]);
+
+        let proposed = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        let rid = ReplacementId {
+            source: host,
+            index: 0,
+        };
+        let mut events = Vec::new();
+        let result = damage_done_applier(proposed, rid, &mut state, &mut events);
+        match result {
+            ApplyResult::Modified(ProposedEvent::Damage { target, amount, .. }) => {
+                assert_eq!(
+                    target,
+                    TargetRef::Player(PlayerId(0)),
+                    "the damage stays on its original recipient"
+                );
+                assert_eq!(amount, 3, "no damage may be deleted by an unmapped shield");
+            }
+            other => panic!("an unmapped recipient must fail closed, got {other:?}"),
+        }
     }
 
     // ── destination_zone filter tests (CR 614.6) ──
@@ -14568,6 +15230,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: EtbTapState::Tapped,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -14897,6 +15560,7 @@ mod tests {
             .damage_target_filter(DamageTargetFilter::PlayerOrPermanentsControlledBy {
                 player: DamageTargetPlayerScope::Opponent,
                 permanent_type: None,
+                source_scope: SourceExclusion::Include,
             });
 
         // Hawkeye = ObjectId(10), controlled by P0, power 2.
@@ -15316,6 +15980,7 @@ mod tests {
         .damage_target_filter(DamageTargetFilter::PlayerOrPermanentsControlledBy {
             player: DamageTargetPlayerScope::Opponent,
             permanent_type: None,
+            source_scope: SourceExclusion::Include,
         });
         // Replacement on P0's object
         let state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
@@ -15341,6 +16006,7 @@ mod tests {
         .damage_target_filter(DamageTargetFilter::PlayerOrPermanentsControlledBy {
             player: DamageTargetPlayerScope::Opponent,
             permanent_type: None,
+            source_scope: SourceExclusion::Include,
         });
         let state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
 
@@ -15366,6 +16032,7 @@ mod tests {
         .damage_target_filter(DamageTargetFilter::PlayerOrPermanentsControlledBy {
             player: DamageTargetPlayerScope::Opponent,
             permanent_type: None,
+            source_scope: SourceExclusion::Include,
         });
         let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
 
@@ -15402,6 +16069,7 @@ mod tests {
             DamageTargetFilter::PlayerOrPermanentsControlledBy {
                 player: DamageTargetPlayerScope::SourceChosenPlayer,
                 permanent_type: None,
+                source_scope: SourceExclusion::Include,
             },
         );
         let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
@@ -15444,6 +16112,7 @@ mod tests {
             DamageTargetFilter::PlayerOrPermanentsControlledBy {
                 player: DamageTargetPlayerScope::SourceChosenPlayer,
                 permanent_type: None,
+                source_scope: SourceExclusion::Include,
             },
         );
         let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
@@ -15779,6 +16448,9 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,
@@ -17719,6 +18391,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -17765,6 +18438,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,

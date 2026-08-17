@@ -67,6 +67,7 @@ function createMockDraftView(overrides: Partial<DraftPlayerView> = {}): DraftPla
     pass_direction: "Left",
     current_pack: null,
     pool: [],
+    draft_effects: [],
     pool_groups: EMPTY_DRAFT_POOL_GROUPS,
     seats: [],
     cards_per_pack: 14,
@@ -114,6 +115,7 @@ const viewerInteraction = {
   autoPassRecommended: false,
   opportunities: [],
   attachmentFans: {},
+  attachmentViews: {},
   availability: { type: "inputRequired" },
 } as LegalActionsResult["viewerInteraction"];
 

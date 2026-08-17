@@ -80,6 +80,7 @@ fn fire_cast_trigger(
         card_id: CardId(9000),
         controller: caster,
         object_id: ObjectId(9000),
+        cast_mana_value: None,
     });
     let parsed = parse_oracle_text(
         ORACLE,

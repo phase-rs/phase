@@ -12,7 +12,7 @@ import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 
 import { P2PGuestAdapter, P2PHostAdapter, playerSlotsFromSeatView } from "../p2p-adapter";
-import { supportsAiDecisionDiagnostics, supportsMatchConcede, type FormatConfig, type GameAction, type GameEvent, type GameLogEntry, type GameState } from "../types";
+import { AdapterError, AdapterErrorCode, supportsAiDecisionDiagnostics, supportsMatchConcede, type FormatConfig, type GameAction, type GameEvent, type GameLogEntry, type GameState } from "../types";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
 import { WIRE_PROTOCOL_VERSION } from "../../network/protocol";
 import { p2pFinalStateCommitment } from "../../services/p2pTerminalResult";
@@ -153,8 +153,18 @@ const mocks = vi.hoisted(() => {
         nowStarted: false,
       },
     })),
-    initializeGame: vi.fn(async () => ({ events: [] })),
+    /**
+     * The host's atomic claim: the engine refuses an occupied engine and takes
+     * the multiplayer flag in this one call. Default "the engine accepted" — a
+     * real engine with nothing installed answers the same way.
+     */
+    initializeMultiplayerHostGame: vi.fn(async () => ({ events: [] })),
     setMultiplayerMode: vi.fn(async (_enabled: boolean) => undefined),
+    /**
+     * Replaces the bare `dispose()` the host used to call on its engine.
+     * Shared by every mock instance: assertions read the `claimed` argument.
+     */
+    releaseHostSession: vi.fn(async (_claimed: boolean) => undefined),
     setAiDecisionDiagnosticsEnabled: vi.fn(),
     subscribeAiDecisionDiagnostics: vi.fn(() => () => {}),
   };
@@ -184,7 +194,7 @@ vi.mock("../ws-adapter", () => ({
 const mockSubmitAction = mocks.submitAction;
 const mockCheckDeckCompatibility = mocks.checkDeckCompatibility;
 const mockGetViewerSnapshot = mocks.getViewerSnapshot;
-const mockInitializeGame = mocks.initializeGame;
+const mockInitializeHostGame = mocks.initializeMultiplayerHostGame;
 const mockSetMultiplayerMode = mocks.setMultiplayerMode;
 const mockProjectSeatView = mocks.projectSeatView;
 interface AsyncMockWithResolvedValueOnce {
@@ -253,30 +263,37 @@ async function flushPromises(iterations = 5): Promise<void> {
   }
 }
 
-vi.mock("../wasm-adapter", () => ({
-  WasmAdapter: vi.fn().mockImplementation(function () {
-    return {
-      initialize: mocks.initialize,
-      initializeGame: mocks.initializeGame,
-      submitAction: mocks.submitAction,
-      checkDeckCompatibility: mocks.checkDeckCompatibility,
-      getState: mocks.getState,
-      getLegalActions: mocks.getLegalActions,
-      getSnapshot: mocks.getSnapshot,
-      getLegalActionsForViewer: mocks.getLegalActionsForViewer,
-      getFilteredState: mocks.getFilteredState,
-      getViewerSnapshot: mocks.getViewerSnapshot,
-      getAiActionProposal: mocks.getAiActionProposal,
-      submitAiActionProposal: mocks.submitAiActionProposal,
-      applySeatMutation: mocks.applySeatMutation,
-      projectSeatView: mocks.projectSeatView,
-      setMultiplayerMode: mocks.setMultiplayerMode,
-      setAiDecisionDiagnosticsEnabled: mocks.setAiDecisionDiagnosticsEnabled,
-      subscribeAiDecisionDiagnostics: mocks.subscribeAiDecisionDiagnostics,
-      dispose: vi.fn(),
-    };
-  }),
-}));
+// `getHostAdapter` is how the host acquires its engine (shared worker on
+// memory-constrained devices, a private one everywhere else). Both exports
+// hand back the same instance shape here — the branch itself is exercised
+// against the real module in `wasm-adapter.test.ts`.
+vi.mock("../wasm-adapter", () => {
+  const createEngine = () => ({
+    initialize: mocks.initialize,
+    initializeMultiplayerHostGame: mocks.initializeMultiplayerHostGame,
+    submitAction: mocks.submitAction,
+    checkDeckCompatibility: mocks.checkDeckCompatibility,
+    getState: mocks.getState,
+    getLegalActions: mocks.getLegalActions,
+    getSnapshot: mocks.getSnapshot,
+    getLegalActionsForViewer: mocks.getLegalActionsForViewer,
+    getFilteredState: mocks.getFilteredState,
+    getViewerSnapshot: mocks.getViewerSnapshot,
+    getAiActionProposal: mocks.getAiActionProposal,
+    submitAiActionProposal: mocks.submitAiActionProposal,
+    applySeatMutation: mocks.applySeatMutation,
+    projectSeatView: mocks.projectSeatView,
+    setMultiplayerMode: mocks.setMultiplayerMode,
+    releaseHostSession: mocks.releaseHostSession,
+    setAiDecisionDiagnosticsEnabled: mocks.setAiDecisionDiagnosticsEnabled,
+    subscribeAiDecisionDiagnostics: mocks.subscribeAiDecisionDiagnostics,
+    dispose: vi.fn(),
+  });
+  return {
+    WasmAdapter: vi.fn().mockImplementation(createEngine),
+    getHostAdapter: vi.fn(createEngine),
+  };
+});
 
 // Stub crypto.randomUUID for deterministic token assertions
 const mockInitialize = mocks.initialize;
@@ -290,7 +307,6 @@ beforeEach(() => {
   mockSubmitAction.mockClear();
   mockCheckDeckCompatibility.mockClear();
   mockGetViewerSnapshot.mockClear();
-  mockInitializeGame.mockClear();
   mockSetMultiplayerMode.mockClear();
   mockProjectSeatView.mockClear();
   mockGetState.mockClear();
@@ -298,6 +314,13 @@ beforeEach(() => {
   mockSubmitAiActionProposal.mockClear();
   mocks.setAiDecisionDiagnosticsEnabled.mockClear();
   mocks.subscribeAiDecisionDiagnostics.mockClear();
+  // `mockReset`, not `mockClear`: these two carry per-test
+  // `mockResolvedValueOnce`/`mockRejectedValueOnce` overrides, and only
+  // `mockReset` drops an unconsumed one (a test that throws before consuming it
+  // would otherwise leak a rejecting host-start into the next test). Both are
+  // `vi.fn(impl)`, so the reset restores their default implementations.
+  mocks.initializeMultiplayerHostGame.mockReset();
+  mocks.releaseHostSession.mockReset();
   nativeWebSocketMocks.initializePregame.mockReset();
   nativeWebSocketMocks.waitForPlayerSlots.mockReset();
   nativeWebSocketMocks.onEvent.mockClear();
@@ -581,17 +604,33 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     ).toThrow("P2P supports 2-6 players");
   });
 
-  it("enables multiplayer-mode enforcement on the engine at init time", async () => {
-    // P2PHostAdapter owns an authoritative WASM engine locally; flipping
-    // the engine's multiplayer flag during initialize() ensures any stray
-    // restore_game_state call is refused in the Rust layer.
+  it("claims the engine through the atomic host-start call, never a client flag flip", async () => {
+    // The engine's multiplayer flag is process-wide and nothing ever clears it,
+    // so an open host lobby must leave zero engine footprint. The claim belongs
+    // to the engine, made inside the same call that installs the game: a client
+    // flag flip followed by a separate install is two round-trips, and a local
+    // `initializeGame` sharing this worker can land between them.
     const { adapter } = makeHost(2);
     expect(mockSetMultiplayerMode).not.toHaveBeenCalled();
 
     await adapter.initialize();
 
-    expect(mockSetMultiplayerMode).toHaveBeenCalledTimes(1);
-    expect(mockSetMultiplayerMode).toHaveBeenCalledWith(true);
+    expect(mockSetMultiplayerMode).not.toHaveBeenCalled();
+
+    await adapter.applySeatMutation({
+      type: "SetKind",
+      data: {
+        seatIndex: 1,
+        kind: {
+          type: "Ai",
+          data: { difficulty: "Medium", deck: { type: "Random" } },
+        },
+      },
+    });
+    await adapter.initializeGame();
+
+    expect(mockInitializeHostGame).toHaveBeenCalledTimes(1);
+    expect(mockSetMultiplayerMode).not.toHaveBeenCalled();
   });
 
   it("does not reinitialize the host during the lobby-to-game handoff", async () => {
@@ -601,7 +640,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     await adapter.initialize();
 
     expect(mockInitialize).toHaveBeenCalledTimes(1);
-    expect(mockSetMultiplayerMode).toHaveBeenCalledTimes(1);
+    expect(mockSetMultiplayerMode).not.toHaveBeenCalled();
   });
 
   it("fences a stale host when a same-session resume claims a new incarnation", async () => {
@@ -733,7 +772,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       signature_spell: ["Invalid Signature Spell"],
       selected_format: "Commander",
     });
-    expect(mockInitializeGame).not.toHaveBeenCalled();
+    expect(mockInitializeHostGame).not.toHaveBeenCalled();
 
     const kicked = (await guest.getSentMessages()).find(
       (message) =>
@@ -2188,5 +2227,188 @@ describe("P2PHostAdapter — bound draft match concession", () => {
       reason: "Whole-match concession is unavailable for this game",
     }));
     adapter.dispose();
+  });
+});
+
+/**
+ * On a memory-constrained device the host's engine is the same worker local
+ * play uses, so teardown must clear engine state for the claimant and only the
+ * claimant, and a start must never overwrite a game that is already live.
+ */
+describe("P2PHostAdapter — shared-engine ownership", () => {
+  beforeEach(() => {
+    // Earlier suites leave persistent `mockResolvedValue` overrides on the AI
+    // mocks (`mockClear` does not undo those). Restore a board where the host
+    // holds priority and no AI proposal is pending, so `runAiLoop` returns
+    // immediately and these tests observe only the ownership bookkeeping.
+    mockGetState.mockResolvedValue({
+      players: [],
+      objects: {},
+      priority_player: 0,
+      waiting_for: { type: "Priority", data: { player: 0 } },
+    });
+    mockGetAiActionProposal.mockResolvedValue(null);
+  });
+
+  async function seatAi(adapter: P2PHostAdapter): Promise<void> {
+    await adapter.applySeatMutation({
+      type: "SetKind",
+      data: {
+        seatIndex: 1,
+        kind: { type: "Ai", data: { difficulty: "Medium", deck: { type: "Random" } } },
+      },
+    });
+  }
+
+  async function startedHost(): Promise<P2PHostAdapter> {
+    const { adapter } = makeHost(2);
+    await adapter.initialize();
+    await seatAi(adapter);
+    await adapter.initializeGame();
+    return adapter;
+  }
+
+  it("clears the engine state it installed when the host tears down", async () => {
+    const adapter = await startedHost();
+    mocks.releaseHostSession.mockClear();
+
+    adapter.dispose();
+
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(true);
+  });
+
+  it("leaves the engine untouched when a host that never started tears down", async () => {
+    const { adapter } = makeHost(2);
+    await adapter.initialize();
+    mocks.releaseHostSession.mockClear();
+
+    adapter.dispose();
+
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(false);
+  });
+
+  it("does not let another host's teardown clear the claimant's game", async () => {
+    const claimant = await startedHost();
+    const { adapter: other } = makeHost(2);
+    await other.initialize();
+
+    mocks.releaseHostSession.mockClear();
+    other.dispose();
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(false);
+
+    mocks.releaseHostSession.mockClear();
+    claimant.dispose();
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(true);
+  });
+
+  function occupiedRefusal(): AdapterError {
+    return new AdapterError(
+      AdapterErrorCode.ENGINE_OCCUPIED,
+      "Finish or leave your current game before starting a new one.",
+      false,
+    );
+  }
+
+  it("surfaces the engine's refusal when it already holds a game", async () => {
+    const { adapter } = makeHost(2);
+    await adapter.initialize();
+    await seatAi(adapter);
+    // The engine is the authority, not a client-side probe: it tests occupancy
+    // and installs inside one synchronous worker task, so a local
+    // `initializeGame` on the same shared worker cannot land in between.
+    mockInitializeHostGame.mockRejectedValueOnce(occupiedRefusal());
+
+    await expect(adapter.initializeGame()).rejects.toThrow(
+      /Finish or leave your current game/,
+    );
+    // A refused claim installed nothing, so there is nothing to compensate.
+    // `releaseHostSession(true)` here would run `resetGameState()` on the
+    // shared engine and destroy the live local game the refusal just protected.
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(false);
+    expect(mocks.releaseHostSession).not.toHaveBeenCalledWith(true);
+    expect(mockSetMultiplayerMode).not.toHaveBeenCalled();
+    adapter.dispose();
+  });
+
+  it("leaves the engine untouched when a refused claim is disposed concurrently", async () => {
+    const { adapter } = makeHost(2);
+    await adapter.initialize();
+    await seatAi(adapter);
+    // "Cancel hosting" clicked while a refused start is still in flight:
+    // `dispose()` sets `disposed` synchronously, so the catch takes its
+    // *disposed* branch — which routes to `releaseHostSession` as well. With
+    // `true` that branch would reset the very game the refusal protected. The
+    // test above never disposes, so only this one covers that exit.
+    const gate = deferred<undefined>();
+    mockInitializeHostGame.mockImplementationOnce(async () => {
+      await gate.promise;
+      throw occupiedRefusal();
+    });
+    const start = adapter.initializeGame();
+    await vi.waitFor(() => {
+      expect(mockInitializeHostGame).toHaveBeenCalled();
+    });
+
+    adapter.dispose();
+    mocks.releaseHostSession.mockClear();
+    gate.resolve(undefined);
+
+    await expect(start).rejects.toThrow(/disposed during start/);
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(false);
+    expect(mocks.releaseHostSession).not.toHaveBeenCalledWith(true);
+  });
+
+  it("hands the engine back when teardown lands while the start call is in flight", async () => {
+    const { adapter } = makeHost(2);
+    await adapter.initialize();
+    await seatAi(adapter);
+    // Park inside the host-start call — the real window is the card-DB load it
+    // awaits, seconds wide with "Cancel hosting" one click away. Here the
+    // engine *accepted*, so this bail owns the state it installed and has to
+    // hand it back, flag included; nothing else ever clears it.
+    const install = deferred<{ events: [] }>();
+    mockInitializeHostGame.mockReturnValueOnce(install.promise);
+    const start = adapter.initializeGame();
+    await vi.waitFor(() => {
+      expect(mockInitializeHostGame).toHaveBeenCalled();
+    });
+
+    adapter.dispose();
+    mocks.releaseHostSession.mockClear();
+    install.resolve({ events: [] });
+
+    await expect(start).rejects.toThrow(/disposed during start/);
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(true);
+  });
+
+  it("leaves the engine untouched when the start call rejects for any other reason", async () => {
+    const { adapter } = makeHost(2);
+    await adapter.initialize();
+    await seatAi(adapter);
+    // The engine also rejects on deck validation, and on "Card database not
+    // loaded" whenever `ensureCardDb` swallowed a fetch failure — routine on
+    // the flaky-network devices that share this worker. No engine state is
+    // installed on any of those paths either.
+    const refusal = new Error("Card database not loaded");
+    mockInitializeHostGame.mockRejectedValueOnce(refusal);
+
+    await expect(adapter.initializeGame()).rejects.toThrow(refusal);
+
+    expect(mockSetMultiplayerMode).not.toHaveBeenCalled();
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(false);
+    expect(mocks.releaseHostSession).not.toHaveBeenCalledWith(true);
+    adapter.dispose();
+  });
+
+  it("fails loud on engine calls after teardown", async () => {
+    const { adapter } = makeHost(2);
+    await adapter.initialize();
+
+    adapter.dispose();
+
+    await expect(adapter.getState()).rejects.toThrow("P2P host adapter has been disposed");
+    await expect(adapter.submitAction({ type: "PassPriority" }, 0)).rejects.toThrow(
+      "P2P host adapter has been disposed",
+    );
   });
 });

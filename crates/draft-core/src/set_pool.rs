@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use engine::types::card::DraftEffect;
+
 /// Rarity of a card printing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -46,6 +48,9 @@ pub struct SheetCard {
     /// Full type line, e.g. "Creature — Human Wizard". Populated from MTGJSON at extraction.
     #[serde(default)]
     pub type_line: String,
+    /// Draft-time effect parsed from the card's Oracle text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_effect: Option<DraftEffect>,
 }
 
 /// A named sheet of cards (e.g., "common", "uncommon", "rareMythic").

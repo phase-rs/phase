@@ -1,8 +1,8 @@
 use crate::types::ability::{
-    AbilityKind, ContinuousModification, CopyCountStatus, Duration, Effect, EffectKind, FilterProp,
-    KeywordAction, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility,
-    SiblingCondition, SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetRef,
-    TargetSelectionMode, TriggerCondition,
+    AbilityKind, ContinuousModification, CopyCountStatus, DetachedRemainder, Duration, Effect,
+    EffectKind, FilterProp, KeywordAction, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef,
+    ResolvedAbility, SiblingCondition, SpellContext, SubAbilityLink, TargetChoiceTiming,
+    TargetFilter, TargetRef, TargetSelectionMode, TriggerCondition,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -102,22 +102,26 @@ fn push_to_stack_with_firing(
         entry.kind,
         StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. }
     ) {
+        if let Some(ability) = entry.ability_mut() {
+            // CR 400.7 + CR 113.7a: Capture the source incarnation for every
+            // activated or triggered ability, including non-transforming
+            // permanents. The transformation guard below has a narrower scope.
+            if ability.source_incarnation.is_none() {
+                ability
+                    .set_source_incarnation_recursive(source_ref.map(|source| source.incarnation));
+            }
+        }
+
         let source = state
             .objects
             .get(&entry.source_id)
             .filter(|object| object.back_face.is_some());
         let count = source.map(|object| object.transformation_count);
-        let incarnation = source.map(|object| object.incarnation);
         if let Some(ability) = entry.ability_mut() {
             // CR 701.27f: delayed triggered abilities already carry their
             // creation-time generation and must not be restamped when fired.
             if ability.context.source_transformation_count.is_none() {
                 ability.set_source_transformation_count_recursive(count);
-                // CR 400.7: a re-entered source can share the same storage ID
-                // and transformation generation, so retain its incarnation too.
-                if ability.source_incarnation.is_none() {
-                    ability.set_source_incarnation_recursive(incarnation);
-                }
             }
         }
     }
@@ -932,59 +936,104 @@ pub(crate) fn bind_resolution_scope(
     entry: &StackEntry,
     trigger_event_batch: Option<Vec<GameEvent>>,
 ) -> bool {
-    // CR 603.4: Intervening-if condition rechecked at resolution time.
-    if let StackEntryKind::TriggeredAbility {
-        condition: Some(ref condition),
-        source_id: _,
-        ref trigger_event,
-        ..
-    } = &entry.kind
-    {
-        let trigger_source = entry
-            .ability()
-            .and_then(|ability| ability.trigger_source.as_ref());
-        if !super::triggers::check_trigger_condition_with_source(
-            state,
+    let triggered = match &entry.kind {
+        StackEntryKind::TriggeredAbility {
             condition,
-            entry.controller,
-            trigger_source,
-            trigger_event.as_ref(),
-        ) {
-            return false;
+            trigger_event,
+            subject_match_count,
+            die_result,
+            ..
+        } => Some(TriggeredResolutionScope {
+            condition: condition.as_ref(),
+            controller: entry.controller,
+            trigger_source: entry
+                .ability()
+                .and_then(|ability| ability.trigger_source.as_ref()),
+            trigger_event: trigger_event.as_ref(),
+            subject_match_count: *subject_match_count,
+            die_result: *die_result,
+        }),
+        _ => None,
+    };
+    bind_triggered_resolution_scope(state, triggered, trigger_event_batch)
+}
+
+/// The facts a triggered ability contributes to its own resolution scope,
+/// lifted out of `StackEntryKind::TriggeredAbility` so a resolution that owns
+/// no stack entry can bind exactly the same scope.
+///
+/// CR 605.4a triggered mana abilities are the motivating second consumer: they
+/// resolve without ever creating a stack object, yet they still need the
+/// CR 603.4 recheck, the CR 608.2k event context, the CR 603.2c subject count,
+/// and the CR 706.2 die-roll re-stamp to be bound in exactly the order and with
+/// exactly the semantics stack resolution uses. Reimplementing that binding
+/// beside the immediate dispatcher would be a second authority for CR 603.4.
+pub(crate) struct TriggeredResolutionScope<'a> {
+    pub condition: Option<&'a TriggerCondition>,
+    pub controller: PlayerId,
+    pub trigger_source: Option<&'a TriggerSourceContext>,
+    pub trigger_event: Option<&'a GameEvent>,
+    pub subject_match_count: Option<u32>,
+    pub die_result: Option<i32>,
+}
+
+/// The decision-and-binding half of [`bind_resolution_scope`], with no stack
+/// entry in sight. Returns `false` exactly when the CR 603.4 intervening-if
+/// recheck fails, in which case **nothing** has been bound — the caller must
+/// abandon the resolution without applying any effect.
+///
+/// `triggered` is `None` for a non-triggered resolution (a spell, an activated
+/// ability, a keyword action); such a scope has no condition, no subject count,
+/// and no die result, and reaches only the batch branch below.
+pub(crate) fn bind_triggered_resolution_scope(
+    state: &mut GameState,
+    triggered: Option<TriggeredResolutionScope<'_>>,
+    trigger_event_batch: Option<Vec<GameEvent>>,
+) -> bool {
+    // CR 603.4: Intervening-if condition rechecked at resolution time.
+    if let Some(scope) = &triggered {
+        if let Some(condition) = scope.condition {
+            if !super::triggers::check_trigger_condition_with_source(
+                state,
+                condition,
+                scope.controller,
+                scope.trigger_source,
+                scope.trigger_event,
+            ) {
+                return false;
+            }
         }
     }
 
     // CR 608.2k: Set trigger event context for event-context target resolution.
     // TriggeringSpellController, TriggeringSource, etc. read this during resolution.
-    if let StackEntryKind::TriggeredAbility {
-        trigger_event: Some(ref te),
-        ..
-    } = entry.kind
-    {
-        state.current_trigger_event = Some(te.clone());
-        state.current_trigger_events = trigger_event_batch.unwrap_or_else(|| vec![te.clone()]);
-    } else if let Some(trigger_events) = trigger_event_batch {
-        state.current_trigger_event = trigger_events.first().cloned();
-        state.current_trigger_events = trigger_events;
+    match (
+        triggered.as_ref().and_then(|scope| scope.trigger_event),
+        trigger_event_batch,
+    ) {
+        (Some(te), batch) => {
+            state.current_trigger_event = Some(te.clone());
+            state.current_trigger_events = batch.unwrap_or_else(|| vec![te.clone()]);
+        }
+        (None, Some(trigger_events)) => {
+            state.current_trigger_event = trigger_events.first().cloned();
+            state.current_trigger_events = trigger_events;
+        }
+        (None, None) => {}
     }
 
     // CR 603.2c: Lift the filtered subject count of a batched trigger into
     // resolution scope so `QuantityRef::EventContextAmount` resolves "that
     // many" against the count, not against zero. Set in lockstep with
     // `current_trigger_event` and cleared at every reset site below.
-    if let StackEntryKind::TriggeredAbility {
-        subject_match_count,
-        die_result,
-        ..
-    } = entry.kind
-    {
-        state.current_trigger_match_count = subject_match_count;
+    if let Some(scope) = &triggered {
+        state.current_trigger_match_count = scope.subject_match_count;
         // CR 706.2 + CR 706.4 + CR 603.12: re-stamp the carried die-roll result
         // into resolution scope so a reflexive "When you do … the result"
         // sub-ability resolving on its own stack entry (a later apply(), after
         // the original roll's resolution scope cleared) reads the rolled value
         // via the `QuantityRef::EventContextAmount` cascade.
-        state.die_result_this_resolution = die_result;
+        state.die_result_this_resolution = scope.die_result;
     }
 
     true
@@ -2789,12 +2838,12 @@ pub fn resolve_next_with_limit(
                 }
             }
         }
-        if let Some(run_len) = fixed_opponent_lose_life_run_len(state) {
+        if let Some(run_len) = fixed_opponent_effect_run_len(state) {
             let run_len = run_len.min(max_consumed);
             if run_len >= 2 {
                 crate::game::perf_counters::record_stack_batch_candidate();
                 if let Some(consumed) =
-                    resolve_proven_fixed_opponent_lose_life_batch(state, events, run_len)
+                    resolve_proven_fixed_opponent_effect_batch(state, events, run_len)
                 {
                     return consumed;
                 }
@@ -2868,7 +2917,7 @@ fn resolve_proven_inert_trigger_batch(
     run_len: u32,
     pipeline_invariant: Option<InertTriggerBatchPipelineInvariant>,
 ) -> Option<u32> {
-    if !inert_trigger_batch_state_is_settled(state) {
+    if !priority_checkpoint_is_settled(state) {
         return None;
     }
 
@@ -2917,7 +2966,7 @@ fn resolve_proven_inert_trigger_batch(
             || counters_after_resolution
                 .is_some_and(|before| battlefield_counter_snapshot(&proof) != before)
             || initial_len.saturating_sub(proof.stack.len()) != expected_consumed
-            || !inert_trigger_batch_state_is_settled(&proof)
+            || !priority_checkpoint_is_settled(&proof)
         {
             return None;
         }
@@ -2976,7 +3025,11 @@ fn consumed_trigger_event_occurrences(
         .collect()
 }
 
-fn inert_trigger_batch_state_is_settled(state: &GameState) -> bool {
+/// True when resolution has reached a full priority checkpoint with no latent
+/// trigger, replacement, or continuation work.  Batch consumers that prove a
+/// sequence on a clone share this boundary rather than inferring safety from
+/// stack depth alone.
+pub(crate) fn priority_checkpoint_is_settled(state: &GameState) -> bool {
     state.pending_replacement.is_none()
         && state.pending_trigger.is_none()
         && state.pending_trigger_event_batch.is_empty()
@@ -3072,6 +3125,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         trigger_definition_ref,
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
+        selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
         controller: _,
         original_controller,
         scoped_player,
@@ -3083,12 +3137,15 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         context,
         optional_targeting,
         optional,
+        optional_player,
         optional_for,
         multi_target,
         target_constraints,
         target_choice_timing,
         description,
         selected_mode_labels,
+        modal_instruction_ordinal,
+        detached_remainder,
         repeat_for,
         min_x_value,
         announced_x,
@@ -3097,6 +3154,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         forward_result,
         unless_pay,
         distribution,
+        distribute,
         player_scope,
         starting_with,
         chosen_x,
@@ -3143,12 +3201,22 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && *context == SpellContext::default()
         && !*optional_targeting
         && !*optional
+        && optional_player.is_none()
         && optional_for.is_none()
         && multi_target.is_none()
         && target_constraints.is_empty()
         && *target_choice_timing == TargetChoiceTiming::Stack
         && description.is_none()
         && selected_mode_labels.is_empty()
+        // CR 700.2 + CR 700.2d: a mode root is the head of ONE selected
+        // instruction of a modal ability, and its ordinal gates the
+        // per-mode reset of the chain-local tracked-set identity in
+        // `resolve_ability_chain`. A batch collapses N stack entries into a
+        // SINGLE chain entry, so it would fire that per-instruction boundary
+        // once instead of N times. That is outside what this batch proof
+        // covers, so decline — declining only costs the optimization.
+        && modal_instruction_ordinal.is_none()
+        && matches!(detached_remainder, DetachedRemainder::NoProducer)
         && repeat_for.is_none()
         && *min_x_value == 0
         // CR 601.2b: an announce-locked X makes this ability's X board-dependent;
@@ -3159,6 +3227,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && !*forward_result
         && unless_pay.is_none()
         && distribution.is_none()
+        && distribute.is_none()
         && player_scope.is_none()
         && starting_with.is_none()
         && chosen_x.is_none()
@@ -3284,6 +3353,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         trigger_definition_ref: _,
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
+        selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
         controller: _,
         original_controller: _,
         scoped_player,
@@ -3292,15 +3362,18 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         else_ability,
         duration,
         condition,
-        context: _,
+        context,
         optional_targeting,
         optional,
+        optional_player,
         optional_for,
         multi_target,
         target_constraints,
         target_choice_timing,
         description: _,
         selected_mode_labels,
+        modal_instruction_ordinal,
+        detached_remainder,
         repeat_for,
         min_x_value,
         announced_x,
@@ -3309,6 +3382,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         forward_result,
         unless_pay,
         distribution,
+        distribute,
         player_scope,
         starting_with,
         chosen_x,
@@ -3347,13 +3421,24 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && else_ability.is_none()
         && duration.is_none()
         && condition.is_none()
+        && *context == SpellContext::default()
         && !*optional_targeting
         && !*optional
+        && optional_player.is_none()
         && optional_for.is_none()
         && multi_target.is_none()
         && target_constraints.is_empty()
         && *target_choice_timing == TargetChoiceTiming::Stack
         && selected_mode_labels.is_empty()
+        // CR 700.2 + CR 700.2d: a mode root is the head of ONE selected
+        // instruction of a modal ability, and its ordinal gates the
+        // per-mode reset of the chain-local tracked-set identity in
+        // `resolve_ability_chain`. A batch collapses N stack entries into a
+        // SINGLE chain entry, so it would fire that per-instruction boundary
+        // once instead of N times. That is outside what this batch proof
+        // covers, so decline — declining only costs the optimization.
+        && modal_instruction_ordinal.is_none()
+        && matches!(detached_remainder, DetachedRemainder::NoProducer)
         && repeat_for.is_none()
         && *min_x_value == 0
         && announced_x.is_none()
@@ -3362,6 +3447,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && !*forward_result
         && unless_pay.is_none()
         && distribution.is_none()
+        && distribute.is_none()
         && player_scope.is_none()
         && starting_with.is_none()
         && chosen_x.is_none()
@@ -3385,10 +3471,10 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && parent_target_missing_reason.is_none()
 }
 
-/// CR 117.3b + CR 117.3d + CR 117.5 + CR 608.2 + CR 704.3 + CR 119.3: Fixed
-/// opponent life-loss class — shared inert proof; life-loss observer refusal
-/// is covered by the common event/settled checkpoint checks.
-fn resolve_proven_fixed_opponent_lose_life_batch(
+/// CR 117.3b + CR 117.3d + CR 117.5 + CR 608.2 + CR 704.3: Fixed opponent-
+/// scoped effect class — shared inert proof. Zone-change and life-change
+/// observers are covered by the common event/settled checkpoint checks.
+fn resolve_proven_fixed_opponent_effect_batch(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     run_len: u32,
@@ -3396,7 +3482,7 @@ fn resolve_proven_fixed_opponent_lose_life_batch(
     resolve_proven_inert_trigger_batch(state, events, run_len, None)
 }
 
-struct FixedOpponentLoseLifeRunKey<'a> {
+struct FixedOpponentEffectRunKey<'a> {
     controller: PlayerId,
     ability: &'a ResolvedAbility,
     condition: Option<&'a TriggerCondition>,
@@ -3404,17 +3490,17 @@ struct FixedOpponentLoseLifeRunKey<'a> {
 }
 
 /// CR 603.3b + CR 603.4 + CR 608.2: Length of the top contiguous run of
-/// identical triggered abilities that make each opponent lose a fixed amount
-/// of life. Equal intervening-if conditions are admitted because the shared
-/// clone proof rechecks every entry at resolution time before committing.
+/// identical triggered abilities that apply a fixed life-loss or mill effect
+/// to each opponent. Equal intervening-if conditions are admitted because the
+/// shared clone proof rechecks every entry at resolution time before committing.
 /// Source provenance is inert for this effect shape, so distinct sources can
 /// share one run when all resolution-relevant fields agree.
-fn fixed_opponent_lose_life_run_len(state: &GameState) -> Option<u32> {
+fn fixed_opponent_effect_run_len(state: &GameState) -> Option<u32> {
     let top = state.stack.back()?;
-    let top_key = fixed_opponent_lose_life_run_key(state, top)?;
+    let top_key = fixed_opponent_effect_run_key(state, top)?;
     let mut len = 1u32;
     for entry in state.stack.iter().rev().skip(1) {
-        match fixed_opponent_lose_life_run_key(state, entry) {
+        match fixed_opponent_effect_run_key(state, entry) {
             Some(key)
                 if key.controller == top_key.controller
                     && key.condition == top_key.condition
@@ -3432,10 +3518,10 @@ fn fixed_opponent_lose_life_run_len(state: &GameState) -> Option<u32> {
     Some(len)
 }
 
-fn fixed_opponent_lose_life_run_key<'a>(
+fn fixed_opponent_effect_run_key<'a>(
     state: &'a GameState,
     entry: &'a StackEntry,
-) -> Option<FixedOpponentLoseLifeRunKey<'a>> {
+) -> Option<FixedOpponentEffectRunKey<'a>> {
     let StackEntryKind::TriggeredAbility {
         source_id: _,
         ability,
@@ -3452,12 +3538,12 @@ fn fixed_opponent_lose_life_run_key<'a>(
     };
 
     if !flatten_targets_in_chain(ability).is_empty()
-        || !fixed_opponent_lose_life_ability_is_batch_candidate(ability)
+        || !fixed_opponent_effect_ability_is_batch_candidate(ability)
     {
         return None;
     }
 
-    Some(FixedOpponentLoseLifeRunKey {
+    Some(FixedOpponentEffectRunKey {
         controller: entry.controller,
         ability,
         condition: condition.as_ref(),
@@ -3465,7 +3551,7 @@ fn fixed_opponent_lose_life_run_key<'a>(
     })
 }
 
-fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
+fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
     let ResolvedAbility {
         effect,
         targets,
@@ -3475,6 +3561,7 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         trigger_definition_ref: _,
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
+        selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
         controller: _,
         original_controller: _,
         scoped_player,
@@ -3483,15 +3570,18 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         else_ability,
         duration,
         condition,
-        context: _,
+        context,
         optional_targeting,
         optional,
+        optional_player,
         optional_for,
         multi_target,
         target_constraints,
         target_choice_timing,
         description: _,
         selected_mode_labels,
+        modal_instruction_ordinal,
+        detached_remainder,
         repeat_for,
         min_x_value,
         announced_x,
@@ -3500,6 +3590,7 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         forward_result,
         unless_pay,
         distribution,
+        distribute,
         player_scope,
         starting_with,
         chosen_x,
@@ -3522,15 +3613,19 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         parent_target_missing_reason,
     } = ability;
 
-    let fixed_opponent_lose_life = matches!(
+    let fixed_opponent_effect = matches!(
         effect,
         Effect::LoseLife {
             amount: QuantityExpr::Fixed { .. },
             target: None,
+        } | Effect::Mill {
+            count: QuantityExpr::Fixed { .. },
+            target: TargetFilter::Controller,
+            destination: Zone::Graveyard,
         }
     );
 
-    fixed_opponent_lose_life
+    fixed_opponent_effect
         && targets.is_empty()
         && scoped_player.is_none()
         && matches!(kind, AbilityKind::Spell | AbilityKind::Database)
@@ -3538,13 +3633,24 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         && else_ability.is_none()
         && duration.is_none()
         && condition.is_none()
+        && *context == SpellContext::default()
         && !*optional_targeting
         && !*optional
+        && optional_player.is_none()
         && optional_for.is_none()
         && multi_target.is_none()
         && target_constraints.is_empty()
         && *target_choice_timing == TargetChoiceTiming::Stack
         && selected_mode_labels.is_empty()
+        // CR 700.2 + CR 700.2d: a mode root is the head of ONE selected
+        // instruction of a modal ability, and its ordinal gates the
+        // per-mode reset of the chain-local tracked-set identity in
+        // `resolve_ability_chain`. A batch collapses N stack entries into a
+        // SINGLE chain entry, so it would fire that per-instruction boundary
+        // once instead of N times. That is outside what this batch proof
+        // covers, so decline — declining only costs the optimization.
+        && modal_instruction_ordinal.is_none()
+        && matches!(detached_remainder, DetachedRemainder::NoProducer)
         && repeat_for.is_none()
         && *min_x_value == 0
         && announced_x.is_none()
@@ -3553,6 +3659,7 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         && !*forward_result
         && unless_pay.is_none()
         && distribution.is_none()
+        && distribute.is_none()
         && *player_scope == Some(PlayerFilter::Opponent)
         && starting_with.is_none()
         && chosen_x.is_none()
@@ -4125,12 +4232,27 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         context: a_context,
         optional_targeting: a_optional_targeting,
         optional: a_optional,
+        optional_player: a_optional_player,
         optional_for: a_optional_for,
         multi_target: a_multi_target,
         target_constraints: a_target_constraints,
         target_choice_timing: a_target_choice_timing,
         description: _,
         selected_mode_labels: a_selected_mode_labels,
+        // CR 700.2: deliberately NOT part of run identity. At the ROOT it is
+        // provably `None` — this function is entered ONLY through the three
+        // `*_ability_is_batch_candidate` gates, each of which now requires
+        // `modal_instruction_ordinal.is_none()`. That guarantee is ONE HOP
+        // deep: the `sub_ability`/`else_ability` recursions below re-enter
+        // this function directly, without re-checking a gate, so a deeper node
+        // could in principle carry an ordinal. Ignoring it is still right —
+        // this equality is issue #5946's `SourceIndependent` inert-trigger RUN
+        // IDENTITY, not a modal check, and two runs that differ only in which
+        // mode produced them are still the same run.
+        modal_instruction_ordinal: _,
+        // CR 608.2c: split-remainder marker. Guaranteed `NoProducer` ONE HOP
+        // upstream by the batch-candidate checks, same as the modal ordinal.
+        detached_remainder: _,
         repeat_for: a_repeat_for,
         min_x_value: a_min_x_value,
         announced_x: a_announced_x,
@@ -4139,6 +4261,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         forward_result: a_forward_result,
         unless_pay: a_unless_pay,
         distribution: a_distribution,
+        distribute: a_distribute,
         player_scope: a_player_scope,
         starting_with: a_starting_with,
         chosen_x: a_chosen_x,
@@ -4159,6 +4282,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         modal: a_modal,
         mode_abilities: a_mode_abilities,
         parent_target_missing_reason: a_parent_target_missing_reason,
+        selected_target_incarnations: a_selected_target_incarnations,
     } = a;
     let ResolvedAbility {
         effect: b_effect,
@@ -4180,12 +4304,27 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         context: b_context,
         optional_targeting: b_optional_targeting,
         optional: b_optional,
+        optional_player: b_optional_player,
         optional_for: b_optional_for,
         multi_target: b_multi_target,
         target_constraints: b_target_constraints,
         target_choice_timing: b_target_choice_timing,
         description: _,
         selected_mode_labels: b_selected_mode_labels,
+        // CR 700.2: deliberately NOT part of run identity. At the ROOT it is
+        // provably `None` — this function is entered ONLY through the three
+        // `*_ability_is_batch_candidate` gates, each of which now requires
+        // `modal_instruction_ordinal.is_none()`. That guarantee is ONE HOP
+        // deep: the `sub_ability`/`else_ability` recursions below re-enter
+        // this function directly, without re-checking a gate, so a deeper node
+        // could in principle carry an ordinal. Ignoring it is still right —
+        // this equality is issue #5946's `SourceIndependent` inert-trigger RUN
+        // IDENTITY, not a modal check, and two runs that differ only in which
+        // mode produced them are still the same run.
+        modal_instruction_ordinal: _,
+        // CR 608.2c: split-remainder marker. Guaranteed `NoProducer` ONE HOP
+        // upstream by the batch-candidate checks, same as the modal ordinal.
+        detached_remainder: _,
         repeat_for: b_repeat_for,
         min_x_value: b_min_x_value,
         announced_x: b_announced_x,
@@ -4194,6 +4333,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         forward_result: b_forward_result,
         unless_pay: b_unless_pay,
         distribution: b_distribution,
+        distribute: b_distribute,
         player_scope: b_player_scope,
         starting_with: b_starting_with,
         chosen_x: b_chosen_x,
@@ -4214,6 +4354,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         modal: b_modal,
         mode_abilities: b_mode_abilities,
         parent_target_missing_reason: b_parent_target_missing_reason,
+        selected_target_incarnations: b_selected_target_incarnations,
     } = b;
 
     a_effect == b_effect
@@ -4224,6 +4365,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         // keeps this manual comparison in agreement with the type's derived
         // `PartialEq`; disagreeing with the derive would be the actual defect.
         && a_target_incarnations == b_target_incarnations
+        && a_selected_target_incarnations == b_selected_target_incarnations
         && a_controller == b_controller
         && a_scoped_player == b_scoped_player
         && a_kind == b_kind
@@ -4246,6 +4388,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_context == b_context
         && a_optional_targeting == b_optional_targeting
         && a_optional == b_optional
+        && a_optional_player == b_optional_player
         && a_optional_for == b_optional_for
         && a_multi_target == b_multi_target
         && a_target_constraints == b_target_constraints
@@ -4259,6 +4402,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_forward_result == b_forward_result
         && a_unless_pay == b_unless_pay
         && a_distribution == b_distribution
+        && a_distribute == b_distribute
         && a_player_scope == b_player_scope
         && a_starting_with == b_starting_with
         && a_chosen_x == b_chosen_x
@@ -4688,6 +4832,81 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    #[test]
+    fn unassigned_distribution_rejects_all_inert_batch_candidates() {
+        let self_counter = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        assert!(self_counter_ability_is_batch_candidate(&self_counter));
+        let mut divided_counter = self_counter.clone();
+        divided_counter.distribute = Some(crate::types::game_state::DistributionUnit::Counters(
+            "+1/+1".to_string(),
+        ));
+        assert!(!self_counter_ability_is_batch_candidate(&divided_counter));
+
+        let gain_life = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(2),
+            PlayerId(0),
+        );
+        assert!(fixed_controller_gain_life_ability_is_batch_candidate(
+            &gain_life
+        ));
+        let mut divided_gain = gain_life.clone();
+        divided_gain.distribute = Some(crate::types::game_state::DistributionUnit::Life);
+        assert!(!fixed_controller_gain_life_ability_is_batch_candidate(
+            &divided_gain
+        ));
+
+        let mut lose_life = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: None,
+            },
+            Vec::new(),
+            ObjectId(3),
+            PlayerId(0),
+        );
+        lose_life.player_scope = Some(crate::types::ability::PlayerFilter::Opponent);
+        assert!(fixed_opponent_effect_ability_is_batch_candidate(&lose_life));
+        let mut divided_loss = lose_life.clone();
+        divided_loss.distribute = Some(crate::types::game_state::DistributionUnit::Life);
+        assert!(!fixed_opponent_effect_ability_is_batch_candidate(
+            &divided_loss
+        ));
+    }
+
+    #[test]
+    fn inert_trigger_identity_compares_unassigned_distribution_unit() {
+        let mut a = ResolvedAbility::new(Effect::NoOp, Vec::new(), ObjectId(10), PlayerId(0));
+        a.distribute = Some(crate::types::game_state::DistributionUnit::Damage);
+        let mut same_shape_different_provenance = a.clone();
+        same_shape_different_provenance.source_id = ObjectId(11);
+        same_shape_different_provenance.ability_index = Some(7);
+
+        assert!(inert_trigger_abilities_eq_ignoring_provenance(
+            &a,
+            &same_shape_different_provenance
+        ));
+
+        same_shape_different_provenance.distribute = None;
+        assert!(!inert_trigger_abilities_eq_ignoring_provenance(
+            &a,
+            &same_shape_different_provenance
+        ));
     }
 
     fn pending_spell_entry(id: ObjectId) -> StackEntry {
@@ -7338,8 +7557,8 @@ mod tests {
         // Driver internals under test (the stack module).
         use super::super::{
             batch_run_len, effects, fixed_controller_gain_life_run_len,
-            fixed_opponent_lose_life_run_len, inert_trigger_batch_state_is_settled,
-            observers_are_batch_safe, resolve_next, resolve_next_with_limit, resolve_top,
+            fixed_opponent_effect_run_len, observers_are_batch_safe,
+            priority_checkpoint_is_settled, resolve_next, resolve_next_with_limit, resolve_top,
             self_counter_run_len,
         };
         // Test fixtures from the parent `tests` module.
@@ -7836,6 +8055,47 @@ mod tests {
             });
         }
 
+        fn fixed_opponent_mill_effect() -> Effect {
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+            }
+        }
+
+        fn push_fixed_opponent_mill_trigger(
+            state: &mut GameState,
+            source: ObjectId,
+            trigger_event: GameEvent,
+        ) {
+            let entry_id = ObjectId(state.next_object_id);
+            state.next_object_id += 1;
+            let mut ability =
+                ResolvedAbility::new(fixed_opponent_mill_effect(), vec![], source, PlayerId(0));
+            ability.player_scope = Some(PlayerFilter::Opponent);
+            ability.description = Some("each opponent mills a card".to_string());
+            ability.ability_index = Some(0);
+            state.stack.push_back(StackEntry {
+                id: entry_id,
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: source,
+                    ability: Box::new(ability),
+                    condition: None,
+                    trigger_event: Some(trigger_event),
+                    description: Some(
+                        "Whenever another permanent enters, each opponent mills a card."
+                            .to_string(),
+                    ),
+                    source_name: state.objects[&source].name.clone(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+        }
+
         fn life_event(player_id: PlayerId, amount: i32) -> GameEvent {
             GameEvent::LifeChanged { player_id, amount }
         }
@@ -8008,7 +8268,7 @@ mod tests {
             });
 
             assert!(
-                !inert_trigger_batch_state_is_settled(&state),
+                !priority_checkpoint_is_settled(&state),
                 "an active resolution frame makes a skipped priority checkpoint observable"
             );
         }
@@ -8193,7 +8453,7 @@ mod tests {
             );
 
             assert_eq!(
-                fixed_opponent_lose_life_run_len(&state),
+                fixed_opponent_effect_run_len(&state),
                 Some(3),
                 "fixed opponent life loss should ignore inert source provenance"
             );
@@ -8272,7 +8532,7 @@ mod tests {
             );
 
             assert_eq!(
-                fixed_opponent_lose_life_run_len(&state),
+                fixed_opponent_effect_run_len(&state),
                 Some(2),
                 "a distinct intervening-if must end the contiguous batch"
             );
@@ -8323,6 +8583,99 @@ mod tests {
             assert_eq!(
                 consumed, 1,
                 "life-lost observers must force single-entry fallback"
+            );
+            assert_eq!(
+                crate::game::perf_counters::snapshot().stack_batched_entries,
+                0
+            );
+        }
+
+        #[test]
+        fn fixed_opponent_mill_triggers_batch() {
+            crate::game::perf_counters::reset();
+            let mut state = setup();
+            let source = add_self_counter_source(&mut state, "Altar of the Brood");
+            let milled_cards: Vec<_> = (0..3)
+                .map(|index| {
+                    create_object(
+                        &mut state,
+                        CardId(9_700 + index),
+                        PlayerId(1),
+                        format!("Library Card {index}"),
+                        Zone::Library,
+                    )
+                })
+                .collect();
+            let trigger_event = life_event(PlayerId(0), 0);
+            for _ in 0..3 {
+                push_fixed_opponent_mill_trigger(&mut state, source, trigger_event.clone());
+            }
+
+            assert_eq!(
+                fixed_opponent_effect_run_len(&state),
+                Some(3),
+                "identical Altar of the Brood triggers should form one inert run"
+            );
+
+            let mut events = Vec::new();
+            let consumed = resolve_next(&mut state, &mut events);
+
+            assert_eq!(consumed, 3);
+            assert!(state.stack.is_empty());
+            assert!(milled_cards
+                .iter()
+                .all(|id| state.objects[id].zone == Zone::Graveyard));
+            assert_eq!(
+                crate::game::perf_counters::snapshot().stack_batched_entries,
+                3
+            );
+        }
+
+        #[test]
+        fn fixed_opponent_mill_batch_refuses_when_mill_observer_fires() {
+            crate::game::perf_counters::reset();
+            let mut state = setup();
+            let source = add_self_counter_source(&mut state, "Altar of the Brood");
+            let observer = create_object(
+                &mut state,
+                CardId(9_701),
+                PlayerId(0),
+                "Mill Watcher".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&observer).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .origin(Zone::Library)
+                    .destination(Zone::Graveyard)
+                    .execute(AbilityDefinition::new(
+                        crate::types::ability::AbilityKind::Database,
+                        Effect::NoOp,
+                    ));
+                Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger.clone());
+                obj.trigger_definitions.push(trigger);
+            }
+            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
+            for index in 0..2 {
+                create_object(
+                    &mut state,
+                    CardId(9_710 + index),
+                    PlayerId(1),
+                    format!("Library Card {index}"),
+                    Zone::Library,
+                );
+            }
+            let trigger_event = life_event(PlayerId(0), 0);
+            push_fixed_opponent_mill_trigger(&mut state, source, trigger_event.clone());
+            push_fixed_opponent_mill_trigger(&mut state, source, trigger_event);
+
+            let mut events = Vec::new();
+            let consumed = resolve_next(&mut state, &mut events);
+
+            assert_eq!(
+                consumed, 1,
+                "a library-to-graveyard observer must preserve the per-entry priority checkpoint"
             );
             assert_eq!(
                 crate::game::perf_counters::snapshot().stack_batched_entries,
@@ -13558,6 +13911,274 @@ mod tests {
                 expected_loyalty,
                 "CR 107.3m ({label}): the ETB counter count comes from the POPPED \
                  payment snapshot, which stays bound in `resolve_top`"
+            );
+        }
+    }
+
+    /// **The shared CR 603.4 / CR 608.2k / CR 603.2c / CR 706.2 binder is
+    /// entry-shaped only at its adapter.**
+    ///
+    /// `bind_triggered_resolution_scope` is the authority a stackless CR 605.4a
+    /// triggered mana resolution will call — it owns no `StackEntry` and must
+    /// therefore reach every binding shape the entry-shaped wrapper reaches.
+    /// The delicate part is that baseline's three `if let` blocks are **not**
+    /// three independent branches: the event/batch block is an `if / else if`
+    /// chain, so a triggered ability carrying `trigger_event: None` and a batch
+    /// falls THROUGH to the non-triggered batch arm. A rewrite that keys the
+    /// batch arm on "not a triggered ability" silently loses that case.
+    ///
+    /// Rows, each keyed to one thing the extraction could have broken:
+    ///
+    /// * **(a)** triggered + `Some(event)` + no batch ⇒ the batch is
+    ///   synthesized as a one-element vector from that event;
+    /// * **(b)** triggered + `Some(event)` + a batch ⇒ the batch wins and the
+    ///   singleton event stays the authoritative one;
+    /// * **(c)** triggered + `None` event + a batch ⇒ the fall-through arm, so
+    ///   the authoritative event is the batch head;
+    /// * **(d)** NOT triggered + a batch ⇒ same arm, but CR 603.2c/CR 706.2
+    ///   must NOT be re-stamped, because a spell carries neither;
+    /// * **(e)** a false CR 603.4 intervening-if returns `false` having bound
+    ///   **nothing** — the caller must be able to abandon without unwinding;
+    /// * **(f)** the entry-shaped adapter and a hand-built scope produce
+    ///   byte-identical bindings from the same facts.
+    ///
+    /// REACH-GUARD: every row asserts the pre-call scope is the sentinel value,
+    /// so "unchanged" can never be confused with "bound to the same thing".
+    ///
+    /// REVERT-PROBES: making the batch arm `else if triggered.is_none()` fails
+    /// (c); dropping the `(Some(te), batch)` arm's `unwrap_or_else` fails (a);
+    /// stamping the count/die outside the `triggered` guard fails (d); binding
+    /// before the condition check fails (e).
+    #[test]
+    fn the_shared_resolution_scope_binder_reaches_every_baseline_binding_shape() {
+        let event_a = GameEvent::StackResolved {
+            object_id: ObjectId(9001),
+        };
+        let event_b = GameEvent::StackResolved {
+            object_id: ObjectId(9002),
+        };
+        let sentinel = GameEvent::StackResolved {
+            object_id: ObjectId(9999),
+        };
+
+        // Every row starts from a distinguishable sentinel scope, so a row that
+        // asserts a bound value cannot pass because nothing ran.
+        let armed = || {
+            let mut state = setup();
+            state.current_trigger_event = Some(sentinel.clone());
+            state.current_trigger_events = vec![sentinel.clone()];
+            state.current_trigger_match_count = Some(77);
+            state.die_result_this_resolution = Some(77);
+            state
+        };
+        // ── (a) triggered + event, no batch ⇒ synthesized singleton batch ──
+        {
+            let mut state = armed();
+            assert!(bind_triggered_resolution_scope(
+                &mut state,
+                Some(TriggeredResolutionScope {
+                    condition: None,
+                    controller: PlayerId(0),
+                    trigger_source: None,
+                    trigger_event: Some(&event_a),
+                    subject_match_count: Some(4),
+                    die_result: Some(6),
+                }),
+                None,
+            ));
+            assert_eq!(state.current_trigger_event.as_ref(), Some(&event_a));
+            assert_eq!(
+                state.current_trigger_events,
+                vec![event_a.clone()],
+                "CR 608.2k: with no batch the authoritative event IS the batch"
+            );
+            assert_eq!(state.current_trigger_match_count, Some(4));
+            assert_eq!(state.die_result_this_resolution, Some(6));
+        }
+
+        // ── (b) triggered + event + batch ⇒ the batch wins ──
+        {
+            let mut state = armed();
+            assert!(bind_triggered_resolution_scope(
+                &mut state,
+                Some(TriggeredResolutionScope {
+                    condition: None,
+                    controller: PlayerId(0),
+                    trigger_source: None,
+                    trigger_event: Some(&event_a),
+                    subject_match_count: None,
+                    die_result: None,
+                }),
+                Some(vec![event_a.clone(), event_b.clone()]),
+            ));
+            assert_eq!(state.current_trigger_event.as_ref(), Some(&event_a));
+            assert_eq!(
+                state.current_trigger_events,
+                vec![event_a.clone(), event_b.clone()]
+            );
+            assert_eq!(
+                state.current_trigger_match_count, None,
+                "CR 603.2c: a triggered scope stamps its own None over the sentinel"
+            );
+        }
+
+        // ── (c) triggered + NO event + batch ⇒ the fall-through arm ──
+        {
+            let mut state = armed();
+            assert!(bind_triggered_resolution_scope(
+                &mut state,
+                Some(TriggeredResolutionScope {
+                    condition: None,
+                    controller: PlayerId(0),
+                    trigger_source: None,
+                    trigger_event: None,
+                    subject_match_count: Some(2),
+                    die_result: None,
+                }),
+                Some(vec![event_b.clone(), event_a.clone()]),
+            ));
+            assert_eq!(
+                state.current_trigger_event.as_ref(),
+                Some(&event_b),
+                "the batch HEAD becomes authoritative — this is the `else if` \
+                 fall-through a triggered ability with no singleton event reaches"
+            );
+            assert_eq!(
+                state.current_trigger_events,
+                vec![event_b.clone(), event_a.clone()]
+            );
+            assert_eq!(state.current_trigger_match_count, Some(2));
+        }
+
+        // ── (d) not triggered + batch ⇒ count/die are NOT re-stamped ──
+        {
+            let mut state = armed();
+            assert!(bind_triggered_resolution_scope(
+                &mut state,
+                None,
+                Some(vec![event_a.clone()]),
+            ));
+            assert_eq!(state.current_trigger_event.as_ref(), Some(&event_a));
+            assert_eq!(
+                (
+                    state.current_trigger_match_count,
+                    state.die_result_this_resolution
+                ),
+                (Some(77), Some(77)),
+                "CR 603.2c + CR 706.2 belong to a TRIGGERED entry only; a spell must \
+                 leave the ambient values exactly as it found them"
+            );
+        }
+
+        // ── (e) a false CR 603.4 recheck binds nothing at all ──
+        {
+            let mut state = armed();
+            assert!(!bind_triggered_resolution_scope(
+                &mut state,
+                Some(TriggeredResolutionScope {
+                    // `setup()` is a 20-life board, so this is FALSE.
+                    condition: Some(&TriggerCondition::LifeTotalGE { minimum: 99 }),
+                    controller: PlayerId(0),
+                    trigger_source: None,
+                    trigger_event: Some(&event_a),
+                    subject_match_count: Some(4),
+                    die_result: Some(6),
+                }),
+                Some(vec![event_a.clone(), event_b.clone()]),
+            ));
+            assert_eq!(
+                (
+                    state.current_trigger_event.as_ref(),
+                    state.current_trigger_events.as_slice(),
+                    state.current_trigger_match_count,
+                    state.die_result_this_resolution,
+                ),
+                (
+                    Some(&sentinel),
+                    [sentinel.clone()].as_slice(),
+                    Some(77),
+                    Some(77)
+                ),
+                "CR 603.4: the recheck is the FIRST thing the binder does, so a \
+                 refused resolution leaves the caller's scope untouched"
+            );
+            // The TRUE twin proves the row is not passing on a broken condition.
+            let mut state = armed();
+            assert!(bind_triggered_resolution_scope(
+                &mut state,
+                Some(TriggeredResolutionScope {
+                    condition: Some(&TriggerCondition::LifeTotalGE { minimum: 5 }),
+                    controller: PlayerId(0),
+                    trigger_source: None,
+                    trigger_event: Some(&event_a),
+                    subject_match_count: Some(4),
+                    die_result: Some(6),
+                }),
+                None,
+            ));
+            assert_eq!(state.current_trigger_match_count, Some(4));
+        }
+
+        // ── (f) the entry-shaped adapter agrees with the hand-built scope ──
+        {
+            let entry = StackEntry {
+                id: ObjectId(9100),
+                source_id: ObjectId(9101),
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: ObjectId(9101),
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::Controller,
+                        },
+                        vec![],
+                        ObjectId(9101),
+                        PlayerId(0),
+                    )),
+                    condition: Some(TriggerCondition::LifeTotalGE { minimum: 5 }),
+                    trigger_event: Some(event_a.clone()),
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: Some(3),
+                    die_result: Some(20),
+                    provenance: None,
+                },
+            };
+            let mut via_entry = armed();
+            assert!(bind_resolution_scope(
+                &mut via_entry,
+                &entry,
+                Some(vec![event_a.clone(), event_b.clone()]),
+            ));
+            let mut via_scope = armed();
+            assert!(bind_triggered_resolution_scope(
+                &mut via_scope,
+                Some(TriggeredResolutionScope {
+                    condition: Some(&TriggerCondition::LifeTotalGE { minimum: 5 }),
+                    controller: PlayerId(0),
+                    trigger_source: None,
+                    trigger_event: Some(&event_a),
+                    subject_match_count: Some(3),
+                    die_result: Some(20),
+                }),
+                Some(vec![event_a.clone(), event_b.clone()]),
+            ));
+            assert_eq!(
+                (
+                    via_entry.current_trigger_event,
+                    via_entry.current_trigger_events,
+                    via_entry.current_trigger_match_count,
+                    via_entry.die_result_this_resolution,
+                ),
+                (
+                    via_scope.current_trigger_event,
+                    via_scope.current_trigger_events,
+                    via_scope.current_trigger_match_count,
+                    via_scope.die_result_this_resolution,
+                ),
+                "the adapter is a projection of the entry onto the shared scope, \
+                 not a second binding policy"
             );
         }
     }

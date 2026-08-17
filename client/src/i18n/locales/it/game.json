@@ -20,6 +20,11 @@
     "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
     "convokeInfo_other": "Auto-taps up to {{count}} creatures for convoke each iteration.",
+    "countAria": "Number of iterations",
+    "previewTitle_one": "Repeating once produces:",
+    "previewTitle_other": "Repeating {{count}} times produces:",
+    "previewEntry": "{{amount}} {{resource}}",
+    "previewEntryPlayer": "{{amount}} {{resource}} — {{player}}",
     "winKind": {
       "LethalDamage": "This loop deals lethal damage.",
       "PoisonLoss": "This loop gives lethal poison counters.",
@@ -43,6 +48,13 @@
     "label": "Risoluzione {{resolved}} / {{total}}",
     "collapse": "Comprimi avanzamento risoluzione",
     "expand": "Espandi avanzamento risoluzione"
+  },
+  "resolveAllConsent": {
+    "eyebrow": "Risolvi tutto",
+    "title": "Approvare la risoluzione rapida?",
+    "subtitle": "Tutti i giocatori devono approvare prima che il motore risolva un prefisso sicuro della pila.",
+    "grant": "Approva",
+    "decline": "Mantieni priorità"
   },
   "debugCreate": {
     "copies": "Copie",
@@ -255,12 +267,16 @@
     "ringBearer": "Anello",
     "ringBearerTooltip": "Portatore dell'Anello",
     "hiddenAttachments": "+{{count}} more attached",
+    "hiddenAttachmentsAria_few": "Mostra {{count}} carte assegnate nascoste",
+    "hiddenAttachmentsAria_many": "Mostra {{count}} carte assegnate nascoste",
     "hiddenAttachmentsAria_one": "Mostra {{count}} carta assegnata nascosta",
     "hiddenAttachmentsAria_other": "Mostra {{count}} carte assegnate nascoste",
     "fanPick": "Scegli",
     "fanConfirm": "Conferma ({{count}})",
     "viewAttachments_one": "Mostra carta assegnata",
     "viewAttachments_other": "Mostra {{count}} carte assegnate",
+    "viewAttachmentsFor_few": "Mostra {{count}} carte assegnate a {{name}}",
+    "viewAttachmentsFor_many": "Mostra {{count}} carte assegnate a {{name}}",
     "viewAttachmentsFor_one": "Mostra carta assegnata a {{name}}",
     "viewAttachmentsFor_other": "Mostra {{count}} carte assegnate a {{name}}",
     "hiddenExileCards": "+{{count}} more exiled",
@@ -1749,7 +1765,22 @@
     "emergeEyebrow": "Emergere",
     "emergeNormalLabel": "Lancia normalmente",
     "emergeAltLabel": "Lancia con Emergere",
-    "emergeSubtitle": "Lancia {{name}} normalmente, o paga il suo costo di Emergere sacrificando una creatura, riducendo il costo del valore di mana di quella creatura.",
+    "emergeSubtitle": "Lancia {{name}} normalmente, o paga il suo costo di Emergere sacrificando {{sacrifice}}, riducendo il costo del valore di mana di quel permanente.",
+    "emergeFallbackSacrifice": "un permanente corrispondente",
+    "emergeSacrificeQuality": {
+      "artifact": "un artefatto",
+      "battle": "una battaglia",
+      "card": "una carta",
+      "creature": "una creatura",
+      "enchantment": "un incantesimo",
+      "instant": "un istantaneo",
+      "kindred": "un tribale",
+      "land": "una terra",
+      "permanent": "un permanente",
+      "planeswalker": "un planeswalker",
+      "sorcery": "una stregoneria",
+      "subtype": "un permanente di tipo {{subtype}}"
+    },
     "impendingEyebrow": "Incombere",
     "impendingNormalLabel": "Lancia normalmente",
     "impendingAltLabel": "Lancia con Incombere",
@@ -1808,6 +1839,10 @@
   "giftRecipient": {
     "title": "Scegli il destinatario del dono",
     "subtitle": "Scegli quale avversario riceve il dono promesso."
+  },
+  "entryController": {
+    "title": "Scegli il controllore all'entrata",
+    "subtitle": "Scegli quale avversario controlla questo permanente mentre entra."
   },
   "optionalCost": {
     "gift": {
@@ -2042,6 +2077,7 @@
     "searchPlaceholder": "Cerca per nome...",
     "noCardsFound": "Nessuna carta trovata",
     "buttonSubtitle": "Seleziona un'opzione",
+    "numberSubtitle": "Inserisci un numero intero maggiore o uguale a {{min}}",
     "filterPlaceholder": "Filtra opzioni...",
     "noOptionsMatch": "Nessuna opzione corrisponde"
   },

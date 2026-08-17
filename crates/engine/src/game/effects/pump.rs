@@ -96,14 +96,6 @@ pub fn resolve_all(
         _ => return Ok(()),
     };
 
-    // CR 608.2c: Concretize contextual filters against this ability's inherited
-    // target before the mass scan — e.g. `Not{ParentTarget}` from a "target X and
-    // all other X with the same name get -N/-M" chain (Bile Blight) becomes
-    // `Not{SpecificObject{target}}`, excluding the already-pumped target so it is
-    // not shrunk twice. No-op for filters without contextual refs, mirroring the
-    // single `resolve` (above) and `destroy`/`bounce`.
-    let target_filter = crate::game::effects::resolved_object_filter(ability, &target_filter);
-
     let dur = ability.duration.clone().unwrap_or(Duration::UntilEndOfTurn);
 
     // CR 608.2h + CR 613.4c: same recipient-relative parity as `resolve` — an
@@ -115,14 +107,7 @@ pub fn resolve_all(
     let shared = (!per_recipient).then(|| pt_modifications(power, toughness, state, ability, None));
 
     // Collect matching object IDs first to avoid borrow conflicts.
-    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
-    let ctx = filter::FilterContext::from_ability(ability);
-    let matching: Vec<ObjectId> = state
-        .battlefield
-        .iter()
-        .filter(|id| filter::matches_target_filter(state, **id, &target_filter, &ctx))
-        .copied()
-        .collect();
+    let matching = pump_all_affected_objects(state, ability, &target_filter);
 
     for obj_id in matching {
         let modifications = match &shared {
@@ -146,6 +131,81 @@ pub fn resolve_all(
     });
 
     Ok(())
+}
+
+/// CR 611.2c: the population `Effect::PumpAll` affects, fixed at the moment its
+/// continuous effect begins and never changing afterwards.
+///
+/// SINGLE AUTHORITY: `resolve_all` installs the transient effects over exactly
+/// this list, and `effects::affected_objects_from_events` publishes exactly this
+/// list as the chain tracked set, so a later "Untap those creatures"
+/// (CR 701.26b) binds the creatures actually pumped. Both call sites go through
+/// this ONE enumeration function — never a second, hand-written scan at the
+/// publish site. Be precise about what that does and does not buy: this
+/// function IS handed the head filter and DOES re-run the scan against a later
+/// `state`, so the two enumerations agree because they are the same code over
+/// an unchanged board, not because the list was memoised.
+///
+/// FLUSH HAZARD — the load-bearing precondition. The board must not change
+/// between `resolve_all` and the publish, and in particular the pump's own
+/// modifications must not have MATERIALISED. They do not today:
+/// `GameState::add_transient_continuous_effect` installs the effect and marks
+/// the layer cache dirty, while materialisation happens in
+/// `layers::flush_layers`. The precise claim — the falsifiable one is weaker
+/// than it looks — is NOT that `flush_layers` is never called during
+/// resolution: several effect resolvers call it (`amass`, `attach`,
+/// `become_copy`, among others), and a reader who greps for it will find them.
+/// It is that nothing flushes on the SPAN between this node's own
+/// `resolve_effect` and this node's publish, because the publish site runs
+/// immediately after that call with no other resolver in between. Introduce
+/// a flush on that span and a filter that reads a modified characteristic
+/// (power, toughness, controller, a granted type) would enumerate DIFFERENTLY
+/// at the publish site than at resolution — the published set would silently
+/// stop being the frozen population. If you add such a flush, snapshot this
+/// list at resolution instead of re-scanning.
+///
+/// The unit test in this module pins the identity for a CONTROLLER filter,
+/// which no pump modification can move, so it would NOT catch that regression.
+/// A discriminating test for the flush hazard needs a filter reading a pumped
+/// characteristic (e.g. "creatures with power 2 or less").
+///
+/// NOTE for a future zone-aware `resolve_all`: this scans the battlefield, so
+/// Elvish Elegy's `InZone: Graveyard` filter returns `[]` today. That is NOT
+/// what keeps its milled tracked set intact — the `is_sole_chain_producer`
+/// guard at the publish site does, because the preceding `Mill` already
+/// published. Making this zone-aware is therefore safe.
+pub(crate) fn pump_all_affected_objects(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+) -> Vec<ObjectId> {
+    // CR 608.2c: concretize contextual filters against this ability's inherited
+    // target before the mass scan — e.g. `Not{ParentTarget}` from a "target X and
+    // all other X with the same name get -N/-M" chain (Bile Blight) becomes
+    // `Not{SpecificObject{target}}`, excluding the already-pumped target so it is
+    // not shrunk twice. No-op for filters without contextual refs, mirroring the
+    // single `resolve` and `destroy`/`bounce`.
+    let target_filter = crate::game::effects::resolved_object_filter(ability, target);
+    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
+    let ctx = filter::FilterContext::from_ability(ability);
+    // CR 702.26b: a phased-out permanent "is treated as though it does not
+    // exist". CR 702.26e is the specific rule for this producer: a continuous
+    // effect from a resolving spell/ability that modifies characteristics does
+    // NOT include phased-out permanents in its set of affected objects.
+    //
+    // Deliberately redundant with `filter_inner`'s own CR 702.26b choke point in
+    // `filter.rs`, which already excludes phased-out objects from every
+    // `matches_target_filter` call — measured (see the test's DISCRIMINATION
+    // table), not assumed. Kept because this function is the single authority for
+    // BOTH the pump and the published tracked set, so it holds the invariant
+    // locally rather than inheriting it from a matcher whose own comment reserves
+    // the right to be bypassed by "targeted callers". Enumerates exactly as the
+    // sibling `goad_targets` authority does.
+    state
+        .battlefield_phased_in_ids()
+        .into_iter()
+        .filter(|id| filter::matches_target_filter(state, *id, &target_filter, &ctx))
+        .collect()
 }
 
 /// CR 701.10a: "Doubling a creature's power and/or toughness creates a continuous effect."
@@ -376,6 +436,7 @@ fn resolve_variable_pt(value: &str, ability: &ResolvedAbility) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::{PhaseOutCause, PhaseStatus};
     use crate::game::layers::evaluate_layers;
     use crate::game::zones::create_object;
     use crate::types::ability::{
@@ -509,6 +570,145 @@ mod tests {
         // Opponent unchanged
         assert_eq!(state.objects[&opp].power, Some(3));
         assert_eq!(state.objects[&opp].toughness, Some(3));
+    }
+
+    /// CR 702.26b + CR 702.26e: a phased-out permanent "is treated as though it
+    /// does not exist", and a continuous effect from a resolving spell/ability
+    /// does NOT include it in its set of affected objects.
+    ///
+    /// Covers BOTH halves the review asked for with one assertion each, because
+    /// `pump_all_affected_objects` is the single authority for the pump AND for
+    /// the published tracked set (that identity is pinned by the sibling test
+    /// below): excluding the phased-out creature from this population excludes
+    /// it from the set a later "those creatures" consumer reads.
+    ///
+    /// DISCRIMINATION, measured as a 2x2 rather than claimed — two independent
+    /// guards enforce this invariant, so reverting either ALONE leaves the test
+    /// green, and only the conjunction is load-bearing:
+    ///
+    /// | `filter_inner` CR 702.26b choke point | this fn's `battlefield_phased_in_ids()` | result |
+    /// |---|---|---|
+    /// | on  | on  | pass |
+    /// | on  | off | pass |
+    /// | off | on  | pass |
+    /// | off | off | **FAIL** — population comes back `[phased_in, phased_out]` |
+    ///
+    /// So this test does not prove the local enumeration is *necessary* today; it
+    /// pins that the producer keeps excluding phased-out permanents if EITHER
+    /// guard is later removed or routed around. The phased-IN creature's
+    /// assertions are the paired non-vacuity witness: without them a helper that
+    /// returned `[]` for everything would pass.
+    #[test]
+    fn pump_all_excludes_a_phased_out_creature_from_the_population_and_the_pump() {
+        let mut state = GameState::new_two_player(7);
+        let phased_in = make_creature(&mut state, "Phased In", 2, 2, PlayerId(0));
+        let phased_out = make_creature(&mut state, "Phased Out", 2, 2, PlayerId(0));
+        if let Some(obj) = state.objects.get_mut(&phased_out) {
+            obj.phase_status = PhaseStatus::PhasedOut {
+                cause: PhaseOutCause::Directly,
+            };
+        }
+
+        let yours: TargetFilter = TypedFilter::creature()
+            .controller(ControllerRef::You)
+            .into();
+        let ability = ResolvedAbility::new(
+            Effect::PumpAll {
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                target: yours.clone(),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        assert_eq!(
+            pump_all_affected_objects(&state, &ability, &yours),
+            vec![phased_in],
+            "CR 702.26e: a phased-out permanent must not enter the frozen population, \
+             which is also the set the publish site republishes"
+        );
+
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+        // The pump installs a transient continuous effect; P/T only materializes
+        // once the layer system evaluates (see this module's FLUSH HAZARD note).
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&phased_in].power,
+            Some(3),
+            "non-vacuity: the phased-IN creature must actually be pumped, else the \
+             exclusion above could pass on an empty population"
+        );
+        assert_eq!(
+            state.objects[&phased_out].power,
+            Some(2),
+            "CR 702.26b: the phased-out creature must be untouched by the pump"
+        );
+    }
+
+    /// CR 611.2c (issue #6857): `pump_all_affected_objects` is the SINGLE
+    /// AUTHORITY for the population `resolve_all` freezes — the publish site
+    /// republishes this exact list rather than re-deriving it.
+    ///
+    /// Two properties, both parameter-level rather than card-level:
+    ///  * the helper's list IS the pumped set, for whatever filter it is handed
+    ///    (identity between publisher and producer);
+    ///  * the filter is honoured, and a BROADER filter genuinely widens it — so
+    ///    a `target: Any` head (the mass-pump shape whose head filter names the
+    ///    whole battlefield) proves why the publish site may not substitute its
+    ///    own re-enumeration for the resolver's.
+    #[test]
+    fn pump_all_affected_objects_is_the_filtered_population_that_resolve_all_pumps() {
+        let mut state = GameState::new_two_player(42);
+        let mine_a = make_creature(&mut state, "Mine A", 2, 2, PlayerId(0));
+        let mine_b = make_creature(&mut state, "Mine B", 1, 1, PlayerId(0));
+        let theirs = make_creature(&mut state, "Theirs", 3, 3, PlayerId(1));
+
+        let yours: TargetFilter = TypedFilter::creature()
+            .controller(ControllerRef::You)
+            .into();
+        let ability = ResolvedAbility::new(
+            Effect::PumpAll {
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                target: yours.clone(),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut affected = pump_all_affected_objects(&state, &ability, &yours);
+        affected.sort();
+        let mut expected = vec![mine_a, mine_b];
+        expected.sort();
+        assert_eq!(
+            affected, expected,
+            "the controller filter must survive: the opponent's creature is not in the frozen population"
+        );
+
+        // The same filter under a broader head names strictly more — the
+        // enumeration is parameterized, not a fixed battlefield scan.
+        let mut broad = pump_all_affected_objects(&state, &ability, &TargetFilter::Any);
+        broad.sort();
+        let mut all = vec![mine_a, mine_b, theirs];
+        all.sort();
+        assert_eq!(broad, all);
+        assert_ne!(
+            affected, broad,
+            "if a broad filter returned the same list, the filter argument would be inert \
+             and this test could not detect a publish-site re-enumeration"
+        );
+
+        // Identity with the producer: exactly the helper's list gets pumped.
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&mine_a].power, Some(3));
+        assert_eq!(state.objects[&mine_b].power, Some(2));
+        assert_eq!(state.objects[&theirs].power, Some(3), "not pumped");
     }
 
     /// Issue #4727 (CR 611.2a): "Target creature and all other creatures with the

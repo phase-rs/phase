@@ -352,11 +352,80 @@ fn search_decision_authority(
 }
 
 pub fn authorized_submitter_for_player(state: &GameState, semantic_player: PlayerId) -> PlayerId {
+    // Resolve All consent freezes the submitting authority at proposal time.
+    // This must win over live turn control: otherwise a control effect that
+    // changes while a representative is queued could redirect an already-issued
+    // response to a different actor.
+    if let WaitingFor::ResolveAllConsent {
+        epoch,
+        representative,
+    } = &state.waiting_for
+    {
+        if *representative == semantic_player {
+            if let Some(submitter) = state
+                .resolve_all_consent_run
+                .as_ref()
+                .filter(|run| run.epoch == *epoch)
+                .and_then(|run| run.authorized_submitter_for(*representative))
+            {
+                return submitter;
+            }
+        }
+    }
     match search_decision_authority(state, semantic_player) {
         Some(ActiveSearchDecisionAuthority::LatchedController { controller }) => controller,
         Some(ActiveSearchDecisionAuthority::SearcherFallback) => semantic_player,
         None => effective_authority_for_player(state, semantic_player),
     }
+}
+
+/// Returns the frozen submitter who may revoke one granted Resolve All consent.
+/// Revoke is valid while a later representative is queued and after the run is
+/// Ready, so it cannot be expressed through the ordinary single-actor prompt.
+pub fn resolve_all_granted_submitter(
+    state: &GameState,
+    epoch: u64,
+    representative: PlayerId,
+) -> Option<PlayerId> {
+    matches!(
+        &state.waiting_for,
+        WaitingFor::ResolveAllConsent { epoch: active, .. }
+            | WaitingFor::ResolveAllReady { epoch: active }
+            if *active == epoch
+    )
+    .then(|| state.resolve_all_consent_run.as_ref())
+    .flatten()
+    .filter(|run| run.epoch == epoch && run.is_granted(representative))
+    .and_then(|run| run.authorized_submitter_for(representative))
+}
+
+/// Drops an active Resolve All consent run when player topology changes. A
+/// frozen representative set is no longer meaningful after elimination, so
+/// restart ordinary priority from a living representative instead of trying to
+/// repair the proposal in place.
+pub fn invalidate_resolve_all_consent(state: &mut GameState) {
+    if state.resolve_all_consent_run.take().is_none() {
+        return;
+    }
+    if !matches!(
+        state.waiting_for,
+        WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
+    ) {
+        return;
+    }
+    let preferred = super::topology::priority_pass_representative(state, state.active_player);
+    let player = super::players::is_alive(state, preferred)
+        .then_some(preferred)
+        .or_else(|| {
+            super::topology::priority_pass_participants(state)
+                .first()
+                .copied()
+        })
+        .unwrap_or(preferred);
+    state.waiting_for = WaitingFor::Priority { player };
+    state.priority_player = authorized_submitter_for_player(state, player);
+    state.priority_pass_count = 0;
+    state.priority_passes.clear();
 }
 
 /// CR 723.4: A controlled player and the player controlling them may see the

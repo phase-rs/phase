@@ -2,14 +2,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use engine::ai_support::{
-    auto_pass_recommended, legal_actions_full as engine_legal_actions_full, AiDecisionContract,
-};
+use engine::ai_support::{auto_pass_recommended, legal_actions_full as engine_legal_actions_full};
 use engine::database::legality::{validate_cedh_bracket, CedhBracketError};
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{DeckPayload, PlayerDeckPayload};
 use engine::game::engine::{
-    apply, resolve_all_fast_forward, start_game, ResolveAllCallbackDecision,
+    apply, resolve_all_ready_is_authorized, resolve_all_ready_prefix, start_game,
 };
 use engine::game::interaction::{bind_interaction_authority, submit_interaction};
 use engine::game::layers::flush_layers;
@@ -33,7 +31,6 @@ use engine::types::mana::ManaCost;
 use engine::types::match_config::MatchConfig;
 use engine::types::match_config::MatchForfeitCause;
 use engine::types::player::PlayerId;
-use phase_ai::choose_action_with_session;
 use phase_ai::config::{AiConfig, AiDifficulty, Platform};
 use phase_ai::session::AiSession;
 use rand::{Rng, SeedableRng};
@@ -100,8 +97,8 @@ pub type ActionResult = (
 pub type RevisionedActionResult = (u64, ActionResult);
 
 /// Maximum server-authorized stack entries in one remote Resolve All request.
-/// The wire request is untrusted; `0` is intentionally not the engine's
-/// unlimited sentinel on this transport.
+/// The wire request is untrusted, but `0` remains the engine-defined uncapped
+/// sentinel; the active consent run, not this transport value, owns the cap.
 pub const MAX_RESOLVE_ALL_RESOLUTIONS: u32 = 5_000;
 
 #[derive(Debug, Clone)]
@@ -926,6 +923,10 @@ impl GameSession {
     /// - card characteristics from the card database
     /// - `log_player_names` from the persisted display names
     /// - `rng` re-seeded with fresh randomness
+    ///
+    /// The fresh seed also resets `rng_word_pos` — a `#[serde(default)]` field, not a skipped
+    /// one. It is the saved high-water of the stream the old seed generated, and has no
+    /// meaning against the new one.
     pub fn from_persisted(ps: PersistedSession, db: &CardDatabase) -> Result<Self, String> {
         let mut state = ps.state.into_game_state();
         state
@@ -945,6 +946,14 @@ impl GameSession {
         let fresh_seed: u64 = rand::rng().random();
         state.rng_seed = fresh_seed;
         state.rng = rand_chacha::ChaCha20Rng::seed_from_u64(fresh_seed);
+        // A fresh stream starts at word 0, so the saved high-water — which indexes into the
+        // OLD keystream and is meaningless against this one — has to go with the old seed.
+        // Leaving it behind is what broke restore: the chokepoint's `rehydrate_rng` had put
+        // live and high-water in agreement, the re-seed above rewound live to 0, and the next
+        // `capture_rng_word_pos` (`game::library::resolve_and_apply_library_shuffle` performs
+        // one before every shuffle) `.expect`-panicked `HighWaterRegression`. Same three-
+        // statement resume policy as `engine-wasm`'s `resume_multiplayer_host_state`.
+        state.rng_word_pos = 0;
         finalize_public_state(&mut state);
         // Re-bind rather than trusting any id the blob carries, on the same
         // principle that `restore_session` re-stamps `hosting` and revokes an
@@ -1562,17 +1571,20 @@ impl SessionManager {
         ))
     }
 
-    /// Fast-forwards stack resolution for an authenticated player while every
-    /// non-requester priority holder is a server-configured AI seat.
+    /// Consumes an engine-issued unanimous Resolve All consent run for an
+    /// authenticated player. AI seats do not authorize future priority passes;
+    /// each representative grants through the engine's consent protocol first.
+    /// `max_resolutions` remains range-checked for wire compatibility, while
+    /// the already-issued consent run owns the resolution cap.
     pub fn resolve_all_for_player(
         &mut self,
         game_code: &str,
         player_token: &str,
         max_resolutions: u32,
     ) -> Result<ResolveAllActionResult, String> {
-        if max_resolutions == 0 || max_resolutions > MAX_RESOLVE_ALL_RESOLUTIONS {
+        if max_resolutions > MAX_RESOLVE_ALL_RESOLUTIONS {
             return Err(format!(
-                "Resolve All maximum must be between 1 and {MAX_RESOLVE_ALL_RESOLUTIONS}"
+                "Resolve All maximum must not exceed {MAX_RESOLVE_ALL_RESOLUTIONS}"
             ));
         }
 
@@ -1591,64 +1603,22 @@ impl SessionManager {
             );
         }
 
-        // This is a priority shortcut, never an authorization bypass. A human
-        // may start it only while they currently hold the engine's priority.
-        if acting_player(&session.state) != Some(requester) {
-            return Err("Resolve All requires your priority".to_string());
+        if !resolve_all_ready_is_authorized(&session.state, requester) {
+            return Err("Resolve All consent is not ready".to_string());
         }
 
         session.state.log_player_names = session.display_names.clone();
         flush_layers(&mut session.state);
-        let ai_seats = session.ai_seats.clone();
-        let ai_configs = session.ai_configs.clone();
-        let ai_session = Arc::clone(
-            session
-                .ai_session
-                .get_or_insert_with(|| AiSession::arc_from_game(&session.state)),
-        );
         let pre_action_state = session.state.clone();
-        let mut rng = rand::rng();
-        let batch = resolve_all_fast_forward(
-            &mut session.state,
-            requester,
-            max_resolutions,
-            |state, actor| {
-                if !ai_seats.contains(&actor) {
-                    return ResolveAllCallbackDecision::Stop;
-                }
-                let Some(config) = ai_configs.get(&actor) else {
-                    return ResolveAllCallbackDecision::Stop;
-                };
-                let Some(semantic_owner) = state
-                    .waiting_for
-                    .acting_player()
-                    .or_else(|| state.waiting_for.acting_players().first().copied())
-                else {
-                    return ResolveAllCallbackDecision::Stop;
-                };
-                let contract = AiDecisionContract::issue(state, semantic_owner);
-                match choose_action_with_session(
-                    state,
-                    semantic_owner,
-                    config,
-                    &mut rng,
-                    &ai_session,
-                ) {
-                    Some(action) if contract.permits(state, actor, &action) => {
-                        ResolveAllCallbackDecision::Proposal { contract, action }
-                    }
-                    Some(_) | None => ResolveAllCallbackDecision::Stop,
-                }
-            },
-        );
+        // The cap is frozen into the consent run by BeginResolveAll. The wire
+        // argument remains range-checked above for transport compatibility but
+        // cannot enlarge or replace that explicit authorization.
+        let _ = max_resolutions;
+        let batch = resolve_all_ready_prefix(&mut session.state, requester);
         let summary = ResolveAllSummary {
             items_resolved: batch.items_resolved,
             total: batch.total,
         };
-
-        if batch.recorded_actions.is_empty() {
-            return Ok((None, summary));
-        }
 
         session.push_takeback_state(requester, pre_action_state);
         let (legal_actions, spell_costs, by_object) = engine_legal_actions_full(&session.state);
@@ -4783,6 +4753,114 @@ mod tests {
         assert_eq!(session.state.debug_permitted, BTreeSet::from([PlayerId(0)]));
     }
 
+    /// The high-water this row plants before persisting. Deliberately NOT block-aligned
+    /// (ChaCha20 block 18, word 3), so a fast-forward that only lands on block boundaries
+    /// cannot pass by accident. `set_word_pos`/`get_word_pos` round-trip any position exactly.
+    const SAVED_WORD_POS: u128 = 291;
+
+    /// `from_persisted` re-seeds `rng` from fresh entropy — deliberately, so restored games do
+    /// not all share one deterministic sequence — and must drop `rng_word_pos` in the same step.
+    /// A fresh stream starts at word 0, so a surviving high-water leaves `advance_rng_high_water`
+    /// guarding a position the live cursor is BEHIND, and the next `capture_rng_word_pos`
+    /// `.expect`-panics `HighWaterRegression`. `resolve_and_apply_library_shuffle` performs that
+    /// capture before every shuffle, so this bit every restored server game that had shuffled.
+    ///
+    /// Non-vacuity: the premise assertions measure that the blob really carried a NON-ZERO
+    /// position AND that the engine chokepoint really resumed it, so the `== 0` below can only be
+    /// this function discarding it — not serde dropping a field that was never there.
+    /// Discrimination: deleting `state.rng_word_pos = 0` reds the high-water assertion with
+    /// `291 != 0` and panics the shuffle underneath it.
+    #[test]
+    fn restore_reseeds_the_rng_and_drops_the_saved_stream_position() {
+        let db = engine::database::CardDatabase::default();
+        let mut mgr = SessionManager::new();
+        let code = single_ai_opponent_game(&mut mgr);
+
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        // Guard, not an assumption: if setup ever consumes past the planted position the
+        // capture below would panic in the fixture rather than in the code under test.
+        assert!(
+            session.state.rng_word_pos < SAVED_WORD_POS,
+            "fixture premise: setup must leave the high-water below the planted position",
+        );
+        // Plant it the way a shuffle does — advance the live cursor, then promote it through
+        // the engine's own monotonic primitive. Never by writing the field.
+        session.state.rng.set_word_pos(SAVED_WORD_POS);
+        session.state.capture_rng_word_pos();
+        let saved_seed = session.state.rng_seed;
+        assert_eq!(
+            session.state.rng_word_pos, SAVED_WORD_POS,
+            "fixture premise: a NON-ZERO saved high-water, or this row measures nothing",
+        );
+
+        let json = serde_json::to_string(&mgr.sessions.get(&code).unwrap().to_persisted()).unwrap();
+        let blob: crate::persist::PersistedSession = serde_json::from_str(&json).unwrap();
+
+        // Premise 2, measured: the position survives disk AND the chokepoint resumes it.
+        let chokepoint_only = blob.state.clone().into_game_state();
+        assert_eq!(
+            chokepoint_only.rng_word_pos, SAVED_WORD_POS,
+            "premise: the persisted blob carries the position across disk",
+        );
+        assert_eq!(
+            chokepoint_only.rng.get_word_pos(),
+            chokepoint_only.rng_word_pos,
+            "premise: `into_game_state` resumes it, so a zero below is this session's own \
+             policy and not a lost field",
+        );
+
+        let mut restored =
+            GameSession::from_persisted(blob, &db).expect("supported persisted format config");
+
+        assert_ne!(
+            restored.state.rng_seed, saved_seed,
+            "the fresh-seed policy must survive this fix",
+        );
+        assert_eq!(
+            restored.state.rng_word_pos, 0,
+            "a freshly seeded stream must not inherit the old stream's high-water",
+        );
+        assert_eq!(
+            restored.state.rng.get_word_pos(),
+            restored.state.rng_word_pos,
+            "live cursor and persisted high-water must agree after restore",
+        );
+
+        assert!(
+            !restored.state.players[0].library.is_empty(),
+            "reach-guard: the shuffle below must have a library to act on",
+        );
+        engine::game::library::resolve_and_apply_library_shuffle(
+            &mut restored.state,
+            PlayerId(0),
+            &mut Vec::new(),
+        )
+        .expect("a restored session must be able to shuffle");
+    }
+
+    /// Paired reach-guard. It does NOT red when the fix is reverted, and is not meant to: its job
+    /// is to prove the panic is REACHABLE through the production shuffle seam on a restored
+    /// session, so the row above's "the shuffle succeeds" is evidence rather than a statement
+    /// about a call that could never have failed.
+    #[test]
+    #[should_panic(expected = "HighWaterRegression")]
+    fn a_restored_session_that_kept_the_saved_stream_position_panics_on_its_next_shuffle() {
+        let db = engine::database::CardDatabase::default();
+        let mut mgr = SessionManager::new();
+        let code = single_ai_opponent_game(&mut mgr);
+        let mut restored = round_trip_through_disk(mgr.sessions.get(&code).unwrap(), &db);
+
+        // Re-create the pre-fix pairing on a RESTORED state: a fresh word-0 stream under a
+        // surviving high-water. Exactly what `from_persisted` used to hand back.
+        restored.state.rng_word_pos = SAVED_WORD_POS;
+        engine::game::library::resolve_and_apply_library_shuffle(
+            &mut restored.state,
+            PlayerId(0),
+            &mut Vec::new(),
+        )
+        .expect("unreachable: the capture panics first");
+    }
+
     // CR 107.1c: "remove any number of counters" — a human's intermediate submit
     // ("remove 2 of 3") is not one of the coarse AI candidates (remove-none /
     // remove-all), but the engine validates the full legal space directly.
@@ -5266,8 +5344,10 @@ mod tests {
             selectable_cards: top_three.clone(),
             kept_destination: Some(Zone::Library),
             rest_destination: Some(Zone::Library),
+            rest_order: engine::types::ability::DigRestOrder::Preserve,
             source_id: None,
             enter_tapped: false,
+            enters_attacking: false,
         };
 
         // Non-canonical permutation [c, a, b] — not an enumerated candidate.

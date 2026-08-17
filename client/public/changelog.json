@@ -1,6 +1,49 @@
 {
   "entries": [
     {
+      "id": 193,
+      "date": "2026-08-16",
+      "title": "Resolve All respects every player",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Passive-voice damage triggers now work, so cards such as Smaug the Impenetrable and Innocent Bystander can see themselves being dealt damage\n• Damage thresholds now total simultaneous damage over the whole event when the card calls for it, while still honoring ‘by a single source’ clauses\n• Devour gives the right number of counters for the creatures you actually sacrificed, and Crabomination can emerge by sacrificing an artifact\n\n🛠️ Cards That Now Work Right\n• ‘When you do’ riders only fire when you actually took the optional action — Atraxa’s Skitterfang no longer asks for a target or grants a keyword after it can’t remove an oil counter\n• ‘Cowards can’t block Warriors’ and similar restrictions now constrain the right blockers and attackers (Gornog, the Red Reaper and the wider card class)\n• Tokens keep the literal names their cards give them, even when that name includes the creator’s name (Kher Keep and Selenia’s Curse)\n• Sensei’s Divining Top, M’Baku, Jabari Chieftain; Mister Fantastic; Kang Prime; Heroic Sacrifice; and Palace Jailer now follow their printed abilities more faithfully\n\n⚔️ Combat & Gameplay\n• Deferred and reflexive triggers now reach the stack at the right time instead of leaving a game stalled; several related fixes also prevent freezes during retargeting and mill replacement effects\n• After a mass pump, goad, or control effect, follow-up instructions such as ‘untap those creatures’ now act on the correct group (Jeskai Ascendancy and 15 more cards)\n\n🖥️ Interface\n• Resolve All now asks each player to explicitly authorize standing passes, keeps that consent current, and resumes cleanly after an AI player agrees",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1538799194658050168"
+    },
+    {
+      "id": 192,
+      "date": "2026-08-15",
+      "title": "Wheel of Misfortune spins for real",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Wheel of Misfortune resolves in full — every player secretly picks a number, and the engine can finally compare those choices across the whole table (Menacing Ogre and Life at Stake come along)\n• Gideon Jura's three loyalty abilities all work, including sending an opponent's creatures at him instead of at you\n• Bartz and Boko's other Birds each deal their own power — and so do nine more cards that ask a group of creatures to each deal damage (Moonlight Hunt, Kamahl's Will, Nissa's Judgment, Sarkhan the Mad, Season's Beatings…)\n• Balduvian Horde discards at random as a cost, instead of letting you pick the card you'd least miss\n• Braid of Fire's cumulative upkeep can be paid with the mana it makes\n• Kentaro, the Smiling Cat lets you pay {X} for a Samurai spell equal to its mana value\n• Raubahn, Bull of Ala Mhigo's Ward charges life equal to his power\n• Crackle with Power, Currency Converter, Thor God of Thunder, First Family, Fight for the Throne, Heart-Shaped Herb, Heroic Return and Doomsday now do what they print\n• Cogwork Librarian drafts face up, and the rest of the pod can see it\n• A card that returns to the battlefield transformed now lands there (Esper Origins cast from your graveyard)\n\n🛠️ Cards That Now Work Right\n• Faunsbane Troll's Monster Role was created and destroyed in the same instant, so the card appeared to do nothing — Roles made \"attached to it\" now find their creature, on six cards including Cursed Courtier and Unassuming Sage\n• Every Role token was missing its art\n• A token that copies an Aura entered attached to nothing and was swept away before you saw it; it now asks you for a host\n• Proliferating while a counter-doubler asks you to order replacements (Hardened Scales plus Doubling Season) wedged the game and broke every prompt after it — and \"proliferate twice\" only proliferated once\n• 55 cards with a \"return this from your graveyard\" ability were offered while the card was on the battlefield and hidden while it was in the graveyard — exactly backwards (Bestial Bloodline)\n• Overencumbered's Clue, Food and Junk now belong to the player it enchants\n• Emperor of Bones, Pulse of the Forge and Forage each got a targeted fix\n• \"You may\" enter-the-battlefield triggers ask the player whose permanent entered, and effects that hand an opponent the choice of who controls something ask before it enters\n• Optional damage targets are no longer dropped on the way through the parser\n\n⚔️ Combat & Gameplay\n• Creatures put onto the battlefield attacking now actually attack, and choose who they're attacking\n• Effects that dig through your library put the leftovers back in a random order when the card says so\n\n🖥️ Interface\n• A creature's own activated ability was unreachable whenever it wore an Aura or Equipment that was also activatable — clicking it opened the attachment chooser every time (reported on Slumbering Keepguard). The host gets its click back, and the attachments keep a route of their own\n• Your own face-down permanents are visible to you again\n• Loading an older save restores mana-spent triggers, tap effects, trigger history and token triggers that were previously lost — and a restored game no longer replays its shuffles from the wrong point\n• The AI opponent catalog no longer piles up unbounded compatibility work on the menu\n• Resolve All and reconnecting settle correctly in native games\n\n🤖 AI\n• A gang block against a trampler now has to actually absorb enough to survive the turn — the AI was throwing creatures in front of lethal trample damage and dying anyway\n\n🌐 Multiplayer\n• Hosting a game loaded the ~100MB card database twice, which reliably reloaded the page on iOS before anyone even joined. A memory-constrained host now shares one engine\n• A cast left paused by a player who leaves the game is abandoned cleanly instead of stalling the table",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1538204164071493723"
+    },
+    {
+      "id": 191,
+      "date": "2026-08-12",
+      "title": "The AI finally blocks menace",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Narci, Fable Singer drains — the engine can now watch another permanent's Saga chapter abilities resolve, which nothing could do before (Historian's Boon rides along)\n• Court of Ambition's monarch rider works: \"each opponent loses 6 life unless they discard two cards\", plus every punisher that asks a player for more than one card\n• True-Name Nemesis gets its protection from the player you name\n• Mechanized Production can win you the game on eight same-named artifacts\n• \"Whenever you cast your second spell each turn\" triggers now fire (Ichneumon Druid)\n• A spell can pay with convoke and delve together\n• Freerunning is now castable once your commander has connected\n• Forage offers its actions, and Faerie Miscreant draws when you already control one\n• Cumulative upkeep costs that aren't mana can finally be paid\n\n🛠️ Cards That Now Work Right\n• Tom Bombadil had hexproof and indestructible unconditionally — he now needs the four lore counters among your Sagas that he asks for\n• Nadu, Winged Wisdom's once-per-turn cap counts per creature, and holds across abilities it granted\n• Caged Sun and Extraplanar Lens amplify a land's mana once instead of repeatedly\n• Wrath of the Skies destroys creatures by the energy you actually paid\n• Moonlight Bargain repeats only over the cards it looked at\n• Coalition Relic stops asking for a color when it has no counter to remove\n• Memory Jar returns your hand at the right end step\n• Thousand-Year Storm counts your earlier spells again\n• Expend counts mana that was auto-tapped for you (Bakersbane Duo)\n• Fight effects point at the right two creatures\n• \"Creatures entering don't trigger\" effects now suppress only the abilities they should\n• Emperor of Bones, Serra's Emissary, Rhythm of the Wild, Eerie Interlude, Valakut, Recruit and Harsh Mentor each got a targeted fix\n• Paying life, paying mana mid-resolution, and drawing while a replacement effect asks you a question all keep their bookkeeping straight now\n\n⚔️ Combat & Gameplay\n• Your phase stops are honored during auto-pass again\n\n🤖 AI\n• The AI blocks menace creatures — and anything printing \"can't be blocked except by three or more creatures\", like Pathrazer of Ulamog. Before this it offered exactly one legal declaration against them: don't block\n• It will also throw a doomed gang block in front of lethal, since a block that dies still stops every point of damage from a non-trampler\n• It stops pointing burn at a creature it provably can't kill, while still casting mixed removal whose other half does the work\n• It no longer proposes targets it can't legally complete\n\n🖥️ Interface\n• Loading a saved game rebuilds combat prompts, suspended cards, and the full set of legal actions\n\n🌐 Multiplayer\n• A hidden card's real printed name and an unrevealed Room's details no longer travel in the state sent to opponents",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1537282067329720370"
+    },
+    {
       "id": 190,
       "date": "2026-08-10",
       "title": "Magmatic Scorchwing takes flight",

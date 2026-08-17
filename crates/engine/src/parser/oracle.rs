@@ -1,11 +1,10 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, ops::ControlFlow};
 
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while};
 use nom::character::complete::multispace0;
-use nom::combinator::{all_consuming, opt, recognize, value};
-use nom::multi::many1;
+use nom::combinator::{all_consuming, opt, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 use serde::{Deserialize, Serialize};
@@ -19,6 +18,8 @@ use crate::types::ability::{
     ReplacementDefinition, SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition,
     TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
 };
+use crate::types::ability_visit::{visit_ability_def_scoped, ResolutionScope};
+use crate::types::card::DraftEffect;
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::ManaCost;
@@ -32,8 +33,8 @@ use crate::types::zones::Zone;
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::oracle_nom::condition::parse_graveyard_keyword_grant_sentence;
 use super::oracle_nom::primitives::{
-    parse_number as nom_parse_number, parse_object_recipient_pronoun, scan_at_word_boundaries,
-    scan_contains, scan_preceded,
+    parse_number as nom_parse_number, parse_object_recipient_pronoun, parse_period_sentences,
+    scan_at_word_boundaries, scan_contains, scan_preceded,
 };
 
 use super::oracle_attraction::parse_attraction_visit_triggers;
@@ -52,7 +53,7 @@ use super::oracle_classifier::{
     is_instead_replacement_line, is_opening_hand_begin_game, is_pay_life_as_colored_mana_pattern,
     is_replacement_pattern, is_spells_alternative_cost_pattern, is_static_pattern,
     is_vehicle_tier_line, lower_starts_with, should_defer_spell_to_effect,
-    split_flashback_trailing_self_spell_cost_reduction,
+    split_flashback_trailing_self_spell_cost_reduction, strip_entry_this_way_riders,
 };
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, parse_single_cost, try_parse_cost_reduction};
@@ -248,16 +249,14 @@ fn parse_replacement_sentence_sequence_ir(
     Some(replacements)
 }
 
+/// Split a replacement line into its period-terminated sentences, requiring the
+/// line to be fully consumed (a trailing unterminated fragment rejects the whole
+/// line, so the multi-sentence replacement path never sees a partial tail).
+///
+/// Segmentation itself is delegated to `oracle_nom::primitives::parse_period_sentences`,
+/// the single authority shared with `oracle_classifier::strip_entry_this_way_riders`.
 fn parse_replacement_sentences(input: &str) -> OracleResult<'_, Vec<&str>> {
-    all_consuming(many1(parse_replacement_sentence)).parse(input)
-}
-
-fn parse_replacement_sentence(input: &str) -> OracleResult<'_, &str> {
-    preceded(
-        multispace0,
-        recognize(terminated(take_until("."), tag("."))),
-    )
-    .parse(input)
+    all_consuming(parse_period_sentences).parse(input)
 }
 
 // CR 100.2a / CR 903.5b: Deck-construction overrides like "A deck can have
@@ -399,11 +398,49 @@ pub(crate) fn is_draft_matters_sentence(line: &str) -> bool {
     let lower = line.trim().to_ascii_lowercase();
     lower_starts_with(&lower, "draft this card face up")
         || lower_starts_with(&lower, "as you draft ")
+        || lower_starts_with(&lower, "if you do, put this card into that booster pack")
         || lower_starts_with(&lower, "during the draft")
         || lower_starts_with(&lower, "immediately after the draft")
         || lower_starts_with(&lower, "instead of drafting ")
         || lower_starts_with(&lower, "as long as this card is face up during the draft")
         || lower_starts_with(&lower, "each player passes the last card")
+}
+
+/// CR 905.1a + CR 905.2: Identify a draft-time ability that changes the
+/// booster-draft procedure rather than constructed-game resolution.
+pub fn draft_effect_from_oracle_text(oracle_text: &str) -> Option<DraftEffect> {
+    let lower = oracle_text.to_lowercase();
+    let pair = TextPair::new(oracle_text, &lower);
+    let parsed = nom_on_lower(pair.original, pair.lower, |input| {
+        all_consuming(terminated(
+            (
+                terminated(
+                    value((), tag("draft this card face up")),
+                    tag("."),
+                ),
+                preceded(
+                    multispace0,
+                    terminated(
+                        value(
+                            (),
+                            tag("as you draft a card, you may draft an additional card from that booster pack"),
+                        ),
+                        tag("."),
+                    ),
+                ),
+                preceded(
+                    multispace0,
+                    terminated(
+                        value((), tag("if you do, put this card into that booster pack")),
+                        opt(tag(".")),
+                    ),
+                ),
+            ),
+            multispace0,
+        ))
+        .parse(input)
+    });
+    parsed.is_some().then_some(DraftEffect::AdditionalPick)
 }
 
 /// Whether Oracle text explicitly permits this card to be a commander.
@@ -1510,7 +1547,6 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::CountersOnObjects { filter, .. }
         | QuantityRef::Aggregate { filter, .. }
         | QuantityRef::ControlledByEachPlayer { filter, .. }
-        | QuantityRef::DistinctColorsAmongPermanents { filter }
         | QuantityRef::DistinctCounterKindsAmong { filter }
         | QuantityRef::EnteredThisTurn { filter }
         // CR 608.2i: the look-back sibling carries a `TargetFilter` too, and this
@@ -1520,15 +1556,48 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => {
             target_filter_uses_filter_prop(filter, pred)
         }
-        QuantityRef::DistinctCardTypes {
-            source: crate::types::ability::CardTypeSetSource::Objects { filter },
+        // CR 109.2: the three distinct-characteristic counts embed their filters
+        // through the shared population enum; recurse over it so a union member
+        // or a journal's narrowing filter is not dropped.
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
+            characteristic_source_uses_filter_prop(source, pred)
         }
-        | QuantityRef::DistinctSubtypes {
-            source: crate::types::ability::CardTypeSetSource::Objects { filter },
-            ..
-        } => target_filter_uses_filter_prop(filter, pred),
         _ => false,
     }
+}
+
+/// CR 109.2: Does any `TargetFilter` reachable through a `CardTypeSetSource`
+/// population use `pred`? The fixed-vocabulary zone / linked-exile / tracked-set
+/// arms carry none.
+fn characteristic_source_uses_filter_prop(
+    source: &crate::types::ability::CardTypeSetSource,
+    pred: &impl Fn(&FilterProp) -> bool,
+) -> bool {
+    use crate::types::ability::CardTypeSetSource;
+    let mut found = false;
+    let complete =
+        source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+            if found {
+                return;
+            }
+            found = match leaf {
+                CardTypeSetSource::Objects { filter } => {
+                    target_filter_uses_filter_prop(filter, pred)
+                }
+                CardTypeSetSource::TurnJournal { filter, .. } => filter
+                    .as_ref()
+                    .is_some_and(|filter| target_filter_uses_filter_prop(filter, pred)),
+                CardTypeSetSource::Zone { .. }
+                | CardTypeSetSource::ExiledBySource
+                | CardTypeSetSource::TrackedSet { .. }
+                | CardTypeSetSource::AnyOf { .. } => false,
+            };
+        });
+    // A truncated walk claims the prop: this feeds parse-time capability
+    // reporting, where over-reporting a dependency is the harmless direction.
+    found || !complete
 }
 
 fn target_filter_uses_filter_prop(
@@ -2636,7 +2705,20 @@ fn is_spell_resolution_instruction_line(
     } else {
         std::borrow::Cow::Borrowed(effect_lower.as_str())
     };
-    if is_static_pattern(&static_view) && !should_defer_spell_to_effect(&effect_lower) {
+    // CR 608.2c: head-scope this gate for the same reason `is_replacement_pattern`
+    // is head-scoped. `is_static_compound_pattern` classifies on
+    // `"enters with " && !"counter"` — tokens a reflexive "… this way" rider's
+    // CONSEQUENT supplies just as readily as the replacement tokens did, and this
+    // predicate short-circuits the spell path one branch EARLIER than the
+    // replacement one. Heroic Return survives today only because its rider happens
+    // to contain the word "counter"; a rider with a non-counter consequent ("… it
+    // enters with your choice of …", "… it enters with flying") would otherwise
+    // drop the head reanimation instruction. `None` (text unit is only riders) is
+    // not a static.
+    let static_head = strip_entry_this_way_riders(&static_view);
+    if static_head.as_deref().is_some_and(is_static_pattern)
+        && !should_defer_spell_to_effect(&effect_lower)
+    {
         return false;
     }
 
@@ -5119,12 +5201,18 @@ pub(crate) fn parse_oracle_ir(
         // trigger and excludes it from this replacement interceptor.
         // CR 608.2c: "If a [type] enters this way, it enters with …" is a reflexive
         // conditional rider on a non-ETB trigger (Winter Soldier, Reborn Avenger),
-        // not a CR 614.1c enters-with replacement head. Skip the replacement
-        // interceptor so the line routes through trigger dispatch.
+        // not a CR 614.1c enters-with replacement head. The "enters with" token must
+        // therefore be sought in the HEAD instruction only, through the same
+        // `strip_entry_this_way_riders` authority the classifier uses. A literal
+        // `"enters this way,"` scan modelled just ONE grammatical voice of the rider
+        // class (present-tense, comma-terminated), so it still handed a passive-voice
+        // ("… is put onto the battlefield this way, …") or comma-less rider to the
+        // replacement interceptor and lost the head instruction. `None` (the line is
+        // only riders) has no head to intercept either.
         if has_trigger_prefix(&lower)
             && !is_enters_with_counter_trigger(&lower)
-            && scan_contains(&lower, "enters with")
-            && !scan_contains(&lower, "enters this way,")
+            && strip_entry_this_way_riders(&lower)
+                .is_some_and(|head| scan_contains(&head, "enters with"))
         {
             // CR 603.1 + CR 603.3 + CR 614.1c/614.12: "Whenever you cast [spell],
             // that [subject] enters with … counter(s) on it[, where X is …]"
@@ -6754,6 +6842,9 @@ fn activation_zone_from_self_cost(cost: &AbilityCost) -> Option<Zone> {
             zone: Some(zone),
             ..
         } => Some(*zone),
+        AbilityCost::Sacrifice(sacrifice) if sacrifice.target == TargetFilter::SelfRef => {
+            Some(Zone::Battlefield)
+        }
         AbilityCost::Composite { costs } => costs.iter().find_map(activation_zone_from_self_cost),
         _ => None,
     }
@@ -6762,27 +6853,76 @@ fn activation_zone_from_self_cost(cost: &AbilityCost) -> Option<Zone> {
 /// Effect-side companion to `activation_zone_from_self_cost`.
 ///
 /// CR 113.6m + CR 602.1: an activated ability whose *effect* moves the object
-/// it's printed on out of a particular non-battlefield zone (e.g. "Put this
-/// card from your hand onto the battlefield") functions only from that zone.
-/// The cost-based derivation cannot see this because the zone lives in the
-/// effect, not the cost. This walks the parsed effect chain for a self-
-/// `ChangeZone` whose `origin` is a non-battlefield zone and `destination` is
-/// the battlefield, returning that origin as the activation zone.
+/// it's printed on out of a particular non-battlefield zone functions only from
+/// that zone. The cost-based derivation cannot see this because the zone lives
+/// in the effect, not the cost. This walks the parsed effect chain for a self-
+/// `ChangeZone` with a non-battlefield `origin`, returning that origin as the
+/// activation zone.
+///
+/// **The rule quantifies over the ORIGIN zone only.** CR 113.6m reads "an
+/// ability whose cost or effect specifies that it moves the object it's on
+/// **out of a particular zone** functions only in that zone" — the destination
+/// appears nowhere in it. Both destinations are live in the corpus and both
+/// derive the same way: `→ Battlefield` (Reassembling Skeleton /
+/// Bloodsoaked Champion, CR 113.6m's own printed example) and `→ Hand`
+/// (Gutterbones / Bestial Bloodline, "Return this card from your graveyard to
+/// your hand"). Do not re-add a `destination` field to the pattern.
+///
+/// `origin != Zone::Battlefield` is the CR 113.6 default guard, **not** part of
+/// CR 113.6m: an ability whose effect moves its own source *off* the
+/// battlefield already functions there by default, so there is nothing to
+/// derive. Keep it — it is the correct default and costs nothing — but do not
+/// mistake it for load-bearing: **its class is empty at this corpus vintage.**
+/// 0 of the 22,794 parsed abilities carry a self-`ChangeZone` with
+/// `origin: Some(Zone::Battlefield)`, so no card and no test reaches this line.
+/// The shape that would reach it is an effect lowering to
+/// `ChangeZone { origin: Some(Zone::Battlefield), target: TargetFilter::SelfRef, .. }`
+/// — a self-move whose text names the battlefield as the zone it moves out of.
+/// No printed self-move does today: they leave the origin unstated
+/// (`origin: None`) or lower to a different variant. The two Auras that look
+/// like this class are rejected by *earlier* parts of the pattern and never
+/// arrive here — Cooped Up (`{2}{W}: Exile enchanted creature.`) by
+/// `target: TargetFilter::SelfRef`, because it moves the enchanted creature and
+/// not its own source, and Cage of Hands (`{1}{W}: Return this Aura to its
+/// owner's hand.`) by the `Effect::ChangeZone` variant match, because it lowers
+/// to `Effect::Bounce`.
+///
+/// The canonical own-resolution traversal is **kind-agnostic** and walks direct
+/// sub-, otherwise-, and modal branches. Lochmere Serpent depends on exactly
+/// that: its `Graveyard → Hand` self-move sits on a sub-ability whose kind is
+/// `Spell`, not `Activated`. Three parts of CR 113.6m are deliberately **not** implemented because
+/// each governs a measurably empty class at this corpus vintage; each has its
+/// extension point named here:
+/// - the `unless` clause's effect half ("a previous part of its … effect
+///   specifies that the object is put into that zone") — 0 operative cards;
+///   extension point: skip a later self-move whose zone an earlier part filled.
+/// - the Aura half of the `unless` clause (satisfiable by a cost, an effect
+///   **or** a trigger condition specifying that the enchanted object leaves the
+///   battlefield) — none of the Auras in the class qualifies; extension point:
+///   a cost-chain inspection in this function.
+/// - CR 113.6m sentence 2 (an effect that creates a delayed triggered ability
+///   which moves the object out of a zone, CR 603.7) — 0 operative cards (the
+///   abilities carrying that shape are synthesized Unearth, CR 702.84, whose
+///   delayed move is `Battlefield → Exile`, i.e. the CR 113.6 default);
+///   extension point: an `Effect::CreateDelayedTrigger` arm here that recurses
+///   into the carried `AbilityDefinition`.
 fn activation_zone_from_self_effect(def: &AbilityDefinition) -> Option<Zone> {
-    if let Effect::ChangeZone {
-        origin: Some(origin),
-        destination: Zone::Battlefield,
-        target: TargetFilter::SelfRef,
-        ..
-    } = *def.effect
-    {
-        if origin != Zone::Battlefield {
-            return Some(origin);
+    let mut activation_zone = None;
+    let _ = visit_ability_def_scoped(def, ResolutionScope::OwnResolutionOnly, &mut |effect| {
+        if let Effect::ChangeZone {
+            origin: Some(origin),
+            target: TargetFilter::SelfRef,
+            ..
+        } = effect
+        {
+            if *origin != Zone::Battlefield {
+                activation_zone = Some(*origin);
+                return ControlFlow::Break(());
+            }
         }
-    }
-    def.sub_ability
-        .as_deref()
-        .and_then(activation_zone_from_self_effect)
+        ControlFlow::Continue(())
+    });
+    activation_zone
 }
 
 /// CR 608.2k: Source zone of a non-self `AbilityCost::Exile` component
@@ -6843,13 +6983,45 @@ fn parse_activated_ability_ir(
     ctx.current_ability_exile_cost_zone = prev_exile_zone;
     ctx.current_ability_index = prev_ability_index;
     let lowered_for_activation_zone = lower_ability_ir(&ir);
-    // CR 113.6m: fall back to the effect-side derivation — an ability whose
-    // effect moves the source out of a non-battlefield zone functions only
-    // from that zone. Cost-based derivation keeps priority.
-    ir.shell.activation_zone = lowered_for_activation_zone
-        .activation_zone
-        .or_else(|| activation_zone_from_self_cost(&cost))
-        .or_else(|| activation_zone_from_self_effect(&lowered_for_activation_zone));
+    // Three-authority precedence for the activation zone. The ORDER IS A RULES
+    // BOUNDARY, not a style choice — see Kogla and Yidaro below.
+    //
+    // 1. CR 113.6b: "An ability that states which zones it functions in
+    //    functions only from those zones." When the card states the zone there
+    //    is nothing to derive, and "only from those zones" is exclusive. Today
+    //    this link is reachable only from the whole-line dispatch sites that
+    //    stamp the shell directly (Channel, CR 207.2c; Forecast, CR 702.57a) and
+    //    from the `database/` synthesis writers — never from inside this
+    //    function, whose `ir` is built fresh from the post-colon effect text.
+    //    It is a deliberate forward guard for the day an explicit-zone grammar
+    //    routes through here, NOT dead code to be tidied away.
+    // 2. CR 113.6j + CR 118.3: a cost-derived source zone takes priority over
+    //    a conflicting effect origin. Battlefield remains the implicit default
+    //    representation unless that priority is needed.
+    // 3. CR 113.6m: an ability whose effect moves the source out of a
+    //    non-battlefield zone functions only from that zone.
+    //
+    // 2 ≻ 3 is discriminating on **Kogla and Yidaro**: "{2}{R}{G}, Discard this
+    // card: … Shuffle this card into your library from your graveyard, …".
+    // The cost yields `Hand` and the effect yields `Graveyard`; `Hand` is
+    // correct, because discarding is what put the card into the graveyard, so
+    // CR 113.6m's `unless` clause ("a previous part of its cost … specifies
+    // that the object is put into that zone") makes the effect side
+    // inapplicable by rule, and CR 118.3 makes a graveyard activation
+    // unpayable rather than merely suboptimal. Reversing this precedence
+    // regresses that card.
+    let cost_activation_zone = activation_zone_from_self_cost(&cost);
+    let effect_activation_zone = activation_zone_from_self_effect(&lowered_for_activation_zone);
+    ir.shell.activation_zone = lowered_for_activation_zone.activation_zone.or({
+        match (cost_activation_zone, effect_activation_zone) {
+            // A self-sacrifice is paid from the battlefield, but Battlefield is
+            // the default activation zone. Preserve `None` until it must defeat
+            // a derived non-battlefield effect origin.
+            (Some(Zone::Battlefield), None) => None,
+            (Some(cost_zone), _) => Some(cost_zone),
+            (None, effect_zone) => effect_zone,
+        }
+    });
     ir.shell.cost = Some(cost);
     ir.shell.description = Some(description.to_string());
     if !constraints.restrictions.is_empty() {

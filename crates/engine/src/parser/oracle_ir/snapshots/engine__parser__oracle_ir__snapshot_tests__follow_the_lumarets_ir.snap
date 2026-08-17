@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 1742
 expression: "&ir"
 ---
 {
@@ -67,7 +68,8 @@ expression: "&ir"
                     },
                     "rest_destination": null,
                     "reveal": false,
-                    "enter_tapped": false
+                    "enter_tapped": false,
+                    "enters_attacking": false
                   },
                   "duration": null,
                   "sub_ability": null,
@@ -140,7 +142,9 @@ expression: "&ir"
                         },
                         "destination": "Hand",
                         "rest_destination": null,
+                        "rest_order": "preserve",
                         "enter_tapped": false,
+                        "enters_attacking": false,
                         "reveal_verb": true
                       }
                     }
@@ -236,7 +240,8 @@ expression: "&ir"
                           },
                           "rest_destination": null,
                           "reveal": false,
-                          "enter_tapped": false
+                          "enter_tapped": false,
+                          "enters_attacking": false
                         },
                         "cost": null,
                         "sub_ability": null,
@@ -303,7 +308,8 @@ expression: "&ir"
                     },
                     "rest_destination": null,
                     "reveal": false,
-                    "enter_tapped": false
+                    "enter_tapped": false,
+                    "enters_attacking": false
                   },
                   "duration": null,
                   "sub_ability": null,
@@ -348,7 +354,8 @@ expression: "&ir"
                     "continuation": {
                       "PutRest": {
                         "destination": "Library",
-                        "reorder_all": false
+                        "reorder_all": false,
+                        "rest_order": "random"
                       }
                     }
                   }

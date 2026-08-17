@@ -11,7 +11,7 @@ import {
   getPlayerDisplayName,
   useMultiplayerStore,
 } from "../../stores/multiplayerStore.ts";
-import type { PlayerId, WaitingFor } from "../../adapter/types.ts";
+import type { FreeEntry, PlayerId, WaitingFor } from "../../adapter/types.ts";
 
 type OptionChoice = Extract<
   WaitingFor,
@@ -54,7 +54,73 @@ export function NamedChoiceModal({ data }: { data: OptionChoice["data"] }) {
   if (typeKey === "CardName") {
     return <CardNameSearch />;
   }
+  // CR 107.1a/b: the engine publishes a free-entry contract when the answer is
+  // typed rather than picked from `options`. Its PRESENCE — not any reading of
+  // `choice_type`'s serialized shape — selects the numeric form; an enumerated
+  // choice carries no contract and keeps its grid.
+  const freeEntry = "free_entry" in data ? data.free_entry : undefined;
+  if (freeEntry?.kind === "Number") {
+    return <NumberEntry contract={freeEntry} />;
+  }
   return <ButtonGrid data={data} typeKey={typeKey} />;
+}
+
+/** CR 107.1a/b: free-entry numeric prompt, rendered and bounded entirely from
+ *  the engine's published contract.
+ *
+ *  The engine validates the submitted answer authoritatively
+ *  (`ChoiceType::accepts_free_entry_answer`) against the same bounds it
+ *  published here, so this check can only ever agree with it. Deriving the
+ *  bounds locally instead — from the choice type's shape, or from a hard-coded
+ *  numeric ceiling — would make the client a second authority, free to reject a
+ *  value the engine accepts and to drift when the engine's domain changes. */
+function NumberEntry({ contract }: { contract: FreeEntry }) {
+  const { min, max } = contract;
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const [value, setValue] = useState(String(min));
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  const parsed = /^\d+$/.test(value.trim()) ? Number(value.trim()) : null;
+  const valid =
+    parsed !== null &&
+    Number.isSafeInteger(parsed) &&
+    parsed >= min &&
+    parsed <= max;
+
+  const confirm = useCallback(() => {
+    if (valid) {
+      dispatch({ type: "ChooseOption", data: { choice: String(parsed) } });
+    }
+  }, [dispatch, parsed, valid]);
+
+  return (
+    <ChoiceOverlay
+      title={t("namedChoice.title.numberRange")}
+      subtitle={t("namedChoice.numberSubtitle", { min })}
+      footer={<ConfirmButton onClick={confirm} disabled={!valid} />}
+    >
+      <input
+        ref={inputRef}
+        type="text"
+        inputMode="numeric"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && valid) {
+            e.preventDefault();
+            confirm();
+          }
+        }}
+        className="w-40 rounded-lg border-2 border-gray-600 bg-gray-900/90 px-4 py-3 text-center text-xl text-white outline-none transition focus:border-cyan-400"
+      />
+    </ChoiceOverlay>
+  );
 }
 
 function CardNameSearch() {

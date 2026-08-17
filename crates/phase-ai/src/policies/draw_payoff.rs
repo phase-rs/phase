@@ -207,6 +207,9 @@ fn candidate_draws_structurally(ctx: &PolicyContext<'_>) -> bool {
         // this match at compile time and forces an intentional classification
         // instead of silently bypassing the draw payoff (CR 121.1).
         GameAction::PassPriority
+        | GameAction::BeginResolveAll { .. }
+        | GameAction::RespondResolveAllConsent { .. }
+        | GameAction::RevokeResolveAllConsent { .. }
         | GameAction::ChooseMeldPair { .. }
         | GameAction::ChooseEntryAttackTarget { .. }
         | GameAction::PlayLand { .. }
@@ -237,6 +240,7 @@ fn candidate_draws_structurally(ctx: &PolicyContext<'_>) -> bool {
         | GameAction::SelectTargets { .. }
         | GameAction::ChooseTarget { .. }
         | GameAction::ChooseReplacement { .. }
+        | GameAction::ChooseEntryController { .. }
         | GameAction::OrderTriggers { .. }
         | GameAction::CancelCast
         | GameAction::Equip { .. }

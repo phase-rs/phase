@@ -13,8 +13,8 @@ use crate::ai_support::{
     FilterPipeline, TacticalClass,
 };
 use crate::analysis::decision_template::{
-    predictability_gate, validate_pins, DecisionGroupKey, DecisionKind, DecisionTemplate,
-    IterationCount, PinnedDecision, ReplayMode, TargetPin,
+    declaration_conforms, AnnouncementSubject, DecisionGroupKey, DecisionKind, DecisionTemplate,
+    IterationCount, PinnedDecision, Ranking, ReplayMode, TargetPin, TargetSchedule,
 };
 use crate::types::ability::{
     AggregateFunction, ChoiceType, ChooseFromZoneConstraint, Comparator, CounterCostSelection,
@@ -37,19 +37,20 @@ use crate::types::identifiers::ObjectId;
 use crate::types::interaction::{
     ActiveInteractionSlot, AggregateComparator, AmountAssignment, ConfirmSemantics,
     InteractionActionCode, InteractionActionId, InteractionAggregateFunction,
-    InteractionAttachmentFan, InteractionAttachmentFanChild, InteractionAvailability,
-    InteractionChoice, InteractionChoiceId, InteractionChoiceStatus,
-    InteractionDamageAssignmentMode, InteractionGroupConstraint, InteractionId,
-    InteractionIntentCode, InteractionManaAbilityActivationScope, InteractionManaColor,
-    InteractionManaComparator, InteractionManaRestriction, InteractionManaSpecialAction,
-    InteractionManaSpellCostCriterion, InteractionManaZoneSpendPolarity, InteractionObjectProperty,
-    InteractionOpportunity, InteractionOpportunityResponse, InteractionOutcomeCode,
-    InteractionPresentationSurface, InteractionPreview, InteractionPreviewRequest,
-    InteractionPreviewStatus, InteractionProgress, InteractionReasonCode,
-    InteractionRelationConstraint, InteractionRelationSourceConstraint, InteractionResponse,
-    InteractionResponseSpec, InteractionRoleCode, InteractionSessionId,
+    InteractionAttachmentFan, InteractionAttachmentFanChild, InteractionAttachmentView,
+    InteractionAttachmentViewCard, InteractionAvailability, InteractionChoice, InteractionChoiceId,
+    InteractionChoiceStatus, InteractionDamageAssignmentMode, InteractionGroupConstraint,
+    InteractionId, InteractionIntentCode, InteractionManaAbilityActivationScope,
+    InteractionManaColor, InteractionManaComparator, InteractionManaRestriction,
+    InteractionManaSpecialAction, InteractionManaSpellCostCriterion,
+    InteractionManaZoneSpendPolarity, InteractionObjectProperty, InteractionOpportunity,
+    InteractionOpportunityResponse, InteractionOutcomeCode, InteractionPresentationSurface,
+    InteractionPreview, InteractionPreviewRequest, InteractionPreviewStatus, InteractionProgress,
+    InteractionReasonCode, InteractionRelationConstraint, InteractionRelationSourceConstraint,
+    InteractionResponse, InteractionResponseSpec, InteractionRoleCode, InteractionSessionId,
     InteractionShortcutCountSpec, InteractionShortcutDecision, InteractionShortcutPoint,
-    InteractionShortcutPointKind, InteractionShortcutReply, InteractionShortcutResponseCode,
+    InteractionShortcutPointKind, InteractionShortcutPreview, InteractionShortcutPreviewEntry,
+    InteractionShortcutPreviewFamily, InteractionShortcutReply, InteractionShortcutResponseCode,
     InteractionSlotKind, InteractionSubmission, InteractionSummaryCode, InteractionWaitingForCode,
     InteractionWaitingForKind, InteractionZoneCode, SelectionConstraint, SimultaneousDecisionKind,
     ViewerInteraction, MAX_INTERACTION_LIST_LEN,
@@ -63,6 +64,7 @@ use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
 use super::combat::AttackTarget;
+use super::derived_views::{family_of, payload_seat, UnboundedFamily};
 use super::dungeon::DungeonId;
 use super::engine::{
     apply_interaction, apply_interaction_for_simulation, EngineError, MAX_SHORTCUT_CYCLES,
@@ -243,6 +245,11 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         WaitingFor::OutsideGameChoice { .. } => HumanResponseModel::OutsideSelection,
         WaitingFor::NamedChoice { .. } => HumanResponseModel::TextChoice,
         WaitingFor::RespondToShortcut { .. } => HumanResponseModel::ShortcutReply,
+        // Resolve All consent has a finite, engine-authored Grant/Decline or
+        // Revoke domain. It is not a CR 732 shortcut-reply protocol.
+        WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. } => {
+            HumanResponseModel::ExactCandidates(AuditedExactCandidates)
+        }
         WaitingFor::PrecastCopyShortcutOffer { .. }
         | WaitingFor::RespondToPrecastCopyShortcut { .. }
         | WaitingFor::CommanderZoneChoice { .. }
@@ -255,11 +262,13 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         WaitingFor::Priority { .. }
         | WaitingFor::MeldPairChoice { .. }
         | WaitingFor::MeldAttackTargetChoice { .. }
+        | WaitingFor::EntryAttackTargetChoice { .. }
         | WaitingFor::MulliganDecision { .. }
         | WaitingFor::AssistChoosePlayer { .. }
         | WaitingFor::ExertChoice { .. }
         | WaitingFor::EnlistChoice { .. }
         | WaitingFor::ReplacementChoice { .. }
+        | WaitingFor::EntryControllerChoice { .. }
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::ReturnAsAuraTarget { .. }
@@ -427,7 +436,14 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
             None,
             Some(InteractionSlotKind::Single),
         ),
-        WaitingFor::LoopShortcut { .. } | WaitingFor::RespondToShortcut { .. } => (
+        WaitingFor::ResolveAllConsent { .. } => (
+            InteractionWaitingForCode::Shortcut,
+            Some(SimultaneousDecisionKind::ResolveAllConsent),
+            Some(InteractionSlotKind::Single),
+        ),
+        WaitingFor::LoopShortcut { .. }
+        | WaitingFor::RespondToShortcut { .. }
+        | WaitingFor::ResolveAllReady { .. } => (
             InteractionWaitingForCode::Shortcut,
             None,
             Some(InteractionSlotKind::Single),
@@ -481,11 +497,13 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         WaitingFor::Priority { .. }
         | WaitingFor::MeldPairChoice { .. }
         | WaitingFor::MeldAttackTargetChoice { .. }
+        | WaitingFor::EntryAttackTargetChoice { .. }
         | WaitingFor::ChooseXValue { .. }
         | WaitingFor::UntapChoice { .. }
         | WaitingFor::ExertChoice { .. }
         | WaitingFor::EnlistChoice { .. }
         | WaitingFor::ReplacementChoice { .. }
+        | WaitingFor::EntryControllerChoice { .. }
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::ReturnAsAuraTarget { .. }
@@ -565,16 +583,70 @@ fn waiting_for_kind(waiting_for: &WaitingFor) -> InteractionWaitingForKind {
     }
 }
 
-fn semantic_slots(waiting_for: &WaitingFor) -> Vec<(PlayerId, InteractionSlotKind)> {
-    let classification = classify_waiting_for(waiting_for);
+fn semantic_slots(state: &GameState) -> Vec<(PlayerId, InteractionSlotKind)> {
+    let classification = classify_waiting_for(&state.waiting_for);
     let Some(slot_kind) = classification.slot_kind else {
         return Vec::new();
     };
-    waiting_for
-        .acting_players()
-        .into_iter()
-        .map(|player| (player, slot_kind))
-        .collect()
+    match &state.waiting_for {
+        WaitingFor::ResolveAllConsent {
+            epoch,
+            representative,
+        } => state
+            .resolve_all_consent_run
+            .as_ref()
+            .filter(|run| run.epoch == *epoch)
+            .map(|run| {
+                run.participants
+                    .iter()
+                    .filter(|participant| {
+                        participant.granted && participant.representative != *representative
+                    })
+                    .map(|participant| (participant.representative, slot_kind))
+                    .chain(std::iter::once((*representative, slot_kind)))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        WaitingFor::ResolveAllReady { epoch } => state
+            .resolve_all_consent_run
+            .as_ref()
+            .filter(|run| run.epoch == *epoch)
+            .map(|run| {
+                run.participants
+                    .iter()
+                    .filter(|participant| participant.granted)
+                    .map(|participant| (participant.representative, slot_kind))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => state
+            .waiting_for
+            .acting_players()
+            .into_iter()
+            .map(|player| (player, slot_kind))
+            .collect(),
+    }
+}
+
+fn interaction_submitter_for_owner(state: &GameState, semantic_owner: PlayerId) -> PlayerId {
+    let frozen = match &state.waiting_for {
+        WaitingFor::ResolveAllConsent { epoch, .. } | WaitingFor::ResolveAllReady { epoch } => {
+            turn_control::resolve_all_granted_submitter(state, *epoch, semantic_owner)
+        }
+        _ => None,
+    };
+    frozen.unwrap_or_else(|| turn_control::authorized_submitter_for_player(state, semantic_owner))
+}
+
+fn interaction_authorized_submitters(state: &GameState) -> Vec<PlayerId> {
+    let mut submitters = Vec::new();
+    for (owner, _) in semantic_slots(state) {
+        let submitter = interaction_submitter_for_owner(state, owner);
+        if !submitters.contains(&submitter) {
+            submitters.push(submitter);
+        }
+    }
+    submitters
 }
 
 fn interaction_serial_is_valid(value: &str) -> bool {
@@ -645,7 +717,7 @@ fn allocate_interaction_ids(
 }
 
 fn bind_all_current_slots(state: &mut GameState) -> bool {
-    let semantic = semantic_slots(&state.waiting_for);
+    let semantic = semantic_slots(state);
     let Some((ids, generation, serial)) = allocate_interaction_ids(state, semantic.len()) else {
         return false;
     };
@@ -735,7 +807,7 @@ pub(crate) fn ensure_interaction_authority(state: &mut GameState) {
         state.active_interaction_slots.clear();
         return;
     }
-    let expected = semantic_slots(&state.waiting_for);
+    let expected = semantic_slots(state);
     let matches = expected.len() == state.active_interaction_slots.len()
         && expected.iter().all(|(owner, kind)| {
             state
@@ -751,16 +823,10 @@ pub(crate) fn ensure_interaction_authority(state: &mut GameState) {
 }
 
 pub(crate) fn semantic_owner_for_actor(state: &GameState, actor: PlayerId) -> Option<PlayerId> {
-    let acting = state.waiting_for.acting_players();
-    acting
-        .iter()
-        .copied()
-        .find(|owner| *owner == actor)
-        .or_else(|| {
-            acting
-                .into_iter()
-                .find(|owner| turn_control::authorized_submitter_for_player(state, *owner) == actor)
-        })
+    semantic_slots(state)
+        .into_iter()
+        .map(|(owner, _)| owner)
+        .find(|owner| interaction_submitter_for_owner(state, *owner) == actor)
 }
 
 pub(crate) fn action_preserves_interaction(action: &GameAction) -> bool {
@@ -798,7 +864,7 @@ pub(crate) fn rebind_interaction_slots_after_action(
         });
     }
     let prior = classify_waiting_for(previous_waiting);
-    let next = semantic_slots(&state.waiting_for);
+    let next = semantic_slots(state);
     let preserve_other_simultaneous = prior.simultaneous.is_some();
     let mut rebound = Vec::with_capacity(next.len());
     let mut needs_id = Vec::new();
@@ -853,7 +919,7 @@ pub(crate) fn debug_assert_interaction_consistency(state: &GameState) {
         if !interaction_serial_is_valid(&state.next_interaction_serial) {
             return;
         }
-        let expected = semantic_slots(&state.waiting_for);
+        let expected = semantic_slots(state);
         debug_assert_eq!(expected.len(), state.active_interaction_slots.len());
         let mut ids = HashSet::new();
         for (owner, kind) in expected {
@@ -1111,6 +1177,7 @@ struct LoopShortcutPointProjection {
 #[derive(Debug, Clone)]
 struct LoopShortcutProjection {
     count: InteractionShortcutCountSpec,
+    preview: Option<InteractionShortcutPreview>,
     points: Vec<LoopShortcutPointProjection>,
     candidates: Vec<LoopShortcutCandidateValue>,
 }
@@ -1839,6 +1906,14 @@ fn mana_payment_direct_actions(
     player: PlayerId,
     convoke_mode: Option<ConvokeMode>,
 ) -> Result<Vec<GameAction>, InteractionReasonCode> {
+    let has_delve = state.pending_cast.as_ref().is_some_and(|pending| {
+        super::casting::spell_has_delve_payment_for(
+            state,
+            player,
+            pending.object_id,
+            pending.casting_variant == CastingVariant::Fuse,
+        )
+    });
     let activation_upper_bound = state
         .battlefield
         .iter()
@@ -1867,11 +1942,7 @@ fn mana_payment_direct_actions(
         .unwrap_or_default();
     let convoke_upper_bound = match convoke_mode {
         None => 0,
-        Some(ConvokeMode::Delve) => state
-            .objects
-            .values()
-            .filter(|object| object.is_delve_eligible(player))
-            .count(),
+        Some(ConvokeMode::Delve) => 0,
         Some(mode) => state
             .battlefield
             .iter()
@@ -1889,11 +1960,21 @@ fn mana_payment_direct_actions(
             .try_fold(0usize, |count, choices| count.checked_add(choices))
             .ok_or(InteractionReasonCode::PayloadTooLarge)?,
     };
+    let delve_upper_bound = if has_delve {
+        state
+            .objects
+            .values()
+            .filter(|object| object.is_delve_eligible(player))
+            .count()
+    } else {
+        0
+    };
     let total_upper_bound = actions
         .len()
         .checked_add(tapped_for_mana.len())
         .and_then(|count| count.checked_add(pool.mana_pool.mana.len()))
         .and_then(|count| count.checked_add(convoke_upper_bound))
+        .and_then(|count| count.checked_add(delve_upper_bound))
         .and_then(|count| count.checked_add(2))
         .ok_or(InteractionReasonCode::PayloadTooLarge)?;
     if total_upper_bound > MAX_INTERACTION_LIST_LEN {
@@ -1926,18 +2007,18 @@ fn mana_payment_direct_actions(
                 }
             }),
     );
+    if has_delve {
+        actions.extend(state.objects.values().filter_map(|object| {
+            object
+                .is_delve_eligible(player)
+                .then_some(GameAction::TapForConvoke {
+                    object_id: object.id,
+                    mana_type: ManaType::Colorless,
+                })
+        }));
+    }
     match convoke_mode {
-        None => {}
-        Some(ConvokeMode::Delve) => {
-            actions.extend(state.objects.values().filter_map(|object| {
-                object
-                    .is_delve_eligible(player)
-                    .then_some(GameAction::TapForConvoke {
-                        object_id: object.id,
-                        mana_type: ManaType::Colorless,
-                    })
-            }));
-        }
+        None | Some(ConvokeMode::Delve) => {}
         Some(mode) => {
             let cost_shards = state
                 .pending_cast
@@ -2412,12 +2493,96 @@ fn number_projection(waiting_for: &WaitingFor) -> Option<NumberProjection> {
     }
 }
 
+/// Rename `game::derived_views::UnboundedFamily` into its projection-layer code.
+///
+/// A pure rename on purpose: `family_of` stays the SINGLE authority for which axis groups
+/// into which family, so this function makes no grouping decision of its own and cannot
+/// drift from it. Exhaustive with no wildcard — a new family must choose a code here.
+///
+/// Mirrors `comparator_dto` above: the engine owns the fact, and the projection layer owns
+/// the name it crosses the wire under.
+fn preview_family(family: UnboundedFamily) -> InteractionShortcutPreviewFamily {
+    match family {
+        UnboundedFamily::Mana => InteractionShortcutPreviewFamily::Mana,
+        UnboundedFamily::Life => InteractionShortcutPreviewFamily::Life,
+        UnboundedFamily::Damage => InteractionShortcutPreviewFamily::Damage,
+        UnboundedFamily::Mill => InteractionShortcutPreviewFamily::Mill,
+        UnboundedFamily::Counters => InteractionShortcutPreviewFamily::Counters,
+        UnboundedFamily::Tokens => InteractionShortcutPreviewFamily::Tokens,
+        UnboundedFamily::Cards => InteractionShortcutPreviewFamily::Cards,
+        UnboundedFamily::Casts => InteractionShortcutPreviewFamily::Casts,
+        UnboundedFamily::Combats => InteractionShortcutPreviewFamily::Combats,
+        UnboundedFamily::Turns => InteractionShortcutPreviewFamily::Turns,
+        UnboundedFamily::Triggers => InteractionShortcutPreviewFamily::Triggers,
+    }
+}
+
+/// CR 732.2a: the finished magnitude of repeating `count` cycles of a measured per-period
+/// delta — "the predictable results of the sequence of choices", stated per display family
+/// and per affected seat.
+///
+/// **This is arithmetic over the certificate's `per_cycle.delta`, and nothing else.** It
+/// applies no game action, resolves nothing, and touches no `GameState`: the multiplication
+/// `n × δ` is the whole computation. In particular it is NOT
+/// `interaction::preview_interaction`, which answers a different question (is this response
+/// submittable) by cloning the state and applying to the clone. A clone-apply cannot answer
+/// this one anyway — the count may be up to `MAX_SHORTCUT_CYCLES`, and the point of a CR
+/// 732.2a shortcut is that the sequence is *not* played out.
+///
+/// The fold is over families, not axes: `ResourceVector` distinguishes mana by color and
+/// counters by `(kind, bearer class)`, and summing those into one labelled magnitude per seat
+/// is the aggregation the display layer is forbidden to do for itself. Losses are included
+/// (signed), which is why this reads `axis_components()` rather than `unbounded_components()` —
+/// the latter reports only what a cycle accrues, so a lethal drain would preview as nothing.
+///
+/// ponytail: magnitudes clamp to `i32`, so a per-cycle delta above ~2.1M would be reported
+/// short. No such delta exists — one period's delta is a difference of two game-state
+/// readings — and `i32` is exact in the JS number the binding generates, which `i64` is not.
+fn shortcut_preview_entries(
+    delta: &crate::analysis::resource::ResourceVector,
+    count: u32,
+) -> Vec<InteractionShortcutPreviewEntry> {
+    let mut per_cycle_totals: BTreeMap<(InteractionShortcutPreviewFamily, Option<u8>), i64> =
+        BTreeMap::new();
+    for (axis, magnitude) in delta.axis_components() {
+        // Both halves of the key are `derived_views`' decisions, not this layer's: `family_of`
+        // owns the grouping and `payload_seat` owns the seat. The seat in particular is NOT
+        // keyed from the proposer — a drain's magnitude belongs to the player LOSING the life
+        // — and sharing the authority with `attribution_player` is what keeps the offer from
+        // attributing a seat the HUD badge does not.
+        let key = (
+            preview_family(family_of(axis)),
+            payload_seat(axis).map(|player| player.0),
+        );
+        let total = per_cycle_totals.entry(key).or_insert(0);
+        *total = total.saturating_add(magnitude);
+    }
+    per_cycle_totals
+        .into_iter()
+        .filter_map(|((family, player), per_cycle)| {
+            // Families that cancel to zero across their axes (a cycle that gains and spends
+            // the same mana) state nothing and are dropped rather than shown as `0`.
+            let amount = per_cycle.saturating_mul(i64::from(count));
+            (amount != 0).then_some(InteractionShortcutPreviewEntry {
+                family,
+                player,
+                amount: amount.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+            })
+        })
+        .collect()
+}
+
 fn loop_shortcut_projection(
     waiting_for: &WaitingFor,
 ) -> Result<LoopShortcutProjection, InteractionReasonCode> {
     use crate::analysis::decision_template::DecisionPointKind;
 
-    let WaitingFor::LoopShortcut { schema, .. } = waiting_for else {
+    let WaitingFor::LoopShortcut {
+        schema,
+        certificate,
+        ..
+    } = waiting_for
+    else {
         return Err(InteractionReasonCode::UnsupportedResponse);
     };
     if schema.points.len() > MAX_INTERACTION_LIST_LEN {
@@ -2495,6 +2660,35 @@ fn loop_shortcut_projection(
         crate::analysis::decision_template::IterationCount::UntilLethal => {
             InteractionShortcutCountSpec::UntilLethal
         }
+    };
+    // CR 732.2a: state what the offer's own count DOES, so the picker's number carries its
+    // consequence instead of standing alone. Two authorities have to agree before there is
+    // anything to state, and both are the offer's own:
+    //
+    //   * `per_cycle` — published only by the producer that measured a per-period signature
+    //     (`certified_bounded_cycle_offer`). Every other mint carries `None`, and so does
+    //     every save written before the field existed.
+    //   * a FINITE count — `UntilLethal` names no number to multiply by. It is the
+    //     determinate-drain mode, where the count is the drain's own arithmetic, not a
+    //     player's choice.
+    //
+    // Those two coincide by construction rather than by luck: the bounded producer is the
+    // one that both narrows `max_iterations` and mints `Fixed(max_iterations)`, so a preview
+    // exists exactly on the offers whose count is worth picking.
+    //
+    // `suggested` is the stated count, and the ONLY count these magnitudes describe — which
+    // is why it travels with them in `InteractionShortcutPreview.count` rather than being
+    // left for a renderer to assume.
+    let preview = match (&count, &certificate.per_cycle) {
+        (InteractionShortcutCountSpec::Fixed { suggested, .. }, Some(periodic)) => {
+            let entries = shortcut_preview_entries(&periodic.delta, *suggested);
+            (!entries.is_empty()).then_some(InteractionShortcutPreview {
+                count: *suggested,
+                entries,
+            })
+        }
+        (InteractionShortcutCountSpec::Fixed { .. }, None)
+        | (InteractionShortcutCountSpec::UntilLethal, _) => None,
     };
     let mut candidates = Vec::new();
     let mut points = Vec::with_capacity(schema.points.len());
@@ -2649,6 +2843,7 @@ fn loop_shortcut_projection(
     }
     Ok(LoopShortcutProjection {
         count,
+        preview,
         points,
         candidates,
     })
@@ -2894,6 +3089,7 @@ fn selection_projection(
     }
 
     Ok(match waiting_for {
+        WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. } => None,
         WaitingFor::OpeningHandBottomCards { pending, .. } => pending
             .iter()
             .find(|entry| entry.player == semantic_owner)
@@ -3408,6 +3604,7 @@ fn selection_projection(
         WaitingFor::Priority { .. }
         | WaitingFor::MeldPairChoice { .. }
         | WaitingFor::MeldAttackTargetChoice { .. }
+        | WaitingFor::EntryAttackTargetChoice { .. }
         | WaitingFor::ManaPayment { .. }
         | WaitingFor::ManaSourceSelection { .. }
         | WaitingFor::AssistChoosePlayer { .. }
@@ -3421,6 +3618,7 @@ fn selection_projection(
         | WaitingFor::EnlistChoice { .. }
         | WaitingFor::GameOver { .. }
         | WaitingFor::ReplacementChoice { .. }
+        | WaitingFor::EntryControllerChoice { .. }
         | WaitingFor::OrderTriggers { .. }
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
@@ -4364,7 +4562,8 @@ fn project_action_payload(
         | GameAction::ChooseZoneOpponentChooser { opponent }
         | GameAction::ChoosePileOpponent { opponent }
         | GameAction::ChooseAnnouncingOpponent { opponent }
-        | GameAction::ChooseGiftRecipient { opponent } => {
+        | GameAction::ChooseGiftRecipient { opponent }
+        | GameAction::ChooseEntryController { opponent } => {
             push_player_surface(surfaces, *opponent, InteractionRoleCode::Opponent)
         }
         GameAction::ChooseAssistPlayer { player } => {
@@ -4964,6 +5163,27 @@ fn project_action_payload(
             };
             surfaces.push(InteractionPresentationSurface::ShortcutResponse { response });
         }
+        GameAction::BeginResolveAll { .. } => {
+            surfaces.push(InteractionPresentationSurface::ShortcutResponse {
+                response: InteractionShortcutResponseCode::Propose,
+            });
+        }
+        GameAction::RespondResolveAllConsent { decision, .. } => {
+            let response = match decision {
+                crate::types::actions::ResolveAllConsentDecision::Grant => {
+                    InteractionShortcutResponseCode::Accept
+                }
+                crate::types::actions::ResolveAllConsentDecision::Decline => {
+                    InteractionShortcutResponseCode::Decline
+                }
+            };
+            surfaces.push(InteractionPresentationSurface::ShortcutResponse { response });
+        }
+        GameAction::RevokeResolveAllConsent { .. } => {
+            surfaces.push(InteractionPresentationSurface::ShortcutResponse {
+                response: InteractionShortcutResponseCode::Decline,
+            });
+        }
         // CR 116.2c: two live pay-to-end permissions are two distinct
         // candidates, so the group key must reach the surface list or they
         // project identically. The permanent whose resolution installed the
@@ -5089,6 +5309,7 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
         GameAction::SelectTargets { .. } => InteractionActionCode::SelectTargets,
         GameAction::ChooseTarget { .. } => InteractionActionCode::ChooseTarget,
         GameAction::ChooseReplacement { .. } => InteractionActionCode::ChooseReplacement,
+        GameAction::ChooseEntryController { .. } => InteractionActionCode::ChooseEntryController,
         GameAction::OrderTriggers { .. } => InteractionActionCode::OrderTriggers,
         GameAction::CancelCast => InteractionActionCode::CancelCast,
         GameAction::Equip { .. } => InteractionActionCode::Equip,
@@ -5202,6 +5423,9 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
         GameAction::RespondToShortcut { .. } => InteractionActionCode::RespondToShortcut,
         GameAction::DeclineShortcut => InteractionActionCode::DeclineShortcut,
         GameAction::PrecastCopyShortcut { .. } => InteractionActionCode::PrecastCopyShortcut,
+        GameAction::BeginResolveAll { .. } => InteractionActionCode::DeclareShortcut,
+        GameAction::RespondResolveAllConsent { .. } => InteractionActionCode::RespondToShortcut,
+        GameAction::RevokeResolveAllConsent { .. } => InteractionActionCode::DeclineShortcut,
         GameAction::Debug(_) => InteractionActionCode::Debug,
     }
 }
@@ -6997,6 +7221,7 @@ fn opportunity_for_slot(
                             count: projection.count,
                             points,
                             allow_decline: true,
+                            preview: projection.preview.clone(),
                             confirm: ConfirmSemantics::Explicit,
                         },
                         candidates,
@@ -7280,98 +7505,121 @@ pub fn derive_viewer_interaction(
     viewer: PlayerId,
 ) -> ViewerInteraction {
     debug_assert_interaction_consistency(authoritative_state);
-    let authorized_submitters = turn_control::authorized_submitters(authoritative_state);
+    // Membership follows visibility, so it is built before any authorization,
+    // session or bounding gate and carried by every projection below. Overflow
+    // is a value here, not a silently emptied map: the finalizer is the only
+    // place allowed to decide what an unbounded projection becomes.
+    let attachment_views = attachment_views_for_viewer(filtered_state);
+    let authorized_submitters = interaction_authorized_submitters(authoritative_state);
     let can_submit = authorized_submitters.contains(&viewer);
     let kind = waiting_for_kind(&authoritative_state.waiting_for);
     if kind.terminal {
-        return ViewerInteraction {
-            waiting_for_kind: kind,
-            authorized_submitters: Vec::new(),
-            can_submit: false,
-            auto_pass_recommended: false,
-            opportunities: Vec::new(),
-            attachment_fans: BTreeMap::new(),
-            availability: InteractionAvailability::Terminal {
-                outcome: InteractionOutcomeCode::Terminal,
+        return finalize_viewer_interaction(
+            ViewerInteraction {
+                waiting_for_kind: kind,
+                authorized_submitters: Vec::new(),
+                can_submit: false,
+                auto_pass_recommended: false,
+                opportunities: Vec::new(),
+                attachment_fans: BTreeMap::new(),
+                attachment_views: BTreeMap::new(),
+                availability: InteractionAvailability::Terminal {
+                    outcome: InteractionOutcomeCode::Terminal,
+                },
             },
-        };
+            attachment_views.clone(),
+        );
     }
     if !can_submit {
-        return ViewerInteraction {
-            waiting_for_kind: kind,
-            authorized_submitters: authorized_submitters
-                .into_iter()
-                .map(|player| player.0)
-                .collect(),
-            can_submit: false,
-            auto_pass_recommended: false,
-            opportunities: Vec::new(),
-            attachment_fans: BTreeMap::new(),
-            availability: InteractionAvailability::Waiting,
-        };
+        return finalize_viewer_interaction(
+            ViewerInteraction {
+                waiting_for_kind: kind,
+                authorized_submitters: authorized_submitters
+                    .into_iter()
+                    .map(|player| player.0)
+                    .collect(),
+                can_submit: false,
+                auto_pass_recommended: false,
+                opportunities: Vec::new(),
+                attachment_fans: BTreeMap::new(),
+                attachment_views: BTreeMap::new(),
+                availability: InteractionAvailability::Waiting,
+            },
+            attachment_views.clone(),
+        );
     }
     if authoritative_state
         .interaction_session_id
         .as_ref()
         .is_none_or(|session| !interaction_session_is_valid(session))
     {
-        return ViewerInteraction {
-            waiting_for_kind: kind,
-            authorized_submitters: authorized_submitters
-                .into_iter()
-                .map(|player| player.0)
-                .collect(),
-            can_submit: true,
-            auto_pass_recommended: false,
-            opportunities: Vec::new(),
-            attachment_fans: BTreeMap::new(),
-            availability: InteractionAvailability::Unsupported {
-                reason: InteractionReasonCode::AuthorityUnbound,
+        return finalize_viewer_interaction(
+            ViewerInteraction {
+                waiting_for_kind: kind,
+                authorized_submitters: authorized_submitters
+                    .into_iter()
+                    .map(|player| player.0)
+                    .collect(),
+                can_submit: true,
+                auto_pass_recommended: false,
+                opportunities: Vec::new(),
+                attachment_fans: BTreeMap::new(),
+                attachment_views: BTreeMap::new(),
+                availability: InteractionAvailability::Unsupported {
+                    reason: InteractionReasonCode::AuthorityUnbound,
+                },
             },
-        };
+            attachment_views.clone(),
+        );
     }
     if !interaction_serial_is_valid(&authoritative_state.next_interaction_serial) {
-        return ViewerInteraction {
-            waiting_for_kind: kind,
-            authorized_submitters: authorized_submitters
-                .into_iter()
-                .map(|player| player.0)
-                .collect(),
-            can_submit: true,
-            auto_pass_recommended: false,
-            opportunities: Vec::new(),
-            attachment_fans: BTreeMap::new(),
-            availability: InteractionAvailability::Unsupported {
-                reason: InteractionReasonCode::InvalidAuthorityState,
+        return finalize_viewer_interaction(
+            ViewerInteraction {
+                waiting_for_kind: kind,
+                authorized_submitters: authorized_submitters
+                    .into_iter()
+                    .map(|player| player.0)
+                    .collect(),
+                can_submit: true,
+                auto_pass_recommended: false,
+                opportunities: Vec::new(),
+                attachment_fans: BTreeMap::new(),
+                attachment_views: BTreeMap::new(),
+                availability: InteractionAvailability::Unsupported {
+                    reason: InteractionReasonCode::InvalidAuthorityState,
+                },
             },
-        };
+            attachment_views.clone(),
+        );
     }
 
     let slots: Vec<_> = authoritative_state
         .active_interaction_slots
         .iter()
         .filter(|slot| {
-            turn_control::authorized_submitter_for_player(
-                authoritative_state,
-                PlayerId(slot.semantic_owner),
-            ) == viewer
+            interaction_submitter_for_owner(authoritative_state, PlayerId(slot.semantic_owner))
+                == viewer
         })
         .collect();
     if slots.len() > MAX_INTERACTION_LIST_LEN {
-        return ViewerInteraction {
-            waiting_for_kind: kind,
-            authorized_submitters: authorized_submitters
-                .into_iter()
-                .map(|player| player.0)
-                .collect(),
-            can_submit: true,
-            auto_pass_recommended: false,
-            opportunities: Vec::new(),
-            attachment_fans: BTreeMap::new(),
-            availability: InteractionAvailability::Unsupported {
-                reason: InteractionReasonCode::PayloadTooLarge,
+        return finalize_viewer_interaction(
+            ViewerInteraction {
+                waiting_for_kind: kind,
+                authorized_submitters: authorized_submitters
+                    .into_iter()
+                    .map(|player| player.0)
+                    .collect(),
+                can_submit: true,
+                auto_pass_recommended: false,
+                opportunities: Vec::new(),
+                attachment_fans: BTreeMap::new(),
+                attachment_views: BTreeMap::new(),
+                availability: InteractionAvailability::Unsupported {
+                    reason: InteractionReasonCode::PayloadTooLarge,
+                },
             },
-        };
+            attachment_views.clone(),
+        );
     }
     let mut opportunities = Vec::with_capacity(slots.len());
     let mut attachment_fans = BTreeMap::new();
@@ -7414,27 +7662,61 @@ pub fn derive_viewer_interaction(
     let availability = first_progress
         .or(first_fallback)
         .unwrap_or(default_availability);
-    let mut view = ViewerInteraction {
-        waiting_for_kind: kind,
-        authorized_submitters: authorized_submitters
-            .into_iter()
-            .map(|player| player.0)
-            .collect(),
-        can_submit: true,
-        auto_pass_recommended: matches!(
-            authoritative_state.waiting_for,
-            WaitingFor::Priority { .. }
-        ) && authoritative_state.auto_pass.contains_key(&viewer),
-        opportunities,
-        attachment_fans,
-        availability,
-    };
-    if bound_outbound_view(&view).is_err() {
+    let attachment_views = attachment_views.map(|mut views| {
+        bind_attachment_view_submissions(&mut views, &attachment_fans);
+        views
+    });
+    finalize_viewer_interaction(
+        ViewerInteraction {
+            waiting_for_kind: kind,
+            authorized_submitters: authorized_submitters
+                .into_iter()
+                .map(|player| player.0)
+                .collect(),
+            can_submit: true,
+            auto_pass_recommended: matches!(
+                authoritative_state.waiting_for,
+                WaitingFor::Priority { .. }
+            ) && authoritative_state.auto_pass.contains_key(&viewer),
+            opportunities,
+            attachment_fans,
+            attachment_views: BTreeMap::new(),
+            availability,
+        },
+        attachment_views,
+    )
+}
+
+/// The single exit of [`derive_viewer_interaction`]: every projection the engine
+/// hands outward — terminal, unauthorized, unbound-authority, invalid-serial,
+/// oversized-slot and the derived one alike — leaves through here, so one
+/// aggregate budget governs the whole payload. Membership is built before the
+/// authorization and session gates, so an early return carries just as much of
+/// it as the derived path does; charging it only on the derived path would leave
+/// the other five able to serialize an unbounded attachment tree.
+///
+/// Failing the budget fails closed: the unbounded lists are dropped and the
+/// availability states why, rather than shipping a truncated payload that reads
+/// as an authoritative "nothing is attached".
+///
+/// `attachment_views` arrives as the projection or as the reason it could not be
+/// produced within the bound, and is installed here rather than by the caller.
+/// A membership map that overflowed inside its own derivation is therefore just
+/// as visible to this gate as one that overflows the aggregate: both reach the
+/// same fail-closed answer, and neither can leave as a plausible empty map.
+fn finalize_viewer_interaction(
+    mut view: ViewerInteraction,
+    attachment_views: Result<BTreeMap<u64, InteractionAttachmentView>, InteractionReasonCode>,
+) -> ViewerInteraction {
+    let bounded = attachment_views.and_then(|views| {
+        view.attachment_views = views;
+        bound_outbound_view(&view)
+    });
+    if let Err(reason) = bounded {
         view.opportunities.clear();
         view.attachment_fans.clear();
-        view.availability = InteractionAvailability::Unsupported {
-            reason: InteractionReasonCode::PayloadTooLarge,
-        };
+        view.attachment_views.clear();
+        view.availability = InteractionAvailability::Unsupported { reason };
     }
     view
 }
@@ -7610,6 +7892,152 @@ fn attachment_fan_submission(
         interaction_id: interaction_id.clone(),
         response,
     })
+}
+
+/// Publish what is attached to every object the viewer can see.
+///
+/// Membership is a board fact — an attached permanent is an object in play
+/// (CR 301.5 / CR 303.4), not a property of the current prompt — so this reads
+/// the filtered projection alone and runs on every path, including the ones
+/// that carry no opportunity: an opponent's turn, an open prompt, a finished
+/// game. Publishing it only where picks exist would make an Aura disappear from
+/// the one surface that shows it as soon as a sibling Equipment became
+/// clickable.
+///
+/// Both directions of every relationship must agree, the same guard
+/// [`attachment_fans_for_object_choices`] applies, so authority-only or stale
+/// back-links cannot reach a consumer.
+///
+/// Overflow is returned, never absorbed. Dropping an oversized host or emptying
+/// an oversized map here would hand the caller a bounded, plausible projection
+/// that states the opposite of the truth — "nothing is attached" — and the
+/// budget gate downstream would have nothing left to object to. The reason code
+/// travels instead, and [`finalize_viewer_interaction`] decides what the viewer
+/// is told.
+fn attachment_views_for_viewer(
+    filtered_state: &GameState,
+) -> Result<BTreeMap<u64, InteractionAttachmentView>, InteractionReasonCode> {
+    let mut views = BTreeMap::new();
+    // Cards materialized so far, across every host. Charged BEFORE each subtree
+    // is built rather than measured after, so an over-budget projection is
+    // refused while it is still small.
+    //
+    // Every card the derivation emits is charged again by
+    // `bound_outbound_view`, alongside the map, the fans and the opportunities —
+    // so this running total can only ever be a LOWER bound on what the finalizer
+    // charges. That direction is what makes the early refusal safe: it can never
+    // reject a projection the finalizer would have accepted, and the finalizer
+    // stays the single authority on the answer the viewer is given.
+    let mut charged = 0usize;
+    for host_id in filtered_state.objects.keys().copied() {
+        let mut cards = Vec::new();
+        collect_attachment_subtree(filtered_state, host_id, charged, &mut cards)?;
+        if cards.is_empty() {
+            continue;
+        }
+        charged += cards.len();
+        views.insert(
+            host_id.0,
+            InteractionAttachmentView {
+                host_id: host_id.0,
+                cards: cards
+                    .into_iter()
+                    .map(|object_id| InteractionAttachmentViewCard {
+                        object_id: object_id.0,
+                        submission: None,
+                    })
+                    .collect(),
+            },
+        );
+    }
+    // Implied by the card charge — no view is inserted empty, so the map can
+    // never be longer than the cards already counted — but stated where the map
+    // is built so its own list bound does not have to be inferred.
+    if views.len() > MAX_INTERACTION_LIST_LEN {
+        return Err(InteractionReasonCode::PayloadTooLarge);
+    }
+    Ok(views)
+}
+
+/// Depth-first pre-order, so a nested attachment follows the card it hangs on
+/// and consumers can lay the subtree out without re-deriving its shape.
+///
+/// Iterative, with the frontier on the heap. The walk descends one level per
+/// nested attachment, and an attachment chain is only bounded by how many
+/// objects the game can grow, so recursion would put a game-controlled quantity
+/// on the call stack.
+///
+/// `already_charged` is what earlier hosts have spent, and the walk stops the
+/// moment this subtree carries the running total past the aggregate. An
+/// over-budget projection therefore costs one card more than the budget rather
+/// than its full size: the point of deriving membership is to publish it, and a
+/// projection that can no longer be published is not worth materializing.
+///
+/// The running total is compared by addition rather than by handing the walk a
+/// remaining allowance, so the bound cannot be expressed as a subtraction that
+/// underflows if the caller's accounting ever slips.
+fn collect_attachment_subtree(
+    filtered_state: &GameState,
+    host_id: ObjectId,
+    already_charged: usize,
+    out: &mut Vec<ObjectId>,
+) -> Result<(), InteractionReasonCode> {
+    // Seeded with the host: an attachment cycle would otherwise walk forever,
+    // and no host may appear as a card beneath itself.
+    let mut seen = HashSet::from([host_id]);
+    let mut frontier = vec![host_id];
+    while let Some(current) = frontier.pop() {
+        if current != host_id {
+            out.push(current);
+            if already_charged + out.len() > MAX_INTERACTION_LIST_LEN {
+                return Err(InteractionReasonCode::PayloadTooLarge);
+            }
+        }
+        let Some(object) = filtered_state.objects.get(&current) else {
+            continue;
+        };
+        // Pushed in reverse so the frontier pops them in the order the host
+        // lists them, which is what keeps the output in pre-order.
+        for child_id in object.attachments.iter().rev() {
+            let Some(child) = filtered_state.objects.get(child_id) else {
+                continue;
+            };
+            if !matches!(child.attached_to, Some(AttachTarget::Object(id)) if id == current) {
+                continue;
+            }
+            if !seen.insert(*child_id) {
+                continue;
+            }
+            frontier.push(*child_id);
+        }
+    }
+    Ok(())
+}
+
+/// Bind the published picks onto the membership the engine already owns.
+///
+/// The fans are keyed by the child's DIRECT host, so a card published beneath a
+/// nested attachment must still reach the view of the outermost host it hangs
+/// under. Object ids are unique, so a flat index is exact: it cannot move a
+/// pick onto a different card, and every host that legitimately lists the card
+/// gets the same submission.
+fn bind_attachment_view_submissions(
+    views: &mut BTreeMap<u64, InteractionAttachmentView>,
+    fans: &BTreeMap<u64, InteractionAttachmentFan>,
+) {
+    if fans.is_empty() {
+        return;
+    }
+    let submissions: HashMap<u64, &InteractionSubmission> = fans
+        .values()
+        .flat_map(|fan| fan.children.iter())
+        .map(|child| (child.object_id, &child.submission))
+        .collect();
+    for view in views.values_mut() {
+        for card in &mut view.cards {
+            card.submission = submissions.get(&card.object_id).map(|s| (*s).clone());
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7809,13 +8237,21 @@ fn bound_outbound_spec(
                 }
             }
         }
-        InteractionResponseSpec::Shortcut { points, .. } => {
+        InteractionResponseSpec::Shortcut {
+            points, preview, ..
+        } => {
             budget.list(points.len())?;
             for point in points {
                 budget.list(point.candidate_ids.len())?;
                 for candidate_id in &point.candidate_ids {
                     budget.string(candidate_id.as_str())?;
                 }
+            }
+            // The preview's entries are a published outbound list like every other
+            // list on this spec (at most one per display family per seat), so they are charged
+            // to the same ceiling rather than crossing uncounted.
+            if let Some(preview) = preview {
+                budget.list(preview.entries.len())?;
             }
         }
         InteractionResponseSpec::Select { .. }
@@ -7915,6 +8351,17 @@ fn bound_outbound_view(view: &ViewerInteraction) -> Result<(), InteractionReason
             bound_outbound_response(&child.submission.response, &mut budget)?;
         }
     }
+    budget.list(view.attachment_views.len())?;
+    for attachment_view in view.attachment_views.values() {
+        budget.list(attachment_view.cards.len())?;
+        for card in &attachment_view.cards {
+            let Some(submission) = &card.submission else {
+                continue;
+            };
+            budget.string(submission.interaction_id.as_str())?;
+            bound_outbound_response(&submission.response, &mut budget)?;
+        }
+    }
     if let InteractionAvailability::ProgressAvailable { witness } = &view.availability {
         budget.string(witness.interaction_id.as_str())?;
         bound_outbound_response(&witness.response, &mut budget)?;
@@ -8008,8 +8455,7 @@ fn slot_for_submission<'a>(
         .iter()
         .find(|slot| slot.interaction_id == *interaction_id)
         .ok_or(InteractionReasonCode::StaleInteraction)?;
-    let authorized =
-        turn_control::authorized_submitter_for_player(state, PlayerId(slot.semantic_owner));
+    let authorized = interaction_submitter_for_owner(state, PlayerId(slot.semantic_owner));
     if authorized != actor {
         return Err(InteractionReasonCode::NotAuthorized);
     }
@@ -8807,8 +9253,18 @@ fn materialize_loop_shortcut_response(
                 let targets = candidate_indices
                     .iter()
                     .map(|index| match &projection.candidates[*index] {
+                        // CR 601.2c: the HUMAN ingress of the SAME point kind, so it emits
+                        // the SAME spelling as the engine's own producer
+                        // (`game::engine::record_trigger_target_answer`). A candidate on a
+                        // `Targets` point is an announced TARGET, so the seat is judged by
+                        // CR 702.11c hexproof / CR 702.18a shroud / CR 702.16b protection
+                        // through the announcement-subject arm — never by existence alone.
+                        // Emitting `TargetPin::Player` here instead would select the
+                        // authority by WHO SUBMITTED the answer rather than by WHAT IT IS.
                         LoopShortcutCandidateValue::Target(TargetRef::Player(player)) => {
-                            Ok(TargetPin::Player(*player))
+                            Ok(TargetPin::Scheduled(TargetSchedule::Constant(
+                                Ranking::one(AnnouncementSubject::Seat(*player)),
+                            )))
                         }
                         LoopShortcutCandidateValue::Target(TargetRef::Object(object_id)) => {
                             let object = authoritative_state
@@ -8897,26 +9353,30 @@ fn materialize_loop_shortcut_response(
         key: DecisionGroupKey::from_sources(&sources, DecisionKind::LoopChoice),
     });
     if let Some(template) = &template {
-        let required = authoritative_schema
-            .points
-            .iter()
-            .map(|point| point.slot.clone())
-            .collect::<Vec<_>>();
         // TRAP REMOVAL, NOT A BUG FIX — recorded so the next reader does not "correct" this
         // literal into `shortcut_validated_range(..)` and then wonder what changed. This
-        // decoder emits only `Player` and `ByIdentity` pins, both of which resolve
-        // INDEPENDENTLY of `iteration`, so validating at index 0 alone is correct by
-        // construction here: a wider range would re-resolve the same pin to the same value.
+        // decoder emits only ITERATION-INVARIANT pins, so validating at index 0 alone is
+        // correct by construction here: a wider range would re-resolve the same pin to the
+        // same value. That is the property doing the work, and it is stated as the property
+        // rather than as a list of variant names — the list has already moved once. Today
+        // the emitted set is `ByIdentity` (never reads `iteration` at all) and
+        // `Scheduled(TargetSchedule::Constant(..))`, whose arm in
+        // `decision_template::evaluate_schedule` selects its `Ranking` without consulting
+        // `iter` (unlike the `RoundRobin` / `Piecewise` arms beside it, which this decoder
+        // does not emit). Emitting a genuinely iteration-VARYING pin here would invalidate
+        // the literal, not just this comment.
         // It is also strictly weaker than the declare-path firewall rather than a second
         // hole — `1` is a prefix of any range that path validates. It cannot mint a
         // `Fixed(0)` either: the count-spec projection's `Fixed` arm hard-codes `min: 1`
         // beside its `debug_assert!(schema.max_iterations >= 1, ..)` and its clamp.
         // ⚠ Navigation trap: `shortcut_drive_period`'s doc enumerates its own consumers, and
-        // this site consumes `validate_pins` WITHOUT consuming that helper, so it is
+        // this site consumes the pin firewall WITHOUT consuming that helper, so it is
         // invisible from there.
-        if predictability_gate(template, &required).is_err()
-            || validate_pins(authoritative_schema, template, 1, authoritative_state).is_err()
-        {
+        //
+        // The `required` slot list is no longer derived here: `declaration_conforms` derives
+        // it from the SAME `authoritative_schema` this site already passed, so the coverage
+        // half and the value half can no longer drift apart per call site.
+        if !declaration_conforms(authoritative_schema, template, 1, authoritative_state) {
             return Err(InteractionReasonCode::ConstraintUnsatisfied);
         }
     }
@@ -9433,4 +9893,220 @@ pub fn submit_interaction(
         },
     )?;
     Ok(AppliedInteraction { action, result })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// F4 — the preview's entry list is budgeted like every other outbound list on the
+    /// shortcut spec.
+    ///
+    /// `bound_outbound_spec` counted `points` and each point's `candidate_ids` but not
+    /// `preview.entries`, so the one list added by the CR 732.2a preview crossed the boundary
+    /// uncounted. It is bounded small in practice (at most one entry per display family per
+    /// seat), so this is a CONSISTENCY row and not a live payload-exhaustion row — which is
+    /// why it drives the budget to its last free slot rather than building a giant preview.
+    ///
+    /// PAIRED CONTROL FIRST: the same spec at the same starting budget WITHOUT a preview must
+    /// fit. Without it, the failure below could come from the spec's other lists, or from a
+    /// budget that was already over before the preview was ever read.
+    ///
+    /// WHAT WRONG IMPLEMENTATION WOULD STILL PASS THIS ROW? One that budgets the preview's
+    /// entries but not a future second list added to the same spec — the row pins the field it
+    /// names, not "every field is budgeted". One that charged the entries to the STRING budget
+    /// instead would fail here, because the control proves the LIST budget is what moved.
+    ///
+    /// REVERT-PROBE, RUN: drop the `preview` budget call ⇒ the second assertion gets `Ok`.
+    #[test]
+    fn the_shortcut_preview_entry_list_is_counted_against_the_outbound_budget() {
+        let spec = |preview| InteractionResponseSpec::Shortcut {
+            count: InteractionShortcutCountSpec::Fixed {
+                min: 1,
+                max: 3,
+                suggested: 3,
+            },
+            points: Vec::new(),
+            allow_decline: true,
+            preview,
+            confirm: ConfirmSemantics::Explicit,
+        };
+        let preview = InteractionShortcutPreview {
+            count: 3,
+            entries: vec![
+                InteractionShortcutPreviewEntry {
+                    family: InteractionShortcutPreviewFamily::Life,
+                    player: Some(1),
+                    amount: -6,
+                },
+                InteractionShortcutPreviewEntry {
+                    family: InteractionShortcutPreviewFamily::Mana,
+                    player: None,
+                    amount: 9,
+                },
+            ],
+        };
+        let at_last_free_slot = || OutboundBudget {
+            entries: MAX_INTERACTION_LIST_LEN - 1,
+            string_bytes: 0,
+        };
+
+        let mut budget = at_last_free_slot();
+        assert!(
+            bound_outbound_spec(&spec(None), &mut budget).is_ok(),
+            "control: with one slot free and no preview, this spec's own lists fit — so the \
+             refusal below is the preview being counted, not the spec being oversized"
+        );
+
+        let mut budget = at_last_free_slot();
+        assert_eq!(
+            bound_outbound_spec(&spec(Some(preview)), &mut budget),
+            Err(InteractionReasonCode::PayloadTooLarge),
+            "CR 732.2a: the preview's entries are published outbound, so they are charged to \
+             the same ceiling as every other list on the spec"
+        );
+    }
+
+    /// F5 — the offer channel and the HUD channel must SPELL each display family identically.
+    ///
+    /// `InteractionShortcutPreviewFamily` is `rename_all = "camelCase"`; its grouping authority
+    /// `derived_views::UnboundedFamily` is `rename_all = "lowercase"`. All eleven variants are
+    /// single words today, so both spell `mana`, `life`, ... and the agreement reads as design
+    /// when it is coincidence. A future two-word family would cross as `extraTurns` on the
+    /// offer and `extraturns` on the HUD — one grouping published in two wire vocabularies,
+    /// and THIS row is what catches it. Nothing on the client does: no client code reads the
+    /// preview's `family` today (the generated `InteractionShortcutPreviewFamily` in
+    /// `client/src/adapter/generated/interaction/index.ts` has no consumer), and the HUD's
+    /// family-keyed lookups (`UNBOUNDED_FAMILY_GLYPH` / `UNBOUNDED_FAMILY_LABEL_KEY`, both
+    /// `Record<UnboundedFamily, _>` in `client/src/components/hud/HudBadges.tsx`) are keyed by
+    /// the SEPARATELY declared hand-written `UnboundedFamily` union — so a future consumer that
+    /// crossed the two would break as a TypeScript type error, not miss silently.
+    ///
+    /// `preview_family`'s exhaustive match pins the GROUPING, not the STRING — a new family
+    /// build-breaks it, a renamed WIRE STRING does not. This row pins the string.
+    ///
+    /// It takes its family list from `unbounded-family-tags.json`, the same golden the client's
+    /// `Record<ResourceAxisTag, UnboundedFamily>` is checked against, so one chain now runs
+    /// engine grouping ⇒ HUD string ⇒ offer string. That also makes the list forced rather than
+    /// hand-maintained: an 18th `ResourceAxis` reds `family_tag_table_matches_the_client_golden`
+    /// until the golden is regenerated, and a regenerated golden carries the new family here.
+    ///
+    /// THIS ROW PASSES TODAY BY CONSTRUCTION, AND THAT IS THE POINT — it is written to fail on
+    /// a two-word variant, which is the only way the divergence can ship.
+    ///
+    /// WHAT WRONG IMPLEMENTATION WOULD STILL PASS THIS ROW? One that mis-GROUPS an axis (that
+    /// is `family_tag_table_matches_the_client_golden`'s question, not this one), and one that
+    /// adds a family reachable from no `ResourceAxis` at all, which the golden cannot see and
+    /// no client lookup can receive.
+    ///
+    /// REVERT-PROBE, RUN: rename the `Turns` variant of BOTH enums to `ExtraTurns` and
+    /// regenerate the golden ⇒ `extraturns` vs `extraTurns` ⇒ this row FAILS.
+    #[test]
+    fn every_preview_family_spells_the_same_wire_string_as_its_unbounded_family() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../client/src/test/fixtures/unbounded-family-tags.json"
+        );
+        let golden: BTreeMap<String, UnboundedFamily> =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("committed family golden"))
+                .expect("the family golden parses as tag -> UnboundedFamily");
+        let families: std::collections::BTreeSet<UnboundedFamily> =
+            golden.values().copied().collect();
+        assert_eq!(
+            families.len(),
+            11,
+            "reach-guard: every display family must be reachable from the golden, else this \
+             row silently checks a subset of the wire surface"
+        );
+
+        for family in families {
+            let hud = serde_json::to_string(&family).expect("UnboundedFamily serializes");
+            let offer =
+                serde_json::to_string(&preview_family(family)).expect("preview family serializes");
+            assert_eq!(
+                hud, offer,
+                "the shortcut offer and the HUD badge must cross the wire under the SAME \
+                 string for this display family — the client keys both into one \
+                 `Record<UnboundedFamily, _>`, so a divergence is a silent lookup miss"
+            );
+        }
+    }
+
+    /// The derivation itself, not the projection it feeds.
+    ///
+    /// `attachment_views_for_viewer` is the authority that decides whether the
+    /// membership can be published at all, and the public rows in
+    /// `interaction_contract` cannot see the difference this change makes: the
+    /// aggregate bound in `bound_outbound_view` already refused this payload, so
+    /// the ANSWER was fail-closed before and after. What changes is that the
+    /// refusal now happens while the projection is small.
+    ///
+    /// A chain of exactly `MAX_INTERACTION_LIST_LEN` links is the worst case and
+    /// the only one that discriminates: it is the LONGEST chain in which no
+    /// single host's subtree exceeds the per-view cap, so the per-host check
+    /// never fires and a derivation that measures afterwards runs to completion.
+    /// One link longer and the outermost view trips that cap on its own.
+    ///
+    /// REVERT-PROBE, RUN: drop the running charge in `collect_attachment_subtree`
+    /// and restore the post-walk `cards.len()` check ⇒ this returns `Ok` with
+    /// 49 995 000 card entries across 9 999 views (23.2 s, 7.4 GB resident on the
+    /// machine this was measured on) instead of `Err`.
+    #[test]
+    fn the_membership_derivation_refuses_a_worst_case_chain_before_building_it() {
+        use crate::game::game_object::GameObject;
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new_two_player(42);
+        let owner = PlayerId(0);
+        let mut previous: Option<ObjectId> = None;
+        for index in 0..=MAX_INTERACTION_LIST_LEN {
+            let id = ObjectId(index as u64 + 1);
+            let mut object = GameObject::new(
+                id,
+                CardId(index as u64 + 1),
+                owner,
+                format!("Chain Link {index}"),
+                Zone::Battlefield,
+            );
+            if let Some(host_id) = previous {
+                object.attached_to = Some(AttachTarget::Object(host_id));
+                state
+                    .objects
+                    .get_mut(&host_id)
+                    .expect("the host was inserted on the previous iteration")
+                    .attachments
+                    .push(id);
+            }
+            state.objects.insert(id, object);
+            state.battlefield.push_back(id);
+            previous = Some(id);
+        }
+
+        // Reach guard: the fixture really is one chain of the intended length,
+        // and every view in it would sit inside the per-view cap on its own —
+        // without this, an over-long fixture would fail for the wrong reason.
+        assert_eq!(state.objects.len(), MAX_INTERACTION_LIST_LEN + 1);
+        assert!(
+            state
+                .objects
+                .values()
+                .all(|object| object.attachments.len() <= 1),
+            "a chain, not a fan: no host may carry two attachments"
+        );
+
+        // Compared by discriminant, and reported by SIZE rather than by value:
+        // the `Ok` this row exists to reject holds 49 995 000 entries, and a
+        // failure that prints them is a failure nobody can read.
+        let derived = attachment_views_for_viewer(&state);
+        assert!(
+            matches!(derived, Err(InteractionReasonCode::PayloadTooLarge)),
+            "the derivation must refuse the payload itself rather than hand it to \
+             the finalizer to reject — got {} views totalling {} cards",
+            derived.as_ref().map_or(0, BTreeMap::len),
+            derived.as_ref().map_or(0, |views| views
+                .values()
+                .map(|view| view.cards.len())
+                .sum::<usize>()),
+        );
+    }
 }

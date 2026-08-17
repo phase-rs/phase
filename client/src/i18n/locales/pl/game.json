@@ -20,6 +20,11 @@
     "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
     "convokeInfo_other": "Auto-taps up to {{count}} creatures for convoke each iteration.",
+    "countAria": "Number of iterations",
+    "previewTitle_one": "Repeating once produces:",
+    "previewTitle_other": "Repeating {{count}} times produces:",
+    "previewEntry": "{{amount}} {{resource}}",
+    "previewEntryPlayer": "{{amount}} {{resource}} — {{player}}",
     "winKind": {
       "LethalDamage": "This loop deals lethal damage.",
       "PoisonLoss": "This loop gives lethal poison counters.",
@@ -43,6 +48,13 @@
     "label": "Rozwiązywanie {{resolved}} / {{total}}",
     "collapse": "Zwiń postęp rozwiązywania",
     "expand": "Rozwiń postęp rozwiązywania"
+  },
+  "resolveAllConsent": {
+    "eyebrow": "Rozpatrz wszystko",
+    "title": "Zatwierdzić szybkie rozpatrywanie?",
+    "subtitle": "Wszyscy gracze muszą zatwierdzić, zanim silnik rozpatrzy bezpieczny prefiks stosu.",
+    "grant": "Zatwierdź",
+    "decline": "Zachowaj priorytet"
   },
   "debugCreate": {
     "copies": "Kopie",
@@ -255,14 +267,18 @@
     "ringBearer": "Pierścień",
     "ringBearerTooltip": "Powiernik Pierścienia",
     "hiddenAttachments": "+{{count}} more attached",
+    "hiddenAttachmentsAria_few": "Pokaż {{count}} ukryte dołączone karty",
+    "hiddenAttachmentsAria_many": "Pokaż {{count}} ukrytych dołączonych kart",
     "hiddenAttachmentsAria_one": "Pokaż {{count}} ukrytą dołączoną kartę",
-    "hiddenAttachmentsAria_other": "Pokaż {{count}} ukryte dołączone karty",
+    "hiddenAttachmentsAria_other": "Pokaż {{count}} ukrytych dołączonych kart",
     "fanPick": "Wybierz",
     "fanConfirm": "Potwierdź ({{count}})",
     "viewAttachments_one": "Pokaż dołączoną kartę",
     "viewAttachments_other": "Pokaż dołączone karty ({{count}})",
+    "viewAttachmentsFor_few": "Pokaż {{count}} dołączone karty {{name}}",
+    "viewAttachmentsFor_many": "Pokaż {{count}} dołączonych kart {{name}}",
     "viewAttachmentsFor_one": "Pokaż dołączoną kartę {{name}}",
-    "viewAttachmentsFor_other": "Pokaż {{count}} dołączone karty {{name}}",
+    "viewAttachmentsFor_other": "Pokaż {{count}} dołączonych kart {{name}}",
     "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {
@@ -1749,7 +1765,22 @@
     "emergeEyebrow": "Emerge",
     "emergeNormalLabel": "Rzuć normalnie",
     "emergeAltLabel": "Rzuć z Emerge",
-    "emergeSubtitle": "Rzuć {{name}} normalnie lub zapłać jego koszt Emerge, poświęcając stwora, co zmniejsza koszt o wartość many tego stwora.",
+    "emergeSubtitle": "Rzuć {{name}} normalnie lub zapłać jego koszt Emerge, poświęcając {{sacrifice}}, co zmniejsza koszt o wartość many tego permanentu.",
+    "emergeFallbackSacrifice": "pasujący permanent",
+    "emergeSacrificeQuality": {
+      "artifact": "artefakt",
+      "battle": "bitwę",
+      "card": "kartę",
+      "creature": "stwora",
+      "enchantment": "urok",
+      "instant": "sztuczkę",
+      "kindred": "permanent typowy",
+      "land": "ląd",
+      "permanent": "permanent",
+      "planeswalker": "wędrowca",
+      "sorcery": "obrzęd",
+      "subtype": "permanent typu {{subtype}}"
+    },
     "impendingEyebrow": "Impending",
     "impendingNormalLabel": "Rzuć normalnie",
     "impendingAltLabel": "Rzuć z Impending",
@@ -1808,6 +1839,10 @@
   "giftRecipient": {
     "title": "Wybierz odbiorcę prezentu",
     "subtitle": "Wybierz przeciwnika, który otrzyma obiecany prezent."
+  },
+  "entryController": {
+    "title": "Wybierz kontrolującego przy wejściu",
+    "subtitle": "Wybierz przeciwnika, który kontroluje ten permanent, gdy wchodzi na pole bitwy."
   },
   "optionalCost": {
     "gift": {
@@ -2042,6 +2077,7 @@
     "searchPlaceholder": "Szukaj po nazwie...",
     "noCardsFound": "Nie znaleziono kart",
     "buttonSubtitle": "Wybierz jedną opcję",
+    "numberSubtitle": "Wpisz liczbę całkowitą nie mniejszą niż {{min}}",
     "filterPlaceholder": "Filtruj opcje...",
     "noOptionsMatch": "Brak pasujących opcji"
   },

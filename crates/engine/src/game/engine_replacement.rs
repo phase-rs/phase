@@ -170,6 +170,19 @@ pub(super) fn handle_replacement_choice(
         .pending_replacement
         .as_ref()
         .and_then(|pending| pending.library_placement.clone());
+    let parked_exile_controller = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.exile_controller);
+    let parked_exile_duration = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.exile_duration.clone());
+    let parked_exile_tracking = state
+        .pending_replacement
+        .as_ref()
+        .map(|pending| pending.exile_tracking)
+        .unwrap_or_default();
     // CR 120.4a + CR 702.15b: capture the excess-redirect rider and the deferred
     // lifelink bonus BEFORE `continue_replacement` consumes the pending record, so
     // the Damage resume arm can restore them onto the ctx it rebuilds from the
@@ -269,7 +282,11 @@ pub(super) fn handle_replacement_choice(
                         approved,
                         crate::game::zone_pipeline::DeliveryCtx {
                             source_id: cause,
-                            exile_links: crate::game::zone_pipeline::ExileLinkSpec::default(),
+                            exile_links: crate::game::zone_pipeline::ExileLinkSpec {
+                                duration: parked_exile_duration,
+                                controller: parked_exile_controller,
+                                tracking: parked_exile_tracking,
+                            },
                             drain:
                                 crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
                             // CR 701.24a: thread the parked W3 library placement so
@@ -987,6 +1004,11 @@ pub(super) fn handle_replacement_choice(
                 // CR 101.4: a simultaneous each-player sacrifice paused by a
                 // CR 616.1 replacement choice resumes the already-announced
                 // remaining sacrifices before any parked continuation can run.
+                let sacrifice_source_id = state
+                    .pending_player_scope_sacrifice_choice
+                    .as_ref()
+                    .map(|pending| pending.ability.source_id)
+                    .expect("active sacrifice choice owns its source identity");
                 match effects::drain_pending_player_scope_sacrifice_after_replacement(state, events)
                     .map_err(|error| EngineError::InvalidAction(error.to_string()))?
                 {
@@ -994,7 +1016,18 @@ pub(super) fn handle_replacement_choice(
                     effects::PendingPlayerScopeSacrificeOutcome::PausedForReplacement => {
                         waiting_for = state.waiting_for.clone();
                     }
-                    effects::PendingPlayerScopeSacrificeOutcome::Completed { .. } => {
+                    effects::PendingPlayerScopeSacrificeOutcome::Completed {
+                        sacrificed_count,
+                        ..
+                    } => {
+                        effects::stamp_active_player_action_completion(
+                            state,
+                            sacrifice_source_id,
+                            crate::types::ability::EffectResolutionResult {
+                                cause: crate::types::ability::ThisWayCause::Sacrificed,
+                                count: sacrificed_count,
+                            },
+                        );
                         effects::drain_pending_continuation(state, events);
                         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                             waiting_for = state.waiting_for.clone();
@@ -1148,6 +1181,18 @@ pub(super) fn handle_replacement_choice(
             if let Some(pending) = state.pending_replacement.as_mut() {
                 if pending.library_placement.is_none() {
                     pending.library_placement = parked_library_placement.clone();
+                }
+                if pending.exile_controller.is_none() {
+                    pending.exile_controller = parked_exile_controller;
+                }
+                if pending.exile_duration.is_none() {
+                    pending.exile_duration = parked_exile_duration.clone();
+                }
+                if matches!(
+                    pending.exile_tracking,
+                    crate::types::game_state::ZoneDeliveryExileTracking::None
+                ) {
+                    pending.exile_tracking = parked_exile_tracking;
                 }
                 // CR 120.4a: a SECOND material replacement ordering choice on the
                 // same damage event re-parked a fresh record with
@@ -1414,6 +1459,64 @@ pub(super) fn handle_replacement_choice(
     }
 }
 
+/// CR 614.12a: Commit a pre-entry controller choice onto the exact parked
+/// ZoneChange, then resume through the ordinary replacement-choice handler so
+/// delivery, trigger collection, and any later replacement ordering retain
+/// their existing single authorities.
+pub(super) fn handle_entry_controller_choice(
+    state: &mut GameState,
+    opponent: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let (player, candidates) = match &state.waiting_for {
+        WaitingFor::EntryControllerChoice { player, candidates } => (*player, candidates),
+        _ => {
+            return Err(EngineError::InvalidAction(
+                "entry controller choice is not pending".to_string(),
+            ));
+        }
+    };
+    if !candidates.contains(&opponent)
+        || !crate::game::players::choosable_opponents(state, player).contains(&opponent)
+    {
+        return Err(EngineError::InvalidAction(
+            "chosen entry controller is not eligible".to_string(),
+        ));
+    }
+    let Some(pending) = state.pending_replacement.as_mut() else {
+        return Err(EngineError::InvalidAction(
+            "entry controller choice has no pending replacement".to_string(),
+        ));
+    };
+    if pending.candidates.len() != 1 || pending.is_optional {
+        return Err(EngineError::InvalidAction(
+            "entry controller choice has an invalid replacement resume".to_string(),
+        ));
+    }
+    let ProposedEvent::ZoneChange {
+        controller_override,
+        to: Zone::Battlefield,
+        ..
+    } = &mut pending.proposed
+    else {
+        return Err(EngineError::InvalidAction(
+            "entry controller choice does not own a battlefield entry".to_string(),
+        ));
+    };
+    *controller_override = Some(opponent);
+    pending.proposed.applied_set_mut().insert(
+        crate::types::proposed_event::AppliedReplacementKey::EntryControllerChoice {
+            source: pending.candidates[0].source,
+            index: pending.candidates[0].index,
+            controller: opponent,
+        },
+    );
+    // Mark before re-entering the ordinary handler so the pre-entry chooser
+    // is not offered again while that handler applies this same replacement.
+    pending.proposed.mark_applied(pending.candidates[0]);
+    handle_replacement_choice(state, 0, events)
+}
+
 /// CR 707.2c + CR 614.12a + CR 613.1a: Answer path for Metamorphic Alteration's
 /// "As this Aura enters, choose a creature." Latches the chosen creature's
 /// copiable values (fixed here, per CR 707.2c, as the copy effect first starts
@@ -1504,8 +1607,17 @@ fn handle_persist_chosen_attribute_choice(
             .is_some_and(|aura| aura.attached_to.is_none())
     {
         match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id) {
+            // CR 303.4g does NOT apply on this route: `NoLegalHost` here means the
+            // entrant already ENTERED the battlefield as a non-Aura and only became
+            // an Aura when its `BecomeCopy` replacement realized post-entry. There is
+            // no un-entering it — CR 303.4g's "isn't created" / "remains in its
+            // current zone" clause governs an object still in the act of entering —
+            // so the CR 704.5m unattached-Aura state-based action owns it from here,
+            // exactly as it did before the `Resolved` split. Same disposition as
+            // `Attached`: nothing further to do at this seam.
             crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
-            | crate::game::zone_pipeline::EnteringAuraAttachment::Resolved => {}
+            | crate::game::zone_pipeline::EnteringAuraAttachment::Attached
+            | crate::game::zone_pipeline::EnteringAuraAttachment::NoLegalHost => {}
             crate::game::zone_pipeline::EnteringAuraAttachment::NeedsChoice { .. } => {
                 return Err(EngineError::InvalidAction(
                     "PersistChosenAttribute requires a resolved Aura host before the copy installs"
@@ -1773,7 +1885,7 @@ pub(super) fn handle_copy_target_choice(
             entry.copy_resume.as_ref().and_then(|copy| {
                 (entry.remaining_count > 0).then(|| {
                     (
-                        entry.object.owner,
+                        entry.object.projected().owner,
                         copy.clone(),
                         entry.enter_tapped,
                         entry.enter_with_counters.clone(),
@@ -2091,22 +2203,53 @@ fn finish_copy_target_choice_entry(
     // to priority, and any entry trigger already placed on the stack resolves with
     // the host chosen (CR 303.4f). The auto-attach (0/1 host) branch never pauses.
     //
-    // Liminal-path caveat: the copy-token caller (`handle_copy_target_choice`,
-    // ~1236) has a `copy_continuation` / committed-token-entry tail that runs only
-    // if this function returns `Ok(None)`. A multi-host `NeedsChoice` pause here
-    // would return `Ok(Some(..))` and skip that tail — the same drop the existing
-    // `replay_deferred_entry_events` pause above already causes. No card reaches
-    // that intersection today (the liminal accept path requires the COPIED card to
-    // carry its own enter-as-a-copy replacement, and none of those realize into a
-    // multi-host Aura with a token continuation); if one ever does, thread the
-    // continuation through the resume like the ETB-counter pause does.
+    // CR 616.1: the `NeedsChoice` arm below is a PAUSE, so it owes the same
+    // carrier the ETB-counter pause above owes — `counter_pause_post_actions`
+    // holds the liminal copy-token caller's committed-entry emit and its
+    // remaining-batch continuation, and returning `Ok(Some(..))` without parking
+    // them would drop both (`handle_copy_target_choice` runs that tail only on
+    // `Ok(None)`). Parked rather than reasoned about: the current card pool does
+    // not reach the intersection (the liminal accept path requires the COPIED card
+    // to carry its own enter-as-a-copy replacement, and none of those realize into
+    // a multi-host Aura with a token continuation), but "no card does this today"
+    // is not a property the engine should depend on.
     match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id) {
+        // CR 303.4g does NOT apply on this route: this entrant already ENTERED the
+        // battlefield as a non-Aura (Copy Enchantment enters as a plain enchantment)
+        // and only became an Aura when `BecomeCopy` realized post-entry. It cannot be
+        // un-entered, and CR 303.4g's "isn't created" clause governs only an object
+        // still in the act of entering — so the CR 704.5m unattached-Aura state-based
+        // action owns it. Same disposition as `Attached`: nothing to do here.
         crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
-        | crate::game::zone_pipeline::EnteringAuraAttachment::Resolved => {}
+        | crate::game::zone_pipeline::EnteringAuraAttachment::Attached
+        | crate::game::zone_pipeline::EnteringAuraAttachment::NoLegalHost => {}
         crate::game::zone_pipeline::EnteringAuraAttachment::NeedsChoice {
             controller,
             legal_targets,
         } => {
+            // CR 616.1 carrier for the host pause. Same vehicle the non-liminal
+            // copy-token path uses for its own `ReturnAsAuraTarget` pause
+            // (`token_copy::apply_copy_token_after_replacement_with_created_ids`,
+            // the `ContinueCopyTokenEntryAfterAuraHost` stash): an empty counter
+            // queue whose completion carries the post-actions, drained by
+            // `drain_pending_counter_additions` when the `ReturnAsAuraTarget`
+            // handler in `engine.rs` returns to priority and calls
+            // `resume_pending_continuation_if_priority`.
+            //
+            // Only stashed when there is something to carry — the non-liminal
+            // caller (real Copy Enchantment) passes an empty list and must not
+            // acquire a spurious pending-counter frame. `EmitCommittedCopyTokenEntry`
+            // in the list is idempotent (`flush_pending_token_battlefield_entry`
+            // above already realized the parked entry), so re-running it after the
+            // host choice is a no-op rather than a double emit.
+            if !counter_pause_post_actions.is_empty() {
+                super::effects::counters::stash_pending_counter_post_actions(
+                    state,
+                    crate::types::ability::EffectKind::CopyTokenOf,
+                    source_id,
+                    counter_pause_post_actions,
+                );
+            }
             state.waiting_for = WaitingFor::ReturnAsAuraTarget {
                 player: controller,
                 source_id,
@@ -2212,6 +2355,7 @@ fn copy_effect_for_source(state: &GameState, source_id: ObjectId) -> Option<&Abi
     if let Some(entry) = state.liminal_entries.get(&source_id) {
         return entry
             .object
+            .projected()
             .replacement_definitions
             .iter_all()
             .filter_map(|replacement| replacement.execute.as_deref())
@@ -2264,7 +2408,7 @@ pub(super) fn apply_post_replacement_effect(
                     state
                         .liminal_entries
                         .get(&obj_id)
-                        .map(|entry| &entry.object)
+                        .map(|entry| entry.object.projected())
                 })
                 .map(|obj| {
                     (
@@ -2387,6 +2531,59 @@ pub(super) fn apply_post_replacement_effect(
     }
 }
 
+thread_local! {
+    /// Set while a post-replacement dispatch is live on THIS thread's call
+    /// stack. Deliberately not `GameState`: liveness describes the call stack,
+    /// not the game, and serializing it would make the very `Dispatching`
+    /// status this module forbids look legitimate across a round trip. Mirrors
+    /// `game::engine::IN_SIMULATION_PROBE`, whose doc records the properties
+    /// this relies on: engine game logic is single-threaded (no rayon /
+    /// par_iter / std::thread::spawn in the apply or legal_actions path),
+    /// `apply()` is fully synchronous, and the tokio server runs each apply
+    /// synchronously within one task on one thread.
+    ///
+    /// KNOWN RESIDUAL: the WASM release profile is `panic = 'abort'`
+    /// (Cargo.toml), so `Drop` does not run on a panic. A panic inside a
+    /// dispatch therefore leaves this set, and the priority-boundary sweep is
+    /// suppressed for the life of that module instance. The suppression is
+    /// reported by a `tracing::warn!` at the sweep site so the condition is
+    /// observable on the native build rather than silent. Native
+    /// (`server-release`) and every test build are `panic = 'unwind'` and are
+    /// unaffected. An unconditional reset at the `apply()` boundary was
+    /// rejected: `apply()` is re-entrant via `SimulationFilter`'s
+    /// clone-and-apply probe, so an ungated reset would clear a live outer
+    /// dispatch's flag inside the probe.
+    static POST_REPLACEMENT_DISPATCH_LIVE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// RAII: sets the flag, restores the PREVIOUS value on drop — nesting-correct,
+/// so the CR 616.1g nested same-frame dispatch (Jace/Swans) keeps it set for
+/// the outer dispatch after the inner one returns.
+#[must_use]
+struct LiveDispatchGuard(bool);
+
+impl LiveDispatchGuard {
+    fn enter() -> Self {
+        LiveDispatchGuard(POST_REPLACEMENT_DISPATCH_LIVE.with(|flag| flag.replace(true)))
+    }
+}
+
+impl Drop for LiveDispatchGuard {
+    fn drop(&mut self) {
+        POST_REPLACEMENT_DISPATCH_LIVE.with(|flag| flag.set(self.0));
+    }
+}
+
+/// True while any `apply_pending_post_replacement_effect` dispatch is between
+/// its `begin_dispatch` and its cleanup on this thread. The priority-boundary
+/// sweeper consults this before retiring a `Dispatching` resident: when it is
+/// false, "ownerless" is a definition rather than an inference, at any frame
+/// depth and at any drain depth.
+pub(crate) fn post_replacement_dispatch_is_live() -> bool {
+    POST_REPLACEMENT_DISPATCH_LIVE.with(std::cell::Cell::get)
+}
+
 pub(crate) fn apply_pending_post_replacement_effect(
     state: &mut GameState,
     object_id: Option<ObjectId>,
@@ -2422,9 +2619,14 @@ pub(crate) fn apply_pending_post_replacement_effect(
         .map(|drain| std::mem::take(&mut drain.applied))
         .unwrap_or_default();
 
-    let (continuation, dispatch) = state
-        .active_post_replacement_drains_mut()?
-        .begin_dispatch()?;
+    let (continuation, dispatch) = state.begin_post_replacement_dispatch()?;
+    // CR 603.3b + CR 608.2c: this dispatch is now live on this thread's call
+    // stack. Constructed AFTER the mint so the `?` early-return path never
+    // enters it, and dropped by RAII at every exit — the
+    // `capture_deferred_entry_events_if_mid_entry_choice` tail, every `?`, and
+    // (on unwind profiles) a panic. While it is held, the priority-boundary
+    // sweeper must not treat a `Dispatching` resident as ownerless.
+    let _live_dispatch = LiveDispatchGuard::enter();
     let waiting_for = match continuation {
         PostReplacementContinuation::Resolved(resolved) => {
             apply_post_replacement_resolved_effect(state, &resolved, replacement_applied, events)
@@ -2439,21 +2641,42 @@ pub(crate) fn apply_pending_post_replacement_effect(
             events,
         ),
     };
-    // CR 615.5: a direct pause retains this dispatch's context on its own entry.
-    // If a nested drain owns the prompt instead, this continuation has completed;
-    // retire its exact `Dispatching` entry below the nested top.
-    if waiting_for.is_some()
-        && state
-            .active_post_replacement_drains()
-            .is_some_and(|drains| drains.dispatch_is_resident_top(dispatch))
-    {
-        let _ = state
-            .active_post_replacement_drains_mut()
-            .is_some_and(|drains| drains.pause_dispatch(dispatch));
+    // CR 614.12a + CR 616.1g: classify by what OWNS the outstanding prompt, never
+    // by whether the two-deep positional accessor can currently see this frame.
+    // The predecessor asked `active_post_replacement_drains()`, which returns None
+    // as soon as this frame's DISTANCE FROM THE STACK TOP exceeds one — whether
+    // because the dispatched continuation raised two or more frames, or because a
+    // parent-of-active insert slid a frame in above it
+    // (`ResolutionStack::insert_parent_of_active`, reached from
+    // `effects::append_to_pending_continuation`). Note the frame need not have
+    // moved at all: `active_post_replacement_parent_index` looks only at the top
+    // and its immediate predecessor, by design. Both arms then degraded to no-ops
+    // and the entry was stranded `Dispatching` — unrecoverable, because every
+    // retirement path is keyed on `Ready`, on `Paused`, or on a handle that dies
+    // with this call. Worse, on the same miss
+    // `GameState::install_post_replacement_drain` mints a SIBLING PostReplacement
+    // frame, and the accessor then hands this cleanup that frame's drain vector —
+    // so the outer `finish_dispatch` could remove an unrelated frame's entry.
+    // The dispatch now names its frame by a stable `PostReplacementFrameId`, bound
+    // to the frame at most once, so both failure modes are closed: the lookup
+    // follows the frame through every `frames.insert` / `frames.swap`, never
+    // resolves to a sibling, and is not invalidated by a nested same-frame
+    // dispatch.
+    if waiting_for.is_some() && state.post_replacement_dispatch_is_resident_top(dispatch) {
+        // This dispatch's own work owns the prompt: park it so the paused-retire
+        // paths (`finish_active_paused_post_replacement_dispatch` and the
+        // `resume_resolution_frames` Paused branch) can finish it after the answer.
+        let _ = state.pause_post_replacement_dispatch(dispatch);
     } else {
-        let _ = state
-            .active_post_replacement_drains_mut()
-            .and_then(|drains| drains.finish_dispatch(dispatch));
+        // Either the continuation completed, or a NESTED drain above this entry
+        // owns the prompt (CR 616.1g) — in both cases this entry's work is done.
+        // Retire exactly `dispatch`, addressed by frame id, wherever that frame
+        // now sits.
+        let _ = state.finish_post_replacement_dispatch(dispatch);
+        // Unchanged from the predecessor, and deliberately NOT folded into the
+        // call above: this removes any empty PostReplacement frame that is now the
+        // stack top, which is a wider set than "the frame this dispatch
+        // addressed". Narrowing it would be a second, unrelated behavioural delta.
         state.remove_empty_active_post_replacement_frame();
     }
     // NOTE: the inherited token-choice applied seed is intentionally NOT cleared
@@ -2938,6 +3161,9 @@ mod tests {
             depth: 0,
             is_optional: true,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,
@@ -3610,6 +3836,9 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,
@@ -4140,6 +4369,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -6058,6 +6288,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -6263,6 +6494,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -6384,6 +6616,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -6490,6 +6723,147 @@ mod tests {
             state.objects[&copy_ench].zone,
             Zone::Graveyard,
             "CR 303.4g: the unattached Aura copy goes to its owner's graveyard"
+        );
+    }
+
+    /// CR 616.1: the CR 303.4f host pause must CARRY the caller's entry tail, not
+    /// drop it.
+    ///
+    /// `finish_copy_target_choice_entry` returns `Ok(Some(..))` on that pause, and
+    /// its liminal copy-token caller runs the committed-entry emit and the
+    /// remaining-batch continuation only on `Ok(None)`. Before the carrier, a
+    /// multi-host Aura realized by a liminal copy token would therefore have
+    /// abandoned the rest of the batch and never published its created ids.
+    ///
+    /// Driven at the seam rather than through a card, because no card in the pool
+    /// reaches the intersection today (see the comment at the `NeedsChoice` arm) —
+    /// which is exactly why the behaviour needs a test that does not depend on
+    /// one. The post-action chosen is the real batch continuation, and the
+    /// prompt is answered through the production `apply` path, so the assertion
+    /// is "the second token actually got created", not "a struct was stored".
+    #[test]
+    fn the_aura_host_pause_carries_the_liminal_copy_token_continuation() {
+        use crate::game::printed_cards::intrinsic_copiable_values;
+        use crate::types::game_state::PendingCounterPostAction;
+        use crate::types::keywords::Keyword;
+        use crate::types::proposed_event::{CopyTokenSpec, EtbTapState};
+
+        let mut state = GameState::new_two_player(42);
+        let hosts: Vec<ObjectId> = (0..2)
+            .map(|i| make_creature(&mut state, PlayerId(0), &format!("Grizzly Bears {i}")))
+            .collect();
+
+        // An unattached Aura on the battlefield with two legal hosts: the shape
+        // `resolve_entering_aura_attachment` answers with `NeedsChoice`.
+        let entering_aura = create_object(
+            &mut state,
+            CardId(400),
+            PlayerId(0),
+            "Entering Aura".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&entering_aura).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Enchantment];
+            obj.card_types.core_types = vec![CoreType::Enchantment];
+            obj.base_card_types.subtypes = vec!["Aura".to_string()];
+            obj.card_types.subtypes = vec!["Aura".to_string()];
+            let enchant = Keyword::Enchant(TargetFilter::Typed(
+                crate::types::ability::TypedFilter::new(
+                    crate::types::ability::TypeFilter::Creature,
+                ),
+            ));
+            obj.base_keywords = vec![enchant.clone()];
+            obj.keywords = vec![enchant];
+        }
+
+        // The tail the caller would otherwise have run itself: one more token in
+        // this batch, a copy of a Treasure.
+        let copied = create_object(
+            &mut state,
+            CardId(401),
+            PlayerId(0),
+            "Treasure".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&copied).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Artifact];
+            obj.card_types = obj.base_card_types.clone();
+        }
+        let values = intrinsic_copiable_values(state.objects.get(&copied).unwrap());
+        let continuation = PendingCounterPostAction::ContinueCopyTokenCreation {
+            owner: PlayerId(0),
+            copy: Box::new(CopyTokenSpec {
+                values: Box::new(values),
+                display_source: crate::game::game_object::DisplaySource::Token,
+                printed_ref: None,
+                token_image_ref: None,
+                extra_keywords: Vec::new(),
+                additional_modifications: Vec::new(),
+                tapped: false,
+                enters_attacking: false,
+                sacrifice_at: None,
+                source_id: entering_aura,
+                controller: PlayerId(0),
+            }),
+            enter_tapped: EtbTapState::Unspecified,
+            enter_with_counters: Vec::new(),
+            remaining_count: 1,
+        };
+
+        let tokens_before = state
+            .battlefield
+            .iter()
+            .filter(|id| state.objects[id].is_token)
+            .count();
+
+        let mut events = Vec::new();
+        let paused = finish_copy_target_choice_entry(
+            &mut state,
+            entering_aura,
+            &mut events,
+            vec![continuation],
+            false,
+        )
+        .expect("the host pause is not an error");
+
+        assert!(
+            matches!(paused, Some(WaitingFor::ReturnAsAuraTarget { .. })),
+            "two legal hosts must pause on the CR 303.4f host choice, got {paused:?}"
+        );
+        assert!(
+            state.active_counter_additions().is_some(),
+            "CR 616.1: the pause must park the caller's tail, not drop it"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(hosts[1])),
+            },
+        )
+        .expect("answer the CR 303.4f host choice");
+
+        assert_eq!(
+            state.objects[&entering_aura].attached_to,
+            Some(crate::game::game_object::AttachTarget::Object(hosts[1])),
+            "the host choice still applies"
+        );
+        let tokens_after = state
+            .battlefield
+            .iter()
+            .filter(|id| state.objects[id].is_token)
+            .count();
+        assert_eq!(
+            tokens_after,
+            tokens_before + 1,
+            "CR 616.1: the parked batch continuation must run once the host is chosen \
+             — this is the assertion that fails if the carrier is removed"
+        );
+        assert!(
+            state.active_counter_additions().is_none(),
+            "the parked frame is consumed, not left resident"
         );
     }
 
@@ -6699,6 +7073,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -6864,6 +7239,7 @@ mod tests {
             branch_descriptions: Vec::new(),
             parent_targets: Vec::new(),
             context: Default::default(),
+            continuation: None,
             replacement_applied: Default::default(),
             remaining_players: Vec::new(),
         };
@@ -7074,7 +7450,9 @@ mod tests {
         state.liminal_entries.insert(
             liminal_id,
             LiminalEntry {
-                object: liminal,
+                object: crate::types::game_state::LiminalEntrant::Token(
+                    crate::types::game_state::TokenProjection::materialize(liminal),
+                ),
                 name: "Liminal Mockingbird".to_string(),
                 source_id: ObjectId(999),
                 controller: PlayerId(0),
@@ -7150,5 +7528,159 @@ mod tests {
             }
             other => panic!("expected CopyTargetChoice, got {other:?}"),
         }
+    }
+
+    /// Park a state on Priority whose single resolution frame is a
+    /// `PostReplacement` holding one `Dispatching` resident — the wedge shape,
+    /// reached the only way it can be reached without a live dispatcher: an
+    /// install followed by a direct `begin_dispatch` whose handle is then
+    /// dropped, exactly as a real dispatcher's handle dies with its call frame.
+    fn state_with_ownerless_dispatching_resident() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_player = PlayerId(0);
+
+        let mut drains = crate::types::game_state::PostReplacementDrainStack::default();
+        assert!(
+            drains.install(
+                crate::types::game_state::PostReplacementDrain::ready(
+                    PostReplacementContinuation::Resolved(Box::new(ResolvedAbility::new(
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                        Vec::new(),
+                        ObjectId(81),
+                        PlayerId(0),
+                    ))),
+                ),
+                crate::types::game_state::ResidentDrainPolicy::KeepResident,
+            ),
+            "the fixture's ready drain installs"
+        );
+        let (_continuation, _handle) = drains
+            .begin_dispatch()
+            .expect("a ready resident begins dispatching");
+        state.resolution_stack.push_post_replacement(drains);
+        state
+    }
+
+    fn resident_is_dispatching(state: &GameState) -> bool {
+        state
+            .active_post_replacement_drains()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident)
+            .is_some_and(|drain| {
+                matches!(
+                    drain.status,
+                    crate::types::game_state::DrainStatus::Dispatching
+                )
+            })
+    }
+
+    /// **H5 — discriminating(U1), two halves.** A `Dispatching` entry whose
+    /// dispatcher is still on this thread's call stack is live work, not a
+    /// strand, and the priority-boundary sweeper must leave it alone.
+    ///
+    /// Carried WITHOUT a CR citation, deliberately. This is an invariant of the
+    /// engine's own dispatch machinery — which in-flight work the sweeper may
+    /// retire — and no rule of the game speaks to it. It formerly cited
+    /// CR 615.5, which says a prevention effect may include an additional effect
+    /// referring to the amount of damage that was prevented, the rest of the
+    /// effect taking place immediately after the prevention itself.
+    ///
+    /// That rule is real authority for the PREVENTION family's additional-effect
+    /// reference, and it is why `begin_dispatch`
+    /// (`types/game_state.rs`) and `apply_pending_post_replacement_effect` above
+    /// both still cite it: the engine satisfies that reference by keeping the
+    /// drain resident with its event context readable, which is how
+    /// `PostReplacementSourceController` resolves Swans of Bryn Argoll. What
+    /// CR 615.5 does NOT speak to is dispatch LIVENESS — whether a `Dispatching`
+    /// entry is still on this thread's call stack — and that is this test's
+    /// actual subject. So the number is dropped HERE rather than swapped for a
+    /// guess. Do not read that omission as a reason to strip CR 615.5 from the
+    /// event-context sites, where it is the correct anchor.
+    ///
+    /// Half (i) holds a `LiveDispatchGuard` across the sweep and asserts the
+    /// drain SURVIVES. Hand-patching `post_replacement_dispatch_is_live()` to
+    /// return `false` turns half (i) red behaviourally — the sweep fires
+    /// mid-dispatch and destroys the event context the running continuation
+    /// reads.
+    ///
+    /// Half (ii) repeats the sweep with no guard held and asserts the drain IS
+    /// retired. It is half (i)'s positive control: without it, half (i) would be
+    /// satisfied by a sweep that never fires at all. Reverting the sweep turns
+    /// half (ii) red.
+    ///
+    /// Half (iii) tests the shared policy FUNCTION rather than one of its callers.
+    /// The guard is the only protection the new entry-side call site in
+    /// `engine::apply_action_boundary_core` has, so it is asserted at the function
+    /// both callers share. Half (iii)'s second call is its own positive control:
+    /// without it, a policy that never sweeps anything would pass.
+    ///
+    /// `LiveDispatchGuard::enter()` stays module-private deliberately — the
+    /// guard's soundness argument is "the dispatcher is the sole thing that can
+    /// make a dispatch live", and a `pub(crate) enter()` would downgrade that
+    /// from a compiler-enforced fact to a convention.
+    #[test]
+    fn h5_a_live_dispatch_suppresses_the_ownerless_sweep_and_its_absence_permits_it() {
+        // Half (i): a live dispatch is on this thread's call stack.
+        let mut state = state_with_ownerless_dispatching_resident();
+        assert!(
+            resident_is_dispatching(&state),
+            "reach-guard: the fixture parks a Dispatching resident"
+        );
+        let mut events = Vec::new();
+        {
+            let _live = LiveDispatchGuard::enter();
+            assert!(
+                post_replacement_dispatch_is_live(),
+                "reach-guard: the guard actually marks the dispatch live"
+            );
+            crate::game::effects::resume_resolution_frames(&mut state, &mut events);
+        }
+        assert!(
+            resident_is_dispatching(&state),
+            "a live dispatch's resident must survive the priority-boundary sweep"
+        );
+        assert_eq!(
+            state.resolution_stack.len(),
+            1,
+            "the frame that owns a live dispatch must survive too"
+        );
+
+        // Half (ii), the positive control: with no dispatch live, the same call
+        // retires the same entry — so half (i) is not passing on an inert sweep.
+        assert!(
+            !post_replacement_dispatch_is_live(),
+            "the guard restored the previous value on drop"
+        );
+        crate::game::effects::resume_resolution_frames(&mut state, &mut events);
+        assert!(
+            state.resolution_stack.is_empty(),
+            "CR 603.3b + CR 608.2c: an ownerless Dispatching resident and its emptied frame retire"
+        );
+
+        // Half (iii): the shared policy FUNCTION, called directly, is guard
+        // suppressed exactly as its `resume_resolution_frames` caller is.
+        let mut direct = state_with_ownerless_dispatching_resident();
+        assert!(
+            resident_is_dispatching(&direct),
+            "reach-guard: the fixture parks a Dispatching resident"
+        );
+        {
+            let _live = LiveDispatchGuard::enter();
+            crate::game::effects::sweep_ownerless_post_replacement_strand(&mut direct);
+        }
+        assert!(
+            resident_is_dispatching(&direct),
+            "a live dispatch's resident survives the shared policy function too"
+        );
+        crate::game::effects::sweep_ownerless_post_replacement_strand(&mut direct);
+        assert!(
+            !resident_is_dispatching(&direct),
+            "half (iii)'s own positive control: with no dispatch live the same direct call retires it"
+        );
     }
 }

@@ -703,6 +703,60 @@ impl GameScenario {
         builder
     }
 
+    /// CR 306.1 + CR 306.5b: Add a planeswalker to the battlefield with its
+    /// loyalty abilities parsed from Oracle text and `loyalty` loyalty counters
+    /// already on it.
+    ///
+    /// Mirrors [`Self::add_enchantment_from_oracle`], plus the two things a
+    /// planeswalker needs that no other permanent does: the loyalty counters
+    /// (CR 306.5b — a planeswalker with none is put into its owner's graveyard
+    /// as a state-based action, so a fixture without them evaporates), and the
+    /// `Gideon`-style planeswalker subtype the caller supplies.
+    pub fn add_planeswalker_from_oracle(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        subtype: &str,
+        loyalty: u32,
+        oracle_text: &str,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let ts = self.state.next_timestamp();
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Planeswalker);
+        obj.card_types.subtypes.push(subtype.to_string());
+        obj.base_card_types = obj.card_types.clone();
+        obj.timestamp = ts;
+        // A pre-existing permanent (entered on a prior turn), matching the
+        // enchantment/land builders. CR 302.6 gates only creatures, but a
+        // planeswalker animated by its own ability would otherwise inherit the
+        // flag.
+        obj.summoning_sick = false;
+        // CR 306.5b: a planeswalker's loyalty IS the count of loyalty counters on
+        // it, but the engine keeps a `loyalty` field alongside the counter map —
+        // the activation gate reads the counters (CR 606.3) while the
+        // zero-loyalty state-based action reads the field (CR 704.5i). Seed BOTH
+        // so they start in sync; seeding only one produces a planeswalker that
+        // can be activated but can never die.
+        obj.loyalty = Some(loyalty);
+        obj.counters
+            .insert(crate::types::counter::CounterType::Loyalty, loyalty);
+
+        let mut builder = CardBuilder {
+            state: &mut self.state,
+            id,
+        };
+        builder.from_oracle_text(oracle_text);
+        builder
+    }
+
     /// Add a creature to hand with abilities parsed from Oracle text.
     pub fn add_creature_to_hand_from_oracle(
         &mut self,
@@ -1155,6 +1209,57 @@ impl<'a> CardBuilder<'a> {
     }
 
     // --- Special modifiers ---
+
+    /// CR 903.3: Mark this object as its owner's commander IN PLACE, without
+    /// moving it to the command zone (unlike `GameScenario::with_commander`,
+    /// which forces `Zone::Command`).
+    ///
+    /// CR 903.3d resolves "controlling a commander" against a permanent ON THE
+    /// BATTLEFIELD, so every "you control your/a commander" gate — Lieutenant
+    /// statics, Lieutenant triggers, activation restrictions, and
+    /// resolution-time gates alike — needs a battlefield commander to be
+    /// reachable at all. This is that building block.
+    pub fn commander(&mut self) -> &mut Self {
+        self.obj().is_commander = true;
+        self
+    }
+
+    /// CR 613.1b (Layer 2: control-changing effects) + CR 109.5: put this object
+    /// under `player`'s control while leaving `owner` unchanged — the
+    /// owner/controller divergence a stolen permanent has.
+    ///
+    /// This is the only way to exercise the two conjuncts of
+    /// `game::commander::controls_own_commander` (owner, then controller)
+    /// independently, which CR 903.3 makes observable: the commander designation
+    /// is an attribute of the card, so a stolen commander is still its owner's.
+    ///
+    /// Sets BOTH fields on purpose: Layer 2 recomputes `obj.controller` from
+    /// `base_controller.unwrap_or(owner)` on every `evaluate_layers` pass, so
+    /// setting `controller` alone is silently reverted by the first layer pass a
+    /// cast pipeline runs. `controller` is set too so the state is coherent
+    /// before any layer pass.
+    ///
+    /// Battlefield-only: `state.battlefield` is a flat list with no per-player
+    /// split, so no zone-list bookkeeping is needed. Do NOT use this for
+    /// hand/library/graveyard objects, whose zone lists are keyed by owner —
+    /// the `debug_assert_eq!` below ENFORCES that precondition rather than
+    /// merely documenting it, so a misapplied call fails loudly at the fixture
+    /// that wrote it instead of desynchronizing an owner-keyed zone list and
+    /// surfacing somewhere unrelated.
+    pub fn controlled_by(&mut self, player: PlayerId) -> &mut Self {
+        let obj = self.obj();
+        debug_assert_eq!(
+            obj.zone,
+            Zone::Battlefield,
+            "CardBuilder::controlled_by is battlefield-only: object {:?} is in {:?}, whose \
+             zone list is keyed by OWNER, so diverging the controller would corrupt the fixture",
+            obj.id,
+            obj.zone,
+        );
+        obj.base_controller = Some(player);
+        obj.controller = player;
+        self
+    }
 
     /// Mark this creature as having summoning sickness (entered this turn).
     pub fn with_summoning_sickness(&mut self) -> &mut Self {
@@ -1741,8 +1846,11 @@ impl GameRunner {
     pub fn waiting_for_kind(&self) -> &'static str {
         match &self.state.waiting_for {
             WaitingFor::Priority { .. } => "Priority",
+            WaitingFor::ResolveAllConsent { .. } => "ResolveAllConsent",
+            WaitingFor::ResolveAllReady { .. } => "ResolveAllReady",
             WaitingFor::MeldPairChoice { .. } => "MeldPairChoice",
             WaitingFor::MeldAttackTargetChoice { .. } => "MeldAttackTargetChoice",
+            WaitingFor::EntryAttackTargetChoice { .. } => "EntryAttackTargetChoice",
             WaitingFor::MulliganDecision { .. } => "MulliganDecision",
             WaitingFor::OpeningHandBottomCards { .. } => "OpeningHandBottomCards",
             WaitingFor::ManaPayment { .. } => "ManaPayment",
@@ -1756,6 +1864,7 @@ impl GameRunner {
             WaitingFor::EnlistChoice { .. } => "EnlistChoice",
             WaitingFor::GameOver { .. } => "GameOver",
             WaitingFor::ReplacementChoice { .. } => "ReplacementChoice",
+            WaitingFor::EntryControllerChoice { .. } => "EntryControllerChoice",
             WaitingFor::OrderTriggers { .. } => "OrderTriggers",
             WaitingFor::CopyTargetChoice { .. } => "CopyTargetChoice",
             WaitingFor::ExploreChoice { .. } => "ExploreChoice",
@@ -2309,6 +2418,11 @@ impl<'a> SpellCast<'a> {
         // distinct targets while a single declaration remains reusable across
         // independent modal slots.
         let mut remaining_objects: Vec<ObjectId> = target_objects;
+        // CR 603.3d: triggered-ability targets are chosen after the trigger is
+        // put on the stack, independently of the spell's own target slots.
+        // Keep a separate object-intent pool so the same declared object can
+        // satisfy a trigger target and a later resolution target.
+        let mut remaining_trigger_objects = remaining_objects.clone();
         let declared_players: Vec<PlayerId> = target_players;
         let mut remaining_multi_target_players = declared_players.clone();
         let mut remaining_cost_objects: Vec<ObjectId> = cost_objects;
@@ -2483,18 +2597,18 @@ impl<'a> SpellCast<'a> {
                 // the pool can't cover it, `PassPriority` errors and the `.expect`
                 // below fails loudly — fund the pool in the scenario.
                 WaitingFor::ManaPayment { convoke_mode, .. } => {
-                    if matches!(convoke_mode, Some(ConvokeMode::Delve)) {
-                        for &card in &delve_with {
-                            act_collect(
-                                runner,
-                                GameAction::TapForConvoke {
-                                    object_id: card,
-                                    mana_type: ManaType::Colorless,
-                                },
-                                &mut events,
-                            )?;
-                        }
-                    } else {
+                    let only_delve = matches!(convoke_mode, Some(ConvokeMode::Delve));
+                    for &card in &delve_with {
+                        act_collect(
+                            runner,
+                            GameAction::TapForConvoke {
+                                object_id: card,
+                                mana_type: ManaType::Colorless,
+                            },
+                            &mut events,
+                        )?;
+                    }
+                    if !only_delve {
                         for &creature in &convoke_with {
                             // CR 702.51b: pay one mana of the creature's color, or
                             // colorless toward the generic portion of the cost.
@@ -2544,6 +2658,29 @@ impl<'a> SpellCast<'a> {
                             .multi_target
                             .as_ref()
                             .map(|_| &mut remaining_multi_target_players),
+                        &declared_players,
+                        selection.current_slot,
+                    );
+                    act_collect(
+                        runner,
+                        GameAction::ChooseTarget { target: choice },
+                        &mut events,
+                    )?;
+                }
+                // CR 603.3d: triggered abilities choose targets after they are
+                // put on the stack. Their object intents are independent of
+                // the spell's target slots, while player intents remain
+                // reusable across both prompts.
+                WaitingFor::TriggerTargetSelection {
+                    target_slots,
+                    selection,
+                    ..
+                } => {
+                    let slot = &target_slots[selection.current_slot];
+                    let choice = pick_slot_target(
+                        slot,
+                        &mut remaining_trigger_objects,
+                        None,
                         &declared_players,
                         selection.current_slot,
                     );
@@ -2641,6 +2778,22 @@ impl<'a> CastCommit<'a> {
     /// Read the current pre-resolution state.
     pub fn state(&self) -> &GameState {
         &self.runner.state
+    }
+
+    /// Submit an action while this cast remains committed on the stack.
+    ///
+    /// This keeps response tests on the same `apply()` pipeline as the live
+    /// game, while preserving the committed cast's hand and target baselines.
+    pub fn act(&mut self, action: GameAction) -> Result<ActionResult, EngineError> {
+        self.runner.act(action)
+    }
+
+    /// Start another fluent cast while this committed spell waits on the stack.
+    ///
+    /// Used by response tests to cast a counterspell or other instant before
+    /// resolving the committed spell and its triggers.
+    pub fn cast(&mut self, spell: ObjectId) -> SpellCast<'_> {
+        self.runner.cast(spell)
     }
 
     /// Mutate the board WHILE the committed spell is still on the stack.

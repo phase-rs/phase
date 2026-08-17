@@ -5,6 +5,11 @@
     "close": "Cerrar",
     "closeNamed": "Cerrar {{name}}"
   },
+  "quantityRef": {
+    "highestNumber": "el número más alto",
+    "lowestNumber": "el número más bajo",
+    "chosenNumber": "el número elegido"
+  },
   "scryOutcome": {
     "title": "Adivinación completada",
     "you": "Tú",

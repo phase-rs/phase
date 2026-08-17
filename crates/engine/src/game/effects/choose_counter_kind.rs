@@ -107,6 +107,7 @@ pub fn resolve(
     let options: Vec<String> = kinds.iter().map(|k| k.as_str().into_owned()).collect();
     state.waiting_for = WaitingFor::NamedChoice {
         player: ability.controller,
+        free_entry: choice_type.free_entry(),
         choice_type,
         options,
         source,

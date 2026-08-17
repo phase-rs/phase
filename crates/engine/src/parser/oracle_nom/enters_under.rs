@@ -252,7 +252,10 @@ fn map_relative_player_scope(scope: &ControllerRef) -> Option<ControllerRef> {
         | ControllerRef::DefendingPlayer
         | ControllerRef::SourceChosenPlayer
         | ControllerRef::EnchantedPlayer
-        | ControllerRef::ActivePlayer => None,
+        | ControllerRef::ActivePlayer
+        // CR 109.4 + CR 611.2: never produced by the parser — this lowering is
+        // installed by resolvers only, so no enters-under scope maps to it.
+        | ControllerRef::SpecificPlayer { .. } => None,
     }
 }
 

@@ -2,7 +2,7 @@ use crate::game::targeting::{extract_source_from_event, resolve_event_context_ta
 use crate::types::ability::{
     AbilityDefinition, DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect, EffectError,
     EffectKind, ReplacementCondition, ReplacementDefinition, ResolvedAbility, RestrictionExpiry,
-    TargetFilter, TargetRef,
+    SourceExclusion, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -385,6 +385,10 @@ pub fn resolve(
                             Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
                                 player: DamageTargetPlayerScope::Specific(player),
                                 permanent_type: None,
+                                // CR 109.1: no "other" article in this class —
+                                // the granted shield covers every permanent the
+                                // targeted player controls.
+                                source_scope: SourceExclusion::Include,
                             });
                     }
                     state.pending_damage_replacements.push(replacement);
@@ -412,7 +416,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, DamageModification, DamageTargetPlayerScope, Duration,
-        ReplacementDefinition, RestrictionExpiry, TargetFilter, TypeFilter, TypedFilter,
+        ReplacementDefinition, RestrictionExpiry, SourceExclusion, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -662,6 +667,7 @@ mod tests {
             Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
                 player: DamageTargetPlayerScope::Specific(PlayerId(1)),
                 permanent_type: None,
+                source_scope: SourceExclusion::Include,
             })
         );
         assert_eq!(

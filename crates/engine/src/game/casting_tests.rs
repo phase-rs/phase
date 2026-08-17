@@ -21,7 +21,7 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ManaChoice, ManaChoicePrompt, SpellCastRecord};
-use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
+use crate::types::keywords::{EmergeCost, EscapeCost, FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::{
     ManaColor, ManaCost, ManaCostShard, ManaRestriction, ManaSourceSelection, ManaSpellGrant,
     ManaType, ManaUnit,
@@ -9027,6 +9027,267 @@ fn jhoira_exile_cost_activation_suspends_the_exiled_card() {
     );
 }
 
+/// Negative sibling of `jhoira_exile_cost_activation_suspends_the_exiled_card`
+/// and the runtime proof for the COST-PAID binding class of the keyword anaphor.
+///
+/// CR 608.2k: "if it doesn't have suspend" back-references the object introduced
+/// by the ability's COST, so the parser lowers Jhoira's gate to
+/// `AbilityCondition::CostPaidObjectMatchesFilter` (clause-context re-anchoring
+/// in `rewrite_keyword_anaphor_for_cost_paid_parent`) — `TargetFilter::
+/// CostPaidObject` is never written into `ResolvedAbility.targets`, and an
+/// activated ability has no trigger event, so the target-scoped reading would
+/// find no subject at all.
+///
+/// When the exiled card ALREADY has printed `Suspend 4—{U}` the gate must be
+/// FALSE and no grant may fire. Revert-fail: with the old `SourceLacksKeyword`
+/// lowering the gate reads Jhoira (never suspended), the redundant grant fires,
+/// and `off_zone_characteristics::upsert_keyword_contribution` replaces the
+/// printed contribution with `Suspend { count: 0, cost: {} }` — so the effective
+/// suspend cost collapses from `{U}` to `{0}`.
+#[test]
+fn jhoira_does_not_regrant_suspend_to_a_natively_suspended_card() {
+    use super::super::engine::apply_as_current;
+    use crate::types::counter::CounterType;
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaCostShard;
+
+    let blue = ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue],
+        generic: 0,
+    };
+
+    let mut state = setup_game_at_main_phase();
+    let jhoira = create_object(
+        &mut state,
+        CardId(983),
+        PlayerId(0),
+        "Jhoira of the Ghitu".to_string(),
+        Zone::Battlefield,
+    );
+    // The eligible exile-cost card, printed with `Suspend 4—{U}`.
+    let nonland = create_object(
+        &mut state,
+        CardId(984),
+        PlayerId(0),
+        "Already Suspended Sorcery".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&jhoira).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "{2}, Exile a nonland card from your hand: Put four time \
+                 counters on the exiled card. If it doesn't have suspend, it \
+                 gains suspend.",
+            "Jhoira of the Ghitu",
+            &[],
+            &[String::from("Creature")],
+            &[],
+        );
+        Arc::make_mut(&mut obj.abilities).extend(parsed.abilities);
+    }
+    {
+        let nl = state.objects.get_mut(&nonland).unwrap();
+        nl.card_types.core_types.push(CoreType::Sorcery);
+        nl.base_card_types = nl.card_types.clone();
+        let printed = Keyword::Suspend {
+            count: 4,
+            cost: blue.clone(),
+        };
+        // Both lists: the cost-payment LKI snapshot reads `keywords`, and the
+        // post-exile off-zone read starts from `base_keywords`.
+        nl.keywords.push(printed.clone());
+        nl.base_keywords.push(printed);
+    }
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+    apply_as_current(
+        &mut state,
+        GameAction::ActivateAbility {
+            source_id: jhoira,
+            ability_index: 0,
+        },
+    )
+    .expect("Jhoira's exile-cost ability must enter the activation pipeline");
+    apply_as_current(
+        &mut state,
+        GameAction::SelectCards {
+            cards: vec![nonland],
+        },
+    )
+    .expect("paying the exile-from-hand cost must succeed");
+
+    let mut events = Vec::new();
+    stack::resolve_top(&mut state, &mut events);
+
+    // Reach-guard: the chain really ran — CR 122.1, four time counters landed.
+    assert_eq!(
+        state.objects[&nonland]
+            .counters
+            .get(&CounterType::Time)
+            .copied(),
+        Some(4),
+        "the exiled card must still carry four time counters"
+    );
+    // CR 702.62a: "Suspend N—[cost]". The printed cost must survive untouched.
+    assert_eq!(
+        crate::game::keywords::effective_suspend_cost(&state, nonland),
+        Some(blue),
+        "the cost-paid anaphor must read the EXILED CARD: it already has suspend, \
+         so no redundant grant may clobber its printed Suspend 4—{{U}} to {{0}}"
+    );
+}
+
+/// CR 608.2h + CR 608.2k + CR 613.1f: the cost-paid referent must be read at
+/// RESOLUTION, not from the payment-time snapshot.
+///
+/// The card enters the cost with NO suspend at all, so the payment-time
+/// `LKISnapshot` honestly records "no suspend". Only after the cost is paid —
+/// while the card is sitting in EXILE, and before the ability resolves — does a
+/// Layer-6 continuous effect grant it `Suspend 4—{U}`. CR 608.2k keeps the
+/// ability pointing at that object, and CR 608.2h says a reference to an object
+/// still in the public zone it was expected to be in reads that object's CURRENT
+/// information. So by the time the gate is evaluated the card DOES have suspend
+/// and no grant may fire.
+///
+/// This is the case a snapshot read cannot get right in principle: the kind-level
+/// keyword props exist to consult the off-zone keyword ledger, and an off-zone
+/// grant is applied to the live object, never captured in an LKI snapshot.
+///
+/// Revert-fail: evaluate the filter through `matches_target_filter_on_lki_snapshot`
+/// instead of `matches_target_filter_on_cost_paid_reference` and the gate reads
+/// the payment-time keyword list (empty), fires the redundant grant, and
+/// `upsert_keyword_contribution` replaces the granted `Suspend 4—{U}` contribution
+/// with `Suspend { count: 0, cost: {} }` — so this reads `Some({0})`.
+#[test]
+fn jhoira_reads_a_suspend_granted_in_exile_after_the_cost_was_paid() {
+    use super::super::engine::apply_as_current;
+    use crate::types::ability::{ContinuousModification, Duration, TargetFilter};
+    use crate::types::counter::CounterType;
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaCostShard;
+
+    let blue = ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue],
+        generic: 0,
+    };
+
+    let mut state = setup_game_at_main_phase();
+    let jhoira = create_object(
+        &mut state,
+        CardId(985),
+        PlayerId(0),
+        "Jhoira of the Ghitu".to_string(),
+        Zone::Battlefield,
+    );
+    // Deliberately NO printed suspend, on either list: the payment-time snapshot
+    // must honestly say "no suspend" so the grant below is the only source.
+    let nonland = create_object(
+        &mut state,
+        CardId(986),
+        PlayerId(0),
+        "Plain Sorcery".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&jhoira).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "{2}, Exile a nonland card from your hand: Put four time \
+                 counters on the exiled card. If it doesn't have suspend, it \
+                 gains suspend.",
+            "Jhoira of the Ghitu",
+            &[],
+            &[String::from("Creature")],
+            &[],
+        );
+        Arc::make_mut(&mut obj.abilities).extend(parsed.abilities);
+    }
+    {
+        let nl = state.objects.get_mut(&nonland).unwrap();
+        nl.card_types.core_types.push(CoreType::Sorcery);
+        nl.base_card_types = nl.card_types.clone();
+    }
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+    apply_as_current(
+        &mut state,
+        GameAction::ActivateAbility {
+            source_id: jhoira,
+            ability_index: 0,
+        },
+    )
+    .expect("Jhoira's exile-cost ability must enter the activation pipeline");
+    apply_as_current(
+        &mut state,
+        GameAction::SelectCards {
+            cards: vec![nonland],
+        },
+    )
+    .expect("paying the exile-from-hand cost must succeed");
+
+    // Reach-guard: the cost really moved the card to exile, so the grant below is
+    // an EXILE-zone characteristic change and the snapshot is already stale.
+    assert_eq!(
+        state.objects[&nonland].zone,
+        Zone::Exile,
+        "reach-guard: paying the cost must have exiled the card"
+    );
+    assert!(
+        !crate::game::keywords::object_has_effective_keyword_kind(
+            &state,
+            nonland,
+            crate::types::keywords::KeywordKind::Suspend,
+        ),
+        "reach-guard: the card must have no suspend at payment time, or the \
+         grant below proves nothing"
+    );
+
+    // The characteristic change, AFTER payment and BEFORE resolution.
+    state.add_transient_continuous_effect(
+        jhoira,
+        PlayerId(0),
+        Duration::Permanent,
+        TargetFilter::SpecificObject { id: nonland },
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Suspend {
+                count: 4,
+                cost: blue.clone(),
+            },
+        }],
+        None,
+    );
+    assert!(
+        crate::game::keywords::object_has_effective_keyword_kind(
+            &state,
+            nonland,
+            crate::types::keywords::KeywordKind::Suspend,
+        ),
+        "reach-guard: the off-zone grant must be visible before resolution, or \
+         the gate below is not being asked the question this test intends"
+    );
+
+    let mut events = Vec::new();
+    stack::resolve_top(&mut state, &mut events);
+
+    // Reach-guard: the chain really ran — CR 122.1, four time counters landed.
+    assert_eq!(
+        state.objects[&nonland]
+            .counters
+            .get(&CounterType::Time)
+            .copied(),
+        Some(4),
+        "the exiled card must carry four time counters"
+    );
+    assert_eq!(
+        crate::game::keywords::effective_suspend_cost(&state, nonland),
+        Some(blue),
+        "CR 608.2h: the gate must read the card's state AT RESOLUTION, where the \
+         exile-zone grant already gave it Suspend 4—{{U}} — no redundant grant may \
+         clobber that to {{0}}"
+    );
+}
+
 /// The Wedding of River Song (WHO) — runtime regression for the core chain.
 /// Drives the real cast pipeline (CastSpell → resolution) and asserts:
 /// (a) the controller draws two cards; (b) the controller's nonland card is
@@ -9034,9 +9295,11 @@ fn jhoira_exile_cost_activation_suspends_the_exiled_card() {
 ///
 /// The "Cards exiled this way that don't have suspend gain suspend" clause
 /// (Defect C) is a *documented strict-failure* — the "that don't have <kw>"
-/// restrictive clause strict-fails to `Unimplemented` because the correct
-/// per-card object-scoped condition (applying `SourceLacksKeyword` per exiled
-/// card, not per spell source) does not yet exist in the engine. The exiled
+/// restrictive clause strict-fails to `Unimplemented` because it needs a
+/// PER-MEMBER predicate over the exiled tracked set. The singular anaphor's two
+/// lowerings (`TargetMatchesFilter` / `CostPaidObjectMatchesFilter`) each test
+/// exactly one subject, and `ZoneChangedThisWay` is a set existential, so none
+/// of them expresses "exclude each member that already has suspend". The exiled
 /// card therefore does NOT gain suspend at runtime — this is expected, not a
 /// regression. See `try_parse_exiled_this_way_keyword_grant` for details.
 ///
@@ -37230,8 +37493,46 @@ mod alt_cost_reduction_509 {
         obj.base_power = Some(5);
         obj.base_toughness = Some(5);
         obj.base_characteristics_initialized = true;
-        obj.keywords.push(Keyword::Emerge(emerge));
+        obj.keywords
+            .push(Keyword::Emerge(EmergeCost::creature(emerge)));
         obj_id
+    }
+
+    fn create_artifact_emerge_spell(
+        state: &mut GameState,
+        player: PlayerId,
+        card_id: u64,
+        printed: ManaCost,
+        emerge: ManaCost,
+    ) -> ObjectId {
+        let spell = create_emerge_spell(state, player, card_id, printed, emerge.clone());
+        state.objects.get_mut(&spell).unwrap().keywords =
+            vec![Keyword::Emerge(EmergeCost::from_quality(
+                emerge,
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            ))];
+        spell
+    }
+
+    fn create_sacrifice_artifact(
+        state: &mut GameState,
+        player: PlayerId,
+        card_id: u64,
+        mana_cost: ManaCost,
+    ) -> ObjectId {
+        let artifact = create_object(
+            state,
+            CardId(card_id),
+            player,
+            "Sacrifice Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&artifact).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.base_card_types.core_types.push(CoreType::Artifact);
+        obj.mana_cost = mana_cost.clone();
+        obj.base_mana_cost = mana_cost;
+        artifact
     }
 
     fn create_sacrifice_creature(
@@ -37917,6 +38218,175 @@ mod alt_cost_reduction_509 {
             0,
             "Emerge should charge the reduced {{1}}{{U}}{{U}} cost, consuming exactly three mana"
         );
+    }
+
+    /// CR 702.119b-c: Emerge from artifact must offer only qualifying artifacts
+    /// and reduce the emerge cost by the selected artifact's mana value.
+    #[test]
+    fn emerge_from_artifact_casts_after_sacrificing_an_artifact() {
+        let mut state = setup_game_at_main_phase();
+        add_mana(&mut state, PlayerId(0), ManaType::Black, 2);
+
+        let emerge = create_artifact_emerge_spell(
+            &mut state,
+            PlayerId(0),
+            811,
+            ManaCost::generic(6),
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                generic: 5,
+            },
+        );
+        let artifact =
+            create_sacrifice_artifact(&mut state, PlayerId(0), 812, ManaCost::generic(5));
+        let creature =
+            create_sacrifice_creature(&mut state, PlayerId(0), 813, ManaCost::generic(1));
+
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), emerge),
+            "an artifact with mana value 5 must reduce {{5}}{{B}}{{B}} to payable {{B}}{{B}}"
+        );
+
+        let mut events = Vec::new();
+        let waiting_for =
+            handle_cast_spell(&mut state, PlayerId(0), emerge, CardId(811), &mut events)
+                .expect("artifact emerge should enter sacrifice payment");
+        match &waiting_for {
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                choices,
+                ..
+            } => {
+                assert!(
+                    choices.contains(&artifact),
+                    "artifact must be a legal emerge sacrifice"
+                );
+                assert!(
+                    !choices.contains(&creature),
+                    "a creature must not be legal for emerge from artifact"
+                );
+            }
+            other => panic!("expected Emerge PayCost(Sacrifice), got {other:?}"),
+        }
+
+        state.waiting_for = waiting_for;
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![artifact],
+            },
+        )
+        .expect("sacrificing the artifact should complete the emerge cast");
+
+        assert_eq!(state.objects[&artifact].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&emerge].zone, Zone::Stack);
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            0,
+            "artifact mana value must reduce the emerge cost before black mana is paid"
+        );
+    }
+
+    const CRABOMINATION_ORACLE: &str = "Emerge from artifact {5}{B}{B} (You may cast this spell by sacrificing an artifact and paying the emerge cost reduced by that artifact's mana value.)\nWhen this creature enters, target opponent exiles the top card of their library, a card at random from their graveyard, and a card at random from their hand. You may cast a spell from among cards exiled this way without paying its mana cost.";
+
+    /// CR 702.119b-c: Crabomination's real Oracle text must carry its artifact
+    /// quality through parsing and into the cast-cost selection pipeline.
+    #[test]
+    fn crabomination_real_oracle_casts_by_sacrificing_only_an_artifact() {
+        use crate::game::scenario::{GameScenario, P0};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let crabomination = scenario
+            .add_creature_to_hand_from_oracle(P0, "Crabomination", 5, 5, CRABOMINATION_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                generic: 4,
+            })
+            .id();
+        let artifact = scenario
+            .add_creature(P0, "Artifact Tribute", 1, 1)
+            .as_artifact()
+            .with_mana_cost(ManaCost::generic(5))
+            .id();
+        let creature = scenario
+            .add_creature(P0, "Creature Tribute", 1, 1)
+            .with_mana_cost(ManaCost::generic(1))
+            .id();
+
+        let mut runner = scenario.build();
+        add_mana(runner.state_mut(), P0, ManaType::Black, 2);
+        let card_id = runner.state().objects[&crabomination].card_id;
+        let mut events = Vec::new();
+        let waiting_for =
+            handle_cast_spell(runner.state_mut(), P0, crabomination, card_id, &mut events)
+                .expect("Crabomination must enter its Emerge sacrifice payment");
+
+        match &waiting_for {
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                choices,
+                ..
+            } => {
+                assert!(choices.contains(&artifact));
+                assert!(!choices.contains(&creature));
+            }
+            other => panic!("expected Crabomination Emerge PayCost(Sacrifice), got {other:?}"),
+        }
+
+        runner.state_mut().waiting_for = waiting_for;
+        apply_as_current(
+            runner.state_mut(),
+            GameAction::SelectCards {
+                cards: vec![artifact],
+            },
+        )
+        .expect("the artifact sacrifice must complete Crabomination's Emerge cast");
+
+        assert_eq!(runner.state().objects[&artifact].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&crabomination].zone, Zone::Stack);
+        assert_eq!(runner.state().players[P0.0 as usize].mana_pool.total(), 0);
+    }
+
+    #[test]
+    fn crabomination_real_oracle_prompt_describes_artifact_sacrifice() {
+        use crate::game::scenario::{GameScenario, P0};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let crabomination = scenario
+            .add_creature_to_hand_from_oracle(P0, "Crabomination", 5, 5, CRABOMINATION_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                generic: 4,
+            })
+            .id();
+        scenario
+            .add_creature(P0, "Artifact Tribute", 1, 1)
+            .as_artifact()
+            .with_mana_cost(ManaCost::generic(5));
+
+        let mut runner = scenario.build();
+        add_mana(runner.state_mut(), P0, ManaType::Black, 6);
+        let card_id = runner.state().objects[&crabomination].card_id;
+        let mut events = Vec::new();
+        let waiting_for =
+            handle_cast_spell(runner.state_mut(), P0, crabomination, card_id, &mut events)
+                .expect("Crabomination must offer its normal and Emerge casts");
+
+        match waiting_for {
+            WaitingFor::AlternativeCastChoice {
+                keyword: crate::types::game_state::AlternativeCastKeyword::Emerge,
+                alternative_additional_cost_description,
+                ..
+            } => assert_eq!(
+                alternative_additional_cost_description,
+                Some(crate::types::game_state::AlternativeAdditionalCostDescription::EmergeSacrifice {
+                    quality: crate::types::game_state::EmergeSacrificeQuality::Artifact,
+                })
+            ),
+            other => panic!("expected Crabomination AlternativeCastChoice(Emerge), got {other:?}"),
+        }
     }
 
     #[test]
@@ -42687,6 +43157,7 @@ fn bestow_cost_choice_legal_actions_includes_both_paths() {
             generic: 3,
         }),
         alternative_additional_cost: None,
+        alternative_additional_cost_description: None,
         payment_mode: CastPaymentMode::Auto,
     };
     let cands = candidate_actions_broad(&state);
@@ -48562,7 +49033,9 @@ fn colored_shard_pin_preserves_grant() {
     let obj = create_creature_spell_in_hand(&mut state, PlayerId(0));
     // Red unit carrying a CantBeCountered grant + three colorless for {3}.
     let mut red_grant = plain_unit(ManaType::Red, ObjectId(5));
-    red_grant.grants.push(ManaSpellGrant::CantBeCountered);
+    red_grant.grants.push(ManaSpellGrant::CantBeCountered {
+        filter: TargetFilter::Any,
+    });
     let red_pip = seed_unit(&mut state, PlayerId(0), red_grant);
     seed_unit(
         &mut state,

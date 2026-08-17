@@ -783,6 +783,7 @@ pub fn route_debug_create_to_battlefield(
         cause: None,
         attach_to: None,
         enter_tapped: Default::default(),
+        enters_attacking: false,
         enter_with_counters: vec![],
         controller_override: None,
         enter_transformed: false,
@@ -800,6 +801,7 @@ pub fn route_debug_create_to_battlefield(
             match super::effects::change_zone::deliver_replaced_zone_change(
                 state,
                 event,
+                None,
                 None,
                 None,
                 false,

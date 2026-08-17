@@ -20,6 +20,11 @@
     "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
     "convokeInfo_other": "Auto-taps up to {{count}} creatures for convoke each iteration.",
+    "countAria": "Number of iterations",
+    "previewTitle_one": "Repeating once produces:",
+    "previewTitle_other": "Repeating {{count}} times produces:",
+    "previewEntry": "{{amount}} {{resource}}",
+    "previewEntryPlayer": "{{amount}} {{resource}} — {{player}}",
     "winKind": {
       "LethalDamage": "This loop deals lethal damage.",
       "PoisonLoss": "This loop gives lethal poison counters.",
@@ -43,6 +48,13 @@
     "label": "Auflösen {{resolved}} / {{total}}",
     "collapse": "Auflösungsfortschritt einklappen",
     "expand": "Auflösungsfortschritt ausklappen"
+  },
+  "resolveAllConsent": {
+    "eyebrow": "Alles auflösen",
+    "title": "Schnelles Auflösen genehmigen?",
+    "subtitle": "Alle Spieler müssen zustimmen, bevor die Engine einen sicheren Stapelpräfix auflöst.",
+    "grant": "Genehmigen",
+    "decline": "Priorität behalten"
   },
   "debugCreate": {
     "copies": "Kopien",
@@ -255,12 +267,16 @@
     "ringBearer": "Ring",
     "ringBearerTooltip": "Ringträger",
     "hiddenAttachments": "+{{count}} more attached",
+    "hiddenAttachmentsAria_few": "{{count}} verborgene angelegte Karten anzeigen",
+    "hiddenAttachmentsAria_many": "{{count}} verborgene angelegte Karten anzeigen",
     "hiddenAttachmentsAria_one": "{{count}} verborgene angelegte Karte anzeigen",
     "hiddenAttachmentsAria_other": "{{count}} verborgene angelegte Karten anzeigen",
     "fanPick": "Wählen",
     "fanConfirm": "Bestätigen ({{count}})",
     "viewAttachments_one": "Angelegte Karte ansehen",
     "viewAttachments_other": "{{count}} angelegte Karten ansehen",
+    "viewAttachmentsFor_few": "{{count}} angelegte Karten von {{name}} ansehen",
+    "viewAttachmentsFor_many": "{{count}} angelegte Karten von {{name}} ansehen",
     "viewAttachmentsFor_one": "Angelegte Karte von {{name}} ansehen",
     "viewAttachmentsFor_other": "{{count}} angelegte Karten von {{name}} ansehen",
     "hiddenExileCards": "+{{count}} more exiled",
@@ -1749,7 +1765,22 @@
     "emergeEyebrow": "Auftauchen",
     "emergeNormalLabel": "Normal wirken",
     "emergeAltLabel": "Mit Auftauchen wirken",
-    "emergeSubtitle": "Wirke {{name}} normal oder zahle seine Auftauchen-Kosten, indem du eine Kreatur opferst, was die Kosten um den Manawert dieser Kreatur reduziert.",
+    "emergeSubtitle": "Wirke {{name}} normal oder zahle seine Auftauchen-Kosten, indem du {{sacrifice}} opferst, was die Kosten um den Manawert dieser bleibenden Karte reduziert.",
+    "emergeFallbackSacrifice": "eine passende bleibende Karte",
+    "emergeSacrificeQuality": {
+      "artifact": "ein Artefakt",
+      "battle": "eine Schlacht",
+      "card": "eine Karte",
+      "creature": "eine Kreatur",
+      "enchantment": "eine Verzauberung",
+      "instant": "ein Spontanzauber",
+      "kindred": "ein Stammes-Permanent",
+      "land": "ein Land",
+      "permanent": "ein Permanent",
+      "planeswalker": "ein Planeswalker",
+      "sorcery": "eine Hexerei",
+      "subtype": "ein Permanent vom Typ {{subtype}}"
+    },
     "impendingEyebrow": "Drohend",
     "impendingNormalLabel": "Normal wirken",
     "impendingAltLabel": "Mit Drohend wirken",
@@ -1808,6 +1839,10 @@
   "giftRecipient": {
     "title": "Geschenk-Empfänger wählen",
     "subtitle": "Wähle, welcher Gegner das versprochene Geschenk erhält."
+  },
+  "entryController": {
+    "title": "Kontrolleur beim Eintreten wählen",
+    "subtitle": "Wähle, welcher Gegner diese bleibende Karte beim Eintreten kontrolliert."
   },
   "optionalCost": {
     "gift": {
@@ -2042,6 +2077,7 @@
     "searchPlaceholder": "Nach Name suchen...",
     "noCardsFound": "Keine Karten gefunden",
     "buttonSubtitle": "Wähle eine Option",
+    "numberSubtitle": "Gib eine ganze Zahl größer oder gleich {{min}} ein",
     "filterPlaceholder": "Optionen filtern...",
     "noOptionsMatch": "Keine Option passt"
   },

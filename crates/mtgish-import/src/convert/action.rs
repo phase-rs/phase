@@ -10,8 +10,8 @@ use std::collections::BTreeSet;
 
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChoiceType,
-    ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, DigSource,
-    Duration, Effect, EffectScope, FilterProp, LibraryPosition, ManaProduction,
+    ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, DigRestOrder,
+    DigSource, Duration, Effect, EffectScope, FilterProp, LibraryPosition, ManaProduction,
     ManaSpendRestriction, ModalSelectionConstraint, MultiTargetSpec, PileSource, PlayerFilter,
     PlayerScope, PtValue, QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality,
     StaticDefinition, TapStateChange, TargetFilter, TriggerDefinition, TypedFilter, VoterScope,
@@ -3239,8 +3239,10 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
+            rest_order: DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         },
 
@@ -3642,10 +3644,12 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             expiry: None,
             target: None,
         },
-        // CR 717.1: The monarch designation. The acting player becomes the
+        // CR 725.1: The monarch designation. The acting player becomes the
         // monarch (singleton — replaces any existing monarch), opting into
         // the end-step draw and the take-damage-yields-monarchy interactions.
-        Action::BecomeTheMonarch => Effect::BecomeMonarch,
+        Action::BecomeTheMonarch => Effect::BecomeMonarch {
+            target: TargetFilter::Controller,
+        },
 
         // CR 100.6 / "Time Travel" planar mechanic: travel to an adjacent
         // plane / step a time counter. Engine slot is the zero-arg
@@ -4429,10 +4433,10 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         // are out of range or inverted (defensive — the engine would generate
         // a degenerate option list).
         Action::ChooseANumberBetween(min, max) => {
-            let (Ok(min_u8), Ok(max_u8)) = (u8::try_from(*min), u8::try_from(*max)) else {
+            let (Ok(min_u8), Ok(max_u8)) = (u32::try_from(*min), u32::try_from(*max)) else {
                 return Err(ConversionGap::EnginePrerequisiteMissing {
                     engine_type: "ChoiceType::NumberRange",
-                    needed_variant: format!("number-range bounds out of u8 ({min}, {max})"),
+                    needed_variant: format!("number-range bounds out of u32 ({min}, {max})"),
                 });
             };
             if min_u8 > max_u8 {
@@ -4444,7 +4448,10 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             Effect::Choose {
                 choice_type: ChoiceType::NumberRange {
                     min: min_u8,
-                    max: max_u8,
+                    // CR 107.1a: "between X and Y" states an upper bound, so this
+                    // converts to the BOUNDED form. The unbounded engine shape is
+                    // reserved for text that states no maximum.
+                    max: Some(max_u8),
                     distinctness: engine::types::ability::NumberDistinctness::Repeatable,
                 },
                 persist: true,
@@ -4902,8 +4909,10 @@ fn convert_look_at_top(
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
+            rest_order: DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         }),
 
@@ -4922,8 +4931,17 @@ fn convert_look_at_top(
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: Some(Zone::Library),
+                rest_order: if matches!(
+                    dispositions.last(),
+                    Some(L::PutTheRemainingCardsOnTheBottomOfLibraryInARandomOrder)
+                ) {
+                    DigRestOrder::Random
+                } else {
+                    DigRestOrder::Preserve
+                },
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -4941,8 +4959,10 @@ fn convert_look_at_top(
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -4963,8 +4983,17 @@ fn convert_look_at_top(
                 up_to: true,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: Some(Zone::Library),
+                rest_order: if matches!(
+                    dispositions.last(),
+                    Some(L::PutTheRemainingCardsOnTheBottomOfLibraryInARandomOrder)
+                ) {
+                    DigRestOrder::Random
+                } else {
+                    DigRestOrder::Preserve
+                },
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -4981,8 +5010,10 @@ fn convert_look_at_top(
                 up_to: true,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: Some(Zone::Graveyard),
+                rest_order: DigRestOrder::Preserve,
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -5042,8 +5073,10 @@ fn convert_reveal_top_dig(
                 up_to: true,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -5057,8 +5090,10 @@ fn convert_reveal_top_dig(
                 up_to: false,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -5072,8 +5107,10 @@ fn convert_reveal_top_dig(
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -5088,8 +5125,17 @@ fn convert_reveal_top_dig(
                 up_to: true,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: Some(Zone::Library),
+                rest_order: if matches!(
+                    dispositions.last(),
+                    Some(RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInARandomOrder)
+                ) {
+                    DigRestOrder::Random
+                } else {
+                    DigRestOrder::Preserve
+                },
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -5104,8 +5150,17 @@ fn convert_reveal_top_dig(
                 up_to: false,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: Some(Zone::Library),
+                rest_order: if matches!(
+                    dispositions.last(),
+                    Some(RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInARandomOrder)
+                ) {
+                    DigRestOrder::Random
+                } else {
+                    DigRestOrder::Preserve
+                },
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }

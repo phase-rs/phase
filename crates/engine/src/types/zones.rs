@@ -16,6 +16,23 @@ pub enum Zone {
     Command,
 }
 
+impl Zone {
+    /// CR 400.2: the battlefield, graveyard, stack, exile, and command zones are
+    /// public; the library and hand are hidden even when their cards are
+    /// momentarily revealed.
+    ///
+    /// The distinction is load-bearing for CR 608.2h: an effect that needs
+    /// information from a specific object reads that object's CURRENT
+    /// characteristics while it is in the public zone it was expected to be in,
+    /// and falls back to last known information once it is not.
+    pub fn is_public(self) -> bool {
+        match self {
+            Zone::Battlefield | Zone::Graveyard | Zone::Stack | Zone::Exile | Zone::Command => true,
+            Zone::Library | Zone::Hand => false,
+        }
+    }
+}
+
 /// CR 118.9a + CR 601.2b + CR 601.2h: Source zone for an `AbilityCost::Exile`
 /// payment. Only `Hand` (pitch spells, CR 118.9a) and `Graveyard` (escape,
 /// CR 702.138a) are valid; any other zone is rejected at cost-resolution time

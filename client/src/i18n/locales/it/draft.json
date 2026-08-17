@@ -59,7 +59,8 @@
     "passingLeft": "→ Passaggio a sinistra →",
     "passingRight": "← Passaggio a destra ←",
     "connected": "Connected",
-    "disconnected": "Disconnected"
+    "disconnected": "Disconnected",
+    "faceUpDraftCards": "A faccia in su: {{cards}}"
   },
   "setSelector": {
     "botDifficulty": "Difficoltà bot",
@@ -77,6 +78,7 @@
   },
   "pack": {
     "confirmPick": "Conferma scelta",
+    "draftEffects": "Effetti del draft:",
     "waitingNext": "In attesa della prossima busta...",
     "cardsInPack": "{{count}} carte nella busta",
     "picking": "Scelta…",

@@ -12,8 +12,9 @@ use engine::types::card_type::CardType;
 use engine::types::definitions::Definitions;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{
-    AutoPassMode, LandPlayRecord, LiminalEntry, LinkedExileSnapshot, PendingConniveReentry,
-    PersistedGameState, PriorityPassingMode, SpellCastRecord, StackPaidSnapshot, WaitingFor,
+    AutoPassMode, LandPlayRecord, LiminalEntrant, LiminalEntry, LinkedExileSnapshot,
+    PendingConniveReentry, PersistedGameState, PriorityPassingMode, SpellCastRecord,
+    StackPaidSnapshot, TokenProjection, WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use engine::types::keywords::ProtectionTarget;
@@ -520,6 +521,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             HASH_SET,
         ),
         ("PostReplacementDrain", None, "applied", "HashSet", HASH_SET),
+        ("PendingDrawDelivery", None, "applied", "HashSet", HASH_SET),
         ("DrawSequenceFrame", None, "applied", "HashSet", HASH_SET),
     ] {
         add_spec(
@@ -1418,7 +1420,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         (
             ObjectId(1),
             LiminalEntry {
-                object: first.clone(),
+                object: LiminalEntrant::Token(TokenProjection::materialize(first.clone())),
                 name: "First liminal".to_string(),
                 source_id: ObjectId(11),
                 controller: PlayerId(0),
@@ -1438,7 +1440,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         (
             ObjectId(2),
             LiminalEntry {
-                object: second.clone(),
+                object: LiminalEntrant::Token(TokenProjection::materialize(second.clone())),
                 name: "Second liminal".to_string(),
                 source_id: ObjectId(22),
                 controller: PlayerId(1),
@@ -1911,7 +1913,7 @@ fn declare_attackers_numeric_maps_round_trip_through_value_bare_raw_and_trusted(
             (
                 ObjectId(2),
                 CombatRequirement::MustAttack {
-                    players: vec![PlayerId(1)],
+                    defenders: vec![AttackTarget::Player(PlayerId(1))],
                     sources: vec![ObjectId(22)],
                 },
             ),

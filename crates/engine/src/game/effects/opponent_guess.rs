@@ -47,9 +47,17 @@ pub fn resolve(
             // domain directly from `choice_type` (ignoring `distinctness`), NOT
             // via the history-subtracting `compute_options`.
             let options = match choice_type {
-                ChoiceType::NumberRange { min, max, .. } => {
-                    (*min..=*max).map(|n| n.to_string()).collect::<Vec<_>>()
-                }
+                // CR 107.1a/b: only a BOUNDED committed domain can be enumerated
+                // for the guesser. An unbounded one has no printed list to guess
+                // from, so it falls through to the empty set and the CR 609.3
+                // no-op guard below — the same outcome as any other committed
+                // domain the guess machinery cannot enumerate. No printed card
+                // pairs an unbounded choice with a guess.
+                ChoiceType::NumberRange {
+                    min,
+                    max: Some(max),
+                    ..
+                } => (*min..=*max).map(|n| n.to_string()).collect::<Vec<_>>(),
                 // Other committed-choice domains route through the shared option
                 // enumerator's printed-domain semantics. No printed card uses a
                 // non-number committed guess yet; fall back to an empty set so the
@@ -249,7 +257,7 @@ pub(crate) fn guess_is_correct(
             // CR 607.2d link between two distinct printed abilities.
             let committed = match committed_choice {
                 Some(crate::types::ability::ChosenAttribute::Number(number)) => {
-                    Some(i32::from(*number))
+                    Some(crate::game::arithmetic::u32_to_i32_saturating(*number))
                 }
                 _ => None,
             };

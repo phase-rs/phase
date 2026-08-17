@@ -97,6 +97,7 @@ mod tests {
         scope: SkipScope,
     ) -> ResolvedAbility {
         ResolvedAbility {
+            detached_remainder: crate::types::ability::DetachedRemainder::NoProducer,
             effect: Effect::SkipNextStep {
                 target: TargetFilter::Controller,
                 step,
@@ -113,6 +114,7 @@ mod tests {
             trigger_definition_ref: None,
             force_block_attacker: None,
             target_incarnations: Vec::new(),
+            selected_target_incarnations: Vec::new(),
             targets: vec![],
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -122,12 +124,14 @@ mod tests {
             context: SpellContext::default(),
             optional_targeting: false,
             optional: false,
+            optional_player: None,
             optional_for: None,
             multi_target: None,
             target_constraints: Vec::new(),
             target_choice_timing: crate::types::ability::TargetChoiceTiming::Stack,
             description: None,
             selected_mode_labels: Vec::new(),
+            modal_instruction_ordinal: None,
             player_scope: None,
             starting_with: None,
             chosen_x: None,
@@ -146,6 +150,7 @@ mod tests {
             forward_result: false,
             unless_pay: None,
             distribution: None,
+            distribute: None,
             target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
             chosen_players: Vec::new(),
             repeat_until: None,

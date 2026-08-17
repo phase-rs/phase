@@ -5,12 +5,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     additional_cost_instance_payment_count, additional_cost_instance_payment_count_for_ordinal,
-    AbilityBlockEntry, AbilityDefinition, AdditionalCost, AdditionalCostInstancePayment,
-    AdditionalCostOrigin, BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission,
-    CastingRestriction, ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot,
-    ExiledSpellRider, ModalChoice, ReplacementDefinition, SeatDirection, SolveCondition,
-    SpellCastingOption, StaticDefinition, TriggerBaseSetInstanceRef, TriggerDefinition,
-    TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerOccurrenceState,
+    materialize_legacy_printed_trigger_entries, AbilityBlockEntry, AbilityDefinition,
+    AdditionalCost, AdditionalCostInstancePayment, AdditionalCostOrigin, BasicLandType,
+    CastTimingPermission, CastVariantPaid, CastingPermission, CastingRestriction, ChosenAttribute,
+    ChosenSubtypeKind, CostPaidObjectSnapshot, ExiledSpellRider, ModalChoice,
+    ReplacementDefinition, SeatDirection, SolveCondition, SpellCastingOption, StaticDefinition,
+    TriggerBaseSetInstanceRef, TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerEntry,
+    TriggerOccurrenceState,
 };
 use crate::types::card::{LayoutKind, PrintedCardRef, PrintedLoyalty, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
@@ -1456,6 +1457,19 @@ pub(crate) fn chosen_card_type_of(attrs: &[ChosenAttribute]) -> Option<CoreType>
 }
 
 impl GameObject {
+    /// CR 109.4 + CR 108.4a: Objects on the stack or battlefield have a
+    /// controller; when an effect asks for the controller of a card that has
+    /// none, use its owner instead. CR 109.4c: emblems are the explicitly
+    /// modeled command-zone exception that retains their controller.
+    pub(crate) fn controller_or_owner(&self) -> PlayerId {
+        match self.zone {
+            Zone::Battlefield | Zone::Stack => self.controller,
+            Zone::Command if self.is_emblem => self.controller,
+            Zone::Command => self.owner,
+            Zone::Library | Zone::Hand | Zone::Graveyard | Zone::Exile => self.owner,
+        }
+    }
+
     const fn initial_trigger_base_set_instance() -> TriggerBaseSetInstanceRef {
         TriggerBaseSetInstanceRef::INITIAL
     }
@@ -1618,32 +1632,22 @@ impl GameObject {
     /// runtime payloads are rejected rather than guessed from equal definition
     /// bytes.
     pub fn migrate_legacy_trigger_definitions(&mut self) -> Result<(), &'static str> {
-        let has_legacy_entries = self.trigger_definitions.iter_all().any(|entry| {
-            matches!(
-                entry.occurrence,
-                TriggerDefinitionOccurrenceRef::Unmaterialized
-            )
-        });
-        if !has_legacy_entries {
-            return self.validate_trigger_definitions();
-        }
-        if self.base_trigger_definitions.is_empty()
-            || self.trigger_definitions.len() != self.base_trigger_definitions.len()
-            || !self.trigger_definitions.iter_all().all(|entry| {
-                matches!(
-                    entry.occurrence,
-                    TriggerDefinitionOccurrenceRef::Unmaterialized
-                )
-            })
-            || !self
+        let mut entries = self.trigger_definitions.iter_all().cloned().collect();
+        materialize_legacy_printed_trigger_entries(
+            &mut entries,
+            self.base_trigger_definitions.as_slice(),
+            self.trigger_base_set_instance,
+        )?;
+        if entries
+            == self
                 .trigger_definitions
                 .iter_all()
-                .zip(self.base_trigger_definitions.iter())
-                .all(|(entry, base)| entry.definition == *base)
+                .cloned()
+                .collect::<Vec<_>>()
         {
-            return Err("legacy runtime trigger payload has no provable producer or base slot");
+            return self.validate_trigger_definitions();
         }
-        self.materialize_base_trigger_definitions();
+        self.trigger_definitions = entries.into();
         self.validate_trigger_definitions()
     }
 
@@ -2816,7 +2820,7 @@ impl GameObject {
     }
 
     /// Look up a stored chosen number (e.g., Talion's "choose a number").
-    pub fn chosen_number(&self) -> Option<u8> {
+    pub fn chosen_number(&self) -> Option<u32> {
         self.chosen_attributes.iter().find_map(|a| match a {
             ChosenAttribute::Number(n) => Some(*n),
             _ => None,

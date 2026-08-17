@@ -18,15 +18,16 @@ use crate::parser::oracle_util::SELF_REF_TYPE_PHRASES;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, ChoiceType,
-    CoinFlipResult, Comparator, ContinuousModification, ControllerRef, CountScope,
-    CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
-    EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
+    CoinFlipResult, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
+    CountScope, CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode,
+    Duration, EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
     ForEachCategoryAction, GameRestriction, LibraryPosition, ManaProduction, ObjectProperty,
     ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
     QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
     SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption,
-    SpellCastingOptionKind, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, VoteSubject, ZoneRef,
+    SpellCastingOptionKind, SpellStackToGraveyardReplacement, StackAbilityKind, StaticCondition,
+    StaticDefinition, TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+    VoteSubject, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -153,10 +154,10 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // the attacker that must be blocked (Provoke). Enforced by direct
             // match in combat.rs declare-blockers validation.
             | StaticMode::MustBlockAttacker { .. }
-            // CR 508.1d: MustAttackPlayer carries the `PlayerId` that must be
+            // CR 508.1d: MustAttackDefender carries the `PlayerId` that must be
             // attacked (Alluring Siren). Enforced by direct match in combat.rs
             // declare-attackers validation.
-            | StaticMode::MustAttackPlayer { .. }
+            | StaticMode::MustAttackDefender { .. }
             // CR 509.1b: CantBeBlockedByMoreThan carries the blocker maximum
             // (Stalking Tiger). Enforced in combat.rs declare-blockers validation.
             | StaticMode::CantBeBlockedByMoreThan { .. }
@@ -549,6 +550,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::Player => "player".into(),
         TargetFilter::AllPlayers => "any player".into(),
         TargetFilter::Controller => "controller".into(),
+        TargetFilter::SourceController => "source's controller".into(),
         TargetFilter::Opponent => "opponent".into(),
         TargetFilter::OriginalController => "original controller".into(),
         TargetFilter::ScopedPlayer => "scoped player".into(),
@@ -559,45 +561,30 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::OriginalSource => "original source".into(),
         TargetFilter::SourceOrPaired => "source or paired creature".into(),
         TargetFilter::ExiledCardByIndex { index } => format!("exiled card {index}"),
-        TargetFilter::StackAbility { tag: Some(tag), .. } => format!("{tag:?} ability on stack"),
+        // CR 113.3b / CR 113.3c + CR 109.4: render the two independent axes
+        // (ability kind, controller scope) compositionally. Enumerating the
+        // product as separate match arms silently dropped one axis whenever a
+        // new combination became reachable — the trailing kind-only catch-alls
+        // swallowed controller-bearing filters and rendered them without the
+        // "you control" scope.
         TargetFilter::StackAbility {
-            controller: None,
-            tag: None,
-            kind: None,
-        } => "ability on stack".into(),
-        TargetFilter::StackAbility {
-            controller: None,
-            tag: None,
-            kind: Some(crate::types::ability::StackAbilityKind::Triggered),
-        } => "triggered ability on stack".into(),
-        TargetFilter::StackAbility {
-            controller: None,
-            tag: None,
-            kind: Some(crate::types::ability::StackAbilityKind::Activated),
-        } => "activated ability on stack".into(),
-        TargetFilter::StackAbility {
-            controller: Some(ControllerRef::You),
-            tag: None,
-            kind: None,
-        } => "ability you control on stack".into(),
-        TargetFilter::StackAbility {
-            controller: Some(ControllerRef::Opponent),
-            tag: None,
-            kind: None,
-        } => "ability opponent controls on stack".into(),
-        TargetFilter::StackAbility {
-            controller: Some(controller),
-            tag: None,
-            kind: None,
-        } => format!("ability scoped to {controller:?} on stack"),
-        TargetFilter::StackAbility {
-            kind: Some(crate::types::ability::StackAbilityKind::Triggered),
-            ..
-        } => "triggered ability on stack".into(),
-        TargetFilter::StackAbility {
-            kind: Some(crate::types::ability::StackAbilityKind::Activated),
-            ..
-        } => "activated ability on stack".into(),
+            controller,
+            tag,
+            kind,
+        } => {
+            let kind_word = match kind {
+                None => "ability",
+                Some(StackAbilityKind::Triggered) => "triggered ability",
+                Some(StackAbilityKind::Activated) => "activated ability",
+            };
+            let tag_prefix = tag
+                .as_ref()
+                .map_or_else(String::new, |tag| format!("{tag:?} "));
+            let controller_suffix = controller.as_ref().map_or_else(String::new, |controller| {
+                format!(" {}", fmt_controller(controller))
+            });
+            format!("{tag_prefix}{kind_word}{controller_suffix} on stack")
+        }
         TargetFilter::StackSpell => "spell on stack".into(),
         TargetFilter::AttachedTo => "attached permanent".into(),
         TargetFilter::LastCreated => "last created".into(),
@@ -623,10 +610,21 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::PostReplacementDamageSource => "prevented event's damage source".into(),
         TargetFilter::PostReplacementDamageTarget => "prevented damage target".into(),
         TargetFilter::PostReplacementDamageTargetOwner => "prevented damage target's owner".into(),
-        TargetFilter::ControllerAndControlledPermanents { permanent_type } => {
+        // CR 109.1: the "other" article is part of the human-readable scope — a
+        // change between "you and permanents you control" and "you and OTHER
+        // permanents you control" must be visible in the coverage/parse diff.
+        TargetFilter::ControllerAndControlledPermanents {
+            permanent_type,
+            source_scope,
+        } => {
+            let other = if source_scope.is_exclude() {
+                "other "
+            } else {
+                ""
+            };
             match permanent_type {
-                Some(ct) => format!("you and {ct:?}s you control"),
-                None => "you and permanents you control".into(),
+                Some(ct) => format!("you and {other}{ct:?}s you control"),
+                None => format!("you and {other}permanents you control"),
             }
         }
         TargetFilter::SpecificObject { id } => format!("object #{}", id.0),
@@ -760,6 +758,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             }
             FilterProp::SameName => parts.push("same name".into()),
             FilterProp::SameNameAsParentTarget => parts.push("same name as parent target".into()),
+            FilterProp::SameNameAsExiledBySource => parts.push("same name as exiled card".into()),
             FilterProp::NameMatchesAnyPermanent { controller } => match controller {
                 Some(c) => parts.push(format!("name matches {} permanent", fmt_controller(c))),
                 None => parts.push("name matches any permanent".into()),
@@ -889,6 +888,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::EnchantedPlayer => "enchanted player's",
                     // CR 102.1: Display label for active-player controller scope.
                     ControllerRef::ActivePlayer => "the active player's",
+                    // CR 109.4 + CR 611.2: snapshotted controller scope.
+                    ControllerRef::SpecificPlayer { .. } => "that player's",
                 };
                 let zone_str = format!("{zone:?}").to_lowercase();
                 parts.push(format!(
@@ -1061,6 +1062,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::EnchantedPlayer => "enchanted player",
                 // CR 102.1: Display label for active-player controller scope.
                 ControllerRef::ActivePlayer => "the active player",
+                // CR 109.4 + CR 611.2: Display label for a snapshotted controller scope.
+                ControllerRef::SpecificPlayer { .. } => "that player",
             };
             parts.push(label.into());
         } else {
@@ -1136,6 +1139,8 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::EnchantedPlayer => "enchanted player controls",
         // CR 102.1: Display label for active-player controller scope.
         ControllerRef::ActivePlayer => "the active player controls",
+        // CR 109.4 + CR 611.2: Display label for a snapshotted controller scope.
+        ControllerRef::SpecificPlayer { .. } => "that player controls",
     }
     .into()
 }
@@ -1207,6 +1212,9 @@ fn fmt_duration(d: &Duration) -> String {
         }
         Duration::UntilHostLeavesPlay => "while on battlefield".to_string(),
         Duration::UntilSourceExilesAnotherCard => "until source exiles another card".to_string(),
+        Duration::UntilOpponentBecomesMonarch => {
+            "until an opponent becomes the monarch".to_string()
+        }
         Duration::UntilNextStepOf { step, player } => {
             format!(
                 "until next {} ({})",
@@ -1266,6 +1274,8 @@ fn fmt_player_scope(scope: &PlayerScope) -> String {
         PlayerScope::DefendingPlayer => "defending player".to_string(),
         PlayerScope::SourceChosenPlayer => "the chosen player".to_string(),
         PlayerScope::AnyTurn => "any turn".to_string(),
+        // CR 109.4 + CR 611.2: display label for a snapshotted duration scope.
+        PlayerScope::SpecificPlayer { .. } => "that player".to_string(),
         PlayerScope::ParentObjectTargetController => "parent target's controller".to_string(),
         PlayerScope::Opponent { aggregate } => {
             format!("{} of opponents", fmt_aggregate_function(*aggregate))
@@ -1356,6 +1366,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::OtherRevealedCard => "other revealed card",
                 ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card",
                 ObjectScope::AmassedArmy => "amassed Army",
+                ObjectScope::BatchSource => "batch source",
             };
             match counter_type {
                 Some(ct) => format!("{} counters on {scope_str}", ct.as_str()),
@@ -1383,6 +1394,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::OtherRevealedCard => "other revealed card's power".into(),
             ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's power".into(),
             ObjectScope::AmassedArmy => "amassed Army's power".into(),
+            ObjectScope::BatchSource => "batch source's power".into(),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1396,6 +1408,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::OtherRevealedCard => "other revealed card's toughness".into(),
             ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's toughness".into(),
             ObjectScope::AmassedArmy => "amassed Army's toughness".into(),
+            ObjectScope::BatchSource => "batch source's toughness".into(),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1409,6 +1422,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::OtherRevealedCard => "other revealed card's mana value".into(),
             ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's mana value".into(),
             ObjectScope::AmassedArmy => "amassed Army's mana value".into(),
+            ObjectScope::BatchSource => "batch source's mana value".into(),
         },
         QuantityRef::TargetObjectManaValue { .. } => "target object's mana value".into(),
         QuantityRef::ObjectColorCount { scope } => match scope {
@@ -1423,6 +1437,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::OtherRevealedCard => "other revealed card's colors".into(),
             ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's colors".into(),
             ObjectScope::AmassedArmy => "amassed Army's colors".into(),
+            ObjectScope::BatchSource => "batch source's colors".into(),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1438,6 +1453,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 "typeline components on owned linked-exiled card".into()
             }
             ObjectScope::AmassedArmy => "typeline components on amassed Army".into(),
+            ObjectScope::BatchSource => "typeline components on batch source".into(),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1451,6 +1467,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::OtherRevealedCard => "words in other revealed card's name".into(),
             ObjectScope::OwnedLinkedExileCard => "words in owned linked-exiled card's name".into(),
             ObjectScope::AmassedArmy => "words in amassed Army's name".into(),
+            ObjectScope::BatchSource => "words in batch source's name".into(),
         },
         QuantityRef::ManaSymbolsInManaCost { scope, color } => {
             let scope_str = match scope {
@@ -1463,6 +1480,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::OtherRevealedCard => "other revealed card",
                 ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card",
                 ObjectScope::AmassedArmy => "amassed Army",
+                ObjectScope::BatchSource => "batch source",
             };
             match color {
                 Some(c) => format!("{c:?} mana symbols in {scope_str}'s mana cost"),
@@ -1496,6 +1514,8 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             crate::types::ability::DevotionColors::ChosenColor => "devotion to chosen color".into(),
         },
         QuantityRef::DistinctCardTypes { source } => match source {
+            // Preserved surface form: the zone reading renders "card types in
+            // <zone>", not "card types among cards in <zone>".
             CardTypeSetSource::Zone { zone, scope } => {
                 format!(
                     "card types in {} {}",
@@ -1503,26 +1523,16 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                     fmt_zone_ref(zone)
                 )
             }
-            CardTypeSetSource::ExiledBySource => "card types among cards exiled with source".into(),
-            CardTypeSetSource::Objects { filter } => {
-                format!("card types among {}", fmt_target(filter))
+            CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::Objects { .. }
+            | CardTypeSetSource::TrackedSet { .. }
+            | CardTypeSetSource::TurnJournal { .. }
+            | CardTypeSetSource::AnyOf { .. } => {
+                format!(
+                    "card types among {}",
+                    fmt_characteristic_population_bounded(source)
+                )
             }
-            CardTypeSetSource::TrackedSet { caused_by } => match caused_by {
-                Some(cause) => {
-                    use crate::types::ability::ThisWayCause;
-                    let verb = match cause {
-                        ThisWayCause::Discarded => "discarded",
-                        ThisWayCause::Exiled => "exiled",
-                        ThisWayCause::Milled => "milled",
-                        ThisWayCause::Destroyed => "destroyed",
-                        ThisWayCause::Sacrificed => "sacrificed",
-                        ThisWayCause::Returned => "returned",
-                        ThisWayCause::Bounced => "bounced",
-                    };
-                    format!("card types among cards {verb} this way")
-                }
-                None => "card types among tracked cards".into(),
-            },
         },
         QuantityRef::DistinctSubtypes { source, exclude } => {
             let suffix = match exclude {
@@ -1531,14 +1541,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 }
                 crate::types::ability::SubtypeExclusion::None => "",
             };
-            let scope_desc = match source {
-                CardTypeSetSource::Zone { zone, scope } => {
-                    format!("cards in {} {}", fmt_count_scope(scope), fmt_zone_ref(zone))
-                }
-                CardTypeSetSource::ExiledBySource => "cards exiled with source".into(),
-                CardTypeSetSource::Objects { filter } => fmt_target(filter),
-                CardTypeSetSource::TrackedSet { .. } => "tracked cards".into(),
-            };
+            let scope_desc = fmt_characteristic_population_bounded(source);
             format!("subtypes{suffix} among {scope_desc}")
         }
         QuantityRef::CardsExiledBySource => "cards exiled with source".into(),
@@ -1575,14 +1578,18 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 fmt_controller(controller)
             )
         }
-        QuantityRef::DistinctColorsAmongPermanents { filter } => {
-            format!("# of colors among {}", fmt_target(filter))
+        QuantityRef::DistinctColorsAmong { source } => {
+            format!(
+                "# of colors among {}",
+                fmt_characteristic_population_bounded(source)
+            )
         }
         QuantityRef::DistinctCounterKindsAmong { filter } => {
             format!("# of counter kinds among {}", fmt_target(filter))
         }
         QuantityRef::VoteCount { choice_index } => format!("# of votes for choice {choice_index}"),
         QuantityRef::PreviousEffectAmount { .. } => "amount from preceding effect".into(),
+        QuantityRef::PreviousEffectCount => "count from preceding effect".into(),
         QuantityRef::TrackedSetSize => "cards moved".into(),
         QuantityRef::FilteredTrackedSetSize { filter, .. } => {
             format!("filtered tracked set ({})", fmt_target(filter))
@@ -1617,6 +1624,17 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 fmt_count_scope(scope)
             ),
             None => format!("spells cast this turn ({})", fmt_count_scope(scope)),
+        },
+        QuantityRef::SpellsCastBeforeTriggeringSpell { scope, filter } => match filter {
+            Some(filter) => format!(
+                "{} spells cast before the triggering spell ({})",
+                fmt_target(filter),
+                fmt_count_scope(scope)
+            ),
+            None => format!(
+                "spells cast before the triggering spell ({})",
+                fmt_count_scope(scope)
+            ),
         },
         QuantityRef::EnteredThisTurn { filter } => {
             format!("{} entered this turn", fmt_target(filter))
@@ -1701,6 +1719,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         }
         QuantityRef::TurnsTaken => "turns taken".into(),
         QuantityRef::ChosenNumber => "chosen number".into(),
+        QuantityRef::PlayerChosenNumber { player } => {
+            format!("secretly chosen number ({})", fmt_player_scope(player))
+        }
         QuantityRef::AttackedThisTurn { .. } => "attacked this turn".into(),
         QuantityRef::DescendedThisTurn => "descended this turn".into(),
         QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player } => {
@@ -2057,7 +2078,13 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
             }
         }
         ChoiceType::CardName => "card name",
-        ChoiceType::NumberRange { min, max, .. } => return format!("number ({min}-{max})"),
+        // CR 107.1a/b: an unbounded range has no ceiling to print.
+        ChoiceType::NumberRange { min, max, .. } => {
+            return match max {
+                Some(max) => format!("number ({min}-{max})"),
+                None => format!("number ({min} or greater)"),
+            }
+        }
         ChoiceType::Labeled { options } => return format!("one of: {}", options.join(", ")),
         ChoiceType::LandType => "land type",
         ChoiceType::CardPredicate { .. } => "card predicate",
@@ -2233,6 +2260,71 @@ fn fmt_core_type(ct: &CoreType) -> &'static str {
     }
 }
 
+/// CR 109.2 + CR 400.1 + CR 601.2a: Human-readable rendering of the population a
+/// [`CardTypeSetSource`] names, shared by every distinct-characteristic count
+/// (card types CR 205.2, subtypes CR 205.3, colors CR 105.1) so a new population
+/// renders once rather than in three drifting copies.
+fn fmt_characteristic_population(source: &CardTypeSetSource) -> String {
+    match source {
+        CardTypeSetSource::Zone { zone, scope } => {
+            format!("cards in {} {}", fmt_count_scope(scope), fmt_zone_ref(zone))
+        }
+        CardTypeSetSource::ExiledBySource => "cards exiled with source".into(),
+        CardTypeSetSource::Objects { filter } => fmt_target(filter),
+        CardTypeSetSource::TrackedSet { caused_by } => match caused_by {
+            Some(cause) => {
+                use crate::types::ability::ThisWayCause;
+                let verb = match cause {
+                    ThisWayCause::Discarded => "discarded",
+                    ThisWayCause::Exiled => "exiled",
+                    ThisWayCause::Milled => "milled",
+                    ThisWayCause::Destroyed => "destroyed",
+                    ThisWayCause::Sacrificed => "sacrificed",
+                    ThisWayCause::Returned => "returned",
+                    ThisWayCause::Bounced => "bounced",
+                };
+                format!("cards {verb} this way")
+            }
+            None => "tracked cards".into(),
+        },
+        // CR 601.2a: the per-turn cast journal, not a live board census.
+        CardTypeSetSource::TurnJournal {
+            journal,
+            scope,
+            filter,
+        } => {
+            let base = match journal {
+                crate::types::ability::TurnJournalKind::SpellsCast => {
+                    format!("spells {} cast this turn", fmt_count_scope(scope))
+                }
+            };
+            match filter {
+                Some(filter) => format!("{base} matching {}", fmt_target(filter)),
+                None => base,
+            }
+        }
+        // CR 109.2: a set union renders as its members joined by "and", mirroring
+        // the Oracle surface form ("permanents you control and spells you've cast
+        // this turn").
+        // Rendered by the bounded walker in the caller, which flattens nested
+        // unions — set union is associative, so "A and B and C" is the same
+        // population however the tree was built, and matches the Oracle surface
+        // form more closely than a parenthesized nesting would.
+        CardTypeSetSource::AnyOf { .. } => String::new(),
+    }
+}
+
+/// Display form for a whole population, unions flattened through the single
+/// bounded walker. Display-only: a truncated walk renders fewer members, which
+/// is a cosmetic loss in a coverage report rather than a correctness one.
+fn fmt_characteristic_population_bounded(source: &CardTypeSetSource) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+        parts.push(fmt_characteristic_population(leaf))
+    });
+    parts.join(" and ")
+}
+
 fn fmt_count_scope(scope: &CountScope) -> &'static str {
     match scope {
         CountScope::Controller | CountScope::Owner => "your",
@@ -2406,7 +2498,6 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
-        | Effect::ForceAttack { target, .. }
         // CR 701.27a: single-scope Transform reports its `target` like other
         // single-target effects; mass Transform (scope:All) reports a `filter` below.
         | Effect::Transform {
@@ -2431,6 +2522,33 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             if let Some(attacker) = attacker {
                 d.push(("attacker".into(), format!("{attacker:?}")));
             }
+            if *duration != Duration::UntilEndOfTurn {
+                d.push(("duration".into(), format!("{duration:?}")));
+            }
+        }
+        // CR 508.1d + CR 506.3: ForceAttack reports the SUBJECT under the key its
+        // scope earns — `target` for a chosen creature (CR 115.1), `filter` for a
+        // non-targeting population (Gideon Jura's "creatures that player
+        // controls") — plus the REQUIRED DEFENDER, which is the axis that
+        // distinguishes an attack pointed at a player from one pointed at a
+        // planeswalker. Without the defender in the signature those two collapse
+        // to one entry and the coverage/parse-diff artifact cannot tell a
+        // Gideon-Jura-class card from an Alluring-Siren-class one.
+        //
+        // Modelled on the `ForceBlock` arm above, including its non-default
+        // duration rule.
+        Effect::ForceAttack {
+            target,
+            required_defender,
+            duration,
+            scope,
+        } => {
+            let subject_key = match scope {
+                EffectScope::Single => "target",
+                EffectScope::All => "filter",
+            };
+            d.push((subject_key.into(), fmt_target(target)));
+            d.push(("defender".into(), fmt_target(required_defender)));
             if *duration != Duration::UntilEndOfTurn {
                 d.push(("duration".into(), format!("{duration:?}")));
             }
@@ -2782,6 +2900,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target,
             enters_under,
             enter_tapped,
+            enters_attacking,
             enter_with_counters,
             face_down_profile,
             library_position,
@@ -2800,6 +2919,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if !matches!(enter_tapped, EtbTapState::Unspecified) {
                 d.push(("enter_tapped".into(), format!("{enter_tapped:?}")));
+            }
+            if *enters_attacking {
+                d.push(("enters_attacking".into(), "true".into()));
             }
             if !enter_with_counters.is_empty() {
                 d.push((
@@ -2922,6 +3044,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         }
         Effect::SwapChosenLabels { first, second } => {
             d.push(("swap".into(), format!("{first} <-> {second}")));
+        }
+        Effect::RevealChosenNumbers { players } => {
+            d.push(("reveal chosen numbers".into(), format!("{players:?}")));
         }
         Effect::ChooseDamageSource { source_filter } => {
             d.push(("source".into(), fmt_target(source_filter)));
@@ -3256,6 +3381,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target_filter,
             redirect_object_filter,
             recipient_object_filter,
+            redirect_lifetime,
             ..
         } => {
             if let Some(m) = modification {
@@ -3263,6 +3389,15 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if let Some(r) = redirect_to {
                 d.push(("redirect_to".into(), format!("{r:?}")));
+            }
+            // CR 614.5 vs CR 611.2a: parser-alterable, and the difference between
+            // "protects one damage event" and "protects the rest of the turn" —
+            // omitting it would make that flip invisible to the parse diff.
+            if !redirect_lifetime.is_one_opportunity() {
+                d.push((
+                    "redirect_lifetime".into(),
+                    format!("{redirect_lifetime:?}"),
+                ));
             }
             if let Some(a) = redirect_amount {
                 d.push(("redirect_amount".into(), format!("{a:?}")));
@@ -3676,7 +3811,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Unimplemented { .. }
         | Effect::Explore
         | Effect::Investigate
-        | Effect::BecomeMonarch
+        | Effect::BecomeMonarch { .. }
         | Effect::NoOp
         | Effect::Proliferate
         | Effect::ProliferateTarget { .. }
@@ -3700,6 +3835,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::ChangeTargets { .. }
         | Effect::ExchangeControl { .. }
         | Effect::Forage
+        | Effect::CompletePlayerAction { .. }
         | Effect::Harness
         | Effect::Learn
         | Effect::NoteManaSpent
@@ -3807,6 +3943,24 @@ fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
             ),
         ));
     }
+    // CR 113.6b + CR 113.6j + CR 113.6m: the zone this ability functions from.
+    // `None` is the CR 113.6 battlefield default and emits nothing, so an
+    // unqualified signature stays byte-identical.
+    //
+    // Emitted UNCONDITIONALLY, unlike the narrowly scoped `repeat_for` above.
+    // This is a rules-load-bearing parse output — `can_activate_ability_now`
+    // gates legality on it and the candidate enumerators key their hand,
+    // graveyard and library loops off it, so a change to this field moves cards
+    // between "offered" and "not offered". Scoping it would reproduce exactly
+    // the blindness this exists to remove.
+    //
+    // The key is "activates from", NOT "from": `effect_details` already emits
+    // "from" for a `ChangeZone` origin and `trigger_details` for a trigger
+    // origin, and `build_ability_item` silently drops duplicate keys — reusing
+    // "from" would hide this on precisely the abilities it exists to watch.
+    if let Some(zone) = &def.activation_zone {
+        d.push(("activates from".into(), fmt_zone(zone)));
+    }
     d
 }
 
@@ -3865,6 +4019,23 @@ fn fmt_comparator(c: &Comparator) -> &'static str {
         Comparator::LE => "≤",
         Comparator::EQ => "=",
         Comparator::NE => "≠",
+    }
+}
+
+/// CR 903.3 vs CR 903.3d: the single label authority for a commander-control
+/// gate, shared by ALL FOUR condition-vocabulary formatters
+/// (`AbilityCondition`, `TriggerCondition`, `StaticCondition`, and any future
+/// mirror).
+///
+/// The two arms are DIFFERENT predicates — CR 903.3 + CR 109.5 "your commander"
+/// is owned AND controlled, CR 903.3d "a commander" is controlled by any owner —
+/// so they must never share a label. Collapsing them prints a strictly weaker
+/// predicate than the card, and the parse-details / Alt-hover overlay is what
+/// bug triage reads. Centralized here so one mirror cannot drift from another.
+fn fmt_commander_ownership(ownership: &CommanderOwnership) -> &'static str {
+    match ownership {
+        CommanderOwnership::Own => "you control your commander",
+        CommanderOwnership::Any => "you control a commander",
     }
 }
 
@@ -3932,6 +4103,9 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         ),
         AbilityCondition::HasMaxSpeed => "has max speed".into(),
         AbilityCondition::IsMonarch => "is monarch".into(),
+        AbilityCondition::ControlsCommander { ownership } => {
+            fmt_commander_ownership(ownership).into()
+        }
         AbilityCondition::CompletedDungeon { specific } => match specific {
             None => "you've completed a dungeon".into(),
             Some(dungeon) => format!("you've completed {dungeon}"),
@@ -4080,7 +4254,13 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
             fmt_quantity(rhs)
         ),
         TC::HasMaxSpeed => "has max speed".into(),
-        TC::IsMonarch => "is monarch".into(),
+        // CR 725.1 + CR 109.5: keep the controller-scoped description byte-stable
+        // so existing gap strings do not churn; a scoped subject reads
+        // differently and gets its own phrase.
+        TC::IsMonarch {
+            player: PlayerScope::Controller,
+        } => "is monarch".into(),
+        TC::IsMonarch { .. } => "that player is monarch".into(),
         TC::IsInitiative => "has the initiative".into(),
         TC::NoMonarch => "no monarch".into(),
         TC::WasStartingPlayer { .. } => "was the starting player".into(),
@@ -4111,7 +4291,7 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
         }
         TC::ManaSpentCondition { .. } => "mana spent condition".into(),
         TC::HadCounters { .. } => "had counters".into(),
-        TC::ControlsCommander { .. } => "you control a commander".into(),
+        TC::ControlsCommander { ownership } => fmt_commander_ownership(ownership).into(),
         TC::IsRenowned { .. } => "is renowned".into(),
         TC::HasCounters {
             minimum, maximum, ..
@@ -4271,7 +4451,11 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::SourceIsAttacking => "source is attacking".into(),
         SC::SourceIsBlocking => "source is blocking".into(),
         SC::SourceIsBlocked => "source is blocked".into(),
-        SC::IsMonarch => "is monarch".into(),
+        // CR 725.1 + CR 109.5: see the `TC::IsMonarch` arm above.
+        SC::IsMonarch {
+            player: PlayerScope::Controller,
+        } => "is monarch".into(),
+        SC::IsMonarch { .. } => "that player is monarch".into(),
         SC::IsInitiative => "has the initiative".into(),
         SC::NoMonarch => "no monarch".into(),
         SC::HasCityBlessing => "has the city's blessing".into(),
@@ -4298,7 +4482,7 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         },
         SC::IsRingBearer => "is the ring-bearer".into(),
         SC::RingLevelAtLeast { level } => format!("ring level ≥ {level}"),
-        SC::ControlsCommander { .. } => "you control a commander".into(),
+        SC::ControlsCommander { ownership } => fmt_commander_ownership(ownership).into(),
         SC::SourceIsTapped => "source is tapped".into(),
         SC::IsTapped { .. } => "is tapped".into(),
         SC::SourceIsSaddled => "source is saddled".into(),
@@ -6412,7 +6596,7 @@ fn visit_direct_effect_ability_payloads<'a>(
         | Effect::Investigate
         | Effect::Tribute { .. }
         | Effect::TimeTravel
-        | Effect::BecomeMonarch
+        | Effect::BecomeMonarch { .. }
         | Effect::NoOp
         | Effect::Proliferate
         | Effect::ProliferateTarget { .. }
@@ -6473,6 +6657,7 @@ fn visit_direct_effect_ability_payloads<'a>(
         | Effect::Choose { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
+        | Effect::RevealChosenNumbers { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
         | Effect::Unsuspect { .. }
@@ -6575,6 +6760,7 @@ fn visit_direct_effect_ability_payloads<'a>(
         | Effect::Adapt { .. }
         | Effect::Learn
         | Effect::Forage
+        | Effect::CompletePlayerAction { .. }
         | Effect::Harness
         | Effect::CollectEvidence { .. }
         | Effect::Endure { .. }
@@ -6953,6 +7139,7 @@ fn count_effective_oracle_lines(oracle_text: &str) -> usize {
         if is_deck_construction_copy_limit_sentence(stripped) {
             continue;
         }
+
         // Draft-time "draft matters" lines (CR 905) are consumed as no-ops by
         // the parser, so they produce no parse item — don't count them as
         // effective Oracle lines either, or the silent-drop guard would flag
@@ -7601,8 +7788,21 @@ fn extract_static_condition_features(
                 extract_static_condition_features(sub, features);
             }
         }
+        // `Not` is a boolean COMBINATOR exactly like `And` / `Or` —
+        // `layers::evaluate_condition` negates its operand's own evaluation and
+        // has no independent semantics of its own. Letting it fall into the
+        // catch-all below emitted only `static_condition:Not` (classified
+        // `Handled`, correctly, because negation itself is implemented) and
+        // SWALLOWED the operand, so an unhandled leaf under a negation was
+        // reported as supported. That is a fail-open in the direction coverage
+        // must never fail: `Not(IsMonarch { ScopedPlayer })` — the "unless that
+        // player is the monarch" shape the `layers` entry gate hard-rejects to
+        // `false` — would advertise a restriction that silently never applies.
+        StaticCondition::Not { condition } => {
+            extract_static_condition_features(condition, features);
+        }
         _ => {
-            // All other variants (including `Not`) emit a single tag. The
+            // Every remaining variant is a LEAF and emits a single tag. The
             // classifier carries compiler-enforced handled/unhandled status.
             let (name, support) = static_condition_feature(cond);
             features.insert(format!("static_condition:{name}"), support);
@@ -7807,6 +8007,8 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::ManaColorSpent { .. } => ("ManaColorSpent", Handled),
         AbilityCondition::HasMaxSpeed => ("HasMaxSpeed", Handled),
         AbilityCondition::IsMonarch => ("IsMonarch", Handled),
+        // CR 903.3d: evaluated at resolution via `game::commander`.
+        AbilityCondition::ControlsCommander { .. } => ("ControlsCommander", Handled),
         // CR 309.7: evaluated at resolution via `dungeon::has_completed_dungeon`.
         AbilityCondition::CompletedDungeon { .. } => ("CompletedDungeon", Handled),
         AbilityCondition::IsInitiative => ("IsInitiative", Handled),
@@ -7934,6 +8136,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardPower", Handled),
             ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardPower", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyPower", Handled),
+            ObjectScope::BatchSource => ("BatchSourcePower", Handled),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -7947,6 +8150,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardToughness", Handled),
             ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardToughness", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyToughness", Handled),
+            ObjectScope::BatchSource => ("BatchSourceToughness", Handled),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -7960,6 +8164,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardManaValue", Handled),
             ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardManaValue", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyManaValue", Handled),
+            ObjectScope::BatchSource => ("BatchSourceManaValue", Handled),
         },
         QuantityRef::TargetObjectManaValue { .. } => ("TargetObjectManaValue", Handled),
         QuantityRef::ObjectColorCount { scope } => match scope {
@@ -7974,6 +8179,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardColorCount", Handled),
             ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardColorCount", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyObjectColorCount", Handled),
+            ObjectScope::BatchSource => ("BatchSourceObjectColorCount", Handled),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -7987,6 +8193,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardNameWordCount", Handled),
             ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardNameWordCount", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyObjectNameWordCount", Handled),
+            ObjectScope::BatchSource => ("BatchSourceObjectNameWordCount", Handled),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -8002,6 +8209,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
                 ("OwnedLinkedExileCardTypelineComponentCount", Handled)
             }
             ObjectScope::AmassedArmy => ("AmassedArmyObjectTypelineComponentCount", Handled),
+            ObjectScope::BatchSource => ("BatchSourceObjectTypelineComponentCount", Handled),
         },
         QuantityRef::ManaSymbolsInManaCost { scope, .. } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -8017,6 +8225,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
                 ("OwnedLinkedExileCardManaSymbolsInManaCost", Handled)
             }
             ObjectScope::AmassedArmy => ("AmassedArmyManaSymbolsInManaCost", Handled),
+            ObjectScope::BatchSource => ("BatchSourceManaSymbolsInManaCost", Handled),
         },
         QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
         QuantityRef::Aggregate { .. } => ("Aggregate", Handled),
@@ -8027,12 +8236,11 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::ExiledCardPower { .. } => ("ExiledCardPower", Handled),
         QuantityRef::ZoneCardCount { .. } => ("ZoneCardCount", Handled),
         QuantityRef::BasicLandTypeCount { .. } => ("BasicLandTypeCount", Handled),
-        QuantityRef::DistinctColorsAmongPermanents { .. } => {
-            ("DistinctColorsAmongPermanents", Handled)
-        }
+        QuantityRef::DistinctColorsAmong { .. } => ("DistinctColorsAmong", Handled),
         QuantityRef::DistinctCounterKindsAmong { .. } => ("DistinctCounterKindsAmong", Handled),
         QuantityRef::VoteCount { .. } => ("VoteCount", Handled),
         QuantityRef::PreviousEffectAmount { .. } => ("PreviousEffectAmount", Handled),
+        QuantityRef::PreviousEffectCount => ("PreviousEffectCount", Handled),
         QuantityRef::TrackedSetSize => ("TrackedSetSize", Handled),
         QuantityRef::FilteredTrackedSetSize { .. } => ("FilteredTrackedSetSize", Handled),
         QuantityRef::TrackedSetAggregate { .. } => ("TrackedSetAggregate", Handled),
@@ -8040,6 +8248,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::LifeLostThisTurn { .. } => ("LifeLostThisTurn", Handled),
         QuantityRef::EventContextAmount => ("EventContextAmount", Handled),
         QuantityRef::SpellsCastThisTurn { .. } => ("SpellsCastThisTurn", Handled),
+        QuantityRef::SpellsCastBeforeTriggeringSpell { .. } => {
+            ("SpellsCastBeforeTriggeringSpell", Handled)
+        }
         QuantityRef::EnteredThisTurn { .. } => ("EnteredThisTurn", Handled),
         QuantityRef::SacrificedThisTurn { .. } => ("SacrificedThisTurn", Handled),
         QuantityRef::CrimesCommittedThisTurn => ("CrimesCommittedThisTurn", Handled),
@@ -8076,6 +8287,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         // strict-failure marker anywhere, so it is genuinely handled.
         QuantityRef::TurnsTaken => ("TurnsTaken", Handled),
         QuantityRef::ChosenNumber => ("ChosenNumber", Unhandled),
+        // CR 101.4 + CR 608.2d: resolved live in `quantity::resolve_quantity`
+        // over `Player::chosen_attributes` (per-candidate and aggregate scopes).
+        QuantityRef::PlayerChosenNumber { .. } => ("PlayerChosenNumber", Handled),
         QuantityRef::AttackedThisTurn { .. } => ("AttackedThisTurn", Handled),
         QuantityRef::DescendedThisTurn => ("DescendedThisTurn", Unhandled),
         QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. } => {
@@ -8201,9 +8415,14 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         // Variants below are parsed but not classified as handled by the prior registry.
         StaticCondition::HasMaxSpeed => ("HasMaxSpeed", Unhandled),
         StaticCondition::SpeedGE { .. } => ("SpeedGE", Unhandled),
-        // CR 608.2c: Compound conditions — resolved recursively by
+        // Compound conditions — resolved recursively by
         // `layers::evaluate_condition`, which short-circuits And/Or and
         // negates Not. Verified at layers.rs ~line 263.
+        //
+        // All three arms are UNREACHABLE from `extract_static_condition_features`:
+        // that walker recurses every combinator and only classifies leaves, so a
+        // combinator never contributes a tag of its own. They exist for
+        // exhaustiveness and for the direct unit-test callers below.
         StaticCondition::And { .. } => ("And", Handled),
         StaticCondition::Or { .. } => ("Or", Handled),
         StaticCondition::Not { .. } => ("Not", Handled),
@@ -8214,7 +8433,14 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::SourceIsAttacking => ("SourceIsAttacking", Handled),
         StaticCondition::SourceIsBlocking => ("SourceIsBlocking", Handled),
         StaticCondition::SourceIsBlocked => ("SourceIsBlocked", Handled),
-        StaticCondition::IsMonarch => ("IsMonarch", Handled),
+        // CR 725.1: only the controller subject has a static-side evaluator.
+        // `layers::evaluate_condition{,_with_recipient}` rejects every other
+        // scope at its entry boundary (no trigger event, no combat anchor), so
+        // coverage must report those `Unhandled` rather than claim support.
+        StaticCondition::IsMonarch {
+            player: PlayerScope::Controller,
+        } => ("IsMonarch", Handled),
+        StaticCondition::IsMonarch { .. } => ("IsMonarch", Unhandled),
         StaticCondition::IsInitiative => ("IsInitiative", Handled),
         StaticCondition::NoMonarch => ("NoMonarch", Handled),
         StaticCondition::HasCityBlessing => ("HasCityBlessing", Handled),
@@ -8232,6 +8458,27 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::AnyPlayerAttackedYouLastTurn => ("AnyPlayerAttackedYouLastTurn", Handled),
         StaticCondition::OpponentPoisonAtLeast { .. } => ("OpponentPoisonAtLeast", Unhandled),
         StaticCondition::UnlessPay { .. } => ("UnlessPay", Handled),
+        // CR 903.3d: the RUNTIME does evaluate this static
+        // (`layers::evaluate_static_condition`, layers.rs:1875, delegating both
+        // ownership arms to the single `game::commander` authority), so the
+        // `Unhandled` tag below understates the resolver.
+        //
+        // It stays `Unhandled` DELIBERATELY, and must not be flipped as a rider on
+        // an unrelated change: the tag is currently the only thing holding two
+        // demonstrably MISPARSED Lieutenant cards out of the supported set. Of the
+        // seven `ControlsCommander` statics in the pool, Convergence of Dominion
+        // parses to a static with `modifications: []` (a no-op continuous effect)
+        // and Thunderfoot Baloth collapses "this creature gets +2/+2 and other
+        // creatures you control get +2/+2 and have trample" into ONE `SelfRef`
+        // static, dropping the "other creatures you control" clause and granting
+        // trample to the Baloth itself. Flipping the tag alone would advertise both
+        // as `supported: true, gap_count: 0`.
+        //
+        // Land the flip in its own change, AFTER an empty-`modifications` static
+        // and a dropped continuous-modification clause each register as real gaps.
+        // Nothing in the commander-gate work depends on this tag — Fight for the
+        // Throne's intervening-`if` is an `AbilityCondition`, classified `Handled`
+        // in `condition_feature` above.
         StaticCondition::ControlsCommander { .. } => ("ControlsCommander", Unhandled),
         // SourceIsEquipped resolved by layers::evaluate_condition (layers.rs:1057)
         StaticCondition::SourceIsEquipped => ("SourceIsEquipped", Handled),
@@ -9172,6 +9419,12 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         // legitimately produce no `ParsedElement`. Skip them so they are not
         // falsely reported as `SilentDrop`.
         if is_deck_construction_copy_limit_sentence(stripped) {
+            continue;
+        }
+
+        // CR 905.1a + CR 905.2: Draft-procedure lines are handled by the
+        // Draft engine, not by constructed-game card abilities.
+        if is_draft_matters_sentence(stripped) {
             continue;
         }
 
@@ -11263,6 +11516,148 @@ pub fn format_semantic_audit_markdown(summary: &SemanticAuditSummary) -> String 
 #[cfg(test)]
 mod tests {
 
+    /// CR 113.3b / CR 113.3c + CR 109.4: the ability-kind and controller axes
+    /// are independent, so `fmt_target` must render BOTH. Enumerated per-product
+    /// arms could not: the trailing kind-only catch-all swallowed
+    /// controller-bearing filters and dropped the "you control" scope — which
+    /// would make a newly-narrowed copy filter look like a controller misparse
+    /// in coverage output.
+    #[test]
+    fn fmt_target_composes_stack_ability_controller_and_kind() {
+        use crate::types::ability::{ControllerRef, StackAbilityKind, TargetFilter};
+
+        let stack_ability = |controller: Option<ControllerRef>, kind: Option<StackAbilityKind>| {
+            super::fmt_target(&TargetFilter::StackAbility {
+                controller,
+                tag: None,
+                kind,
+            })
+        };
+
+        // The newly reachable combination (Mister Fantastic / Strionic
+        // Resonator / Kirol). Pre-change this rendered "triggered ability on
+        // stack", silently dropping "you control".
+        assert_eq!(
+            stack_ability(Some(ControllerRef::You), Some(StackAbilityKind::Triggered)),
+            "triggered ability you control on stack"
+        );
+        assert_eq!(
+            stack_ability(Some(ControllerRef::You), Some(StackAbilityKind::Activated)),
+            "activated ability you control on stack"
+        );
+
+        // All six pre-existing renderings must be byte-identical.
+        assert_eq!(stack_ability(None, None), "ability on stack");
+        assert_eq!(
+            stack_ability(None, Some(StackAbilityKind::Triggered)),
+            "triggered ability on stack"
+        );
+        assert_eq!(
+            stack_ability(None, Some(StackAbilityKind::Activated)),
+            "activated ability on stack"
+        );
+        assert_eq!(
+            stack_ability(Some(ControllerRef::You), None),
+            "ability you control on stack"
+        );
+        assert_eq!(
+            stack_ability(Some(ControllerRef::Opponent), None),
+            "ability opponent controls on stack"
+        );
+        assert_eq!(
+            stack_ability(Some(ControllerRef::TargetPlayer), None),
+            "ability target player controls on stack"
+        );
+
+        // Tags may coexist with either narrowing axis. The formatter must not
+        // let the tag-specific form hide its controller or ability kind.
+        assert_eq!(
+            super::fmt_target(&TargetFilter::StackAbility {
+                controller: Some(ControllerRef::TargetPlayer),
+                tag: Some(crate::types::ability::AbilityTag::Backup),
+                kind: Some(StackAbilityKind::Triggered),
+            }),
+            "Backup triggered ability target player controls on stack"
+        );
+    }
+
+    /// #7317 — an ability's `activation_zone` must reach the parse-diff
+    /// signature, under a key that does NOT collide with the `from` that
+    /// `effect_details` already emits for a `ChangeZone` origin.
+    ///
+    /// The collision is the whole point. `build_ability_item` drops duplicate
+    /// keys, and the abilities this field matters most on are exactly the ones
+    /// whose effect already occupies `from` — a graveyard self-return carries
+    /// `from: graveyard` for the effect's origin and needs a second, distinct
+    /// key for the zone it is activated from. Naming this one `from` would make
+    /// it invisible on precisely those abilities.
+    ///
+    /// The `None` row is the #5507 requirement restated: an ordinary
+    /// battlefield ability must emit NO zone key at all, byte-identical to
+    /// before, so this addition cannot churn the ~12k abilities that default to
+    /// the battlefield under CR 113.6.
+    #[test]
+    fn activation_zone_reaches_parse_details_without_colliding_with_effect_origin() {
+        use crate::types::ability::AbilityKind;
+        use crate::types::zones::Zone;
+
+        // A graveyard self-return: the shape where the collision bites.
+        let graveyard_self_return = || Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Hand,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        };
+        let details = |zone: Option<Zone>| -> Vec<(String, String)> {
+            let mut def = AbilityDefinition::new(AbilityKind::Activated, graveyard_self_return());
+            def.activation_zone = zone;
+            build_ability_item(&def).details
+        };
+
+        // (1) `None` — the CR 113.6 battlefield default. No zone key emitted.
+        let default_zone = details(None);
+        assert!(
+            !default_zone.iter().any(|(k, _)| k == "activates from"),
+            "a battlefield-default ability must emit no activation-zone key, so \
+             existing signatures stay byte-identical (#5507's requirement)"
+        );
+
+        // (2) `Some(Graveyard)` — both keys present, and distinct.
+        let gated = details(Some(Zone::Graveyard));
+        assert!(
+            gated.iter().any(|(k, v)| k == "from" && v == "graveyard"),
+            "the effect's own origin must still render under `from`: {gated:?}"
+        );
+        assert!(
+            gated
+                .iter()
+                .any(|(k, v)| k == "activates from" && v == "graveyard"),
+            "the activation zone must render under its own key; had it been \
+             named `from`, build_ability_item's dedup would have dropped it \
+             silently and this ability would look unchanged (#7317): {gated:?}"
+        );
+
+        // The point of the separate key: the two zones are independent, and a
+        // signature must distinguish them. Cage of Hands returns itself to hand
+        // from the battlefield; Gutterbones returns itself to hand from the
+        // graveyard. Same effect shape, different activation zone.
+        assert_ne!(
+            details(Some(Zone::Graveyard)),
+            details(Some(Zone::Exile)),
+            "two activation zones on the same effect are different parses and \
+             must not collapse to the same sticky signature"
+        );
+    }
+
     /// Matrix row 19 — `parse_details` renders each DECLARED mana role under its
     /// OWN key. Under the old role-blind rendering, Carpet of Flowers (count
     /// source) and Belbe (recipient) produced indistinguishable `target:` keys
@@ -12097,6 +12492,128 @@ mod tests {
         let mut missing = Vec::new();
         check_parse_warnings(&warnings, &mut missing);
         assert!(missing.is_empty());
+    }
+
+    /// CR 903.3d: the Lieutenant STATIC's `Unhandled` coverage tag is a
+    /// deliberate mask, not an oversight — this pins both halves so the flip
+    /// cannot be smuggled in as a rider on an unrelated change.
+    ///
+    /// The runtime DOES evaluate `StaticCondition::ControlsCommander`
+    /// (`layers::evaluate_static_condition`, layers.rs:1875), so on the
+    /// resolver axis alone the tag understates the engine. But the tag is also
+    /// the only thing keeping two demonstrably misparsed Lieutenant cards out
+    /// of the supported set, so it must stay until those misparses register as
+    /// real gaps.
+    ///
+    /// The second assertion is the evidence, on verbatim Oracle text: Thunderfoot
+    /// Baloth's "…this creature gets +2/+2 AND OTHER CREATURES YOU CONTROL get
+    /// +2/+2 and have trample" collapses into a single `SelfRef` static, so the
+    /// other-creatures clause is silently dropped and trample lands on the Baloth
+    /// itself — with no gap recorded anywhere.
+    ///
+    /// FLIP PROTOCOL: when the dropped-clause misparse (and Convergence of
+    /// Dominion's empty-`modifications` no-op static) each register as a gap, the
+    /// second assertion here goes red. THAT is the signal to flip the tag to
+    /// `Handled` and delete this test — not before.
+    #[test]
+    fn lieutenant_commander_static_tag_is_a_deliberate_mask() {
+        let (label, support) = static_condition_feature(&StaticCondition::ControlsCommander {
+            ownership: CommanderOwnership::Own,
+        });
+        assert_eq!(label, "ControlsCommander");
+        assert!(
+            matches!(support, FeatureSupport::Unhandled),
+            "the mask must stay until the two misparses register as gaps; see the \
+             FLIP PROTOCOL on this test"
+        );
+
+        let parsed = crate::parser::parse_oracle_text(
+            "Trample\nLieutenant — As long as you control your commander, this creature gets \
+             +2/+2 and other creatures you control get +2/+2 and have trample.",
+            "Thunderfoot Baloth",
+            &[],
+            &["Creature".to_string()],
+            &["Beast".to_string()],
+        );
+        // Reach-guard: the fixture only exercises the misparse if the parser
+        // really produced the OWNER-scoped commander gate.
+        let commander_statics: Vec<_> = parsed
+            .statics
+            .iter()
+            .filter(|s| {
+                matches!(
+                    &s.condition,
+                    Some(StaticCondition::ControlsCommander {
+                        ownership: CommanderOwnership::Own
+                    })
+                )
+            })
+            .collect();
+        assert!(
+            !commander_statics.is_empty(),
+            "the Lieutenant line must parse to an Own-scoped ControlsCommander static: {:#?}",
+            parsed.statics
+        );
+        assert!(
+            commander_statics
+                .iter()
+                .all(|s| matches!(s.affected, Some(TargetFilter::SelfRef))),
+            "MISPARSE STILL PRESENT (expected): the \"other creatures you control\" clause \
+             is dropped and the whole Lieutenant grant lands on SelfRef. When this goes \
+             red the parser was fixed — flip `static_condition_feature` to Handled and \
+             delete this test. Got {commander_statics:#?}"
+        );
+    }
+
+    /// CR 903.3 vs CR 903.3d: the parse-details label is what bug triage reads,
+    /// so the two ownership arms must never print the same string — in ANY of
+    /// the condition-vocabulary formatters.
+    #[test]
+    fn commander_ownership_labels_differ_in_every_formatter() {
+        for (ability_label, trigger_label, static_label) in [
+            (
+                fmt_ability_condition(&AbilityCondition::ControlsCommander {
+                    ownership: CommanderOwnership::Own,
+                }),
+                fmt_trigger_condition(
+                    &crate::types::ability::TriggerCondition::ControlsCommander {
+                        ownership: CommanderOwnership::Own,
+                    },
+                ),
+                fmt_static_condition(&StaticCondition::ControlsCommander {
+                    ownership: CommanderOwnership::Own,
+                }),
+            ),
+            (
+                fmt_ability_condition(&AbilityCondition::ControlsCommander {
+                    ownership: CommanderOwnership::Any,
+                }),
+                fmt_trigger_condition(
+                    &crate::types::ability::TriggerCondition::ControlsCommander {
+                        ownership: CommanderOwnership::Any,
+                    },
+                ),
+                fmt_static_condition(&StaticCondition::ControlsCommander {
+                    ownership: CommanderOwnership::Any,
+                }),
+            ),
+        ] {
+            assert_eq!(
+                ability_label, trigger_label,
+                "the three mirrors of ONE printed clause must render identically"
+            );
+            assert_eq!(ability_label, static_label);
+        }
+        assert_ne!(
+            fmt_static_condition(&StaticCondition::ControlsCommander {
+                ownership: CommanderOwnership::Own,
+            }),
+            fmt_static_condition(&StaticCondition::ControlsCommander {
+                ownership: CommanderOwnership::Any,
+            }),
+            "CR 903.3 \"your commander\" is strictly narrower than CR 903.3d \"a \
+             commander\"; collapsing them prints a weaker predicate than the card"
+        );
     }
 
     #[test]
@@ -13423,6 +13940,19 @@ mod tests {
                 .iter()
                 .any(|f| matches!(f, SemanticFinding::DroppedCondition { condition_text, .. } if condition_text == "as long as")),
             "Should detect dropped 'as long as' condition: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn test_audit_skips_draft_procedure_lines() {
+        let face = make_face();
+        let oracle = "Draft this card face up.\nAs you draft a card, you may draft an additional card from that booster pack.\nIf you do, put this card into that booster pack.";
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            findings.is_empty(),
+            "draft-procedure lines are owned by CR 905 draft handling: {findings:?}"
         );
     }
 
@@ -14970,6 +15500,86 @@ mod tests {
                 "StaticCondition::{expected_name} is resolved by layers::evaluate_condition",
             );
         }
+    }
+
+    /// `extract_static_condition_features` must recurse
+    /// `StaticCondition::Not` exactly as it recurses `And` / `Or`. Negation is a
+    /// combinator with no semantics of its own, so swallowing its operand
+    /// reports an UNHANDLED leaf as supported — the fail-open direction coverage
+    /// must never take.
+    ///
+    /// Revert-failing: restore the `_ =>` catch-all for `Not` and the first
+    /// assertion fails — the map holds only `static_condition:Not` (Handled) and
+    /// the `IsMonarch` leaf disappears, so
+    /// `Not(IsMonarch { player: ScopedPlayer })` — the "unless that player is
+    /// the monarch" shape `layers`' entry gate hard-rejects to `false` — would
+    /// be advertised as fully supported.
+    #[test]
+    fn static_condition_not_recurses_into_its_operand() {
+        let feature_map = |cond: &StaticCondition| {
+            let mut features = HashMap::new();
+            extract_static_condition_features(cond, &mut features);
+            features
+        };
+
+        let negated_scoped_monarch = StaticCondition::Not {
+            condition: Box::new(StaticCondition::IsMonarch {
+                player: PlayerScope::ScopedPlayer,
+            }),
+        };
+        let features = feature_map(&negated_scoped_monarch);
+        assert_eq!(
+            features.get("static_condition:IsMonarch"),
+            Some(&FeatureSupport::Unhandled),
+            "the operand under `Not` must reach the classifier"
+        );
+        assert!(
+            !features.contains_key("static_condition:Not"),
+            "`Not` is a combinator and contributes no tag of its own, exactly \
+             like `And` / `Or`"
+        );
+
+        // Discrimination guard: recursion reports the operand's OWN class — it
+        // does not blanket-downgrade everything under a negation.
+        assert_eq!(
+            feature_map(&StaticCondition::Not {
+                condition: Box::new(StaticCondition::SourceIsTapped),
+            })
+            .get("static_condition:SourceIsTapped"),
+            Some(&FeatureSupport::Handled),
+        );
+
+        // Nesting guard: `Not(Or(..))` is a real corpus shape; both operands
+        // must surface, not just the first.
+        let nested = feature_map(&StaticCondition::Not {
+            condition: Box::new(StaticCondition::Or {
+                conditions: vec![
+                    StaticCondition::SourceIsTapped,
+                    StaticCondition::IsMonarch {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                ],
+            }),
+        });
+        assert_eq!(
+            nested.get("static_condition:SourceIsTapped"),
+            Some(&FeatureSupport::Handled)
+        );
+        assert_eq!(
+            nested.get("static_condition:IsMonarch"),
+            Some(&FeatureSupport::Unhandled)
+        );
+
+        // Reach-guard for the affirmative shape: the printed default subject is
+        // still `Handled`, so the rows above are about the SCOPE, not about
+        // `IsMonarch` having become unsupported wholesale.
+        assert_eq!(
+            feature_map(&StaticCondition::IsMonarch {
+                player: PlayerScope::Controller,
+            })
+            .get("static_condition:IsMonarch"),
+            Some(&FeatureSupport::Handled)
+        );
     }
 
     /// CR 614.1b + CR 614.10: `SkipStep { step: Draw }` must be recognised by

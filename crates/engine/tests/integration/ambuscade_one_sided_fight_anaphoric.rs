@@ -25,7 +25,10 @@
 //!     takes 0 instead of the boosted power.
 
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::counter::CounterType;
+use engine::types::game_state::WaitingFor;
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
 
 const AMBUSCADE_ORACLE: &str = "Target creature you control gets +1/+1 until end of turn. \
 It deals damage equal to its power to target creature an opponent controls.";
@@ -35,6 +38,76 @@ It deals damage equal to its power to target creature an opponent controls.";
 // Source -> Anaphoric (step 1b of the fix) for the runtime fallback to fire.
 const CONDITIONAL_FIGHT_ORACLE: &str = "Target creature you control gets +2/+0 until end of turn. \
 Then it deals damage equal to its power to target creature an opponent controls.";
+
+const VENOM_BLAST_ORACLE: &str = "Put two +1/+1 counters on target creature you control. \
+It deals damage equal to its power to up to one other target creature.";
+
+/// CR 601.2c + CR 115.6 + CR 120.1: Venom Blast announces its mandatory
+/// counter recipient and optional damage recipient in printed order. Selecting
+/// both puts exactly two +1/+1 counters on P0's 2/2, then deals its resulting
+/// power (4) to P1's creature without damaging the source.
+#[test]
+fn venom_blast_selected_optional_recipient_gets_boosted_power_damage() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Venom Blast", true, VENOM_BLAST_ORACLE)
+        .id();
+    let source = scenario.add_creature(P0, "Venom Carrier", 2, 2).id();
+    let recipient = scenario.add_creature(P1, "Venom Recipient", 7, 7).id();
+
+    let mut runner = scenario.build();
+    let outcome = runner
+        .cast(spell)
+        .target_objects(&[source, recipient])
+        .resolve();
+
+    outcome.assert_counters(source, CounterType::Plus1Plus1, 2);
+    assert_eq!(
+        outcome.state().objects[&recipient].damage_marked,
+        4,
+        "the countered 2/2 must deal its resulting power (4) to the selected recipient"
+    );
+    assert_eq!(
+        outcome.state().objects[&source].damage_marked,
+        0,
+        "the counter recipient is the damage source, not the damage recipient"
+    );
+}
+
+/// CR 115.6: an up-to-one target slot permits announcing zero targets. Venom
+/// Blast still applies its mandatory counters, then resolves with no damage and
+/// returns to Priority; the legal opponent creature remains on the battlefield.
+#[test]
+fn venom_blast_can_decline_its_optional_damage_recipient() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Venom Blast", true, VENOM_BLAST_ORACLE)
+        .id();
+    let source = scenario.add_creature(P0, "Venom Carrier", 2, 2).id();
+    let recipient = scenario.add_creature(P1, "Untargeted Recipient", 7, 7).id();
+
+    let mut runner = scenario.build();
+    // The recipient is legal and present, but only the mandatory first target
+    // is declared; the driver declines the optional second slot.
+    let outcome = runner.cast(spell).target_object(source).resolve();
+
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "declining Venom Blast's optional recipient must finish at Priority, got {:?}",
+        outcome.final_waiting_for()
+    );
+    outcome.assert_counters(source, CounterType::Plus1Plus1, 2);
+    assert_eq!(
+        outcome.state().objects[&recipient].damage_marked,
+        0,
+        "an undeclared optional recipient must not take damage"
+    );
+    outcome.assert_zone(&[recipient], Zone::Battlefield);
+}
 
 /// CR 120.1 + CR 608.2c + CR 115.10a: Ambuscade boosts P0's 2/2 to 3/3, then the
 /// boosted creature (NOT the spell, NOT the opponent's creature) deals damage

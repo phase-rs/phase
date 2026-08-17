@@ -120,6 +120,7 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::Discarded { .. }
         | GameEvent::Cycled { .. }
         | GameEvent::CardsRevealed { .. }
+        | GameEvent::ChosenNumbersRevealed { .. }
         | GameEvent::BecomesTarget { .. }
         | GameEvent::ReplacementApplied { .. }
         | GameEvent::SpeedChanged { .. }
@@ -134,6 +135,7 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::ZoneChanged { .. }
         | GameEvent::ManaAdded { .. }
         | GameEvent::TappedForMana { .. }
+        | GameEvent::ManaAbilityProduced { .. }
         | GameEvent::ManaPoolEmptied { .. }
         | GameEvent::ManaRecolored { .. }
         | GameEvent::PermanentTapped { .. }
@@ -283,6 +285,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::ZoneChanged { .. }
         | GameEvent::ManaAdded { .. }
         | GameEvent::TappedForMana { .. }
+        | GameEvent::ManaAbilityProduced { .. }
         | GameEvent::ManaPoolEmptied { .. }
         | GameEvent::ManaRecolored { .. }
         | GameEvent::PermanentTapped { .. }
@@ -328,6 +331,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::TurnedFaceUp { .. }
         | GameEvent::TurnedFaceDown { .. }
         | GameEvent::CardsRevealed { .. }
+        | GameEvent::ChosenNumbersRevealed { .. }
         | GameEvent::CombatDamageDealtToPlayer { .. }
         | GameEvent::CrimeCommitted { .. }
         | GameEvent::Regenerated { .. }
@@ -531,6 +535,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::Discarded { .. }
         | GameEvent::Cycled { .. }
         | GameEvent::CardsRevealed { .. }
+        | GameEvent::ChosenNumbersRevealed { .. }
         | GameEvent::Foretold { .. }
         | GameEvent::BecameForetold { .. } => LogCategory::Zone,
 
@@ -538,6 +543,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
 
         GameEvent::ManaAdded { .. }
         | GameEvent::TappedForMana { .. }
+        | GameEvent::ManaAbilityProduced { .. }
         | GameEvent::ManaPoolEmptied { .. }
         | GameEvent::ManaRecolored { .. } => LogCategory::Mana,
 
@@ -927,6 +933,22 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" reveals: "),
             text(&card_names.join(", ")),
         ],
+
+        // CR 101.4: one line for the whole simultaneous reveal — the numbers
+        // become public together, so rendering them per-player would imply an
+        // ordering the rules do not have.
+        GameEvent::ChosenNumbersRevealed { numbers } => {
+            let mut segments = vec![text("Chosen numbers revealed: ")];
+            for (index, (player, value)) in numbers.iter().enumerate() {
+                if index > 0 {
+                    segments.push(text(", "));
+                }
+                segments.push(player_seg(state, *player));
+                segments.push(text(" "));
+                segments.push(num(crate::game::arithmetic::u32_to_i32_saturating(*value)));
+            }
+            segments
+        }
 
         GameEvent::LifeChanged { player_id, amount } => {
             if *amount >= 0 {
@@ -1724,7 +1746,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         // `TapsForMana` matchers. The per-unit `ManaAdded` events already
         // produce the user-facing "adds X mana" log lines, so this event is
         // internal plumbing and emits no segments of its own.
-        GameEvent::TappedForMana { .. } => vec![],
+        GameEvent::TappedForMana { .. } | GameEvent::ManaAbilityProduced { .. } => vec![],
     }
 }
 
@@ -1753,6 +1775,7 @@ mod tests {
             card_id: CardId(1),
             controller: PlayerId(0),
             object_id: id,
+            cast_mana_value: None,
         };
         let entries = resolve_log_entries(&[event], &state, &state);
         assert_eq!(entries.len(), 1);

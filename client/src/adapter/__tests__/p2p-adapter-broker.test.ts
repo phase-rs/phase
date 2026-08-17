@@ -40,7 +40,7 @@ vi.mock("../../network/protocol", async (orig) => {
 
 
 const mocks = vi.hoisted(() => ({
-  initializeGame: vi.fn(async () => ({ events: [] })),
+  initializeMultiplayerHostGame: vi.fn(async () => ({ events: [] })),
   getLegalActions: vi.fn(async () => ({
     actions: [],
     autoPassRecommended: false,
@@ -71,23 +71,28 @@ const mocks = vi.hoisted(() => ({
   setMultiplayerMode: vi.fn(async (_enabled: boolean) => undefined),
 }));
 
-vi.mock("../wasm-adapter", () => ({
-  WasmAdapter: vi.fn().mockImplementation(function () {
-    return {
-      initialize: vi.fn(async () => undefined),
-      initializeGame: mocks.initializeGame,
-      submitAction: vi.fn(async () => ({ events: [] })),
-      getState: vi.fn(async () => ({})),
-      getLegalActions: mocks.getLegalActions,
-      getLegalActionsForViewer: mocks.getLegalActionsForViewer,
-      getFilteredState: mocks.getFilteredState,
-      getViewerSnapshot: mocks.getViewerSnapshot,
-      projectSeatView: mocks.projectSeatView,
-      setMultiplayerMode: mocks.setMultiplayerMode,
-      dispose: vi.fn(),
-    };
-  }),
-}));
+// Mirrors `p2p-adapter-multiplayer.test.ts`: the host acquires its engine via
+// `getHostAdapter()`, and teardown goes through `releaseHostSession()`.
+vi.mock("../wasm-adapter", () => {
+  const createEngine = () => ({
+    initialize: vi.fn(async () => undefined),
+    initializeMultiplayerHostGame: mocks.initializeMultiplayerHostGame,
+    submitAction: vi.fn(async () => ({ events: [] })),
+    getState: vi.fn(async () => ({})),
+    getLegalActions: mocks.getLegalActions,
+    getLegalActionsForViewer: mocks.getLegalActionsForViewer,
+    getFilteredState: mocks.getFilteredState,
+    getViewerSnapshot: mocks.getViewerSnapshot,
+    projectSeatView: mocks.projectSeatView,
+    setMultiplayerMode: mocks.setMultiplayerMode,
+    releaseHostSession: vi.fn(async (_claimed: boolean) => undefined),
+    dispose: vi.fn(),
+  });
+  return {
+    WasmAdapter: vi.fn().mockImplementation(createEngine),
+    getHostAdapter: vi.fn(createEngine),
+  };
+});
 
 interface FakePeer {
   on(event: string, handler: (conn: DataConnection) => void): void;
@@ -183,8 +188,8 @@ function makeHost(
 }
 
 beforeEach(() => {
-  mocks.initializeGame.mockClear();
-  mocks.initializeGame.mockImplementation(async () => ({ events: [] }));
+  mocks.initializeMultiplayerHostGame.mockClear();
+  mocks.initializeMultiplayerHostGame.mockImplementation(async () => ({ events: [] }));
   mocks.getLegalActions.mockClear();
   mocks.getFilteredState.mockClear();
   mocks.setMultiplayerMode.mockClear();
@@ -245,7 +250,7 @@ describe("P2PHostAdapter — broker integration", () => {
 
   it("does NOT call broker.unregister when initializeGame throws", async () => {
     const broker = makeBrokerMock();
-    mocks.initializeGame.mockRejectedValueOnce(new Error("WASM panic"));
+    mocks.initializeMultiplayerHostGame.mockRejectedValueOnce(new Error("WASM panic"));
     const { adapter, emitConnection } = makeHost(broker, "GAME01");
     await adapter.initialize();
 

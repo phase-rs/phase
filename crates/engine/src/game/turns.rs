@@ -179,6 +179,12 @@ pub(in crate::game) fn advance_phase_once(
         removed = taken;
     }
 
+    // CR 511.3: End Combat teardown happens when the step ends, after its
+    // priority window, not when the step begins.
+    if leaving == Phase::EndCombat {
+        complete_end_combat_teardown(state);
+    }
+
     // If wrapping from Cleanup to Untap, start next turn. Turn-level skip
     // replacements (CR 614.10) are handled inside `start_next_turn` — the
     // per-phase pipeline below runs only for within-turn phase advances.
@@ -247,18 +253,13 @@ pub fn end_turn_to_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) {
     enter_phase(state, Phase::Cleanup, events);
 }
 
-/// CR 724.2d: End the current combat phase by removing everything from combat,
-/// expiring "until end of combat" effects, and skipping straight to the
-/// postcombat main phase. Mirrors the end-of-combat teardown the `EndCombat`
-/// step performs (see the `Phase::EndCombat` arm of `advance_phase`), but skips
-/// the intervening end-of-combat step so its "at end of combat" triggers do not
-/// fire (CR 724.2e). Drives `Effect::EndCombatPhase` (Mandate of Peace).
-pub fn end_combat_phase_to_postcombat(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    // CR 724.2d / CR 511.3: Remove all creatures and planeswalkers from combat.
+/// CR 511.2 + CR 511.3: End Combat effects expire and combat objects leave
+/// combat only after the step's priority window has ended. Explicit effects
+/// that skip directly out of combat use the same teardown authority.
+fn complete_end_combat_teardown(state: &mut GameState) {
     state.combat = None;
-    // CR 724.2d: Effects that last "until end of combat" expire — continuous
-    // effects, replacement definitions, and pending damage replacements alike,
-    // matching the normal end-of-combat prune.
+    state.current_combat_attacker_restriction = None;
+    state.current_combat_attacker_restriction_source = None;
     super::layers::prune_end_of_combat_effects(state);
     super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
@@ -268,11 +269,19 @@ pub fn end_combat_phase_to_postcombat(state: &mut GameState, events: &mut Vec<Ga
     state
         .pending_damage_replacements
         .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
+}
 
-    // CR 511.3 / CR 724.2d: the combat phase is over — clear any active
-    // additional-combat attacker restriction (Last Night Together / Bumi).
-    state.current_combat_attacker_restriction = None;
-    state.current_combat_attacker_restriction_source = None;
+/// CR 724.2d: End the current combat phase by removing everything from combat,
+/// expiring "until end of combat" effects, and skipping straight to the
+/// postcombat main phase. Mirrors the end-of-combat teardown the `EndCombat`
+/// step performs (see the `Phase::EndCombat` arm of `advance_phase`), but skips
+/// the intervening end-of-combat step so its "at end of combat" triggers do not
+/// fire (CR 724.2e). Drives `Effect::EndCombatPhase` (Mandate of Peace).
+pub fn end_combat_phase_to_postcombat(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    // CR 724.2d / CR 511.3: Remove all creatures and planeswalkers from combat.
+    // CR 724.2d: Effects that last "until end of combat" expire through the
+    // same authority as the normal End Combat transition.
+    complete_end_combat_teardown(state);
 
     // CR 724.2d: Skip straight to the postcombat main phase, skipping any
     // intervening steps (including the end-of-combat step — CR 724.2e). Any
@@ -295,22 +304,13 @@ pub(super) fn mark_empty_attackers_end_combat(state: &mut GameState, events: &mu
 }
 
 /// The declaration-continuation form of [`mark_empty_attackers_end_combat`].
-/// It preserves the established ordering that has already processed
-/// declaration triggers and advances past the synthetic marker without
-/// running EndCombat step triggers.
+/// CR 508.8 skips only Declare Blockers and Combat Damage; the normal End
+/// Combat step still begins and must run its triggers and priority window.
 pub(super) fn advance_after_empty_attackers(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
     mark_empty_attackers_end_combat(state, events);
-    state.combat = None;
-    // CR 511.3: The synthetic empty-attacker path still ends this combat, so
-    // its extra-combat attacker restriction cannot survive to postcombat main.
-    state.current_combat_attacker_restriction = None;
-    state.current_combat_attacker_restriction_source = None;
-    super::layers::prune_end_of_combat_effects(state);
-    super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
-    let _ = advance_phase_once(state, events);
     auto_advance(state, events)
 }
 
@@ -2190,6 +2190,11 @@ fn clear_cleanup_damage(state: &mut GameState, events: &mut Vec<GameEvent>) {
 /// Execute the cleanup step. Returns `Some(WaitingFor)` if the player must
 /// choose which cards to discard down to maximum hand size, or `None` if
 /// cleanup completes immediately.
+///
+/// CR 514.3a: a `Some` return additionally means "triggered abilities were put
+/// on the stack and the active player must receive priority before another
+/// cleanup step begins" — either the control-reversion delayed triggers below,
+/// or a parked `deferred_triggers` batch settled at the tail of this function.
 pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<WaitingFor> {
     // CR 508.6 + CR 514.2: Snapshot this turn's attacks so "attacked you during
     // their last turn" (Avenge / O-Kagachi / Weathered Sentinels) can query each
@@ -2426,6 +2431,114 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
             obj.is_saddled = false;
             obj.saddled_by.clear();
         }
+    }
+
+    // CR 514.3a: "At this point, the game checks to see if any state-based
+    // actions would be performed and/or ANY TRIGGERED ABILITIES ARE WAITING TO
+    // BE PUT ONTO THE STACK (including those that trigger 'at the beginning of
+    // the next cleanup step'). If so, those state-based actions are performed,
+    // THEN those triggered abilities are put on the stack, then the active
+    // player gets priority. ... Once the stack is empty and all players pass in
+    // succession, another cleanup step begins."
+    //
+    // SCOPE — this block implements ONLY the triggered-ability half of CR 514.3a.
+    // The rule orders an SBA pass FIRST ("those state-based actions are
+    // performed, then those triggered abilities are put on the stack"); this
+    // block performs no SBA pass. SBAs are instead performed at the priority
+    // boundary this block routes to, by `sba::check_state_based_actions` inside
+    // `engine_priority::run_post_action_pipeline` (`engine_priority.rs:177`),
+    // i.e. AFTER the abilities are stacked rather than before. Whether cleanup
+    // should perform a full CR 704 pass at CR 514.3a's exact instant is a
+    // separate question, deliberately not answered here.
+    //
+    // REACHABILITY — read this block as defence in depth, NOT as documentation
+    // of a live path. No production route through the public API was FOUND that
+    // reaches it with a non-empty queue. The two structural reasons, which need
+    // no census: the drain at the end of `process_phase_triggers` sits in that
+    // function's shared body rather than in any one arm, so it runs for whatever
+    // phase/step arm reaches it; and the pipeline's drain likewise sits in
+    // `engine_priority::run_post_action_pipeline_from`'s body, so it runs for
+    // settlements routed through it. The one cleanup path that pauses and
+    // resumes — discard to maximum hand size — never re-enters this function
+    // (its resume runs `finish_cleanup_discard` and then the pipeline), so its
+    // CR 514.3a settlement comes from the pipeline, not from here.
+    //
+    // The remaining input, "who parks a batch during cleanup", rests on an
+    // identifier search for `collect_triggers_into_deferred` that returns no hit
+    // in this file. That instrument cannot see a macro-generated or
+    // trait-dispatched call, so treat it as "none found", not "none exists" —
+    // which is the second reason the block stays.
+    //
+    // It is kept regardless: CR 514.3a is a real obligation at this exact
+    // instant, the block is inert when the queue is empty (the gate refuses, it
+    // returns `None`, and cleanup advances unchanged), and it is the local
+    // guarantee that a future producer which parks a batch during cleanup
+    // cannot carry it across the Cleanup -> Untap wrap. If you are looking for
+    // the code that settles a parked batch in practice, it is the step-boundary
+    // drain in `process_phase_triggers` or the post-action pipeline.
+    //
+    // A parked `deferred_triggers` batch IS "a triggered ability waiting to be
+    // put onto the stack", so it must settle HERE, during cleanup — not survive
+    // `advance_phase_once`'s Cleanup -> Untap wrap (which runs `start_next_turn`)
+    // and land on the next turn's upkeep. CR 514.3 (the parent rule) says no
+    // player normally receives priority during cleanup and then states that this
+    // is the exception; returning `Some(Priority { .. })` is that exception, not
+    // a violation of it.
+    //
+    // POPULATION — this checks `deferred_triggers` only, unlike the CR 603.3b +
+    // issue #1350 guard in `auto_advance_once`'s `Phase::CombatDamage` arm
+    // (grep `issue #1350` in this file), which checks
+    // `!deferred_triggers.is_empty() || pending_trigger.is_some()`. The
+    // `pending_trigger` disjunct is deliberately excluded, not overlooked: a live
+    // `pending_trigger` means a trigger is mid-construction and owns the open
+    // prompt, so `current_trigger_prompt` still echoes for it (that disjunct is
+    // retained by the CR 603.3d narrowing) and the game would be sitting at that
+    // trigger's own target/mode choice rather than passing priority into cleanup.
+    // If that assumption is ever falsified, the fix is to widen this condition to
+    // match that `Phase::CombatDamage` guard, not to add a second block.
+    //
+    // The second half of CR 514.3a — "another cleanup step begins" — is ALREADY
+    // implemented: `priority.rs:79-90` re-enters `auto_advance` when all players
+    // pass with an empty stack at `Phase::Cleanup`, which re-runs this function.
+    // On that repeat the queue is empty, `can_drain_deferred_triggers` refuses,
+    // the stack does not grow, and cleanup advances normally.
+    //
+    // TERMINATION, in two parts. (1) No in-process loop is possible: this block
+    // returns only `Some(..)` — which the `Phase::Cleanup` arm converts to
+    // `AutoAdvanceStep::Waiting`, exiting `auto_advance`'s UNBOUNDED loop (no
+    // iteration cap) — or `None`, which advances the phase. It can never yield
+    // `Continue`, so it cannot spin that loop. Part (1) is what carries
+    // termination; it is sufficient on its own. (2) An unbounded REPEAT would
+    // still not be a freeze: each repeat cleanup step costs a real
+    // `PassPriority` from every living seat before `priority.rs:79-90` re-enters,
+    // so the game remains answerable throughout and any seat may act instead of
+    // passing. No CR draw rule is claimed for that case — CR 104.4b's draw is
+    // for loops of MANDATORY actions and expressly excludes loops containing an
+    // optional action, so it is not the authority here.
+    // NOTE: this is NOT the argument `priority.rs:86-89` makes for the
+    // control-reversion case — that one is monotone-decreasing (its one-shot TCE
+    // is already pruned, so no new event re-fires). Nothing analogous holds for
+    // `deferred_triggers`, which can in principle be re-parked by a resolving
+    // ability; the two parts above are why termination holds anyway.
+    //
+    // Structurally identical to the CR 514.3a control-reversion block above
+    // (`check_delayed_triggers` + stack-growth pause); same authority, same
+    // shape, different waiting population.
+    //
+    // `drain_deferred_trigger_queue` (the restrictive member, gate
+    // `can_drain_deferred_triggers(state, /*allow_spell_on_stack=*/false)`) is
+    // the right authority: cleanup is reached only after the end step's stack
+    // emptied (CR 500.2), so the guard passes on every normal entry, and a
+    // refusal is inert — the stack does not grow, this returns `None`, and
+    // cleanup advances exactly as it does today.
+    let stack_before = state.stack.len();
+    if let Some(prompt) = super::triggers::drain_deferred_trigger_queue(state, events) {
+        return Some(prompt);
+    }
+    if state.stack.len() > stack_before {
+        return Some(WaitingFor::Priority {
+            player: state.active_player,
+        });
     }
 
     None
@@ -2672,6 +2785,20 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
 ///   - an active trigger prompt (`TriggerTargetSelection`, etc.) when
 ///     `pending_trigger` / `deferred_triggers` still hold unresolved work (CR
 ///     603.3). The caller MUST surface this prompt instead of granting priority.
+///
+/// CR 117.5 + CR 603.3: this function is a stack-placement point. Abilities
+/// waiting in `deferred_triggers` are put on the stack here, not merely
+/// reported, so a parked batch cannot survive a phase or step boundary.
+/// Individual arms must NOT re-derive their own deferred-queue guards; the
+/// `Phase::CombatDamage` guard in `auto_advance_once` (issue #1350) predates
+/// this and is retained because it also covers `pending_trigger`.
+///
+/// The CLEANUP step does not reach this function. On the non-discard path,
+/// CR 514.3a is handled by the deferred-trigger block in `execute_cleanup`. When
+/// cleanup instead pauses for discard to maximum hand size, the resume runs
+/// `finish_cleanup_discard` and then the post-action pipeline — it does not
+/// re-enter `execute_cleanup` — so on that path CR 514.3a settles at the
+/// pipeline's drain rather than in `execute_cleanup`.
 fn process_phase_triggers(
     state: &mut GameState,
     events: &[GameEvent],
@@ -2694,7 +2821,62 @@ fn process_phase_triggers(
         &delayed_events,
         events_out,
     );
-    (outcome.fired, outcome.prompt)
+    // CR 117.3a + CR 117.5 + CR 603.3: reaching this point in a phase/step arm
+    // IS the moment "a player would receive priority", so abilities already
+    // waiting in `deferred_triggers` must be PUT ON THE STACK here, not merely
+    // reported. This mirrors what `engine_priority::run_post_action_pipeline`
+    // already does at the sibling (`WaitingFor::Priority`) boundary, using the
+    // same authority and the same gate.
+    //
+    // This is load-bearing, not belt-and-braces: `engine::start_game` and
+    // `engine::start_game_skip_mulligan` drive `turns::auto_advance` and return
+    // an `ActionResult` without going through the post-action pipeline, so on
+    // those paths the pipeline's drain does not run and a parked batch would
+    // survive the boundary if this drain were removed. (Stated structurally
+    // rather than as "the only drain on those paths": that would be a universal
+    // over drain sites, and no search performed here could bound them.)
+    // Regression: `parked_queue_drains_at_first_upkeep_from_start_game`.
+    //
+    // `drain_deferred_trigger_queue` (not the post-announcement variant) is
+    // deliberate: its gate is `can_drain_deferred_triggers(state, /*allow_
+    // spell_on_stack=*/false)`. CR 500.2 means a step in which players receive
+    // priority ends only with an empty stack, so on every normal step entry the
+    // guard passes; when it does not, refusing is the CR 601.2h + CR 602.2b
+    // conservative choice (issue #1793) and CANNOT re-wedge the game — a `None`
+    // prompt makes every calling arm fall through to `WaitingFor::Priority`,
+    // which is answerable and re-drains through the post-action pipeline.
+    // (Note: the entry gate is restrictive, but `dispatch_deferred_triggers_in_order`
+    // in `triggers.rs` ends in a tail call to
+    // `drain_deferred_triggers_after_trigger_construction`, whose `else` arm is
+    // permissive — identical to the deferred-drain branch of
+    // `engine_priority::run_post_action_pipeline_from`, and behaviourally the
+    // same here because the stack is empty at a step boundary.)
+    //
+    // NOTE: unlike the post-action pipeline's deferred-drain branch, this drain
+    // is not gated on `skip_deferred_trigger_drain` — and does not need to be.
+    //
+    // Do NOT defend that with a census of the flag's call sites. The opt-out can
+    // be passed positionally (as it is by the trailing `true` in
+    // `engine_resolution_choices::park_cast_during_resolution_cast_observers`),
+    // and a positional literal carries no identifier, so no search for the
+    // flag's name can enumerate the sites that set it.
+    //
+    // The gate is the protection instead. The flag exists to hold a drain back
+    // while a parent resolution continuation is still open (CR 608.2e, issue
+    // #1793). That condition is a property of state, and this drain already
+    // tests it directly: `drain_deferred_trigger_queue` is gated by
+    // `can_drain_deferred_triggers`, which refuses unless
+    // `triggers::resolution_completion_can_settle` — the same predicate that
+    // guards the pipeline's sibling branch, and the one that returns `false`
+    // while `resolving_stack_entry` is live under a resolution-choice prompt.
+    // So the opt-out's condition is enforced here from state rather than
+    // inherited through a parameter, and a caller that sets the flag cannot
+    // lose its effect by reaching this path.
+    let prompt = match outcome.prompt {
+        Some(prompt) => Some(prompt),
+        None => super::triggers::drain_deferred_trigger_queue(state, events_out),
+    };
+    (outcome.fired, prompt)
 }
 
 /// CR 800.4: Skip an eliminated active player's remaining turn through the
@@ -3006,40 +3188,31 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                     player: state.active_player,
                 });
             }
-            let _ = advance_phase_once(state, events);
-            // Continue to EndCombat
+            // CR 117.3a: After the combat-damage turn-based action and its
+            // triggered abilities are handled, the active player receives
+            // priority before the step ends. This also gives phase stops a
+            // Priority window in which to interrupt auto-pass.
+            return AutoAdvanceStep::waiting(WaitingFor::Priority {
+                player: state.active_player,
+            });
         }
         Phase::EndCombat => {
             // CR 511.1: "At end of combat" triggers fire here.
             let event_snapshot = events.clone();
             let (triggers_fired, ordering_prompt) =
                 process_phase_triggers(state, &event_snapshot, events);
-            // CR 511.3: At end of combat, all creatures are removed from combat.
-            state.combat = None;
-            // CR 511.3: the combat phase is over — its attacker restriction
-            // (Last Night Together / Bumi) ends with it.
-            state.current_combat_attacker_restriction = None;
-            state.current_combat_attacker_restriction_source = None;
-            super::layers::prune_end_of_combat_effects(state);
-            super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
-            for obj in state.objects.iter_mut().map(|(_, v)| v) {
-                obj.replacement_definitions
-                    .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
-            }
-            state
-                .pending_damage_replacements
-                .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
             if triggers_fired {
                 // CR 603.3b: surface a same-controller ordering prompt before priority.
                 if let Some(prompt) = ordering_prompt {
                     return AutoAdvanceStep::waiting(prompt);
                 }
-                return AutoAdvanceStep::waiting(WaitingFor::Priority {
-                    player: state.active_player,
-                });
             }
-            let _ = advance_phase_once(state, events);
-            // Continue to PostCombatMain
+            // CR 511.1: The active player receives priority as the End Combat step
+            // begins, even when no ability triggered. Keeping the phase active until
+            // all players pass lets phase stops interrupt auto-pass here.
+            return AutoAdvanceStep::waiting(WaitingFor::Priority {
+                player: state.active_player,
+            });
         }
         Phase::End => {
             // CR 513.1 + CR 611.2a/b: Expire `PlayFromExile { duration:
@@ -3169,7 +3342,14 @@ mod tests {
         state.current_combat_attacker_restriction_source = Some(ObjectId(99));
         let mut events = Vec::new();
 
-        let _ = advance_after_empty_attackers(&mut state, &mut events);
+        let waiting = advance_after_empty_attackers(&mut state, &mut events);
+
+        assert_eq!(state.phase, Phase::EndCombat);
+        assert!(matches!(waiting, WaitingFor::Priority { .. }));
+        assert!(state.current_combat_attacker_restriction.is_some());
+
+        apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
+        apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
 
         assert!(state.current_combat_attacker_restriction.is_none());
         assert!(state.current_combat_attacker_restriction_source.is_none());
@@ -7636,6 +7816,10 @@ mod tests {
         )
         .unwrap();
 
+        // CR 511.1: the empty-attacker path still enters EndCombat, whose
+        // priority window must be passed before PostCombatMain.
+        apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
+        apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
         assert_eq!(state.phase, Phase::PostCombatMain);
     }
 
@@ -9533,3 +9717,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "turns_declare_attackers_wedge_tests.rs"]
+mod declare_attackers_wedge_tests;

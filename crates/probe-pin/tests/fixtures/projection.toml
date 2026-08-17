@@ -1,0 +1,33 @@
+# Row 26: a manifest that declares a projection. Fail-closed in BOTH paths (`run --write` and
+# `check`) — probe-pin will not emit a block whose projection sentence is missing, because a
+# table that looks complete and is unmeasured is what this tool exists to prevent.
+version = 1
+
+[target]
+mode         = "runtime-read"
+package      = "probe-pin"
+test         = "pure_logic"
+filter       = "ppfixture_census"
+filter_match = "substring"
+timeout_secs = 60
+
+# NOT dogfood_block.md. That block is what `dogfood.toml`, `isolation_e2e::dogfood_check` and the
+# Tilt `probe-pin-check` resource all validate, and THIS manifest is driven with `run --write` by
+# `isolation_e2e::proj_missing_both_paths`. Nothing structural stopped the splice: measured on the
+# shipping binary with ast-grep installed, `run --write` on this fixture exited 0 and replaced the
+# committed dogfood block with a projection block of its own. tmp/ is gitignored and excluded from
+# that Tilt resource's deps, so the write can no longer reach a committed artifact.
+[output]
+file   = "crates/probe-pin/tests/fixtures/tmp/projection_block.md"
+marker = "PROBE-PIN"
+
+[[probe]]
+id = "P0_control"
+  [probe.expect]
+  outcome = "pass"
+
+[[projection]]
+id       = "instrument_sites"
+pattern  = "Instrument::$V"
+paths    = ["crates/probe-pin/src"]
+sentence = "`Instrument` is named at {count} sites."

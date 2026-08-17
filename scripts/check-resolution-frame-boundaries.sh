@@ -5,9 +5,30 @@
 # ResolutionStateWire v1 reader, its legacy wire structures/inventory, or test
 # fixtures. Runtime resolution work is represented by typed ResolutionFrame
 # payloads; identically named typed payload members are not wire keys. The
-# frame stack also permits only top access or a captured adjacent-pair boundary:
-# searching the vector for a frame or removing an arbitrary index breaks that
-# authority.
+# frame stack permits top access, a captured adjacent-pair boundary, or
+# identity-addressed access. Removing an arbitrary index, or searching the
+# vector to decide what to mutate, breaks that authority.
+#
+# That rule is NO LONGER ENFORCED HERE. It is enforced by the type system:
+# `ResolutionStack::frames` is a `FrameVec` whose backing `Vec` is private to
+# `crates/engine/src/types/resolution/frame_vec.rs`, every accessor takes an
+# opaque `FrameSlot`, and the removal operations have no wrapper. A positional
+# scan still compiles and still cannot be spent, because it produces a `usize`
+# and nothing accepts one. The distinction being drawn is unchanged —
+# positional/adjacency-inferred access GUESSES a structural relationship the
+# stack does not guarantee, while identity-addressed access asserts one, since
+# ids come from a monotonic allocator that never rewinds and a stale id matches
+# nothing rather than aliasing a later frame. It mirrors
+# `DrawSequenceStack::frame_mut` / `active_if` / `pop`, the same access mode on
+# a sibling frame stack.
+#
+# This script previously grepped for that rule because `frames` was private to
+# a 7,000-line module and Rust privacy is module-scoped, so "private" bought
+# nothing against the code beside it. Shrinking the module to ~230 lines is what
+# made the privacy real. What remains below is a single structural check that
+# the design itself is intact: `FrameSlot` must be mintable only by the
+# documented methods, since a new one would reopen positional addressing
+# without any compiler error to show for it.
 
 set -euo pipefail
 
@@ -208,7 +229,10 @@ def line_number(source: str, offset: int) -> int:
 
 
 def legacy_allowlist_spans(source: str) -> list[tuple[int, int]]:
-    v1_match = re.search(r"\bLEGACY_RESOLUTION_STATE_WIRE_VERSION\s*=>\s*\{", source)
+    # The version discriminator maps numeric wire versions to the typed decode
+    # mode before the reader match. Anchor the allowlist to that typed v1 arm,
+    # which is the sole branch that consumes legacy resolution fields.
+    v1_match = re.search(r"\bGameStateDecodeMode::ResolutionWireV1\s*=>\s*\{", source)
     if v1_match is None:
         raise ValueError("missing ResolutionStateWire v1 reader arm")
 
@@ -216,7 +240,21 @@ def legacy_allowlist_spans(source: str) -> list[tuple[int, int]]:
     if inventory_match is None:
         raise ValueError("missing legacy resolution key inventory")
 
-    spans = [block_span(source, v1_match), block_span(source, inventory_match)]
+    live_roots_match = re.search(
+        r"\bconst\s+LEGACY_LIVE_ZONE_CHANGED_EVENT_ROOTS\s*:\s*&\[&str\]\s*=\s*&\[",
+        source,
+    )
+    if live_roots_match is None:
+        raise ValueError("missing legacy live ZoneChanged root census")
+    live_roots_end = source.find("];", live_roots_match.end())
+    if live_roots_end == -1:
+        raise ValueError("unterminated legacy live ZoneChanged root census")
+
+    spans = [
+        block_span(source, v1_match),
+        block_span(source, inventory_match),
+        (live_roots_match.start(), live_roots_end + 2),
+    ]
     legacy_struct = re.compile(r"\bstruct\s+Legacy\w+Wire\b[^\{]*\{")
     spans.extend(block_span(source, match) for match in legacy_struct.finditer(source))
     return spans
@@ -320,24 +358,38 @@ for file_name in files:
     if path != resolution_path:
         continue
 
-    production_spans = test_spans
-    remove_pattern = re.compile(
-        r"\b(?:self\s*\.\s*)?frames\s*\.\s*"
-        r"(?:remove|swap_remove|retain|drain|truncate|clear)\s*\("
-    )
-    search_pattern = re.compile(
-        r"\b(?:self\s*\.\s*)?frames\s*\.\s*iter(?:_mut)?\s*\(\s*\)"
-        r"(?:\s*\.\s*\w+\s*\([^;{}]*\))*?"
-        r"\s*\.\s*(?:position|rposition|find|find_map|any|next|nth)\s*\(",
-        re.DOTALL,
-    )
-    for pattern, message in [
-        (remove_pattern, "arbitrary ResolutionStack frame removal is forbidden; use a checked top-only API"),
-        (search_pattern, "generic ResolutionStack frame search is forbidden; use top or adjacent-pair access"),
-    ]:
-        for match in pattern.finditer(source):
-            if not in_any_span(match.start(), production_spans):
-                fail(failures, path, source, match.start(), message)
+    # The frame-search and frame-removal scans that used to run here are gone,
+    # because the type system now enforces what they policed.
+    # `ResolutionStack::frames` is a `FrameVec` whose backing `Vec` is private
+    # to `types/resolution/frame_vec.rs`; every accessor takes an opaque
+    # `FrameSlot`, and the removal operations have no wrapper at all. A
+    # positional scan still compiles, and still cannot be spent: it yields a
+    # `usize`, and nothing accepts one.
+    #
+    # That argument holds only while `FrameSlot` values come from the minting
+    # methods below. A new `fn ... -> Option<FrameSlot>` in that module would
+    # reopen positional addressing with no compiler error to show for it, so
+    # that -- and only that -- is what a grep still has to protect. The rule is
+    # now one structural check on a ~230-line module rather than a search-shape
+    # scan over 7,000 lines.
+    #
+    # `slot_at_captured_depth` is deliberately on this list: it is the single
+    # `usize` door, and it exists because an effect records
+    # `resolution_stack.len()` before running a child producer and hands that
+    # length back afterwards. Giving that captured depth its own type at all of
+    # its origins would remove the door entirely; until then it is named so
+    # that misuse reads as misuse at the call site.
+    frame_vec_source = (root / "crates/engine/src/types/resolution/frame_vec.rs").read_text()
+    minting = set(re.findall(r"fn\s+(\w+)\s*\([^)]*\)\s*->[^{;]*\bFrameSlot\b", frame_vec_source))
+    sanctioned_minting = {"top", "below", "above", "by_id", "slot_at_captured_depth"}
+    if minting != sanctioned_minting:
+        added = ", ".join(sorted(minting - sanctioned_minting)) or "none"
+        missing = ", ".join(sorted(sanctioned_minting - minting)) or "none"
+        failures.append(
+            "  crates/engine/src/types/resolution/frame_vec.rs: FrameSlot may be "
+            f"minted only by {', '.join(sorted(sanctioned_minting))}; "
+            f"unexpected: {added}; missing: {missing}"
+        )
 
 if failures:
     print("Resolution-frame boundary guard failed:", file=sys.stderr)

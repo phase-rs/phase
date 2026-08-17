@@ -3,7 +3,7 @@ use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{GameState, StackEntry, StackEntryKind, WaitingFor};
 use crate::types::keywords::Keyword;
 use crate::types::ObjectId;
 
@@ -85,8 +85,24 @@ pub fn resolve(
             // `vec![new_target]`, which would delete the untouched slot.
             let updated =
                 forced_retarget_targets(state, &stack_ability, &current_targets, new_target);
+            let changed = updated
+                .iter()
+                .zip(current_targets.iter())
+                .find(|(updated, current)| {
+                    stack_ability.retarget_target_requires_pin_refresh(current, updated, state)
+                })
+                .and_then(|(target, _)| match target {
+                    TargetRef::Object(id) => state
+                        .objects
+                        .get(id)
+                        .map(crate::types::identifiers::ObjectIncarnationRef::from_object),
+                    TargetRef::Player(_) => None,
+                });
             if let Some(stack_ability_mut) = state.stack[stack_entry_index].ability_mut() {
                 stack_ability_mut.targets = updated;
+                if let Some(pin) = changed {
+                    stack_ability_mut.update_selected_target_incarnation(pin);
+                }
             }
         }
         events.push(GameEvent::EffectResolved {
@@ -102,13 +118,35 @@ pub fn resolve(
     // CR 115.7: Enumerate legal new targets by re-evaluating the stack entry's
     // own targeting restriction against the current game state.
     //
-    // CR 303.4a: An Aura spell's target is defined by its enchant *ability*, not
+    // CR 303.4a: An Aura SPELL's target is defined by its enchant *ability*, not
     // by its effect's target field — the synthesized spell ability carries a
-    // placeholder effect with no targetable filter (`target_filter()` is `None`).
-    // Enumerate Aura hosts from the source's `Keyword::Enchant(filter)` instead,
-    // mirroring the Aura branch of `casting::spell_has_legal_targets`. Non-Aura
-    // spells/abilities fall back to the effect's declared target filter.
-    let legal_new_targets = legal_new_targets_for_stack_ability(state, &stack_ability);
+    // placeholder effect with no targetable filter (`target_filter()` is `None`),
+    // so Aura hosts are enumerated from the source's `Keyword::Enchant(filter)`
+    // instead, mirroring the Aura branch of `casting::spell_has_legal_targets`.
+    // CR 115.1b: that substitution is keyed on the STACK ENTRY being the Aura
+    // spell — "An Aura permanent doesn't target anything; only the spell is
+    // targeted. (An activated or triggered ability of an Aura permanent can also
+    // be targeted.)" Every other entry — including a triggered or activated
+    // ability whose source happens to be a resident Aura — falls back to its own
+    // effect's declared target filter.
+    let legal_new_targets = legal_new_targets_for_stack_entry(state, stack_entry_index);
+
+    // CR 115.7a: "If a target can't be changed to another legal target, the
+    // original target is unchanged, even if the original target is itself
+    // illegal by then." An empty pool IS that case, so there is no choice to
+    // make. Parking anyway produces a prompt nothing can discharge:
+    // `apply_retarget`'s `Single` arm requires membership in this (empty) set,
+    // and `interaction.rs`'s projection asks for N picks from zero candidates.
+    // Resolve as a no-change instead — mirroring the empty-`current_targets`
+    // no-op guard above.
+    if legal_new_targets.is_empty() {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
 
     state.waiting_for = WaitingFor::RetargetChoice {
         player: ability.controller,
@@ -201,24 +239,43 @@ pub fn legal_new_targets_for_stack_entry(
     state
         .stack
         .get(stack_entry_index)
-        .and_then(|entry| entry.ability())
-        .map(|ability| legal_new_targets_for_stack_ability(state, ability))
+        .map(|entry| legal_new_targets_for_entry(state, entry))
         .unwrap_or_default()
 }
 
-fn legal_new_targets_for_stack_ability(
-    state: &GameState,
-    stack_ability: &ResolvedAbility,
-) -> Vec<TargetRef> {
-    // CR 303.4a: An Aura spell's target is defined by its enchant ability, not
-    // by the placeholder effect synthesized for the spell on the stack.
-    if let Some(filter) = aura_enchant_filter(state, stack_ability.source_id) {
-        return find_legal_targets(
-            state,
-            &filter,
-            stack_ability.controller,
-            stack_ability.source_id,
-        );
+fn legal_new_targets_for_entry(state: &GameState, entry: &StackEntry) -> Vec<TargetRef> {
+    let Some(stack_ability) = entry.ability() else {
+        return Vec::new();
+    };
+
+    // CR 303.4a: "An Aura spell requires a target, which is defined by its
+    // enchant ability." That is a statement about the Aura SPELL — the object on
+    // the stack whose resolution puts the Aura onto the battlefield — and it is
+    // needed here only because the cast path synthesizes a placeholder spell
+    // ability whose `target_filter()` is `None`.
+    //
+    // CR 115.1b + CR 113.7a: A triggered or activated ability of an Aura already
+    // on the battlefield is a DIFFERENT object on the stack — 113.7a, "once
+    // activated or triggered, an ability exists on the stack independently of its
+    // source" — and 115.1b says outright that "an Aura permanent doesn't target
+    // anything; only the spell is targeted. (An activated or triggered ability of
+    // an Aura permanent can also be targeted.)" So it declares its own target
+    // through its own effect (Pain for All: "When this Aura enters, enchanted
+    // creature deals damage equal to its power to any other target").
+    // Keying this branch on "the source object is an Aura" instead of on the
+    // stack entry claimed those abilities too and handed back the Aura's
+    // "creature you control" enchant pool for them — a pool that cannot even
+    // contain the ability's current target, so every retarget submission was
+    // rejected and no actor could discharge the prompt.
+    if matches!(entry.kind, StackEntryKind::Spell { .. }) {
+        if let Some(filter) = aura_enchant_filter(state, stack_ability.source_id) {
+            return find_legal_targets(
+                state,
+                &filter,
+                stack_ability.controller,
+                stack_ability.source_id,
+            );
+        }
     }
 
     // CR 115.7 + CR 601.2c: A multi-role mana declares its recipient AND its
@@ -233,8 +290,10 @@ fn legal_new_targets_for_stack_ability(
     //
     // The pool is necessarily FLAT (`Vec<TargetRef>`, no slot structure), so it
     // is a SUPERSET pre-filter for the UI/AI. Per-slot CR 115.7a legality is
-    // enforced at the assignment seam by `retarget_slot_violation`
-    // (`engine.rs::apply_retarget`). Single-role manas take
+    // enforced at the assignment seam by `retarget_slot_violation`, consulted by
+    // BOTH `engine.rs::apply_retarget` and the AI generator
+    // (`ai_support::candidates::retarget_actions`) so the two cannot propose and
+    // reject different sets. Single-role manas take
     // `mana_multi_role == None` and are served entirely by the standard branch,
     // exactly as before.
     if let Some(role) = crate::types::ability::mana_multi_role(&stack_ability.effect) {

@@ -1,3 +1,4 @@
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
@@ -6,16 +7,18 @@ use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost,
+    default_target_filter_permanent, legacy_trigger_entry_list,
+    materialize_legacy_printed_trigger_entries, AbilityCost, AbilityDefinition, AdditionalCost,
     AdditionalCostInstance, AdditionalCostInstancePayment, AttackSubject, BeholdCostAction,
     CastTimingPermission, CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue,
     ChooseFromZoneConstraint, ChosenAttribute, CoinFlipResult, Comparator, ContinuousModification,
     ControlWindow, CopiableValues, CopyChooseScope, CopyScale, CopyTargetPurpose,
-    CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind,
-    FaceDownProfile, GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice,
-    PermanentEntryMode, PileSource, QuantityExpr, ResolvedAbility, SearchDestinationSplit,
-    SearchSelectionConstraint, StaticCondition, TapCreaturesAggregate, TargetFilter, TargetRef,
-    ThisWayCause, TriggerCondition, TriggerDefinition, TriggerDefinitionRef, TriggerEntry,
+    CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, DigRestOrder, Duration,
+    EffectKind, FaceDownProfile, GameRestriction, KeywordAction, KickerVariant, LibraryPosition,
+    ModalChoice, PermanentEntryMode, PileSource, QuantityExpr, ResolvedAbility,
+    SearchDestinationSplit, SearchSelectionConstraint, StackAbilityKind, StaticCondition,
+    TapCreaturesAggregate, TargetFilter, TargetRef, ThisWayCause, TriggerBaseSetInstanceRef,
+    TriggerCondition, TriggerDefinition, TriggerDefinitionRef, TriggerEntry,
 };
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
@@ -45,7 +48,7 @@ use super::replacements::ReplacementEvent;
 #[cfg(debug_assertions)]
 use super::resolution::debug_assert_runtime_resolution_invariants;
 use super::resolution::{
-    AbilityContinuationFrame, ChangeZoneFrame, MultiDrawFrame, OptionalEffectFrame,
+    AbilityContinuationFrame, ChangeZoneFrame, FrameGate, MultiDrawFrame, OptionalEffectFrame,
     PendingCoinFlip, PendingMutateMerge, PendingProliferateActions, RepeatedOptionalPaymentFrame,
     ResolutionFrame, ResolutionStack, ResolutionStackError, ResolutionStateWire,
 };
@@ -79,6 +82,10 @@ fn default_game_number() -> u8 {
 }
 
 fn initial_delayed_trigger_instance_id() -> u64 {
+    1
+}
+
+fn initial_resolve_all_consent_epoch() -> u64 {
     1
 }
 
@@ -1901,6 +1908,58 @@ pub struct PriorityYield {
     pub target: YieldTarget,
 }
 
+/// Exact priority state restored if a Resolve All consent run is declined,
+/// revoked, or invalidated before it becomes actionable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolveAllPrioritySnapshot {
+    pub waiting_player: PlayerId,
+    pub priority_player: PlayerId,
+    pub priority_pass_count: u8,
+    pub priority_passes: BTreeSet<PlayerId>,
+}
+
+/// One canonical priority representative and the submitter authorized for that
+/// representative when a Resolve All consent run began.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolveAllConsentParticipant {
+    pub representative: PlayerId,
+    pub authorized_submitter: PlayerId,
+    pub granted: bool,
+}
+
+/// Server-authoritative state behind the public Resolve All consent prompts.
+/// The frozen submitters prevent turn-control changes from rebinding a queued
+/// response or a later revocation to a different person.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolveAllConsentRun {
+    pub epoch: u64,
+    pub max_resolutions: u32,
+    pub priority_snapshot: ResolveAllPrioritySnapshot,
+    pub participants: Vec<ResolveAllConsentParticipant>,
+}
+
+impl ResolveAllConsentRun {
+    pub fn authorized_submitter_for(&self, representative: PlayerId) -> Option<PlayerId> {
+        self.participants
+            .iter()
+            .find(|participant| participant.representative == representative)
+            .map(|participant| participant.authorized_submitter)
+    }
+
+    pub fn is_granted(&self, representative: PlayerId) -> bool {
+        self.participants
+            .iter()
+            .any(|participant| participant.representative == representative && participant.granted)
+    }
+
+    pub fn next_pending_representative(&self) -> Option<PlayerId> {
+        self.participants
+            .iter()
+            .find(|participant| !participant.granted)
+            .map(|participant| participant.representative)
+    }
+}
+
 /// CR 609.7a: A source of damage chosen while creating a prevention or
 /// replacement effect. The original filter is retained so property-based
 /// choices such as "red source of your choice" recheck source qualities when
@@ -2055,6 +2114,12 @@ pub struct CounterAddedRecord {
 pub enum ExileLinkKind {
     /// CR 610.3a: Return the exiled object when the source leaves the battlefield.
     UntilSourceLeaves { return_zone: Zone },
+    /// CR 610.3: Return the exiled object immediately after an opponent of
+    /// `controller` becomes the monarch.
+    UntilOpponentBecomesMonarch {
+        return_zone: Zone,
+        controller: PlayerId,
+    },
     /// Track cards "exiled with" a source without creating an automatic return.
     TrackedBySource,
     /// CR 702.xxx: Paradigm (Strixhaven) — this exile entry marks the card as a
@@ -2423,6 +2488,8 @@ impl LatchedBatchedTrigger {
 pub struct LatchedSuppressTrigger {
     pub source_context: TriggerSourceContext,
     pub source_filter: TargetFilter,
+    #[serde(default)]
+    pub trigger_source_filter: Option<TargetFilter>,
     pub events: Vec<crate::types::statics::SuppressedTriggerEvent>,
 }
 
@@ -3444,6 +3511,46 @@ impl PendingZoneChangeDelivery {
         Ok(())
     }
 
+    /// CR 400.7: A zone change creates a new object, so the retained delivery
+    /// event slice — not current object state — identifies whether this exact
+    /// pre-delivery incarnation moved.
+    ///
+    /// Returns the terminal completion recorded by the delivery pipeline, or
+    /// derives it from this paused delivery's exact event slice once its
+    /// resolution has returned to the owning resume driver.
+    ///
+    /// A returned prompt is terminal for this delivery. If an older pause path
+    /// omitted the sidecar classification, its own retained events remain the
+    /// authoritative witness; do not inspect live object state or global event
+    /// history, either of which could observe a later incarnation.
+    pub fn terminal_completion_after_resume(&self) -> ZoneMoveCompletion {
+        self.terminal_completion.unwrap_or_else(|| {
+            Self::completion_from_delivery_events(self.member, &self.delivery_events)
+        })
+    }
+
+    /// Classifies one explicit delivery slice against its pre-delivery
+    /// incarnation. Callers use this when a completed move does not have a
+    /// separately captured terminal sidecar.
+    pub fn completion_from_delivery_events(
+        member: ObjectIncarnationRef,
+        delivery_events: &[GameEvent],
+    ) -> ZoneMoveCompletion {
+        if delivery_events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged { record, .. }
+                    if record
+                        .trigger_source_context()
+                        .is_some_and(|context| context.identity.reference == member)
+            )
+        }) {
+            ZoneMoveCompletion::Moved
+        } else {
+            ZoneMoveCompletion::Remained
+        }
+    }
+
     pub fn mark_counted(&mut self) {
         self.count = PausedZoneChangeDeliveryCount::AlreadyCounted;
     }
@@ -3571,7 +3678,7 @@ pub enum PersistentAxisMaterialization {
     /// (the `TokensCreated` axis). Carries NO per-cycle count because the per-cycle
     /// fodder count k is STRUCTURALLY ≡ 1: this stash is only registered when
     /// `materialize_object_growth_shortcut`'s `derived_fodder_class`
-    /// (engine.rs:1991-2005) found EXACTLY one new battlefield object per period
+    /// found EXACTLY one new battlefield object per period
     /// (a two+-object period returns `None` ⇒ no `Tokens` stash), so the boundary
     /// mint of `count: amount` == k·amount is EXACT. (Contrast `Counters`/`Life`,
     /// which carry a measured `per_cycle_delta` to handle k>1.)
@@ -3795,6 +3902,10 @@ pub struct PendingChooseOneOf {
     pub parent_targets: Vec<TargetRef>,
     #[serde(default)]
     pub context: super::ability::SpellContext,
+    /// CR 608.2c: Runtime tail retained until the final queued chooser selects
+    /// a branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<Box<super::ability::ResolvedAbility>>,
     /// CR 614.5 + CR 616.1f: replacement effects already applied to the event
     /// that produced this queued branch choice.
     #[serde(
@@ -4762,6 +4873,8 @@ pub struct PendingBatchZoneMoveRequest {
     pub cause: PendingBatchZoneChangeCause,
     #[serde(default, skip_serializing_if = "EtbTapState::is_unspecified")]
     pub enter_tapped: EtbTapState,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub enters_attacking: bool,
     #[serde(default)]
     pub enter_transformed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4776,6 +4889,8 @@ pub struct PendingBatchZoneMoveRequest {
     pub library_placement: Option<LibraryPosition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exile_duration: Option<Duration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exile_controller: Option<PlayerId>,
     #[serde(default)]
     pub exile_tracking: ZoneDeliveryExileTracking,
     #[serde(
@@ -4957,6 +5072,8 @@ pub enum BatchCompletion {
         source_id: Option<ObjectId>,
         rest_cards: Vec<ObjectId>,
         rest_destination: Zone,
+        #[serde(default)]
+        rest_order: DigRestOrder,
         publish_tracked_set: Vec<ObjectId>,
         continuation_targets: Vec<ObjectId>,
     },
@@ -5009,6 +5126,10 @@ pub enum BatchCompletion {
         /// Where the rest pile goes (`Library` => bottom in a reposition, else
         /// the destination zone).
         rest_destination: Zone,
+        /// Dig-only rest piles preserve this policy across a replacement pause.
+        /// Reveal-until uses the serde-default Preserve value.
+        #[serde(default)]
+        rest_order: DigRestOrder,
         /// CR 701.20b: reveal markers to clear once the cards have moved (the
         /// kept card plus the misses).
         clear_markers: Vec<ObjectId>,
@@ -5032,6 +5153,8 @@ pub enum BatchCompletion {
         selected: Vec<ObjectId>,
         destination: Zone,
         enter_tapped: EtbTapState,
+        #[serde(default)]
+        enters_attacking: bool,
     },
     /// CR 608.2c + CR 616.1: Every selected card of a deterministic mass Dig
     /// has settled. Publish only cards that actually reached `destination`, then
@@ -5269,6 +5392,20 @@ impl PendingEffectResolved {
             player_action: Some(PendingPlayerAction { player_id, action }),
         }
     }
+
+    /// Whether this completion has no work left to perform.
+    ///
+    /// A post-action that pauses hands back whatever of its completion has not
+    /// run yet. When that residue is empty there is nothing to re-park, and
+    /// parking it anyway would install a frame that only exists to do nothing.
+    pub fn is_noop(&self) -> bool {
+        self.post_actions.is_empty()
+            && matches!(
+                self.resolution_event,
+                PendingEffectResolutionEvent::Suppress
+            )
+            && self.player_action.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -5306,6 +5443,28 @@ pub struct PendingTokenBattlefieldEntry {
     /// The `TokenCreated` display name (the token's OWN name, not the copied source's).
     pub name: String,
     pub source_id: ObjectId,
+}
+
+/// CR 707.2 + CR 614.1c: everything the non-liminal copy-token entry tail still
+/// has to do for ONE token after its body is materialized — the copy exceptions,
+/// its entry counters, its entry events, and the rest of the batch.
+///
+/// Split out of the batch loop so the tail has exactly one implementation
+/// (`token_copy::finish_non_liminal_copy_token_entry`), reachable both inline and
+/// from the [`PendingCounterPostAction::ContinueCopyTokenEntryAfterAuraHost`]
+/// resume.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyTokenEntryTail {
+    pub owner: PlayerId,
+    pub copy: Box<CopyTokenSpec>,
+    pub enter_tapped: EtbTapState,
+    pub enter_with_counters: Vec<(CounterType, u32)>,
+    /// CR 306.5b + CR 614.1c: the entry counters the copy path seeds itself
+    /// (copied loyalty, "enters with N counters" self-replacements, and the
+    /// creating effect's own additions), already merged in application order.
+    pub etb_counters: Vec<(CounterType, u32)>,
+    /// How many tokens of this batch are still unstarted after this one.
+    pub remaining_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5372,6 +5531,19 @@ pub enum PendingCounterPostAction {
         controller: PlayerId,
         remaining_modifications: Vec<ContinuousModification>,
     },
+    /// CR 303.4f: finish a NON-liminal copy-token entry whose CR 303.4f Aura-host
+    /// choice paused it between the body's materialization and the rest of its
+    /// entry.
+    ///
+    /// Deliberately NOT `ApplyCopyTokenModificationsAndFinalize`: that action's
+    /// handler resumes a copy whose ETB counters have ALREADY been applied and
+    /// therefore skips `etb_counters` entirely, while this pause happens BEFORE
+    /// them — reusing it would silently drop a copied planeswalker's CR 306.5b
+    /// loyalty and every CR 614.1c "enters with counters" self-replacement.
+    ContinueCopyTokenEntryAfterAuraHost {
+        object_id: ObjectId,
+        tail: Box<CopyTokenEntryTail>,
+    },
     FinalizeCommittedLiminalTokenEntry {
         object_id: ObjectId,
         name: String,
@@ -5413,7 +5585,13 @@ pub enum PendingCounterPostAction {
         cause: Option<ObjectId>,
         source_id: Option<ObjectId>,
         duration: Option<Duration>,
+        #[serde(default)]
+        exile_controller: Option<PlayerId>,
         exile_tracking: ZoneDeliveryExileTracking,
+        /// CR 508.4: The completed battlefield entry joins combat after any
+        /// as-enters replacement choice has settled.
+        #[serde(default)]
+        enters_attacking: bool,
         /// Who drains `post_replacement_continuation` when this deferred tail
         /// finally runs (CR 614.12a). `#[serde(default)]` = `DeliveryTail`,
         /// matching every record minted before the field existed.
@@ -5430,6 +5608,48 @@ pub enum PendingCounterPostAction {
     },
     MarkRenowned {
         object_id: ObjectId,
+    },
+    /// CR 701.34a + CR 614.1a: The proliferate action whose counter placement
+    /// paused on a replacement choice has finished; continue with the actions
+    /// the originating effect still owes.
+    ///
+    /// The `Proliferate` direct-choice frame is deliberately NOT resident while
+    /// this is parked. Its handler takes the frame before applying counters, so
+    /// a counter-addition pause can never strand it on the stack (issue #7384);
+    /// continuing pushes a fresh frame only if another target choice is needed.
+    ///
+    /// CR 608.2c ordering: this is installed at index 0 of the completion's
+    /// `post_actions`, so anything a replacement's execute ability later appends
+    /// through `append_pending_counter_post_actions` runs AFTER the next
+    /// proliferate action. That is correct for the appenders that exist — they
+    /// are entry/delivery tails of the counter placement that already finished,
+    /// and CR 701.34a makes each proliferate action a separate event — but a
+    /// future appender that belongs to the SAME counter-placement event would
+    /// need to be ordered ahead of this instead.
+    ///
+    /// `add-engine-variant` gate, recorded because the verdict is binding:
+    /// * Stage 1 DOES_NOT_EXIST — no post-action resumes a pausable proliferate,
+    ///   and the declared alternative (`replace_active_proliferate_frame`) is
+    ///   structurally unusable here, as its own doc note records.
+    /// * Stage 2 EXTEND_OK — the `Continue*` members share a name root but carry
+    ///   structurally disjoint payloads for distinct suspended operations, with
+    ///   no `(op, scope, target)` axis to parameterize over. This enum is a
+    ///   tagged union of suspended-work families — the `ResolutionFrame` shape —
+    ///   not a parameterization gap.
+    /// * Stage 3 WITHIN_SECTION — the payload lies wholly inside CR 701.34, and
+    ///   this is a resumption layer, not a leaf-reference layer.
+    ///
+    /// Serialized surface: this enum reaches persisted state through
+    /// `PendingEffectResolved::post_actions`, carried on the
+    /// `RESOLUTION_STATE_WIRE_VERSION` = 2 frame wire. A new externally-tagged
+    /// variant is backward compatible — no save written before it can contain
+    /// one, so existing saves still decode — but NOT forward compatible: a build
+    /// predating this variant cannot decode a save taken mid-paused-proliferate.
+    /// That is the same one-way contract `MarkMonstrous`, `MarkRenowned` and
+    /// `EmitCommittedCopyTokenEntry` shipped under, so the wire version is
+    /// deliberately not bumped.
+    ContinueProliferateActions {
+        pending: PendingProliferateActions,
     },
 }
 
@@ -5983,6 +6203,18 @@ pub struct ManaAbilityCostParent {
     pub cursor: Box<ManaAbilityCostCursor>,
     #[serde(default)]
     pub lifecycle: ManaAbilityCostParentLifecycle,
+    /// CR 603.2 + CR 603.3b: Index into the live reducer action's `events`
+    /// vector marking where this parent frame's own unscanned cost events
+    /// begin, while the lifecycle is `Synchronous`. Each nested child entry
+    /// prepares a fresh local snapshot whose ledger is extended with
+    /// `events[current_action_event_start..]`, so a later pausing child
+    /// inherits the parent prefix plus every earlier synchronously completed
+    /// sibling. It is never consulted once the parent becomes `Suspended`,
+    /// because the pause has already made that prefix durable, so it is not
+    /// serialized. Distinct from `ManaAbilityCostCursor::current_action_deferred_start`,
+    /// which indexes the local ledger rather than the event vector.
+    #[serde(skip)]
+    pub current_action_event_start: usize,
 }
 
 /// CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: The unpaid suffix of an
@@ -6030,16 +6262,18 @@ pub struct ManaAbilityCostCursor {
     /// before the cost cursor advances to the next component.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_sacrifice_remaining: Option<Vec<ObjectId>>,
-    /// CR 603.2 + CR 603.3b: Cost events produced before a replacement-choice
-    /// pause cannot reach the ordinary post-action pipeline. Keep them with
-    /// their typed payment root so observers are collected exactly once when
-    /// that root completes.
+    /// CR 603.2 + CR 603.3b: Frame-local cost events produced before a
+    /// replacement-choice pause cannot reach the ordinary post-action
+    /// pipeline. Each cursor owns only its own unscanned events; an ancestor's
+    /// ledger remains opaque in `parent` until a suspended child moves its
+    /// local ledger upward. Only the ultimate parentless cursor may settle the
+    /// accumulated batch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_cost_events: Vec<GameEvent>,
-    /// Ephemeral split point for the active reducer action. It lets a newly
-    /// nested typed root prepend its parent's unscanned batch without copying
-    /// the local events this root already captured on pause. The split is
-    /// consumed before state is returned to a player, so it is not serialized.
+    /// Ephemeral split point into this cursor's frame-local ledger for the
+    /// active reducer action. It lets an immediately re-paused ultimate root
+    /// retain its already captured local suffix while inherited root events
+    /// move in front of that suffix without duplication. It is not serialized.
     #[serde(skip)]
     pub current_action_deferred_start: usize,
     /// A nested costed mana source owns this parent until it completes. This
@@ -6198,18 +6432,13 @@ pub enum PendingCostMoveResume {
         resolved: Box<ResolvedAbility>,
         ability_index: usize,
     },
-    /// CR 702.21a + CR 122.1 + CR 616.1: Ward's player-counter unless-cost
-    /// (`AbilityCost::GetPlayerCounters`) paused on a replacement choice for
-    /// the `AddCounter` event it attempted (e.g. an optional "you may
-    /// prevent a player from getting counters" replacement, or a CR 616.1
-    /// ordering choice among several applicable replacements). Retains the
-    /// full `WaitingFor::UnlessPayment` payload so the choice's resolution —
-    /// Applied (paid) via the `ReplacementDelivered` boundary, or Prevented
-    /// (failed) via the `ReplacementPrevented` boundary — can drive the same
-    /// paid/failed tail `handle_unless_payment` uses for every other cost
-    /// shape, instead of resetting to bare priority with the Ward-guarded
-    /// ability's fate undetermined.
-    GetPlayerCountersUnlessPayment {
+    /// CR 118.12 + CR 122.1 + CR 616.1: A counter-addition unless-cost paused
+    /// on a replacement choice. Covers Ward's player-counter payment and the
+    /// source-counter `EffectCost` used by cumulative upkeep. Retains the full
+    /// `WaitingFor::UnlessPayment` payload so Applied completes payment and a
+    /// prevented placement fails it instead of orphaning the pending ability.
+    #[serde(alias = "GetPlayerCountersUnlessPayment")]
+    CounterAdditionUnlessPayment {
         #[serde(deserialize_with = "crate::types::ability::deserialize_ability_cost_compat")]
         cost: AbilityCost,
         pending_effect: Box<ResolvedAbility>,
@@ -6220,6 +6449,50 @@ pub enum PendingCostMoveResume {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remaining: Vec<PlayerId>,
     },
+    /// CR 701.9b + CR 118.12 + CR 616.1: a RANDOM unless-discard that paused on
+    /// a replacement choice (Library of Leng, Madness) partway through its batch.
+    ///
+    /// Two things would otherwise be lost, because both live only in the paying
+    /// stack frame that returns when the choice is raised:
+    ///
+    ///   * the unless-payment itself — nothing else records
+    ///     `pending_effect` / `trigger_event` / `effect_description` /
+    ///     `remaining`, so the guarded ability is left neither paid nor unpaid
+    ///     and the game resets to bare priority with its fate undetermined;
+    ///   * the batch cursor — the picks still owed after the paused card.
+    ///
+    /// The player-CHOSEN sibling needs no analogue: it parks in
+    /// `WaitingFor::WardDiscardChoice`, whose own re-prompt loop owns the
+    /// remainder. A random discard raises no prompt, so nothing else can own it.
+    ///
+    /// Boxed deliberately. `GameState` is moved by value through the
+    /// phase-server action + AI path and is guarded by a hard size budget
+    /// (`game_state_size.rs`); this payload is large and populated only during
+    /// a replacement pause, which is exactly the shape that guard says to box
+    /// rather than widen the budget for.
+    RandomDiscardUnlessPayment(Box<RandomDiscardUnlessPaymentResume>),
+}
+
+/// CR 701.9b + CR 118.12 + CR 616.1: payload of
+/// [`PendingCostMoveResume::RandomDiscardUnlessPayment`]. Split into its own
+/// boxed struct purely to keep `PendingCostMoveResume` — and therefore
+/// `GameState` — inside its stack budget.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RandomDiscardUnlessPaymentResume {
+    pub pending_effect: Box<ResolvedAbility>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_event: Option<GameEvent>,
+    /// The paying player — the unless-payer, not necessarily the ability's
+    /// controller.
+    pub payer: PlayerId,
+    /// Discard source, so resumed picks keep their replacement provenance.
+    pub source_id: ObjectId,
+    /// Cards still un-picked when the batch paused.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remaining_eligible: Vec<ObjectId>,
+    /// Picks still owed after the paused card settles.
+    #[serde(default)]
+    pub remaining_count: u32,
 }
 
 /// CR 601.2h + CR 616.1: Resume paying a sequential cost after a replacement
@@ -7303,6 +7576,132 @@ pub struct ReplacementCandidateSummary {
     pub description: String,
 }
 
+/// CR 603.3b + CR 603.7: One completed normal-plus-delayed trigger collection
+/// for a single raw event batch, produced before any live occurrence is claimed.
+///
+/// Generic and phase processing consume this immediately; the triggered-mana
+/// continuation may instead persist it undispatched across a pause, so a later
+/// action partitions already-materialized contexts rather than rematching raw
+/// events. It deliberately carries no live action ordinal: occurrence identities
+/// are only meaningful against the reducer event vector of the action that
+/// claimed them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CollectedTriggerContextBatch {
+    /// The combined normal and delayed contexts in APNAP rank/timestamp order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contexts: Vec<crate::game::triggers::PendingTriggerContext>,
+    /// The raw logical delayed batch, stored exactly once for durable replay and
+    /// accounting. Immediate consumers drop it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delayed_events: Vec<GameEvent>,
+    /// Raw identities consumed by the delayed matcher for this batch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delayed_consumed: Vec<crate::game::triggers::ConsumedTriggerEventOccurrence>,
+    /// Whether the caller's already-observed normal seed was non-empty. The
+    /// closing processors clear post-collection transients only in that case.
+    #[serde(default)]
+    pub normal_was_non_empty: bool,
+}
+
+/// CR 605.3b + CR 608.2d: The activated mana ability's own colour prompt,
+/// latched exactly as the mana frame had already built it before the
+/// triggered-mana fixed point suspended that frame.
+///
+/// This wait belongs to the outer activated mana ability, never to an accepted
+/// triggered-mana body: the fixed point reconstructs it verbatim rather than
+/// re-deriving an option set against a board the accepted triggers may have
+/// changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ManaColorChoiceResume {
+    pub player: PlayerId,
+    pub choice: ManaChoicePrompt,
+    pub context: ManaChoiceContext,
+}
+
+/// CR 605.4a: What resumes once every accepted triggered-mana occurrence in one
+/// completed mana frame has reached a terminal disposition.
+///
+/// Exactly one of the three shapes a completed frame can own. `Parent` is a
+/// nested child returning to its suspended cursor; `Root` is the completed root
+/// frame's own resume root; `ColorChoice` is the already-built prompt above.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub(crate) enum ManaTriggerFixedPointResume {
+    /// A nested child frame: its suspended parent cursor is the authority and
+    /// no wait is reconstructed here.
+    Parent,
+    /// The completed root mana frame's own activation resume root, together
+    /// with the mana source's controller — `resume_mana_ability_root`'s own
+    /// first argument, which its catch-all arm needs to rebuild the waiting
+    /// state. It travels with the root because a resumed accepted occurrence
+    /// no longer has the payment cursor that supplied it.
+    Root {
+        player: PlayerId,
+        resume: Box<ManaAbilityResume>,
+    },
+    /// The root frame's already-built `ChooseManaColor` wait.
+    ColorChoice(Box<ManaColorChoiceResume>),
+}
+
+/// CR 605.4a: Which existing interaction the current accepted triggered-mana
+/// occurrence is paused on. Private control state, never a wire discriminator:
+/// the public interaction surface is the ordinary `WaitingFor` value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub(crate) enum TriggeredManaStage {
+    /// CR 700.2e: the controller is choosing which other player picks modes.
+    ChoosingModalChooser,
+    /// The chosen player is selecting modes.
+    ChoosingModes,
+    /// The selected body is executing and paused on one whitelisted
+    /// optional / optional-for / repeat / replacement interaction.
+    ResolvingBody,
+}
+
+/// CR 605.4a + CR 603.12a: The authoritative continuation for a classifier-
+/// accepted triggered mana ability that paused mid-resolution.
+///
+/// It owns only "after this immediate trigger finishes under this exact
+/// rules-execution node, partition these already-collected emission batches,
+/// then run this accepted tail, then resume this exact mana frame". Every inner
+/// operation (resolution frames, optional/repeat frames, pending replacement or
+/// cost-move state, and `waiting_for` itself) keeps its existing owner.
+///
+/// This carrier is trusted persistence authority: it can hold hidden object
+/// identities, last-known source snapshots, controller-only event batches, and
+/// the current rules-execution node. It is redacted from every client
+/// projection by `visibility.rs` and `derived_views.rs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TriggeredManaResume {
+    /// The complete accepted work item currently executing.
+    pub current: Box<crate::game::triggers::PendingTriggerContext>,
+    /// The occurrence-local production override captured by the auto-tap
+    /// planner for this exact `TapsForMana` occurrence, if any. The transient
+    /// override map is cleared before an interactive trigger can resume, so it
+    /// must travel with the occurrence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_override: Option<ProductionOverride>,
+    /// CR 605.4a: The one `RulesExecutionNodeKind::TriggeredMana` node for this
+    /// occurrence. Required, not optional: every classifier-accepted context
+    /// yields exactly one source incarnation, and every pause of this
+    /// occurrence rebinds this exact ref.
+    pub rules_execution_node: RulesExecutionNodeRef,
+    /// Accepted work that has not been made current yet, in collection order.
+    /// Tail members deliberately have no node until they become current.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_tail: Vec<crate::game::triggers::PendingTriggerContext>,
+    /// Already-collected, still-undispatched emission batches produced by the
+    /// current occurrence across its pauses. Stored before the live occurrences
+    /// were claimed, so a later action partitions materialized contexts instead
+    /// of rematching raw events.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collected_batches: Vec<CollectedTriggerContextBatch>,
+    /// The suspended mana frame this fixed point resumes exactly once.
+    pub outer_resume: ManaTriggerFixedPointResume,
+    /// Which existing interaction owns the current pause.
+    pub stage: TriggeredManaStage,
+}
+
 /// CR 603.3b: One controller's group within an in-flight trigger ordering
 /// pass. `ordered = true` once the controller has submitted their permutation
 /// (or once the group is single-trigger and trivially in final order, or once
@@ -7405,6 +7804,30 @@ pub struct PileResult {
 ///
 /// Adding a new alternative-cost keyword (e.g., Madness CR 702.35a, Spectacle
 /// CR 702.137a) is a compile error at every dispatch site until handled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AlternativeAdditionalCostDescription {
+    /// CR 702.119b: The quality named by Emerge from [quality].
+    EmergeSacrifice { quality: EmergeSacrificeQuality },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum EmergeSacrificeQuality {
+    Artifact,
+    Battle,
+    Card,
+    Creature,
+    Enchantment,
+    Instant,
+    Kindred,
+    Land,
+    Permanent,
+    Planeswalker,
+    Sorcery,
+    Subtype(String),
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 #[serde(tag = "type")]
 pub enum AlternativeCastKeyword {
@@ -7413,8 +7836,9 @@ pub enum AlternativeCastKeyword {
     /// CR 702.74a: ETB + sacrifice trigger fires when the resolving permanent
     /// was cast for its evoke cost (CR 702.74b).
     Evoke,
-    /// CR 702.119a-c: Emerge alternative cost requires sacrificing a creature
-    /// while casting and reduces the emerge cost by that creature's mana value.
+    /// CR 702.119a-c: Emerge alternative cost requires sacrificing the specified
+    /// permanent quality while casting and reduces the emerge cost by that
+    /// permanent's mana value.
     Emerge,
     /// CR 702.109a: Cast for the dash cost — the resolving permanent gains haste
     /// and is returned to its owner's hand at the next end step.
@@ -7873,6 +8297,384 @@ fn migrate_legacy_batched_zone_change_trigger_fired(
                 );
             }
         }
+    }
+    Ok(())
+}
+
+/// CR 400.7 + CR 603.10a: zone-change triggers use the exact source at the
+/// event, rather than a same-id object from a later zone change. Promotes
+/// legacy payload-only trigger lists carried by persisted zone-change snapshots
+/// before the typed state can expose them to a serializer. A record's own
+/// source context is authoritative; an absent live-record context can use only
+/// the exact initial printed base set of the persisted object with the same map
+/// key and object id. Journal snapshots never receive that fallback.
+pub(crate) fn migrate_legacy_zone_change_trigger_provenance(
+    value: &mut serde_json::Value,
+    additional_live_event_roots: &[&str],
+) -> Result<(), String> {
+    let state = value
+        .as_object_mut()
+        .ok_or_else(|| "persisted game state must be a JSON object".to_string())?;
+    if !state
+        .get("objects")
+        .and_then(serde_json::Value::as_object)
+        .is_some()
+    {
+        return Err("persisted game state objects must be an object".to_string());
+    }
+    // Keep the serialized object map in place without cloning it. Removing it
+    // temporarily lets the mutable record walk borrow `state` while fallback
+    // lookups retain an immutable view of the original persisted objects.
+    let objects_value = state
+        .remove("objects")
+        .expect("the checked persisted game state retains its object map");
+    let migration = {
+        let objects = objects_value
+            .as_object()
+            .expect("the checked persisted object map remains an object");
+        let mut trigger_bases = HashMap::new();
+
+        (|| {
+            prune_ceased_source_legacy_trigger_payloads(state, objects)?;
+
+            for field in [
+                "created_tokens_this_turn",
+                "sacrificed_permanents_this_turn",
+                "zone_changes_this_turn",
+            ] {
+                let Some(records) = state.get_mut(field) else {
+                    continue;
+                };
+                let records = records
+                    .as_array_mut()
+                    .ok_or_else(|| format!("{field} must be an array"))?;
+                for record in records {
+                    migrate_persisted_zone_change_trigger_record(
+                        record,
+                        objects,
+                        &mut trigger_bases,
+                        true,
+                    )?;
+                }
+            }
+
+            visit_persisted_live_zone_changed_records(
+                state,
+                additional_live_event_roots,
+                &mut |record| {
+                    migrate_persisted_zone_change_trigger_record(
+                        record,
+                        objects,
+                        &mut trigger_bases,
+                        true,
+                    )
+                },
+            )?;
+
+            if let Some(journal) = state.get_mut("resolved_rules_journal") {
+                visit_persisted_journal_zone_change_trigger_records(
+                    journal,
+                    objects,
+                    &mut trigger_bases,
+                )?;
+            }
+            Ok(())
+        })()
+    };
+    state.insert("objects".to_string(), objects_value);
+    migration
+}
+
+/// CR 400.7 + CR 603.3: a ceased source cannot be reconstructed through a
+/// same-id object lookup, while an already-stacked triggered ability keeps its
+/// captured ability independently of that source. Historical ledgers and stack
+/// entries may therefore discard only an all-payload legacy trigger list for a
+/// source which no longer exists. Live event carriers remain strict below: they
+/// can still need the exact trigger occurrence to finish trigger collection.
+fn prune_ceased_source_legacy_trigger_payloads(
+    state: &mut serde_json::Map<String, serde_json::Value>,
+    objects: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    for field in [
+        "created_tokens_this_turn",
+        "sacrificed_permanents_this_turn",
+        "zone_changes_this_turn",
+    ] {
+        let Some(records) = state.get_mut(field) else {
+            continue;
+        };
+        let records = records
+            .as_array_mut()
+            .ok_or_else(|| format!("{field} must be an array"))?;
+        for record in records {
+            prune_ceased_source_legacy_trigger_payload(record, objects)?;
+        }
+    }
+
+    for field in ["stack", "resolving_stack_entry"] {
+        let Some(entries) = state.get_mut(field) else {
+            continue;
+        };
+        visit_persisted_triggered_stack_entry_records(entries, &mut |record| {
+            prune_ceased_source_legacy_trigger_payload(record, objects)
+        })?;
+    }
+    Ok(())
+}
+
+fn prune_ceased_source_legacy_trigger_payload(
+    record: &mut serde_json::Value,
+    objects: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    let record = record
+        .as_object_mut()
+        .ok_or_else(|| "persisted zone-change record must be an object".to_string())?;
+    if !matches!(
+        record.get("trigger_source_context"),
+        Some(serde_json::Value::Null) | None
+    ) {
+        return Ok(());
+    }
+    let object_id: ObjectId = record
+        .get("object_id")
+        .cloned()
+        .ok_or_else(|| "persisted zone-change record has no object id".to_string())
+        .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))?;
+    if objects.contains_key(&object_id.0.to_string()) {
+        return Ok(());
+    }
+    let entries = record
+        .get("trigger_definitions")
+        .cloned()
+        .map(serde_json::from_value::<Vec<TriggerEntry>>)
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .unwrap_or_default();
+    if legacy_trigger_entry_list(&entries).map_err(str::to_string)? {
+        record.insert(
+            "trigger_definitions".to_string(),
+            serde_json::Value::Array(Vec::new()),
+        );
+    }
+    Ok(())
+}
+
+/// Visits `ZoneChanged` records held by a current triggered stack entry. This
+/// intentionally does not recurse through generic live carriers: only a
+/// triggered ability already on the stack has completed trigger collection.
+fn visit_persisted_triggered_stack_entry_records(
+    value: &mut serde_json::Value,
+    visit: &mut impl FnMut(&mut serde_json::Value) -> Result<(), String>,
+) -> Result<(), String> {
+    match value {
+        serde_json::Value::Array(entries) => {
+            for entry in entries {
+                visit_persisted_triggered_stack_entry_records(entry, visit)?;
+            }
+        }
+        serde_json::Value::Object(entry) => {
+            let Some(kind) = entry
+                .get_mut("kind")
+                .and_then(serde_json::Value::as_object_mut)
+            else {
+                return Ok(());
+            };
+            if kind.get("type").and_then(serde_json::Value::as_str) != Some("TriggeredAbility") {
+                return Ok(());
+            }
+            let Some(event) = kind
+                .get_mut("data")
+                .and_then(serde_json::Value::as_object_mut)
+                .and_then(|data| data.get_mut("trigger_event"))
+            else {
+                return Ok(());
+            };
+            let Some(event) = event.as_object_mut() else {
+                return Ok(());
+            };
+            if let Some(record) = serialized_zone_changed_record_mut(event) {
+                visit(record)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// The only persisted object fields that can prove a context-free legacy
+/// record was one of its initial printed trigger slots.
+#[derive(Deserialize)]
+struct PersistedTriggerBase {
+    id: ObjectId,
+    #[serde(default = "initial_trigger_base_set_instance")]
+    trigger_base_set_instance: TriggerBaseSetInstanceRef,
+    #[serde(default)]
+    base_trigger_definitions: Vec<TriggerDefinition>,
+}
+
+const fn initial_trigger_base_set_instance() -> TriggerBaseSetInstanceRef {
+    TriggerBaseSetInstanceRef::INITIAL
+}
+
+fn migrate_persisted_zone_change_trigger_record(
+    record: &mut serde_json::Value,
+    objects: &serde_json::Map<String, serde_json::Value>,
+    trigger_bases: &mut HashMap<ObjectId, PersistedTriggerBase>,
+    allow_object_fallback: bool,
+) -> Result<(), String> {
+    let record = record
+        .as_object_mut()
+        .ok_or_else(|| "persisted zone-change record must be an object".to_string())?;
+    let object_id: ObjectId = record
+        .get("object_id")
+        .cloned()
+        .ok_or_else(|| "persisted zone-change record has no object id".to_string())
+        .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))?;
+    let mut entries = record
+        .get("trigger_definitions")
+        .cloned()
+        .map(serde_json::from_value::<Vec<TriggerEntry>>)
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .unwrap_or_default();
+    let has_legacy_entries = legacy_trigger_entry_list(&entries).map_err(str::to_string)?;
+
+    let migrated = match record.get("trigger_source_context") {
+        Some(serde_json::Value::Null) | None => {
+            if !has_legacy_entries {
+                return Ok(());
+            }
+            if !allow_object_fallback {
+                return Err(
+                    "legacy journal zone-change record has no record-owned trigger source context"
+                        .to_string(),
+                );
+            }
+            let object_key = object_id.0.to_string();
+            let object_value = objects.get(&object_key).ok_or_else(|| {
+                "legacy zone-change record has no same-id persisted object base set".to_string()
+            })?;
+            let object = match trigger_bases.entry(object_id) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => entry.insert(
+                    serde_json::from_value(object_value.clone())
+                        .map_err(|error| error.to_string())?,
+                ),
+            };
+            if object.id != object_id {
+                return Err(
+                    "legacy zone-change record object map key does not match serialized object id"
+                        .to_string(),
+                );
+            }
+            if object.trigger_base_set_instance != TriggerBaseSetInstanceRef::INITIAL {
+                return Err(
+                    "legacy zone-change record requires the initial printed trigger base set"
+                        .to_string(),
+                );
+            }
+            materialize_legacy_printed_trigger_entries(
+                &mut entries,
+                object.base_trigger_definitions.as_slice(),
+                TriggerBaseSetInstanceRef::INITIAL,
+            )
+            .map_err(str::to_string)?;
+            entries
+        }
+        Some(context_value) => {
+            let context: TriggerSourceContext =
+                serde_json::from_value(context_value.clone()).map_err(|error| error.to_string())?;
+            if context.identity.reference.object_id != object_id {
+                return Err(
+                    "zone-change trigger source context object id does not match its record"
+                        .to_string(),
+                );
+            }
+            if legacy_trigger_entry_list(&context.trigger_entries).map_err(str::to_string)? {
+                return Err(
+                    "zone-change trigger source context has unmaterialized trigger entries"
+                        .to_string(),
+                );
+            }
+            if entries.len() != context.trigger_entries.len() {
+                return Err(
+                    "zone-change record trigger list disagrees with its source context".to_string(),
+                );
+            }
+            if has_legacy_entries {
+                if !entries.iter().zip(&context.trigger_entries).all(
+                    |(record_entry, context_entry)| {
+                        record_entry.definition == context_entry.definition
+                    },
+                ) {
+                    return Err(
+                        "zone-change record trigger list disagrees with its source context"
+                            .to_string(),
+                    );
+                }
+                context.trigger_entries
+            } else {
+                if entries != context.trigger_entries {
+                    return Err(
+                        "zone-change record trigger occurrence does not match its source context"
+                            .to_string(),
+                    );
+                }
+                return Ok(());
+            }
+        }
+    };
+
+    record.insert(
+        "trigger_definitions".to_string(),
+        serde_json::to_value(migrated).map_err(|error| error.to_string())?,
+    );
+    Ok(())
+}
+
+/// CR 400.7 + CR 603.10a: journal snapshots are immutable historical
+/// authority. They may use only an exact record-owned context, never a current
+/// object's printed base set.
+fn visit_persisted_journal_zone_change_trigger_records(
+    value: &mut serde_json::Value,
+    objects: &serde_json::Map<String, serde_json::Value>,
+    trigger_bases: &mut HashMap<ObjectId, PersistedTriggerBase>,
+) -> Result<(), String> {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                visit_persisted_journal_zone_change_trigger_records(value, objects, trigger_bases)?;
+            }
+        }
+        serde_json::Value::Object(object) => {
+            if let Some(record) = serialized_zone_changed_record_mut(object) {
+                migrate_persisted_zone_change_trigger_record(
+                    record,
+                    objects,
+                    trigger_bases,
+                    false,
+                )?;
+                return Ok(());
+            }
+            if let Some(record) = object.get_mut("zone_change_record") {
+                migrate_persisted_zone_change_trigger_record(
+                    record,
+                    objects,
+                    trigger_bases,
+                    false,
+                )?;
+            }
+            for (key, value) in object {
+                if key != "zone_change_record" {
+                    visit_persisted_journal_zone_change_trigger_records(
+                        value,
+                        objects,
+                        trigger_bases,
+                    )?;
+                }
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -9354,6 +10156,56 @@ fn migrate_legacy_mana_target_roles_in_value(
     Ok(())
 }
 
+/// Upgrade the pre-`SetTapState` tap-family effects at the persisted-state
+/// boundary. This is deliberately scoped to `effect` payloads: `Untap` is
+/// still meaningful in other serialized enums (for example, a phase or a
+/// target property), and current card data must continue to reject obsolete
+/// effect variants rather than silently accepting them.
+fn migrate_legacy_tap_effects(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                migrate_legacy_tap_effects(value);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            if let Some(effect) = object.get_mut("effect") {
+                migrate_legacy_tap_effect(effect);
+            }
+            for value in object.values_mut() {
+                migrate_legacy_tap_effects(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn migrate_legacy_tap_effect(effect: &mut serde_json::Value) {
+    let Some(effect) = effect.as_object_mut() else {
+        return;
+    };
+    let Some((scope, state)) = effect
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|effect_type| match effect_type {
+            "Tap" => Some(("Single", "Tap")),
+            "Untap" => Some(("Single", "Untap")),
+            "TapAll" => Some(("All", "Tap")),
+            "UntapAll" => Some(("All", "Untap")),
+            _ => None,
+        })
+    else {
+        return;
+    };
+
+    effect.insert(
+        "type".to_string(),
+        serde_json::Value::String("SetTapState".to_string()),
+    );
+    effect.insert("scope".to_string(), serde_json::json!({ "type": scope }));
+    effect.insert("state".to_string(), serde_json::json!({ "type": state }));
+}
+
 fn delayed_trigger_install_command(
     entry: &serde_json::Value,
 ) -> Option<&serde_json::Map<String, serde_json::Value>> {
@@ -9421,6 +10273,7 @@ fn reject_zero_bound_shortcut_offer(state: &GameState) -> Result<(), String> {
     if let WaitingFor::LoopShortcut {
         schema,
         certificate,
+        proposer,
         ..
     } = &state.waiting_for
     {
@@ -9428,6 +10281,73 @@ fn reject_zero_bound_shortcut_offer(state: &GameState) -> Result<(), String> {
             return Err(
                 "persisted LoopShortcut offer states max_iterations 0, which CR 732.2a admits \
                  no legally takeable sequence for"
+                    .to_string(),
+            );
+        }
+        // THE PAIR NO PRODUCER MINTS. `is_bounded()` says the offer's producer NARROWED the
+        // repetition bound below `MAX_SHORTCUT_CYCLES`; `loop_period_controller()` says a driving
+        // period belonging to THIS proposer is recorded. The engine's three `LoopShortcut` mints
+        // partition that cross-product and none of them lands in this cell:
+        //
+        //   * the object-growth mint (`reconcile_terminal_result`, schema from
+        //     `try_offer_object_growth_shortcut`) and the Path A drain mint
+        //     (`interactive_loop_bridge`) both hand `build_shortcut_schema` the global
+        //     `MAX_SHORTCUT_CYCLES` verbatim, so neither is EVER `is_bounded()` — the growth mint
+        //     is the one that REQUIRES its proposer's own period, and it is unbounded by
+        //     construction;
+        //   * the bounded mint (`certified_bounded_cycle_offer`) is `is_bounded()` by construction
+        //     — it refuses `NoNarrowedLegalCount` unless `(1..MAX_SHORTCUT_CYCLES)` contains the
+        //     bound — but its caller's gate (1b) (`bounded_cycle_offer`) returns
+        //     `BoundedOfferRefusal::ProposerHasDrivingPeriod` while that seat's own period is
+        //     accumulating, so it can never mint INTO this cell;
+        //   * `visibility.rs`'s per-viewer re-wrap copies `max_iterations` verbatim off an offer
+        //     one of the three already minted.
+        //
+        // No live beat can join the two afterwards either. Nothing assigns `schema` or
+        // `max_iterations` in place anywhere in the engine, so an unbounded offer cannot ACQUIRE a
+        // narrowed bound; and every writer that GROWS `last_loop_action_sequence` is priority-side
+        // — the `TapLandForMana` / `ActivateManaSource` / `ActivateAbility` `WaitingFor::Priority`
+        // arms (`accumulate_loop_action_step` and the token-creating `vec![step]` beside it) and
+        // the cast finalize. A pending offer reaches none of them: its only reducer arms are
+        // `DeclareShortcut` and `DeclineShortcut`.
+        //
+        // WHAT IT COSTS TO ACCEPT IT: `materialize_fixed_shortcut` (SITE C) dispatches on period
+        // ownership ALONE and early-returns the accepted proposal into
+        // `materialize_object_growth_shortcut`, committing ZERO of the agreed cycles — the silent
+        // misroute gate (1b)'s own doc block exists to prevent, entering through the restore door
+        // instead of the producer door.
+        //
+        // ⚠ DELIBERATELY CARRIES NO `CR` ANNOTATION, and the measurement for that absence travels
+        // with it so a later reader does not "fix" the omission. CR 732.2a's own Example is a
+        // proposer repeating THEIR OWN activation a SPECIFIED 999,999 more times — bounded, own
+        // period — so this state class is LEGAL AT THE TABLE and the rules license nothing here to
+        // enforce. What is violated is a producer-reachability fact about this engine, not a rule.
+        // Same call, same reason, same file family as `handle_declare_shortcut`'s IMPLEMENTATION
+        // BUDGET BOUND note: "a maintainer applying the CR 732.2a iff to a branch that wears a CR
+        // number will either trust it wrongly or delete it wrongly."
+        //
+        // BOTH conjuncts are required. Own period ALONE is the object-growth route's own admission
+        // condition, so rejecting it would refuse every legitimate growth capture; a narrowed bound
+        // ALONE is the ordinary bounded offer.
+        //
+        // ⚠ AFTER THE ZERO-BOUND CHECK, DELIBERATELY: `0 < MAX_SHORTCUT_CYCLES`, so a zero bound is
+        // ALSO `is_bounded()` and hoisting this block would relabel a corrupt zero with the wrong
+        // invariant. Observed, not assumed — see the zero-bound-plus-own-period arm of
+        // `a_wire_bounded_offer_carrying_the_proposers_own_period_fails_the_load`.
+        //
+        // ⚠ THIS BLOCK COVERS ONE OF THE HARM'S TWO WIRE HOSTS, and unlike the zero-bound sibling
+        // above the residual is NOT empty. A persisted `WaitingFor::RespondToShortcut { proposal }`
+        // whose `proposal.proposer` owns the recorded period reaches the SAME SITE C misroute via
+        // `apply_confirmed_shortcut`. No bound-keyed conjunct can see it — `ShortcutProposal`
+        // carries no `schema`/`max_iterations` at all (the scoping note on the zero-bound guard
+        // above). The candidate discriminator on that host is `proposal.per_cycle.is_some()`; it is
+        // filed rather than shipped because "`per_cycle: Some` ⟺ the bounded mint" is not yet
+        // measured per branch, and a guard on an inherited marker is what this seam must not carry.
+        if schema.is_bounded() && state.loop_period_controller() == Some(*proposer) {
+            return Err(
+                "persisted LoopShortcut offer narrows its repetition bound while recording the \
+                 proposer's own driving period; no producer mints that pair, and accepting it \
+                 routes the agreed cycles to the object-growth materializer, committing none"
                     .to_string(),
             );
         }
@@ -9734,6 +10654,32 @@ impl PersistedGameState {
         // one (it is lowered to the activator at creation), so this only sanitizes
         // corrupt/forged snapshots and closes the fail-open path in both consumers.
         state.drop_unresolved_source_controller_restrictions();
+        // Issue #5466: `rng` is `#[serde(skip)]`, so a decode leaves the LIVE ChaCha20 stream at
+        // word 0 while the serialized high-water `rng_word_pos` keeps its saved offset. A
+        // `capture_rng_word_pos` on that state — the production library shuffle performs one, see
+        // `game/library.rs` — then `.expect`-panics `HighWaterRegression { current: <saved>,
+        // requested: 0 }`, and any shuffle before it replays entropy the game already consumed.
+        //
+        // Rehydrating HERE means every caller of the chokepoint inherits the repair instead of
+        // owing its own. It does NOT make the load paths equivalent: what each caller does
+        // AFTERWARDS is that caller's own policy, and they differ.
+        //   * `engine-wasm`'s `restore_game_state` still calls `rehydrate_rng` itself, so that
+        //     path now runs it twice. Harmless — `rehydrate_rng` is idempotent, both of its
+        //     statements being absolute assignments from persisted fields.
+        //   * `engine-wasm`'s `resume_multiplayer_host_state` deliberately re-seeds and sets
+        //     `rng_word_pos = 0` so a resumed host does not replay saved randomness. That is a
+        //     resume policy choice, not a bug, and it leaves live position and high-water agreed.
+        //   * `server-core`'s `GameSession::from_persisted` re-seeds `rng` from fresh entropy and
+        //     zeroes `rng_word_pos` in the same step, so it lands on the same agreed live-0 /
+        //     high-water-0 pair as the host resume above. It therefore DISCARDS the position this
+        //     call just restored, deliberately: a resumed server game must not replay randomness
+        //     the pre-save game already consumed. That makes this call's rehydrate inert on the
+        //     server path — the chokepoint hands every caller a coherent stream, and a caller
+        //     wanting a different one overwrites BOTH halves rather than half of one. Re-seeding
+        //     WITHOUT zeroing the offset was the earlier server bug: it left live 0 / high-water
+        //     <saved>, so the next `capture_rng_word_pos` `.expect`-panicked `HighWaterRegression`.
+        // Offline tooling (`phase-ai`'s `load_saved_game_state`) simply inherits the repair.
+        state.rehydrate_rng();
         state
     }
 }
@@ -9744,6 +10690,17 @@ pub enum WaitingFor {
     Priority {
         player: PlayerId,
     },
+    /// Public Resolve All consent prompt. The protocol details and frozen
+    /// submitter ledger remain in `GameState::resolve_all_consent_run`.
+    ResolveAllConsent {
+        epoch: u64,
+        representative: PlayerId,
+    },
+    /// Every canonical representative granted the same Resolve All epoch.
+    /// Phase 1 deliberately keeps this state inert; a later phase consumes it.
+    ResolveAllReady {
+        epoch: u64,
+    },
     /// CR 608.2d + CR 701.42: choose the exact pair of current battlefield
     /// referents the meld instruction will exile. Candidate identity is frozen
     /// in the tuples; the physical meld-card check intentionally happens later.
@@ -9751,11 +10708,18 @@ pub enum WaitingFor {
         player: PlayerId,
         choices: Vec<MeldSelection>,
     },
-    /// CR 508.4a: choose what the meld result enters attacking. The engine
+    /// CR 508.4: choose what the meld result enters attacking. The engine
     /// supplies the complete legal topology; clients only return one member.
     MeldAttackTargetChoice {
         player: PlayerId,
         context: MeldSelection,
+        valid_targets: Vec<AttackTarget>,
+    },
+    /// CR 508.4: choose a defending player, planeswalker, or battle for a
+    /// creature that entered the battlefield attacking during resolution.
+    EntryAttackTargetChoice {
+        player: PlayerId,
+        object_id: ObjectId,
         valid_targets: Vec<AttackTarget>,
     },
     /// CR 103.5 + 103.5b: London mulligan — each un-kept player decides
@@ -10011,6 +10975,14 @@ pub enum WaitingFor {
         #[serde(default)]
         candidates: Vec<ReplacementCandidateSummary>,
     },
+    /// CR 614.12a: choose the opponent that a permanent enters under before
+    /// the zone change is delivered. `candidates` is captured at replacement
+    /// application time; the pending replacement retains the exact proposed
+    /// event and replacement-applied set for the shared pipeline resume.
+    EntryControllerChoice {
+        player: PlayerId,
+        candidates: Vec<PlayerId>,
+    },
     /// CR 603.3b: When a player controls 2+ triggered abilities placed on the
     /// stack in the same pass, that player chooses the order. The variant is
     /// emitted in **choice order** (APNAP per CR 101.4 — active player chooses
@@ -10175,6 +11147,9 @@ pub enum WaitingFor {
         /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom).
         #[serde(default)]
         rest_destination: Option<Zone>,
+        /// CR 400.5 + CR 608.2c: Ordering instruction for a library rest pile.
+        #[serde(default)]
+        rest_order: DigRestOrder,
         /// Source ability's object ID for filter context.
         #[serde(default)]
         source_id: Option<ObjectId>,
@@ -10182,6 +11157,10 @@ pub enum WaitingFor {
         /// dig are tapped.
         #[serde(default)]
         enter_tapped: bool,
+        /// CR 508.4: Kept cards entering the battlefield via this dig enter
+        /// attacking rather than being declared as attackers.
+        #[serde(default)]
+        enters_attacking: bool,
     },
     SurveilChoice {
         player: PlayerId,
@@ -10312,6 +11291,11 @@ pub enum WaitingFor {
         parent_targets: Vec<TargetRef>,
         #[serde(default)]
         context: super::ability::SpellContext,
+        /// CR 608.2c: Runtime continuation that follows the complete modal
+        /// choice. It is attached only to the final selected branch, after all
+        /// CR 701.55d choosers have resolved their instances.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuation: Option<Box<super::ability::ResolvedAbility>>,
         /// CR 614.5 + CR 616.1f: replacement effects already applied to the
         /// event that produced this choice.
         #[serde(
@@ -10543,6 +11527,17 @@ pub enum WaitingFor {
         /// object-scoped binding used by Khans Sieges and every other named choice.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         persist_player: Option<PlayerId>,
+        /// CR 107.1a/b: the free-entry contract for `choice_type`, when its
+        /// answer is supplied by the player rather than picked from `options`.
+        ///
+        /// Published so a client renders the right control and bounds its input
+        /// from engine-stated values, instead of inspecting `choice_type`'s
+        /// serialized shape and restating the domain itself — a second authority
+        /// that could reject a value the engine accepts. Always
+        /// `choice_type.free_entry()`; `named_choice_free_entry_matches_choice_type`
+        /// pins that across every prompt the engine raises.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        free_entry: Option<crate::types::ability::FreeEntry>,
     },
     /// CR 608.2d + CR 608.2e: a player other than the controller (an opponent /
     /// the defending player) guesses a committed value or proposition during
@@ -10717,10 +11712,15 @@ pub enum WaitingFor {
         /// the alternative cost (e.g., `AbilityCost::Exile { count, zone,
         /// filter }` for the MH2 Evoke Incarnations). `None` when the
         /// alternative cost is pure mana (Warp, Lorwyn Evoke, Overload,
-        /// Bestow, mana-only Flashback). Engine owns the derived display
-        /// string; the frontend renders the engine-provided description.
+        /// Bestow, mana-only Flashback). The engine owns the typed display
+        /// payload; the frontend localizes and renders the descriptor.
         #[serde(default)]
         alternative_additional_cost: Option<AbilityCost>,
+        /// Engine-authored typed display descriptor for an alternative cost's
+        /// non-mana component when its semantic details affect player-facing
+        /// wording. The frontend localizes this descriptor.
+        #[serde(default)]
+        alternative_additional_cost_description: Option<AlternativeAdditionalCostDescription>,
     },
     /// CR 702.140c + CR 730.2a: As a mutating creature spell resolves with a
     /// legal target, the spell's controller chooses whether the spell is put on
@@ -10875,6 +11875,39 @@ pub enum WaitingFor {
         /// forward-compatible deserialization of pre-schema snapshots.
         #[serde(default)]
         schema: crate::analysis::decision_template::ShortcutDecisionSchema,
+        /// CR 732.2a: the declaration the ENGINE itself can already specify from what this
+        /// window's proposer actually did — one pin per published point of `schema`, read out
+        /// of the `(DecisionSlot, PlayerId)` answer journal at offer construction, or `None`
+        /// when any published point has no single answer under the proposer's own key.
+        /// Built by `game::engine::build_bounded_declaration`; `None` on every other mint.
+        ///
+        /// LATCHED at offer time, not a live view: it is a snapshot of the answers the
+        /// detection window observed. Latching the pin SET latches no per-iteration OUTCOME,
+        /// because no pin kind stores one: a SEAT designation is state-independent under
+        /// either spelling — the CR 115.10a `TargetPin::Player` and the CR 601.2c
+        /// `Scheduled(Constant(Ranking::one(AnnouncementSubject::Seat(..))))` alike — and
+        /// `TargetPin::ByIdentity` re-resolves live per iteration inside
+        /// `analysis::decision_template::resolve` (CR 608.2b). The ranked spelling is
+        /// re-resolved live too, and it is the STRONGER case rather than a new exposure: its
+        /// arm re-asks CR 702.11c hexproof / CR 702.18a shroud / CR 702.16b protection at
+        /// every iteration, so a latched TARGET-class seat can stop resolving mid-drive where
+        /// a latched CHOICE-class one could not.
+        ///
+        /// `#[serde(default)]` follows `schema`'s precedent on this same variant. Consequence,
+        /// chosen rather than discovered: a pre-declaration save decodes with `None`, which is
+        /// exactly today's refusal — fail-closed. ⚠ MEASURED: the attribute is BELT-AND-BRACES
+        /// on an `Option` field, not the mechanism — `serde_derive` routes a missing field
+        /// through `missing_field`, whose deserializer answers `deserialize_option` with
+        /// `visit_none`, so removing it changes no decode today. It is kept because it states
+        /// the intent at the field and becomes load-bearing the moment this stops being an
+        /// `Option`. Either way this field IS a client INGRESS — a restored save can carry a
+        /// hostile declaration, and the AI generator hands whatever it finds straight to
+        /// `GameAction::DeclareShortcut`. That is safe today only
+        /// because `handle_declare_shortcut` runs the owner firewall, `predictability_gate`
+        /// and `validate_pins` on EVERY declaration regardless of origin, and nothing here
+        /// adds a path around them.
+        #[serde(default)]
+        declaration: Option<crate::analysis::decision_template::DecisionTemplate>,
     },
     /// CR 732.2b/c: the APNAP accept-or-shorten window. After the proposer declares the
     /// shortcut, each other living player is prompted in turn order (drain-one-advance
@@ -11998,8 +13031,11 @@ impl WaitingFor {
     pub fn variant_name(&self) -> &'static str {
         match self {
             WaitingFor::Priority { .. } => "Priority",
+            WaitingFor::ResolveAllConsent { .. } => "ResolveAllConsent",
+            WaitingFor::ResolveAllReady { .. } => "ResolveAllReady",
             WaitingFor::MeldPairChoice { .. } => "MeldPairChoice",
             WaitingFor::MeldAttackTargetChoice { .. } => "MeldAttackTargetChoice",
+            WaitingFor::EntryAttackTargetChoice { .. } => "EntryAttackTargetChoice",
             WaitingFor::MulliganDecision { .. } => "MulliganDecision",
             WaitingFor::OpeningHandBottomCards { .. } => "OpeningHandBottomCards",
             WaitingFor::ManaPayment { .. } => "ManaPayment",
@@ -12014,6 +13050,7 @@ impl WaitingFor {
             WaitingFor::EnlistChoice { .. } => "EnlistChoice",
             WaitingFor::GameOver { .. } => "GameOver",
             WaitingFor::ReplacementChoice { .. } => "ReplacementChoice",
+            WaitingFor::EntryControllerChoice { .. } => "EntryControllerChoice",
             WaitingFor::OrderTriggers { .. } => "OrderTriggers",
             WaitingFor::CopyTargetChoice { .. } => "CopyTargetChoice",
             WaitingFor::ExploreChoice { .. } => "ExploreChoice",
@@ -12150,9 +13187,15 @@ impl WaitingFor {
                     None
                 }
             }
+            WaitingFor::ResolveAllReady { .. } => None,
             WaitingFor::Priority { player }
+            | WaitingFor::ResolveAllConsent {
+                representative: player,
+                ..
+            }
             | WaitingFor::MeldPairChoice { player, .. }
             | WaitingFor::MeldAttackTargetChoice { player, .. }
+            | WaitingFor::EntryAttackTargetChoice { player, .. }
             | WaitingFor::ManaPayment { player, .. }
             | WaitingFor::ManaSourceSelection { player, .. }
             | WaitingFor::ChooseXValue { player, .. }
@@ -12164,6 +13207,7 @@ impl WaitingFor {
             | WaitingFor::ExertChoice { player, .. }
             | WaitingFor::EnlistChoice { player, .. }
             | WaitingFor::ReplacementChoice { player, .. }
+            | WaitingFor::EntryControllerChoice { player, .. }
             | WaitingFor::OrderTriggers { player, .. }
             | WaitingFor::CopyTargetChoice { player, .. }
             | WaitingFor::ExploreChoice { player, .. }
@@ -13393,6 +14437,53 @@ pub enum StackEntryKind {
     KeywordAction { action: KeywordAction },
 }
 
+impl StackEntryKind {
+    /// CR 113.3b / CR 113.3c: which kind of *ability* this stack entry is, or
+    /// `None` when the entry is a spell (a spell is not an ability, CR 112.1).
+    ///
+    /// SINGLE AUTHORITY for the ability-kind axis of
+    /// `TargetFilter::StackAbility`. Both legality authorities read it from
+    /// here — `game::targeting` at announcement (CR 601.2c) and `game::filter`
+    /// at the resolution recheck (CR 608.2b) — so the two gates cannot admit
+    /// different sets of stack-entry kinds. They previously each spelled the
+    /// mapping out inline and had already drifted: the recheck excluded
+    /// `KeywordAction` entirely while the announce gate admitted them, so a
+    /// kindless counter (Stifle / Trickbind / Repudiate) could legally announce
+    /// a target on an equip/crew entry and then fizzle at resolution.
+    ///
+    /// `KeywordAction` is `Activated`: CR 702.6a (equip), CR 702.122a (crew),
+    /// CR 702.171a (saddle) and CR 702.184a (station) each define the keyword as
+    /// an *activated ability*, so such an entry is an activated ability on the
+    /// stack for every rules purpose — including being a legal target of
+    /// "target activated ability" effects (Squelch, Interdict, Reroute).
+    ///
+    /// Exhaustive on purpose: a future `StackEntryKind` variant must make this
+    /// classification decision explicitly instead of silently defaulting.
+    pub fn stack_ability_kind(&self) -> Option<StackAbilityKind> {
+        match self {
+            StackEntryKind::Spell { .. } => None,
+            StackEntryKind::ActivatedAbility { .. } | StackEntryKind::KeywordAction { .. } => {
+                Some(StackAbilityKind::Activated)
+            }
+            StackEntryKind::TriggeredAbility { .. } => Some(StackAbilityKind::Triggered),
+        }
+    }
+
+    /// CR 113.3b / CR 113.3c + CR 115.1: whether this entry is a stack ability
+    /// that satisfies the optional `kind` narrowing of a
+    /// `TargetFilter::StackAbility`. This is the whole membership test, not just
+    /// the narrowing: a spell entry never satisfies it, and `None` (a combined
+    /// "activated or triggered ability" spelling) accepts either ability kind.
+    /// Mana abilities never reach the stack (CR 605.3b), so every ability entry
+    /// reaching this predicate is targetable in principle.
+    pub fn matches_stack_ability_kind(&self, kind: Option<&StackAbilityKind>) -> bool {
+        match self.stack_ability_kind() {
+            None => false,
+            Some(entry_kind) => kind.is_none_or(|wanted| *wanted == entry_kind),
+        }
+    }
+}
+
 /// CR 608.2e: A clause-local snapshot of an equalization minimum/maximum,
 /// frozen when a `player_scope` link begins so every player in that clause's
 /// APNAP fan-out resolves its disposal count against the same pre-clause board.
@@ -13641,9 +14732,156 @@ impl ResolvingTriggerContext {
     }
 }
 
+/// CR 303.4f + CR 614.12: the entrant an entering Aura's host choice was decided
+/// against, parked across the [`WaitingFor::ReturnAsAuraTarget`] pause that asks
+/// its controller which of several legal hosts to enchant.
+///
+/// CR 303.4f requires the chooser to pick "a legal object or player according to
+/// the Aura's enchant ability and any other applicable effects" — i.e. according
+/// to the Aura AS IT ENTERS. When the choice pauses, the act half runs in a later
+/// `apply` call and can no longer see the deciding seam's stack frame, so the
+/// entrant travels here. Without it the act half re-derives CR 701.3a legality
+/// from `state.objects[aura_id]`, which on the non-liminal copy-token path still
+/// holds the PRE-exception body: a copy exception that changes the Aura's color
+/// (CR 707.9b) would make the chosen host's protection (CR 702.16c) reject an
+/// attachment CR 303.4f had legally offered, and CR 701.3b would turn the attach
+/// into a silent no-op, leaving the token for the CR 704.5m sweep.
+///
+/// `None` for every seam whose stored object already IS the entrant, so the
+/// shared resume path is unchanged for them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnteringAuraAuthority {
+    /// The Aura the parked entrant belongs to. The `ReturnAsAuraTarget` resume
+    /// path is shared with seams that park nothing, so the id is matched before
+    /// the entrant is honoured.
+    pub aura_id: ObjectId,
+    /// CR 614.12: the characteristics the Aura will have on the battlefield.
+    pub entrant: Box<GameObject>,
+}
+
+/// CR 111.1: a token projection — "a marker used to represent any permanent
+/// that isn't represented by a card".
+///
+/// A witness type, not a convenience wrapper. CR 303.4g ends with "If the Aura
+/// is a token, it isn't created", so the seam that denies an unhosted entry has
+/// to know whether its entrant is a token — and a plain [`GameObject`] can only
+/// be *expected* to have `is_token` set, never proven to. That left the seam
+/// carrying a disposition for a card-backed entrant the type still admitted.
+/// The single constructor sets the flag and no accessor hands out a
+/// `&mut GameObject`, so "this entrant is a token" holds by construction
+/// wherever this type appears.
+#[derive(Debug, Clone)]
+pub struct TokenProjection(GameObject);
+
+impl TokenProjection {
+    /// CR 111.1: project characteristics as a token. Marking is part of the
+    /// construction, so the invariant cannot be missed by a caller that forgot.
+    pub fn materialize(mut object: GameObject) -> Self {
+        object.is_token = true;
+        Self(object)
+    }
+
+    pub fn projected(&self) -> &GameObject {
+        &self.0
+    }
+
+    pub fn into_projected(self) -> GameObject {
+        self.0
+    }
+
+    /// CR 614.1c: an entry replacement can still settle the entrant's tapped
+    /// state before it enters. Deliberately narrow — a general
+    /// `&mut GameObject` would let a caller clear the CR 111.1 flag this type
+    /// exists to carry.
+    pub fn set_tapped(&mut self, tapped: bool) {
+        self.0.tapped = tapped;
+    }
+}
+
+/// CR 614.12: the entrant of a liminal (decided-but-not-yet-entered) projection.
+///
+/// Two kinds of entrant reach `GameState::liminal_entries`, and CR 303.4g makes
+/// the difference load-bearing rather than cosmetic:
+///
+/// * a token, which exists in no zone at all until its entry commits, and
+/// * the CR 701.42 meld result, whose components are real cards sitting in
+///   exile.
+///
+/// Storing both as a bare `GameObject` erased that distinction at exactly the
+/// seam that has to act on it.
+#[derive(Debug, Clone)]
+pub enum LiminalEntrant {
+    /// CR 111.1: the entrant of a `ProposedEvent::TokenEntry`. It is in no zone,
+    /// so CR 303.4g's zone-phrased dispositions cannot apply to it — only the
+    /// rule's token clause can.
+    Token(TokenProjection),
+    /// CR 701.42: a card-backed projection. It always enters from a real prior
+    /// zone through `ProposedEvent::ZoneChange`, so CR 303.4g's card
+    /// dispositions ("remains in its current zone", or the stack's
+    /// owner's-graveyard placement) are decided on that path — which
+    /// re-proposes the graveyard placement as a fresh, replacement-consulted
+    /// event (CR 614.6).
+    Card(GameObject),
+}
+
+impl LiminalEntrant {
+    /// CR 614.12: the characteristics the entrant will have on the battlefield,
+    /// whichever kind of entrant it is.
+    pub fn projected(&self) -> &GameObject {
+        match self {
+            Self::Token(token) => token.projected(),
+            Self::Card(object) => object,
+        }
+    }
+
+    pub fn into_projected(self) -> GameObject {
+        match self {
+            Self::Token(token) => token.into_projected(),
+            Self::Card(object) => object,
+        }
+    }
+
+    /// CR 111.1: whether this projection is a token, answered by the stored
+    /// witness rather than by trusting a flag on the projected object.
+    pub fn is_token_projection(&self) -> bool {
+        matches!(self, Self::Token(_))
+    }
+
+    /// CR 614.1c: settle the entrant's tapped state before it enters.
+    pub fn set_tapped(&mut self, tapped: bool) {
+        match self {
+            Self::Token(token) => token.set_tapped(tapped),
+            Self::Card(object) => object.tapped = tapped,
+        }
+    }
+}
+
+/// The serialized form is the projected object itself, unchanged from when this
+/// field was a bare `GameObject`: the witness is a compile-time distinction, and
+/// CR 111.1 token-ness is already a persisted characteristic of the projection.
+impl Serialize for LiminalEntrant {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.projected().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for LiminalEntrant {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let object = GameObject::deserialize(deserializer)?;
+        // CR 111.1: reading the witness back off the projection is exact — the
+        // two constructors are the two sides of this test, and nothing else can
+        // produce a `LiminalEntrant`.
+        Ok(if object.is_token {
+            Self::Token(TokenProjection(object))
+        } else {
+            Self::Card(object)
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiminalEntry {
-    pub object: GameObject,
+    pub object: LiminalEntrant,
     pub name: String,
     pub source_id: ObjectId,
     pub controller: PlayerId,
@@ -13949,6 +15187,13 @@ declare_game_state! {
 
     // Game flow
     pub waiting_for: WaitingFor,
+    /// Persisted allocation source for Resolve All consent epochs. Starts at
+    /// one for legacy saves and is minted only by `BeginResolveAll`.
+    #[serde(default = "initial_resolve_all_consent_epoch")]
+    pub next_resolve_all_consent_epoch: u64,
+    /// Private protocol ledger behind the public consent/ready waiting states.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolve_all_consent_run: Option<ResolveAllConsentRun>,
     /// Trusted interaction capability scope. Viewer-filtered copies always
     /// redact this field; only the engine uses it to mint opaque decision IDs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -13989,6 +15234,24 @@ declare_game_state! {
     pub liminal_entries: HashMap<ObjectId, LiminalEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_liminal_entry_resume: Option<PendingLiminalEntryResume>,
+    /// CR 303.4f + CR 614.12: see [`EnteringAuraAuthority`]. Written only by
+    /// `zone_pipeline::apply_entering_aura_hosts` when it hands an entering
+    /// Aura's host choice to a player and the deciding seam judged legality
+    /// against a projection the stored object does not match yet; taken by the
+    /// `WaitingFor::ReturnAsAuraTarget` resume arm.
+    ///
+    /// Pause-scoped, and therefore INTENTIONALLY omitted from
+    /// `impl PartialEq for GameState` (same treatment as
+    /// `resolving_continuation_attach_host`): the pause it belongs to is already
+    /// compared through `waiting_for`, and a projection snapshot is not board
+    /// state a CR 104.4b loop can accumulate in.
+    ///
+    /// Not redacted by `visibility::filter_state_for_viewer` (unlike
+    /// `liminal_entries`, which can hold a face-down/meld projection no viewer
+    /// may see): this entrant is a token that is already on the battlefield, so
+    /// its characteristics are public information.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entering_aura_authority: Option<EnteringAuraAuthority>,
     /// CR 614.12a: set by `continue_replacement` when an optional `MayCost`
     /// accept's payment paused for an interactive sub-choice (e.g. Mox Diamond's
     /// "discard a land card" with multiple eligible lands). It re-parks the
@@ -14148,6 +15411,68 @@ declare_game_state! {
     /// dedup on semantically-identical positions is unaffected.
     #[serde(skip, default)]
     pub loop_detect_ring: std::collections::VecDeque<std::sync::Arc<LoopDetectSample>>,
+    /// CR 603.5 + CR 608.2b + CR 732.2a: the answers given to published decision SLOTS
+    /// during the window `loop_detect_ring` is sampling, so the CR 732.2a declaration can
+    /// pin the choice each iteration actually made instead of guessing one. Both published
+    /// axes ride ONE journal: the CR 603.5 "may" gate and the CR 601.2c target
+    /// announcement, distinguished by the value's own kind ([`LoopAnswerValue`]) and by the
+    /// slot's sub-index — a parallel target journal would double the eight ring-clear
+    /// sites and widen their census for no capability this field lacks.
+    ///
+    /// KEYED BY THE PAIR `(slot, seat)`, not by the source alone. The SUB-INDEX half is
+    /// what keeps the two slots one source can publish apart: `entry_publishes_pin_slots`
+    /// binds `source` ONCE and builds both `DecisionSlot::target(source)` (CR 601.2c) and
+    /// `DecisionSlot::may(source)` (CR 603.5) from it, and the shipped unit test
+    /// `bounded_cycle_pin_slots_publishes_the_may_gate_of_an_optional_trigger` asserts an
+    /// optional targeted trigger publishes both. Under a source-only key those two writes
+    /// would land in ONE entry with different values and latch `Conflicted`. NON-CLAIM,
+    /// measured: no board in this lane exercises that collision — every published point on
+    /// the three tracked F4 dumps carries a distinct source — so the sub-index is adopted
+    /// because it aligns the journal's identity with the engine's own published one
+    /// (`DecisionPoint.slot`, which is what the consumer looks up), never because a
+    /// measured board needs it.
+    ///
+    /// The SEAT half: CR 603.5 routes a
+    /// "may" to whichever seat the effect names, and `game::effects` really does prompt
+    /// several seats for ONE source inside one window (the scoped-search acceptance
+    /// cascade). A seat can therefore only ever answer for itself: no seat's answer can
+    /// fill another's slot, and no two seats can manufacture a false disagreement. The
+    /// seat authority lives in the key type rather than in a consumer-side guard.
+    ///
+    /// STATED SO IT IS NOT OVER-READ: this is DEFENSE IN DEPTH PLUS A CODE DELETION, NOT
+    /// A LIVE-BUG FIX. Both harms a source-only key could produce are already firewalled
+    /// downstream — the pin injector reads the recipient off the prompt in hand and aborts
+    /// the replay when it does not match the template owner (`game::engine`'s
+    /// `WaitingFor::OptionalEffectChoice` arm, `if *player != template.owner`). NO BOARD
+    /// HAS BEEN MEASURED on which the seat component changes an offer; the multi-seat
+    /// board that does exist journals two seats and mints no offer at all
+    /// (`tests/integration/natural_balance.rs`). The claim this key earns is "cannot be
+    /// worse, and removes a runtime guard", not "prevents a reachable wrong declaration".
+    ///
+    /// TRANSIENT DERIVED STATE with `loop_detect_ring`'s exact treatment — same
+    /// `#[serde(skip, default)]`, same omission from `impl PartialEq for GameState`
+    /// (rebuilt from play; comparing it would break AI-search dedup on
+    /// semantically-identical positions), and cleared at every one of the ring's clear
+    /// sites on the same receiver. `#[serde(skip)]` is also load-bearing rather than
+    /// merely tidy: a `BTreeMap` with a tuple key has no JSON object form and
+    /// [`LoopAnswer`] AND [`LoopAnswerValue`] both deliberately derive no `Serialize`, so a
+    /// future attempt to persist this fails at compile time instead of silently emitting a
+    /// stale window.
+    ///
+    /// `Option<Box<..>>` for `game_state_size.rs`'s stated reason — "box it if it is a
+    /// large rarely-populated one" — costing 8 B inline like the `life_safety_probe`
+    /// neighbour below. NOTHING TESTS THE BOXING: at the current ceiling an unboxed
+    /// `BTreeMap` (24 B inline) also fits, so this rationale is a convention here, not a
+    /// guarded invariant.
+    #[serde(skip, default)]
+    pub(crate) loop_answer_journal: Option<
+        Box<
+            std::collections::BTreeMap<
+                (crate::analysis::decision_template::DecisionSlot, PlayerId),
+                crate::analysis::decision_template::LoopAnswer,
+            >,
+        >,
+    >,
     /// Live-only authority for the finite pre-cast shortcut. It is absent from
     /// raw/public serialization; trusted persistence uses the explicit codec
     /// envelope in `game::precast_copy_shortcut`.
@@ -14323,9 +15648,29 @@ declare_game_state! {
     /// effects (e.g., "Exile target permanent and the top card of your library
     /// ... For each of those cards") merge their results into a single set
     /// before downstream "those cards" references resolve. Cleared at the
-    /// top-level chain entry (depth == 0) in `resolve_ability_chain`.
+    /// top-level chain entry (depth == 0) in `resolve_ability_chain`, and — when
+    /// the chain is modal — again at each CR 700.2 mode boundary, keyed on
+    /// [`Self::resolving_modal_instruction`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain_tracked_set_id: Option<TrackedSetId>,
+
+    /// CR 700.2 + CR 608.2c: The `modal_instruction_ordinal` of the modal
+    /// instruction currently resolving. It EDGE-TRIGGERS the mode boundary in
+    /// `resolve_ability_chain`; `None` outside a modal resolution.
+    ///
+    /// Paired with [`Self::chain_tracked_set_id`] and cleared in the SAME depth-0
+    /// prelude block: this field's only job is to record whether
+    /// `chain_tracked_set_id` has already been cleared for the mode now entering,
+    /// so the two must never be reset at different times.
+    ///
+    /// EDGE, not level. A level trigger (reset whenever an ordinal is present)
+    /// would re-fire on every re-entry into the SAME mode:
+    /// `split_player_scope_chain` clones the ordinal-bearing node once per
+    /// fanned-out player and re-enters `resolve_ability_chain` with each, and a
+    /// paused chain resumes its remaining scoped nodes at depth 1. Either would
+    /// fragment one mode's population into one set per player.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolving_modal_instruction: Option<usize>,
 
     /// CR 608.2c + CR 614.6: Per-member producer-action provenance for tracked
     /// sets. When a producer publishes (or extends) a chain tracked set, each
@@ -15862,6 +17207,55 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_deferred_life_cost_resume: Option<DeferredLifeCostResume>,
 
+    /// CR 605.4a + CR 603.12a: Typed continuation for a classifier-accepted
+    /// triggered mana ability that paused mid-resolution. It stays serialized
+    /// with the matching whitelisted prompt so a host checkpoint resumes the
+    /// same stackless occurrence under the same rules-execution node.
+    /// Redacted from every client projection (`visibility.rs`,
+    /// `derived_views.rs`); the projected `WaitingFor` is the complete public
+    /// interaction surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pending_triggered_mana_resume: Option<Box<TriggeredManaResume>>,
+
+    /// CR 117.3c + CR 117.5 + CR 605.4a: The player who must receive priority
+    /// once a settled-Priority trigger batch finishes announcing, when that
+    /// player is not the active player. Installed only by the settled-Priority
+    /// convergence wrapper from its own exhaustively validated
+    /// `WaitingFor::Priority { player }`, retained across every
+    /// trigger-construction prompt, and consumed by the construction finisher
+    /// once the whole construction/deferred tail is exhausted.
+    ///
+    /// Deliberately **not** part of `resolution_completion_can_settle`: that
+    /// predicate gates `can_drain_deferred_triggers`, so a carrier inside it
+    /// would reject the very drains this batch depends on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pending_trigger_construction_priority_recipient: Option<PlayerId>,
+
+    /// CR 605.1b + CR 605.4a: The exact rules-execution node of the accepted
+    /// triggered-mana occurrence whose stackless body is currently executing or
+    /// resuming. Presence means the complete classifier accepted the original
+    /// graph, so a resolver-time context-ref injection into `targets` cannot
+    /// reopen classification (CR 605.4a).
+    ///
+    /// Transient by construction: it is a lexical scope marker equal to
+    /// `active_rules_execution_node` while live, and every sidecar-owned action
+    /// reinstalls it from `TriggeredManaResume::rules_execution_node`. Serde
+    /// persists the sidecar and its node, never this marker.
+    #[serde(skip)]
+    pub(crate) active_accepted_triggered_mana_node: Option<RulesExecutionNodeRef>,
+
+    /// Debug-only witness that the trigger-construction finisher ran at most
+    /// once per reducer action. The finisher is applied at the outermost handler
+    /// return of each of its enumerated action seams; a second call in the same
+    /// action would mean a seam was added below dispatch, where a `Priority`
+    /// result is discarded and the recipient would be lost mid-batch.
+    ///
+    /// Transient by construction — `apply_action_boundary_core` clears it at
+    /// action entry beside the other per-action transients — so it is never
+    /// serialized and never part of state equality.
+    #[serde(skip)]
+    pub(crate) trigger_construction_finisher_ran_this_action: bool,
+
     /// CR 601.2h + CR 616.1: Resume a sequential discard cost after a
     /// replacement choice. Cost moves use `pending_cost_move_resume` above.
     #[serde(skip)]
@@ -16023,7 +17417,9 @@ impl GameStateDecode {
             value,
             matches!(mode, GameStateDecodeMode::ResolutionWireV1),
         )?;
-        migrate_legacy_mana_target_roles(value)
+        migrate_legacy_mana_target_roles(value)?;
+        migrate_legacy_tap_effects(value);
+        Ok(())
     }
 
     pub(crate) fn materialize_prepared(value: serde_json::Value) -> Result<GameState, String> {
@@ -16216,6 +17612,15 @@ pub enum DrainStatus {
 /// the synchronous dispatcher finish or pause the entry it took after a nested
 /// replacement has pushed another drain above it. It is never serialized and
 /// introduces no cross-carrier reference.
+///
+/// It addresses an entry *within* one drain stack, and says nothing about WHICH
+/// frame that stack belongs to. `types::resolution::IdentifiedPostReplacementDispatch`
+/// is what pairs it with the identity of that frame, so a cleanup can find the
+/// frame wherever the stack has since moved it. This type is deliberately left
+/// unchanged by that pairing: widening it would change
+/// [`PostReplacementDrainStack::begin_dispatch`]'s signature, which every
+/// existing call site — including two bare-path `Option::and_then` uses in
+/// `game/elimination.rs` — depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PostReplacementDrainDispatch {
     depth: usize,
@@ -16355,6 +17760,14 @@ pub enum ResidentDrainPolicy {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PostReplacementDrainStack {
     drains: Vec<PostReplacementDrain>,
+    /// This frame's stable identity, bound at its first dispatch and never
+    /// rebound. Private, and reached only through [`Self::frame_id`] /
+    /// [`Self::stamp_frame_id`], so "assigned at most once" is a property of the
+    /// type rather than of any call site. `skip_serializing_if` keeps an
+    /// unstamped frame's wire shape byte-identical to what it was before this
+    /// field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<PostReplacementFrameId>,
 }
 
 impl PostReplacementDrain {
@@ -16530,9 +17943,74 @@ impl PostReplacementDrainStack {
         None
     }
 
+    /// CR 603.3b + CR 608.2c: retire a resident whose dispatch is over.
+    ///
+    /// `Dispatching` means "taken and running" (see [`DrainStatus`]). The sole
+    /// production dispatcher — `engine_replacement::apply_pending_post_replacement_effect`
+    /// — is synchronous, and `engine_replacement::post_replacement_dispatch_is_live`
+    /// reports whether any such dispatch is on this thread's call stack. The
+    /// sweeper calls this ONLY when that predicate is false, so a `Dispatching`
+    /// entry reaching here has no owner at all: `begin_dispatch` refuses it,
+    /// `finish_paused_dispatch` pops only `Paused`, and `finish_dispatch` needs a
+    /// handle that died with its call frame. Left behind, it keeps
+    /// `resolution_stack` non-empty forever, which makes
+    /// `triggers::resolution_completion_can_settle` false forever: deferred
+    /// triggered abilities can then never be put on the stack (CR 603.3b) and the
+    /// resolving carrier can never settle (CR 608.2c).
+    ///
+    /// Scope is the RESIDENT only, and that is exact rather than conservative. A
+    /// `Dispatching` entry sitting BELOW a nested `Paused` one is never the
+    /// resident, so it is never reached here; it is retired later, after the
+    /// `Paused` entry above it retires and it becomes the resident at a boundary
+    /// where — again — no dispatch is live. A `Dispatching` entry below another
+    /// `Dispatching` one is reachable only after the caller's loop has popped the
+    /// one above it, and the ownerless predicate is stack-wide rather than
+    /// per-entry, so it is equally ownerless. A `Ready` or `Paused` resident is
+    /// live parked work and is returned untouched.
+    pub fn finish_ownerless_dispatching_resident(&mut self) -> Option<PostReplacementDrain> {
+        match self.drains.last()?.status {
+            DrainStatus::Dispatching => self.drains.pop(),
+            DrainStatus::Ready(_) | DrainStatus::Paused => None,
+        }
+    }
+
     /// CR 800.4a: abandon every pending continuation (player departure).
     pub fn abandon_all(&mut self) {
         self.drains.clear();
+    }
+
+    /// This frame's identity, or `None` if it has never been dispatched.
+    ///
+    /// "Unstamped" is carried by the type, not by a reserved value: a legacy
+    /// payload, a freshly minted sibling frame, and a journal-replayed frame are
+    /// all `None`, and `None` can never equal a handle's `Some(id)`.
+    pub(super) fn frame_id(&self) -> Option<PostReplacementFrameId> {
+        self.id
+    }
+
+    /// Bind identity exactly once, and return the EFFECTIVE id.
+    ///
+    /// If this frame is already stamped, `candidate` is discarded and the
+    /// existing id is returned. That is not an optimisation — it is the
+    /// invariant. A nested same-frame dispatch is the shipped CR 616.1g shape (a
+    /// running continuation draws, the draw is replaced, and the replacement
+    /// carries a mandatory post-effect — Jace, Wielder of Mysteries' win; see
+    /// [`Self::install`]'s doc). Re-stamping there would invalidate the OUTER
+    /// dispatch's still-live handle and strand its entry `Dispatching` forever —
+    /// the exact failure this identity exists to close. Keeping the rule inside
+    /// the type means no call site can violate it. The caller detects "was my
+    /// candidate consumed?" by comparing the returned id against the candidate,
+    /// and only then commits its allocator, so no id is burned.
+    ///
+    /// This writes ONLY the frame's own id. It deliberately does not touch
+    /// `ResolutionStack::last_post_replacement_frame_id`, which is the mint's
+    /// business — that asymmetry is what lets a test build a payload whose
+    /// frames carry ids while its allocator is still 0.
+    pub(super) fn stamp_frame_id(
+        &mut self,
+        candidate: PostReplacementFrameId,
+    ) -> PostReplacementFrameId {
+        *self.id.get_or_insert(candidate)
     }
 }
 
@@ -16554,6 +18032,48 @@ pub struct PendingMultiDraw {
 /// may have been pushed and popped above it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct DrawSequenceFrameId(pub u64);
+
+/// Identifies one `PostReplacement` frame within a [`ResolutionStack`].
+///
+/// Frames are addressed by ID, never by position, for the same reason
+/// [`DrawSequenceFrameId`] is: between a dispatch's mint and its cleanup the
+/// frame may have left the two-deep positional window the accessor can see —
+/// because a nested instruction (CR 616.1g) raised child frames above it, or
+/// because a parent-of-active continuation insert slid a frame in between. In
+/// neither case did the frame itself move; only its distance from the stack top
+/// changed, and that is the only thing positional addressing can observe.
+///
+/// Deliberately no `Default`: the field that holds one is
+/// `Option<PostReplacementFrameId>`, whose `Default` is `None` regardless of
+/// `T`, so "unstamped" is carried by the type rather than by a reserved zero id
+/// that could alias a real frame.
+///
+/// [`ResolutionStack`]: crate::types::resolution::ResolutionStack
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PostReplacementFrameId(pub u64);
+
+/// The unbookkept suffix of one individual draw whose Library → Hand delivery
+/// parked on a replacement choice.
+///
+/// The selected card stays here until its zone change settles. Recording it as
+/// drawn before then would emit `CardDrawn` and advance the draw ledger while
+/// the card is still in the library; retaining the remaining selected cards
+/// also preserves the ordinary one-at-a-time draw order after the choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingDrawDelivery {
+    pub player: PlayerId,
+    pub current: ObjectId,
+    /// False while the current card still needs its initial pipeline pass;
+    /// true once a parked replacement choice has delivered that pass.
+    pub current_settled: bool,
+    pub remaining: Vec<ObjectId>,
+    #[serde(
+        default,
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
+    pub applied: HashSet<AppliedReplacementKey>,
+    pub attempted_empty_library: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DrawSequenceOrigin {
@@ -16597,6 +18117,10 @@ pub struct DrawSequenceFrame {
     /// effect replaces a draw within a sequence of card draws, the replacement
     /// effect is completed before resuming the sequence."
     pub remaining: u32,
+    /// A card delivery that has selected its card but has not yet settled its
+    /// `Moved` replacement choice. The frame owns its ledger and suffix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_delivery: Option<PendingDrawDelivery>,
     /// CR 608.2c: running total of cards ACTUALLY delivered across every
     /// completed unit of this instruction. This is the value a later "that many"
     /// clause on the same card reads ("Draw two cards, then discard that many") —
@@ -16717,6 +18241,7 @@ impl DrawSequenceStack {
             applied,
             origin,
             remaining: count,
+            pending_delivery: None,
             accumulated: 0,
         });
         debug_assert!(
@@ -16768,6 +18293,7 @@ impl DrawSequenceStack {
                     && a.remaining == b.remaining
                     && a.accumulated == b.accumulated
                     && a.origin == b.origin
+                    && a.pending_delivery == b.pending_delivery
             })
     }
 
@@ -16818,6 +18344,16 @@ pub struct PendingReplacement {
     /// away. `None` for every other parked event (the common case).
     #[serde(default)]
     pub library_placement: Option<crate::types::ability::LibraryPosition>,
+    /// CR 603.3a + CR 109.5: preserve the controller that resolved a
+    /// monarch-bounded exile while its zone change waits on CR 616.1.
+    #[serde(default)]
+    pub exile_controller: Option<PlayerId>,
+    #[serde(default)]
+    pub exile_duration: Option<crate::types::ability::Duration>,
+    /// Preserve source-linked exile bookkeeping while a zone change waits on
+    /// a CR 616.1 replacement choice.
+    #[serde(default)]
+    pub exile_tracking: ZoneDeliveryExileTracking,
     /// CR 120.4a: carries the excess-redirect rider ("Excess damage is dealt to
     /// that creature's controller instead") across a damage replacement *choice*
     /// pause. The resume in `handle_replacement_choice` rebuilds the
@@ -17201,6 +18737,17 @@ impl GameState {
         Ok(self.take_active_ability_continuation()?.is_some())
     }
 
+    /// Clears the reveal choice's continuation while allowing an exact active
+    /// batch-delivery child to retain its own pending zone-change work.
+    pub fn clear_active_ability_continuation_or_batch_delivery_child(
+        &mut self,
+    ) -> Result<bool, ResolutionStackError> {
+        Ok(self
+            .resolution_stack
+            .take_active_ability_continuation_or_batch_delivery_child()?
+            .is_some())
+    }
+
     /// Returns the complete ChangeZone owner only when it owns the stack top.
     pub fn active_change_zone_frame(&self) -> Option<&ChangeZoneFrame> {
         self.resolution_stack.active_change_zone()
@@ -17439,6 +18986,27 @@ impl GameState {
     /// Park a new CounterAdditions queue as the active inner frame.
     pub fn push_counter_additions(&mut self, pending: PendingCounterAdditionQueue) {
         self.resolution_stack.push_counter_additions(pending);
+    }
+
+    /// Insert a CounterAdditions queue immediately below the active child.
+    ///
+    /// A paused post-action may have installed a direct-choice owner (a fresh
+    /// `ProliferateChoice`, say). That owner must remain the stack top until
+    /// its action handler consumes it — `ResolutionStack::validate` rejects a
+    /// direct-choice owner buried below another frame — so a completion that
+    /// outlives the pause becomes the owner's PARENT instead of being pushed
+    /// on top of it.
+    pub fn insert_counter_additions_parent_of_active(
+        &mut self,
+        pending: PendingCounterAdditionQueue,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolve_and_apply_frame_transition(ResolvedFrameTransition::InsertParentOfActive {
+            frame: super::resolution::ResolutionFrame::CounterAdditions(pending),
+        })
+        .map(|_| ())
+        .map_err(|error| match error {
+            ResolvedFrameTransitionReplayInvariantError::Stack(error) => error,
+        })
     }
 
     /// Re-park the active CounterAdditions queue after it advances or pauses
@@ -17868,8 +19436,15 @@ impl GameState {
         self.resolution_stack.push_proliferate(pending);
     }
 
-    /// Re-parks the active proliferate owner after a replacement-produced
-    /// subsequent target choice.
+    /// Re-parks the active proliferate owner in place.
+    ///
+    /// NOTE: this is deliberately NOT the path for surviving a counter-addition
+    /// replacement choice. A proliferate that pauses that way has a
+    /// `CounterAdditions` frame at the stack top, so re-parking the proliferate
+    /// owner beneath it would bury a direct-choice owner — which
+    /// `ResolutionStack::validate` rejects. That case rides
+    /// `PendingCounterPostAction::ContinueProliferateActions` on the
+    /// counter-additions completion instead (issue #7384).
     pub fn replace_active_proliferate_frame(
         &mut self,
         pending: PendingProliferateActions,
@@ -18165,6 +19740,54 @@ impl GameState {
                 .promote_ability_continuation_after_post_replacement_draw()?;
         }
         Ok(completed)
+    }
+
+    /// CR 614.12a + CR 616.1g: take the active frame's resident continuation and
+    /// return it paired with the identity of the frame it came from.
+    ///
+    /// Pure delegation to [`ResolutionStack::begin_active_post_replacement_dispatch`],
+    /// which is where the frame index, the id stamp and the allocator commit all
+    /// live. This exists so the dispatcher keeps talking to `GameState`.
+    ///
+    /// [`ResolutionStack::begin_active_post_replacement_dispatch`]: super::resolution::ResolutionStack::begin_active_post_replacement_dispatch
+    pub(crate) fn begin_post_replacement_dispatch(
+        &mut self,
+    ) -> Option<(
+        crate::types::ability::PostReplacementContinuation,
+        super::resolution::IdentifiedPostReplacementDispatch,
+    )> {
+        self.resolution_stack
+            .begin_active_post_replacement_dispatch()
+    }
+
+    /// Whether `dispatch` still owns the resident top of its OWN frame, found by
+    /// identity rather than by position. Pure delegation.
+    pub(crate) fn post_replacement_dispatch_is_resident_top(
+        &self,
+        dispatch: super::resolution::IdentifiedPostReplacementDispatch,
+    ) -> bool {
+        self.resolution_stack
+            .post_replacement_dispatch_is_resident_top(dispatch)
+    }
+
+    /// Park `dispatch`'s exact entry in its own frame. Pure delegation.
+    pub(crate) fn pause_post_replacement_dispatch(
+        &mut self,
+        dispatch: super::resolution::IdentifiedPostReplacementDispatch,
+    ) -> bool {
+        self.resolution_stack
+            .pause_post_replacement_dispatch(dispatch)
+    }
+
+    /// Retire `dispatch`'s exact entry in its own frame. Pure delegation — it
+    /// removes no frame; `remove_empty_active_post_replacement_frame` keeps that
+    /// job, and keeps its wider "any empty frame that is now the top" scope.
+    pub(crate) fn finish_post_replacement_dispatch(
+        &mut self,
+        dispatch: super::resolution::IdentifiedPostReplacementDispatch,
+    ) -> Option<PostReplacementDrain> {
+        self.resolution_stack
+            .finish_post_replacement_dispatch(dispatch)
     }
 
     /// Retires only the exact top general drain whose continuation paused and
@@ -18725,6 +20348,38 @@ impl GameState {
             .record_frame_transition(command.clone())
             .expect("resolved frame transition must have a live journal cause");
         Ok(command)
+    }
+
+    /// Atomically installs a direct-choice owner and the prompt it is allowed to
+    /// consume. A direct-choice frame may never be visible with an unrelated
+    /// `WaitingFor`, nor may it be buried below another direct-choice owner.
+    pub fn install_direct_choice_frame(
+        &mut self,
+        frame: ResolutionFrame,
+        waiting_for: WaitingFor,
+    ) -> Result<(), ResolutionStackError> {
+        if !matches!(frame.gate(), FrameGate::DirectChoice(_)) {
+            return Err(ResolutionStackError::InvalidPayload {
+                frame: frame.kind(),
+                message: "direct-choice installation requires a direct-choice frame".to_string(),
+            });
+        }
+
+        let transition = ResolvedFrameTransition::Push {
+            frame: frame.clone(),
+        };
+        let mut candidate = (*self.resolution_stack).clone();
+        candidate.push_inner(frame);
+        candidate.validate(&waiting_for)?;
+
+        let previous_waiting_for = std::mem::replace(&mut self.waiting_for, waiting_for);
+        if let Err(error) = self.resolve_and_apply_frame_transition(transition) {
+            self.waiting_for = previous_waiting_for;
+            return Err(match error {
+                ResolvedFrameTransitionReplayInvariantError::Stack(error) => error,
+            });
+        }
+        Ok(())
     }
 
     /// Applies and journals one already-resolved player resource edit.
@@ -19499,6 +21154,8 @@ impl GameState {
             waiting_for: WaitingFor::Priority {
                 player: starting_player,
             },
+            next_resolve_all_consent_epoch: initial_resolve_all_consent_epoch(),
+            resolve_all_consent_run: None,
             interaction_session_id: None,
             interaction_generation: 0,
             next_interaction_serial: default_interaction_serial(),
@@ -19511,6 +21168,7 @@ impl GameState {
             pending_replacement: None,
             liminal_entries: HashMap::new(),
             pending_liminal_entry_resume: None,
+            entering_aura_authority: None,
             replacement_may_cost_paused: false,
             post_replacement_token_choice_applied: None,
             post_replacement_token_substitution_count: None,
@@ -19523,6 +21181,7 @@ impl GameState {
             static_source_index: StaticSourceIndex::default(),
             static_mode_presence: crate::types::statics::StaticModePresence::all_present(),
             loop_detect_ring: std::collections::VecDeque::new(),
+            loop_answer_journal: None,
             precast_shortcut_runtime: PrecastShortcutRuntime::default(),
             life_safety_probe: Box::default(),
             next_timestamp: 1,
@@ -19550,6 +21209,7 @@ impl GameState {
             tracked_object_sets: HashMap::new(),
             next_tracked_set_id: 1,
             chain_tracked_set_id: None,
+            resolving_modal_instruction: None,
             tracked_set_member_causes: HashMap::new(),
             commander_cast_count: HashMap::new(),
             commander_cast_owners: HashMap::new(),
@@ -19725,6 +21385,10 @@ impl GameState {
             current_triggered_mana_override: None,
             pending_cost_move_resume: None,
             pending_deferred_life_cost_resume: None,
+            pending_triggered_mana_resume: None,
+            pending_trigger_construction_priority_recipient: None,
+            active_accepted_triggered_mana_node: None,
+            trigger_construction_finisher_ran_this_action: false,
             pending_discard_for_cost: None,
             pending_cast: None,
             ring_level: HashMap::new(),
@@ -20403,6 +22067,9 @@ impl GameState {
         // CR 104.4b: pip-id counter is a volatile monotonic field; zero it (like
         // next_object_id) so two otherwise-identical loop states compare equal.
         clone.next_pip_id = 0;
+        // CR 104.4b: consent epochs are monotonic authorization receipts, not
+        // recurring game-position state.
+        clone.next_resolve_all_consent_epoch = 0;
         // P1 provenance is append-only historical evidence, not live rules
         // state. Clear it with the other monotonic identity carriers so it
         // cannot hide a genuine CR 104.4b repeated position.
@@ -20419,9 +22086,23 @@ impl GameState {
         // the live ring → recursive/quadratic growth. Cleared ⇒ every stored snapshot
         // has clone depth 1. Does not affect any comparison (the ring is eq-excluded).
         clone.loop_detect_ring.clear();
+        // CR 603.5: the "may"-answer journal belongs to the LIVE window, not to a stored
+        // position sample. Cleared with the ring, on this same receiver.
+        clone.loop_answer_journal = None;
         // Private shortcut capabilities are live interaction state, never part
         // of a CR 104.4b position sample.
         clone.precast_shortcut_runtime = PrecastShortcutRuntime::default();
+        // CR 700.2 + CR 104.4b: the mode-boundary edge latch is resolution-scoped
+        // and is cleared only at depth-0 chain ENTRY, so between resolutions it
+        // holds the LAST resolved mode's ordinal as pure residue. Two otherwise
+        // identical positions reached via different last-resolved modes would
+        // then differ here alone and never confirm a repeated position. It is
+        // eq-compared (AI-search dedup legitimately reads it), so it is
+        // normalized away HERE rather than excluded from `PartialEq`.
+        // NOTE: its lockstep partner `chain_tracked_set_id` carries the same
+        // residue and is deliberately NOT cleared here — that is pre-existing
+        // behavior with its own follow-up, not something this line may widen.
+        clone.resolving_modal_instruction = None;
         // CR 104.4b + CR 400.7: the all-zone incarnation bump advances a source's
         // epoch on every zone change, so a mandatory loop that cycles its source's
         // zones would otherwise carry a growing `TriggerSourceContext` into loop
@@ -20437,22 +22118,52 @@ impl GameState {
                 ability.clear_trigger_identity_recursive();
             }
         }
+        // `PendingTrigger::timestamp` is a live CR 603.3b ordering key. It is
+        // monotonic allocation history, not a difference in the recurring game
+        // position, so normalize it only in this CR 104.4b snapshot. Keeping
+        // the live values preserves APNAP/same-controller ordering in
+        // `game::triggers`.
+        let normalize_pending_trigger = |pending: &mut crate::game::triggers::PendingTrigger| {
+            pending.timestamp = 0;
+            pending.ability.clear_trigger_identity_recursive();
+        };
         if let Some(pt) = clone.pending_trigger.as_mut() {
-            pt.ability.clear_trigger_identity_recursive();
+            normalize_pending_trigger(pt);
         }
         for ctx in clone.deferred_triggers.iter_mut() {
-            ctx.pending.ability.clear_trigger_identity_recursive();
+            normalize_pending_trigger(&mut ctx.pending);
         }
         if let Some(order) = clone.pending_trigger_order.as_mut() {
             for group in order.groups.iter_mut() {
                 for ctx in group.triggers.iter_mut() {
-                    ctx.pending.ability.clear_trigger_identity_recursive();
+                    normalize_pending_trigger(&mut ctx.pending);
                 }
             }
         }
         for dt in clone.delayed_triggers.iter_mut() {
             dt.ability.clear_trigger_identity_recursive();
             dt.provenance = DelayedInstallIdentity::LegacyDelayed;
+        }
+        // The triggered-mana sidecar is eq-compared like its sibling carriers
+        // above, and it holds both ability carriers and a globally advancing
+        // `SettlementNodeOrdinal`. The live loop-sample sites only fire at
+        // `WaitingFor::Priority`, where the sidecar is None today — this
+        // normalization keeps that a non-load-bearing coincidence rather than a
+        // hidden precondition of CR 104.4b detection.
+        if let Some(resume) = clone.pending_triggered_mana_resume.as_mut() {
+            normalize_pending_trigger(&mut resume.current.pending);
+            for ctx in resume.accepted_tail.iter_mut() {
+                normalize_pending_trigger(&mut ctx.pending);
+            }
+            for batch in resume.collected_batches.iter_mut() {
+                for ctx in batch.contexts.iter_mut() {
+                    normalize_pending_trigger(&mut ctx.pending);
+                }
+            }
+            resume.rules_execution_node =
+                crate::types::resolved_commands::RulesExecutionNodeRef::TriggeredMana(
+                    crate::types::resolved_commands::SettlementNodeOrdinal(0),
+                );
         }
         for epic in clone.epic_effects.iter_mut() {
             epic.spell.clear_trigger_identity_recursive();
@@ -20609,11 +22320,15 @@ impl GameState {
     ///
     /// The ring clear is mandatory and is `normalize_for_loop`'s own reason: samples are
     /// produced from the live state, so without it each stored sample would carry a clone
-    /// of the live ring ⇒ recursive/quadratic growth. **Nothing else is touched** — every
-    /// other field is what makes this half the evaluable one.
+    /// of the live ring ⇒ recursive/quadratic growth. The CR 603.5 `loop_answer_journal`
+    /// is cleared alongside it for a DIFFERENT reason — not recursion, but ownership: the
+    /// journal records the live window's answers, and a stored sample must not carry them.
+    /// **Nothing else is touched** — every other field is what makes this half the
+    /// evaluable one.
     pub(crate) fn loop_detect_live_sample(&self) -> GameState {
         let mut clone = self.clone();
         clone.loop_detect_ring.clear();
+        clone.loop_answer_journal = None;
         clone
     }
 
@@ -20655,7 +22370,7 @@ impl GameState {
     /// shorter slice, so a short snapshot would silently skip tail seats and RETAIN the
     /// ring — the one direction the "clearing can only SHRINK the prior set" guarantee
     /// forbids. One comparison keeps that guarantee structural instead of contractual.
-    /// (CR 119.3, `MagicCompRules.txt:1065`, is the rule the life comparison implements.)
+    /// (CR 119.3 is the rule the life comparison implements.)
     pub(crate) fn invalidate_loop_ring_on_unobserved_life_move(&mut self, lives_before: &[i32]) {
         if self.players.len() != lives_before.len()
             || self
@@ -20665,7 +22380,100 @@ impl GameState {
                 .any(|(p, &before)| p.life != before)
         {
             self.loop_detect_ring.clear();
+            // CR 603.5: the answers belong to the window the ring just lost.
+            self.loop_answer_journal = None;
         }
+    }
+
+    /// CR 603.5 + CR 608.2b: record ONE seat's answer to ONE published decision SLOT for
+    /// the current loop-detection window. A second, DIFFERENT answer from THE SAME SEAT for
+    /// THE SAME SLOT latches [`LoopAnswer::Conflicted`] (see that type — an
+    /// engine-capability refusal, not a CR mandate). A different seat, or the same source's
+    /// OTHER slot, occupies a DIFFERENT KEY and can neither conflict with, nor be read in
+    /// place of, this entry.
+    ///
+    /// The latch arm is axis-agnostic by construction: it compares whole
+    /// [`LoopAnswer`] values, so widening the value to carry CR 601.2c target vectors added
+    /// no second conflict rule. Equality for `Targets` is derived `Vec<TargetPin>`
+    /// equality — order-sensitive, which is STRICTER than set equality and therefore
+    /// fail-closed (strictly fewer offers, never a wrong pin). Order-sensitivity cannot bite
+    /// on the BOUNDED-CYCLE schema, whose producer
+    /// (`game::engine::bounded_cycle_pin_slots_for_window`) hard-codes `min_targets: 1,
+    /// max_targets: 1, ordered: false` — a one-pin answer has no order to disagree about.
+    /// That is the SCOPE of the claim, not a whole-value-space one: a published `Targets`
+    /// point has a SECOND production producer, `game::engine::pinned_decisions_to_points`,
+    /// which emits `ordered: true` with `min/max = targets.len()` from a carried pin list;
+    /// and the writer (`game::engine::record_trigger_target_answer`) can journal a MULTI-PIN
+    /// vector for one slot. That stays FAIL-CLOSED on the stricter-than-set-equality reading
+    /// above rather than unreachable.
+    ///
+    /// ⚠ THE MECHANISM NAMED HERE WAS WRONG, and is corrected rather than dropped because the
+    /// CONCLUSION above survives it. The claim used to be that the writer "journals whatever
+    /// the announcement carried, which for one `multi_target` slot is several pins" — true on
+    /// ONE of its two reducer arms only. `GameAction::SelectTargets` hands the whole announced
+    /// vector over at once, so a multi-pin `Targets` value really is written in a single call.
+    /// `GameAction::ChooseTarget` does not: `engine_stack`'s
+    /// `handle_trigger_target_selection_choose_target` re-raises the SAME
+    /// `WaitingFor::TriggerTargetSelection` with the same one-element `target_slots` and only
+    /// `selection` advanced, and the writer reads its slot count off the prompt in hand — so a
+    /// two-pick single slot arrives as `Targets([A])` and then `Targets([B])` on ONE key, and
+    /// the latch above answers `Conflicted` rather than storing an ordered pair. Both routes
+    /// are fail-closed; only the second one is a conflict rather than an order comparison.
+    ///
+    /// Gated exactly like `game::engine::record_loop_pin`
+    /// (`samples() && !in_simulation_probe()`), so the #4603-Off build never records and
+    /// the detection/materialize drive replays without re-recording.
+    pub(crate) fn record_loop_answer(
+        &mut self,
+        slot: crate::analysis::decision_template::DecisionSlot,
+        player: PlayerId,
+        answer: crate::analysis::decision_template::LoopAnswer,
+    ) {
+        use crate::analysis::decision_template::LoopAnswer;
+        use std::collections::btree_map::Entry;
+        if !self.loop_detection.samples() || crate::game::engine::in_simulation_probe() {
+            return;
+        }
+        match self
+            .loop_answer_journal
+            .get_or_insert_default()
+            .entry((slot, player))
+        {
+            Entry::Vacant(v) => {
+                v.insert(answer);
+            }
+            Entry::Occupied(mut o) => {
+                if *o.get() != answer {
+                    o.insert(LoopAnswer::Conflicted);
+                }
+            }
+        }
+    }
+
+    /// The observed answer for one published SLOT AS ANSWERED BY `player`. `None` = that
+    /// seat never answered this slot in this window ⇒ a declaration must refuse, exactly as
+    /// [`LoopAnswer::Conflicted`] does.
+    pub fn loop_answer(
+        &self,
+        slot: &crate::analysis::decision_template::DecisionSlot,
+        player: PlayerId,
+    ) -> Option<crate::analysis::decision_template::LoopAnswer> {
+        // `BTreeMap` keys by the owned tuple and no `Borrow` shape spans a tuple, so the
+        // key is built. This is the seam's own idiom — `entry_publishes_pin_slots` builds
+        // its slot with `source: source.clone()`. One clone per published point at
+        // declaration-build time, never per iteration. `.cloned()` rather than `.copied()`
+        // because `LoopAnswer` gave up `Copy` when its value grew a `Vec<TargetPin>`.
+        self.loop_answer_journal
+            .as_ref()?
+            .get(&(slot.clone(), player))
+            .cloned()
+    }
+
+    /// How many distinct (slot, seat) pairs this window has answered. `None` and an
+    /// empty map are indistinguishable here BY DESIGN — no caller may branch on the
+    /// `Option`.
+    pub fn loop_answers_recorded(&self) -> usize {
+        self.loop_answer_journal.as_ref().map_or(0, |m| m.len())
     }
 
     /// CR 732.2a: record that an unbounded (net-progress) loop under `controller`
@@ -21194,6 +23002,8 @@ fn _gamestate_partition_is_total(s: &GameState) {
         rng: _,
         combat: _,
         waiting_for: _,
+        next_resolve_all_consent_epoch: _,
+        resolve_all_consent_run: _,
         interaction_session_id: _,
         interaction_generation: _,
         next_interaction_serial: _,
@@ -21215,6 +23025,13 @@ fn _gamestate_partition_is_total(s: &GameState) {
         static_source_index: _,
         static_mode_presence: _,
         loop_detect_ring: _,
+        // CR 603.5 + CR 732.2a "may"-answer journal: EXCLUDED from `impl PartialEq for
+        // GameState` for `loop_detect_ring`'s reason — transient derived state rebuilt
+        // from play, and comparing it would split two semantically-identical positions
+        // in AI-search dedup. It cannot become a hidden per-cycle accumulator riding a
+        // covering pair: `project_out_resources` opens with `normalize_for_loop`, which
+        // is one of the ring-clear sites this field follows, so the projection clears it.
+        loop_answer_journal: _,
         precast_shortcut_runtime: _,
         life_safety_probe: _,
         next_timestamp: _,
@@ -21243,6 +23060,10 @@ fn _gamestate_partition_is_total(s: &GameState) {
         tracked_object_sets: _,
         next_tracked_set_id: _,
         chain_tracked_set_id: _,
+        // CR 700.2: mode-boundary edge latch, cleared in the same depth-0 prelude
+        // block as `chain_tracked_set_id` above and meaningful only inside one
+        // resolution — the same reason that field is projected out here.
+        resolving_modal_instruction: _,
         tracked_set_member_causes: _,
         commander_cast_count: _,
         commander_cast_owners: _,
@@ -21424,6 +23245,10 @@ fn _gamestate_partition_is_total(s: &GameState) {
         current_triggered_mana_override: _,
         pending_cost_move_resume: _,
         pending_deferred_life_cost_resume: _,
+        pending_triggered_mana_resume: _,
+        pending_trigger_construction_priority_recipient: _,
+        active_accepted_triggered_mana_node: _,
+        trigger_construction_finisher_ran_this_action: _,
         pending_discard_for_cost: _,
         pending_cast: _,
         ring_level: _,
@@ -21442,6 +23267,15 @@ fn _gamestate_partition_is_total(s: &GameState) {
         // never involve these, so no certification-death.
         liminal_entries: _,
         pending_liminal_entry_resume: _,
+        // `entering_aura_authority` (CR 303.4f entering-Aura host authority):
+        // EXCLUDED from `impl PartialEq for GameState`, and that is the SAFE
+        // direction here rather than the dangerous one. It is `Some` only while
+        // `waiting_for == ReturnAsAuraTarget` — a state the loop sampler never
+        // records (samples are taken at the Priority window) — and it is taken
+        // by the resume arm, so it is `None` at every sample beat. It is a
+        // read-only snapshot of an object `objects` already carries, never an
+        // accumulator: no value can grow across iterations in it.
+        entering_aura_authority: _,
         last_discover_value: _,
         // Post-rebase upstream additions (rebased onto d1a1e995e), classified by ONE-SIDED-SAFETY
         // (COMPARED is fail-safe; EXCLUSION is the fail-DANGEROUS direction — a field is excluded
@@ -21472,9 +23306,11 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     legitimate loop; a heterogeneous/reordered period is correctly caught and rejected).
         last_loop_action_sequence: _,
         //   - `resolution_source_relatch` (CR 400.7j self-move re-latch): EXCLUDED-REQUIRED (measured
-        //     by ordering trace, not doc-trust). The clear at stack.rs:194 fires at the START of the
+        //     by ordering trace, not doc-trust). The `stack.rs` clears (`resolution_source_relatch =
+        //     None`, one at each resolution-start site) fire at the START of the
         //     NEXT resolution, while `record_loop_detect_sample` fires at the Priority window AFTER
-        //     this resolution's self-move SET it (zones.rs:610) — so at the sample beat it HOLDS this
+        //     this resolution's self-move SET it (`zones::record_resolution_source_relatch`) — so at
+        //     the sample beat it HOLDS this
         //     iteration's `current_incarnation`, which bumps every iteration. COMPARING it would make
         //     every self-moving loop compare UNEQUAL (a false-negative — it would make the 4d
         //     Sprout-Swarm buyback loop undetectable). It is an incarnation/timestamp identity, and
@@ -21518,6 +23354,8 @@ impl PartialEq for GameState {
             && self.rng_seed == other.rng_seed
             && self.combat == other.combat
             && self.waiting_for == other.waiting_for
+            && self.next_resolve_all_consent_epoch == other.next_resolve_all_consent_epoch
+            && self.resolve_all_consent_run == other.resolve_all_consent_run
             && self.lands_played_this_turn == other.lands_played_this_turn
             && self.max_lands_per_turn == other.max_lands_per_turn
             && self.priority_pass_count == other.priority_pass_count
@@ -21553,6 +23391,7 @@ impl PartialEq for GameState {
             && self.tracked_object_sets == other.tracked_object_sets
             && self.next_tracked_set_id == other.next_tracked_set_id
             && self.chain_tracked_set_id == other.chain_tracked_set_id
+            && self.resolving_modal_instruction == other.resolving_modal_instruction
             && self.tracked_set_member_causes == other.tracked_set_member_causes
             && self.commander_cast_count == other.commander_cast_count
             && self.commander_cast_owners == other.commander_cast_owners
@@ -21673,6 +23512,9 @@ impl PartialEq for GameState {
             && self.pending_library_search_delivery == other.pending_library_search_delivery
             && self.pending_search_found_batch == other.pending_search_found_batch
             && self.pending_cost_move_resume == other.pending_cost_move_resume
+            && self.pending_triggered_mana_resume == other.pending_triggered_mana_resume
+            && self.pending_trigger_construction_priority_recipient
+                == other.pending_trigger_construction_priority_recipient
             && self.may_trigger_auto_choices == other.may_trigger_auto_choices
             && self.decision_templates == other.decision_templates
             && self.priority_yields == other.priority_yields
@@ -22255,6 +24097,7 @@ mod forced_cascade_window_tests {
                     predicted_winner: Some(PlayerId(0)),
                     certificate: certificate(),
                     schema: Default::default(),
+                    declaration: None,
                 },
             ),
             (
@@ -22534,6 +24377,308 @@ mod drain_stack_reentrancy_tests {
              dispatching drain (CR 616.1g), not dropped"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Identity-addressed dispatch rows.
+    // -----------------------------------------------------------------------
+
+    fn resident_status(state: &GameState) -> Option<&DrainStatus> {
+        match state.resolution_stack.last() {
+            Some(crate::types::resolution::ResolutionFrame::PostReplacement(drains)) => {
+                drains.drains.first().map(|drain| &drain.status)
+            }
+            _ => None,
+        }
+        .or_else(|| {
+            state.resolution_stack.iter().find_map(|frame| match frame {
+                crate::types::resolution::ResolutionFrame::PostReplacement(drains) => {
+                    drains.drains.first().map(|drain| &drain.status)
+                }
+                _ => None,
+            })
+        })
+    }
+
+    /// **B1 — discriminating(U2).** CR 614.12a + CR 616.1g: a dispatch whose own
+    /// continuation BURIED its frame still addresses its exact entry.
+    ///
+    /// The continuation is an `Effect::Discard` carrying a sub-ability. Parking
+    /// on `DiscardChoice` raises a direct-choice frame, and the sub-ability then
+    /// takes `append_to_pending_continuation`'s parent-of-active branch, which
+    /// inserts an `AbilityContinuation` BETWEEN the `PostReplacement` frame and
+    /// the active child. The frame's absolute index never changes; its distance
+    /// from the top goes from 1 to 2, which is the only thing the two-deep
+    /// positional accessor can see.
+    ///
+    /// Revert-failing assertion: the entry reads `Paused`. With the cleanup
+    /// resolved positionally the accessor misses, both arms degrade to no-ops,
+    /// and the entry is left `Dispatching` — the strand.
+    #[test]
+    fn b1_a_dispatch_whose_continuation_buried_its_frame_still_parks_its_own_entry() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_player = PlayerId(0);
+        for index in 0..3u64 {
+            let id = crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(500 + index),
+                PlayerId(0),
+                format!("Hand Card {index}"),
+                crate::types::zones::Zone::Hand,
+            );
+            let _ = id;
+        }
+
+        let mut discard_with_tail = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Discard {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: crate::types::ability::TargetFilter::Controller,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                unless_filter: None,
+                filter: None,
+            },
+        );
+        discard_with_tail = discard_with_tail.sub_ability(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    player: crate::types::ability::TargetFilter::Controller,
+                },
+            )
+            // CR 701.9a + CR 608.2c: a discard whose tail is gated on what was
+            // discarded raises a real `ResolutionFrame::Discard` for the operation
+            // (`effects/discard.rs::resolve` mints it on the PRESENCE of this
+            // condition variant, not on its contents). The parked tail then becomes a
+            // second frame above it, so the `PostReplacement` frame sits two deep and
+            // the two-deep positional accessor can no longer see it — which is the
+            // burial this row exists to measure.
+            .condition(
+                crate::types::ability::AbilityCondition::DiscardedCardMatchesFilter {
+                    filter: crate::types::ability::TargetFilter::Any,
+                },
+            ),
+        );
+
+        let mut drains = PostReplacementDrainStack::default();
+        assert!(drains.install(
+            PostReplacementDrain::ready(PostReplacementContinuation::Template(Box::new(
+                discard_with_tail
+            ))),
+            ResidentDrainPolicy::KeepResident,
+        ));
+        state.resolution_stack.push_post_replacement(drains);
+
+        // Reach-guard: the mint really handed out a pair — this row is not
+        // passing because no dispatch ever started.
+        assert!(
+            state
+                .active_post_replacement_drains()
+                .is_some_and(PostReplacementDrainStack::has_ready),
+            "the fixture parks a Ready drain reachable by the mint"
+        );
+
+        let mut events = Vec::new();
+        let waiting = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+            &mut state,
+            None,
+            None,
+            None,
+            &mut events,
+        );
+
+        // Reach-guard: the continuation ran AND buried its own frame.
+        assert!(
+            waiting.is_some(),
+            "the continuation must park on a prompt, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            state.resolution_stack.len() >= 3,
+            "the continuation must have raised two frames above its own, got {}",
+            state.resolution_stack.len()
+        );
+        assert!(
+            state.active_post_replacement_drains().is_none(),
+            "reach-guard: the two-deep positional accessor can no longer see the frame — \
+             without this the row measures nothing"
+        );
+
+        assert!(
+            matches!(resident_status(&state), Some(DrainStatus::Paused)),
+            "CR 614.12a: the dispatch parks its OWN entry wherever its frame now sits; \
+             a positional cleanup no-ops and leaves it Dispatching. got {:?}",
+            resident_status(&state)
+        );
+    }
+
+    /// **H2 — guard.** *Hostile: the negative sibling status.* A resident
+    /// `Ready` drain reached at a priority boundary must still be DISPATCHED,
+    /// never swept.
+    ///
+    /// This is `main`'s behaviour with no sweep at all, so it stays green under
+    /// a sweep revert — that is why it is a guard. Its assertion is
+    /// mutation-failing: a sweep written with a wildcard arm, or scoped to
+    /// `!Paused` rather than to `Dispatching` alone, swallows the `Ready`
+    /// continuation and turns this red.
+    ///
+    /// Positive control: the drain's effect is observed to have executed, so
+    /// "the drain is gone" cannot be satisfied by a sweep that discarded it.
+    #[test]
+    fn h2_a_ready_resident_is_dispatched_at_a_priority_boundary_never_swept() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_player = PlayerId(0);
+        let life_before = state.players[0].life;
+
+        let mut drains = PostReplacementDrainStack::default();
+        assert!(drains.install(
+            PostReplacementDrain::ready(PostReplacementContinuation::Template(Box::new(
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
+                        player: crate::types::ability::TargetFilter::Controller,
+                    },
+                )
+            ))),
+            ResidentDrainPolicy::KeepResident,
+        ));
+        state.resolution_stack.push_post_replacement(drains);
+
+        let mut events = Vec::new();
+        crate::game::effects::resume_resolution_frames(&mut state, &mut events);
+
+        assert_eq!(
+            state.players[0].life,
+            life_before + 3,
+            "positive control: the Ready continuation actually RAN — without this, \
+             'the drain is gone' would also be satisfied by a sweep that ate it"
+        );
+        assert!(
+            state.resolution_stack.is_empty(),
+            "the dispatched-and-finished drain leaves no frame behind"
+        );
+    }
+
+    /// **H3 — discriminating(U2).** *Hostile: multi-authority CR 616.1g
+    /// nesting.* One frame, an outer `Dispatching` entry below an inner `Paused`
+    /// one, with the frame buried two deep.
+    ///
+    /// Three claims:
+    ///  (i) the second (inner) mint against the same frame returns a pair whose
+    ///      `frame()` EQUALS the outer's — red under an overwriting stamp;
+    ///  (ii) the outer dispatch's finish removes ONLY depth 0; the inner `Paused`
+    ///      entry survives with its own `event_source` intact and the frame's id
+    ///      unchanged — red under a positional lookup;
+    ///  (iii) the ownerless sweep does not fire here, because the resident is
+    ///      `Paused`, which is live parked work.
+    #[test]
+    fn h3_nested_same_frame_dispatches_share_one_identity_and_retire_lifo() {
+        let mut stack = crate::types::resolution::ResolutionStack::default();
+        stack.push_post_replacement(PostReplacementDrainStack::default());
+
+        let mut outer = ready_drain("outer");
+        outer.event_source = Some(ObjectId(7));
+        assert!(stack
+            .active_post_replacement_or_paired_parent_mut()
+            .expect("frame is active")
+            .install(outer, ResidentDrainPolicy::KeepResident));
+        let (_, handle_outer) = stack
+            .begin_active_post_replacement_dispatch()
+            .expect("the outer ready drain begins dispatching");
+
+        let mut inner = ready_drain("inner");
+        inner.event_source = Some(ObjectId(9));
+        assert!(stack
+            .active_post_replacement_or_paired_parent_mut()
+            .expect("frame is active")
+            .install(inner, ResidentDrainPolicy::KeepResident));
+
+        // Positive control: two entries with DISTINCT event contexts exist.
+        match stack.last() {
+            Some(crate::types::resolution::ResolutionFrame::PostReplacement(drains)) => {
+                assert_eq!(drains.drains.len(), 2, "outer + inner both resident");
+                assert_eq!(drains.drains[0].event_source, Some(ObjectId(7)));
+                assert_eq!(drains.drains[1].event_source, Some(ObjectId(9)));
+                assert!(
+                    drains.frame_id().is_some(),
+                    "the outer mint stamped the frame"
+                );
+            }
+            other => panic!("expected the post-replacement frame, got {other:?}"),
+        }
+
+        let (_, handle_inner) = stack
+            .begin_active_post_replacement_dispatch()
+            .expect("the inner ready drain begins dispatching");
+
+        // (i) The re-stamp regression witness.
+        assert_eq!(
+            handle_inner.frame(),
+            handle_outer.frame(),
+            "CR 616.1g: a nested same-frame dispatch reuses the frame's identity; \
+             re-stamping invalidates the outer dispatch's still-live handle"
+        );
+        assert!(stack.pause_post_replacement_dispatch(handle_inner));
+
+        // Bury the frame two deep, out of the two-deep positional window.
+        stack.push_inner(crate::types::resolution::ResolutionFrame::PostReplacement(
+            PostReplacementDrainStack::default(),
+        ));
+        stack.push_inner(crate::types::resolution::ResolutionFrame::PostReplacement(
+            PostReplacementDrainStack::default(),
+        ));
+        let frames_before = stack.len();
+
+        // (ii) The outer finish retires exactly depth 0.
+        let retired = stack.finish_post_replacement_dispatch(handle_outer);
+        assert!(
+            retired.is_some_and(|drain| drain.event_source == Some(ObjectId(7))),
+            "the outer dispatch retires its OWN entry, identified by event context"
+        );
+        assert_eq!(
+            stack.len(),
+            frames_before,
+            "a buried frame is never removed by a finish — that would reorder the stack"
+        );
+        // Bound out as a statement so the `iter()` temporary (which holds the borrow
+        // of `stack`) drops here rather than after `stack` itself — a tail-expression
+        // `match stack.iter().next()` outlives its own receiver.
+        let bottom_frame = stack.iter().next();
+        match bottom_frame {
+            Some(crate::types::resolution::ResolutionFrame::PostReplacement(drains)) => {
+                assert_eq!(drains.drains.len(), 1, "only the inner entry survives");
+                assert_eq!(
+                    drains.drains[0].event_source,
+                    Some(ObjectId(9)),
+                    "CR 615.5: the surviving inner entry keeps its own prevented-event context"
+                );
+                assert!(
+                    matches!(drains.drains[0].status, DrainStatus::Paused),
+                    "the inner entry is still parked"
+                );
+                assert_eq!(
+                    drains.frame_id(),
+                    Some(handle_outer.frame()),
+                    "the frame's identity is unchanged by either dispatch"
+                );
+
+                // (iii) The ownerless sweep does not fire on a Paused resident.
+                let mut probe = drains.clone();
+                assert!(
+                    probe.finish_ownerless_dispatching_resident().is_none(),
+                    "a Paused resident is live parked work, never an ownerless strand"
+                );
+            }
+            other => panic!("expected the original post-replacement frame, got {other:?}"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -22542,15 +24687,144 @@ mod tests {
     use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, PostReplacementContinuation, QuantityExpr,
-        ResolvedAbility, TargetFilter, TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef,
-        TriggerEntry, TriggerGrantInstanceRef,
+        AbilityDefinition, AbilityKind, Effect, EffectScope, PostReplacementContinuation,
+        QuantityExpr, ResolvedAbility, TapStateChange, TargetFilter, TriggerBaseSetInstanceRef,
+        TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerGrantInstanceRef,
     };
     use crate::types::deterministic_serde::test_support::ReverseBuildHasher;
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
     };
     use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
+
+    #[test]
+    fn persisted_legacy_tap_effects_migrate_only_effect_payloads() {
+        let mut persisted = serde_json::json!({
+            "objects": {
+                "3": {
+                    "abilities": [{
+                        "effect": { "type": "Untap", "target": { "type": "ParentTarget" } },
+                        "sub_ability": {
+                            "effect": { "type": "TapAll", "target": { "type": "Typed" } }
+                        }
+                    }]
+                }
+            },
+            "unrelated": { "type": "Untap" }
+        });
+
+        migrate_legacy_tap_effects(&mut persisted);
+
+        assert_eq!(
+            persisted["objects"]["3"]["abilities"][0]["effect"],
+            serde_json::json!({
+                "type": "SetTapState",
+                "target": { "type": "ParentTarget" },
+                "scope": { "type": "Single" },
+                "state": { "type": "Untap" }
+            }),
+            "legacy single-target Untap maps to the parameterized effect"
+        );
+        assert_eq!(
+            persisted["objects"]["3"]["abilities"][0]["sub_ability"]["effect"],
+            serde_json::json!({
+                "type": "SetTapState",
+                "target": { "type": "Typed" },
+                "scope": { "type": "All" },
+                "state": { "type": "Tap" }
+            }),
+            "nested legacy mass effects retain their population scope"
+        );
+        assert_eq!(
+            persisted["unrelated"],
+            serde_json::json!({ "type": "Untap" }),
+            "only serialized Effect payloads are migrated"
+        );
+    }
+
+    #[test]
+    fn persisted_legacy_untap_effect_restores_as_set_tap_state() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Legacy untap source".to_string(),
+            Zone::Battlefield,
+        );
+        Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&source)
+                .expect("test source exists")
+                .abilities,
+        )
+        .push(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::SetTapState {
+                target: TargetFilter::ParentTarget,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            },
+        ));
+
+        let mut persisted = serde_json::to_value(state).expect("state serializes");
+        persisted["objects"][source.0.to_string()]["abilities"][0]["effect"] = serde_json::json!({
+            "type": "Untap",
+            "target": { "type": "ParentTarget" }
+        });
+
+        let restored = serde_json::from_value::<PersistedGameState>(persisted)
+            .expect("legacy effect save restores through the persisted boundary")
+            .into_game_state();
+        assert!(matches!(
+            restored.objects[&source].abilities[0].effect.as_ref(),
+            Effect::SetTapState {
+                target: TargetFilter::ParentTarget,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            }
+        ));
+    }
+
+    /// The `LiminalEntrant` witness is a compile-time distinction with no wire
+    /// footprint: it serializes as the bare projected object, exactly as this
+    /// field did before the witness existed, and CR 111.1 token-ness — already a
+    /// persisted characteristic — selects the variant on the way back in.
+    #[test]
+    fn a_liminal_entrant_round_trips_as_its_projected_object() {
+        for is_token in [true, false] {
+            let mut object = GameObject::new(
+                ObjectId(7),
+                CardId(3),
+                PlayerId(0),
+                "Projection".to_string(),
+                Zone::Battlefield,
+            );
+            object.is_token = is_token;
+            let entrant = if is_token {
+                LiminalEntrant::Token(TokenProjection::materialize(object.clone()))
+            } else {
+                LiminalEntrant::Card(object.clone())
+            };
+
+            let entrant_json = serde_json::to_string(&entrant).expect("entrant serializes");
+            assert_eq!(
+                entrant_json,
+                serde_json::to_string(&object).expect("object serializes"),
+                "the wire form is the projected object itself"
+            );
+
+            let restored: LiminalEntrant =
+                serde_json::from_str(&entrant_json).expect("entrant restores");
+            assert_eq!(
+                restored.is_token_projection(),
+                is_token,
+                "CR 111.1: the witness survives the round trip"
+            );
+            assert_eq!(restored.projected().name, object.name);
+        }
+    }
 
     #[derive(Serialize)]
     struct TupleKeyFixture<'a> {
@@ -22637,6 +24911,35 @@ mod tests {
                 .caused_by,
             None,
             "triggered mana also rejects an absent explicit or ambient parent"
+        );
+    }
+
+    #[test]
+    fn paused_zone_change_delivery_derives_a_terminal_outcome_after_resume() {
+        let member = ObjectIncarnationRef::of(ObjectId(71), 4);
+        let mut delivery = PendingZoneChangeDelivery::new(
+            member,
+            ProposedEvent::zone_change(
+                member.object_id,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                Some(ObjectId(72)),
+            ),
+        );
+
+        assert_eq!(
+            delivery.terminal_completion_after_resume(),
+            ZoneMoveCompletion::Remained,
+            "an answered pause with no original-incarnation event completed without moving"
+        );
+
+        delivery
+            .record_terminal_completion(ZoneMoveCompletion::Prevented)
+            .expect("the explicit replacement outcome is recorded once");
+        assert_eq!(
+            delivery.terminal_completion_after_resume(),
+            ZoneMoveCompletion::Prevented,
+            "an explicit replacement outcome remains authoritative over slice inference"
         );
     }
 
@@ -25060,6 +27363,18 @@ mod tests {
     /// intentionally outside the state-equality key just as it was before the
     /// ChangeZone frame migration. Replacing `game_state_eq` with derived stack
     /// equality makes this assertion fail.
+    ///
+    /// Exposure note for the per-frame `PostReplacementFrameId`: it DOES
+    /// participate in `GameState` equality, through `ResolutionStack::game_state_eq`'s
+    /// derived fall-through arm for `PostReplacement` — exactly the treatment
+    /// `DiscardFrame.id` already receives, and the direction that function's own
+    /// comment calls fail-safe (COMPARED is fail-safe; EXCLUSION is the
+    /// fail-DANGEROUS direction). Worst case: a repeating position that mints a
+    /// new frame id each iteration stops comparing equal, so the CR 104.4b
+    /// auto-pass window terminates on its iteration cap instead of on loop
+    /// detection. The ALLOCATOR is not exposed here at all — `game_state_eq`
+    /// compares `frames` only, the same treatment `next_draw_sequence_frame_id`
+    /// and `next_discard_frame_id` already get.
     #[test]
     fn game_state_equality_excludes_devour_only_change_zone_frame() {
         let state = GameState::new_two_player(7);
@@ -26122,6 +28437,69 @@ mod tests {
         );
     }
 
+    /// CR 700.2 + CR 104.4b: the mode-boundary edge latch
+    /// (`resolving_modal_instruction`) is resolution-scoped and is cleared only at
+    /// depth-0 chain ENTRY, so between resolutions it holds the last resolved
+    /// mode's ordinal as pure residue. Two identical positions reached via
+    /// different last-resolved modes must still confirm as a repeated position.
+    ///
+    /// DISCRIMINATION: delete `clone.resolving_modal_instruction = None;` from
+    /// `normalize_for_loop` and this test FAILS — the field is eq-compared, so the
+    /// residue alone defeats the CR 104.4b repeat. The `a != b` assertion is the
+    /// paired non-vacuity witness: it proves the two inputs really do differ
+    /// BEFORE normalization, so the positive assertion cannot pass by the two
+    /// sides being trivially identical.
+    #[test]
+    fn normalize_for_loop_clears_the_modal_boundary_latch_residue() {
+        let mut first = GameState::new_two_player(7);
+        let mut second = first.clone();
+        // The ONLY difference: which mode resolved last. Same board, same stack.
+        first.resolving_modal_instruction = Some(0);
+        second.resolving_modal_instruction = Some(2);
+
+        assert!(
+            first != second,
+            "non-vacuity: the two states must differ before normalization, else the \
+             equality assertion below proves nothing"
+        );
+
+        assert!(
+            loop_states_equal(&first.normalize_for_loop(), &second.normalize_for_loop()),
+            "CR 104.4b: positions differing only in the resolution-scoped mode-boundary \
+             latch must confirm as a repeat"
+        );
+    }
+
+    /// CR 104.4b: deferred-trigger timestamps are CR 603.3b scheduling history,
+    /// not a changed recurring position. Their live values must remain distinct
+    /// for ordering, while loop snapshots compare the same pending trigger
+    /// regardless of the allocator position that produced it.
+    #[test]
+    fn normalize_for_loop_canonicalizes_deferred_trigger_timestamps() {
+        let mut first = GameState::new_two_player(7);
+        let source = ObjectId(90_001);
+        first
+            .deferred_triggers
+            .push(PendingTriggerContext::single(ordinary_pending_trigger(
+                source, 11,
+            )));
+        let mut later = first.clone();
+        later.deferred_triggers[0].pending.timestamp = 97;
+
+        assert_ne!(
+            first, later,
+            "fixture must differ in the Eq-compared deferred scheduling timestamp"
+        );
+        let first_normalized = first.normalize_for_loop();
+        let later_normalized = later.normalize_for_loop();
+        assert_eq!(first_normalized.deferred_triggers[0].pending.timestamp, 0);
+        assert_eq!(later_normalized.deferred_triggers[0].pending.timestamp, 0);
+        assert!(
+            loop_states_equal(&first_normalized, &later_normalized),
+            "the volatile deferred ordering timestamp must not hide a recurring state"
+        );
+    }
+
     #[test]
     fn loop_states_equal_distinguishes_stack_trigger_firing() {
         let mut ordinary = GameState::new_two_player(7);
@@ -26258,7 +28636,7 @@ mod tests {
         );
     }
 
-    /// CR 104.4b + CR 611.2c + CR 400.7: a materialized `MustAttackPlayer`
+    /// CR 104.4b + CR 611.2c + CR 400.7: a materialized `MustAttackDefender`
     /// static's `source_object` provenance is a layer-DERIVED characteristic that
     /// `object_content_eq` deliberately omits (like the whole `static_definitions`
     /// vec). Two states differing ONLY in a grafted requirement's directing-source
@@ -26281,8 +28659,8 @@ mod tests {
             Zone::Battlefield,
         );
         object.static_definitions.push(
-            StaticDefinition::new(StaticMode::MustAttackPlayer {
-                player: PlayerId(1).into(),
+            StaticDefinition::new(StaticMode::MustAttackDefender {
+                defender: PlayerId(1).into(),
             })
             .affected(TargetFilter::SelfRef)
             .source_object(ObjectId(800)),
@@ -26296,8 +28674,8 @@ mod tests {
         b.objects
             .get_mut(&ObjectId(500))
             .unwrap()
-            .static_definitions = vec![StaticDefinition::new(StaticMode::MustAttackPlayer {
-            player: PlayerId(1).into(),
+            .static_definitions = vec![StaticDefinition::new(StaticMode::MustAttackDefender {
+            defender: PlayerId(1).into(),
         })
         .affected(TargetFilter::SelfRef)
         .source_object(ObjectId(801))]
@@ -26905,6 +29283,11 @@ mod tests {
         variants.push(Box::new(WaitingFor::Priority {
             player: PlayerId(0),
         }));
+        variants.push(Box::new(WaitingFor::ResolveAllConsent {
+            epoch: 1,
+            representative: PlayerId(0),
+        }));
+        variants.push(Box::new(WaitingFor::ResolveAllReady { epoch: 1 }));
         variants.push(Box::new(WaitingFor::MulliganDecision {
             pending: vec![MulliganDecisionEntry {
                 player: PlayerId(0),
@@ -27013,8 +29396,10 @@ mod tests {
             selectable_cards: vec![ObjectId(1)],
             kept_destination: None,
             rest_destination: None,
+            rest_order: crate::types::ability::DigRestOrder::Preserve,
             source_id: None,
             enter_tapped: false,
+            enters_attacking: false,
         }));
         variants.push(Box::new(WaitingFor::SurveilChoice {
             player: PlayerId(0),
@@ -27042,6 +29427,7 @@ mod tests {
             branch_descriptions: vec!["Draw a card.".to_string()],
             parent_targets: vec![],
             context: crate::types::ability::SpellContext::default(),
+            continuation: None,
             replacement_applied: Default::default(),
             remaining_players: vec![],
         }));
@@ -27236,7 +29622,7 @@ mod tests {
             mana_reduction: ManaCost::zero(),
             pending_cast: dummy_pending(),
         }));
-        assert_eq!(variants.len(), 37);
+        assert_eq!(variants.len(), 39);
     }
 
     #[test]
@@ -29477,6 +31863,365 @@ mod tests {
         assert!(
             moved_state.loop_detect_ring.is_empty(),
             "an observed life move on a full-length snapshot still clears the ring"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────
+    // C2a — the loop-answer journal's STORAGE CONTRACT on the widened `(slot, seat)` key.
+    //
+    // ⚠ TIER, stated rather than implied: these three rows are IN-CRATE STORAGE-CONTRACT
+    // rows, NOT wire rows. They assert what the map does with the keys and values it is
+    // handed; that the PRODUCTION reducer arms hand it the right ones is asserted at the
+    // wire tier by `tests/integration/fantastic_four_bounded_loop.rs` (the CR 603.5 arm
+    // and the CR 608.2b `ChooseTarget` arm) and `tests/integration/loop_shortcut.rs` (the
+    // CR 608.2b `SelectTargets` arm).
+    // ─────────────────────────────────────────────────────────────────────────────────
+
+    /// A `GameState` whose detector SAMPLES, which is `record_loop_answer`'s own gate. A
+    /// state built without this records nothing and every row below would pass vacuously
+    /// on an empty map — which is why each row asserts a CARDINALITY first.
+    fn journal_state() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.loop_detection = LoopDetectionMode::Interactive;
+        state
+    }
+
+    fn journal_source(id: u64) -> crate::analysis::decision_template::DecisionSource {
+        YieldTarget::ThisObject {
+            source_id: ObjectId(id),
+            incarnation: Some(1),
+            trigger_description: None,
+        }
+    }
+
+    /// **Row T2 — the SUB-INDEX half of the key.** CR 601.2c and CR 603.5 are two choices
+    /// of ONE ability instance, and `entry_publishes_pin_slots` publishes both from a
+    /// single bound `source`. They must occupy TWO journal entries.
+    ///
+    /// # Discrimination
+    ///
+    /// Collapse the key to `(slot.source, player)` in `record_loop_answer`'s `entry(..)`
+    /// and `loop_answer`'s `get(..)` (keep both signatures) ⇒ the two writes land in ONE
+    /// entry, the second differs from the first, and the `Entry::Occupied` arm latches
+    /// `Conflicted`: the cardinality assertion reads 1 and both value lookups read
+    /// `Conflicted`.
+    ///
+    /// # Reach-guard
+    ///
+    /// The cardinality is asserted FIRST and is value-independent, so an unsampled
+    /// detector — an empty map — fails this row before any content assertion can pass on
+    /// nothing.
+    ///
+    /// # NON-CLAIM, measured and shipped in the row rather than in a report
+    ///
+    /// NO REAL BOARD IN THIS LANE EXERCISES THIS COLLISION: every published point on all
+    /// three tracked F4 dumps carries a DISTINCT source, so collapsing the sub-index
+    /// leaves those declarations intact. The card class is real (Scryfall: ≥8 cards
+    /// phrased "you may have target opponent …", e.g. Disciple of the Vault) and the
+    /// two-slots-from-one-source publisher shape is asserted in-tree by
+    /// `game::engine`'s `bounded_cycle_pin_slots_publishes_the_may_gate_of_an_optional_trigger`,
+    /// but the end-to-end board is UNMEASURED. This row is the storage invariant only.
+    #[test]
+    fn c2a_row_t2_one_source_two_sub_indices_occupy_two_journal_entries() {
+        use crate::analysis::decision_template::{
+            DecisionSlot, LoopAnswer, LoopAnswerValue, MayChoiceOption, TargetPin,
+        };
+
+        let mut state = journal_state();
+        assert_eq!(
+            state.loop_answers_recorded(),
+            0,
+            "reach-guard: a fresh board starts with an EMPTY journal, so every entry below \
+             is one this row wrote"
+        );
+        let source = journal_source(910);
+        let seat = PlayerId(0);
+
+        state.record_loop_answer(
+            DecisionSlot::may(source.clone()),
+            seat,
+            LoopAnswer::Uniform(LoopAnswerValue::May(MayChoiceOption::Take)),
+        );
+        state.record_loop_answer(
+            DecisionSlot::target(source.clone()),
+            seat,
+            LoopAnswer::Uniform(LoopAnswerValue::Targets(vec![TargetPin::Player(PlayerId(
+                1,
+            ))])),
+        );
+
+        assert_eq!(
+            state.loop_answers_recorded(),
+            2,
+            "CR 601.2c and CR 603.5 are two choices of ONE ability instance: the sub-index \
+             must keep them in two entries. A source-only key holds 1"
+        );
+        assert_eq!(
+            state.loop_answer(&DecisionSlot::may(source.clone()), seat),
+            Some(LoopAnswer::Uniform(LoopAnswerValue::May(
+                MayChoiceOption::Take
+            ))),
+            "the CR 603.5 gate's own answer survives the CR 601.2c write on the same source"
+        );
+        assert_eq!(
+            state.loop_answer(&DecisionSlot::target(source), seat),
+            Some(LoopAnswer::Uniform(LoopAnswerValue::Targets(vec![
+                TargetPin::Player(PlayerId(1))
+            ]))),
+            "and the CR 601.2c announcement's own answer survives the CR 603.5 write"
+        );
+    }
+
+    /// **Row T3 — the LATCH, on the target axis.** CR 732.2a: two observed iterations of
+    /// one (slot, seat) pair that DISAGREE latch [`LoopAnswer::Conflicted`], and the latch
+    /// is idempotent and seat-local.
+    ///
+    /// # Discrimination
+    ///
+    /// Narrow the `Entry::Occupied` arm to the may axis —
+    /// `if *o.get() != answer && !matches!(answer, LoopAnswer::Uniform(LoopAnswerValue::Targets(_)))`
+    /// ⇒ this row reds while C1's existing may-conflict row
+    /// (`c1_row2b_one_seat_answering_one_source_two_ways_latches_conflicted`) stays GREEN.
+    /// The mutation is therefore discriminating rather than shared.
+    ///
+    /// # Paired positive / reach-guards
+    ///
+    /// The first write is read back as `Uniform` BEFORE the differing one lands, so a
+    /// writer that recorded nothing cannot satisfy this row; and the sibling seat's entry
+    /// is asserted still `Uniform` afterwards, so a latch that fired globally fails too.
+    ///
+    /// # NON-CLAIM, measured and shipped in the row
+    ///
+    /// THE TARGET LATCH HAS NO MEASURED WIRE-TIER REACHABILITY: driving the three tracked
+    /// F4 dumps under an ALTERNATING-target policy through production `apply()` reaches NO
+    /// OFFER AT ALL (a varying player target moves a different seat's resources, so the
+    /// period's signature never repeats and certification refuses upstream), while
+    /// constant P1, constant P2 and constant P3 all certify. It is the VARIATION, not the
+    /// seat, that blocks certification. This latch is defence in depth.
+    #[test]
+    fn c2a_row_t3_a_differing_target_answer_latches_conflicted_idempotently_and_seat_locally() {
+        use crate::analysis::decision_template::{
+            DecisionSlot, LoopAnswer, LoopAnswerValue, TargetPin,
+        };
+
+        let mut state = journal_state();
+        assert_eq!(
+            state.loop_answers_recorded(),
+            0,
+            "reach-guard: a fresh board starts with an EMPTY journal"
+        );
+        let slot = DecisionSlot::target(journal_source(911));
+        let (seat, other_seat) = (PlayerId(0), PlayerId(1));
+        let aimed_at_1 = LoopAnswer::Uniform(LoopAnswerValue::Targets(vec![TargetPin::Player(
+            PlayerId(1),
+        )]));
+        let aimed_at_0 = LoopAnswer::Uniform(LoopAnswerValue::Targets(vec![TargetPin::Player(
+            PlayerId(0),
+        )]));
+
+        state.record_loop_answer(slot.clone(), seat, aimed_at_1.clone());
+        state.record_loop_answer(slot.clone(), other_seat, aimed_at_1.clone());
+        assert_eq!(
+            state.loop_answer(&slot, seat),
+            Some(aimed_at_1.clone()),
+            "paired positive: the FIRST answer is journalled as Uniform before any \
+             disagreement, so a writer that stored nothing cannot reach the latch"
+        );
+
+        // The disagreement.
+        state.record_loop_answer(slot.clone(), seat, aimed_at_0);
+        assert_eq!(
+            state.loop_answer(&slot, seat),
+            Some(LoopAnswer::Conflicted),
+            "CR 732.2a: this engine refuses on a differing answer — an ENGINE-CAPABILITY \
+             limit, not a rule the CR states"
+        );
+        assert_eq!(
+            state.loop_answer(&slot, other_seat),
+            Some(aimed_at_1.clone()),
+            "seat-local: the other seat's entry is a DIFFERENT key and is untouched by the \
+             latch"
+        );
+
+        // Idempotence: the latch fires on DISAGREEMENT, not on repetition, and never
+        // returns to `Uniform`.
+        state.record_loop_answer(slot.clone(), seat, aimed_at_1);
+        assert_eq!(
+            state.loop_answer(&slot, seat),
+            Some(LoopAnswer::Conflicted),
+            "the latch never returns to Uniform, even when a later answer matches the first"
+        );
+    }
+
+    /// **Row T4 — the SEAT half of the key, on the target axis.** A seat can only ever
+    /// answer for itself: two seats announcing DIFFERENT targets for one slot occupy two
+    /// entries and neither can be read in place of the other.
+    ///
+    /// # Discrimination
+    ///
+    /// Drop `player` from the key in `record_loop_answer`/`loop_answer` ⇒ ONE entry, the
+    /// second write disagrees with the first, and the latch makes both lookups
+    /// `Conflicted`: the cardinality reads 1 and both value assertions flip.
+    ///
+    /// # Reach-guard
+    ///
+    /// The two seats are asserted DISTINCT and their two answers asserted DIFFERENT before
+    /// the lookups — two identical answers would occupy two entries under either key shape
+    /// and prove nothing.
+    #[test]
+    fn c2a_row_t4_two_seats_answering_one_target_slot_occupy_two_independent_entries() {
+        use crate::analysis::decision_template::{
+            DecisionSlot, LoopAnswer, LoopAnswerValue, TargetPin,
+        };
+
+        let mut state = journal_state();
+        assert_eq!(
+            state.loop_answers_recorded(),
+            0,
+            "reach-guard: a fresh board starts with an EMPTY journal"
+        );
+        let slot = DecisionSlot::target(journal_source(912));
+        let (seat_a, seat_b) = (PlayerId(0), PlayerId(1));
+        assert_ne!(
+            seat_a, seat_b,
+            "reach-guard: the two answering seats must differ, else there is no seat axis"
+        );
+        let answer_a = LoopAnswer::Uniform(LoopAnswerValue::Targets(vec![TargetPin::Player(
+            PlayerId(1),
+        )]));
+        let answer_b = LoopAnswer::Uniform(LoopAnswerValue::Targets(vec![TargetPin::Player(
+            PlayerId(0),
+        )]));
+        assert_ne!(
+            answer_a, answer_b,
+            "reach-guard: the two answers must DIFFER, else a collapsed key would also hold \
+             two consistent entries and this row would not discriminate"
+        );
+
+        state.record_loop_answer(slot.clone(), seat_a, answer_a.clone());
+        state.record_loop_answer(slot.clone(), seat_b, answer_b.clone());
+
+        assert_eq!(
+            state.loop_answers_recorded(),
+            2,
+            "the seat is part of the key: two seats answering one slot hold TWO entries. A \
+             seat-less key holds 1"
+        );
+        assert_eq!(
+            state.loop_answer(&slot, seat_a),
+            Some(answer_a),
+            "each seat reads back its OWN announcement, uncorrupted by the other's"
+        );
+        assert_eq!(state.loop_answer(&slot, seat_b), Some(answer_b));
+    }
+
+    /// **Row T3-R — the latch, exercised with the MIGRATED spelling.** CR 601.2c: after the
+    /// provenance split an announced seat is journalled as
+    /// `Scheduled(Constant(Ranking::one(AnnouncementSubject::Seat(..))))`, and this row
+    /// asserts the [`LoopAnswer::Conflicted`] latch behaves identically on that value.
+    ///
+    /// # Why it exists — the gap it closes
+    ///
+    /// [`c2a_row_t3_a_differing_target_answer_latches_conflicted_idempotently_and_seat_locally`]
+    /// and its T4 sibling HAND-BUILD their `LoopAnswer`s, so the producer migration cannot
+    /// reach them and they stay green unmodified. That leaves the latch never exercised with
+    /// the value production now writes: equality preservation across the re-spelling would
+    /// rest on derived structural `PartialEq` alone — sound, but unpinned. This pins it.
+    ///
+    /// # Discrimination
+    ///
+    /// Two independent mutants, each caught by a different arm, and BOTH RUN rather than
+    /// reasoned about (the mutation must target EQUALITY, not the producer — this row builds
+    /// its own values, so a producer mutation cannot reach it):
+    ///
+    /// * hand-write `impl PartialEq for Ranking` as `self.head() == other.head()` — the
+    ///   head-only shape `evaluate_schedule` uses to RESOLVE, and therefore the plausible
+    ///   wrong reading ⇒ arm (b)'s same-head/different-tail pair compares EQUAL ⇒ no latch ⇒
+    ///   **arm (b) FAILS while arms (a) and (c) stay green**, because (a)'s heads already
+    ///   differ. The tail is the NEXT episode's pre-declaration, so two proposals agreeing
+    ///   only about this episode are not the same answer;
+    /// * hand-write `impl PartialEq for AnnouncementSubject` with `(Seat(_), Seat(_)) => true`
+    ///   ⇒ two DIFFERENT seats compare equal ⇒ arm (a)'s own reach-guard fires first and
+    ///   names the vacuity by hand, which is the reach-guard doing its job rather than the
+    ///   latch assertion doing it late.
+    ///
+    /// # Paired positive
+    ///
+    /// Arm (c) records the SAME ranking twice and requires the entry to stay `Uniform`. Without
+    /// it, a latch that fired on every write — i.e. an equality that is always false — would
+    /// satisfy both negative arms.
+    #[test]
+    fn c2a_row_t3r_the_conflicted_latch_is_unchanged_by_the_migrated_seat_spelling() {
+        use crate::analysis::decision_template::{
+            AnnouncementSubject, DecisionSlot, LoopAnswer, LoopAnswerValue, Ranking, TargetPin,
+            TargetSchedule,
+        };
+
+        let ranked = |subjects: Vec<AnnouncementSubject>| {
+            LoopAnswer::Uniform(LoopAnswerValue::Targets(vec![TargetPin::Scheduled(
+                TargetSchedule::Constant(
+                    Ranking::new(subjects).expect("non-empty, duplicate-free by construction"),
+                ),
+            )]))
+        };
+        let seat = |p: u8| AnnouncementSubject::Seat(PlayerId(p));
+
+        // ── (a) two rankings naming DIFFERENT seats ⇒ Conflicted ──
+        let mut state = journal_state();
+        let slot_a = DecisionSlot::target(journal_source(913));
+        let aimed_at_1 = ranked(vec![seat(1)]);
+        let aimed_at_2 = ranked(vec![seat(2)]);
+        assert_ne!(
+            aimed_at_1, aimed_at_2,
+            "reach-guard: the two announcements must DIFFER as values, else the latch has \
+             nothing to fire on and every arm below is vacuous"
+        );
+        state.record_loop_answer(slot_a.clone(), PlayerId(0), aimed_at_1.clone());
+        assert_eq!(
+            state.loop_answer(&slot_a, PlayerId(0)),
+            Some(aimed_at_1.clone()),
+            "paired positive: the FIRST ranked answer is journalled as Uniform before any \
+             disagreement, so a writer that stored nothing cannot reach the latch"
+        );
+        state.record_loop_answer(slot_a.clone(), PlayerId(0), aimed_at_2);
+        assert_eq!(
+            state.loop_answer(&slot_a, PlayerId(0)),
+            Some(LoopAnswer::Conflicted),
+            "CR 732.2a: two announcements naming different seats are a disagreement in the \
+             ranked spelling exactly as they were in the CHOICE-class one"
+        );
+
+        // ── (b) SAME head, DIFFERENT tail ⇒ still Conflicted ──
+        //
+        // The tail is a pre-declaration for the NEXT episode (CR 732.2a), not decoration, so
+        // two proposals that agree only about this episode are not the same answer. This is
+        // the arm a head-only equality would lose.
+        let slot_b = DecisionSlot::target(journal_source(914));
+        let head1_tail2 = ranked(vec![seat(1), seat(2)]);
+        let head1_tail3 = ranked(vec![seat(1), seat(3)]);
+        state.record_loop_answer(slot_b.clone(), PlayerId(0), head1_tail2.clone());
+        assert_eq!(
+            state.loop_answer(&slot_b, PlayerId(0)),
+            Some(head1_tail2),
+            "reach-guard: the multi-entry ranking round-trips as Uniform first"
+        );
+        state.record_loop_answer(slot_b.clone(), PlayerId(0), head1_tail3);
+        assert_eq!(
+            state.loop_answer(&slot_b, PlayerId(0)),
+            Some(LoopAnswer::Conflicted),
+            "equality over a `Ranking` is STRUCTURAL, not head-only: the tail is the next \
+             episode's pre-declaration, so differing tails are differing answers"
+        );
+
+        // ── (c) the SAME ranking twice ⇒ still Uniform ──
+        let slot_c = DecisionSlot::target(journal_source(915));
+        state.record_loop_answer(slot_c.clone(), PlayerId(0), aimed_at_1.clone());
+        state.record_loop_answer(slot_c.clone(), PlayerId(0), aimed_at_1.clone());
+        assert_eq!(
+            state.loop_answer(&slot_c, PlayerId(0)),
+            Some(aimed_at_1),
+            "the latch fires on DISAGREEMENT, not on repetition — without this arm an \
+             always-false equality would satisfy (a) and (b)"
         );
     }
 }

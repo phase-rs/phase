@@ -8329,8 +8329,8 @@ fn is_bloodthirst_x_etb_replacement(replacement: &ReplacementDefinition) -> bool
 ///
 /// Counter-count linkage: the ranged `EffectZoneChoice` Sacrifice completion
 /// stamps `state.last_effect_count` (the number of creatures chosen).
-/// `QuantityRef::EventContextAmount`'s resolver falls back through
-/// `last_effect_count`, so the `PutCounter` count reads exactly the number
+/// `QuantityRef::PreviousEffectCount` reads that continuation-local tally
+/// directly, so an enclosing trigger's scalar amount cannot shadow the number
 /// sacrificed. For Devour N > 1 the count is wrapped in
 /// `QuantityExpr::Multiply { factor: n, .. }` (CR 702.82a "N counters per
 /// creature sacrificed"). `PreviousEffectAmount` is NOT used — it reads
@@ -8418,19 +8418,19 @@ pub fn synthesize_devour(face: &mut CardFace) {
         let quality_noun = type_filter_noun(quality, false);
         let quality_noun_plural = type_filter_noun(quality, true);
 
-        // CR 122.1: N +1/+1 counters per creature sacrificed this way. The
-        // per-creature count is `EventContextAmount` (resolves to the number
-        // the ranged Sacrifice choice stamped into `last_effect_count`); for
+        // CR 702.82a / CR 702.82c: N +1/+1 counters per sacrificed permanent. The
+        // per-sacrifice count is `PreviousEffectCount` (the number the ranged
+        // Sacrifice choice stamped into `last_effect_count`); for
         // N > 1 it is scaled by `factor: n`.
         let counter_count = if n == 1 {
             QuantityExpr::Ref {
-                qty: QuantityRef::EventContextAmount,
+                qty: QuantityRef::PreviousEffectCount,
             }
         } else {
             QuantityExpr::Multiply {
                 factor: n as i32,
                 inner: Box::new(QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextAmount,
+                    qty: QuantityRef::PreviousEffectCount,
                 }),
             }
         };
@@ -8497,7 +8497,7 @@ pub fn synthesize_devour(face: &mut CardFace) {
 ///
 /// `expected_n` is load-bearing: a card carrying both a printed enters-with-K
 /// replacement and `Keyword::Devour { n: N≠K, .. }` must not dedupe — the
-/// `Multiply` factor (N) for N > 1 and the bare `EventContextAmount` (N == 1)
+/// `Multiply` factor (N) for N > 1 and the bare `PreviousEffectCount` (N == 1)
 /// discriminate the count.
 ///
 /// `expected_quality` is equally load-bearing (CR 702.82c): a land-quality Devour
@@ -8545,13 +8545,13 @@ fn is_devour_etb_replacement(
     }
     let expected_count = if expected_n == 1 {
         QuantityExpr::Ref {
-            qty: QuantityRef::EventContextAmount,
+            qty: QuantityRef::PreviousEffectCount,
         }
     } else {
         QuantityExpr::Multiply {
             factor: expected_n as i32,
             inner: Box::new(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextAmount,
+                qty: QuantityRef::PreviousEffectCount,
             }),
         }
     };
@@ -9011,7 +9011,9 @@ pub fn synthesize_read_ahead(face: &mut CardFace) {
         Effect::Choose {
             choice_type: ChoiceType::NumberRange {
                 min: 1,
-                max: final_chapter.min(u8::MAX as u32) as u8,
+                // CR 702.155b: the Saga states its own upper bound (the final
+                // chapter), so this range is genuinely bounded.
+                max: Some(final_chapter),
                 distinctness: crate::types::ability::NumberDistinctness::Repeatable,
             },
             persist: true,
@@ -18597,6 +18599,33 @@ mod sorcery_speed_invariant_tests {
             )),
             "materials-exile sub-cost present (CR 702.167a/b)"
         );
+
+        // CR 702.167a + CR 113.6m: Craft's cost EXILES THE PERMANENT FROM THE
+        // BATTLEFIELD, so CR 113.6m's `unless` clause ("a previous part of its
+        // cost … specifies that the object is put into that zone") exempts it,
+        // and CR 113.6j makes the battlefield the only zone the cost is payable
+        // from. Craft is synthesized here, never through
+        // `parse_activated_ability_ir`, so the CR 113.6m effect-side derivation
+        // cannot reach it — this pins that.
+        assert_eq!(
+            def.activation_zone, None,
+            "craft functions from the battlefield"
+        );
+        // Second, independent line of defense: even on a hypothetical parser
+        // path, `activation_zone_from_self_cost` matches this cost component
+        // FIRST and yields Battlefield, so the effect side is never consulted.
+        assert!(
+            costs.iter().any(|c| matches!(
+                c,
+                AbilityCost::Exile {
+                    zone: Some(Zone::Battlefield),
+                    filter: Some(TargetFilter::SelfRef),
+                    ..
+                }
+            )),
+            "the self-exile cost names the battlefield, so the cost-side \
+             derivation wins before the effect side is consulted"
+        );
     }
 
     /// CR 702.87a: Level Up synthesis must carry AsSorcery.
@@ -22553,7 +22582,7 @@ mod devour_synthesis_tests {
 
     /// CR 702.82a: Devour 1 synthesizes one `Moved`/`SelfRef` replacement
     /// whose execute chain is `Sacrifice(UpTo) → PutCounter(P1P1, SelfRef)`,
-    /// and whose `PutCounter` count is the bare `EventContextAmount` (one
+    /// and whose `PutCounter` count is the bare `PreviousEffectCount` (one
     /// counter per creature sacrificed).
     #[test]
     fn synthesize_devour_1_builds_sacrifice_then_counter_chain() {
@@ -22600,7 +22629,7 @@ mod devour_synthesis_tests {
             "Devour sacrifices creatures the controller controls"
         );
 
-        // Sub-ability: PutCounter of EventContextAmount P1P1 counters on self.
+        // Sub-ability: PutCounter of PreviousEffectCount P1P1 counters on self.
         let sub = execute
             .sub_ability
             .as_deref()
@@ -22618,11 +22647,10 @@ mod devour_synthesis_tests {
         assert_eq!(
             *count,
             QuantityExpr::Ref {
-                qty: QuantityRef::EventContextAmount
+                qty: QuantityRef::PreviousEffectCount
             },
             "Devour 1 places exactly one counter per creature sacrificed — \
-             the count must be the bare EventContextAmount (NOT \
-             PreviousEffectAmount, which the ranged Sacrifice never stamps)"
+             the count must be the direct continuation-local PreviousEffectCount"
         );
     }
 
@@ -22651,7 +22679,7 @@ mod devour_synthesis_tests {
             QuantityExpr::Multiply {
                 factor: 2,
                 inner: Box::new(QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextAmount
+                    qty: QuantityRef::PreviousEffectCount
                 }),
             },
             "Devour 2 places 2 counters per creature sacrificed (CR 702.82a)"
@@ -22983,7 +23011,7 @@ mod devour_synthesis_tests {
             panic!("read-ahead ETB should choose a number");
         };
         // CR 702.155b + CR 714.2d: between one and the final chapter number (3).
-        assert_eq!((*min, *max), (1, 3));
+        assert_eq!((*min, *max), (1, Some(3)));
         assert!(*persist, "chosen number must persist for ChosenNumber");
 
         let sub = execute

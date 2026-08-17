@@ -13,8 +13,9 @@ use crate::game::quantity::{
 };
 use crate::types::ability::{
     ChoiceValue, ChosenAttribute, CombatRelation, CombatRelationSubject, ControllerRef, CountScope,
-    FilterProp, Parity, ParitySource, PtStat, PtValueScope, QuantityExpr, ResolvedAbility,
-    SharedQuality, SharedQualityRelation, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    FilterProp, Parity, ParitySource, PlayerFilter, PtStat, PtValueScope, QuantityExpr,
+    ResolvedAbility, SharedQuality, SharedQualityRelation, TargetFilter, TargetRef, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, Supertype};
@@ -162,6 +163,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
@@ -349,6 +351,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::Named { .. }
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
         | FilterProp::IsCommander
         // CR 205.3m: reads the controller's COMMANDER, not whole-board population;
         // another object entering or leaving cannot change the commander's types.
@@ -433,6 +436,7 @@ pub(crate) fn target_filter_characteristic_reads_at(
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
@@ -612,7 +616,9 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         }
 
         // ---- CR 613.1c (layer 3): name reads. ----
-        FilterProp::SameName | FilterProp::SameNameAsParentTarget => CharacteristicKinds::NAME_TEXT,
+        FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource => CharacteristicKinds::NAME_TEXT,
         // CR 201.2 + CR 613.1f: `Named` also matches through the live
         // `StaticMode::CountsAsNamed` aliases, which are layer-6 statics.
         FilterProp::Named { .. } => {
@@ -804,6 +810,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
@@ -1003,6 +1010,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::Named { .. }
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
         | FilterProp::IsCommander
         // CR 205.3m: an entering object cannot perturb this — the commander's
         // creature types come from the deck-pool registration, not the board.
@@ -1482,22 +1490,290 @@ pub(crate) fn controller_ref_player(
             .and_then(|host| host.as_player()),
         // CR 102.1: the player whose turn it is — read live.
         ControllerRef::ActivePlayer => Some(state.active_player),
+        // CR 109.4 + CR 611.2: a resolution-time snapshot; already concrete, so
+        // it needs neither `ability` nor `state` context. This is what makes it
+        // the correct lowering for a continuous effect that outlives its
+        // resolving ability (Gideon Jura's "+2").
+        ControllerRef::SpecificPlayer { id } => Some(*id),
     }
 }
+/// Whether `filter`, or any filter nested anywhere inside it, satisfies `leaf`.
+///
+/// The single authority for `TargetFilter`'s recursive shape. Every predicate
+/// that asks "does this filter mention X anywhere" routes here instead of
+/// re-listing the nesting variants, because a predicate that lists them itself
+/// lists them from memory: `filter_contains_last_zone_changed` and its
+/// `last_created` twin both omitted `ChosenDamageSource`'s optional inner filter,
+/// so a `LastCreated` nested one level inside it read as absent.
+///
+/// The match is EXHAUSTIVE on purpose — no `_` arm. A `_ => false` silently
+/// classifies every future variant as a leaf, which is how that omission
+/// survived; with the wildcard gone, a new nesting variant does not compile until
+/// someone decides which side of this match it belongs on. The same discipline
+/// applies to the two enums this traversal descends into,
+/// [`filter_prop_contains`] and [`player_filter_contains`].
+///
+/// SCOPE, stated rather than left implicit: this traverses every nested
+/// `TargetFilter`. It deliberately does NOT descend into the `QuantityExpr`
+/// magnitudes some `FilterProp`s carry (`Cmc { value }`, `Counters { count }`,
+/// `PtComparison { value }`). A filter reached through a quantity is a
+/// *population being counted*, not a quality this filter mentions, and it has its
+/// own authority with its own semantics —
+/// `effects::quantity_ref_counts_population_matching`, which the anaphor gates
+/// call alongside this function rather than through it.
+pub(crate) fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter) -> bool) -> bool {
+    if leaf(filter) {
+        return true;
+    }
+    let recurse = |inner: &TargetFilter| filter_contains(inner, leaf);
+    match filter {
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters.iter().any(recurse),
+        TargetFilter::Not { filter } => recurse(filter),
+        TargetFilter::TrackedSetFiltered { filter, .. } => recurse(filter),
+        // CR 609.7a: the source a "source of your choice" effect chose. CR 609.7b:
+        // the optional inner filter is the "red source"-style quality the shield
+        // rechecks, so it is a real nested filter. The `None` case ("a source of
+        // your choice", unqualified) is a leaf.
+        TargetFilter::ChosenDamageSource { filter } => filter.as_deref().is_some_and(recurse),
+        // `Typed` is NOT a leaf: six of its `FilterProp`s box a `TargetFilter`
+        // (`CanEnchant`, `DifferentNameFrom`, `DistinctFrom`, `SharesQuality`,
+        // `Targets`, `TargetsOnly`), `Not`/`AnyOf` recurse through more props, and
+        // `ControllerMatches` crosses into `PlayerFilter`, which boxes filters of
+        // its own.
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(|prop| filter_prop_contains(prop, leaf)),
+        // Leaves: no nested `TargetFilter` to descend into.
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
+}
+
+/// [`filter_contains`] across the `TargetFilter`s a single `FilterProp` nests.
+///
+/// Exhaustive for the same reason `filter_contains` is: a `_ => false` here would
+/// silently reclassify every future prop as anaphor-free, which is the defect
+/// class this pair exists to make uncompilable.
+pub(crate) fn filter_prop_contains(
+    prop: &FilterProp,
+    leaf: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
+    let recurse = |inner: &TargetFilter| filter_contains(inner, leaf);
+    match prop {
+        // CR 303.4 + CR 702.5: the referenced host an Aura "could enchant".
+        FilterProp::CanEnchant { target } => recurse(target),
+        FilterProp::DifferentNameFrom { filter } => recurse(filter),
+        // CR 109.1 + CR 120.3: the object-identity reference.
+        FilterProp::DistinctFrom { reference } => recurse(reference),
+        FilterProp::SharesQuality { reference, .. } => reference.as_deref().is_some_and(recurse),
+        // CR 115.9b/9c: the stack entry's target-side filters.
+        FilterProp::Targets { filter } | FilterProp::TargetsOnly { filter } => recurse(filter),
+        // CR 608.2c: prop-level combinators.
+        FilterProp::Not { prop } => filter_prop_contains(prop, leaf),
+        FilterProp::AnyOf { props } => props.iter().any(|p| filter_prop_contains(p, leaf)),
+        // CR 109.4: the object-axis crossing into the player axis.
+        FilterProp::ControllerMatches { player } => player_filter_contains(player, leaf),
+        // Leaves: no nested `TargetFilter`. (Props carrying only a `QuantityExpr`
+        // magnitude are leaves HERE by the scope rule documented on
+        // `filter_contains` — the quantity authority classifies those.)
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::WasPlayed
+        | FilterProp::Attacking { .. }
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::Unblocked
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::ConvokedSource
+        | FilterProp::ProtectorMatches { .. }
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::Counters { .. }
+        | FilterProp::Cmc { .. }
+        | FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Owned { .. }
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::AttachedToSource
+        | FilterProp::AttachedToRecipient
+        | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::PtComparison { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::ColorCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::MostPrevalentCreatureTypeIn { .. }
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::MatchesLastChosenCardPredicate
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::NotColor { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Suspected
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Modified
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::AttackedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::CountersPutOnThisTurn { .. }
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        | FilterProp::WasKicked
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
+        | FilterProp::NameMatchesAnyPermanent { .. }
+        | FilterProp::IsCommander
+        | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::Other { .. } => false,
+    }
+}
+
+/// [`filter_contains`] across the `TargetFilter`s a single `PlayerFilter` nests.
+/// Player-axis third of the same exhaustive traversal; see [`filter_contains`].
+pub(crate) fn player_filter_contains(
+    filter: &PlayerFilter,
+    leaf: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
+    let recurse = |inner: &TargetFilter| filter_contains(inner, leaf);
+    match filter {
+        // CR 120.3: the "dealt damage by a <source>" quality.
+        PlayerFilter::OpponentDealtDamage { source, .. } => source.as_deref().is_some_and(recurse),
+        PlayerFilter::ControlsCount { filter, .. } => recurse(filter),
+        PlayerFilter::TrackedSetPossessor { filter, .. } => recurse(filter),
+        // Leaves: no nested `TargetFilter`. `PlayerAttribute`'s `QuantityRef` /
+        // `QuantityExpr` are quantities, which the scope rule on
+        // `filter_contains` assigns to the quantity authority.
+        PlayerFilter::Controller
+        | PlayerFilter::Opponent
+        | PlayerFilter::DefendingPlayer
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::All
+        | PlayerFilter::AllExcept { .. }
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::PerformedActionThisWay { .. }
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::PlayerAttribute { .. }
+        | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ParentObjectTargetOwner => false,
+    }
+}
+
 /// Whether `filter` references the resolution-local `last_zone_changed_ids`
 /// ledger population (bare or nested inside compound filters).
 pub(crate) fn filter_contains_last_zone_changed(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::LastZoneChanged => true,
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().any(filter_contains_last_zone_changed)
-        }
-        TargetFilter::Not { filter } => filter_contains_last_zone_changed(filter),
-        TargetFilter::TrackedSetFiltered { filter, .. } => {
-            filter_contains_last_zone_changed(filter)
-        }
-        _ => false,
-    }
+    filter_contains(filter, &|inner| {
+        matches!(inner, TargetFilter::LastZoneChanged)
+    })
+}
+
+/// Whether `filter` references the resolution-local `last_created_token_ids`
+/// ledger population — "the token created this way" / "it" (bare or nested
+/// inside compound filters).
+///
+/// Structural twin of [`filter_contains_last_zone_changed`]: same anaphor class,
+/// same recursion set, different published ledger. Kept beside it so the two
+/// resolution-local anaphors stay discoverable as one pair.
+pub(crate) fn filter_contains_last_created(filter: &TargetFilter) -> bool {
+    filter_contains(filter, &|inner| matches!(inner, TargetFilter::LastCreated))
 }
 
 /// Check if an object matches a typed TargetFilter against the given context.
@@ -1599,25 +1875,26 @@ pub(crate) fn matches_stack_target_filter(
             tag,
             kind,
         } => {
-            let ability_kind_ok = kind.as_ref().is_none_or(|kind| {
-                matches!(
-                    (kind, &entry.kind),
-                    (
-                        crate::types::ability::StackAbilityKind::Activated,
-                        StackEntryKind::ActivatedAbility { .. }
-                    ) | (
-                        crate::types::ability::StackAbilityKind::Triggered,
-                        StackEntryKind::TriggeredAbility { .. }
-                    )
-                )
-            });
-            matches!(
-                &entry.kind,
-                StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. }
-            ) && ability_kind_ok
+            // CR 113.3b / CR 113.3c + CR 115.1: membership in the stack-ability
+            // set and the optional `kind` narrowing both come from
+            // `StackEntryKind::matches_stack_ability_kind`, the single authority
+            // shared with the CR 601.2c announce-time gate in `game::targeting`.
+            // Sharing it is the fix for a real divergence: this recheck used to
+            // omit `KeywordAction` while the announce gate admitted it, so a
+            // kindless counter (Stifle / Trickbind / Repudiate) could legally
+            // announce a target on an equip/crew/saddle/station entry and then
+            // have that target declared illegal here, fizzling the counter.
+            // CR 702.6a / 702.122a / 702.171a / 702.184a make those keywords
+            // activated abilities, so they also satisfy a `kind: Activated`
+            // filter (Squelch, Interdict, Reroute).
+            entry.kind.matches_stack_ability_kind(kind.as_ref())
                 && stack_entry_controller_matches(state, controller.as_ref(), entry.controller, ctx)
                 // CR 113.7a: keyword-origin tag (e.g. `AbilityTag::Backup`) must
                 // match the ability on the stack when the filter requires one.
+                // A `KeywordAction` entry carries a typed payload rather than a
+                // `ResolvedAbility`, so `entry.ability()` is `None` and it fails
+                // any tag-required filter — correct, since equip/crew/saddle/
+                // station carry no `AbilityTag`.
                 && tag.as_ref().is_none_or(|tag| {
                     entry.ability().and_then(|a| a.context.ability_tag.as_ref()) == Some(tag)
                 })
@@ -1732,6 +2009,8 @@ fn stack_entry_controller_matches(
         }
         // CR 102.1: the active player, read live.
         Some(ControllerRef::ActivePlayer) => state.active_player == entry_controller,
+        // CR 109.4 + CR 611.2: a resolution-time snapshot — compare directly.
+        Some(ControllerRef::SpecificPlayer { id }) => *id == entry_controller,
     }
 }
 
@@ -1960,6 +2239,16 @@ pub fn context_free_prop_matches_face(face: &CardFace, prop: &FilterProp) -> Opt
         FilterProp::WithKeyword { value } => Some(face.keywords.contains(value)),
         // allow-raw-authority: bare CardFace has no object, so no keyword grant can exist to miss
         FilterProp::WithoutKeyword { value } => Some(!face.keywords.contains(value)),
+        // The kind-level siblings (`HasKeywordKind` / `WithoutKeywordKind`) are
+        // intentionally ABSENT and fall to the `None` arm below. They exist to
+        // consult off-zone Layer-6 grants, which a bare face by definition cannot
+        // have, so a face reading would answer a strictly narrower question than
+        // the prop asks. Every production caller of this function evaluates an
+        // effect target filter or a static's `spell_filter` — never an
+        // `AbilityCondition` filter, which is the only place those props appear
+        // today — so the `None` default is unreachable rather than lossy. A future
+        // caller that needs them must add explicit arms here instead of relying on
+        // the fail-closed default.
         // CR 111.1 + CR 108.2: a bare face is a card definition, never a token.
         FilterProp::Token => Some(false),
         FilterProp::NonToken | FilterProp::RepresentedByCard => Some(true),
@@ -2108,6 +2397,58 @@ pub fn matches_target_filter_in_owner_zone(
     )
 }
 
+/// CR 400.3: the zones whose membership is keyed by OWNER rather than controller —
+/// "If an object would go to any library, graveyard, or hand other than its owner's,
+/// it goes to its owner's corresponding zone." The rule enumerates the partition
+/// itself; this predicate is that enumeration and nothing more.
+///
+/// Why ownership is the correct scope for a `ControllerRef::You` filter there:
+/// CR 108.4 + CR 108.4a — a card has a controller only when it represents a
+/// permanent or spell; if it has no controller, use its owner instead. A card in a
+/// hand, library, or graveyard is neither, so CR 109.5 routes "you"/"your" to its
+/// owner. Thus "your graveyard" is an ownership claim even though the parser
+/// represents its player scope as `ControllerRef::You`.
+///
+/// EXILE IS DELIBERATELY EXCLUDED, and CR 400.3 excludes it too — the rule names
+/// library, graveyard, and hand, not exile. The engine matches exiled objects
+/// against their AT-EXILE controller via `effective_controller`'s LKI fallback,
+/// which the Oversimplify class depends on ("creatures they controlled that were
+/// exiled this way" is keyed on who controlled the object when it left, not on who
+/// owns it now). Substituting ownership there would break that class.
+///
+/// The single authority for this partition: `game::targeting::add_zone_targets`
+/// (target enumeration) and `game::off_zone_characteristics` (off-zone keyword
+/// grants) both route through it, so the two cannot drift on which zones are
+/// owner-scoped.
+pub fn is_owner_scoped_zone(zone: Zone) -> bool {
+    matches!(zone, Zone::Hand | Zone::Library | Zone::Graveyard)
+}
+
+/// CR 400.3 + CR 109.5 + CR 108.4a: match `object_id` against `filter` using the
+/// ownership semantics of the zone it is being enumerated from.
+///
+/// The single entry point for "evaluate this filter against an object in zone Z".
+/// In an owner-scoped zone (see [`is_owner_scoped_zone`]) this delegates to
+/// [`matches_target_filter_in_owner_zone`], so a stale `obj.controller` left behind
+/// by a control-change effect cannot exclude the object from its own owner's
+/// player-scoped query — the state `effects::change_zone` documents for a stolen
+/// creature that dies into its owner's graveyard, where `reset_for_battlefield_exit`
+/// leaves `controller = thief`. Everywhere else it delegates to the ordinary
+/// controller-scoped [`matches_target_filter`].
+pub fn matches_target_filter_for_zone(
+    state: &GameState,
+    object_id: ObjectId,
+    zone: Zone,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    if is_owner_scoped_zone(zone) {
+        matches_target_filter_in_owner_zone(state, object_id, filter, ctx)
+    } else {
+        matches_target_filter(state, object_id, filter, ctx)
+    }
+}
+
 pub fn matches_target_filter_on_battlefield_entry(
     state: &GameState,
     event: &ProposedEvent,
@@ -2125,7 +2466,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                 let Some(mut obj) = state
                     .liminal_entries
                     .get(object_id)
-                    .map(|entry| entry.object.clone())
+                    .map(|entry| entry.object.projected().clone())
                     .or_else(|| state.objects.get(object_id).cloned())
                 else {
                     return false;
@@ -2153,7 +2494,7 @@ pub fn matches_target_filter_on_battlefield_entry(
             } else if let Some(entry) = state.liminal_entries.get(object_id) {
                 filter_inner_for_object(
                     state,
-                    &entry.object,
+                    entry.object.projected(),
                     *object_id,
                     filter,
                     ctx.source_id,
@@ -2172,7 +2513,7 @@ pub fn matches_target_filter_on_battlefield_entry(
             state.liminal_entries.get(entry_ref).is_some_and(|entry| {
                 filter_inner_for_object(
                     state,
-                    &entry.object,
+                    entry.object.projected(),
                     *entry_ref,
                     filter,
                     ctx.source_id,
@@ -2428,6 +2769,63 @@ pub fn matches_target_filter_on_lki_snapshot(
     matches_target_filter_on_zone_change_record(state, &record, filter, ctx)
 }
 
+/// CR 608.2k + CR 608.2h: Evaluate a target filter against an ability's
+/// PERSISTENT untargeted reference — today, its cost-paid object.
+///
+/// This is NOT the same question as [`matches_target_filter_on_lki_snapshot`].
+/// A zone-change subject is gone, so its snapshot IS the answer. A cost-paid
+/// referent is a live reference the ability keeps pointing at (CR 608.2k), and
+/// CR 608.2h says such a reference reads the object's CURRENT information while
+/// it is in the public zone it was expected to be in — only a departed or
+/// hidden-zone object falls back to last known information.
+///
+/// The refresh is deliberately scoped to `keywords`. That is the one field the
+/// payment-time snapshot cannot answer honestly: the kind-level keyword props
+/// exist to consult Layer-6 grants recorded in the off-zone ledger
+/// (CR 613.1f), which by construction are applied to the LIVE object and are
+/// absent from any snapshot. A card discarded to Jhoira of the Ghitu's cost and
+/// then granted (or stripped of) suspend in the graveyard or in exile before the
+/// ability resolves must be read as it is at resolution, or the gate answers a
+/// question about a game state that no longer exists. Every other LKI field stays
+/// on the snapshot: type, name, P/T, colors and controller are look-back facts
+/// about the payment itself. (A filter that pairs a kind-level prop with an
+/// object-level `WithKeyword`/`WithoutKeyword` would see the refreshed list for
+/// both, since they read the same field — no card does that today, and CR 608.2h
+/// makes the live reading the correct one either way.)
+///
+/// Guarded by `TargetFilter::queries_keyword_kind` so the common cost-paid filter
+/// — a plain type/name look-back with no keyword question — costs one recursive
+/// predicate walk and skips both the ledger recomputation
+/// (`effective_off_zone_keywords` collects every applicable continuous effect)
+/// and the snapshot clone.
+pub fn matches_target_filter_on_cost_paid_reference(
+    state: &GameState,
+    object_id: ObjectId,
+    lki: &LKISnapshot,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    let refreshed = filter
+        .queries_keyword_kind()
+        .then(|| state.objects.get(&object_id))
+        .flatten()
+        .filter(|object| object.zone.is_public())
+        .map(|_| {
+            crate::game::off_zone_characteristics::effective_off_zone_keywords(state, object_id)
+        });
+
+    match refreshed {
+        Some(keywords) => {
+            let mut lki = lki.clone();
+            lki.keywords = keywords;
+            matches_target_filter_on_lki_snapshot(state, object_id, &lki, filter, ctx)
+        }
+        // Gone, or moved to a hidden zone: CR 608.2h mandates last known
+        // information, which is exactly what the payment snapshot holds.
+        None => matches_target_filter_on_lki_snapshot(state, object_id, lki, filter, ctx),
+    }
+}
+
 /// CR 400.7 + CR 603.10a: Match an event subject from its captured facts,
 /// never by re-reading the live object at the same storage id. Connive uses
 /// this for its exact completion snapshot after a replacement-ordering pause.
@@ -2623,6 +3021,7 @@ fn filter_inner_for_object(
         // CR 118.12a: unless-payer population — never matches an object.
         TargetFilter::AllPlayers => false,
         TargetFilter::Controller => false, // Controller is a player, not an object
+        TargetFilter::SourceController => false, // SourceController is a player, not an object
         // CR 102.3: Opponent is a player reference (used only as a slot announcer),
         // never an object.
         TargetFilter::Opponent => false,
@@ -2832,6 +3231,16 @@ fn filter_inner_for_object(
                     // controller against the player whose turn it is (read live).
                     ControllerRef::ActivePlayer => {
                         if state.active_player != obj_ctrl {
+                            return false;
+                        }
+                    }
+                    // CR 109.4 + CR 611.2: "that player controls", already lowered
+                    // to a snapshot id. This is the arm Gideon Jura's "+2" runs
+                    // through at every declare-attackers step: the OBJECT SET is
+                    // re-derived here each time (CR 611.2c), while the player it
+                    // is derived against was frozen when the ability resolved.
+                    ControllerRef::SpecificPlayer { id } => {
+                        if *id != obj_ctrl {
                             return false;
                         }
                     }
@@ -3121,12 +3530,28 @@ fn filter_inner_for_object(
         // `ObjectScope::EventTarget`; inert (matches nothing) outside a trigger.
         TargetFilter::EventTarget => crate::game::quantity::triggering_event_target_object(state)
             .is_some_and(|damaged| damaged == object_id),
-        // ParentTarget/ParentTargetController/ParentTargetOwner/PostReplacementSourceController
+        // CR 400.7 + CR 603.7c: a parent object can be the member predicate of
+        // a tracked-set continuation. In that one scan-based path, match the
+        // creation-time target only while its recorded incarnation is current.
+        TargetFilter::ParentTarget => ability.is_some_and(|ability| {
+            !ability.target_incarnations.is_empty()
+                && ability.targets.iter().any(|target| {
+                    matches!(target, TargetRef::Object(id)
+                        if *id == object_id && ability.target_pin_is_current(*id, state))
+                })
+        }),
+        TargetFilter::ParentTargetSlot { index } => ability.is_some_and(|ability| {
+            !ability.target_incarnations.is_empty()
+                && matches!(
+                    ability.targets.get(*index),
+                    Some(TargetRef::Object(id))
+                        if *id == object_id && ability.target_pin_is_current(*id, state)
+                )
+        }),
+        // ParentTargetController/ParentTargetOwner/PostReplacementSourceController
         // resolve at resolution time, not via object matching. ParentTargetOwner
         // mirrors ParentTargetController for the player-axis side of CR 108.3 vs CR 109.4.
-        TargetFilter::ParentTarget
-        | TargetFilter::ParentTargetSlot { .. }
-        | TargetFilter::ParentTargetController
+        TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
         // CR 615.5: an object-typed resolution-time ref (the prevented event's
@@ -3254,6 +3679,7 @@ fn zone_change_filter_inner(
         // CR 118.12a: unless-payer population — never matches an object.
         TargetFilter::AllPlayers => false,
         TargetFilter::Controller => false,
+        TargetFilter::SourceController => false,
         // CR 102.3: Opponent is a player reference, never an object.
         TargetFilter::Opponent => false,
         // CR 109.5: OriginalController is a player reference, not an object.
@@ -3717,6 +4143,18 @@ pub fn spell_record_matches_filter(
                     // spell-history record (a cast snapshot carries no live
                     // turn context). Fail closed.
                     ControllerRef::ActivePlayer => return false,
+                    // CR 109.4 + CR 611.2: a snapshot id IS resolvable here, but
+                    // spell history is already scoped to `controller`'s casts, so
+                    // the record matches only when the snapshot names that same
+                    // player. No card produces this combination today (the
+                    // lowering exists only for combat-requirement continuous
+                    // effects), but the comparison is exact rather than
+                    // fail-closed because the id needs no missing context.
+                    ControllerRef::SpecificPlayer { id } => {
+                        if *id != controller {
+                            return false;
+                        }
+                    }
                 }
             }
 
@@ -3747,6 +4185,7 @@ pub fn spell_record_matches_filter(
         // CR 118.12a: unless-payer population, never an object filter.
         | TargetFilter::AllPlayers
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         // CR 102.3: Opponent is a player reference, never a spell-record filter.
         | TargetFilter::Opponent
         | TargetFilter::OriginalController
@@ -4064,6 +4503,7 @@ fn spell_object_matches_filter_inner(
         // CR 118.12a: unless-payer population, never an object filter.
         | TargetFilter::AllPlayers
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         // CR 102.3: Opponent is a player reference, never a spell-record filter.
         | TargetFilter::Opponent
         | TargetFilter::OriginalController
@@ -4463,6 +4903,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // `FilterProp::Named { name }` is handled above against the snapshot.
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
         | FilterProp::NameMatchesAnyPermanent { .. }
         // CR 903.3d: Commander designation is meaningful for permanents on the
         // battlefield. The spell-cast record path is not currently plumbed with
@@ -4518,27 +4959,41 @@ struct SourceContext<'a> {
     recipient_id: Option<ObjectId>,
 }
 
-/// CR 508.5 + CR 508.5a: Source-relative "defending player" resolution. Prefer
-/// the triggered source's captured combat facts — an attacking creature's own
-/// attack trigger snapshots its defending player, and that captured fact must
-/// answer even after the source changes zones (a recycled storage id must never
-/// answer a different ability's filter).
+/// CR 508.5 + CR 508.5a: `ControllerRef::DefendingPlayer` door for
+/// `TargetFilter` evaluation.
 ///
-/// But an attachment/anthem source (Equipment, Aura) is NOT itself the attacker:
-/// `capture_combat_status` finds it absent from `combat.attackers` and records
-/// `defending_player: None`. "Whenever equipped creature attacks, ... defending
-/// player controls" (Captain America's Shield, Greatsword of Tyr, and the rest
-/// of that class) must then resolve the defender of the *attacking creature*,
-/// carried by the triggering event. So a captured `None` is "no answer here",
-/// not "no defender" — fall through to `resolve_defending_player`, which reads
-/// the triggering event's attacker. Using `.map().unwrap_or_else()` collapsed
-/// that captured `None` into a spurious `Some(None)` and suppressed the
-/// fallback, silently fizzling the ability (issue #6678).
+/// Identical call, identical arguments, identical rule as the two quantity
+/// doors. The binding decision is NOT made here — see
+/// `combat::defending_player_cr508_5`, which owns it so one anaphor read once
+/// as a `PlayerScope` and once as a `ControllerRef` cannot bind two different
+/// players.
+///
+/// The issue-#6678 distinction still governs the latch and now lives on the
+/// authority's `trigger_source` parameter: an attachment/anthem source
+/// (Equipment, Aura) is not itself the attacker, so `capture_combat_status`
+/// records `defending_player: None`, and that captured `None` means "no answer
+/// here", not "no defender".
+///
+/// When `source.trigger_source` is `None` the authority binds no event, so this
+/// door remains byte-identical to its previous `resolve_defending_player`
+/// behaviour and no unrelated in-flight combat can leak into continuous-effect
+/// filter evaluation.
 fn source_defending_player(state: &GameState, source: &SourceContext<'_>) -> Option<PlayerId> {
-    source
-        .trigger_source
-        .and_then(|context| context.combat_status.defending_player)
-        .or_else(|| crate::game::combat::resolve_defending_player(state, source.id))
+    crate::game::combat::defending_player_cr508_5(state, source.id, source.trigger_source)
+}
+
+/// Drive the production `ControllerRef::DefendingPlayer` door from the
+/// cross-door agreement fixture in `combat.rs`. Mirrors
+/// `quantity::defending_player_for_quantity_context_for_test` so the fixture
+/// compares two PRODUCTION doors rather than two hand-built approximations.
+#[cfg(test)]
+pub(crate) fn source_defending_player_for_test(
+    state: &GameState,
+    source_id: ObjectId,
+    trigger_source: Option<&TriggerSourceContext>,
+) -> Option<PlayerId> {
+    let context = source_context_from_filter(state, source_id, None, None, trigger_source, None);
+    source_defending_player(state, &context)
 }
 
 fn source_enchanted_player(source: &SourceContext<'_>) -> Option<PlayerId> {
@@ -5175,6 +5630,13 @@ fn matches_filter_prop(
         // (e.g., the seed was just exiled by the preceding effect).
         FilterProp::SameNameAsParentTarget => parent_target_name(state, source.ability)
             .is_some_and(|name| obj.name.eq_ignore_ascii_case(&name)),
+        FilterProp::SameNameAsExiledBySource => state.exile_links.iter().any(|link| {
+            link.source_id == source.id
+                && state
+                    .objects
+                    .get(&link.exiled_id)
+                    .is_some_and(|exiled| obj.name.eq_ignore_ascii_case(&exiled.name))
+        }),
         // CR 201.2 + CR 201.2a: Matches if `obj.name` equals the name of any
         // permanent on the battlefield (optionally narrowed by controller).
         // Name comparison is case-insensitive per `FilterProp::Named` /
@@ -5215,6 +5677,11 @@ fn matches_filter_prop(
                     (Some(ControllerRef::EnchantedPlayer), Some(pid)) => perm.controller == pid,
                     // CR 102.1: active-player-scoped name match (resolved live).
                     (Some(ControllerRef::ActivePlayer), Some(pid)) => perm.controller == pid,
+                    // CR 109.4 + CR 611.2: a resolution-time snapshot player id — concrete with
+                    // no ability/event context needed, unlike the fail-closed siblings above.
+                    (Some(ControllerRef::SpecificPlayer { .. }), Some(pid)) => {
+                        perm.controller == pid
+                    }
                     (Some(_), None) => false,
                     (None, _) => true,
                 };
@@ -5274,6 +5741,9 @@ fn matches_filter_prop(
             }
             // CR 102.1: Ownership relative to the active player (read live).
             ControllerRef::ActivePlayer => state.active_player == obj.owner,
+            // CR 109.4 + CR 611.2: a resolution-time snapshot player id — concrete with
+            // no ability/event context needed, unlike the fail-closed siblings above.
+            ControllerRef::SpecificPlayer { id } => *id == obj.owner,
         },
         // CR 303.4 + CR 301.5f: `EnchantedBy` is source-relative when the
         // source is an Aura ("enchanted creature gets +1/+1"). When the source
@@ -5425,11 +5895,13 @@ fn matches_filter_prop(
         // legs; the combat-damage-source leg of that authority injects a source
         // constraint rather than a set id and does not apply to a set-membership
         // predicate. Composes with `FilterProp::Not` for "all other <type>".
+        //
+        // The two-rung ladder is `targeting::resolve_tracked_set_id`'s body
+        // verbatim, so it is a CALL rather than a copy — an open-coded duplicate
+        // of a documented single authority is a divergence waiting to happen.
         FilterProp::InTrackedSet { id } => {
             let resolved = if id.0 == 0 {
-                state
-                    .chain_tracked_set_id
-                    .or_else(|| crate::game::targeting::latest_tracked_set_id(state))
+                crate::game::targeting::resolve_tracked_set_id(state)
             } else {
                 Some(*id)
             };
@@ -6023,6 +6495,9 @@ fn zone_change_record_matches_property(
             }
             // CR 102.1: Ownership relative to the active player (read live).
             ControllerRef::ActivePlayer => state.active_player == record.owner,
+            // CR 109.4 + CR 611.2: a resolution-time snapshot player id — concrete with
+            // no ability/event context needed, unlike the fail-closed siblings above.
+            ControllerRef::SpecificPlayer { id } => *id == record.owner,
         },
         // CR 205.3e + CR 205.3m + CR 702.73a: Source's chosen creature type
         // applied to the snapshot subtypes, including changeling snapshots.
@@ -6048,6 +6523,13 @@ fn zone_change_record_matches_property(
         // target (parent target). Mirrors the live-object evaluator.
         FilterProp::SameNameAsParentTarget => parent_target_name(state, source.ability)
             .is_some_and(|name| record.name.eq_ignore_ascii_case(&name)),
+        FilterProp::SameNameAsExiledBySource => state.exile_links.iter().any(|link| {
+            link.source_id == source.id
+                && state
+                    .objects
+                    .get(&link.exiled_id)
+                    .is_some_and(|exiled| record.name.eq_ignore_ascii_case(&exiled.name))
+        }),
 
         // -------- Group 3: combat snapshot state --------
         // CR 508.1k / CR 509.1g / CR 509.1h: Combat state as of the zone change.
@@ -6383,6 +6865,9 @@ fn attachment_controller_matches(
         }
         // CR 102.1: attachment controller relative to the active player (live).
         Some(ControllerRef::ActivePlayer) => state.active_player == attachment_controller,
+        // CR 109.4 + CR 611.2: a resolution-time snapshot player id — concrete with
+        // no ability/event context needed, unlike the fail-closed siblings above.
+        Some(ControllerRef::SpecificPlayer { id }) => *id == attachment_controller,
     }
 }
 
@@ -7045,6 +7530,9 @@ fn player_matches_target_filter_with(
             // active-player resolution path runs through `controller_ref_player`
             // where `state` is in scope.
             Some(ControllerRef::ActivePlayer) => false,
+            // CR 109.4 + CR 611.2: a resolution-time snapshot player id — concrete with
+            // no ability/event context needed, unlike the fail-closed siblings above.
+            Some(ControllerRef::SpecificPlayer { id }) => *id == player_id,
             None => true,
         },
         // Typed filters with type_filters don't match players
@@ -7355,6 +7843,178 @@ mod tests {
             !matches_stack_target_filter(&state, spell_obj, &ability_leg, &ctx),
             "the StackAbility leg must NOT match the spell stack entry"
         );
+    }
+
+    /// CR 608.2b + CR 113.3b / CR 113.3c: the RESOLUTION-time legality recheck
+    /// gate is separate code from the announce-time gate in `game::targeting`,
+    /// so the narrowed `kind` filters must be proven against it too — not only
+    /// against `find_legal_targets`.
+    ///
+    /// Both gates now classify through the single authority
+    /// `StackEntryKind::matches_stack_ability_kind`, so this test also pins that
+    /// they admit the SAME set of stack-entry kinds. It enumerates all three
+    /// ability-bearing `StackEntryKind` variants, including the
+    /// production-reachable `KeywordAction` arm this gate previously dropped
+    /// (a kindless Stifle/Trickbind could announce on an equip ability and then
+    /// fizzle when the recheck called that same target illegal).
+    ///
+    /// Also the CR 601.2f consumer: `casting::target_ref_matches_cost_filter`
+    /// routes cost-condition filters through this same function.
+    #[test]
+    fn stack_ability_kind_gate_rejects_wrong_kind_on_recheck() {
+        use crate::types::ability::{KeywordAction, StackAbilityKind};
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+
+        /// Every ability-bearing `StackEntryKind` variant, so no arm that real
+        /// equip/crew/saddle/station data reaches is left without a fixture.
+        #[derive(Clone, Copy)]
+        enum Fixture {
+            Activated,
+            Triggered,
+            /// CR 702.6a: equip is an ACTIVATED ability. The engine models it as
+            /// a typed keyword action carrying no `ResolvedAbility`, which is
+            /// exactly why an `ability()`-shaped fixture cannot stand in for it.
+            KeywordEquip,
+        }
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Ability Source".into(),
+            Zone::Battlefield,
+        );
+        let equipped = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Equipped Creature".into(),
+            Zone::Battlefield,
+        );
+
+        let push_ability = |state: &mut GameState, fixture: Fixture| -> ObjectId {
+            let entry_id = ObjectId(state.next_object_id);
+            state.next_object_id += 1;
+            let draw = || {
+                Box::new(ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    Vec::new(),
+                    source,
+                    PlayerId(0),
+                ))
+            };
+            let kind = match fixture {
+                Fixture::Triggered => StackEntryKind::TriggeredAbility {
+                    source_id: source,
+                    ability: draw(),
+                    condition: None,
+                    trigger_event: None,
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+                Fixture::Activated => StackEntryKind::ActivatedAbility {
+                    source_id: source,
+                    ability: draw(),
+                },
+                Fixture::KeywordEquip => StackEntryKind::KeywordAction {
+                    action: KeywordAction::Equip {
+                        equipment_id: source,
+                        target_creature_id: equipped,
+                    },
+                },
+            };
+            state.stack.push_back(StackEntry {
+                id: entry_id,
+                source_id: source,
+                controller: PlayerId(0),
+                kind,
+            });
+            entry_id
+        };
+
+        let activated = push_ability(&mut state, Fixture::Activated);
+        let triggered = push_ability(&mut state, Fixture::Triggered);
+        let equip = push_ability(&mut state, Fixture::KeywordEquip);
+        let ctx = FilterContext::from_source_with_controller(source, PlayerId(0));
+
+        let triggered_filter = TargetFilter::StackAbility {
+            controller: None,
+            tag: None,
+            kind: Some(StackAbilityKind::Triggered),
+        };
+        // Positive reach-guard first: the filter is live against the right kind,
+        // so the negative below cannot pass because the entry lookup failed.
+        assert!(
+            matches_stack_target_filter(&state, triggered, &triggered_filter, &ctx),
+            "a Triggered-narrowed filter must still match a triggered ability entry"
+        );
+        assert!(
+            !matches_stack_target_filter(&state, activated, &triggered_filter, &ctx),
+            "a Triggered-narrowed filter must NOT match an activated ability entry \
+             (CR 608.2b recheck)"
+        );
+        assert!(
+            !matches_stack_target_filter(&state, equip, &triggered_filter, &ctx),
+            "an equip keyword action is an ACTIVATED ability (CR 702.6a), so a \
+             Triggered-narrowed filter must not match it"
+        );
+
+        let activated_filter = TargetFilter::StackAbility {
+            controller: None,
+            tag: None,
+            kind: Some(StackAbilityKind::Activated),
+        };
+        assert!(
+            matches_stack_target_filter(&state, activated, &activated_filter, &ctx),
+            "an Activated-narrowed filter must match an activated ability entry"
+        );
+        assert!(
+            !matches_stack_target_filter(&state, triggered, &activated_filter, &ctx),
+            "an Activated-narrowed filter must NOT match a triggered ability entry"
+        );
+        assert!(
+            matches_stack_target_filter(&state, equip, &activated_filter, &ctx),
+            "CR 702.6a: equip IS an activated ability, so Squelch/Interdict-style \
+             Activated-narrowed filters must match an equip stack entry"
+        );
+
+        // And the kindless filter still accepts ALL THREE — proving the negatives
+        // above are the kind gate firing, not a broken stack-entry lookup.
+        let kindless = TargetFilter::StackAbility {
+            controller: None,
+            tag: None,
+            kind: None,
+        };
+        assert!(matches_stack_target_filter(
+            &state, activated, &kindless, &ctx
+        ));
+        assert!(matches_stack_target_filter(
+            &state, triggered, &kindless, &ctx
+        ));
+        assert!(
+            matches_stack_target_filter(&state, equip, &kindless, &ctx),
+            "CR 608.2b: a kindless counter (Stifle / Trickbind / Repudiate) that \
+             legally announced on an equip entry at CR 601.2c must still see that \
+             target as legal at resolution — this recheck used to say it was not, \
+             fizzling the counter"
+        );
+
+        // CR 113.7a: a tag-required filter still rejects the keyword action —
+        // it carries a typed payload, not a `ResolvedAbility` with an
+        // `AbilityTag`, so widening the kind axis did not widen the tag axis.
+        let tagged = TargetFilter::StackAbility {
+            controller: None,
+            tag: Some(crate::types::ability::AbilityTag::Backup),
+            kind: None,
+        };
+        assert!(!matches_stack_target_filter(&state, equip, &tagged, &ctx));
     }
 
     #[test]
@@ -10431,6 +11091,125 @@ mod tests {
         assert!(!matches_target_filter(&state, attacker, &filter, attacker));
         assert!(!matches_target_filter(&state, newcomer, &filter, attacker));
         assert!(matches_target_filter(&state, veteran, &filter, attacker));
+    }
+
+    /// `filter_contains` must reach every `TargetFilter` nested anywhere inside a
+    /// filter, or a nested anaphor reads as absent and the CR 608.2c deferral
+    /// gate it feeds lets a prompt-suspended sub-ability evaluate against a stale
+    /// ledger. `ChosenDamageSource`'s optional inner filter was exactly that gap:
+    /// invisible to both `filter_contains_*` predicates, so a `LastCreated` one
+    /// level inside it read as absent.
+    ///
+    /// The recursion set stands on the shape of `TargetFilter` alone. An earlier
+    /// revision of this comment justified it as "the same five
+    /// `normalize_contextual_filter` recurses through"; that premise was simply
+    /// false — that function (CR 608.2c parent-target exclusion) recurses through
+    /// `Not`, `Or` and `And` only and ends in a `_ => filter.clone()` wildcard, so
+    /// it reaches neither `TrackedSetFiltered` nor `ChosenDamageSource`. The two
+    /// functions answer different questions and their sets are not required to
+    /// agree.
+    #[test]
+    fn filter_contains_recurses_through_a_chosen_damage_sources_inner_filter() {
+        let nested = |inner: TargetFilter| TargetFilter::ChosenDamageSource {
+            filter: Some(Box::new(inner)),
+        };
+
+        assert!(
+            filter_contains_last_created(&nested(TargetFilter::LastCreated)),
+            "a LastCreated nested inside ChosenDamageSource must be seen"
+        );
+        assert!(
+            filter_contains_last_zone_changed(&nested(TargetFilter::LastZoneChanged)),
+            "the LastZoneChanged twin has the same nesting set"
+        );
+        // Two levels down, through an intervening compound.
+        assert!(filter_contains_last_created(&nested(TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature()),
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::LastCreated),
+                },
+            ],
+        })));
+        // Negative: the same shape without the anaphor, and the bare `None` form
+        // (which is a leaf, not a missed recursion).
+        assert!(!filter_contains_last_created(&nested(TargetFilter::Typed(
+            TypedFilter::creature()
+        ))));
+        assert!(!filter_contains_last_created(
+            &TargetFilter::ChosenDamageSource { filter: None }
+        ));
+    }
+
+    /// `TargetFilter::Typed` is not a leaf: six `FilterProp`s box a
+    /// `TargetFilter`, two more recurse through further props, and
+    /// `ControllerMatches` crosses into `PlayerFilter`, which boxes filters of its
+    /// own. Treating `Typed` as a leaf hid every one of those from the anaphor
+    /// predicates — the same gap `ChosenDamageSource` had, one level down.
+    ///
+    /// Each assertion here flips to `false` if its arm is removed from
+    /// `filter_prop_contains` / `player_filter_contains`.
+    #[test]
+    fn filter_contains_recurses_into_a_typed_filters_properties() {
+        let typed =
+            |props: Vec<FilterProp>| TargetFilter::Typed(TypedFilter::creature().properties(props));
+        let anaphor = || Box::new(TargetFilter::LastCreated);
+
+        for props in [
+            vec![FilterProp::CanEnchant { target: anaphor() }],
+            vec![FilterProp::DifferentNameFrom { filter: anaphor() }],
+            vec![FilterProp::DistinctFrom {
+                reference: anaphor(),
+            }],
+            vec![FilterProp::SharesQuality {
+                quality: SharedQuality::Color,
+                reference: Some(anaphor()),
+                relation: SharedQualityRelation::default(),
+            }],
+            vec![FilterProp::Targets { filter: anaphor() }],
+            vec![FilterProp::TargetsOnly { filter: anaphor() }],
+            // Prop-level combinators.
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::Targets { filter: anaphor() }),
+            }],
+            vec![FilterProp::AnyOf {
+                props: vec![FilterProp::Token, FilterProp::Targets { filter: anaphor() }],
+            }],
+            // Object axis -> player axis -> back to a filter.
+            vec![FilterProp::ControllerMatches {
+                player: Box::new(PlayerFilter::ControlsCount {
+                    relation: crate::types::ability::PlayerRelation::Controller,
+                    filter: TargetFilter::LastCreated,
+                    comparator: crate::types::ability::Comparator::GE,
+                    count: Box::new(QuantityExpr::Fixed { value: 1 }),
+                }),
+            }],
+        ] {
+            assert!(
+                filter_contains_last_created(&typed(props.clone())),
+                "a LastCreated nested in {props:?} must be seen"
+            );
+        }
+
+        // Negative: the same shapes without the anaphor, and a prop-free typed
+        // filter, so the positives above are not passing vacuously.
+        assert!(!filter_contains_last_created(&typed(vec![
+            FilterProp::Targets {
+                filter: Box::new(TargetFilter::Any),
+            },
+            FilterProp::Token,
+        ])));
+        assert!(!filter_contains_last_created(&typed(Vec::new())));
+        // The `LastZoneChanged` twin shares the traversal, so it must see the
+        // same nesting and not confuse the two ledgers.
+        assert!(filter_contains_last_zone_changed(&typed(vec![
+            FilterProp::Targets {
+                filter: Box::new(TargetFilter::LastZoneChanged),
+            },
+        ])));
+        assert!(!filter_contains_last_zone_changed(&typed(vec![
+            FilterProp::Targets { filter: anaphor() },
+        ])));
     }
 
     #[test]
@@ -13817,6 +14596,7 @@ mod characteristic_read_classification_tests {
             | FilterProp::Named { .. }
             | FilterProp::SameName
             | FilterProp::SameNameAsParentTarget
+            | FilterProp::SameNameAsExiledBySource
             | FilterProp::IsCommander
             | FilterProp::SharesCreatureTypeWithCommander
             | FilterProp::Other { .. } => false,
@@ -13854,11 +14634,11 @@ mod characteristic_read_classification_tests {
         let mut carriers = Vec::new();
         let mut current: Option<&str> = None;
         for line in body.lines() {
+            // Doc comments name `ControllerRef` in prose; they declare nothing — and neither
+            // does a TRAILING comment on a field line, which the shared
+            // `crate::source_census::code` rule removes too.
+            let line = crate::source_census::code(line);
             let trimmed = line.trim_start();
-            // Doc comments name `ControllerRef` in prose; they declare nothing.
-            if trimmed.starts_with("//") {
-                continue;
-            }
             // A variant header is the only thing at one indent level that opens
             // with an uppercase letter; its fields sit one level deeper.
             if let Some(header) = line

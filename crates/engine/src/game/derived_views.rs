@@ -819,6 +819,11 @@ fn client_state_wire_value(
     root.remove("stack_trigger_firings");
     root.remove("resolving_trigger_firing");
     root.remove("resolved_rules_journal");
+    // CR 605.4a + CR 117.3c: Defense in depth for direct `ClientGameStateRef`
+    // callers that did not first run `visibility::filter_state_for_viewer`.
+    // Both are trusted persistence authorities, never client schema.
+    root.remove("pending_triggered_mana_resume");
+    root.remove("pending_trigger_construction_priority_recipient");
 
     redact_private_trigger_firing(&mut value);
 
@@ -1839,33 +1844,41 @@ fn scheduled_display_axes(
     axes
 }
 
-/// CR 732.2a: which player's HUD a pumped `axis` belongs to, given the loop's
-/// `controller`. Exhaustive by design (no wildcard) — a new `ResourceAxis`
-/// variant must make a deliberate attribution choice here, never silently inherit
-/// a default.
+/// The seat a resource axis LANDS ON, for the four axes that name one — and `None` for every
+/// axis that is a whole-game quantity with no seat at all.
 ///
-/// A payload-keyed axis names the player it acts on, so the badge follows the
-/// payload, NOT permanent control:
+/// **This is the SINGLE authority for that partition.** Both consumers derive from it rather
+/// than restating it: [`attribution_player`] below (which resolves `None` to the loop's
+/// controller for the HUD badge) and `game::interaction`'s CR 732.2a shortcut preview (which
+/// publishes `None` as "no seat"). Two exhaustive matches over the same 17 `ResourceAxis`
+/// variants would force a future payload-keyed axis to make two decisions but not the SAME
+/// decision, and the offer could then attribute a seat the HUD does not.
+///
+/// Exhaustive by design (no wildcard) — a new `ResourceAxis` variant must make a deliberate
+/// seat choice here, never silently inherit a default.
+///
+/// A payload-keyed axis names the player it acts on, so the seat follows the payload, NOT
+/// permanent control, and in particular is NOT keyed from the loop's proposer — a drain's
+/// magnitude belongs to the player LOSING the life, which is exactly the key
+/// `ResourceVector`'s per-player maps already use:
 /// - CR 119.3 + CR 704.5a: `Life(p)` — CR 119.3 makes `p` the player whose life total the
 ///   effect adjusts, and CR 704.5a is why that matters (the afflicted player reaching 0 life
 ///   loses). A drain drives an opponent's total down and lifegain raises the controller's own;
-///   either way the badge belongs on `p`'s HUD.
-/// - CR 120: `DamageDealt(p)` — damage accrues to the player it is dealt to, so an
-///   opponent-burn loop shows `∞` on the victim's HUD.
-/// - CR 704.5b: `LibraryDelta(p)` — a mill drives an opponent's library toward the
-///   empty-draw loss and a self-mill the controller's own; the badge follows `p`.
-///
+///   either way it belongs to `p`.
+/// - CR 120.1: `DamageDealt(p)` — damage accrues to the player it is dealt to, so an
+///   opponent-burn loop lands on the victim.
+/// - CR 401 + CR 704.5b: `LibraryDelta(p)` — a mill drives an opponent's library toward the
+///   empty-draw loss and a self-mill the controller's own; the seat follows `p`.
 /// - CR 704.5c: `Poison(p)` — a poison ∞ drives the afflicted player toward the
-///   10-poison loss, so the badge belongs on the VICTIM's HUD.
+///   10-poison loss, so it belongs to the VICTIM.
 ///
-/// Every aggregate axis carries no victim PlayerId and is attributed to the loop's
-/// `controller` (the player generating the unbounded resource).
-fn attribution_player(axis: ResourceAxis, controller: PlayerId) -> PlayerId {
+/// Every aggregate axis carries no victim `PlayerId` and therefore no seat.
+pub(crate) fn payload_seat(axis: ResourceAxis) -> Option<PlayerId> {
     match axis {
         ResourceAxis::Life(p)
         | ResourceAxis::DamageDealt(p)
         | ResourceAxis::LibraryDelta(p)
-        | ResourceAxis::Poison(p) => p,
+        | ResourceAxis::Poison(p) => Some(p),
         ResourceAxis::Mana(_)
         | ResourceAxis::Counter(_, _)
         | ResourceAxis::Trigger(_)
@@ -1878,8 +1891,20 @@ fn attribution_player(axis: ResourceAxis, controller: PlayerId) -> PlayerId {
         | ResourceAxis::DeathTriggers
         | ResourceAxis::EtbTriggers
         | ResourceAxis::LtbTriggers
-        | ResourceAxis::SacTriggers => controller,
+        // A whole-game quantity: mana in a pool, tokens on a board, triggers on a stack.
+        // Nothing in the payload names a player, so there is no seat to report.
+        | ResourceAxis::SacTriggers => None,
     }
+}
+
+/// CR 732.2a: which player's HUD a pumped `axis` belongs to, given the loop's `controller`.
+///
+/// A thin resolution of [`payload_seat`], which is the authority for the partition and carries
+/// the per-axis CR citations: a payload-keyed axis badges on the seat it names, and every
+/// aggregate axis badges on the loop's `controller` (the player generating the unbounded
+/// resource). Deliberately NOT a second exhaustive match — see `payload_seat`.
+fn attribution_player(axis: ResourceAxis, controller: PlayerId) -> PlayerId {
+    payload_seat(axis).unwrap_or(controller)
 }
 
 /// CR 732.2a: whether the object-growth `∞` display set the accept registered for `axis`
@@ -6153,6 +6178,136 @@ mod tests {
             }),
             "the rows are exactly what a client rebuilds from the filtered object's counters, its \
              loyalty, the battlefield set and the `∞` store — zero new information"
+        );
+    }
+
+    /// CR 605.4a + CR 117.3c (plan Step 6, boundary 2): `client_state_wire_value`
+    /// is the defence-in-depth boundary for direct `ClientGameStateRef::wrap`
+    /// callers that never ran `visibility::filter_state_for_viewer`.
+    ///
+    /// All four projections — direct `wrap` for the prompt owner and for an
+    /// opponent, and `wrap_filtered` over both filtered states — must omit both
+    /// root keys and every private sentinel, while the public prompt survives.
+    /// The structural half fails if either field is renamed without updating
+    /// `client_state_wire_value`: the trusted root must contain exactly the
+    /// snake-case key, the client root must not.
+    #[test]
+    fn triggered_mana_sidecar_and_construction_recipient_never_reach_the_client_envelope() {
+        use crate::types::ability::QuantityExpr;
+        use crate::types::game_state::{
+            ManaTriggerFixedPointResume, TriggeredManaResume, TriggeredManaStage,
+        };
+        use crate::types::resolved_commands::{RulesExecutionNodeRef, SettlementNodeOrdinal};
+
+        const MARKER: &str = "WIRE-PRIVATE-ORACLE-SENTINEL";
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let hidden = create_object(
+            &mut state,
+            CardId(70_601),
+            PlayerId(0),
+            "Hidden Wire Source".to_string(),
+            Zone::Battlefield,
+        );
+        let mut pending = PendingTrigger::ordinary(
+            hidden,
+            PlayerId(0),
+            None,
+            Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                hidden,
+                PlayerId(0),
+            )),
+            1,
+        );
+        pending.description = Some(MARKER.to_string());
+        state.pending_triggered_mana_resume = Some(Box::new(TriggeredManaResume {
+            current: Box::new(PendingTriggerContext::single(pending)),
+            current_override: None,
+            rules_execution_node: RulesExecutionNodeRef::TriggeredMana(SettlementNodeOrdinal(5)),
+            accepted_tail: Vec::new(),
+            collected_batches: Vec::new(),
+            outer_resume: ManaTriggerFixedPointResume::Parent,
+            stage: TriggeredManaStage::ChoosingModes,
+        }));
+        state.pending_trigger_construction_priority_recipient = Some(PlayerId(1));
+        state.waiting_for = WaitingFor::AbilityModeChoice {
+            player: PlayerId(2),
+            modal: ModalChoice {
+                min_choices: 1,
+                max_choices: 1,
+                mode_count: 2,
+                ..Default::default()
+            },
+            source_id: hidden,
+            mode_abilities: Vec::new(),
+            is_activated: false,
+            ability_index: None,
+            ability_cost: None,
+            unavailable_modes: Vec::new(),
+        };
+
+        let trusted = serde_json::to_value(&state).expect("serialize trusted state");
+        let trusted_root = trusted.as_object().expect("trusted root object");
+        assert!(
+            trusted_root.contains_key("pending_triggered_mana_resume")
+                && trusted_root.contains_key("pending_trigger_construction_priority_recipient"),
+            "test precondition: trusted persistence keeps both authorities under their exact \
+             snake-case keys"
+        );
+
+        let owner_view = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(2));
+        let opponent_view = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
+        let projections = [
+            serde_json::to_value(ClientGameStateRef::wrap(&state, Some(PlayerId(2))))
+                .expect("direct owner wrap serializes"),
+            serde_json::to_value(ClientGameStateRef::wrap(&state, Some(PlayerId(1))))
+                .expect("direct opponent wrap serializes"),
+            serde_json::to_value(ClientGameStateRef::wrap_filtered(
+                &state,
+                &owner_view,
+                Some(PlayerId(2)),
+            ))
+            .expect("filtered owner wrap serializes"),
+            serde_json::to_value(ClientGameStateRef::wrap_filtered(
+                &state,
+                &opponent_view,
+                Some(PlayerId(1)),
+            ))
+            .expect("filtered opponent wrap serializes"),
+        ];
+
+        for (index, projection) in projections.iter().enumerate() {
+            let client_state = &projection["state"];
+            assert!(
+                client_state.get("pending_triggered_mana_resume").is_none(),
+                "projection {index} leaked the triggered-mana continuation key"
+            );
+            assert!(
+                client_state
+                    .get("pending_trigger_construction_priority_recipient")
+                    .is_none(),
+                "projection {index} leaked the construction recipient key"
+            );
+            let text = serde_json::to_string(projection).expect("projection serializes");
+            assert!(
+                !text.contains(MARKER),
+                "projection {index} leaked the private sidecar payload"
+            );
+            assert!(
+                client_state["waiting_for"] != serde_json::Value::Null,
+                "projection {index} must retain the public prompt"
+            );
+        }
+
+        assert!(
+            state.pending_triggered_mana_resume.is_some()
+                && state.pending_trigger_construction_priority_recipient == Some(PlayerId(1)),
+            "projection must not alter the authoritative carriers"
         );
     }
 }

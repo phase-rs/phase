@@ -146,9 +146,23 @@ function renderPermanent(
   );
 }
 
-function interactionForAttachedObjects(objectIds: number[]): ViewerInteraction {
+/**
+ * The engine's projection for host 1: `members` is everything it publishes as
+ * attached to that host — its whole subtree — and `objectIds` the subset it also
+ * published a one-step pick for. A member without a pick is the ordinary case:
+ * the engine publishes picks per direct host and only for a child with exactly
+ * one legal choice.
+ */
+function interactionForAttachedObjects(
+  objectIds: number[],
+  members: number[] = objectIds,
+): ViewerInteraction {
   const interactionId = "attachment-interaction" as InteractionId;
   const choiceId = (objectId: number) => `attachment-${objectId}` as InteractionChoiceId;
+  const submission = (objectId: number) => ({
+    interactionId,
+    response: { type: "choose" as const, data: { choiceId: choiceId(objectId) } },
+  });
   return {
     waitingForKind: { simultaneous: null, terminal: false, code: "choose" },
     authorizedSubmitters: [0],
@@ -171,22 +185,76 @@ function interactionForAttachedObjects(objectIds: number[]): ViewerInteraction {
     }],
     attachmentFans: {
       1: {
-      hostId: 1,
-      children: objectIds.map((objectId) => ({
-        objectId,
-        submission: {
-          interactionId,
-          response: { type: "choose", data: { choiceId: choiceId(objectId) } },
-        },
-      })),
+        hostId: 1,
+        children: objectIds.map((objectId) => ({ objectId, submission: submission(objectId) })),
+      },
+    },
+    attachmentViews: members.length === 0 ? {} : {
+      1: {
+        hostId: 1,
+        cards: members.map((objectId) => ({
+          objectId,
+          submission: objectIds.includes(objectId) ? submission(objectId) : null,
+        })),
       },
     },
     availability: { type: "inputRequired" },
-  };
+  } as ViewerInteraction;
 }
 
 function interactionForAttachedObject(objectId: number): ViewerInteraction {
   return interactionForAttachedObjects([objectId]);
+}
+
+/**
+ * A projection that publishes membership and no pick at all — what the engine
+ * sends whenever nothing about these cards is currently choosable, which is most
+ * of the time. The badge and the fan read it either way.
+ */
+function membershipOnly(members: number[]): ViewerInteraction {
+  return interactionForAttachedObjects([], members);
+}
+
+/**
+ * The reported board: Slumbering Keepguard (`{2}{W}`: pump) enchanted by Cooped
+ * Up (`{2}{W}`: Exile enchanted creature). Cooped Up is deliberate — its
+ * ability is legitimately activatable FROM THE BATTLEFIELD, so the Aura being a
+ * live choice is CORRECT and the host's unreachability needs no engine defect
+ * to reproduce.
+ */
+function keepguardUnderCoopedUp(): GameState {
+  const keepguard = makeObject({
+    id: 1,
+    name: "Slumbering Keepguard",
+    attachments: [2],
+    power: 3,
+    toughness: 3,
+    base_power: 3,
+    base_toughness: 3,
+  });
+  const coopedUp = makeObject({
+    id: 2,
+    card_id: 200,
+    attached_to: { type: "Object", data: 1 },
+    attachments: [],
+    name: "Cooped Up",
+    power: null,
+    toughness: null,
+    base_power: null,
+    base_toughness: null,
+    card_types: { supertypes: [], core_types: ["Enchantment"], subtypes: ["Aura"] },
+    color: ["White"],
+    base_color: ["White"],
+  });
+
+  return buildGameState({
+    players: buildPlayers([0, 1]),
+    objects: buildObjectMap(keepguard, coopedUp),
+    battlefield: [1, 2],
+    exile: [],
+    stack: [],
+    waiting_for: buildPriorityWaitingFor(),
+  });
 }
 
 describe("PermanentCard", () => {
@@ -208,6 +276,12 @@ describe("PermanentCard", () => {
       legalActions: [],
       legalActionsByObject: {},
       spellCosts: {},
+      // Reset alongside the rest of the engine-published state: without this the
+      // rows that publish an attachment fan leak it into every later row, so the
+      // suite only passed because they happened to be declared last. Membership
+      // itself is always published — object 2 hangs on the host and object 3 on
+      // object 2 — because the fan and the badge now read it from here.
+      viewerInteraction: membershipOnly([2, 3]),
     });
     useUiStore.setState({
       selectedObjectId: null,
@@ -597,7 +671,7 @@ describe("PermanentCard", () => {
     renderPermanent();
 
     const button = screen.getByRole("button", {
-      name: "View Test Creature's attached card",
+      name: "View Test Creature's 2 attached cards",
     });
 
     fireEvent.pointerDown(button);
@@ -608,11 +682,45 @@ describe("PermanentCard", () => {
     expect(useUiStore.getState().inspectedObjectId).toBeNull();
   });
 
+  it("labels the fan control from the projected card count rather than raw attachments", () => {
+    const gameState = makeState();
+    gameState.objects[1].attachments = [2, 4];
+    gameState.objects[4] = makeObject({
+      id: 4,
+      card_id: 400,
+      attached_to: { type: "Object", data: 1 },
+      attachments: [],
+      name: "Second Equipment",
+      power: null,
+      toughness: null,
+      base_power: null,
+      base_toughness: null,
+      card_types: { supertypes: [], core_types: ["Artifact"], subtypes: ["Equipment"] },
+      color: [],
+      base_color: [],
+    });
+    gameState.battlefield = [1, 2, 3, 4];
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      viewerInteraction: membershipOnly([2]),
+    });
+    act(() => {
+      useUiStore.setState({ selectedObjectId: 1 });
+    });
+
+    renderPermanent();
+
+    expect(screen.getByRole("button", {
+      name: "View Test Creature's attached card",
+    })).toBeInTheDocument();
+  });
+
   it("keeps the single-attachment control readable at compact card sizes", () => {
     renderPermanent();
 
     const button = screen.getByRole("button", {
-      name: "View Test Creature's attached card",
+      name: "View Test Creature's 2 attached cards",
     });
 
     expect(button).toHaveStyle({
@@ -823,6 +931,202 @@ describe("PermanentCard", () => {
     expect(useUiStore.getState().attachmentFanHostId).toBeNull();
   });
 
+  /**
+   * Reported from a real game (Priority during Declare Blockers): Slumbering
+   * Keepguard's `{2}{W}` was unreachable while Cooped Up sat on it. Every click
+   * on the host — centre, edge, corner — opened the attachment chooser, and the
+   * chooser cannot pick the host by design (`AttachmentFan.tsx:241`,
+   * `id !== host.id`), so the host's own ability had no path at all.
+   *
+   * This is the SAME branch-order invariant the V13 arm above pins, on the OTHER
+   * source. Hunk B reads the affordance sets and sits LAST; the
+   * `attachmentsActionable` branch reads `viewerInteraction.attachmentFans` and
+   * USED TO sit above the activation branch, on the premise stated in its own
+   * comment — "the host is not a legal choice" — which is unchecked and false
+   * whenever Priority publishes the host as activatable too. It now sits below
+   * the host's own intent (`PermanentCard.tsx:694` activation, `:727` the fan
+   * branch, `:747` hunk B), which is what this row pins.
+   *
+   * COVERAGE GAP this closed: before this row, every interaction-fan test in
+   * this file called `renderPermanent()` with no arguments, so
+   * `activatableObjectIds` was empty in all of them and no arm held a fan AND an
+   * activatable host at once — which is precisely what
+   * `HumanResponseModel::ExactCandidates` publishes during Priority.
+   */
+  const keepguardPump = {
+    type: "ActivateAbility",
+    data: { source_id: 1, ability_index: 0 },
+  } as const;
+  const coopedUpExile = {
+    type: "ActivateAbility",
+    data: { source_id: 2, ability_index: 0 },
+  } as const;
+
+  it("activates the host's own ability while an attachment is a live interaction choice", () => {
+    const gameState = keepguardUnderCoopedUp();
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      viewerInteraction: interactionForAttachedObject(2),
+      legalActionsByObject: { "1": [keepguardPump], "2": [coopedUpExile] },
+    });
+    act(() => {
+      useUiStore.setState({ attachmentFanHostId: null, selectedObjectId: null });
+    });
+
+    const { container } = renderPermanent(new Set(), new Set(), new Set(), new Set([1, 2]));
+    clickHost(container);
+
+    expect(dispatchAction).toHaveBeenCalledWith(keepguardPump);
+    expect(useUiStore.getState().attachmentFanHostId).toBeNull();
+    // BRANCH DISCRIMINATOR: hunk B (`:747`) selects the host unconditionally, so
+    // a failure caused by THAT branch would leave `selectedObjectId === 1`.
+    // MEASURED on the DROP side (the fan branch restored above activation):
+    //   `dispatched: [] fanHostId: 1 selectedObjectId: null`
+    // — no selection, which only the `:727` branch produces, so the red state is
+    // attributable to it and not to hunk B. It also matches the reported
+    // screenshot: the host rendered dimmed and WITHOUT a selection ring. Left as
+    // evidence rather than an assertion: a fix must reach the ability, and
+    // whether it also selects the host is not this row's business.
+  });
+
+  // REACHABILITY GUARD for the reorder above. Handing the click back to the host
+  // is only correct if the attachments keep a route of their own. Two attachments
+  // that are both actionable auto-expand the stack, so `hiddenAttachmentCount`
+  // is 0 and the `+N` control is absent; the `⧉` control used to require exactly
+  // ONE attachment, leaving this state with no entry point at all and each Aura
+  // reachable only through a ~22px peek behind the host face.
+  //
+  // The reported board was Slumbering Keepguard under TWO Bestial Bloodline, but
+  // the fixture deliberately uses Cage of Hands (`{1}{W}: Return this Aura to its
+  // owner's hand`) as the second Aura: Bestial Bloodline's only activated ability
+  // works from the graveyard, so its appearing as a live choice on the
+  // battlefield is a separate engine defect (CR 113.6b). Pinning this row on two
+  // Auras that are legitimately activatable keeps it green once that is fixed.
+  it("keeps an explicit fan route on a host whose several attachments are all expanded", () => {
+    const gameState = keepguardUnderCoopedUp();
+    const secondAura = buildGameObject({
+      ...gameState.objects[2],
+      id: 3,
+      card_id: 300,
+      name: "Cage of Hands",
+    });
+    gameState.objects[1] = { ...gameState.objects[1], attachments: [2, 3] };
+    gameState.objects[3] = secondAura;
+    gameState.battlefield = [1, 2, 3];
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      viewerInteraction: interactionForAttachedObjects([2, 3]),
+      legalActionsByObject: { "1": [keepguardPump], "2": [coopedUpExile] },
+    });
+    act(() => {
+      useUiStore.setState({ attachmentFanHostId: null, selectedObjectId: null });
+    });
+
+    const { container } = renderPermanent(new Set(), new Set(), new Set(), new Set([1, 2, 3]));
+
+    // Both attachments are on the board, so nothing is hidden and no `+N` exists.
+    expect(container.querySelector('[data-object-id="2"]')).not.toBeNull();
+    expect(container.querySelector('[data-object-id="3"]')).not.toBeNull();
+
+    // Stated as its own claim so the red state reads "no explicit route exists"
+    // rather than as a selector that stopped matching.
+    // MEASURED (drop side — the control gated back on `attachments.length === 1`):
+    //   `Unable to find a label with the text of: /Slumbering Keepguard/`.
+    const fanControl = screen.queryByLabelText(/Slumbering Keepguard/, { selector: "button" });
+    expect(fanControl).not.toBeNull();
+
+    fireEvent.click(fanControl as HTMLElement);
+    expect(useUiStore.getState().attachmentFanHostId).toBe(1);
+  });
+
+  // The pair, and the guard on the reorder: when the host itself offers nothing
+  // the fan MUST still take the click, because the Aura's ability is only
+  // reachable through it.
+  //
+  // `selectedObjectId` is what makes this arm discriminating, and it is not
+  // decoration. `attachmentFanHostId === 1` alone is NOT enough: the
+  // affordance-set branch below (hunk B) produces the very same fan from the
+  // very same fixture, so deleting the branch under test left this row green.
+  // Only hunk B calls `selectObject`, so requiring NO selection is what proves
+  // the fan came from the interaction branch.
+  // MEASURED (drop side — the `attachmentsActionable` branch deleted):
+  //   `expected 1 to be null` on the selection assertion; hunk B answered the
+  //   click instead. Before that assertion existed the mutant was invisible here.
+  it("still opens the fan when only the attachment is a live interaction choice", () => {
+    const gameState = keepguardUnderCoopedUp();
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      viewerInteraction: interactionForAttachedObject(2),
+      legalActionsByObject: { "2": [coopedUpExile] },
+    });
+    act(() => {
+      useUiStore.setState({ attachmentFanHostId: null, selectedObjectId: null });
+    });
+
+    const { container } = renderPermanent(new Set(), new Set(), new Set(), new Set([2]));
+    clickHost(container);
+
+    expect(useUiStore.getState().attachmentFanHostId).toBe(1);
+    expect(dispatchAction).not.toHaveBeenCalled();
+    expect(useUiStore.getState().selectedObjectId).toBeNull();
+  });
+
+  // The two halves of the `⧉` gate, each pinned on its own. Without these the
+  // gate could be weakened to either disjunct alone and the whole board suite
+  // stayed green: dropping `attachmentsExpanded` puts a `⧉` on every permanent
+  // that has attachments including collapsed ones (two competing controls), and
+  // dropping `obj.attachments.length > 0` puts one on every permanent on the
+  // board, attachments or not.
+  it("hands the collapsed state to the +N control and renders no second route", () => {
+    const gameState = keepguardUnderCoopedUp();
+    const secondAura = buildGameObject({
+      ...gameState.objects[2],
+      id: 3,
+      card_id: 300,
+      name: "Cage of Hands",
+    });
+    gameState.objects[1] = { ...gameState.objects[1], attachments: [2, 3] };
+    gameState.objects[3] = secondAura;
+    gameState.battlefield = [1, 2, 3];
+    // No interaction fan and no selection, so nothing expands the stack.
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    act(() => {
+      useUiStore.setState({ attachmentFanHostId: null, selectedObjectId: null });
+    });
+
+    renderPermanent();
+
+    expect(screen.queryByLabelText(/Slumbering Keepguard/, { selector: "button" })).toBeNull();
+    // Reach guard: proves the fixture really is collapsed rather than simply
+    // missing both controls for some unrelated reason.
+    expect(screen.getByText("+1")).toBeInTheDocument();
+  });
+
+  it("renders no fan route on a permanent that has no attachments", () => {
+    const gameState = keepguardUnderCoopedUp();
+    gameState.objects[1] = { ...gameState.objects[1], attachments: [] };
+    gameState.battlefield = [1];
+    // Nothing is attached, so the engine publishes no membership for this host —
+    // and the badge is gated on that, not on a scan of the snapshot.
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      viewerInteraction: membershipOnly([]),
+    });
+
+    const { container } = renderPermanent();
+
+    expect(screen.queryByLabelText(/Slumbering Keepguard/, { selector: "button" })).toBeNull();
+    expect(screen.queryByText(/^\+\d+$/)).toBeNull();
+    // Reach guard, matching the row above: both assertions are negative, so
+    // without this an early return (`PermanentCard.tsx:491`, `if (!obj)`) or any
+    // fixture drift would satisfy them for the wrong reason.
+    expect(container.querySelector('[data-object-id="1"]')).not.toBeNull();
+  });
+
   it("refreshes the attachment fan when the engine clears host attachments", () => {
     const gameState = makeState();
     const host = gameState.objects[1];
@@ -853,11 +1157,16 @@ describe("PermanentCard", () => {
       useGameStore.setState({
         gameState: nextState,
         waitingFor: nextState.waiting_for,
+        // The engine republishes membership with the state it belongs to; the
+        // fan follows that, not the raw `attachments` array.
+        viewerInteraction: membershipOnly([]),
       });
     });
 
-    expect(queryAllByLabelText("Test Creature").length).toBeGreaterThan(0);
+    // The last member left the battlefield, so the fan has nothing to spread and
+    // tears itself down rather than lingering as a lone host card over the board.
     expect(queryAllByLabelText("Test Equipment")).toHaveLength(0);
+    expect(queryAllByLabelText("Test Creature")).toHaveLength(0);
   });
 
   it("auto-expands collapsed attachments when one is a valid target", () => {
@@ -1761,6 +2070,38 @@ describe("PermanentCard", () => {
     );
 
     expect(getByLabelText("Face-down card")).toHaveAttribute("data-face-down", "true");
+  });
+
+  it("renders a face-down permanent's identity when the engine projects it to this viewer", () => {
+    const gameState = makeState();
+    gameState.objects[1].face_down = true;
+    gameState.objects[1].display_visible_to_viewer = true;
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    expect(screen.getByLabelText("Test Creature")).toHaveAttribute("data-face-down", "false");
+  });
+
+  it("dispatches the engine-provided turn-face-up action", () => {
+    const gameState = makeState();
+    gameState.objects[1].face_down = true;
+    gameState.objects[1].display_visible_to_viewer = true;
+    gameState.objects[1].attachments = [];
+    const turnFaceUpAction = { type: "TurnFaceUp", data: { object_id: 1 } } as const;
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      legalActions: [turnFaceUpAction],
+      legalActionsByObject: { 1: [turnFaceUpAction] },
+      viewerInteraction: null,
+    });
+
+    const { container } = renderPermanent(new Set(), new Set(), new Set(), new Set([1]));
+
+    fireEvent.click(container.querySelector('[data-object-id="1"]') as HTMLElement);
+
+    expect(dispatchAction).toHaveBeenCalledWith(turnFaceUpAction);
   });
 
   it("forwards engine-provided token rules text and subtypes to the card image", () => {

@@ -208,10 +208,7 @@ pub fn is_canonical_physical_meld_pair(state: &GameState, context: &MeldSelectio
 /// CR 400.2: graveyard, battlefield, stack, exile, and command are public
 /// zones. Hand and library remain hidden even when their cards are revealed.
 fn is_public_zone(zone: Zone) -> bool {
-    match zone {
-        Zone::Battlefield | Zone::Graveyard | Zone::Stack | Zone::Exile | Zone::Command => true,
-        Zone::Library | Zone::Hand => false,
-    }
+    zone.is_public()
 }
 
 /// Commit the projected result entry, then atomically make the second card a
@@ -248,7 +245,10 @@ pub(crate) fn finish_meld_entry(
     state.liminal_entries.insert(
         context.source_id,
         LiminalEntry {
-            object: projected,
+            // CR 701.42a: the meld result is card-backed — its two component
+            // cards are real objects in exile — so it is not a CR 111.1 token
+            // projection and never enters through `ProposedEvent::TokenEntry`.
+            object: crate::types::game_state::LiminalEntrant::Card(projected),
             name: context.result.clone(),
             source_id: context.source_id,
             controller: context.controller,

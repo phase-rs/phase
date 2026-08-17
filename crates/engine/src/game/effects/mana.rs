@@ -188,10 +188,12 @@ pub fn resolve(
     // "first player target" quantity resolution cannot read the recipient.
     let count_ability = count_scoped_ability(state, ability, mana_role.as_ref());
     let count_ability = &count_ability;
-    let is_triggered_mana_inline = crate::game::mana_abilities::is_triggered_mana_ability(
-        ability,
-        state.current_trigger_event.as_ref(),
-    );
+    // CR 605.4a: read back the acceptance decision for the occurrence that is
+    // actually executing rather than re-answering CR 605.1b from a clone the
+    // resolver may already have bound a context referent onto. With no accepted
+    // occurrence live this is byte-for-byte the baseline raw classifier call.
+    let is_triggered_mana_inline =
+        crate::game::mana_abilities::is_resolving_triggered_mana(state, ability);
     let mana_choice = (!is_triggered_mana_inline)
         .then(|| {
             crate::game::mana_abilities::mana_choice_prompt(
@@ -199,6 +201,7 @@ pub fn resolve(
                 state,
                 ability.source_id,
                 Some(ability),
+                Some(count_ability),
             )
         })
         .flatten();
@@ -270,7 +273,8 @@ pub fn resolve(
             .current_trigger_event
             .as_ref()
             .and_then(|event| match event {
-                GameEvent::TappedForMana { player_id, .. } => Some(*player_id),
+                GameEvent::TappedForMana { player_id, .. }
+                | GameEvent::ManaAbilityProduced { player_id, .. } => Some(*player_id),
                 _ => None,
             })
             .unwrap_or(ability.controller),
@@ -867,7 +871,10 @@ fn resolve_mana_types_impl(
         ManaProduction::TriggerEventManaType => {
             use crate::types::events::GameEvent;
             match &state.current_trigger_event {
-                Some(GameEvent::TappedForMana { produced, .. }) => {
+                Some(
+                    GameEvent::TappedForMana { produced, .. }
+                    | GameEvent::ManaAbilityProduced { produced, .. },
+                ) => {
                     let distinct: std::collections::HashSet<_> = produced.iter().copied().collect();
                     distinct.into_iter().collect()
                 }
@@ -2566,7 +2573,9 @@ mod tests {
                     contribution: ManaContribution::Base,
                 },
                 restrictions: vec![],
-                grants: vec![ManaSpellGrant::CantBeCountered],
+                grants: vec![ManaSpellGrant::CantBeCountered {
+                    filter: TargetFilter::Any,
+                }],
                 expiry: None,
                 target: None,
             },
@@ -2578,7 +2587,12 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         let unit = &state.players[0].mana_pool.mana[0];
-        assert_eq!(unit.grants, vec![ManaSpellGrant::CantBeCountered]);
+        assert_eq!(
+            unit.grants,
+            vec![ManaSpellGrant::CantBeCountered {
+                filter: TargetFilter::Any,
+            }]
+        );
     }
 
     /// CR 106.7 + CR 106.1b: Reflecting Pool — produces one mana of any type

@@ -1,0 +1,193 @@
+//! Issue #5941: True-Name Nemesis must not be targetable by objects controlled
+//! by the player chosen as it entered the battlefield.
+//!
+//! The regression casts the parsed card through its as-enters replacement,
+//! answers that production choice through `ChooseOption`, then checks the
+//! production target-legality predicate with sources controlled by both players.
+
+use engine::game::scenario::{GameScenario, P0};
+use engine::game::targeting::find_legal_targets;
+use engine::types::ability::ChoiceType;
+use engine::types::ability::TargetFilter;
+use engine::types::actions::GameAction;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::ManaCost;
+use engine::types::player::PlayerId;
+
+const P1: PlayerId = PlayerId(1);
+const TRUE_NAME_ORACLE: &str = "As True-Name Nemesis enters the battlefield, choose a player.\nTrue-Name Nemesis has protection from the chosen player. (This creature can't be blocked, targeted, dealt damage by, or enchanted by anything controlled by that player.)";
+
+fn add_source(scenario: &mut GameScenario, player: PlayerId, name: &str) -> ObjectId {
+    scenario.add_creature(player, name, 2, 2).id()
+}
+
+#[test]
+fn true_name_protection_uses_the_protected_objects_chosen_player() {
+    let mut scenario = GameScenario::new_n_player(2, 5941);
+    let true_name = scenario
+        .add_creature_to_hand_from_oracle(P0, "True-Name Nemesis", 3, 1, TRUE_NAME_ORACLE)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    scenario.add_card_to_library_top(P0, "Draw Step Filler");
+    let chosen_player_source = add_source(&mut scenario, P1, "Song of the Dryads");
+    let other_player_source = add_source(&mut scenario, P0, "Friendly Spell");
+    let chosen_player_owned_source = scenario
+        .add_creature_to_graveyard(P1, "Chosen Player's Corpse", 2, 2)
+        .id();
+    let other_player_owned_source = scenario
+        .add_creature_to_graveyard(P0, "Other Player's Corpse", 2, 2)
+        .id();
+    let chosen_player_owned_command_source = scenario
+        .add_creature_to_graveyard(P1, "Chosen Player's Commander", 2, 2)
+        .id();
+    scenario.with_commander(chosen_player_owned_command_source);
+    let other_player_owned_command_source = scenario
+        .add_creature_to_graveyard(P0, "Other Player's Commander", 2, 2)
+        .id();
+    scenario.with_commander(other_player_owned_command_source);
+    let mut runner = scenario.build();
+
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&chosen_player_owned_source)
+        .unwrap()
+        .controller = P0;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&other_player_owned_source)
+        .unwrap()
+        .controller = P1;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&chosen_player_owned_command_source)
+        .unwrap()
+        .controller = P0;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&other_player_owned_command_source)
+        .unwrap()
+        .controller = P1;
+
+    let emblem_source = engine::game::effects::create_emblem::grant_emblem(
+        runner.state_mut(),
+        P1,
+        vec![],
+        vec![],
+        vec![],
+    );
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&emblem_source)
+        .unwrap()
+        .controller = P0;
+
+    runner.auto_advance_to_main_phase();
+
+    let card_id = runner.state().objects[&true_name].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: true_name,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting True-Name Nemesis must succeed");
+    runner.advance_until_stack_empty();
+
+    let WaitingFor::NamedChoice {
+        choice_type,
+        options,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "True-Name's as-enters replacement must produce a player choice, got {}",
+            runner.waiting_for_kind()
+        );
+    };
+    assert!(matches!(choice_type, ChoiceType::Player { .. }));
+    assert_eq!(options, vec![P0.0.to_string(), P1.0.to_string()]);
+    runner
+        .act(GameAction::ChooseOption {
+            choice: P1.0.to_string(),
+        })
+        .expect("choosing the player must succeed");
+
+    assert_eq!(runner.state().objects[&true_name].chosen_player(), Some(P1));
+
+    let targets_from_chosen_player =
+        find_legal_targets(runner.state(), &TargetFilter::Any, P1, chosen_player_source);
+    assert!(
+        !targets_from_chosen_player.contains(&engine::types::ability::TargetRef::Object(true_name)),
+        "True-Name must not be targetable by the chosen player's source, got {targets_from_chosen_player:?}"
+    );
+
+    let targets_from_other_player =
+        find_legal_targets(runner.state(), &TargetFilter::Any, P0, other_player_source);
+    assert!(
+        targets_from_other_player.contains(&engine::types::ability::TargetRef::Object(true_name)),
+        "True-Name must remain targetable by another player's source, got {targets_from_other_player:?}"
+    );
+
+    let targets_from_chosen_player_owned_source = find_legal_targets(
+        runner.state(),
+        &TargetFilter::Any,
+        P0,
+        chosen_player_owned_source,
+    );
+    assert!(
+        !targets_from_chosen_player_owned_source
+            .contains(&engine::types::ability::TargetRef::Object(true_name)),
+        "True-Name must not be targetable by an uncontrolled source the chosen player owns, got {targets_from_chosen_player_owned_source:?}"
+    );
+
+    let targets_from_other_player_owned_source = find_legal_targets(
+        runner.state(),
+        &TargetFilter::Any,
+        P1,
+        other_player_owned_source,
+    );
+    assert!(
+        targets_from_other_player_owned_source
+            .contains(&engine::types::ability::TargetRef::Object(true_name)),
+        "a stale controller must not make another player's uncontrolled source match, got {targets_from_other_player_owned_source:?}"
+    );
+
+    let targets_from_chosen_player_owned_command_source = find_legal_targets(
+        runner.state(),
+        &TargetFilter::Any,
+        P1,
+        chosen_player_owned_command_source,
+    );
+    assert!(
+        !targets_from_chosen_player_owned_command_source
+            .contains(&engine::types::ability::TargetRef::Object(true_name)),
+        "True-Name must not be targetable by an ordinary command-zone card the chosen player owns, got {targets_from_chosen_player_owned_command_source:?}"
+    );
+
+    let targets_from_other_player_owned_command_source = find_legal_targets(
+        runner.state(),
+        &TargetFilter::Any,
+        P0,
+        other_player_owned_command_source,
+    );
+    assert!(
+        targets_from_other_player_owned_command_source
+            .contains(&engine::types::ability::TargetRef::Object(true_name)),
+        "a stale command-zone controller must not make another player's card match, got {targets_from_other_player_owned_command_source:?}"
+    );
+
+    let targets_from_emblem_source =
+        find_legal_targets(runner.state(), &TargetFilter::Any, P0, emblem_source);
+    assert!(
+        targets_from_emblem_source
+            .contains(&engine::types::ability::TargetRef::Object(true_name)),
+        "an emblem's explicit controller must remain authoritative in the command zone, got {targets_from_emblem_source:?}"
+    );
+}

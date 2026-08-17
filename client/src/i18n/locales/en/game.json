@@ -26,6 +26,11 @@
     "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
     "convokeInfo_other": "Auto-taps up to {{count}} creatures for convoke each iteration.",
+    "countAria": "Number of iterations",
+    "previewTitle_one": "Repeating once produces:",
+    "previewTitle_other": "Repeating {{count}} times produces:",
+    "previewEntry": "{{amount}} {{resource}}",
+    "previewEntryPlayer": "{{amount}} {{resource}} — {{player}}",
     "winKind": {
       "LethalDamage": "This loop deals lethal damage.",
       "PoisonLoss": "This loop gives lethal poison counters.",
@@ -49,6 +54,13 @@
     "label": "Resolving {{resolved}} / {{total}}",
     "collapse": "Collapse resolving progress",
     "expand": "Expand resolving progress"
+  },
+  "resolveAllConsent": {
+    "eyebrow": "Resolve All",
+    "title": "Approve fast resolution?",
+    "subtitle": "All players must approve before the engine resolves a safe stack prefix.",
+    "grant": "Approve",
+    "decline": "Keep priority"
   },
   "debugCreate": {
     "copies": "Copies",
@@ -262,12 +274,16 @@
     "ringBearer": "Ring",
     "ringBearerTooltip": "Ring-bearer",
     "hiddenAttachments": "+{{count}} more attached",
+    "hiddenAttachmentsAria_few": "Show {{count}} hidden attached cards",
+    "hiddenAttachmentsAria_many": "Show {{count}} hidden attached cards",
     "hiddenAttachmentsAria_one": "Show {{count}} hidden attached card",
     "hiddenAttachmentsAria_other": "Show {{count}} hidden attached cards",
     "fanPick": "Pick",
     "fanConfirm": "Confirm ({{count}})",
     "viewAttachments_one": "View attached card",
     "viewAttachments_other": "View {{count}} attached cards",
+    "viewAttachmentsFor_few": "View {{name}}'s {{count}} attached cards",
+    "viewAttachmentsFor_many": "View {{name}}'s {{count}} attached cards",
     "viewAttachmentsFor_one": "View {{name}}'s attached card",
     "viewAttachmentsFor_other": "View {{name}}'s {{count}} attached cards",
     "hiddenExileCards": "+{{count}} more exiled",
@@ -1793,7 +1809,22 @@
     "emergeEyebrow": "Emerge",
     "emergeNormalLabel": "Cast Normally",
     "emergeAltLabel": "Cast with Emerge",
-    "emergeSubtitle": "Cast {{name}} normally, or pay its Emerge cost by sacrificing a creature, reducing the cost by that creature's mana value.",
+    "emergeSubtitle": "Cast {{name}} normally, or pay its Emerge cost by sacrificing {{sacrifice}}, reducing the cost by that permanent's mana value.",
+    "emergeFallbackSacrifice": "a matching permanent",
+    "emergeSacrificeQuality": {
+      "artifact": "an artifact",
+      "battle": "a battle",
+      "card": "a card",
+      "creature": "a creature",
+      "enchantment": "an enchantment",
+      "instant": "an instant",
+      "kindred": "a kindred",
+      "land": "a land",
+      "permanent": "a permanent",
+      "planeswalker": "a planeswalker",
+      "sorcery": "a sorcery",
+      "subtype": "a permanent of type {{subtype}}"
+    },
     "impendingEyebrow": "Impending",
     "impendingNormalLabel": "Cast Normally",
     "impendingAltLabel": "Cast with Impending",
@@ -1852,6 +1883,10 @@
   "giftRecipient": {
     "title": "Choose Gift Recipient",
     "subtitle": "Choose which opponent receives the promised gift."
+  },
+  "entryController": {
+    "title": "Choose Entry Controller",
+    "subtitle": "Choose which opponent controls this permanent as it enters."
   },
   "optionalCost": {
     "gift": {
@@ -2086,6 +2121,7 @@
     "searchPlaceholder": "Search by name...",
     "noCardsFound": "No cards found",
     "buttonSubtitle": "Select one option",
+    "numberSubtitle": "Enter a whole number {{min}} or greater",
     "filterPlaceholder": "Filter options...",
     "noOptionsMatch": "No options match"
   },

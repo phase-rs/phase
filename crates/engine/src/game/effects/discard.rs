@@ -67,6 +67,7 @@ pub(crate) fn complete_discard_to_graveyard(
         cause: source_id,
         attach_to: None,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enters_attacking: false,
         enter_with_counters: Vec::new(),
         controller_override: None,
         enter_transformed: false,
@@ -81,6 +82,7 @@ pub(crate) fn complete_discard_to_graveyard(
                 state,
                 event,
                 source_id,
+                None,
                 None,
                 false,
                 crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
@@ -377,6 +379,7 @@ pub fn resolve(
                                 zone_event,
                                 None,
                                 None,
+                                None,
                                 false,
                                 crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
                                 None,
@@ -438,27 +441,32 @@ pub fn resolve(
             // CR 608.2c: Effect resolved as no-op (empty hand) — veto downstream IfYouDo.
             state.cost_payment_failed_flag = true;
         } else if random {
-            let mut remaining = hand_cards;
-            for _ in 0..count {
-                if remaining.is_empty() {
-                    break;
-                }
-                let index = state.rng.random_range(0..remaining.len());
-                let obj_id = remaining.swap_remove(index);
-                if let DiscardOutcome::NeedsReplacementChoice(player) =
-                    discard_caused_by_effect_with_source_and_frame(
-                        state,
-                        obj_id,
-                        discard_player,
-                        Some(ability.source_id),
+            // CR 701.9a: this is a resolving effect, so Library-of-Leng-class
+            // replacements DO apply — `DiscardCause::Effect`.
+            //
+            // PRE-EXISTING GAP (unchanged by the extraction, called out so the
+            // asymmetry with the cost caller below is not mistaken for an
+            // oversight): a replacement choice mid-batch drops the remaining
+            // picks, because the effect layer has no batch cursor to resume
+            // through. The returned cursor is therefore ignored here. The cost
+            // caller DOES persist it, since it additionally owes a pending
+            // unless-payment that would otherwise never settle.
+            if matches!(
+                discard_at_random(
+                    state,
+                    RandomDiscardRequest {
+                        player: discard_player,
+                        source_id: ability.source_id,
+                        count,
+                        eligible: hand_cards,
+                        cause: DiscardCause::Effect,
                         discard_frame,
-                        events,
-                    )
-                {
-                    state.waiting_for =
-                        crate::game::replacement::replacement_choice_waiting_for(player, state);
-                    return Ok(());
-                }
+                    },
+                    events,
+                ),
+                RandomDiscardOutcome::NeedsReplacementChoice { .. }
+            ) {
+                return Ok(());
             }
         } else if hand_cards.is_empty() {
             // up_to=true with empty hand — choosing 0 is the only option, skip interaction.
@@ -546,6 +554,160 @@ pub(crate) fn discard_caused_by_effect_with_source(
 }
 
 /// Resolving-effect discard with optional operation-owned provenance.
+/// CR 701.9a vs CR 118.12 / CR 601.2h: WHY a card is being discarded.
+///
+/// This is the `caused_by_effect` axis of `route_discard`, surfaced as a type
+/// rather than a bool because it is load-bearing and silently mis-set: it gates
+/// `ReplacementCondition::EffectCausedDiscard`. Library of Leng replaces a
+/// discard caused by a spell or ability, and must NOT touch a discard made to
+/// pay a cost — the boundary `library_of_leng_does_not_apply_to_discard_cost`
+/// pins.
+///
+/// Callers must state which one they are; there is deliberately no default. A
+/// shared discard helper that hard-codes one of these silently launders a cost
+/// payment into an effect (or vice versa), which is exactly the bug this enum
+/// exists to make unrepresentable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DiscardCause {
+    /// A resolving spell or ability discards the card (CR 701.9a).
+    /// Library-of-Leng-class replacements gate on this.
+    Effect,
+    /// The discard IS the payment of a cost (CR 118.12 unless-cost,
+    /// CR 601.2h additional cost). Effect-caused replacements must not apply.
+    Cost,
+}
+
+/// One game-selected discard batch: who, how many, from what pool, and why.
+///
+/// Bundled rather than passed as positional arguments because the caller-supplied
+/// axes are all easy to transpose — `player` vs the source's controller,
+/// `count` vs pool length, and especially `cause`, which is silently wrong
+/// rather than loudly wrong. Named fields make each call site state its intent.
+pub(crate) struct RandomDiscardRequest {
+    /// The discarding player.
+    pub player: PlayerId,
+    /// Discard source, for replacement provenance.
+    pub source_id: ObjectId,
+    /// How many cards to pick.
+    pub count: usize,
+    /// The already-filtered, already-length-checked pool to pick from.
+    pub eligible: Vec<ObjectId>,
+    /// Effect or cost — see [`DiscardCause`].
+    pub cause: DiscardCause,
+    /// Operation-owned discard frame, when the caller has one.
+    pub discard_frame: Option<crate::types::identifiers::DiscardFrameId>,
+}
+
+/// Result of a game-selected (random) discard batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RandomDiscardOutcome {
+    /// Every requested card was discarded (or replacement-redirected).
+    Completed,
+    /// A replacement effect needs a player choice before the batch can finish.
+    /// `state.waiting_for` has been set; callers MUST return without treating
+    /// the batch as complete.
+    ///
+    /// The payload is the batch cursor: what a caller needs to finish the job
+    /// after the choice settles. It is returned rather than stored globally so
+    /// each caller can persist it in ITS own typed continuation — the cost
+    /// caller owns an unless-payment that must still be settled, which is not
+    /// the effect caller's problem.
+    NeedsReplacementChoice {
+        /// Cards still un-picked. Excludes the card whose replacement paused.
+        remaining_eligible: Vec<ObjectId>,
+        /// Picks still owed AFTER the paused one resolves.
+        remaining_count: usize,
+    },
+}
+
+/// CR 701.9b: "Some effects … require a random discard." Move `count` cards
+/// picked uniformly at random from `eligible` to their owner's graveyard.
+///
+/// SINGLE AUTHORITY for game-selected discard. Both layers call it:
+///
+/// * the EFFECT layer — `Effect::Discard { selection: Random }` (Wheel of
+///   Torture class), and
+/// * the COST layer — an `AbilityCost::Discard { selection: Random }`
+///   unless-payment (Balduvian Horde class).
+///
+/// Keeping one implementation is what stops the two from drifting on the four
+/// things that are easy to get subtly wrong independently: which RNG is used,
+/// how a replacement effect mid-batch is surfaced, whether a short pool
+/// discards partially, and — via `cause` — whether the discard counts as
+/// effect-caused.
+///
+/// RNG: `state.rng` — the seeded, replay-deterministic game RNG. Never
+/// `rand::thread_rng()`: a replayed game (and the CR 732.2a loop replay) must
+/// reproduce the identical discards, and a thread RNG would desync them.
+///
+/// `cause` is REQUIRED and has no default. Sharing one helper across an effect
+/// and a cost is only safe if provenance travels with the call — hard-coding
+/// `Effect` here made Balduvian Horde's *cost* payment trip
+/// `ReplacementCondition::EffectCausedDiscard`, so Library of Leng put the paid
+/// card on top of the library. See [`DiscardCause`].
+///
+/// Caller contract: `eligible` must already be filtered and length-checked.
+/// This function discards `min(count, eligible.len())` cards — it does NOT
+/// enforce CR 118.3's all-or-nothing rule, because the two layers disagree on
+/// what a short pool means (an effect discards what it can; a cost is simply
+/// unpayable). The cost caller performs that check before calling.
+pub(crate) fn discard_at_random(
+    state: &mut GameState,
+    request: RandomDiscardRequest,
+    events: &mut Vec<GameEvent>,
+) -> RandomDiscardOutcome {
+    let RandomDiscardRequest {
+        player,
+        source_id,
+        count,
+        eligible,
+        cause,
+        discard_frame,
+    } = request;
+    let mut remaining = eligible;
+    for pick in 0..count {
+        if remaining.is_empty() {
+            break;
+        }
+        let index = state.rng.random_range(0..remaining.len());
+        let obj_id = remaining.swap_remove(index);
+        // CR 701.9a + CR 614.1a: route with this call site's OWN provenance.
+        // `route_discard` is the shared tail; only the `caused_by_effect` flag
+        // differs, and it is exactly what Library-of-Leng-class replacements
+        // gate on.
+        let outcome = match cause {
+            DiscardCause::Effect => discard_caused_by_effect_with_source_and_frame(
+                state,
+                obj_id,
+                player,
+                Some(source_id),
+                discard_frame,
+                events,
+            ),
+            DiscardCause::Cost => route_discard(
+                state,
+                obj_id,
+                player,
+                Some(source_id),
+                false,
+                discard_frame,
+                events,
+            ),
+        };
+        if let DiscardOutcome::NeedsReplacementChoice(chooser) = outcome {
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(chooser, state);
+            return RandomDiscardOutcome::NeedsReplacementChoice {
+                remaining_eligible: remaining,
+                // The paused pick is settled by the replacement itself, so the
+                // resumed batch owes only the picks after it.
+                remaining_count: count - pick - 1,
+            };
+        }
+    }
+    RandomDiscardOutcome::Completed
+}
+
 pub(crate) fn discard_caused_by_effect_with_source_and_frame(
     state: &mut GameState,
     object_id: ObjectId,
@@ -620,6 +782,7 @@ fn route_discard(
                     zone_event,
                     None,
                     None,
+                    None,
                     false,
                     crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
                     None,
@@ -645,6 +808,271 @@ fn route_discard(
         }
     }
     DiscardOutcome::Complete
+}
+
+#[cfg(test)]
+mod random_discard_authority_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    /// Stage `n` cards in P0's hand on a game seeded with `seed`.
+    fn hand_of(seed: u64, n: usize) -> (GameState, Vec<ObjectId>) {
+        let mut state = GameState::new_two_player(seed);
+        let hand = (0..n)
+            .map(|i| {
+                create_object(
+                    &mut state,
+                    CardId(10 + i as u64),
+                    PlayerId(0),
+                    format!("Hand {i}"),
+                    Zone::Hand,
+                )
+            })
+            .collect();
+        (state, hand)
+    }
+
+    fn discarded(state: &GameState, hand: &[ObjectId]) -> Vec<ObjectId> {
+        hand.iter()
+            .copied()
+            .filter(|id| state.objects[id].zone == Zone::Graveyard)
+            .collect()
+    }
+
+    /// A plain EFFECT-caused request. Tests that care about the provenance axis
+    /// build their own request so the `cause` they exercise is visible at the
+    /// call site rather than hidden in this default.
+    fn request(count: usize, eligible: Vec<ObjectId>) -> RandomDiscardRequest {
+        RandomDiscardRequest {
+            player: PlayerId(0),
+            source_id: ObjectId(500),
+            count,
+            eligible,
+            cause: DiscardCause::Effect,
+            discard_frame: None,
+        }
+    }
+
+    /// CR 701.9b: the authority moves exactly `count` cards from the eligible
+    /// pool to the graveyard.
+    #[test]
+    fn discard_at_random_moves_exactly_count_cards() {
+        let (mut state, hand) = hand_of(42, 5);
+        let mut events = Vec::new();
+        let outcome = discard_at_random(&mut state, request(2, hand.clone()), &mut events);
+        assert_eq!(outcome, RandomDiscardOutcome::Completed);
+        assert_eq!(discarded(&state, &hand).len(), 2);
+        assert_eq!(state.players[0].hand.len(), 3, "the rest stay in hand");
+    }
+
+    /// The RNG must be the seeded, replay-deterministic `state.rng` — NOT a
+    /// thread RNG. Two games with the same seed must discard the same cards,
+    /// or a replayed game (and the CR 732.2a accept-time loop replay) desyncs.
+    /// A `thread_rng` implementation passes the count test above but fails this.
+    #[test]
+    fn discard_at_random_is_seed_deterministic() {
+        let pick = |seed: u64| {
+            let (mut state, hand) = hand_of(seed, 6);
+            let mut events = Vec::new();
+            discard_at_random(&mut state, request(3, hand.clone()), &mut events);
+            discarded(&state, &hand)
+        };
+        assert_eq!(
+            pick(7),
+            pick(7),
+            "same seed must reproduce the same random discards"
+        );
+    }
+
+    /// Reach-guard for the determinism test: the selection genuinely varies
+    /// with the seed, so `pick(7) == pick(7)` above is not passing merely
+    /// because the function always takes the same positions.
+    #[test]
+    fn discard_at_random_varies_across_seeds() {
+        let pick = |seed: u64| {
+            let (mut state, hand) = hand_of(seed, 8);
+            let mut events = Vec::new();
+            discard_at_random(&mut state, request(3, hand.clone()), &mut events);
+            // Compare by hand POSITION, not ObjectId: ids are assigned in the
+            // same order every game, so positions are the comparable signal.
+            discarded(&state, &hand)
+                .iter()
+                .map(|id| hand.iter().position(|h| h == id).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let seeds: Vec<Vec<usize>> = (0u64..12).map(pick).collect();
+        assert!(
+            seeds.windows(2).any(|w| w[0] != w[1]),
+            "picks must depend on the seed, got identical selections: {seeds:?}"
+        );
+    }
+
+    /// CR 701.9a + CR 118.12: `DiscardCause` must actually reach
+    /// `route_discard`'s `caused_by_effect` flag, because that is what
+    /// `ReplacementCondition::EffectCausedDiscard` gates on.
+    ///
+    /// Library of Leng replaces an EFFECT-caused discard (card goes to the top
+    /// of the library instead of the graveyard) and must not touch a COST
+    /// payment. The shared random helper originally hard-coded the effect
+    /// route, so paying Balduvian Horde's cost wrongly offered the replacement.
+    /// This is the random-selection twin of
+    /// `library_of_leng_does_not_apply_to_discard_cost`.
+    ///
+    /// Both arms run in ONE test so the pair cannot drift: the Cost arm alone
+    /// would still pass if `DiscardCause` were ignored and everything routed as
+    /// a cost.
+    #[test]
+    fn discard_at_random_honors_cost_vs_effect_provenance() {
+        let setup = || {
+            let mut state = GameState::new_two_player(42);
+            let leng = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Library of Leng".to_string(),
+                Zone::Battlefield,
+            );
+            let card = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Hand Card".to_string(),
+                Zone::Hand,
+            );
+            state
+                .objects
+                .get_mut(&leng)
+                .unwrap()
+                .replacement_definitions
+                .push(super::tests::library_of_leng_discard_replacement());
+            (state, card)
+        };
+
+        // COST: no effect-caused replacement may fire — the card hits the
+        // graveyard and nothing pauses for a choice.
+        let (mut state, card) = setup();
+        let mut events = Vec::new();
+        let outcome = discard_at_random(
+            &mut state,
+            RandomDiscardRequest {
+                player: PlayerId(0),
+                source_id: ObjectId(500),
+                count: 1,
+                eligible: vec![card],
+                cause: DiscardCause::Cost,
+                discard_frame: None,
+            },
+            &mut events,
+        );
+        assert_eq!(
+            outcome,
+            RandomDiscardOutcome::Completed,
+            "a cost payment must not stop for an effect-caused replacement"
+        );
+        assert!(
+            state.players[0].graveyard.contains(&card),
+            "cost discard goes to the graveyard, not the top of the library"
+        );
+
+        // EFFECT: the same replacement IS offered, proving the flag is read and
+        // the Cost arm above is not passing vacuously.
+        let (mut state, card) = setup();
+        let mut events = Vec::new();
+        let outcome = discard_at_random(
+            &mut state,
+            RandomDiscardRequest {
+                player: PlayerId(0),
+                source_id: ObjectId(500),
+                count: 1,
+                eligible: vec![card],
+                cause: DiscardCause::Effect,
+                discard_frame: None,
+            },
+            &mut events,
+        );
+        assert!(
+            matches!(outcome, RandomDiscardOutcome::NeedsReplacementChoice { .. }),
+            "an effect-caused random discard must offer Library of Leng, got {outcome:?}"
+        );
+    }
+
+    /// The batch cursor returned on a pause must describe the work still owed,
+    /// so the cost caller's persisted continuation can finish it. The paused
+    /// pick is settled by the replacement itself and must NOT be re-counted.
+    #[test]
+    fn discard_at_random_pause_reports_the_remaining_batch() {
+        let mut state = GameState::new_two_player(42);
+        let leng = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Library of Leng".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&leng)
+            .unwrap()
+            .replacement_definitions
+            .push(super::tests::library_of_leng_discard_replacement());
+        let hand: Vec<ObjectId> = (0..4)
+            .map(|i| {
+                create_object(
+                    &mut state,
+                    CardId(10 + i as u64),
+                    PlayerId(0),
+                    format!("Hand {i}"),
+                    Zone::Hand,
+                )
+            })
+            .collect();
+
+        let mut events = Vec::new();
+        let outcome = discard_at_random(
+            &mut state,
+            RandomDiscardRequest {
+                player: PlayerId(0),
+                source_id: ObjectId(500),
+                count: 3,
+                eligible: hand.clone(),
+                cause: DiscardCause::Effect,
+                discard_frame: None,
+            },
+            &mut events,
+        );
+        let RandomDiscardOutcome::NeedsReplacementChoice {
+            remaining_eligible,
+            remaining_count,
+        } = outcome
+        else {
+            panic!("expected a replacement pause, got {outcome:?}");
+        };
+        assert_eq!(
+            remaining_count, 2,
+            "3 requested, the 1st paused and is settled by the replacement, so 2 remain"
+        );
+        assert_eq!(
+            remaining_eligible.len(),
+            3,
+            "the un-picked pool excludes only the paused card"
+        );
+    }
+
+    /// Caller contract (documented on the authority): a pool shorter than
+    /// `count` discards what it can and reports `Completed`. Enforcing
+    /// CR 118.3's all-or-nothing rule is the COST caller's job, because the
+    /// effect layer legitimately discards a short hand.
+    #[test]
+    fn discard_at_random_short_pool_discards_what_it_can() {
+        let (mut state, hand) = hand_of(42, 2);
+        let mut events = Vec::new();
+        let outcome = discard_at_random(&mut state, request(5, hand.clone()), &mut events);
+        assert_eq!(outcome, RandomDiscardOutcome::Completed);
+        assert_eq!(discarded(&state, &hand).len(), 2);
+    }
 }
 
 #[cfg(test)]
@@ -757,7 +1185,7 @@ mod tests {
         );
     }
 
-    fn library_of_leng_discard_replacement() -> ReplacementDefinition {
+    pub(super) fn library_of_leng_discard_replacement() -> ReplacementDefinition {
         ReplacementDefinition::new(ReplacementEvent::Discard)
             .mode(ReplacementMode::Optional { decline: None })
             .condition(ReplacementCondition::EffectCausedDiscard)

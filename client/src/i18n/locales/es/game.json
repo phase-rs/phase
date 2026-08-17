@@ -20,6 +20,11 @@
     "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
     "convokeInfo_other": "Auto-taps up to {{count}} creatures for convoke each iteration.",
+    "countAria": "Number of iterations",
+    "previewTitle_one": "Repeating once produces:",
+    "previewTitle_other": "Repeating {{count}} times produces:",
+    "previewEntry": "{{amount}} {{resource}}",
+    "previewEntryPlayer": "{{amount}} {{resource}} — {{player}}",
     "winKind": {
       "LethalDamage": "This loop deals lethal damage.",
       "PoisonLoss": "This loop gives lethal poison counters.",
@@ -43,6 +48,13 @@
     "label": "Resolviendo {{resolved}} / {{total}}",
     "collapse": "Contraer progreso de resolución",
     "expand": "Expandir progreso de resolución"
+  },
+  "resolveAllConsent": {
+    "eyebrow": "Resolver todo",
+    "title": "¿Aprobar la resolución rápida?",
+    "subtitle": "Todos los jugadores deben aprobar antes de que el motor resuelva un prefijo seguro de la pila.",
+    "grant": "Aprobar",
+    "decline": "Conservar prioridad"
   },
   "debugCreate": {
     "copies": "Copias",
@@ -255,12 +267,16 @@
     "ringBearer": "Anillo",
     "ringBearerTooltip": "Portador del Anillo",
     "hiddenAttachments": "+{{count}} more attached",
+    "hiddenAttachmentsAria_few": "Mostrar {{count}} cartas anexas ocultas",
+    "hiddenAttachmentsAria_many": "Mostrar {{count}} cartas anexas ocultas",
     "hiddenAttachmentsAria_one": "Mostrar {{count}} carta anexa oculta",
     "hiddenAttachmentsAria_other": "Mostrar {{count}} cartas anexas ocultas",
     "fanPick": "Elegir",
     "fanConfirm": "Confirmar ({{count}})",
     "viewAttachments_one": "Ver carta anexada",
     "viewAttachments_other": "Ver {{count}} cartas anexadas",
+    "viewAttachmentsFor_few": "Ver {{count}} cartas anexadas de {{name}}",
+    "viewAttachmentsFor_many": "Ver {{count}} cartas anexadas de {{name}}",
     "viewAttachmentsFor_one": "Ver carta anexada de {{name}}",
     "viewAttachmentsFor_other": "Ver {{count}} cartas anexadas de {{name}}",
     "hiddenExileCards": "+{{count}} more exiled",
@@ -1749,7 +1765,22 @@
     "emergeEyebrow": "Emerger",
     "emergeNormalLabel": "Lanzar normalmente",
     "emergeAltLabel": "Lanzar con Emerger",
-    "emergeSubtitle": "Lanza {{name}} normalmente, o paga su coste de Emerger sacrificando una criatura, reduciendo el coste en el valor de maná de esa criatura.",
+    "emergeSubtitle": "Lanza {{name}} normalmente, o paga su coste de Emerger sacrificando {{sacrifice}}, reduciendo el coste en el valor de maná de ese permanente.",
+    "emergeFallbackSacrifice": "un permanente que cumpla los requisitos",
+    "emergeSacrificeQuality": {
+      "artifact": "un artefacto",
+      "battle": "una batalla",
+      "card": "una carta",
+      "creature": "una criatura",
+      "enchantment": "un encantamiento",
+      "instant": "un instantáneo",
+      "kindred": "un tipo tribal",
+      "land": "una tierra",
+      "permanent": "un permanente",
+      "planeswalker": "un planeswalker",
+      "sorcery": "un conjuro",
+      "subtype": "un permanente del tipo {{subtype}}"
+    },
     "impendingEyebrow": "Inminencia",
     "impendingNormalLabel": "Lanzar normalmente",
     "impendingAltLabel": "Lanzar con Inminencia",
@@ -1808,6 +1839,10 @@
   "giftRecipient": {
     "title": "Elegir destinatario del regalo",
     "subtitle": "Elige qué oponente recibe el regalo prometido."
+  },
+  "entryController": {
+    "title": "Elegir controlador al entrar",
+    "subtitle": "Elige qué oponente controla este permanente al entrar."
   },
   "optionalCost": {
     "gift": {
@@ -2042,6 +2077,7 @@
     "searchPlaceholder": "Buscar por nombre...",
     "noCardsFound": "No se encontraron cartas",
     "buttonSubtitle": "Selecciona una opción",
+    "numberSubtitle": "Introduce un número entero mayor o igual que {{min}}",
     "filterPlaceholder": "Filtrar opciones...",
     "noOptionsMatch": "Ninguna opción coincide"
   },

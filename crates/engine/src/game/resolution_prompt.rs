@@ -209,7 +209,7 @@ fn quantity_offers_up_to_choice(q: &QuantityExpr) -> bool {
 fn effect_offers_choice(e: &Effect) -> bool {
     match e {
         // Engine-set from the activation-payment snapshot, never a player prompt.
-        Effect::NoteManaSpent => false,
+        Effect::NoteManaSpent | Effect::CompletePlayerAction { .. } => false,
         // ---- SCOPE FILTER. DESTRUCTURED WITHOUT `..` on every arm, exactly as
         //      HEAD's three allow arms are, so a new field on any of them forces
         //      a re-audit of whether the class is still in scope.
@@ -280,6 +280,12 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
+        // CR 101.4: `RevealChosenNumbers` publishes an ALREADY-made choice and
+        // raises no `WaitingFor` of its own. It is nonetheless left in the
+        // fail-closed group: claiming choice-free is a soundness claim that
+        // requires a resolver trace and a pinned-guard update, and the only cost
+        // of `MayPrompt` here is a conservative probe verdict.
+        | Effect::RevealChosenNumbers { .. }
         | Effect::Pump { .. }
         | Effect::PairWith { .. }
         | Effect::Destroy { .. }
@@ -317,7 +323,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::Investigate
         | Effect::Tribute { .. }
         | Effect::TimeTravel
-        | Effect::BecomeMonarch
+        | Effect::BecomeMonarch { .. }
         | Effect::NoOp
         | Effect::Proliferate
         | Effect::ProliferateTarget { .. }
@@ -529,6 +535,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         sub_ability,
         else_ability,
         optional,
+        optional_player: _, // selects the optional actor; `optional` already records the choice
         optional_for,
         optional_targeting,
         unless_pay,
@@ -547,6 +554,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         multi_target: _, // announce-time variable-count bounds (Resolution case caught by timing)
         target_constraints: _, // announce-time cross-target legality, no resolution prompt
         distribution: _, // CR 601.2d concrete pre-assigned portions (announce-time)
+        distribute: _, // CR 601.2d/603.3d unassigned division is an announce-time choice
         targets: _,   // concrete announced target refs (already resolved)
         source_id: _, // object id
         source_incarnation: _, // self-transform epoch latch, no resolution-time choice
@@ -555,6 +563,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         trigger_definition_ref: _, // exact trigger occurrence, no choice
         force_block_attacker: _, // exact force-block referent, no choice
         target_incarnations: _, // CR 400.7 referent pins, no choice
+        selected_target_incarnations: _, // CR 400.7 selected-target pins, no choice
         controller: _, // player id
         original_controller: _, // player id
         scoped_player: _, // player id (iteration binding)
@@ -562,11 +571,19 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         context: _,   // SpellContext: cast-time fact snapshot, not a live choice
         description: _, // display string
         selected_mode_labels: _, // display strings, no resolution-time choice
-        min_x_value: _, // u32
-        cant_be_copied: _, // bool
-        copy_count_status: _, // status tag
-        forward_result: _, // bool
-        chosen_x: _,  // concrete cast-time X (chosen at announcement, not resolution)
+        // CR 700.2 + CR 700.2a: mode-root position marker. The modes were CHOSEN
+        // at announcement (`modal` / `mode_abilities`, folded into the verdict
+        // above); this records only where each chosen mode's instructions begin
+        // in the linearized chain. It raises no `WaitingFor` and gates no prompt.
+        modal_instruction_ordinal: _,
+        // CR 608.2c: split-remainder marker. Raises no `WaitingFor` and gates no
+        // prompt; it only decides whether a producer publishes its tracked set.
+        detached_remainder: _,
+        min_x_value: _,                  // u32
+        cant_be_copied: _,               // bool
+        copy_count_status: _,            // status tag
+        forward_result: _,               // bool
+        chosen_x: _, // concrete cast-time X (chosen at announcement, not resolution)
         cost_paid_object: _, // concrete captured-object snapshot
         cost_paid_object_ids: _, // concrete captured-object ids (issue #4948)
         effect_context_object: _, // concrete captured-object snapshot
@@ -576,7 +593,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         target_selection_mode: _, // Chosen/Random tag (announce-time)
         chosen_players: _, // concrete chosen player ids (already selected)
         replacement_applied: _, // replacement provenance set, no prompt
-        sub_link: _,  // SubAbilityLink kind tag
+        sub_link: _, // SubAbilityLink kind tag
         sibling_condition: _, // SiblingCondition replication marker, no resolution-time choice
         parent_target_missing_reason: _, // seam flag
     } = a;
@@ -705,6 +722,40 @@ mod tests {
 
     fn budget() -> ProbeBudget {
         ProbeBudget::for_test(PROBE_BUDGET)
+    }
+
+    /// CR 601.2d + CR 603.3d: an unassigned division UNIT is announcement metadata.
+    /// The division itself is answered while the object is announced (the trigger's
+    /// `DistributeAmong` prompt), never during resolution, so toggling only
+    /// `distribute` may not move the resolution-choice verdict.
+    ///
+    /// The base ability must be an ALLOW-LISTED choice-free effect with a fixed
+    /// quantity. `Effect::NoOp` is NOT one: `effect_offers_choice` fail-closes every
+    /// unclassified variant to `true`, so a `NoOp` base reports `MayPrompt` before
+    /// `distribute` is even read and the row would pass for the wrong reason in the
+    /// negative direction and fail outright in the positive one.
+    #[test]
+    fn unassigned_distribution_unit_is_not_a_resolution_choice() {
+        let base = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: fixed(3),
+                target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                damage_source: None,
+                excess: None,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        assert!(
+            !chain_offers_choice(&base),
+            "reach guard: the undivided base must already be choice-free, otherwise the \
+             divided clone below proves nothing"
+        );
+
+        let mut divided = base.clone();
+        divided.distribute = Some(crate::types::game_state::DistributionUnit::Damage);
+        assert!(!chain_offers_choice(&divided));
     }
 
     /// Snapshot every axis the witness reads.

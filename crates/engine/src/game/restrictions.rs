@@ -1629,6 +1629,7 @@ pub(crate) fn evaluate_condition(
                     trigger_source: None,
                     recipient: None,
                     scoped_player: None,
+                    damage_source: None,
                 },
             ) as usize
                 >= *minimum

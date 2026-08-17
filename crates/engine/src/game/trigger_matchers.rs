@@ -3,8 +3,8 @@ use std::sync::LazyLock;
 
 use crate::types::ability::{
     AbilityTag, CoinFlipResult, ControllerRef, DamageKindFilter, DestinationConstraint,
-    DieResultFilter, EffectKind, OriginConstraint, TargetFilter, TargetRef, TriggerDefinition,
-    TypedFilter,
+    DieResultFilter, EffectKind, ManaAbilityProducedFilter, OriginConstraint, TargetFilter,
+    TargetRef, TriggerDefinition, TypedFilter,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, TriggerSourceContext};
@@ -74,6 +74,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::LandPlayed => match_land_played,
         TriggerMode::PlayCard => match_play_card,
         TriggerMode::ManaAdded => match_mana_added,
+        TriggerMode::ManaAbilityProduced => match_mana_ability_produced,
         TriggerMode::SearchedLibrary
         | TriggerMode::Scry
         | TriggerMode::Surveil
@@ -291,6 +292,10 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::PlayCard, match_play_card);
     r.insert(TriggerMode::SpellCopy, match_spell_cast);
     r.insert(TriggerMode::ManaAdded, match_mana_added);
+    r.insert(
+        TriggerMode::ManaAbilityProduced,
+        match_mana_ability_produced,
+    );
     r.insert(TriggerMode::SearchedLibrary, match_player_action);
     r.insert(TriggerMode::Scry, match_player_action);
     r.insert(TriggerMode::Surveil, match_player_action);
@@ -781,18 +786,6 @@ fn damage_recipient_filter_can_match_player(filter: &TargetFilter) -> bool {
     }
 }
 
-fn is_player_scope_attack_filter(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Player | TargetFilter::Controller | TargetFilter::AllPlayers => true,
-        TargetFilter::Typed(TypedFilter {
-            type_filters,
-            controller: Some(_),
-            properties,
-        }) => type_filters.is_empty() && properties.is_empty(),
-        _ => false,
-    }
-}
-
 /// Basic runtime matching of a TargetFilter against a game object.
 /// Handles the common filter patterns used in triggers.
 pub(super) fn target_filter_matches_object(
@@ -807,6 +800,7 @@ pub(super) fn target_filter_matches_object(
         // CR 118.12a: unless-payer population — never matches an object.
         TargetFilter::AllPlayers => false,
         TargetFilter::Controller => false,
+        TargetFilter::SourceController => false,
         // CR 102.3: Opponent is a player reference, never an object.
         TargetFilter::Opponent => false,
         // CR 109.5: OriginalController is a player reference, not an object.
@@ -978,6 +972,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::LifeChanged { .. }
         | GameEvent::ManaAdded { .. }
         | GameEvent::TappedForMana { .. }
+        | GameEvent::ManaAbilityProduced { .. }
         | GameEvent::ManaPoolEmptied { .. }
         | GameEvent::ManaRecolored { .. }
         | GameEvent::PlayerLost { .. }
@@ -1027,6 +1022,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::TurnedFaceUp { .. }
         | GameEvent::TurnedFaceDown { .. }
         | GameEvent::CardsRevealed { .. }
+        | GameEvent::ChosenNumbersRevealed { .. }
         | GameEvent::CombatDamageDealtToPlayer { .. }
         | GameEvent::PlayerEliminated { .. }
         | GameEvent::CrimeCommitted { .. }
@@ -1272,8 +1268,8 @@ fn matching_combat_damage_to_player_sources(
     source_amounts
         .iter()
         .filter(|(src, amt)| {
-            if let Some((cmp, threshold)) = trigger.damage_amount {
-                if !cmp.evaluate(*amt as i32, threshold as i32) {
+            if let Some(t) = trigger.damage_amount {
+                if !t.comparator.evaluate(*amt as i32, t.threshold as i32) {
                     return false;
                 }
             }
@@ -1299,7 +1295,7 @@ fn damage_kind_matches(filter: DamageKindFilter, is_combat: bool) -> bool {
 fn damage_amount_matches(trigger: &TriggerDefinition, amount: u32) -> bool {
     trigger
         .damage_amount
-        .is_none_or(|(cmp, threshold)| cmp.evaluate(amount as i32, threshold as i32))
+        .is_none_or(|t| t.comparator.evaluate(amount as i32, t.threshold as i32))
 }
 
 pub(super) fn match_damage_done(
@@ -1790,7 +1786,7 @@ pub(super) fn matching_attack_events(
         if let Some(filter) = trigger
             .valid_source
             .as_ref()
-            .filter(|filter| is_player_scope_attack_filter(filter))
+            .filter(|filter| filter.is_player_scope())
         {
             // CR 508.3d + CR 508.5a: "[player] attacks [opponent]" triggers
             // once per attacked defending player, not once per attacking
@@ -1822,7 +1818,11 @@ pub(super) fn matching_attack_events(
                         return None;
                     }
                     let event_defending_player =
-                        attack_target_defending_player(state, target, *defending_player);
+                        crate::game::combat::defending_player_for_target_or(
+                            state,
+                            target,
+                            *defending_player,
+                        );
                     if seen_defending_players.contains(&event_defending_player) {
                         return None;
                     }
@@ -1876,8 +1876,11 @@ pub(super) fn matching_attack_events(
                 {
                     return None;
                 }
-                let event_defending_player =
-                    attack_target_defending_player(state, target, *defending_player);
+                let event_defending_player = crate::game::combat::defending_player_for_target_or(
+                    state,
+                    target,
+                    *defending_player,
+                );
                 if dedup_by_player {
                     if seen_defending_players.contains(&event_defending_player) {
                         return None;
@@ -1914,8 +1917,11 @@ fn attack_target_matches(
         // player is the monarch (CR 725.1), the trigger does not fire (The Spear
         // of Bashenga).
         if matches!(filter, crate::types::triggers::AttackTargetFilter::Monarch) {
-            let defending_player =
-                attack_target_defending_player(state, target, fallback_defending_player);
+            let defending_player = crate::game::combat::defending_player_for_target_or(
+                state,
+                target,
+                fallback_defending_player,
+            );
             if state.monarch != Some(defending_player) {
                 return false;
             }
@@ -1923,8 +1929,11 @@ fn attack_target_matches(
     }
 
     if trigger.valid_target.is_some() {
-        let defending_player =
-            attack_target_defending_player(state, target, fallback_defending_player);
+        let defending_player = crate::game::combat::defending_player_for_target_or(
+            state,
+            target,
+            fallback_defending_player,
+        );
         valid_player_matches(trigger, state, defending_player, source_context)
     } else {
         true
@@ -1958,26 +1967,6 @@ pub(super) fn attack_target_type_matches(
             crate::game::combat::AttackTarget::Player(_)
         )
     )
-}
-
-pub(super) fn attack_target_defending_player(
-    state: &GameState,
-    target: crate::game::combat::AttackTarget,
-    fallback_defending_player: PlayerId,
-) -> PlayerId {
-    match target {
-        crate::game::combat::AttackTarget::Player(player) => player,
-        crate::game::combat::AttackTarget::Planeswalker(object_id) => state
-            .objects
-            .get(&object_id)
-            .map(|object| object.controller)
-            .unwrap_or(fallback_defending_player),
-        crate::game::combat::AttackTarget::Battle(object_id) => state
-            .objects
-            .get(&object_id)
-            .and_then(|object| object.protector())
-            .unwrap_or(fallback_defending_player),
-    }
 }
 
 /// Compound matcher for "Whenever ~ enters or attacks" — fires on either
@@ -2902,6 +2891,41 @@ pub(super) fn match_mana_added(
     _state: &GameState,
 ) -> bool {
     matches!(event, GameEvent::ManaAdded { .. })
+}
+
+/// CR 605.1b: Matches one aggregate production event from an activated mana
+/// ability. This deliberately does not consume `ManaAdded`, whose per-unit
+/// accounting would fire a multi-mana ability's trigger more than once.
+pub(super) fn match_mana_ability_produced(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_context: &TriggerSourceContext,
+    state: &GameState,
+) -> bool {
+    let GameEvent::ManaAbilityProduced {
+        player_id,
+        source_id,
+        produced,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    if !taps_for_mana_card_matches(trigger, state, *source_id, source_context)
+        || !valid_player_matches(trigger, state, *player_id, source_context)
+    {
+        return false;
+    }
+    match trigger.mana_ability_produced.as_ref() {
+        Some(ManaAbilityProducedFilter::SourceChosenColor) => state
+            .objects
+            .get(&source_event_subject_id(source_context))
+            .and_then(|source| source.chosen_color())
+            .is_some_and(|color| {
+                produced.contains(&crate::game::mana_sources::mana_color_to_type(&color))
+            }),
+        None => true,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3915,11 +3939,44 @@ pub(super) fn match_damage_received(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
+    let GameEvent::DamageDealt { amount, .. } = event else {
+        return false;
+    };
+    if !damage_received_filters_match(event, trigger, source_context, state) {
+        return false;
+    }
+    // CR 603.2 + CR 120.1: per-event amount threshold — UNCHANGED for every
+    // caller, including the delayed-trigger seams (`delayed_trigger_event_with_index`
+    // in `game/triggers.rs`) that consume this verdict directly with no batch
+    // fold available. `DamageAmountThreshold::scope` deliberately does NOT relax
+    // this: a `WholeEvent` threshold reaching a single-event consumer is still
+    // honored per event. The whole-event relaxation lives solely in
+    // `game/triggers.rs`, which is the only seam that has the batch to sum.
+    trigger
+        .damage_amount
+        .is_none_or(|t| t.comparator.evaluate(*amount as i32, t.threshold as i32))
+}
+
+/// CR 120.1 + CR 120.2a/b + CR 120.3: the non-threshold half of
+/// `match_damage_received` — event shape, kind filter, recipient scoping
+/// (`TargetRef::Object` vs `Player`), and `valid_source`. Split out so the
+/// whole-event aggregation path in `game/triggers.rs` can apply every filter
+/// EXCEPT the amount threshold, which for `DamageAmountScope::WholeEvent` is a
+/// property of the summed batch and cannot be decided per event (CR 120.4b).
+///
+/// The signature is deliberately `TriggerMatcher` (`game/triggers.rs`) so it
+/// drops into `candidate_passes_batched_filters`'s existing `matcher` slot with
+/// no change to that shared helper.
+pub(super) fn damage_received_filters_match(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_context: &TriggerSourceContext,
+    state: &GameState,
+) -> bool {
     let source_id = source_event_subject_id(source_context);
     if let GameEvent::DamageDealt {
         target,
         is_combat,
-        amount,
         source_id: damagesource_id,
         ..
     } = event
@@ -3929,15 +3986,6 @@ pub(super) fn match_damage_received(
             DamageKindFilter::CombatOnly if !is_combat => return false,
             DamageKindFilter::NoncombatOnly if *is_combat => return false,
             DamageKindFilter::CombatOnly | DamageKindFilter::NoncombatOnly => {}
-        }
-        // CR 603.2 + CR 120.1: Per-event damage-amount threshold. Mirrors
-        // `match_damage_done` so a "is dealt N or more damage" trigger sets
-        // `damage_amount` once and the field's semantics is uniform across
-        // every damage-event matcher.
-        if let Some((cmp, threshold)) = trigger.damage_amount {
-            if !cmp.evaluate(*amount as i32, threshold as i32) {
-                return false;
-            }
         }
         match target {
             TargetRef::Object(target_id) => {
@@ -4119,7 +4167,7 @@ pub(super) fn matching_you_attack_unblocked_pairs(
                 return None;
             }
             if trigger.valid_target.is_some() {
-                let defending_player = attack_target_defending_player(
+                let defending_player = crate::game::combat::defending_player_for_target_or(
                     state,
                     attacker.attack_target,
                     attacker.defending_player,
@@ -5112,8 +5160,9 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::parser::oracle_trigger::parse_trigger_line;
     use crate::types::ability::{
-        Comparator, ControllerRef, FilterProp, QuantityExpr, ResolvedAbility, TargetFilter,
-        TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+        Comparator, ControllerRef, DamageAmountScope, DamageAmountThreshold, FilterProp,
+        QuantityExpr, ResolvedAbility, TargetFilter, TriggerCondition, TriggerDefinition,
+        TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::{ClashResult, GameEvent, ManaTapState, PlayerActionKind};
@@ -6504,6 +6553,7 @@ mod tests {
             card_id: CardId(10),
             controller: PlayerId(0),
             object_id: ObjectId(10),
+            cast_mana_value: None,
         };
         assert!(match_play_card(
             &spell_event,
@@ -6577,6 +6627,7 @@ mod tests {
             card_id: CardId(10),
             controller: PlayerId(1),
             object_id: ObjectId(10),
+            cast_mana_value: None,
         };
         assert!(!match_play_card(
             &opponent_spell,
@@ -6996,6 +7047,7 @@ mod tests {
                 card_id: CardId(2),
                 controller: PlayerId(1),
                 object_id: ObjectId(99),
+                cast_mana_value: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -9905,6 +9957,7 @@ mod tests {
             card_id: CardId(10),
             controller: PlayerId(0),
             object_id: ObjectId(10),
+            cast_mana_value: None,
         };
         assert!(match_spell_cast(
             &event,
@@ -9978,6 +10031,7 @@ mod tests {
             card_id: CardId(100),
             controller: opponent,
             object_id: spell_id,
+            cast_mana_value: None,
         };
         assert!(!match_spell_cast(
             &event,
@@ -10016,6 +10070,7 @@ mod tests {
             card_id: CardId(100),
             controller: opponent,
             object_id: spell_id,
+            cast_mana_value: None,
         };
         assert!(match_spell_cast(
             &event,
@@ -10050,6 +10105,7 @@ mod tests {
             card_id: CardId(100),
             controller: caster,
             object_id: gy_id,
+            cast_mana_value: None,
         };
         assert!(match_spell_cast(
             &event,
@@ -10065,6 +10121,7 @@ mod tests {
             card_id: CardId(100),
             controller: caster,
             object_id: hand_id,
+            cast_mana_value: None,
         };
         assert!(!match_spell_cast(
             &event,
@@ -13673,7 +13730,11 @@ mod tests {
     fn damage_amount_ge_threshold_rejects_below() {
         let state = setup();
         let mut trigger = make_trigger(TriggerMode::DamageDone);
-        trigger.damage_amount = Some((Comparator::GE, 5));
+        trigger.damage_amount = Some(DamageAmountThreshold {
+            comparator: Comparator::GE,
+            threshold: 5,
+            scope: DamageAmountScope::PerSource,
+        });
 
         let event = GameEvent::DamageDealt {
             source_id: ObjectId(1),
@@ -13694,7 +13755,11 @@ mod tests {
     fn damage_amount_ge_threshold_accepts_at_or_above() {
         let state = setup();
         let mut trigger = make_trigger(TriggerMode::DamageDone);
-        trigger.damage_amount = Some((Comparator::GE, 5));
+        trigger.damage_amount = Some(DamageAmountThreshold {
+            comparator: Comparator::GE,
+            threshold: 5,
+            scope: DamageAmountScope::PerSource,
+        });
 
         for amount in [5, 7, 100] {
             let event = GameEvent::DamageDealt {
@@ -13757,7 +13822,11 @@ mod tests {
             Zone::Battlefield,
         );
         let mut trigger = make_trigger(TriggerMode::DamageReceived);
-        trigger.damage_amount = Some((Comparator::GE, 3));
+        trigger.damage_amount = Some(DamageAmountThreshold {
+            comparator: Comparator::GE,
+            threshold: 3,
+            scope: DamageAmountScope::PerSource,
+        });
 
         for (amount, expect) in [(2u32, false), (3, true), (10, true)] {
             let event = GameEvent::DamageDealt {
@@ -13776,6 +13845,59 @@ mod tests {
                 ),
                 expect,
                 "amount={amount} GE 3"
+            );
+        }
+    }
+
+    /// V15 — CR 603.2 + CR 120.1: `match_damage_received` stays STRICTLY
+    /// per-event even for a `WholeEvent` threshold. The whole-event relaxation
+    /// lives only in `game/triggers.rs`, which is the sole seam holding the
+    /// simultaneous batch to sum. Every other registry consumer — notably
+    /// `delayed_trigger_event_with_index`, which calls the matcher per event
+    /// with no fold available — must keep seeing the threshold honored rather
+    /// than silently dropped.
+    ///
+    /// Revert-failing: make the matcher's threshold arm return `true` for
+    /// `DamageAmountScope::WholeEvent` (deferring the check to the fold) and
+    /// the 2-damage case returns `true`.
+    #[test]
+    fn match_damage_received_whole_event_threshold_stays_per_event() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Innocent Bystander".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::DamageReceived);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+        trigger.damage_amount = Some(DamageAmountThreshold {
+            comparator: Comparator::GE,
+            threshold: 3,
+            scope: DamageAmountScope::WholeEvent,
+        });
+
+        // (2, false) is the assertion under test; (3, true) is its paired
+        // positive — without it, `false` could come from any unrelated filter
+        // failing and the negative would be vacuous.
+        for (amount, expect) in [(2u32, false), (3, true)] {
+            let event = GameEvent::DamageDealt {
+                source_id: ObjectId(99),
+                target: TargetRef::Object(source_id),
+                amount,
+                is_combat: true,
+                excess: 0,
+            };
+            assert_eq!(
+                match_damage_received(
+                    &event,
+                    &trigger,
+                    &test_trigger_source_context(&state, source_id),
+                    &state
+                ),
+                expect,
+                "WholeEvent threshold must still be evaluated per event: amount={amount} GE 3"
             );
         }
     }
@@ -14212,7 +14334,11 @@ mod tests {
     fn damage_amount_eq_threshold_only_matches_exact() {
         let state = setup();
         let mut trigger = make_trigger(TriggerMode::DamageDone);
-        trigger.damage_amount = Some((Comparator::EQ, 3));
+        trigger.damage_amount = Some(DamageAmountThreshold {
+            comparator: Comparator::EQ,
+            threshold: 3,
+            scope: DamageAmountScope::PerSource,
+        });
 
         for (amount, expect) in [(2, false), (3, true), (4, false)] {
             let event = GameEvent::DamageDealt {

@@ -32,7 +32,7 @@ use crate::types::GameState;
 
 use super::filter::{matches_target_filter, matches_target_filter_in_owner_zone, FilterContext};
 
-fn is_pitch_bound_cmc_eq_x_prop(prop: &FilterProp) -> bool {
+fn is_x_mana_value_constraint(prop: &FilterProp) -> bool {
     matches!(
         prop,
         FilterProp::Cmc {
@@ -44,22 +44,24 @@ fn is_pitch_bound_cmc_eq_x_prop(prop: &FilterProp) -> bool {
     )
 }
 
-/// True when a cost filter uses the Shoal pattern: "with mana value X" where X
-/// is defined by the card chosen to pay the cost, not by a prior announcement.
-pub(crate) fn target_filter_has_pitch_bound_x(filter: &TargetFilter) -> bool {
+/// True when a cost filter contains a variable mana-value equality.
+pub(crate) fn target_filter_has_x_mana_value_constraint(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed(tf) => tf.properties.iter().any(is_pitch_bound_cmc_eq_x_prop),
+        TargetFilter::Typed(tf) => tf.properties.iter().any(is_x_mana_value_constraint),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(target_filter_has_pitch_bound_x)
+            filters
+                .iter()
+                .any(target_filter_has_x_mana_value_constraint)
         }
         TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
-            target_filter_has_pitch_bound_x(filter)
+            target_filter_has_x_mana_value_constraint(filter)
         }
         TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::None
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
@@ -108,26 +110,26 @@ pub(crate) fn target_filter_has_pitch_bound_x(filter: &TargetFilter) -> bool {
     }
 }
 
-pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter {
+pub(crate) fn relax_x_mana_value_constraint(filter: &TargetFilter) -> TargetFilter {
     match filter {
         TargetFilter::Typed(tf) => TargetFilter::Typed(TypedFilter {
             properties: tf
                 .properties
                 .iter()
-                .filter(|p| !is_pitch_bound_cmc_eq_x_prop(p))
+                .filter(|p| !is_x_mana_value_constraint(p))
                 .cloned()
                 .collect(),
             ..tf.clone()
         }),
         TargetFilter::ExiledCardByIndex { .. } => filter.clone(),
         TargetFilter::Or { filters } => TargetFilter::Or {
-            filters: filters.iter().map(relax_pitch_bound_x_filter).collect(),
+            filters: filters.iter().map(relax_x_mana_value_constraint).collect(),
         },
         TargetFilter::And { filters } => TargetFilter::And {
-            filters: filters.iter().map(relax_pitch_bound_x_filter).collect(),
+            filters: filters.iter().map(relax_x_mana_value_constraint).collect(),
         },
         TargetFilter::Not { filter } => TargetFilter::Not {
-            filter: Box::new(relax_pitch_bound_x_filter(filter)),
+            filter: Box::new(relax_x_mana_value_constraint(filter)),
         },
         TargetFilter::TrackedSetFiltered {
             id,
@@ -135,13 +137,14 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
             caused_by,
         } => TargetFilter::TrackedSetFiltered {
             id: *id,
-            filter: Box::new(relax_pitch_bound_x_filter(filter)),
+            filter: Box::new(relax_x_mana_value_constraint(filter)),
             caused_by: *caused_by,
         },
         TargetFilter::None
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
@@ -190,12 +193,14 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
     }
 }
 
-/// CR 107.3a + CR 118.9: Until the player chooses the pitched card, relax the
-/// CMC=X constraint for 601.2b eligibility on Shoal-style exile costs.
-pub(crate) fn exile_cost_effective_filter(filter: Option<&TargetFilter>) -> Option<TargetFilter> {
+/// CR 107.3a + CR 601.2b: Before X is announced, relax its equality constraint
+/// when checking which cards can pay a cost.
+pub(crate) fn cost_filter_before_x_announcement(
+    filter: Option<&TargetFilter>,
+) -> Option<TargetFilter> {
     filter.map(|f| {
-        if target_filter_has_pitch_bound_x(f) {
-            relax_pitch_bound_x_filter(f)
+        if target_filter_has_x_mana_value_constraint(f) {
+            relax_x_mana_value_constraint(f)
         } else {
             f.clone()
         }
@@ -381,12 +386,13 @@ impl AbilityCost {
                 }
                 let resolved =
                     super::quantity::resolve_quantity(state, count, player, source).max(0) as usize;
+                let effective_filter = cost_filter_before_x_announcement(filter.as_ref());
                 let ctx = FilterContext::from_source(state, source);
                 p.hand
                     .iter()
                     .filter(|&&id| {
                         id != source
-                            && filter
+                            && effective_filter
                                 .as_ref()
                                 .is_none_or(|f| matches_target_filter(state, id, f, &ctx))
                     })
@@ -427,7 +433,7 @@ impl AbilityCost {
                     };
                 }
                 let zone = exile_cost_effective_zone(*zone, filter.as_ref());
-                let effective_filter = exile_cost_effective_filter(filter.as_ref());
+                let effective_filter = cost_filter_before_x_announcement(filter.as_ref());
                 eligible_exile_cost_objects(
                     state,
                     player,
@@ -841,7 +847,7 @@ pub(super) fn eligible_exile_cost_objects(
                 .collect();
         }
     };
-    let effective_filter = exile_cost_effective_filter(filter);
+    let effective_filter = cost_filter_before_x_announcement(filter);
     let filter_ref = effective_filter.as_ref();
     let ctx = FilterContext::from_source(state, source);
     ids.filter(|&id| {

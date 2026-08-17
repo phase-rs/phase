@@ -80,6 +80,18 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * of silently corrupting state.
  *
  * Bumps to date:
+ *  23 — WaitingFor::AlternativeCastChoice.alternative_additional_cost_description
+ *       changed from a string to a typed Emerge-sacrifice descriptor. Older
+ *       clients would receive an object where their modal expects display text.
+ *  22 — LegalActionsWire.viewerInteraction carries attachmentViews: the engine's
+ *       membership list for each host's attachment fan. It parses on a v21 peer
+ *       as an empty map, so the loss is silent — a guest paired with a v21 host
+ *       would simply find every attachment fan gone.
+ *  21 — LegalActionsWire.viewerInteraction carries the loop-shortcut preview,
+ *       and the state snapshot carries WaitingFor::LoopShortcut.declaration.
+ *       Both are optional and parse on a v20 peer; the loss is silent, so the
+ *       handshake is the only place the pairing can be refused.
+ *  20 — Serialized player-action completion provenance and modal continuations.
  *  19 — Added an action_noop acknowledgement for accepted transport no-ops.
  *  18 — DebugCardEntries added a serialized, private resolution frame for
  *       multi-card sandbox battlefield entries that pause for replacement or
@@ -111,7 +123,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 19 as const;
+export const WIRE_PROTOCOL_VERSION = 23 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }

@@ -20,6 +20,11 @@
     "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
     "convokeInfo_other": "Auto-taps up to {{count}} creatures for convoke each iteration.",
+    "countAria": "Number of iterations",
+    "previewTitle_one": "Repeating once produces:",
+    "previewTitle_other": "Repeating {{count}} times produces:",
+    "previewEntry": "{{amount}} {{resource}}",
+    "previewEntryPlayer": "{{amount}} {{resource}} — {{player}}",
     "winKind": {
       "LethalDamage": "This loop deals lethal damage.",
       "PoisonLoss": "This loop gives lethal poison counters.",
@@ -43,6 +48,13 @@
     "label": "Résolution {{resolved}} / {{total}}",
     "collapse": "Réduire la progression de résolution",
     "expand": "Développer la progression de résolution"
+  },
+  "resolveAllConsent": {
+    "eyebrow": "Tout résoudre",
+    "title": "Approuver la résolution rapide ?",
+    "subtitle": "Tous les joueurs doivent approuver avant que le moteur ne résolve un préfixe sûr de la pile.",
+    "grant": "Approuver",
+    "decline": "Garder la priorité"
   },
   "debugCreate": {
     "copies": "Copies",
@@ -255,12 +267,16 @@
     "ringBearer": "Anneau",
     "ringBearerTooltip": "Porteur de l'Anneau",
     "hiddenAttachments": "+{{count}} more attached",
+    "hiddenAttachmentsAria_few": "Afficher {{count}} cartes attachées masquées",
+    "hiddenAttachmentsAria_many": "Afficher {{count}} cartes attachées masquées",
     "hiddenAttachmentsAria_one": "Afficher {{count}} carte attachée masquée",
     "hiddenAttachmentsAria_other": "Afficher {{count}} cartes attachées masquées",
     "fanPick": "Choisir",
     "fanConfirm": "Confirmer ({{count}})",
     "viewAttachments_one": "Voir la carte attachée",
     "viewAttachments_other": "Voir {{count}} cartes attachées",
+    "viewAttachmentsFor_few": "Voir les {{count}} cartes attachées de {{name}}",
+    "viewAttachmentsFor_many": "Voir les {{count}} cartes attachées de {{name}}",
     "viewAttachmentsFor_one": "Voir la carte attachée de {{name}}",
     "viewAttachmentsFor_other": "Voir les {{count}} cartes attachées de {{name}}",
     "hiddenExileCards": "+{{count}} more exiled",
@@ -1749,7 +1765,22 @@
     "emergeEyebrow": "Émergence",
     "emergeNormalLabel": "Lancer normalement",
     "emergeAltLabel": "Lancer avec Émergence",
-    "emergeSubtitle": "Lancez {{name}} normalement, ou payez son coût d'Émergence en sacrifiant une créature, ce qui réduit le coût de la valeur de mana de cette créature.",
+    "emergeSubtitle": "Lancez {{name}} normalement, ou payez son coût d'Émergence en sacrifiant {{sacrifice}}, ce qui réduit le coût de la valeur de mana de ce permanent.",
+    "emergeFallbackSacrifice": "un permanent correspondant",
+    "emergeSacrificeQuality": {
+      "artifact": "un artefact",
+      "battle": "une bataille",
+      "card": "une carte",
+      "creature": "une créature",
+      "enchantment": "un enchantement",
+      "instant": "un éphémère",
+      "kindred": "un tribal",
+      "land": "un terrain",
+      "permanent": "un permanent",
+      "planeswalker": "un planeswalker",
+      "sorcery": "un rituel",
+      "subtype": "un permanent du type {{subtype}}"
+    },
     "impendingEyebrow": "Imminence",
     "impendingNormalLabel": "Lancer normalement",
     "impendingAltLabel": "Lancer avec Imminence",
@@ -1808,6 +1839,10 @@
   "giftRecipient": {
     "title": "Choisir le destinataire du cadeau",
     "subtitle": "Choisissez quel adversaire reçoit le cadeau promis."
+  },
+  "entryController": {
+    "title": "Choisir le contrôleur à l'arrivée",
+    "subtitle": "Choisissez quel adversaire contrôle ce permanent à son arrivée."
   },
   "optionalCost": {
     "gift": {
@@ -2042,6 +2077,7 @@
     "searchPlaceholder": "Rechercher par nom...",
     "noCardsFound": "Aucune carte trouvée",
     "buttonSubtitle": "Sélectionnez une option",
+    "numberSubtitle": "Entrez un nombre entier supérieur ou égal à {{min}}",
     "filterPlaceholder": "Filtrer les options...",
     "noOptionsMatch": "Aucune option ne correspond"
   },

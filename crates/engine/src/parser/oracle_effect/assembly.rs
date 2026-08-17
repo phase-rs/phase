@@ -25,9 +25,10 @@ use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::OracleError;
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CastFromZoneDriver,
-    CastingPermission, ControllerRef, Effect, PlayerFilter, QuantityExpr, QuantityRef,
-    StaticCondition, SubAbilityLink, TapStateChange, TargetFilter,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
+    CastFromZoneDriver, CastingPermission, ChoiceType, Comparator, ControllerRef, DamageChannel,
+    Effect, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition, SubAbilityLink,
+    TapStateChange, TargetFilter,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -1318,33 +1319,10 @@ impl AssemblyEnv {
     }
 }
 
-/// Coverage-honesty marker (issue #7046): a `DamageEachPlayer` reading "that
-/// much/that many" (`Ref(EventContextAmount)`) chained IMMEDIATELY after a mass
-/// zone move cannot be faithfully executed today. CR 608.2c requires the
-/// completed move's TOTAL for every recipient, but the runtime hand-off
-/// (`install_previous_effect_counts_by_player`) publishes a per-OWNER table that
-/// `DamageEachPlayer`'s per-recipient resolution consults first — each opponent
-/// reads their OWN swept-card count (0 in the Valakut Exploration native
-/// pattern). Emitting the parsed shape would be silently wrong at runtime,
-/// which is strictly worse than an honest residual gap (the Winnowing-class
-/// precedent in `imperative.rs`). Scoped to the immediately-chained pairing
-/// because only the next resolution step can see the table (any intermediate
-/// effect clears it), and only `DamageEachPlayer` resolves per-recipient —
-/// scalar consumers (Draw / DealDamage-to-object / Mill / LoseLife /
-/// SearchLibrary / Token) read max-over-owners, which equals the true total for
-/// every corpus pool (single-owner by CR 400.3). DELETE this gate when #7046
-/// provides the completed-sweep scalar-total channel; the T1 zero-delta
-/// assertions and the P2 marker assertion are the tripwires that force that
-/// deletion to be a conscious, tested change.
-pub(crate) const MASS_MOVE_TOTAL_DAMAGE_GAP: &str = "mass_move_total_damage";
-
 /// CR 608.2c: does `effect`'s amount expression read `EventContextAmount`
-/// ("that much"/"that many")? Leaf helper for the `MASS_MOVE_TOTAL_DAMAGE_GAP`
-/// gate above. Mirrors the game-side
-/// `quantity_expr_references_event_context_amount` (`game/effects/mod.rs`),
-/// which this parser module cannot call directly — the parser layer never
-/// reaches into game internals; both consult the single traversal authority
-/// `QuantityExpr::any_ref`.
+/// ("that much"/"that many")? Used when chain grammar proves that the
+/// antecedent is the immediately preceding resolved instruction, so assembly
+/// can bind it to `PreviousEffectAmount` rather than a triggering event.
 fn damage_amount_reads_event_context(effect: &Effect) -> bool {
     let mut reads = false;
     effect.for_each_quantity_expr(&mut |quantity| {
@@ -1376,6 +1354,134 @@ fn is_oneshot_target_source_prevent_chain(defs: &[AbilityDefinition]) -> bool {
                 )
             )
         })
+}
+
+/// The recipient of a single-recipient scalar instruction — the position a
+/// "… to them" / "… they lose" player anaphor occupies. Paired with
+/// [`scalar_amount_mut`], which reads the "that much" position of the same
+/// instruction; split in two because the binding below needs the recipient
+/// immutably to decide, then the amount mutably to rewrite.
+fn scalar_recipient(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::DealDamage { target, .. } => Some(target),
+        Effect::GainLife { player, .. } => Some(player),
+        Effect::LoseLife { target, .. } => target.as_ref(),
+        _ => None,
+    }
+}
+
+fn scalar_amount_mut(effect: &mut Effect) -> Option<&mut QuantityExpr> {
+    match effect {
+        Effect::DealDamage { amount, .. }
+        | Effect::GainLife { amount, .. }
+        | Effect::LoseLife { amount, .. } => Some(amount),
+        _ => None,
+    }
+}
+
+/// CR 109.4: the chain index of the `Choose(Player)` clause a recipient anaphor
+/// names, if it names one. A resolution-time chosen player is carried as a
+/// player-only `Typed` filter whose controller is `ChosenPlayer { index }` —
+/// the shape `subject::chosen_player_anaphor_filter` is the sole producer of.
+fn chosen_player_anaphor_index(filter: &TargetFilter) -> Option<u8> {
+    match filter {
+        TargetFilter::Typed(tf) => match tf.controller {
+            Some(ControllerRef::ChosenPlayer { index }) => Some(index),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// CR 101.4 + CR 107.1a: The extremum a "choose a player with the highest/lowest
+/// number" restriction selected by, if that is what this player filter is.
+///
+/// Recognizes exactly the shape `lower::chosen_number_player_filter` emits, and
+/// only under `EQ` — under `NE` ("an opponent who DIDN'T choose the highest
+/// number") the extremum is provably *not* the chosen player's number, so there
+/// is nothing to bind and this returns `None`.
+fn chosen_number_selection_extremum(filter: &PlayerFilter) -> Option<AggregateFunction> {
+    let PlayerFilter::PlayerAttribute {
+        attr,
+        comparator: Comparator::EQ,
+        value,
+        ..
+    } = filter
+    else {
+        return None;
+    };
+    if !matches!(
+        **attr,
+        QuantityRef::PlayerChosenNumber {
+            player: PlayerScope::ScopedPlayer
+        }
+    ) {
+        return None;
+    }
+    match &**value {
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::PlayerChosenNumber {
+                    player:
+                        PlayerScope::AllPlayers {
+                            aggregate,
+                            exclude: None,
+                        },
+                },
+        } => Some(*aggregate),
+        _ => None,
+    }
+}
+
+/// CR 608.2c + CR 101.4: Bind the "that much" of a
+/// *"Choose an opponent with the highest number. ~ deals that much damage to
+/// them."* continuation (Itazura, Lingering Wick) to the number that selection
+/// was made by.
+///
+/// `EventContextAmount` means "the amount the surrounding event supplies", and a
+/// resolving spell supplies none — left alone the instruction silently deals 0.
+/// The antecedent is provable from the assembled chain rather than guessable at
+/// lowering time, which is why this runs here: the recipient anaphor names a
+/// specific `Choose(Player)` clause by index, and that clause's own restriction
+/// says which extremum it selected by. Both halves must agree, so an
+/// intervening unrestricted player choice (which would shift the index) simply
+/// fails to match and nothing is rebound.
+///
+/// The bound reference is the chain-wide extremum, not a read of the chosen
+/// player's own number: the `EQ` restriction guarantees the chosen player HOLDS
+/// that extremum, so the two are equal by construction, and expressing it this
+/// way reuses the `PlayerChosenNumber` scalar the restriction itself is built
+/// from instead of minting a resolution-scoped `PlayerScope::ChosenPlayer` whose
+/// only consumer would be this binding.
+fn bind_chosen_number_anaphor(def: &mut AbilityDefinition, prior: &[AbilityDefinition]) {
+    let Some(index) = scalar_recipient(&def.effect).and_then(chosen_player_anaphor_index) else {
+        return;
+    };
+    let mut player_choices = prior.iter().filter_map(|d| match &*d.effect {
+        Effect::Choose {
+            choice_type: choice_type @ (ChoiceType::Player { .. } | ChoiceType::Opponent { .. }),
+            ..
+        } => Some(choice_type),
+        _ => None,
+    });
+    let Some(ChoiceType::Opponent {
+        restriction: Some(restriction),
+        ..
+    }) = player_choices.nth(index as usize)
+    else {
+        return;
+    };
+    let Some(aggregate) = chosen_number_selection_extremum(restriction) else {
+        return;
+    };
+    if let Some(amount) = scalar_amount_mut(def.effect.as_mut()) {
+        amount.rebind_event_context_amount(&QuantityRef::PlayerChosenNumber {
+            player: PlayerScope::AllPlayers {
+                aggregate,
+                exclude: None,
+            },
+        });
+    }
 }
 
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
@@ -2118,24 +2224,26 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // boundary→link authority (`oracle_ir::ast::sub_link_after_boundary`),
         // which the referent walk in `oracle_effect::mod` also consults.
         def.sub_link = sub_link_after_boundary(prev_boundary);
-        // Coverage-honesty gate (issue #7046, see `MASS_MOVE_TOTAL_DAMAGE_GAP`
-        // doc comment above `assemble_effect_chain`): a `DamageEachPlayer`
-        // reading "that much/that many" chained IMMEDIATELY after a mass zone
-        // move cannot be faithfully executed today. `prev.sub_ability.is_none()`
-        // matches the runtime scope exactly — only the immediately-next
-        // resolution step can see the per-owner count table
-        // (`install_previous_effect_counts_by_player` clears it for any other
-        // consumer), and only `DamageEachPlayer` resolves per-recipient.
+        // CR 608.2c: A mass zone move immediately followed by "deals that much
+        // damage to each ..." reads ONE scalar result from the completed move,
+        // not a different per-recipient event-context amount. Bind only this
+        // explicit continuation relationship; event-fed and per-player-scoped
+        // `EventContextAmount` consumers retain their ordinary meaning.
+        // CR 608.2c + CR 101.4: bind a "that much … to them" pair back to the
+        // number the earlier player selection was made by (Itazura).
+        bind_chosen_number_anaphor(&mut def, &defs);
         if let Some(prev) = defs.last() {
-            if prev.sub_ability.is_none()
+            if def.sub_link == SubAbilityLink::ContinuationStep
+                && prev.sub_ability.is_none()
                 && matches!(&*prev.effect, Effect::ChangeZoneAll { .. })
                 && matches!(&*def.effect, Effect::DamageEachPlayer { .. })
                 && damage_amount_reads_event_context(&def.effect)
             {
-                *def.effect = Effect::unimplemented(
-                    MASS_MOVE_TOTAL_DAMAGE_GAP,
-                    clause_ir.source.fragment().unwrap_or_default(),
-                );
+                if let Effect::DamageEachPlayer { amount, .. } = def.effect.as_mut() {
+                    amount.rebind_event_context_amount(&QuantityRef::PreviousEffectAmount {
+                        channel: DamageChannel::Total,
+                    });
+                }
             }
         }
         // CR 615.5: A "(When|Whenever|If) damage [from a <type> source] is
@@ -3010,6 +3118,16 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             chain.kind = continuation_kind;
             // R2 — a SHAPE REPAIR, not materialization.
             normalize_linked_exile_cast_pair(&mut prev, &mut chain);
+            if prev.else_ability.is_none()
+                && are_complementary_revealed_card_type_conditions(
+                    prev.condition.as_ref(),
+                    chain.condition.as_ref(),
+                )
+            {
+                prev.else_ability = Some(Box::new(chain));
+                chain = prev;
+                continue;
+            }
             // CR 608.2c: an independent sentence after an if/otherwise choice
             // resolves after either branch (for example, Wedding Announcement's
             // three-counter transform also follows its Human-token branch).
@@ -3162,6 +3280,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
 
     // CR 607.2d: fill every committed-choice guess with the head Choose's domain.
     super::propagate_committed_choice_type_to_guesses(&mut result);
+    // CR 607.2d + CR 101.4: persist a secretly-chosen number whenever a later
+    // clause in the same chain reads it back ("the highest number", "each player
+    // who didn't choose the lowest number").
+    super::promote_chosen_number_persistence(&mut result);
     // CR 608.2d: gate the whole "if they guessed wrong/right" branch, including
     // any "and ..." continuation steps.
     super::propagate_guess_branch_condition_to_continuations(&mut result);
@@ -3219,6 +3341,51 @@ fn merge_search_tail_into_additional_cost_else(
         }
     }
     false
+}
+
+// CR 608.2c: A positive card-type rider and its matching negated rider are
+// complementary branches of the same instruction, not independent siblings.
+fn are_complementary_revealed_card_type_conditions(
+    current: Option<&AbilityCondition>,
+    next: Option<&AbilityCondition>,
+) -> bool {
+    match (current, next) {
+        (
+            Some(positive @ AbilityCondition::RevealedHasCardType { .. }),
+            Some(AbilityCondition::Not { condition }),
+        )
+        | (
+            Some(AbilityCondition::Not { condition }),
+            Some(positive @ AbilityCondition::RevealedHasCardType { .. }),
+        ) => same_revealed_card_type_condition(positive, condition.as_ref()),
+        _ => false,
+    }
+}
+
+fn same_revealed_card_type_condition(
+    positive: &AbilityCondition,
+    negated: &AbilityCondition,
+) -> bool {
+    let AbilityCondition::RevealedHasCardType {
+        card_types: positive_types,
+        additional_filter: positive_filter,
+        subtype_filter: positive_subtype,
+    } = positive
+    else {
+        return false;
+    };
+    let AbilityCondition::RevealedHasCardType {
+        card_types: negated_types,
+        additional_filter: negated_filter,
+        subtype_filter: negated_subtype,
+    } = negated
+    else {
+        return false;
+    };
+
+    positive_types == negated_types
+        && positive_filter == negated_filter
+        && positive_subtype == negated_subtype
 }
 
 /// R2 — CR 608.2c + CR 401.4: linked-exile-cast bottom cleanup.

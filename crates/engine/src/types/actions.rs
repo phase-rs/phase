@@ -309,6 +309,11 @@ pub enum GameAction {
     ChooseReplacement {
         index: usize,
     },
+    /// CR 614.12a: choose which eligible opponent controls an entering
+    /// permanent. This is distinct from CR 616 replacement ordering.
+    ChooseEntryController {
+        opponent: PlayerId,
+    },
     /// CR 603.3b: Player submits the chosen order for their pending triggers.
     /// `order` is a permutation of indices into the `OrderTriggers.triggers`
     /// vec the player was prompted with; index 0 = first placed (bottom of
@@ -936,15 +941,41 @@ pub enum GameAction {
     /// display them verbatim and echo them back; dispatch revalidates `group`
     /// against live state and never trusts either echoed value.
     ///
-    /// Appended at the END of this enum on purpose: `GameActionKind` derives
-    /// `PartialOrd, Ord`, so a mid-enum insertion would renumber later
-    /// discriminants and shift `cmp_stable` ordering (AI candidate ordering and
-    /// replay determinism).
+    /// Kept after the existing action variants so their derived
+    /// `GameActionKind` ordering remains stable for deterministic replay.
     EndContinuousEffect {
         group: crate::types::game_state::EndEffectGroupId,
         source_name: String,
         cost: crate::types::mana::ManaCost,
     },
+    /// Begins the table-consent protocol for the forthcoming Resolve All batch.
+    /// Phase 1 only records unanimous consent; it deliberately does not drive
+    /// priority or resolve the batch.
+    BeginResolveAll {
+        max_resolutions: u32,
+    },
+    /// Answers the currently queued Resolve All consent prompt. `epoch` makes
+    /// delayed transport submissions fail closed rather than answering a newer
+    /// proposal.
+    RespondResolveAllConsent {
+        epoch: u64,
+        decision: ResolveAllConsentDecision,
+    },
+    /// Withdraws a representative's prior Resolve All consent while the exact
+    /// epoch remains active. This is intentionally available from Ready as
+    /// well as while another representative is queued.
+    RevokeResolveAllConsent {
+        epoch: u64,
+        representative: PlayerId,
+    },
+}
+
+/// One representative's explicit Resolve All decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ResolveAllConsentDecision {
+    Grant,
+    Decline,
 }
 
 /// CR 117.3d: The mutation a `GameAction::SetPriorityYield` performs on the
@@ -1687,6 +1718,7 @@ impl GameAction {
             | GameAction::SelectTargets { .. }
             | GameAction::ChooseTarget { .. }
             | GameAction::ChooseReplacement { .. }
+            | GameAction::ChooseEntryController { .. }
             | GameAction::OrderTriggers { .. }
             | GameAction::CancelCast
             | GameAction::BackToManaPayment
@@ -1769,6 +1801,9 @@ impl GameAction {
             | GameAction::RespondToShortcut { .. }
             | GameAction::DeclineShortcut
             | GameAction::PrecastCopyShortcut { .. }
+            | GameAction::BeginResolveAll { .. }
+            | GameAction::RespondResolveAllConsent { .. }
+            | GameAction::RevokeResolveAllConsent { .. }
             // CR 116.2c: the payload names a continuous-effect GROUP, not a
             // permanent — a global action with no source object (frontend
             // Pattern A). The Licid that installed the effect is not addressed

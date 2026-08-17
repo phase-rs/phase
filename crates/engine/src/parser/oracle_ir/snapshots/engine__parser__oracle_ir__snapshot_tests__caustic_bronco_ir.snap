@@ -91,7 +91,8 @@ expression: "&ir"
                         },
                         "rest_destination": null,
                         "reveal": true,
-                        "enter_tapped": false
+                        "enter_tapped": false,
+                        "enters_attacking": false
                       },
                       "duration": null,
                       "sub_ability": null,

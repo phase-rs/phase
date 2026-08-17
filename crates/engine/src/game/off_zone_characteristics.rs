@@ -1,6 +1,4 @@
-use crate::game::filter::{
-    matches_target_filter, matches_target_filter_in_owner_zone, FilterContext,
-};
+use crate::game::filter::FilterContext;
 use crate::game::layers::{
     active_continuous_effects_from_base_static_source, active_effect_condition_controller,
     collect_shared_active_continuous_effects, evaluate_condition_with_recipient,
@@ -198,6 +196,11 @@ pub(crate) fn collect_applicable_off_zone_keyword_effects(
         .collect()
 }
 
+/// CR 109.5 + CR 400.3: "your" cards in hand/library/graveyard are scoped by owner,
+/// not by a stale object controller/LKI. Delegates to
+/// `filter::matches_target_filter_for_zone`, the single authority for that
+/// partition, so this path and target enumeration in `game::targeting` cannot drift
+/// on which zones are owner-scoped.
 fn matches_off_zone_keyword_recipient(
     state: &GameState,
     object_id: ObjectId,
@@ -205,17 +208,7 @@ fn matches_off_zone_keyword_recipient(
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
 ) -> bool {
-    if is_owner_scoped_zone(zone) {
-        matches_target_filter_in_owner_zone(state, object_id, filter, ctx)
-    } else {
-        matches_target_filter(state, object_id, filter, ctx)
-    }
-}
-
-fn is_owner_scoped_zone(zone: Zone) -> bool {
-    // CR 109.5 + CR 400.3: "your" cards in hand/library/graveyard are scoped
-    // by owner, not stale object controller/LKI.
-    matches!(zone, Zone::Hand | Zone::Library | Zone::Graveyard)
+    crate::game::filter::matches_target_filter_for_zone(state, object_id, zone, filter, ctx)
 }
 
 fn supports_off_zone_keyword_query(modification: &ContinuousModification) -> bool {

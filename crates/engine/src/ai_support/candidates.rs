@@ -11,14 +11,16 @@ use crate::game::mana_sources;
 use crate::types::ability::{ChoiceType, CounterCostSelection, TargetRef};
 use crate::types::actions::{
     CastChoice, GameAction, LearnOption, MulliganChoice, OutsideGameSelection,
+    ResolveAllConsentDecision,
 };
 use crate::types::card::LayoutKind;
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
 use crate::types::game_state::{
-    CastOfferKind, CastPaymentMode, CompanionDeclaration, ConvokeMode, CostResume,
+    CastOfferKind, CastPaymentMode, CastingVariant, CompanionDeclaration, ConvokeMode, CostResume,
     CounterCostChoice, CounterMoveChoice, CounterRemoveChoice, GameState, MulliganDecisionPhase,
-    PayCostKind, PayableResource, PendingMulliganAction, TargetSelectionSlot, WaitingFor,
+    PayCostKind, PayableResource, PendingMulliganAction, RetargetScope, TargetSelectionSlot,
+    WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::interaction::MAX_INTERACTION_LIST_LEN;
@@ -73,6 +75,14 @@ pub struct CandidateAction {
 
 const SELECTION_POOL_CAP: usize = 12;
 const SELECTION_CANDIDATE_CAP: usize = 64;
+
+/// Bounds for gang-block proposal enumeration against a CR 509.1b
+/// minimum-blocker restriction. Sized so the widest realistic case stays cheap:
+/// `C(10, 3) = 120` combinations trimmed to 32 per attacker, mirroring the
+/// `SELECTION_*` precedent above — take the first `pool_cap` eligible blockers in
+/// the engine's deterministic order, then cap the emitted set.
+const GANG_BLOCK_POOL_CAP: usize = 10;
+const GANG_BLOCK_CANDIDATE_CAP: usize = 32;
 
 fn collect_mana_combinations(
     count: usize,
@@ -372,6 +382,36 @@ fn permute_into(
 /// constructing `GameAction::Concede { player_id }` directly.
 pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
     match &state.waiting_for {
+        WaitingFor::ResolveAllConsent {
+            epoch,
+            representative,
+        } => {
+            let mut actions = vec![
+                candidate(
+                    GameAction::RespondResolveAllConsent {
+                        epoch: *epoch,
+                        decision: ResolveAllConsentDecision::Grant,
+                    },
+                    TacticalClass::Selection,
+                    Some(*representative),
+                ),
+                candidate(
+                    GameAction::RespondResolveAllConsent {
+                        epoch: *epoch,
+                        decision: ResolveAllConsentDecision::Decline,
+                    },
+                    TacticalClass::Selection,
+                    Some(*representative),
+                ),
+            ];
+            append_resolve_all_revocations(state, *epoch, &mut actions);
+            actions
+        }
+        WaitingFor::ResolveAllReady { epoch } => {
+            let mut actions = Vec::new();
+            append_resolve_all_revocations(state, *epoch, &mut actions);
+            actions
+        }
         WaitingFor::MeldPairChoice { player, choices } => choices
             .iter()
             .map(|choice| {
@@ -386,6 +426,11 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
             })
             .collect(),
         WaitingFor::MeldAttackTargetChoice {
+            player,
+            valid_targets,
+            ..
+        }
+        | WaitingFor::EntryAttackTargetChoice {
             player,
             valid_targets,
             ..
@@ -407,6 +452,17 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
             .map(|i| {
                 candidate(
                     GameAction::ChooseReplacement { index: i },
+                    TacticalClass::Replacement,
+                    Some(*player),
+                )
+            })
+            .collect(),
+        WaitingFor::EntryControllerChoice { player, candidates } => candidates
+            .iter()
+            .copied()
+            .map(|opponent| {
+                candidate(
+                    GameAction::ChooseEntryController { opponent },
                     TacticalClass::Replacement,
                     Some(*player),
                 )
@@ -823,6 +879,35 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
     }
 }
 
+fn append_resolve_all_revocations(
+    state: &GameState,
+    epoch: u64,
+    actions: &mut Vec<CandidateAction>,
+) {
+    let Some(run) = state
+        .resolve_all_consent_run
+        .as_ref()
+        .filter(|run| run.epoch == epoch)
+    else {
+        return;
+    };
+    actions.extend(
+        run.participants
+            .iter()
+            .filter(|participant| participant.granted)
+            .map(|participant| {
+                candidate(
+                    GameAction::RevokeResolveAllConsent {
+                        epoch,
+                        representative: participant.representative,
+                    },
+                    TacticalClass::Selection,
+                    Some(participant.representative),
+                )
+            }),
+    );
+}
+
 pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
     candidate_actions_broad_with_probe(state, None)
 }
@@ -832,9 +917,11 @@ pub fn candidate_actions_broad_with_probe(
     probe: Option<&casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
     let actions = match &state.waiting_for {
-        WaitingFor::MeldPairChoice { .. } | WaitingFor::MeldAttackTargetChoice { .. } => {
-            candidate_actions_exact(state)
-        }
+        WaitingFor::ResolveAllConsent { .. }
+        | WaitingFor::ResolveAllReady { .. }
+        | WaitingFor::MeldPairChoice { .. }
+        | WaitingFor::MeldAttackTargetChoice { .. }
+        | WaitingFor::EntryAttackTargetChoice { .. } => candidate_actions_exact(state),
         WaitingFor::Priority { player } => priority_actions_with_probe(state, *player, probe),
         WaitingFor::ChooseAnnouncingOpponent {
             player, candidates, ..
@@ -860,6 +947,18 @@ pub fn candidate_actions_broad_with_probe(
                         opponent: *opponent,
                     },
                     TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
+        WaitingFor::EntryControllerChoice { player, candidates } => candidates
+            .iter()
+            .map(|opponent| {
+                candidate(
+                    GameAction::ChooseEntryController {
+                        opponent: *opponent,
+                    },
+                    TacticalClass::Replacement,
                     Some(*player),
                 )
             })
@@ -947,8 +1046,15 @@ pub fn candidate_actions_broad_with_probe(
             player,
             valid_blocker_ids,
             valid_block_targets,
+            block_requirements,
             ..
-        } => blocker_actions(state, *player, valid_blocker_ids, valid_block_targets),
+        } => blocker_actions(
+            state,
+            *player,
+            valid_blocker_ids,
+            valid_block_targets,
+            block_requirements,
+        ),
         WaitingFor::UntapChoice {
             player, candidates, ..
         } => candidates
@@ -2996,20 +3102,26 @@ pub fn candidate_actions_broad_with_probe(
                 )]
             }
         }
-        // CR 115.7: Retarget — keep current targets as default.
+        // CR 115.7a: propose every legal alternative. The previous arm proposed
+        // ONLY `current_targets`, which `apply_retarget` rejects whenever the
+        // current target is not in `legal_new_targets` — three rejections in a
+        // row halt the AI controller and freeze the game.
         WaitingFor::RetargetChoice {
             player,
+            stack_entry_index,
+            scope,
             current_targets,
-            ..
-        } => {
-            vec![candidate(
-                GameAction::RetargetSpell {
-                    new_targets: current_targets.clone(),
-                },
-                TacticalClass::Selection,
-                Some(*player),
-            )]
-        }
+            legal_new_targets,
+        } => retarget_actions(
+            state,
+            *stack_entry_index,
+            scope,
+            current_targets,
+            legal_new_targets,
+        )
+        .into_iter()
+        .map(|action| candidate(action, TacticalClass::Selection, Some(*player)))
+        .collect(),
         // CR 701.62a: AI selects one card to manifest — one action per card option
         WaitingFor::ManifestDreadChoice { player, cards, .. } => {
             if cards.is_empty() {
@@ -3252,7 +3364,10 @@ pub fn candidate_actions_broad_with_probe(
         // proposer declares or returns to ordinary priority.
         // (Scored by `phase_ai::policies::loop_shortcut::LoopShortcutPolicy`.)
         WaitingFor::LoopShortcut {
-            proposer, schema, ..
+            proposer,
+            schema,
+            declaration,
+            ..
         } => {
             // CR 732.2a: `UntilLethal` names no count, so it is legal ONLY against an offer
             // that narrowed no bound. `handle_declare_shortcut` rejects it outright against
@@ -3284,15 +3399,23 @@ pub fn candidate_actions_broad_with_probe(
             // the AI's only non-declining option at such a node is an answer the engine
             // refuses. `ShortcutDecisionSchema::is_bounded()` is the engine's single
             // authority for "this producer narrowed the bound"; do NOT re-spell it as a
-            // comparison against `MAX_SHORTCUT_CYCLES`. Gated on empty `points` because this
-            // candidate carries `template: None`, which a published pin set fail-closes on.
-            if schema.points.is_empty() && schema.is_bounded() {
+            // comparison against `MAX_SHORTCUT_CYCLES`.
+            //
+            // The two admissible pin states, and nothing else: an EMPTY published point set
+            // (nothing to pin, so `template: None` is the complete answer), or a published set
+            // the offer ALREADY carries a declaration for. That `template` is the ENGINE'S OWN
+            // published declaration — the very value `handle_declare_shortcut` will validate —
+            // so there is exactly one pin authority at this node and the AI never constructs
+            // one. An offer with published points and NO declaration (a seat that never
+            // answered, or a `Conflicted` latch) still fail-closes: `declaration` is `None`,
+            // the conjunct below is false, and `DeclineShortcut` remains the only candidate.
+            if schema.is_bounded() && (schema.points.is_empty() || declaration.is_some()) {
                 v.push(candidate(
                     GameAction::DeclareShortcut {
                         count: crate::analysis::decision_template::IterationCount::Fixed(
                             schema.max_iterations,
                         ),
-                        template: None,
+                        template: declaration.clone(),
                     },
                     TacticalClass::Utility,
                     Some(*proposer),
@@ -3451,7 +3574,16 @@ fn semantic_candidate_actions_with_probe(
     probe: Option<&casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
     let mut actions = candidate_actions_exact(state);
-    actions.extend(candidate_actions_broad_with_probe(state, probe));
+    // Resolve All consent is wholly represented by its finite exact domain.
+    // The broad enumerator delegates these same states to `candidate_actions_exact`
+    // for broad-only callers, so composing both here would expose every
+    // Grant, Decline, and Revoke choice twice.
+    if !matches!(
+        state.waiting_for,
+        WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
+    ) {
+        actions.extend(candidate_actions_broad_with_probe(state, probe));
+    }
 
     let has_pending_cast = state.waiting_for.has_pending_cast()
         || (matches!(state.waiting_for, WaitingFor::DistributeAmong { .. })
@@ -3477,9 +3609,184 @@ fn semantic_candidate_actions_with_probe(
 
 fn authorize_candidate_actors(state: &GameState, actions: &mut [CandidateAction]) {
     for action in actions {
-        action.metadata.actor = action.metadata.actor.map(|player| {
-            crate::game::turn_control::authorized_submitter_for_player(state, player)
-        });
+        action.metadata.actor = match &action.action {
+            GameAction::RespondResolveAllConsent { epoch, .. } => match &state.waiting_for {
+                WaitingFor::ResolveAllConsent {
+                    epoch: active_epoch,
+                    representative,
+                } if *epoch == *active_epoch => state
+                    .resolve_all_consent_run
+                    .as_ref()
+                    .filter(|run| run.epoch == *active_epoch)
+                    .and_then(|run| run.authorized_submitter_for(*representative)),
+                _ => None,
+            },
+            GameAction::RevokeResolveAllConsent {
+                epoch,
+                representative,
+            } => crate::game::turn_control::resolve_all_granted_submitter(
+                state,
+                *epoch,
+                *representative,
+            ),
+            _ => action.metadata.actor.map(|player| {
+                crate::game::turn_control::authorized_submitter_for_player(state, player)
+            }),
+        };
+    }
+}
+
+/// CR 115.7: Submissions `apply_retarget` will accept for a parked
+/// `RetargetChoice`, derived from the prompt's own payload and filtered through
+/// the same per-slot authority the reducer consults. Sound by construction, and
+/// complete for `Single`; the `All` arm bounds its enumeration deliberately —
+/// see ENUMERATION BOUND below. Not a legality oracle: a submission absent from
+/// this set is not thereby illegal.
+///
+/// Shared by the engine's candidate generator and `phase-ai`'s fallback so the
+/// two cannot disagree about what a legal retarget is — they previously agreed
+/// only in being wrong the same way.
+pub fn retarget_actions(
+    state: &GameState,
+    stack_entry_index: usize,
+    scope: &RetargetScope,
+    current_targets: &[TargetRef],
+    legal_new_targets: &[TargetRef],
+) -> Vec<GameAction> {
+    // CR 115.7a: the pool is FLAT for a multi-role mana node — it `flat_map`s
+    // every surfaced role filter together, so it is a per-slot SUPERSET
+    // (`change_targets.rs`, multi-role branch). `apply_retarget` re-checks each
+    // changed submission positionally via `retarget_slot_violation`, so a
+    // proposal built from a pool member legal only for another slot would be
+    // rejected. Consult the same authority here rather than re-deriving
+    // legality, so every proposed action is accepted by construction —
+    // including CR 115.7d's unchanged submissions, which that authority exempts.
+    let slot_legal = |new_targets: &[TargetRef]| {
+        state
+            .stack
+            .get(stack_entry_index)
+            .and_then(|entry| entry.ability())
+            .is_none_or(|ability| {
+                crate::game::ability_utils::retarget_slot_violation(
+                    state,
+                    ability,
+                    current_targets,
+                    new_targets,
+                )
+                .is_none()
+            })
+    };
+
+    match scope {
+        // CR 115.7a: "each target can be changed only to another legal target."
+        // One proposal per member of the pool `apply_retarget` validates
+        // against. That pool normally still contains the current target — that
+        // member IS CR 115.7a's "the original target is unchanged" fallback, so
+        // it is offered rather than filtered out. An empty pool yields no
+        // proposals; after Unit 1 `change_targets::resolve` no longer parks that
+        // state.
+        //
+        // KNOWN GAP, carried deliberately. Each proposal is a ONE-element list,
+        // because `apply_retarget`'s `Single` arm hard-requires exactly one
+        // target. When the parked entry's `current_targets` has MORE than one
+        // element, applying such a proposal assigns `ability.targets` that
+        // one-element list and TRUNCATES the remaining slots — contrary to BOTH
+        // subrules that reach this arm (CR 115.7a / CR 115.7b), neither of which
+        // permits an undisturbed slot to be dropped.
+        // `change_targets::forced_retarget_targets` already implements that slot
+        // preservation on the FORCED path; the interactive path has no
+        // equivalent, and cannot have one while the reducer's arm rejects any
+        // length but 1.
+        //
+        // TWO TEMPLATES, TWO REMEDIES. `try_parse_change_targets`
+        // (parser/oracle_effect/mod.rs) maps two oracle wordings governed by
+        // DIFFERENT subrules onto this one `RetargetScope::Single` variant, so
+        // the deferred fix must DISPATCH ON THE TEMPLATE rather than apply CR
+        // 115.7b's remedy uniformly:
+        //   - "change a target of " → CR 115.7b: "the process described in rule
+        //     115.7a is followed, except that only one of those targets may be
+        //     changed (rather than all of them or none of them)". Remedy: one
+        //     slot changes, every other declared target stays in place.
+        //   - "change the target of " → CR 115.7a, which ends: "If all the
+        //     targets aren't changed to other legal targets, none of them are
+        //     changed." Remedy for a multi-target entry: ALL-OR-NONE, not
+        //     one-changes-rest-stay. This is Bolt Bend's wording. Bolt Bend
+        //     supplies the WORDING only: it reads "with a single target". Of the
+        //     22 printed cards matching `o:"change the target of"`, the six that
+        //     omit that literal phrase (I'm Rubber You're Glue, Muck Drubb,
+        //     Rebound, Ricochet, Silver Wyvern, Torchling) each restrict to one
+        //     target by the equivalent "targets ONLY <x>" / "a single <x>"
+        //     construction instead. So no printed card on this template can
+        //     present a multi-target entry — the gap below is reachable today
+        //     only by synthetic stack entries, which is why its fixture is
+        //     labelled synthetic rather than card-driven.
+        //
+        //   DEFERRED(out-of-run): interactive Single-scope retarget collapses
+        //   multi-target lists (CR 115.7a / CR 115.7b) — upstream cause filter.rs
+        //   FilterProp::HasSingleTarget is permissive with no resolution-time
+        //   validation; fix needs filter.rs + interaction.rs, both outside phase
+        //   1's frozen scope.
+        //
+        // Behavioural delta this phase knowingly takes: at base the AI FROZE on
+        // this class (its sole proposal was rejected, so nothing could discharge
+        // the prompt); now it PROGRESSES and TRUNCATES. Pinned by
+        // `retarget_prompt_softlock.rs` row 2e and `phase-ai`'s
+        // `retarget_fallback_action.rs` row 2f, whose SCOPE notes record the
+        // acceptance as observed behaviour and explicitly not as CR-115.7a /
+        // CR-115.7b legality.
+        RetargetScope::Single => legal_new_targets
+            .iter()
+            .map(|target| vec![target.clone()])
+            .filter(|new_targets| slot_legal(new_targets))
+            .map(|new_targets| GameAction::RetargetSpell { new_targets })
+            .collect(),
+        // CR 115.7d: "the player may leave any number of the targets unchanged,
+        // even if those targets would be illegal." Leaving every target
+        // unchanged anchors the list; each single-slot substitution to another
+        // legal target is offered on top of it. The anchor goes through the same
+        // `slot_legal` filter as every other proposal and passes unconditionally,
+        // because `retarget_slot_violation` exempts unchanged positions — no
+        // carve-out is needed, and none is made.
+        //
+        // ENUMERATION BOUND, stated rather than left silent: this emits the
+        // unchanged anchor plus every SINGLE-slot substitution. CR 115.7d permits
+        // changing several targets at once ("any number of the targets
+        // unchanged"), and those simultaneous multi-slot proposals are NOT
+        // enumerated — the set would be the product of the per-slot pools, and
+        // bounding the AI's branching factor is worth more than the extra
+        // proposals. This is a search-space bound, not a legality claim: the
+        // reducer accepts a multi-slot change if some other agent submits one,
+        // because `retarget_slot_violation` validates each changed position
+        // independently and never requires that only one position moved.
+        RetargetScope::All => {
+            let mut actions = Vec::new();
+            let anchor = current_targets.to_vec();
+            if slot_legal(&anchor) {
+                actions.push(GameAction::RetargetSpell {
+                    new_targets: anchor,
+                });
+            }
+            for slot in 0..current_targets.len() {
+                for target in legal_new_targets {
+                    if current_targets[slot] == *target {
+                        continue;
+                    }
+                    let mut new_targets = current_targets.to_vec();
+                    new_targets[slot] = target.clone();
+                    if slot_legal(&new_targets) {
+                        actions.push(GameAction::RetargetSpell { new_targets });
+                    }
+                }
+            }
+            actions
+        }
+        // A forced retarget is applied by `change_targets::resolve` without a
+        // prompt, so this scope never reaches an interactive `RetargetChoice`;
+        // `apply_retarget` rejects it unconditionally (`engine.rs`, the
+        // `RetargetScope::ForcedTo(_)` arm) and the parser emits only
+        // `Single`/`All` (`parser/oracle_effect/mod.rs`, the retarget-scope
+        // combinator). There is no legal submission to propose.
+        RetargetScope::ForcedTo(_) => Vec::new(),
     }
 }
 
@@ -4448,6 +4755,10 @@ fn blocker_actions(
         crate::types::identifiers::ObjectId,
         Vec<crate::types::identifiers::ObjectId>,
     >,
+    block_requirements: &std::collections::HashMap<
+        crate::types::identifiers::ObjectId,
+        crate::game::combat::BlockRequirement,
+    >,
 ) -> Vec<CandidateAction> {
     let mut proposals = vec![Vec::new()];
 
@@ -4456,6 +4767,46 @@ fn blocker_actions(
             for &attacker_id in targets {
                 proposals.push(vec![(blocker_id, attacker_id)]);
             }
+        }
+    }
+
+    // CR 509.1b + CR 702.111b: an attacker carrying menace or a `MinBlockers`
+    // restriction can't be blocked except by `count` or more creatures, so every
+    // one-blocker proposal seeded above is an illegal declaration against it and
+    // `complete_blocker_proposals` collapses each to the same tax-free witness.
+    // Without an explicit gang-block seed the defending player's whole candidate
+    // set degenerates to "don't block" and the AI can never block a menace-class
+    // attacker at all. Seed the bounded set of `count`-sized combinations drawn
+    // from that attacker's own eligible blockers; legality is still decided by
+    // `complete_blocker_proposals` below, which is the single authority.
+    //
+    // `block_requirements` only carries attackers whose floor exceeds 1 (see
+    // `block_requirements_for_player`); the `<= 1` guard keeps that contract
+    // local rather than assumed. Attackers are visited in `ObjectId` order so a
+    // `HashMap` iteration order can't perturb candidate ordering (issue #4878).
+    let mut gang_attackers: Vec<_> = block_requirements
+        .iter()
+        .filter(|(_, requirement)| requirement.count > 1)
+        .map(|(&attacker_id, requirement)| (attacker_id, requirement.count as usize))
+        .collect();
+    gang_attackers.sort_unstable();
+    for (attacker_id, needed) in gang_attackers {
+        let eligible: Vec<crate::types::identifiers::ObjectId> = valid_blocker_ids
+            .iter()
+            .copied()
+            .filter(|blocker_id| {
+                valid_block_targets
+                    .get(blocker_id)
+                    .is_some_and(|targets| targets.contains(&attacker_id))
+            })
+            .collect();
+        for combo in bounded_combinations_for_sizes(
+            &eligible,
+            [needed],
+            GANG_BLOCK_POOL_CAP,
+            GANG_BLOCK_CANDIDATE_CAP,
+        ) {
+            proposals.push(combo.into_iter().map(|b| (b, attacker_id)).collect());
         }
     }
 
@@ -4640,6 +4991,52 @@ fn named_choice_actions(
     choice_type: &ChoiceType,
     source_display_name: Option<&str>,
 ) -> Vec<CandidateAction> {
+    // CR 107.1a/b: an unbounded number choice ("a number 0 or greater") offers no
+    // option list, so the AI must SAMPLE a domain it cannot enumerate. The sample
+    // is deliberately small and game-relevant rather than a truncated 0..=N walk:
+    // on Wheel of Misfortune the meaningful decisions are "bid nothing", "bid just
+    // enough to wheel", and "bid past a life total", so the ladder is anchored to
+    // the live life totals rather than to an arbitrary ceiling.
+    //
+    // Every candidate is filtered through `accepts_free_entry_answer`, the same
+    // authority the answer seam uses, so the AI can never propose a value the
+    // engine would then reject.
+    if options.is_empty() {
+        if let ChoiceType::NumberRange { min, max: None, .. } = choice_type {
+            let highest_life = state
+                .players
+                .iter()
+                .map(|p| p.life.max(0) as u32)
+                .max()
+                .unwrap_or(0);
+            let mut sample: Vec<u32> = vec![
+                *min,
+                min.saturating_add(1),
+                min.saturating_add(2),
+                highest_life,
+                highest_life.saturating_add(1),
+            ];
+            sample.sort_unstable();
+            sample.dedup();
+            return sample
+                .into_iter()
+                .map(|n| n.to_string())
+                .filter(|choice| {
+                    choice_type
+                        .accepts_free_entry_answer(choice)
+                        .unwrap_or(false)
+                })
+                .map(|choice| {
+                    candidate(
+                        GameAction::ChooseOption { choice },
+                        TacticalClass::Selection,
+                        Some(player),
+                    )
+                })
+                .collect();
+        }
+    }
+
     if options.is_empty() && matches!(choice_type, ChoiceType::CardName) {
         return card_name_choice_candidates(state, player, source_display_name)
             .into_iter()
@@ -4815,13 +5212,35 @@ fn mana_payment_actions(
     convoke_mode: Option<ConvokeMode>,
 ) -> Vec<CandidateAction> {
     let mut actions = mana_tap_actions(state, player);
+    let has_delve = state.pending_cast.as_ref().is_some_and(|pending| {
+        crate::game::casting::spell_has_delve_payment_for(
+            state,
+            player,
+            pending.object_id,
+            pending.casting_variant == CastingVariant::Fuse,
+        )
+    });
     // Always include PassPriority to finalize payment
     actions.push(candidate(
         GameAction::PassPriority,
         TacticalClass::Pass,
         Some(player),
     ));
-    if let Some(mode) = convoke_mode {
+    if has_delve {
+        for (&obj_id, obj) in &state.objects {
+            if obj.is_delve_eligible(player) {
+                actions.push(candidate(
+                    GameAction::TapForConvoke {
+                        object_id: obj_id,
+                        mana_type: crate::types::mana::ManaType::Colorless,
+                    },
+                    TacticalClass::Mana,
+                    Some(player),
+                ));
+            }
+        }
+    }
+    if let Some(mode) = convoke_mode.filter(|mode| *mode != ConvokeMode::Delve) {
         // CR 702.51a + CR 302.6: Summoning sickness does not restrict tapping for convoke.
         // CR 702.51a: a Convoke tap reduces the cost by {1} (a Colorless marker) or by one
         // mana of the creature's color (a colored marker, which pays ONLY a matching colored
@@ -4834,9 +5253,24 @@ fn mana_payment_actions(
                 crate::types::mana::ManaCost::Cost { shards, .. } => Some(shards.as_slice()),
                 _ => None,
             });
-        if mode == ConvokeMode::Delve {
-            for (&obj_id, obj) in &state.objects {
-                if obj.is_delve_eligible(player) {
+        // Non-Delve convoke/improvise/waterbend taps come from the battlefield
+        // only; the eligibility helpers all require `zone == Battlefield`, so
+        // iterating `state.battlefield` (rather than every object in the game)
+        // is behavior-preserving and avoids scanning hand/library/graveyard
+        // objects on go-wide token boards.
+        for &obj_id in &state.battlefield {
+            let Some(obj) = state.objects.get(&obj_id) else {
+                continue;
+            };
+            // CR 701.26a + CR 508.1f: a "can't become tapped" creature can't be
+            // tapped for convoke/improvise/waterbend (all tap the creature to
+            // pay). Delve (graveyard exile above) never taps, so it's exempt.
+            if crate::game::restrictions::object_cant_tap(state, obj_id) {
+                continue;
+            }
+            match mode {
+                ConvokeMode::Waterbend if obj.is_waterbend_eligible(player) => {
+                    // Waterbend: always colorless
                     actions.push(candidate(
                         GameAction::TapForConvoke {
                             object_id: obj_id,
@@ -4846,79 +5280,52 @@ fn mana_payment_actions(
                         Some(player),
                     ));
                 }
-            }
-        } else {
-            // Non-Delve convoke/improvise/waterbend taps come from the
-            // battlefield only; the eligibility helpers all require
-            // `zone == Battlefield`, so iterating `state.battlefield` (rather
-            // than every object in the game) is behavior-preserving and avoids
-            // scanning hand/library/graveyard objects on go-wide token boards.
-            for &obj_id in &state.battlefield {
-                let Some(obj) = state.objects.get(&obj_id) else {
-                    continue;
-                };
-                // CR 701.26a + CR 508.1f: a "can't become tapped" creature can't be
-                // tapped for convoke/improvise/waterbend (all tap the creature to
-                // pay). Delve (graveyard exile above) never taps, so it's exempt.
-                if crate::game::restrictions::object_cant_tap(state, obj_id) {
-                    continue;
+                ConvokeMode::Improvise if obj.is_improvise_eligible(player) => {
+                    // CR 702.126a: Improvise pays generic mana — always colorless.
+                    actions.push(candidate(
+                        GameAction::TapForConvoke {
+                            object_id: obj_id,
+                            mana_type: crate::types::mana::ManaType::Colorless,
+                        },
+                        TacticalClass::Mana,
+                        Some(player),
+                    ));
                 }
-                match mode {
-                    ConvokeMode::Waterbend if obj.is_waterbend_eligible(player) => {
-                        // Waterbend: always colorless
-                        actions.push(candidate(
-                            GameAction::TapForConvoke {
-                                object_id: obj_id,
-                                mana_type: crate::types::mana::ManaType::Colorless,
-                            },
-                            TacticalClass::Mana,
-                            Some(player),
-                        ));
-                    }
-                    ConvokeMode::Improvise if obj.is_improvise_eligible(player) => {
-                        // CR 702.126a: Improvise pays generic mana — always colorless.
-                        actions.push(candidate(
-                            GameAction::TapForConvoke {
-                                object_id: obj_id,
-                                mana_type: crate::types::mana::ManaType::Colorless,
-                            },
-                            TacticalClass::Mana,
-                            Some(player),
-                        ));
-                    }
-                    ConvokeMode::Convoke if obj.is_convoke_eligible(player) => {
-                        // CR 702.51a: Colorless (for generic) always available
-                        actions.push(candidate(
-                            GameAction::TapForConvoke {
-                                object_id: obj_id,
-                                mana_type: crate::types::mana::ManaType::Colorless,
-                            },
-                            TacticalClass::Mana,
-                            Some(player),
-                        ));
-                        // CR 702.51a: one colored tap per color the creature has — but only
-                        // colors the cost can actually use. A colored convoke marker pays only a
-                        // matching colored pip, so a color absent from the cost is a wasted tap.
-                        // `contributes_to` covers hybrid/Phyrexian/two-brid pips. When the cost is
-                        // unavailable, offer every color rather than risk pruning a useful option.
-                        for color in &obj.color {
-                            if let Some(shards) = convoke_cost_shards {
-                                if !shards.iter().any(|shard| shard.contributes_to(*color)) {
-                                    continue;
-                                }
+                ConvokeMode::Convoke if obj.is_convoke_eligible(player) => {
+                    // CR 702.51a: Colorless (for generic) always available
+                    actions.push(candidate(
+                        GameAction::TapForConvoke {
+                            object_id: obj_id,
+                            mana_type: crate::types::mana::ManaType::Colorless,
+                        },
+                        TacticalClass::Mana,
+                        Some(player),
+                    ));
+                    // CR 702.51a: one colored tap per color the creature has — but only
+                    // colors the cost can actually use. A colored convoke marker pays only a
+                    // matching colored pip, so a color absent from the cost is a wasted tap.
+                    // `contributes_to` covers hybrid/Phyrexian/two-brid pips. When the cost is
+                    // unavailable, offer every color rather than risk pruning a useful option.
+                    for color in &obj.color {
+                        if let Some(shards) = convoke_cost_shards {
+                            if !shards.iter().any(|shard| shard.contributes_to(*color)) {
+                                continue;
                             }
-                            actions.push(candidate(
-                                GameAction::TapForConvoke {
-                                    object_id: obj_id,
-                                    mana_type: mana_sources::mana_color_to_type(color),
-                                },
-                                TacticalClass::Mana,
-                                Some(player),
-                            ));
                         }
+                        actions.push(candidate(
+                            GameAction::TapForConvoke {
+                                object_id: obj_id,
+                                mana_type: mana_sources::mana_color_to_type(color),
+                            },
+                            TacticalClass::Mana,
+                            Some(player),
+                        ));
                     }
-                    _ => {}
                 }
+                ConvokeMode::Convoke
+                | ConvokeMode::Improvise
+                | ConvokeMode::Waterbend
+                | ConvokeMode::Delve => {}
             }
         }
     }
@@ -5329,6 +5736,7 @@ mod tests {
                 per_cycle: None,
             },
             schema: crate::analysis::decision_template::ShortcutDecisionSchema::default(),
+            declaration: None,
         };
 
         let candidates = candidate_actions(&state);
@@ -6218,7 +6626,7 @@ mod tests {
     }
 
     /// Regression (multi-requirement residual): a creature directed by
-    /// `MustAttackPlayer` (CR 508.1b) alongside a goaded creature (CR 701.15b)
+    /// `MustAttackDefender` (CR 508.1b) alongside a goaded creature (CR 701.15b)
     /// also forces a mixed-target declaration. The greedy forced-legal candidate
     /// must steer the directed creature onto its *required* player regardless of
     /// `valid_attack_targets` ordering. A goad-only target pick would land the
@@ -6255,8 +6663,8 @@ mod tests {
             .unwrap()
             .static_definitions
             .push(StaticDefinition::new(
-                crate::types::statics::StaticMode::MustAttackPlayer {
-                    player: PlayerId(1).into(),
+                crate::types::statics::StaticMode::MustAttackDefender {
+                    defender: PlayerId(1).into(),
                 },
             ));
         let goaded = make_creature(&mut state, 2);
@@ -6289,7 +6697,7 @@ mod tests {
         });
         assert!(
             has_legal,
-            "forced assignment must direct the MustAttackPlayer creature to its required player"
+            "forced assignment must direct the MustAttackDefender creature to its required player"
         );
     }
 
@@ -6314,6 +6722,7 @@ mod tests {
         names.extend((0..10_000).map(|i| format!("Bulk Card {i}")));
         state.all_card_names = names.into();
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(0),
             choice_type: ChoiceType::CardName,
             options: Vec::new(),
@@ -7852,6 +8261,140 @@ mod tests {
             Some(TacticalClass::Mana),
             "CR 605.1a: Jack-o'-Lantern's graveyard-activated mana ability \
              must be offered as a Mana-class ActivateAbility candidate"
+        );
+    }
+
+    // ── item-4 C2b row D6-n — the declare candidate is keyed to the offer's OWN declaration ──
+
+    const D6N_PROPOSER: PlayerId = PlayerId(1);
+
+    /// A BOUNDED offer publishing ONE point, carrying `declaration`. Called twice — once `None`,
+    /// once `Some` — so the two states differ in exactly one field and the mint spells the
+    /// `WaitingFor::LoopShortcut` anchor exactly once (a counted site in
+    /// `tests/integration/loop_shortcut_offer_writer_census.rs`).
+    ///
+    /// `ShortcutDecisionSchema::default()` carries `MAX_SHORTCUT_CYCLES`, i.e. `is_bounded()` is
+    /// FALSE — so `max_iterations` is set explicitly below the cap or the row would measure the
+    /// wrong conjunct.
+    fn d6n_offer(
+        declaration: Option<crate::analysis::decision_template::DecisionTemplate>,
+    ) -> GameState {
+        use crate::analysis::decision_template::{
+            DecisionPoint, DecisionPointKind, DecisionSlot, IterationCount, ShortcutDecisionSchema,
+        };
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::LoopShortcut {
+            proposer: D6N_PROPOSER,
+            predicted_winner: None,
+            certificate: crate::analysis::loop_check::LoopCertificate {
+                unbounded: vec![],
+                win_kind: crate::analysis::loop_check::WinKind::Advantage,
+                mandatory: false,
+                residual_board_delta: crate::analysis::resource::BoardDelta::default(),
+                per_cycle: None,
+            },
+            schema: ShortcutDecisionSchema {
+                iteration_count: IterationCount::Fixed(5),
+                max_iterations: 5,
+                points: vec![DecisionPoint {
+                    slot: DecisionSlot::target(d6n_source()),
+                    kind: DecisionPointKind::Targets {
+                        legal_targets: vec![TargetRef::Player(PlayerId(0))],
+                        min_targets: 1,
+                        max_targets: 1,
+                        ordered: false,
+                    },
+                }],
+                convoke_tappable_count: 0,
+            },
+            declaration,
+        };
+        state
+    }
+
+    fn d6n_source() -> crate::types::game_state::YieldTarget {
+        crate::types::game_state::YieldTarget::ThisObject {
+            source_id: ObjectId(555),
+            incarnation: Some(1),
+            trigger_description: None,
+        }
+    }
+
+    /// **Row D6-n — a bounded offer with published points and NO declaration enumerates only
+    /// `DeclineShortcut`.**
+    ///
+    /// CR 732.2a. The declare candidate carries the ENGINE's own published declaration, so an
+    /// offer that has none (a seat that never answered, or a `LoopAnswer::Conflicted` latch) must
+    /// fail closed rather than hand the search layer a fabricated pin set — which
+    /// `handle_declare_shortcut` would then refuse, i.e. an action that looks legal and is not.
+    ///
+    /// # Non-vacuity
+    ///
+    /// The positive arm is the SAME state one field apart: with `declaration: Some(..)` the
+    /// candidate appears AND carries that exact template. Without it, a generator that had
+    /// stopped emitting the candidate for any reason — including not running — would pass the
+    /// negative arm.
+    ///
+    /// REVERT-PROBE: replace `declaration.clone()` in the gate's `template:` with a fabricated
+    /// `Some(..)` and drop the `declaration.is_some()` conjunct ⇒ the negative arm flips.
+    ///
+    /// *What wrong implementation would still pass this row?* One that emits the candidate with
+    /// the RIGHT gate but a template it built itself — which the positive arm's equality against
+    /// the offer's own declaration refuses.
+    #[test]
+    fn d6n_a_points_carrying_offer_without_a_declaration_enumerates_only_decline() {
+        use crate::analysis::decision_template::{
+            DecisionGroupKey, DecisionKind, DecisionSlot, DecisionTemplate, IterationCount,
+            PinnedDecision, ReplayMode, TargetPin,
+        };
+
+        // ── the negative arm ──
+        let bare = d6n_offer(None);
+        let WaitingFor::LoopShortcut { schema, .. } = &bare.waiting_for else {
+            unreachable!("the fixture parks on the offer")
+        };
+        assert!(
+            schema.is_bounded(),
+            "reach-guard: the `Fixed` candidate is gated on `is_bounded()` too, so an unbounded \
+             offer would withhold it for the wrong reason"
+        );
+        assert!(
+            !schema.points.is_empty(),
+            "reach-guard: a NON-empty published pin set is the conjunct this row is about — with \
+             `points` empty the candidate is emitted regardless of the declaration"
+        );
+        assert_eq!(
+            crate::ai_support::legal_actions(&bare),
+            vec![GameAction::DeclineShortcut],
+            "CR 732.2a: with points published and no declaration to state, declining is the only \
+             honest candidate"
+        );
+
+        // ── the paired positive: the same state one field apart ──
+        let declaration = DecisionTemplate {
+            owner: D6N_PROPOSER,
+            decisions: vec![PinnedDecision::Targets {
+                slot: DecisionSlot::target(d6n_source()),
+                targets: vec![TargetPin::Player(PlayerId(0))],
+            }],
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::Fixed(5),
+            },
+            key: DecisionGroupKey::from_sources(&[d6n_source()], DecisionKind::LoopChoice),
+        };
+        let declared = d6n_offer(Some(declaration.clone()));
+        assert!(
+            crate::ai_support::legal_actions(&declared).contains(&GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(5),
+                template: Some(declaration),
+            }),
+            "POSITIVE CONTROL: with the offer carrying a declaration the candidate returns, and \
+             its `template` is the offer's OWN value — the AI never constructs one. got {:?}",
+            crate::ai_support::legal_actions(&declared)
+        );
+        assert!(
+            crate::ai_support::legal_actions(&declared).contains(&GameAction::DeclineShortcut),
+            "the decline stays legal on both arms, which is what keeps the pair one axis apart"
         );
     }
 }

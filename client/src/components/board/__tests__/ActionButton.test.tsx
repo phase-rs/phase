@@ -31,6 +31,19 @@ function blockerPrompt(): WaitingFor {
   };
 }
 
+function attackerPrompt(): WaitingFor {
+  const target = { type: "Player", data: 1 } as const;
+  return {
+    type: "DeclareAttackers",
+    data: {
+      player: 0,
+      valid_attacker_ids: [100],
+      valid_attack_targets: [target],
+      valid_attack_targets_by_attacker: { "100": [target] },
+    },
+  };
+}
+
 function priorityPrompt(player = 0): WaitingFor {
   return buildPriorityWaitingFor({ data: { player } });
 }
@@ -97,6 +110,24 @@ describe("ActionButton", () => {
     render(<ActionButton />);
 
     expect(screen.getByRole("button", { name: "Block with None" })).toBeInTheDocument();
+    expect(screen.queryByText("Auto-Passing to End Step...")).not.toBeInTheDocument();
+  });
+
+  it("keeps attacker controls available while pass-until-end-of-turn is armed", () => {
+    const waitingFor = attackerPrompt();
+    useGameStore.setState({
+      gameState: {
+        ...createGameState(waitingFor),
+        phase: "DeclareAttackers",
+        active_player: 0,
+      },
+      waitingFor,
+    });
+
+    render(<ActionButton />);
+
+    expect(screen.getByRole("button", { name: "Attack with All" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Attack with None" })).toBeInTheDocument();
     expect(screen.queryByText("Auto-Passing to End Step...")).not.toBeInTheDocument();
   });
 
@@ -272,7 +303,7 @@ describe("ActionButton", () => {
         valid_attacker_ids: [100],
         valid_attack_targets: [target],
         valid_attack_targets_by_attacker: { "100": [target] },
-        attacker_constraints: { "100": { kind: "MustAttack", players: [] } },
+        attacker_constraints: { "100": { kind: "MustAttack", defenders: [] } },
       },
     };
     useGameStore.setState({

@@ -1,0 +1,40 @@
+# §7 step 10's wiring pin (MAJOR-2, impl review). `unshare --mount` isolates the MOUNT TABLE,
+# not the filesystem: a target that writes an unmounted path writes the real tree. This
+# manifest drives exactly that — `ppfixture_treewrite` appends to tests/fixtures/tmp/, which
+# the control run reaches with no mounts — so the step-10 re-fingerprint is the only thing
+# between "the tool measured a tree it also modified" and a rendered block.
+#
+# The mutated file is the one the target writes, so it is IN step 6's fingerprint set. `find`
+# survives the target's write (the appended line does not contain "ORIGINAL").
+version = 1
+
+[target]
+mode         = "runtime-read"
+package      = "probe-pin"
+test         = "pure_logic"
+filter       = "ppfixture_treewrite"
+filter_match = "substring"
+timeout_secs = 60
+env          = { PP_FIXTURE = "treewrite" }
+
+# NOT dogfood_block.md, for the same reason as projection.toml: this manifest's abort (step 10's
+# re-fingerprint) is POSITIONAL protection only, and a refusal that moves later in the pipeline
+# would put `run --write` on the committed dogfood block.
+[output]
+file   = "crates/probe-pin/tests/fixtures/tmp/treewrite_block.md"
+marker = "PROBE-PIN"
+
+[[probe]]
+id = "P0_control"
+  [probe.expect]
+  outcome = "pass"
+
+[[probe]]
+id = "P1_mounts_the_written_file"
+  [[probe.mutation]]
+  kind    = "replace"
+  file    = "crates/probe-pin/tests/fixtures/tmp/tree_write.txt"
+  find    = "ORIGINAL"
+  replace = "MUTATED"
+  [probe.expect]
+  outcome = "pass"

@@ -42,6 +42,8 @@ pub struct SeatPublicView {
     pub connected: bool,
     pub has_submitted_deck: bool,
     pub pick_status: PickStatus,
+    /// CR 905.2c: Draft cards that remain face up are visible to every player.
+    pub face_up_draft_cards: Vec<DraftCardInstance>,
 }
 
 /// A stable, engine-defined category for a limited pool display group.
@@ -139,6 +141,8 @@ pub struct DraftPlayerView {
     pub current_pack: Option<Vec<DraftCardInstance>>,
     /// The viewer's drafted pool
     pub pool: Vec<DraftCardInstance>,
+    /// Drafted cards whose effects can be activated during a later pick.
+    pub draft_effects: Vec<DraftCardInstance>,
     /// Engine-defined groups for displaying the viewer's pool without client-side
     /// card classification, ordering, or deduplication.
     pub pool_groups: DraftPoolGroups,
@@ -255,6 +259,7 @@ pub fn filter_for_spectator(
                     .map(|pid| session.submitted_decks.contains_key(&pid))
                     .unwrap_or(false),
                 pick_status,
+                face_up_draft_cards: face_up_draft_cards(&session.pools[i]),
             }
         })
         .collect();
@@ -322,6 +327,7 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         .map(|p| p.0.clone());
 
     let pool = session.pools.get(idx).cloned().unwrap_or_default();
+    let draft_effects = face_up_draft_cards(&pool);
     let sealed_packs = (session.kind == DraftKind::Sealed).then(|| {
         pool.chunks(usize::from(session.config.cards_per_pack))
             .map(ToOwned::to_owned)
@@ -370,6 +376,7 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
                     .map(|pid| session.submitted_decks.contains_key(&pid))
                     .unwrap_or(false),
                 pick_status,
+                face_up_draft_cards: face_up_draft_cards(&session.pools[i]),
             }
         })
         .collect();
@@ -388,6 +395,7 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         pass_direction: session.pass_direction,
         current_pack,
         pool,
+        draft_effects,
         pool_groups,
         sealed_packs,
         seats,
@@ -403,6 +411,13 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         pairings,
         match_config: session.kind.match_config(),
     }
+}
+
+fn face_up_draft_cards(pool: &[DraftCardInstance]) -> Vec<DraftCardInstance> {
+    pool.iter()
+        .filter(|card| card.draft_effect.is_some())
+        .cloned()
+        .collect()
 }
 
 const COLOR_GROUP_ORDER: [DraftPoolGroupKind; 7] = [
@@ -714,6 +729,7 @@ mod tests {
             colors: colors.iter().map(ToString::to_string).collect(),
             cmc,
             type_line: type_line.to_string(),
+            draft_effect: None,
         }
     }
 
@@ -741,6 +757,33 @@ mod tests {
         let view = filter_for_player(&session, 0);
         assert_eq!(view.pool.len(), 1);
         assert_eq!(view.pool[0].instance_id, session.pools[0][0].instance_id);
+    }
+
+    #[test]
+    fn view_exposes_other_players_face_up_draft_cards_without_their_pool() {
+        let (mut session, source) = test_session(2);
+        session::apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+
+        let face_up = DraftCardInstance {
+            instance_id: "cogwork-1".to_string(),
+            name: "Cogwork Librarian".to_string(),
+            set_code: "CNS".to_string(),
+            collector_number: "58".to_string(),
+            rarity: "common".to_string(),
+            colors: Vec::new(),
+            cmc: 4,
+            type_line: "Artifact Creature — Construct".to_string(),
+            draft_effect: Some(engine::types::card::DraftEffect::AdditionalPick),
+        };
+        let hidden = draft_card("Hidden Pool Card", &[], 2, "Creature");
+        session.pools[1] = vec![face_up.clone(), hidden.clone()];
+
+        let view = filter_for_player(&session, 0);
+
+        assert_eq!(view.seats[1].face_up_draft_cards, vec![face_up]);
+        assert!(view.draft_effects.is_empty());
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(!json.contains(&hidden.instance_id));
     }
 
     #[test]
@@ -940,6 +983,7 @@ mod tests {
                 colors: Vec::new(),
                 cmc: 0,
                 type_line: String::new(),
+                draft_effect: None,
             })
             .collect();
         session.pools[1] = session.pools[0].clone();

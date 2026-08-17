@@ -840,7 +840,10 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
             };
         }
-        if nom_on_lower(rest, &rest_lower, |i| value((), tag("a card")).parse(i)).is_some() {
+        if all_consuming(tag::<_, _, nom::error::Error<&str>>("a card"))
+            .parse(rest_lower.as_str())
+            .is_ok()
+        {
             return AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
@@ -2860,6 +2863,29 @@ mod tests {
                 )));
             }
             other => panic!("Expected Exile with green + CmcEQ(X), got {:?}", other),
+        }
+    }
+
+    /// CR 107.3a + CR 701.9a: the shared X in an activated discard cost is
+    /// retained as a typed mana-value filter rather than swallowed as "a card".
+    #[test]
+    fn cost_discard_card_with_mana_value_x() {
+        use crate::types::ability::{Comparator, FilterProp, QuantityExpr, QuantityRef};
+
+        match parse_oracle_cost("Discard a card with mana value X") {
+            AbilityCost::Discard {
+                filter: Some(TargetFilter::Typed(typed)),
+                ..
+            } => assert!(typed.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { name }
+                    }
+                } if name == "X"
+            ))),
+            other => panic!("expected discard with CmcEQ(X), got {other:?}"),
         }
     }
 

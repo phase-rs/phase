@@ -13,7 +13,8 @@ use crate::types::mana::{ManaColor, ManaCost};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::space1;
-use nom::combinator::{eof, opt, peek, value};
+use nom::combinator::{eof, map_res, opt, peek, value};
+use nom::sequence::terminated;
 
 /// A borrowed pair of `(original, lowercase)` slices kept in lockstep.
 ///
@@ -413,23 +414,12 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
         return Some((expr, rest.trim_start()));
     }
 
-    // CR 107.3: "twice N" / "three times N" — multiplicative count (Procrastinate:
-    // "Put twice X stun counters on it"). Mirrors the `parse_cda_quantity` branch
+    // Multiplicative count prefixes. Mirrors the `parse_cda_quantity` branch
     // but applies inside effect-count positions (put-counter count, draw count,
     // mill count, etc.) so every quantity-taking verb picks it up uniformly. The
-    // inner count recursively delegates back to `parse_count_expr`, so "twice X"
-    // and "three times five" both compose through the same types.
-    if let Some((factor, rest)) = super::oracle_nom::bridge::nom_on_lower(text, &lower, |i| {
-        nom::branch::alt((
-            nom::combinator::value(
-                2i32,
-                nom::bytes::complete::tag::<_, _, OracleError<'_>>("twice "),
-            ),
-            nom::combinator::value(2i32, nom::bytes::complete::tag("two times ")),
-            nom::combinator::value(3i32, nom::bytes::complete::tag("three times ")),
-        ))
-        .parse(i)
-    }) {
+    // inner count recursively delegates back to `parse_count_expr`, so any
+    // supported number word or digit composes through the same types.
+    if let Some((factor, rest)) = nom_on_lower(text, &lower, parse_count_multiplier) {
         if let Some((inner, after)) = parse_count_expr(rest) {
             return Some((
                 QuantityExpr::Multiply {
@@ -641,6 +631,31 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
         }
     }
     Some((QuantityExpr::Fixed { value: base }, rest))
+}
+
+/// Parse a multiplicative count prefix, such as `twice ` or `five times `.
+///
+/// A multiplier must be greater than one: `one time` is not a multiplicative
+/// Oracle count phrase, and zero/negative factors cannot arise from the shared
+/// unsigned number grammar.
+// CR 107.3a + CR 107.3i: a spell's controller announces a cost X while
+// casting, and its X instances normally share that announced value. The
+// multiplier wraps the recursively parsed X so each quantity consumer reads
+// that same value.
+pub(crate) fn parse_count_multiplier(input: &str) -> OracleResult<'_, i32> {
+    alt((
+        value(2i32, terminated(tag("twice"), space1)),
+        map_res(
+            terminated(nom_primitives::parse_number, tag(" times ")),
+            |factor| {
+                i32::try_from(factor)
+                    .ok()
+                    .filter(|factor| *factor > 1)
+                    .ok_or(())
+            },
+        ),
+    ))
+    .parse(input)
 }
 
 /// CR 107.1a: Parse a standalone trailing rounding marker left after another
@@ -1707,7 +1722,23 @@ fn unmask_card_name_keyword_action(text: String, originals: &[String]) -> String
     result
 }
 
-fn parse_card_named_literal_prefix(input: &str) -> OracleResult<'_, usize> {
+/// Which flavour of literal-name span a `"… named <X>"` prefix opens.
+///
+/// A **token**'s name is followed by the inline clauses
+/// that define the token in place ("… with \"…\"", "… that's attacking",
+/// "… attached to …"), so its span ends at those clauses. A **card filter**'s
+/// name is not defined in place, and real card names contain exactly those
+/// words ("Once More with Feeling", "All That Glitters") — ending its span
+/// there would truncate the name. The two therefore need different boundaries,
+/// which is why the prefix parser reports which one it matched instead of
+/// letting the caller guess from the text.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum NamedLiteralKind {
+    CardFilter,
+    Token,
+}
+
+fn parse_card_named_literal_prefix(input: &str) -> OracleResult<'_, (usize, NamedLiteralKind)> {
     alt((
         // CR 201.2a + CR 201.5c: a meld RESULT name ("meld them into Titania,
         // Gaea Incarnate") is a distinct object's literal name, not a self-ref to
@@ -1721,21 +1752,79 @@ fn parse_card_named_literal_prefix(input: &str) -> OracleResult<'_, usize> {
         // the instigator (Gisela → Brisela) are already clean; the mask is a no-op
         // for them. Improvement-only for the activated melds' result string
         // (Urza, Lord Protector) — their activated-meld runtime path is unchanged.
-        value("meld them into ".len(), tag("meld them into ")),
-        value("permanents named ".len(), tag("permanents named ")),
-        value("permanent named ".len(), tag("permanent named ")),
-        value("creatures named ".len(), tag("creatures named ")),
-        value("creature named ".len(), tag("creature named ")),
-        value("artifacts named ".len(), tag("artifacts named ")),
-        value("artifact named ".len(), tag("artifact named ")),
-        value("enchantments named ".len(), tag("enchantments named ")),
-        value("enchantment named ".len(), tag("enchantment named ")),
-        value("lands named ".len(), tag("lands named ")),
-        value("land named ".len(), tag("land named ")),
-        value("spells named ".len(), tag("spells named ")),
-        value("spell named ".len(), tag("spell named ")),
-        value("cards named ".len(), tag("cards named ")),
-        value("card named ".len(), tag("card named ")),
+        value(
+            ("meld them into ".len(), NamedLiteralKind::CardFilter),
+            tag("meld them into "),
+        ),
+        // The token-creation template writes the noun "token" immediately before
+        // "named", whatever type words precede it ("create a
+        // legendary black Aura Curse enchantment token named Selenia's Curse").
+        // Anchoring on that noun covers the whole class in one rule instead of
+        // enumerating every type-word combination that can lead up to it.
+        value(
+            ("tokens named ".len(), NamedLiteralKind::Token),
+            tag("tokens named "),
+        ),
+        value(
+            ("token named ".len(), NamedLiteralKind::Token),
+            tag("token named "),
+        ),
+        value(
+            ("permanents named ".len(), NamedLiteralKind::CardFilter),
+            tag("permanents named "),
+        ),
+        value(
+            ("permanent named ".len(), NamedLiteralKind::CardFilter),
+            tag("permanent named "),
+        ),
+        value(
+            ("creatures named ".len(), NamedLiteralKind::CardFilter),
+            tag("creatures named "),
+        ),
+        value(
+            ("creature named ".len(), NamedLiteralKind::CardFilter),
+            tag("creature named "),
+        ),
+        value(
+            ("artifacts named ".len(), NamedLiteralKind::CardFilter),
+            tag("artifacts named "),
+        ),
+        value(
+            ("artifact named ".len(), NamedLiteralKind::CardFilter),
+            tag("artifact named "),
+        ),
+        value(
+            ("enchantments named ".len(), NamedLiteralKind::CardFilter),
+            tag("enchantments named "),
+        ),
+        value(
+            ("enchantment named ".len(), NamedLiteralKind::CardFilter),
+            tag("enchantment named "),
+        ),
+        value(
+            ("lands named ".len(), NamedLiteralKind::CardFilter),
+            tag("lands named "),
+        ),
+        value(
+            ("land named ".len(), NamedLiteralKind::CardFilter),
+            tag("land named "),
+        ),
+        value(
+            ("spells named ".len(), NamedLiteralKind::CardFilter),
+            tag("spells named "),
+        ),
+        value(
+            ("spell named ".len(), NamedLiteralKind::CardFilter),
+            tag("spell named "),
+        ),
+        value(
+            ("cards named ".len(), NamedLiteralKind::CardFilter),
+            tag("cards named "),
+        ),
+        value(
+            ("card named ".len(), NamedLiteralKind::CardFilter),
+            tag("card named "),
+        ),
     ))
     .parse(input)
 }
@@ -1869,7 +1958,37 @@ fn parse_card_named_clause_boundary(input: &str) -> OracleResult<'_, ()> {
     value((), alt((tag("."), tag(":")))).parse(input)
 }
 
-fn parse_card_named_literal_boundary(input: &str) -> OracleResult<'_, ()> {
+/// The clauses that define a freshly created token stand right behind its name
+/// and are not part of it. Terminating the token's literal span here
+/// keeps the mask off the surrounding text, so a quoted granted body still gets
+/// its own self-reference normalization.
+///
+/// Deliberately NOT applied to card-filter spans (see [`NamedLiteralKind`]): a
+/// bare comma is likewise excluded, because token names carry one
+/// ("Icingdeath, Frost Tongue").
+fn parse_token_named_literal_boundary(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = space1::<_, OracleError<'_>>(input)?;
+    let (input, _) = alt((
+        value((), (tag("with"), space1)),
+        value((), (tag("attached"), space1)),
+        value(
+            (),
+            (tag("that"), alt((value((), space1), value((), tag("'s "))))),
+        ),
+    ))
+    .parse(input)?;
+    Ok((input, ()))
+}
+
+fn parse_card_named_literal_boundary(input: &str, kind: NamedLiteralKind) -> OracleResult<'_, ()> {
+    match kind {
+        NamedLiteralKind::Token => {
+            if let Ok(found) = parse_token_named_literal_boundary(input) {
+                return Ok(found);
+            }
+        }
+        NamedLiteralKind::CardFilter => {}
+    }
     alt((
         parse_card_named_list_boundary,
         parse_card_named_zone_boundary,
@@ -1881,7 +2000,7 @@ fn parse_card_named_literal_boundary(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
-fn next_card_named_literal_prefix(lower: &str) -> Option<(usize, usize)> {
+fn next_card_named_literal_prefix(lower: &str) -> Option<(usize, usize, NamedLiteralKind)> {
     lower.char_indices().find_map(|(idx, _)| {
         let is_word_boundary = idx == 0
             || lower[..idx]
@@ -1891,15 +2010,15 @@ fn next_card_named_literal_prefix(lower: &str) -> Option<(usize, usize)> {
         is_word_boundary
             .then(|| parse_card_named_literal_prefix(&lower[idx..]).ok())
             .flatten()
-            .map(|(_, prefix_len)| (idx, prefix_len))
+            .map(|(_, (prefix_len, kind))| (idx, prefix_len, kind))
     })
 }
 
-fn card_named_literal_span_len(lower: &str) -> usize {
+fn card_named_literal_span_len(lower: &str, kind: NamedLiteralKind) -> usize {
     lower
         .char_indices()
         .find_map(|(idx, _)| {
-            parse_card_named_literal_boundary(&lower[idx..])
+            parse_card_named_literal_boundary(&lower[idx..], kind)
                 .is_ok()
                 .then_some(idx)
         })
@@ -1911,6 +2030,13 @@ fn card_named_literal_span_len(lower: &str) -> usize {
 /// while `normalize_card_name_refs` runs so first-word fallback cannot rewrite
 /// cards like Emerald Collector's "Mox Emerald" into "Mox ~" or Kookus's
 /// "Keeper of Kookus" into "Keeper of ~".
+///
+/// CR 111.4: a spell or ability that creates a token sets its name. Token names
+/// are therefore masked the same way — the name a card gives the token is a
+/// literal name, never a reference back to the creating card, even when it
+/// embeds the creator's own name (Selenia, the
+/// Cursed Heart → "Selenia's Curse"; Volo, Itinerant Scholar → "Volo's
+/// Journal"). Their spans end at [`parse_token_named_literal_boundary`].
 fn mask_card_named_literal_spans(text: &str) -> (String, Vec<String>) {
     let lower = text.to_ascii_lowercase();
     let mut masked = String::with_capacity(text.len());
@@ -1918,9 +2044,9 @@ fn mask_card_named_literal_spans(text: &str) -> (String, Vec<String>) {
     let mut rest = text;
     let mut lower_rest = lower.as_str();
 
-    while let Some((idx, prefix_len)) = next_card_named_literal_prefix(lower_rest) {
+    while let Some((idx, prefix_len, kind)) = next_card_named_literal_prefix(lower_rest) {
         let name_start = idx + prefix_len;
-        let name_len = card_named_literal_span_len(&lower_rest[name_start..]);
+        let name_len = card_named_literal_span_len(&lower_rest[name_start..], kind);
         if name_len == 0 {
             masked.push_str(&rest[..name_start]);
             rest = &rest[name_start..];
@@ -2682,7 +2808,91 @@ mod tests {
         assert!(next_card_named_literal_prefix("nazgûlcard named mox emerald").is_none());
         assert_eq!(
             next_card_named_literal_prefix("nazgûl card named mox emerald"),
-            Some(("nazgûl ".len(), "card named ".len()))
+            Some((
+                "nazgûl ".len(),
+                "card named ".len(),
+                NamedLiteralKind::CardFilter
+            ))
+        );
+    }
+
+    #[test]
+    fn token_named_literal_prefix_classifies_plural_as_token() {
+        assert_eq!(
+            next_card_named_literal_prefix("create two tokens named kobolds of kher keep"),
+            Some((
+                "create two ".len(),
+                "tokens named ".len(),
+                NamedLiteralKind::Token
+            ))
+        );
+    }
+
+    #[test]
+    fn normalize_token_named_literal_keeps_creator_name_inside_token_name() {
+        // CR 111.4: Selenia, the Cursed Heart names the token it creates
+        // "Selenia's Curse". That is the token's own literal name, not a
+        // self-reference — without the mask the comma-short-name strategy folds
+        // it to "~'s Curse", the trailing `~` → card-name expansion turns that
+        // into "Selenia, the Cursed Heart's Curse", and the token-name clause
+        // parser then truncates at the injected comma to a bare "Selenia".
+        assert_eq!(
+            normalize_card_name_refs(
+                "When Selenia dies, create a legendary black Aura Curse enchantment token named Selenia's Curse attached to target opponent.",
+                "Selenia, the Cursed Heart",
+            ),
+            "When ~ dies, create a legendary black Aura Curse enchantment token named Selenia's Curse attached to target opponent."
+        );
+    }
+
+    #[test]
+    fn normalize_token_named_literal_keeps_full_card_name_inside_token_name() {
+        // CR 111.4: Kher Keep's token is literally named "Kobolds of Kher
+        // Keep" — the creator's *full* name inside the token's name. The
+        // full-name strategy (a different branch than the comma-short one
+        // above) must leave it alone.
+        assert_eq!(
+            normalize_card_name_refs(
+                "{1}{R}, {T}: Create a 0/1 red Kobold creature token named Kobolds of Kher Keep.",
+                "Kher Keep",
+            ),
+            "{1}{R}, {T}: Create a 0/1 red Kobold creature token named Kobolds of Kher Keep."
+        );
+    }
+
+    #[test]
+    fn normalize_token_named_literal_span_ends_at_the_defining_with_clause() {
+        // The span covers the name only. Ajani's "with \"…\"" clause
+        // stays outside it — proven by "this token" inside that clause still
+        // folding to `~` (it would stay literal if the span had swallowed the
+        // clause), while "Ajani's Pridemate" itself stays literal and line 3's
+        // short name still normalizes.
+        assert_eq!(
+            normalize_card_name_refs(
+                "[+1]: You gain life equal to the number of creatures you control plus the number of planeswalkers you control.\n[−2]: Create a 2/2 white Cat Soldier creature token named Ajani's Pridemate with \"Whenever you gain life, put a +1/+1 counter on this token.\"\n[0]: If you have at least 15 life more than your starting life total, exile Ajani and each artifact and creature your opponents control.",
+                "Ajani, Strength of the Pride",
+            ),
+            "[+1]: You gain life equal to the number of creatures you control plus the number of planeswalkers you control.\n[−2]: Create a 2/2 white Cat Soldier creature token named Ajani's Pridemate with \"Whenever you gain life, put a +1/+1 counter on ~.\"\n[0]: If you have at least 15 life more than your starting life total, exile ~ and each artifact and creature your opponents control."
+        );
+    }
+
+    #[test]
+    fn normalize_token_boundaries_do_not_reach_card_filter_spans() {
+        // Counter-direction: "Once More with Feeling" is a CARD name that
+        // contains "with". Applying the token boundaries here would truncate the
+        // masked span to "Once More" and expose the rest — the reason
+        // [`NamedLiteralKind`] exists rather than one shared boundary set.
+        //
+        // This row does NOT discriminate: it is green with and without the
+        // token-prefix entries, because it pins the direction that must stay
+        // unchanged. It guards a later widening of the boundary set, not the
+        // bug this change fixes.
+        assert_eq!(
+            normalize_card_name_refs(
+                "A deck can have only one card named Once More with Feeling.",
+                "Once More with Feeling",
+            ),
+            "A deck can have only one card named Once More with Feeling."
         );
     }
 
@@ -3623,6 +3833,50 @@ mod tests {
             other => panic!("expected Multiply, got {other:?}"),
         }
         assert_eq!(rest, "cards");
+    }
+
+    #[test]
+    fn parse_count_expr_english_and_numeric_times_x() {
+        for (text, expected_factor) in [
+            ("three times X cards", 3),
+            ("five times X damage", 5),
+            ("17 times X counters", 17),
+        ] {
+            let (qty, rest) = parse_count_expr(text).unwrap();
+            assert!(
+                matches!(
+                    &qty,
+                    QuantityExpr::Multiply { factor, inner }
+                        if *factor == expected_factor
+                            && matches!(
+                                inner.as_ref(),
+                                QuantityExpr::Ref {
+                                    qty: QuantityRef::Variable { name }
+                                } if name == "X"
+                            )
+                ),
+                "{text:?} must retain its multiplier and Variable X, got {qty:?}"
+            );
+            assert!(
+                matches!(rest, "cards" | "damage" | "counters"),
+                "{text:?} must leave the noun phrase untouched, got {rest:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_count_expr_rejects_invalid_multiplier_prefixes() {
+        for (text, expected_remainder) in [
+            ("one time X damage", "time X damage"),
+            ("five timesX damage", "timesX damage"),
+        ] {
+            let (qty, rest) = parse_count_expr(text).unwrap();
+            assert!(
+                !matches!(&qty, QuantityExpr::Multiply { .. }),
+                "{text:?} must not parse as a multiplier, got {qty:?}"
+            );
+            assert_eq!(rest, expected_remainder);
+        }
     }
 
     // CR 107.3: Mathemagics' "draws 2ˣ cards" — digit + U+02E3 MODIFIER LETTER

@@ -36,8 +36,8 @@ const viewerInteractionWithProducedMana = {
 } as never;
 
 describe("encodeWireMessage / decodeWireMessage", () => {
-  it("pins the P2P wire protocol to v18", () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(19);
+  it("pins the P2P wire protocol to v23", () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(23);
   });
 
   it("defaults shortcut actions for a legacy payload created before the additive field", () => {
@@ -183,6 +183,32 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     expect(out).toEqual(msg);
   });
 
+  it("round-trips monarch-bounded exile links", async () => {
+    const msg: P2PMessage = {
+      type: "state_update",
+      state: buildGameState({
+        exile_links: [
+          {
+            exiled_id: 12,
+            source_id: 34,
+            kind: {
+              UntilOpponentBecomesMonarch: {
+                return_zone: "Battlefield",
+                controller: 0,
+              },
+            },
+          },
+        ],
+      }),
+      events: [],
+      legalActions: [],
+      manaPaymentShortcutActions: [],
+      viewerInteraction: viewerInteractionWithProducedMana,
+    };
+    const bytes = await encodeWireMessage(msg);
+    await expect(decodeWireMessage(bytes)).resolves.toEqual(msg);
+  });
+
   // (b) Tiny messages take FORMAT_RAW.
   it("ping uses FORMAT_RAW (0x00) — too small for gzip to win", async () => {
     const bytes = await encodeWireMessage({ type: "ping", timestamp: 1 });
@@ -214,17 +240,36 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     await expect(decodeWireMessage(new Uint8Array())).rejects.toThrow(/empty/);
   });
 
+  const setupFrameAt = (wireProtocolVersion: number) => ({
+    type: "game_setup",
+    wireProtocolVersion,
+    assignedPlayerId: 1,
+    playerToken: "token-123",
+    state: buildGameState(),
+    events: [],
+    legalActions: [],
+    manaPaymentShortcutActions: [],
+  });
+
   it("rejects stale setup wire protocol versions", () => {
-    expect(() => validateMessage({
+    expect(() => validateMessage(setupFrameAt(4))).toThrow(/Wire protocol mismatch/);
+  });
+
+  // The ADJACENT-peer pairing, which the far-stale v4 row above cannot exercise:
+  // 4 is refused whatever this client speaks, so that row proves the mechanism
+  // and nothing about the version. Both halves here stamp LITERALS — a frame
+  // built from WIRE_PROTOCOL_VERSION cannot tell a bumped client from an
+  // unbumped one, which is why every other handshake fixture in the suite is
+  // useless as an instrument for a bump. Revert 23 → 22 and BOTH halves red:
+  // the v22 frame stops being refused, and the v23 frame stops being admitted.
+  // The admitting half is the reach-guard: without it "refuses v22" is also
+  // satisfied by a client that refuses everything.
+  it("refuses the previous wire protocol (v22) and admits its own (v23)", () => {
+    expect(() => validateMessage(setupFrameAt(22))).toThrow(/Wire protocol mismatch/);
+    expect(validateMessage(setupFrameAt(23))).toMatchObject({
       type: "game_setup",
-      wireProtocolVersion: 4,
-      assignedPlayerId: 1,
-      playerToken: "token-123",
-      state: buildGameState(),
-      events: [],
-      legalActions: [],
-      manaPaymentShortcutActions: [],
-    })).toThrow(/Wire protocol mismatch/);
+      wireProtocolVersion: 23,
+    });
   });
 
   // (e) Compressed payload still gates through validateMessage so unknown

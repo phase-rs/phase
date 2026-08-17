@@ -188,7 +188,10 @@ fn is_exact_combat_withdrawal_path(ability: &ResolvedAbility) -> bool {
 fn single_member(
     members: &[crate::types::identifiers::ObjectId],
 ) -> Option<crate::types::identifiers::ObjectId> {
-    (members.len() == 1).then_some(members[0])
+    let [member] = members else {
+        return None;
+    };
+    Some(*member)
 }
 
 #[cfg(test)]
@@ -296,6 +299,15 @@ mod tests {
             source,
             ACTOR,
         )
+    }
+
+    #[test]
+    fn single_member_rejects_empty_and_multi_member_slices() {
+        let member = ObjectId(1);
+
+        assert_eq!(single_member(&[]), None);
+        assert_eq!(single_member(&[member]), Some(member));
+        assert_eq!(single_member(&[member, ObjectId(2)]), None);
     }
 
     #[test]

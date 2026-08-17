@@ -3,13 +3,13 @@ use serde::{Deserialize, Serialize};
 use crate::ai_support::AiDecisionContract;
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{GameState, ResolveAllConsentRun, WaitingFor};
 use crate::types::log::GameLogEntry;
 use crate::types::player::PlayerId;
 
 use super::engine::{apply_action_boundary_with_stack_limit, PublicFinalizeMode};
 use super::public_state::finalize_display_state;
-use super::{topology, turn_control};
+use super::{interaction, stack, topology, turn_control};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,6 +47,206 @@ pub enum ResolveAllCallbackDecision {
     /// dispatched as a current prompt.
     Action(GameAction),
     Stop,
+}
+
+/// Resolves the greatest prefix which has already received every priority
+/// representative's explicit, run-scoped Resolve All consent.
+///
+/// Unlike the legacy callback fast-forward below, this path never asks an AI
+/// (or any future priority holder) whether to pass.  Consent is the sole
+/// authority. Each prospective resolution is materialized on a clone through
+/// a complete, ordinary priority cycle, with `Some(1)` preventing any of the
+/// existing stack batchers from consuming more than its one stack entry. The
+/// clone is committed only when it settles to an unchanged-topology Priority
+/// checkpoint with exactly that entry removed. This is intentionally a
+/// greatest-safe-prefix proof, not loop detection or state equality.
+pub fn resolve_all_ready_prefix(
+    state: &mut GameState,
+    requester: PlayerId,
+) -> ResolveAllFastForwardResult {
+    let total = state.stack.len() as u32;
+    let mut events = Vec::new();
+    let mut log_entries = Vec::new();
+    let mut recorded_actions = Vec::new();
+    let mut items_resolved = 0;
+
+    let Some(run) = ready_consent_run(state, requester).cloned() else {
+        if matches!(&state.waiting_for, WaitingFor::ResolveAllReady { .. }) {
+            turn_control::invalidate_resolve_all_consent(state);
+            finalize_display_state(state);
+            interaction::ensure_interaction_authority(state);
+        }
+        return ResolveAllFastForwardResult {
+            events,
+            waiting_for: state.waiting_for.clone(),
+            log_entries,
+            items_resolved,
+            total,
+            recorded_actions,
+        };
+    };
+
+    // Ready is deliberately inert. Materialize the saved priority checkpoint
+    // only inside this Resolve All consumer; ordinary actions can never pass
+    // through Ready.
+    state.waiting_for = WaitingFor::Priority {
+        player: run.priority_snapshot.waiting_player,
+    };
+
+    let resolution_cap = if run.max_resolutions == 0 {
+        u32::MAX
+    } else {
+        run.max_resolutions
+    };
+
+    while items_resolved < resolution_cap && !state.stack.is_empty() {
+        let mut proof = state.clone();
+        let stack_before = proof.stack.len();
+        let Some((boundary, mut actions)) = materialize_one_consented_resolution(&mut proof, &run)
+        else {
+            break;
+        };
+
+        // CR 117.5 + CR 704.3 + CR 603.3b: do not collapse across any new
+        // checkpoint work. In particular, if item N causes a shuffle/dies/etc.
+        // trigger, this refuses N and leaves it on the live stack for ordinary
+        // priority, while earlier committed entries remain collapsed.
+        if stack_resolved_count(&boundary.events) != 1
+            || proof.stack.len().saturating_add(1) != stack_before
+            || !matches!(proof.waiting_for, WaitingFor::Priority { .. })
+            || !stack::priority_checkpoint_is_settled(&proof)
+            || !consent_authorization_matches(&proof, &run)
+        {
+            break;
+        }
+
+        items_resolved += 1;
+        events.extend(boundary.events);
+        log_entries.extend(boundary.log_entries);
+        recorded_actions.append(&mut actions);
+        *state = proof;
+    }
+
+    // Authorization is one run only. Once the proved prefix ends (including
+    // a zero-length or cap boundary), return the remaining stack to ordinary
+    // priority; no later stack entry inherits this consent.
+    turn_control::invalidate_resolve_all_consent(state);
+    finalize_display_state(state);
+    interaction::ensure_interaction_authority(state);
+
+    ResolveAllFastForwardResult {
+        events,
+        waiting_for: state.waiting_for.clone(),
+        log_entries,
+        items_resolved,
+        total,
+        recorded_actions,
+    }
+}
+
+/// Returns whether the frozen Ready consent run authorizes this requester.
+/// Transport callers must reject an unauthorized request before mutating the
+/// authoritative session; the resolver's fail-closed invalidation remains its
+/// defense-in-depth boundary.
+pub fn resolve_all_ready_requester_is_authorized(state: &GameState, requester: PlayerId) -> bool {
+    ready_consent_run(state, requester).is_some()
+}
+
+/// Validates the frozen Phase-1 consent against the live topology before the
+/// Ready state is materialized. A changed controller, eliminated player, or
+/// stale requester fails closed without invoking a speculative callback.
+pub fn resolve_all_ready_is_authorized(state: &GameState, requester: PlayerId) -> bool {
+    ready_consent_run(state, requester).is_some()
+}
+
+fn ready_consent_run(state: &GameState, requester: PlayerId) -> Option<&ResolveAllConsentRun> {
+    let WaitingFor::ResolveAllReady { epoch } = &state.waiting_for else {
+        return None;
+    };
+    let run = state.resolve_all_consent_run.as_ref().filter(|run| {
+        state.auto_pass.is_empty()
+            && run.epoch == *epoch
+            && run.participants.iter().all(|p| p.granted)
+    })?;
+    (run.participants
+        .iter()
+        .any(|participant| participant.authorized_submitter == requester)
+        && state.priority_player == run.priority_snapshot.priority_player
+        && state.priority_pass_count == run.priority_snapshot.priority_pass_count
+        && state.priority_passes == run.priority_snapshot.priority_passes
+        && consent_authorization_matches(state, run))
+    .then_some(run)
+}
+
+fn consent_authorization_matches(state: &GameState, run: &ResolveAllConsentRun) -> bool {
+    let mut representatives = topology::priority_pass_participants(state);
+    let current =
+        topology::priority_pass_representative(state, run.priority_snapshot.waiting_player);
+    let Some(current_index) = representatives
+        .iter()
+        .position(|representative| *representative == current)
+    else {
+        return false;
+    };
+    representatives.rotate_left(current_index);
+    representatives.len() == run.participants.len()
+        && run.participants.iter().all(|frozen| {
+            representatives.contains(&frozen.representative)
+                && turn_control::authorized_submitter_for_player(state, frozen.representative)
+                    == frozen.authorized_submitter
+        })
+}
+
+/// Performs exactly one actual priority cycle on a proof clone. Every seeded
+/// pass is recorded in application order so replay can submit the same normal
+/// `PassPriority` actions without a hidden batch-only transition.
+fn materialize_one_consented_resolution(
+    state: &mut GameState,
+    run: &ResolveAllConsentRun,
+) -> Option<(
+    crate::types::game_state::ActionResult,
+    Vec<(PlayerId, GameAction)>,
+)> {
+    let WaitingFor::Priority { player } = &state.waiting_for else {
+        return None;
+    };
+    let player = *player;
+    if !consent_authorization_matches(state, run) {
+        return None;
+    }
+    let actor = turn_control::authorized_submitter_for_player(state, player);
+    let mut recorded = Vec::new();
+    seed_remaining_consented_priority_passes(state, player, &mut recorded)?;
+    let boundary = apply_action_boundary_with_stack_limit(
+        state,
+        actor,
+        player,
+        GameAction::PassPriority,
+        PublicFinalizeMode::DeferredDisplay,
+        Some(1),
+    )
+    .ok()?;
+    recorded.insert(0, (actor, GameAction::PassPriority));
+    Some((boundary, recorded))
+}
+
+fn seed_remaining_consented_priority_passes(
+    state: &mut GameState,
+    current_seat: PlayerId,
+    recorded: &mut Vec<(PlayerId, GameAction)>,
+) -> Option<()> {
+    let current_rep = topology::priority_pass_representative(state, current_seat);
+    let participants = topology::priority_pass_participants(state);
+    let current_idx = participants.iter().position(|seat| *seat == current_rep)?;
+    for offset in 1..participants.len() {
+        let representative = participants[(current_idx + offset) % participants.len()];
+        if !state.priority_passes.contains(&representative) {
+            let actor = turn_control::authorized_submitter_for_player(state, representative);
+            state.priority_passes.insert(representative);
+            recorded.push((actor, GameAction::PassPriority));
+        }
+    }
+    Some(())
 }
 
 enum PriorityCycleFastForward {
@@ -285,9 +485,10 @@ mod tests {
         AbilityCost, AbilityDefinition, AbilityKind, CopyRetargetPermission, Effect,
         ManaContribution, ManaProduction, ResolvedAbility, TargetFilter,
     };
+    use crate::types::actions::ResolveAllConsentDecision;
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::format::FormatConfig;
-    use crate::types::game_state::{PublicStateDirty, StackEntry, StackEntryKind};
+    use crate::types::game_state::{AutoPassMode, PublicStateDirty, StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::ManaColor;
     use crate::types::phase::{Phase, PhaseStop, PhaseStopScope};
@@ -642,5 +843,150 @@ mod tests {
         assert_eq!(result.items_resolved, 1);
         assert_eq!(state.public_state_dirty, PublicStateDirty::default());
         assert!(!state.objects[&land_id].has_mana_ability);
+    }
+
+    fn ready_state(stack: Vec<StackEntry>) -> GameState {
+        ready_state_with_active_player(PlayerId(0), stack)
+    }
+
+    fn ready_state_with_active_player(
+        active_player: PlayerId,
+        stack: Vec<StackEntry>,
+    ) -> GameState {
+        let mut state = priority_state(PlayerId(0), stack);
+        state.active_player = active_player;
+        super::super::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::BeginResolveAll { max_resolutions: 0 },
+        )
+        .expect("priority holder begins the consent run");
+        let epoch = match &state.waiting_for {
+            WaitingFor::ResolveAllConsent { epoch, .. } => *epoch,
+            _ => panic!("second representative should be queued"),
+        };
+        super::super::engine::apply(
+            &mut state,
+            PlayerId(1),
+            GameAction::RespondResolveAllConsent {
+                epoch,
+                decision: ResolveAllConsentDecision::Grant,
+            },
+        )
+        .expect("second representative grants");
+        assert!(matches!(
+            &state.waiting_for,
+            WaitingFor::ResolveAllReady { .. }
+        ));
+        state
+    }
+
+    #[test]
+    fn ready_consent_uses_the_priority_holder_first_when_active_player_has_passed() {
+        let mut state =
+            ready_state_with_active_player(PlayerId(1), vec![no_op_entry(1, PlayerId(0))]);
+
+        let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
+
+        assert_eq!(result.items_resolved, 1);
+        assert!(state.stack.is_empty());
+    }
+
+    #[test]
+    fn ready_consent_commits_the_greatest_settled_prefix_and_records_passes() {
+        // The lower self-copy creates a new stack object. It is deliberately
+        // left for ordinary priority, while both safe entries above it commit.
+        let mut state = ready_state(vec![
+            self_copy_entry(1, PlayerId(0)),
+            no_op_entry(2, PlayerId(0)),
+            no_op_entry(3, PlayerId(0)),
+        ]);
+        let run = ready_consent_run(&state, PlayerId(0))
+            .expect("the initiating representative remains authorized at Ready")
+            .clone();
+        let mut proof = state.clone();
+        proof.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let (boundary, _) = materialize_one_consented_resolution(&mut proof, &run)
+            .expect("a full consent run materializes one ordinary priority cycle");
+        assert_eq!(stack_resolved_count(&boundary.events), 1);
+        assert_eq!(proof.stack.len(), 2);
+        assert!(matches!(proof.waiting_for, WaitingFor::Priority { .. }));
+        assert!(stack::priority_checkpoint_is_settled(&proof));
+        assert!(consent_authorization_matches(&proof, &run));
+
+        let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
+
+        assert_eq!(
+            result.items_resolved,
+            2,
+            "safe-prefix proof unexpectedly stopped: result={result:?}, waiting={:?}, stack_len={}",
+            state.waiting_for,
+            state.stack.len(),
+        );
+        assert_eq!(state.stack.len(), 1, "unsafe item remains on the stack");
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.resolve_all_consent_run.is_none());
+        assert_eq!(
+            result.recorded_actions,
+            vec![
+                (PlayerId(0), GameAction::PassPriority),
+                (PlayerId(1), GameAction::PassPriority),
+                (PlayerId(0), GameAction::PassPriority),
+                (PlayerId(1), GameAction::PassPriority),
+            ],
+            "the collapsed prefix remains reproducible through ordinary actions"
+        );
+    }
+
+    #[test]
+    fn ready_consent_honors_its_saved_resolution_cap() {
+        let mut state = ready_state(vec![
+            no_op_entry(1, PlayerId(0)),
+            no_op_entry(2, PlayerId(0)),
+        ]);
+        state
+            .resolve_all_consent_run
+            .as_mut()
+            .expect("Ready retains its frozen run")
+            .max_resolutions = 1;
+
+        let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
+
+        assert_eq!(result.items_resolved, 1);
+        assert_eq!(state.stack.len(), 1);
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.resolve_all_consent_run.is_none());
+    }
+
+    #[test]
+    fn changed_controller_invalidates_ready_consent_without_resolving() {
+        let mut state = ready_state(vec![no_op_entry(1, PlayerId(0))]);
+        state.turn_decision_controller = Some(PlayerId(1));
+        let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
+
+        assert_eq!(result.items_resolved, 0);
+        assert_eq!(state.stack.len(), 1);
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.resolve_all_consent_run.is_none());
+    }
+
+    #[test]
+    fn ready_consent_refuses_to_collapse_while_an_auto_pass_preference_is_active() {
+        let mut state = ready_state(vec![no_op_entry(1, PlayerId(0))]);
+        state.auto_pass.insert(
+            PlayerId(0),
+            AutoPassMode::UntilStackEmpty {
+                initial_stack_len: state.stack.len(),
+            },
+        );
+
+        let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
+
+        assert_eq!(result.items_resolved, 0);
+        assert_eq!(state.stack.len(), 1);
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.resolve_all_consent_run.is_none());
     }
 }

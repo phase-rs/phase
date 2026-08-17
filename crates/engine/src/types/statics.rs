@@ -807,7 +807,7 @@ pub enum AttackDefenderScope {
 }
 
 /// CR 508.1d + CR 611.2 / CR 604.2: how the required defending player of a
-/// [`StaticMode::MustAttackPlayer`] requirement is determined. Struct variants
+/// [`StaticMode::MustAttackDefender`] requirement is determined. Struct variants
 /// (NOT tuple/newtype) so internal `#[serde(tag = "type")]` tagging stays valid
 /// — this mirrors [`super::ability::QuantityExpr`] (`Fixed { value }` |
 /// `Ref { qty }`), which uses struct variants for the same serde reason: a
@@ -829,6 +829,31 @@ pub enum RequiredDefender {
     /// effect is continuously applied; the requirement is re-checked each
     /// declare-attackers step. Resolved via `game::effects::matches_player_scope`.
     Matching { filter: PlayerFilter },
+    /// CR 506.3 + CR 508.1 + CR 611.2: a specific PERMANENT defender. CR 506.3
+    /// makes "a player, a planeswalker, or a battle" one defender category, and
+    /// the engine already models that category as one type
+    /// (`combat::AttackTarget`), so the required-defender axis spans it rather
+    /// than forking a parallel player-only/permanent-only static pair. Gideon
+    /// Jura: "+2: During target opponent's next turn, creatures that player
+    /// controls attack Gideon Jura if able."
+    ///
+    /// The permanent is snapshotted at resolution (CR 611.2) as an
+    /// [`ObjectIncarnationRef`], NOT a bare `ObjectId` — CR 400.7: a permanent
+    /// that leaves and re-enters the battlefield is a new object, and the engine
+    /// reuses `ObjectId` as storage identity, so a bare id would let a
+    /// re-entered Gideon inherit a requirement aimed at the old one. Mirrors
+    /// [`StaticMode::MustBlockAttacker`]'s identical pin.
+    ///
+    /// Which `AttackTarget` kind the permanent presents is derived LIVE at each
+    /// declare-attackers step from its current card types, never pre-committed
+    /// here: a Gideon that animated itself is still a planeswalker (CR 306.1)
+    /// and still attackable, while one that has left the battlefield is not
+    /// attackable at all. CR 508.1d then simply drops the unobeyable
+    /// requirement — matching the official ruling: "If a creature controlled by
+    /// the affected player can't attack Gideon Jura (because he's no longer on
+    /// the battlefield, for example), that player may have it attack you,
+    /// another one of your planeswalkers, or nothing at all."
+    Permanent { permanent: ObjectIncarnationRef },
 }
 
 impl From<PlayerId> for RequiredDefender {
@@ -873,12 +898,14 @@ impl<'de> Deserialize<'de> for RequiredDefender {
                 enum Tagged {
                     Fixed { player: PlayerId },
                     Matching { filter: PlayerFilter },
+                    Permanent { permanent: ObjectIncarnationRef },
                 }
                 let tagged: Tagged =
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
                 Ok(match tagged {
                     Tagged::Fixed { player } => RequiredDefender::Fixed { player },
                     Tagged::Matching { filter } => RequiredDefender::Matching { filter },
+                    Tagged::Permanent { permanent } => RequiredDefender::Permanent { permanent },
                 })
             }
             _ => Err(serde::de::Error::custom(
@@ -1227,22 +1254,34 @@ pub enum StaticMode {
     /// runtime-implemented; other arms are inert.
     PlayerProtection(super::keywords::ProtectionTarget),
     MustAttack,
-    /// CR 508.1d: This creature must attack a *specific* player (or a live player
-    /// CLASS) if able. The required defender is a [`RequiredDefender`]:
+    /// CR 508.1d: This creature must attack a *specific* defender if able. Per
+    /// CR 506.3 a defender is "a player, a planeswalker, or a battle"; the
+    /// required one is a [`RequiredDefender`]:
     /// - `Fixed { player }` — a resolution-time snapshot id (Alluring Siren,
     ///   Dulcet Sirens, Encore; grafted via `Effect::ForceAttack`), CR 611.2.
     /// - `Matching { filter }` — a printed static's live player class re-evaluated
     ///   each declare-attackers step (Galactus, "an opponent with the most life
     ///   among your opponents"), CR 604.1 / CR 604.2.
+    /// - `Permanent { permanent }` — a snapshotted planeswalker/battle (Gideon
+    ///   Jura's "+2: … creatures that player controls attack Gideon Jura if
+    ///   able"), CR 611.2 + CR 400.7.
     ///
     /// Unlike the generic [`MustAttack`] (attack any defender), this narrows the
-    /// requirement to specific players. Data-carrying variant — not
+    /// requirement to specific defenders. Data-carrying variant — not
     /// registry-registered (see `coverage::is_data_carrying_static`); enforced by
     /// direct pattern-match in `combat.rs` declare-attackers validation (the
-    /// resolver at `must_attack_player_directives_for_creature` resolves the
-    /// `RequiredDefender` to concrete `PlayerId`s). Mirrors [`MustBlockAttacker`].
-    MustAttackPlayer {
-        player: RequiredDefender,
+    /// resolver at `must_attack_defender_directives_for_creature` resolves the
+    /// `RequiredDefender` to concrete `AttackTarget`s).
+    /// Mirrors [`MustBlockAttacker`].
+    ///
+    /// `serde(alias)`: pre-widening snapshots (game-state saves, P2P resume,
+    /// undo journals) wrote this variant as `MustAttackPlayer` with a `player`
+    /// field, so both the variant name and the field keep a read alias. New
+    /// writes emit the canonical names.
+    #[serde(alias = "MustAttackPlayer")]
+    MustAttackDefender {
+        #[serde(alias = "player")]
+        defender: RequiredDefender,
     },
     MustBlock,
     /// CR 702.39a / CR 509.1c: This creature must block a *specific* attacker if
@@ -1665,6 +1704,11 @@ pub enum StaticMode {
     /// only if the variant population grows beyond two.
     SuppressTriggers {
         source_filter: TargetFilter,
+        /// Optional filter over the permanent whose triggered ability would
+        /// fire. `None` retains Torpor Orb's event-wide suppression; `Some`
+        /// models Elesh Norn's controller-scoped restriction.
+        #[serde(default)]
+        trigger_source_filter: Option<TargetFilter>,
         events: Vec<SuppressedTriggerEvent>,
     },
 
@@ -2159,7 +2203,7 @@ pub enum StaticModeKind {
     CantLoseLife,
     PlayerProtection,
     MustAttack,
-    MustAttackPlayer,
+    MustAttackDefender,
     MustBlock,
     MustBlockAttacker,
     CantDraw,
@@ -2297,7 +2341,7 @@ impl StaticMode {
             StaticMode::CantLoseLife => StaticModeKind::CantLoseLife,
             StaticMode::PlayerProtection(..) => StaticModeKind::PlayerProtection,
             StaticMode::MustAttack => StaticModeKind::MustAttack,
-            StaticMode::MustAttackPlayer { .. } => StaticModeKind::MustAttackPlayer,
+            StaticMode::MustAttackDefender { .. } => StaticModeKind::MustAttackDefender,
             StaticMode::MustBlock => StaticModeKind::MustBlock,
             StaticMode::MustBlockAttacker { .. } => StaticModeKind::MustBlockAttacker,
             StaticMode::CantDraw { .. } => StaticModeKind::CantDraw,
@@ -2474,13 +2518,17 @@ impl Hash for StaticMode {
             StaticMode::ExtraBlockers { count } => count.hash(state),
             StaticMode::MustBlockAttacker { attacker } => attacker.hash(state),
             // CR 508.1d: `RequiredDefender::Matching` wraps a non-Hash
-            // `PlayerFilter`; hash the discriminant for both arms and the
-            // concrete id only for `Fixed` (precedent: the non-Hash TargetFilter
-            // arms below). Equal values still hash equal.
-            StaticMode::MustAttackPlayer { player } => {
-                std::mem::discriminant(player).hash(state);
-                if let RequiredDefender::Fixed { player: p } = player {
-                    p.hash(state);
+            // `PlayerFilter`; hash the discriminant for every arm and the
+            // concrete id only for the hashable ones (precedent: the non-Hash
+            // TargetFilter arms below). Equal values still hash equal.
+            StaticMode::MustAttackDefender { defender } => {
+                std::mem::discriminant(defender).hash(state);
+                match defender {
+                    RequiredDefender::Fixed { player } => player.hash(state),
+                    // CR 400.7: the incarnation pin is fully hashable, so a
+                    // permanent defender contributes its exact identity.
+                    RequiredDefender::Permanent { permanent } => permanent.hash(state),
+                    RequiredDefender::Matching { .. } => {}
                 }
             }
             StaticMode::MaxAttackersEachCombat { max, defender } => {
@@ -2681,7 +2729,7 @@ impl StaticMode {
             | StaticMode::CantLoseLife
             | StaticMode::PlayerProtection(_)
             | StaticMode::MustAttack
-            | StaticMode::MustAttackPlayer { .. }
+            | StaticMode::MustAttackDefender { .. }
             | StaticMode::MustBlock
             | StaticMode::MustBlockAttacker { .. }
             | StaticMode::CantDraw { .. }
@@ -2878,8 +2926,8 @@ impl fmt::Display for StaticMode {
                 write!(f, "PlayerProtection({target:?})")
             }
             StaticMode::MustAttack => write!(f, "MustAttack"),
-            StaticMode::MustAttackPlayer { player } => {
-                write!(f, "MustAttackPlayer({player:?})")
+            StaticMode::MustAttackDefender { defender } => {
+                write!(f, "MustAttackDefender({defender:?})")
             }
             StaticMode::MustBlock => write!(f, "MustBlock"),
             StaticMode::MustBlockAttacker { attacker } => {
@@ -4590,20 +4638,30 @@ mod tests {
         assert!(serde_json::from_str::<RequiredDefender>(r#"{"type":"Bogus"}"#).is_err());
     }
 
-    /// The production serde path: `MustAttackPlayer` carries a `RequiredDefender`,
-    /// and BOTH forms must round-trip through the derived `StaticMode`
-    /// (de)serialization (card-data export + game-state snapshots).
+    /// The production serde path: `MustAttackDefender` carries a
+    /// `RequiredDefender`, and EVERY form must round-trip through the derived
+    /// `StaticMode` (de)serialization (card-data export + game-state snapshots).
+    ///
+    /// `Permanent` is the one with a hand-rolled `Deserialize` on both sides —
+    /// `RequiredDefender`'s custom impl plus `ObjectIncarnationRef`'s
+    /// legacy-integer shim — so a missed arm in either would surface only here.
     #[test]
-    fn must_attack_player_round_trips_through_static_mode() {
+    fn must_attack_defender_round_trips_through_static_mode() {
         for mode in [
-            StaticMode::MustAttackPlayer {
-                player: RequiredDefender::Fixed {
+            StaticMode::MustAttackDefender {
+                defender: RequiredDefender::Fixed {
                     player: PlayerId(1),
                 },
             },
-            StaticMode::MustAttackPlayer {
-                player: RequiredDefender::Matching {
+            StaticMode::MustAttackDefender {
+                defender: RequiredDefender::Matching {
                     filter: PlayerFilter::Opponent,
+                },
+            },
+            // CR 506.3 + CR 400.7: the permanent defender, pinned by incarnation.
+            StaticMode::MustAttackDefender {
+                defender: RequiredDefender::Permanent {
+                    permanent: ObjectIncarnationRef::of(crate::types::identifiers::ObjectId(7), 3),
                 },
             },
         ] {
@@ -4622,8 +4680,8 @@ mod tests {
         let mode: StaticMode = serde_json::from_str(legacy).unwrap();
         assert_eq!(
             mode,
-            StaticMode::MustAttackPlayer {
-                player: RequiredDefender::Fixed {
+            StaticMode::MustAttackDefender {
+                defender: RequiredDefender::Fixed {
                     player: PlayerId(1)
                 },
             }
@@ -4780,12 +4838,14 @@ mod tests {
         // CR 603.2g: SuppressTriggers display enumerates the event set.
         let mode = StaticMode::SuppressTriggers {
             source_filter: TargetFilter::SelfRef,
+            trigger_source_filter: None,
             events: vec![SuppressedTriggerEvent::EntersBattlefield],
         };
         assert_eq!(mode.to_string(), "SuppressTriggers(EntersBattlefield)");
 
         let mode = StaticMode::SuppressTriggers {
             source_filter: TargetFilter::SelfRef,
+            trigger_source_filter: None,
             events: vec![
                 SuppressedTriggerEvent::EntersBattlefield,
                 SuppressedTriggerEvent::Dies,
