@@ -8,7 +8,7 @@
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::Duration;
 use engine::types::actions::GameAction;
-use engine::types::game_state::StackEntryKind;
+use engine::types::game_state::{StackEntryKind, WaitingFor};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -44,9 +44,13 @@ fn source_leaving_before_linked_exile_trigger_resolves_prevents_initial_exile() 
         .act(GameAction::PassPriority)
         .expect("P1 can pass priority for White Auracite");
     assert_eq!(committed.state().objects[&source].zone, Zone::Battlefield);
-    committed
-        .act(GameAction::OrderTriggers { order: vec![0] })
-        .expect("White Auracite's ETB trigger must be ordered");
+    assert!(
+        matches!(
+            committed.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "reach-guard: the single ETB trigger must be on the stack and return priority to P0"
+    );
 
     let StackEntryKind::TriggeredAbility { ability, .. } = &committed
         .state()
