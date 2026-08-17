@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-08-16T00:00:00Z",
+  "updated": "2026-08-17T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -838,12 +838,12 @@
           "name": "Into the Flood Maw"
         },
         {
-          "count": 3,
-          "name": "Lightning Axe"
+          "count": 4,
+          "name": "Sleight of Hand"
         },
         {
           "count": 4,
-          "name": "Island"
+          "name": "Opt"
         },
         {
           "count": 4,
@@ -875,7 +875,7 @@
         },
         {
           "count": 4,
-          "name": "Opt"
+          "name": "Island"
         },
         {
           "count": 4,
@@ -883,21 +883,21 @@
         },
         {
           "count": 4,
-          "name": "Sleight of Hand"
+          "name": "Steam Vents"
         },
         {
-          "count": 4,
-          "name": "Steam Vents"
+          "count": 3,
+          "name": "Lightning Axe"
         }
       ],
       "sideboard": [
         {
-          "count": 1,
-          "name": "Abrade"
-        },
-        {
           "count": 2,
           "name": "Disdainful Stroke"
+        },
+        {
+          "count": 1,
+          "name": "Abrade"
         },
         {
           "count": 3,
@@ -945,19 +945,15 @@
           "name": "Boomerang Basics"
         },
         {
-          "count": 3,
-          "name": "Combustion Technique"
-        },
-        {
           "count": 4,
-          "name": "Consider"
+          "name": "Combustion Technique"
         },
         {
           "count": 4,
           "name": "Divide by Zero"
         },
         {
-          "count": 3,
+          "count": 4,
           "name": "Firebending Lesson"
         },
         {
@@ -965,12 +961,16 @@
           "name": "Gran-Gran"
         },
         {
+          "count": 1,
+          "name": "Great Hall of the Biblioplex"
+        },
+        {
           "count": 2,
           "name": "Igneous Inspiration"
         },
         {
           "count": 4,
-          "name": "Island"
+          "name": "Steam Vents"
         },
         {
           "count": 2,
@@ -982,6 +982,10 @@
         },
         {
           "count": 4,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 4,
           "name": "Riverglide Pathway"
         },
         {
@@ -990,41 +994,33 @@
         },
         {
           "count": 1,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 2,
           "name": "Shivan Reef"
+        },
+        {
+          "count": 1,
+          "name": "Ral, Crackling Wit"
+        },
+        {
+          "count": 4,
+          "name": "Island"
         },
         {
           "count": 4,
           "name": "Stormchaser's Talent"
         },
         {
-          "count": 2,
-          "name": "Vivi Ornitier"
-        },
-        {
-          "count": 1,
-          "name": "Spell Pierce"
-        },
-        {
           "count": 4,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 1,
-          "name": "Shivan Reef"
-        },
-        {
-          "count": 2,
-          "name": "Ral, Crackling Wit"
+          "name": "Tablet of Discovery"
         }
       ],
       "sideboard": [
         {
           "count": 2,
-          "name": "Abrade"
+          "name": "Soul-Guide Lantern"
         },
         {
           "count": 1,
@@ -1036,15 +1032,11 @@
         },
         {
           "count": 1,
-          "name": "Combustion Technique"
+          "name": "Brazen Borrower"
         },
         {
           "count": 1,
-          "name": "Firebending Lesson"
-        },
-        {
-          "count": 1,
-          "name": "Flashfreeze"
+          "name": "Ral, Crackling Wit"
         },
         {
           "count": 1,
@@ -1055,20 +1047,159 @@
           "name": "Iroh's Demonstration"
         },
         {
+          "count": 1,
+          "name": "Price of Freedom"
+        },
+        {
+          "count": 1,
+          "name": "Disdainful Stroke"
+        },
+        {
+          "count": 3,
+          "name": "Abrade"
+        },
+        {
+          "count": 2,
+          "name": "Test of Talents"
+        }
+      ]
+    },
+    {
+      "name": "Temur Lessons",
+      "author": "MTGGoldfish",
+      "colors": [
+        "U",
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 1,
+          "name": "Iroh's Demonstration"
+        },
+        {
+          "count": 2,
+          "name": "Pop Quiz"
+        },
+        {
+          "count": 3,
+          "name": "Accumulate Wisdom"
+        },
+        {
+          "count": 3,
+          "name": "Combustion Technique"
+        },
+        {
+          "count": 4,
+          "name": "It'll Quench Ya!"
+        },
+        {
+          "count": 4,
+          "name": "Firebending Lesson"
+        },
+        {
+          "count": 4,
+          "name": "Divide by Zero"
+        },
+        {
+          "count": 4,
+          "name": "Tablet of Discovery"
+        },
+        {
+          "count": 4,
+          "name": "Abandon Attachments"
+        },
+        {
           "count": 2,
           "name": "Thor, God of Thunder"
         },
         {
-          "count": 1,
-          "name": "Ral, Crackling Wit"
+          "count": 3,
+          "name": "Questing Druid"
         },
         {
-          "count": 1,
-          "name": "Torch the Tower"
+          "count": 4,
+          "name": "Gran-Gran"
+        },
+        {
+          "count": 4,
+          "name": "Willowrush Verge"
+        },
+        {
+          "count": 4,
+          "name": "Riverpyre Verge"
+        },
+        {
+          "count": 4,
+          "name": "Riverglide Pathway"
+        },
+        {
+          "count": 3,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
         },
         {
           "count": 2,
-          "name": "Soul-Guide Lantern"
+          "name": "Island"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "True Ancestry"
+        },
+        {
+          "count": 1,
+          "name": "Boomerang Basics"
+        },
+        {
+          "count": 1,
+          "name": "Environmental Sciences"
+        },
+        {
+          "count": 2,
+          "name": "Sokka's Haiku"
+        },
+        {
+          "count": 1,
+          "name": "Price of Freedom"
+        },
+        {
+          "count": 1,
+          "name": "Mascot Exhibition"
+        },
+        {
+          "count": 2,
+          "name": "Improvisation Capstone"
+        },
+        {
+          "count": 2,
+          "name": "Ghost Vacuum"
+        },
+        {
+          "count": 1,
+          "name": "Origin of Metalbending"
+        },
+        {
+          "count": 1,
+          "name": "Iroh's Demonstration"
+        },
+        {
+          "count": 1,
+          "name": "Accumulate Wisdom"
+        },
+        {
+          "count": 1,
+          "name": "Combustion Technique"
         }
       ]
     },
@@ -1200,149 +1331,6 @@
         {
           "count": 2,
           "name": "Graveyard Trespasser"
-        }
-      ]
-    },
-    {
-      "name": "Temur Lessons",
-      "author": "MTGGoldfish",
-      "colors": [
-        "U",
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Abandon Attachments"
-        },
-        {
-          "count": 3,
-          "name": "Accumulate Wisdom"
-        },
-        {
-          "count": 3,
-          "name": "Combustion Technique"
-        },
-        {
-          "count": 4,
-          "name": "Divide by Zero"
-        },
-        {
-          "count": 4,
-          "name": "Firebending Lesson"
-        },
-        {
-          "count": 4,
-          "name": "Gran-Gran"
-        },
-        {
-          "count": 1,
-          "name": "Iroh's Demonstration"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "It'll Quench Ya!"
-        },
-        {
-          "count": 3,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 2,
-          "name": "Pop Quiz"
-        },
-        {
-          "count": 3,
-          "name": "Questing Druid"
-        },
-        {
-          "count": 4,
-          "name": "Riverglide Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Riverpyre Verge"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Tablet of Discovery"
-        },
-        {
-          "count": 2,
-          "name": "Thor, God of Thunder"
-        },
-        {
-          "count": 4,
-          "name": "Willowrush Verge"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Accumulate Wisdom"
-        },
-        {
-          "count": 1,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 1,
-          "name": "Combustion Technique"
-        },
-        {
-          "count": 1,
-          "name": "Environmental Sciences"
-        },
-        {
-          "count": 2,
-          "name": "Improvisation Capstone"
-        },
-        {
-          "count": 2,
-          "name": "Ghost Vacuum"
-        },
-        {
-          "count": 1,
-          "name": "Iroh's Demonstration"
-        },
-        {
-          "count": 1,
-          "name": "Mascot Exhibition"
-        },
-        {
-          "count": 1,
-          "name": "Origin of Metalbending"
-        },
-        {
-          "count": 1,
-          "name": "Price of Freedom"
-        },
-        {
-          "count": 2,
-          "name": "Sokka's Haiku"
-        },
-        {
-          "count": 1,
-          "name": "True Ancestry"
         }
       ]
     }
