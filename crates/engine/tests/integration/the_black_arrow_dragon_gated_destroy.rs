@@ -218,6 +218,7 @@ fn cast_the_black_arrow(target: ArrowTarget, prevent_damage: bool) -> (Zone, u32
         ArrowTarget::Dragon | ArrowTarget::NonDragon => TargetRef::Object(victim),
     };
 
+    let mut settled = false;
     for _ in 0..32 {
         match runner.state().waiting_for.clone() {
             WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
@@ -227,7 +228,10 @@ fn cast_the_black_arrow(target: ArrowTarget, prevent_damage: bool) -> (Zone, u32
                     })
                     .expect("selecting The Black Arrow's ETB target must succeed");
             }
-            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => {
+                settled = true;
+                break;
+            }
             WaitingFor::Priority { .. } => {
                 runner
                     .act(GameAction::PassPriority)
@@ -236,6 +240,10 @@ fn cast_the_black_arrow(target: ArrowTarget, prevent_damage: bool) -> (Zone, u32
             other => panic!("unexpected The Black Arrow prompt: {other:?}"),
         }
     }
+    assert!(
+        settled,
+        "The Black Arrow must fully resolve before inspecting the damage recipient"
+    );
 
     let state = runner.state();
     let (zone, damage) = state
@@ -336,6 +344,7 @@ fn a_permanent_rider_does_not_fall_back_to_its_creature_source_for_a_player_targ
         })
         .expect("casting the creature source must succeed");
 
+    let mut settled = false;
     for _ in 0..32 {
         match runner.state().waiting_for.clone() {
             WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
@@ -345,7 +354,10 @@ fn a_permanent_rider_does_not_fall_back_to_its_creature_source_for_a_player_targ
                     })
                     .expect("selecting the player damage target must succeed");
             }
-            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => {
+                settled = true;
+                break;
+            }
             WaitingFor::Priority { .. } => {
                 runner
                     .act(GameAction::PassPriority)
@@ -354,6 +366,10 @@ fn a_permanent_rider_does_not_fall_back_to_its_creature_source_for_a_player_targ
             other => panic!("unexpected permanent-rider prompt: {other:?}"),
         }
     }
+    assert!(
+        settled,
+        "the permanent-rider source must fully resolve before inspecting the game state"
+    );
 
     assert_eq!(
         runner.state().players[P1.0 as usize].life,
