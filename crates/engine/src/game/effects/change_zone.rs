@@ -1121,7 +1121,7 @@ pub fn resolve(
             per_obj_ctx.source_id,
         );
         let delivery_start = events.len();
-        let stack_depth_before_zone_move = state.resolution_stack.len();
+        let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
         match process_one_zone_move_with_terminal(state, &per_obj_ctx, *obj_id, events) {
             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                 logical_zone_change_group
@@ -1996,7 +1996,7 @@ pub fn resolve_all(
         let anticipated_pause =
             anticipated_zone_change_delivery(state, obj_id, dest_zone, ability.source_id);
         let delivery_start = events.len();
-        let stack_depth_before_zone_move = state.resolution_stack.len();
+        let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
         match crate::game::zone_pipeline::execute_zone_move_with_terminal_and_controller(
             state,
             obj_id,

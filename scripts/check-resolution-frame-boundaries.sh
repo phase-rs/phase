@@ -9,12 +9,14 @@
 # identity-addressed access. Removing an arbitrary index, or searching the
 # vector to decide what to mutate, breaks that authority.
 #
-# That rule is NO LONGER ENFORCED HERE. It is enforced by the type system:
-# `ResolutionStack::frames` is a `FrameVec` whose backing `Vec` is private to
-# `crates/engine/src/types/resolution/frame_vec.rs`, every accessor takes an
-# opaque `FrameSlot`, and the removal operations have no wrapper. A positional
-# scan still compiles and still cannot be spent, because it produces a `usize`
-# and nothing accepts one. The distinction being drawn is unchanged —
+# That rule is enforced by the type system, with one residual structural guard
+# here. `ResolutionStack::frames` is a `FrameVec` whose backing `Vec` is
+# private to `crates/engine/src/types/resolution/frame_vec.rs`, every operation
+# that addresses a frame for mutation takes an opaque `FrameSlot` or an opaque
+# `ChildStackDepth`, and the removal operations have no wrapper. A positional
+# scan still compiles, and the one method that accepts the `usize` it yields is
+# `frame_at_offset`, which hands back a frame to read and never a position to
+# address. The distinction being drawn is unchanged —
 # positional/adjacency-inferred access GUESSES a structural relationship the
 # stack does not guarantee, while identity-addressed access asserts one, since
 # ids come from a monotonic allocator that never rewinds and a stale id matches
@@ -25,10 +27,12 @@
 # This script previously grepped for that rule because `frames` was private to
 # a 7,000-line module and Rust privacy is module-scoped, so "private" bought
 # nothing against the code beside it. Shrinking the module to ~230 lines is what
-# made the privacy real. What remains below is a single structural check that
-# the design itself is intact: `FrameSlot` must be mintable only by the
-# documented methods, since a new one would reopen positional addressing
-# without any compiler error to show for it.
+# made the privacy real. This script carries five structural checks that the
+# design itself is intact: `FrameSlot` and `ChildStackDepth` must each be
+# mintable only by their documented methods, the two depth-addressed doors
+# must each take a `ChildStackDepth`, and `frame_at_offset` must stay the
+# module's only bare-`usize` parameter — any of those breaking would reopen
+# positional addressing without any compiler error to show for it.
 
 set -euo pipefail
 
@@ -267,6 +271,70 @@ def function_span(source: str, function_name: str) -> tuple[int, int]:
     return block_span(source, match)
 
 
+def rust_fn_signatures(source: str) -> list[tuple[str, str, str]]:
+    """`(name, params, tail)` for every `fn` in `source`.
+
+    `params` is the parameter list with the contents of every APPLIED group
+    elided -- a bracket whose opener directly follows an identifier, i.e.
+    `Fn(..)` / `fn(..)` / `Foo[..]`.  A bare tuple type `(usize, u8)` is not
+    applied, so its contents are kept.  `tail` is the text between the
+    parameter list and the body's `{` (or a `;`): the return type and any
+    `where` clause.
+
+    This is a text scan, not a parser: it does not see, for example, a `usize`
+    behind a type alias, a method a macro generated, or a raw identifier.
+    """
+    out: list[tuple[str, str, str]] = []
+    n = len(source)
+    for match in re.finditer(r"\bfn\s+(\w+)", source):
+        i = match.end()
+        while i < n and source[i].isspace():
+            i += 1
+        if i < n and source[i] == "<":  # skip a generic parameter list
+            angle = 0
+            while i < n:
+                if source[i] == "<":
+                    angle += 1
+                elif source[i] == ">" and source[i - 1] != "-":  # not the `>` of `->`
+                    angle -= 1
+                    if angle == 0:
+                        i += 1
+                        break
+                i += 1
+            while i < n and source[i].isspace():
+                i += 1
+        if i >= n or source[i] != "(":
+            continue
+        depth = 0
+        elide_from = 0
+        params: list[str] = []
+        while i < n:
+            char = source[i]
+            if char in "([{":
+                depth += 1
+                if depth > 1 and not elide_from and re.match(r"\w", source[i - 1]):
+                    elide_from = depth
+                i += 1
+                continue
+            if char in ")]}":
+                if elide_from == depth:
+                    elide_from = 0
+                depth -= 1
+                i += 1
+                if depth == 0:
+                    break
+                continue
+            if not elide_from:
+                params.append(char)
+            i += 1
+        tail: list[str] = []
+        while i < n and source[i] not in "{;":
+            tail.append(source[i])
+            i += 1
+        out.append((match.group(1), "".join(params), "".join(tail)))
+    return out
+
+
 def fail(failures: list[str], path: Path, source: str, offset: int, message: str) -> None:
     failures.append(f"  {path}:{line_number(source, offset)}: {message}")
 
@@ -361,24 +429,29 @@ for file_name in files:
     # The frame-search and frame-removal scans that used to run here are gone,
     # because the type system now enforces what they policed.
     # `ResolutionStack::frames` is a `FrameVec` whose backing `Vec` is private
-    # to `types/resolution/frame_vec.rs`; every accessor takes an opaque
-    # `FrameSlot`, and the removal operations have no wrapper at all. A
-    # positional scan still compiles, and still cannot be spent: it yields a
-    # `usize`, and nothing accepts one.
+    # to `types/resolution/frame_vec.rs`; every operation that addresses a
+    # frame for mutation takes an opaque `FrameSlot` or an opaque
+    # `ChildStackDepth`, and the removal operations have no wrapper at all. A
+    # positional scan still compiles, and the one method that accepts the
+    # `usize` it yields is `frame_at_offset`, which hands back a frame to read
+    # and never a position to address.
     #
-    # That argument holds only while `FrameSlot` values come from the minting
-    # methods below. A new `fn ... -> Option<FrameSlot>` in that module would
-    # reopen positional addressing with no compiler error to show for it, so
-    # that -- and only that -- is what a grep still has to protect. The rule is
-    # now one structural check on a ~230-line module rather than a search-shape
-    # scan over 7,000 lines.
+    # That argument holds only while `FrameSlot` and `ChildStackDepth` values
+    # come from their minting methods, and while `frame_at_offset` stays the
+    # only bare-`usize` parameter in that module. A new
+    # `fn ... -> Option<FrameSlot>`, a second mint of a depth, or a new
+    # bare-`usize` parameter would each reopen positional addressing with no
+    # compiler error to show for it, so that -- and only that -- is what a grep
+    # still has to protect: five structural checks on a ~270-line module rather
+    # than a search-shape scan over 7,000 lines.
     #
-    # `slot_at_captured_depth` is deliberately on this list: it is the single
-    # `usize` door, and it exists because an effect records
-    # `resolution_stack.len()` before running a child producer and hands that
-    # length back afterwards. Giving that captured depth its own type at all of
-    # its origins would remove the door entirely; until then it is named so
-    # that misuse reads as misuse at the call site.
+    # `slot_at_captured_depth` stays on this list, and its argument is no
+    # longer a bare `usize`: the captured depth has its own opaque type,
+    # `ChildStackDepth`, minted only by `FrameVec::capture_depth`. The deferral
+    # this comment used to record -- giving that captured depth its own type at
+    # all of its origins -- has been taken, so the sanctioned `FrameSlot`
+    # minting set is unchanged while the one door it names is closed at the
+    # type.
     frame_vec_source = (root / "crates/engine/src/types/resolution/frame_vec.rs").read_text()
     minting = set(re.findall(r"fn\s+(\w+)\s*\([^)]*\)\s*->[^{;]*\bFrameSlot\b", frame_vec_source))
     sanctioned_minting = {"top", "below", "above", "by_id", "slot_at_captured_depth"}
@@ -389,6 +462,58 @@ for file_name in files:
             "  crates/engine/src/types/resolution/frame_vec.rs: FrameSlot may be "
             f"minted only by {', '.join(sorted(sanctioned_minting))}; "
             f"unexpected: {added}; missing: {missing}"
+        )
+
+    # Four more structural checks, on the second opaque value this module
+    # mints. (1) `ChildStackDepth` may be minted only by `capture_depth`.
+    # (2) `slot_at_captured_depth` and (3) `insert_at_child_boundary` must each
+    # take one. (4) `frame_at_offset` must remain the module's only
+    # bare-`usize` parameter, since a new one would reopen positional mutation
+    # with no compiler error to show for it -- the same hazard the `FrameSlot`
+    # minting check exists for, on the parameter axis instead of the return
+    # axis.
+    #
+    # All four read `rust_fn_signatures`, which splits a signature into its
+    # top-level parameter list and its return text, so a `usize` sitting after
+    # a nested `)` -- `pick: impl Fn(&ResolutionFrame) -> bool, depth: usize`
+    # -- is still seen. It is a text scan, not a compiler: it does not see, for
+    # example, a `usize` renamed by a type alias or a method a macro generated.
+    signatures = rust_fn_signatures(frame_vec_source)
+
+    depth_minting = {
+        name for name, _params, tail in signatures
+        if re.search(r"\bChildStackDepth\b", tail)
+    }
+    if depth_minting != {"capture_depth"}:
+        added = ", ".join(sorted(depth_minting - {"capture_depth"})) or "none"
+        missing = "none" if "capture_depth" in depth_minting else "capture_depth"
+        failures.append(
+            "  crates/engine/src/types/resolution/frame_vec.rs: ChildStackDepth may "
+            f"be minted only by capture_depth; unexpected: {added}; missing: {missing}"
+        )
+
+    depth_typed = {
+        name for name, params, _tail in signatures
+        if re.search(r"\bChildStackDepth\b", params)
+    }
+    for door in ("slot_at_captured_depth", "insert_at_child_boundary"):
+        if door not in depth_typed:
+            failures.append(
+                "  crates/engine/src/types/resolution/frame_vec.rs: "
+                f"{door} must take a ChildStackDepth, not a bare usize"
+            )
+
+    usize_params = {
+        name for name, params, _tail in signatures
+        if re.search(r"\busize\b", params)
+    }
+    if usize_params != {"frame_at_offset"}:
+        added = ", ".join(sorted(usize_params - {"frame_at_offset"})) or "none"
+        missing = "none" if "frame_at_offset" in usize_params else "frame_at_offset"
+        failures.append(
+            "  crates/engine/src/types/resolution/frame_vec.rs: frame_at_offset must "
+            "be the only method taking a bare usize (it returns a frame, never a "
+            f"slot); unexpected: {added}; missing: {missing}"
         )
 
 if failures:

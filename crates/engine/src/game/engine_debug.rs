@@ -971,7 +971,7 @@ fn drain_debug_card_entries(
     events: &mut Vec<GameEvent>,
 ) {
     while pending.remaining > 0 && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-        let child_stack_start = state.resolution_stack.len();
+        let child_stack_start = state.resolution_stack.capture_child_boundary();
         let object_id = materialize_debug_card(
             state,
             &pending.source,
@@ -986,9 +986,9 @@ fn drain_debug_card_entries(
         state.waiting_for = entry.waiting_for;
 
         if !matches!(state.waiting_for, WaitingFor::Priority { .. })
-            || state.resolution_stack.len() > child_stack_start
+            || state.resolution_stack.capture_child_boundary() > child_stack_start
         {
-            if state.resolution_stack.len() > child_stack_start {
+            if state.resolution_stack.capture_child_boundary() > child_stack_start {
                 state
                     .insert_debug_card_entries_parent_at_child_boundary(pending, child_stack_start)
                     .expect("debug-card parent must sit below the entry child stack");

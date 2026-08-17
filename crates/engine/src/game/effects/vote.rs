@@ -28,6 +28,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+use crate::types::resolution::ChildStackDepth;
 
 use super::resolve_ability_chain;
 use crate::game::ability_utils::build_resolved_from_def;
@@ -381,7 +382,7 @@ pub fn resolve_tally(
             // If a ballot parks an interactive choice (e.g. ChooseFromZoneChoice),
             // stash remaining voters and return early; the drain function resumes.
             let initial_waiting_for = state.waiting_for.clone();
-            let stack_depth_before_ballot = state.resolution_stack.len();
+            let stack_depth_before_ballot = state.resolution_stack.capture_child_boundary();
             let mut remaining_voters: Vec<PlayerId> = choice_ballots.clone();
 
             while let Some(voter) = remaining_voters.first().copied() {
@@ -654,7 +655,7 @@ pub(crate) fn drain_active_vote_ballot(state: &mut GameState, events: &mut Vec<G
     let source_id = pending.source_id;
     let controller = pending.controller;
     let template = pending.ability_template;
-    let stack_depth_before_ballot = state.resolution_stack.len();
+    let stack_depth_before_ballot = state.resolution_stack.capture_child_boundary();
 
     while let Some(voter) = remaining_voters.first().copied() {
         remaining_voters.remove(0);
@@ -694,9 +695,13 @@ pub(crate) fn drain_active_vote_ballot(state: &mut GameState, events: &mut Vec<G
 fn park_vote_ballot_after_current_ballot(
     state: &mut GameState,
     pending: PendingVoteBallotIteration,
-    stack_depth_before_ballot: usize,
+    stack_depth_before_ballot: ChildStackDepth,
 ) {
-    match state.resolution_stack.len().cmp(&stack_depth_before_ballot) {
+    match state
+        .resolution_stack
+        .capture_child_boundary()
+        .cmp(&stack_depth_before_ballot)
+    {
         std::cmp::Ordering::Less => {
             panic!("vote ballot removed a parent frame before it could be re-parked")
         }

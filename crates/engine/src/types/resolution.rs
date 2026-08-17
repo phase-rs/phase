@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
+pub use frame_vec::ChildStackDepth;
 use frame_vec::{FrameSlot, FrameVec};
 
 use crate::types::ability::{AbilityDefinition, DiscardedCardResult, ResolvedAbility, TargetRef};
@@ -469,19 +470,19 @@ pub enum ResolutionStackError {
         "child-stack boundary {child_stack_start} is not below the active child stack of length {stack_len}"
     )]
     InvalidChildBoundary {
-        child_stack_start: usize,
+        child_stack_start: ChildStackDepth,
         stack_len: usize,
     },
     #[error(
         "child-stack boundary {child_stack_start} has {actual:?} immediately below it, expected {expected:?}"
     )]
     UnexpectedChildBoundaryParent {
-        child_stack_start: usize,
+        child_stack_start: ChildStackDepth,
         expected: FrameKind,
         actual: FrameKind,
     },
     #[error("child-stack boundary {child_stack_start} does not retain the ChangeZone owner being re-parked")]
-    MismatchedChangeZoneBoundaryOwner { child_stack_start: usize },
+    MismatchedChangeZoneBoundaryOwner { child_stack_start: ChildStackDepth },
     #[error("top frame {frame:?} does not match waiting prompt {waiting_for}")]
     PromptMismatch {
         frame: FrameKind,
@@ -529,8 +530,10 @@ pub enum ParkedFramePlacement {
 /// the type system rather than by convention: [`FrameVec`] hands out positions
 /// only as opaque [`FrameSlot`]s minted from the top, from an adjacent frame, or
 /// from a [`PostReplacementFrameId`]. A frame located any other way — by
-/// scanning, by arithmetic on the length — yields a `usize` that no accessor
-/// accepts, so a positional search cannot be spent even when it can be written.
+/// scanning, by arithmetic on the length — yields a `usize`, and the only
+/// thing that accepts one is [`FrameVec::frame_at_offset`], which hands back
+/// a frame to read and never a position to address, so a positional search
+/// still cannot be spent on a mutation even when it can be written.
 /// See [`frame_vec`] for why that replaced a grep-based guard.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ResolutionStack {
@@ -617,6 +620,15 @@ impl ResolutionStack {
 
     pub fn len(&self) -> usize {
         self.frames.len()
+    }
+
+    /// Record the current stack depth, before running a child producer.
+    ///
+    /// This is the public face of the only [`ChildStackDepth`] constructor;
+    /// even this module cannot build one directly, because the field is private
+    /// to [`frame_vec`] and this module is its parent, not its descendant.
+    pub fn capture_child_boundary(&self) -> ChildStackDepth {
+        self.frames.capture_depth()
     }
 
     pub fn last(&self) -> Option<&ResolutionFrame> {
@@ -1117,7 +1129,7 @@ impl ResolutionStack {
     pub fn insert_change_zone_parent_at_child_boundary(
         &mut self,
         pending: PendingChangeZoneIteration,
-        child_stack_start: usize,
+        child_stack_start: ChildStackDepth,
     ) -> Result<(), ResolutionStackError> {
         let Some(boundary) = self.frames.slot_at_captured_depth(child_stack_start) else {
             return Err(ResolutionStackError::InvalidChildBoundary {
@@ -1173,7 +1185,7 @@ impl ResolutionStack {
     pub fn replace_change_zone_parent_at_child_boundary(
         &mut self,
         pending: PendingChangeZoneIteration,
-        child_stack_start: usize,
+        child_stack_start: ChildStackDepth,
     ) -> Result<(), ResolutionStackError> {
         let logical_group_id = pending.logical_zone_change_group.logical_group_id;
         let boundary = self.frames.slot_at_captured_depth(child_stack_start);
@@ -1570,7 +1582,7 @@ impl ResolutionStack {
     pub fn insert_copy_token_parent_at_child_boundary(
         &mut self,
         pending: PendingCopyTokenResolution,
-        child_stack_start: usize,
+        child_stack_start: ChildStackDepth,
     ) -> Result<(), ResolutionStackError> {
         self.insert_parent_at_child_boundary(ResolutionFrame::CopyToken(pending), child_stack_start)
     }
@@ -1614,7 +1626,7 @@ impl ResolutionStack {
     pub fn insert_debug_card_entries_parent_at_child_boundary(
         &mut self,
         pending: PendingDebugCardEntries,
-        child_stack_start: usize,
+        child_stack_start: ChildStackDepth,
     ) -> Result<(), ResolutionStackError> {
         self.insert_parent_at_child_boundary(
             ResolutionFrame::DebugCardEntries(Box::new(pending)),
@@ -1692,7 +1704,7 @@ impl ResolutionStack {
     pub fn insert_each_player_copy_chosen_parent_at_child_boundary(
         &mut self,
         pending: PendingEachPlayerCopyChosen,
-        child_stack_start: usize,
+        child_stack_start: ChildStackDepth,
     ) -> Result<(), ResolutionStackError> {
         self.insert_parent_at_child_boundary(
             ResolutionFrame::EachPlayerCopyChosen(pending),
@@ -3035,7 +3047,7 @@ impl ResolutionStack {
     pub fn insert_parent_at_child_boundary(
         &mut self,
         frame: ResolutionFrame,
-        child_stack_start: usize,
+        child_stack_start: ChildStackDepth,
     ) -> Result<(), ResolutionStackError> {
         let stack_len = self.frames.len();
         if stack_len == 0 {
@@ -5273,8 +5285,9 @@ mod tests {
             stack.insert_parent_of_active(continuation_frame(1)),
             Err(ResolutionStackError::NoActiveChild)
         );
+        let empty_boundary = stack.capture_child_boundary();
         assert_eq!(
-            stack.insert_parent_at_child_boundary(continuation_frame(1), 0),
+            stack.insert_parent_at_child_boundary(continuation_frame(1), empty_boundary),
             Err(ResolutionStackError::NoActiveChild)
         );
 
@@ -5295,10 +5308,11 @@ mod tests {
                 FrameKind::AbilityContinuation,
             ]
         );
+        let at_top = stack.capture_child_boundary();
         assert_eq!(
-            stack.insert_parent_at_child_boundary(continuation_frame(3), stack.len()),
+            stack.insert_parent_at_child_boundary(continuation_frame(3), at_top),
             Err(ResolutionStackError::InvalidChildBoundary {
-                child_stack_start: stack.len(),
+                child_stack_start: at_top,
                 stack_len: stack.len(),
             })
         );
@@ -5732,6 +5746,21 @@ mod tests {
     }
 
     #[test]
+    fn captured_child_boundaries_order_by_stack_growth() {
+        let mut stack = ResolutionStack::default();
+        let empty = stack.capture_child_boundary();
+
+        stack.push_inner(continuation_frame(1));
+        let after_push = stack.capture_child_boundary();
+        assert!(after_push > empty);
+
+        stack
+            .pop_expected(FrameKind::AbilityContinuation)
+            .expect("the pushed continuation is the top frame");
+        assert_eq!(stack.capture_child_boundary(), empty);
+    }
+
+    #[test]
     fn change_zone_repark_keeps_a_distinct_nested_change_zone_child() {
         let ResolutionFrame::ChangeZone(outer) = change_zone_frame(160) else {
             unreachable!("helper constructs a ChangeZone frame")
@@ -5754,10 +5783,11 @@ mod tests {
 
         let mut stack = ResolutionStack::default();
         stack.push_inner(ResolutionFrame::ChangeZone(outer));
+        let boundary = stack.capture_child_boundary();
         stack.push_inner(ResolutionFrame::ChangeZone(child));
 
         stack
-            .replace_change_zone_parent_at_child_boundary(replacement, 1)
+            .replace_change_zone_parent_at_child_boundary(replacement, boundary)
             .expect("the outer ChangeZone owner remains immediately below its child");
 
         let frames = stack.iter().collect::<Vec<_>>();

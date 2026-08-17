@@ -32,8 +32,8 @@ use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
 use crate::types::player::{Player, PlayerId};
 use crate::types::resolution::{
-    AbilityContinuationFrame, FrameGate, OptionalEffectFrame, PendingRepeatedOptionalPayment,
-    RepeatedOptionalPaymentFrame, ResolutionFrame,
+    AbilityContinuationFrame, ChildStackDepth, FrameGate, OptionalEffectFrame,
+    PendingRepeatedOptionalPayment, RepeatedOptionalPaymentFrame, ResolutionFrame,
 };
 use crate::types::zones::Zone;
 
@@ -1184,11 +1184,11 @@ fn drain_active_repeat_until(state: &mut GameState) {
 fn park_repeat_until_after_inner_pause(
     state: &mut GameState,
     pending: crate::types::game_state::PendingRepeatUntil,
-    stack_depth_before_iteration: usize,
+    stack_depth_before_iteration: ChildStackDepth,
 ) {
     match state
         .resolution_stack
-        .len()
+        .capture_child_boundary()
         .cmp(&stack_depth_before_iteration)
     {
         std::cmp::Ordering::Less => {
@@ -1362,7 +1362,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 )
             });
             let delivery_start = events.len();
-            let stack_depth_before_zone_move = state.resolution_stack.len();
+            let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
             match crate::game::effects::change_zone::process_one_zone_move_with_terminal(
                 state, &ctx, *obj_id, events,
             ) {
@@ -1618,7 +1618,7 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
             } else {
                 &ability
             };
-            let stack_depth_before_iteration = state.resolution_stack.len();
+            let stack_depth_before_iteration = state.resolution_stack.capture_child_boundary();
             // CR 608.2c + CR 109.5: Drive the FULL chain (parent effect +
             // sub_ability + line-1660 continuation wiring) for each resumed
             // iteration, mirroring iteration 0's path. Calling `resolve_effect`
@@ -1680,11 +1680,11 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
 fn park_repeat_for_after_current_iteration(
     state: &mut GameState,
     pending: crate::types::game_state::PendingRepeatIteration,
-    stack_depth_before_iteration: usize,
+    stack_depth_before_iteration: ChildStackDepth,
 ) {
     match state
         .resolution_stack
-        .len()
+        .capture_child_boundary()
         .cmp(&stack_depth_before_iteration)
     {
         std::cmp::Ordering::Less => {
@@ -7422,7 +7422,7 @@ fn drive_repeat_for_outermost(
     while iteration < base_iterations {
         let mut iter_ability = effective.clone();
         iter_ability.repeat_for = None;
-        let stack_depth_before_iteration = state.resolution_stack.len();
+        let stack_depth_before_iteration = state.resolution_stack.capture_child_boundary();
         resolve_chain_body(state, &iter_ability, events, depth)?;
         if state.waiting_for != initial_waiting_for
             || (!initial_continuation_present && state.active_ability_continuation().is_some())
@@ -9520,7 +9520,7 @@ pub fn resolve_ability_chain(
         None => resolve_chain_body(state, ability, events, depth),
         Some(RepeatContinuation::ControllerChoice) => {
             let initial_waiting_for = state.waiting_for.clone();
-            let stack_depth_before_iteration = state.resolution_stack.len();
+            let stack_depth_before_iteration = state.resolution_stack.capture_child_boundary();
             resolve_chain_body(state, ability, events, depth)?;
             if state.waiting_for != initial_waiting_for {
                 // Inner pause: stash so the drain re-sets the repeat prompt
@@ -9547,7 +9547,7 @@ pub fn resolve_ability_chain(
             stop_on_duplicate_exiled_names,
         }) => loop {
             let initial_waiting_for = state.waiting_for.clone();
-            let stack_depth_before_iteration = state.resolution_stack.len();
+            let stack_depth_before_iteration = state.resolution_stack.capture_child_boundary();
             resolve_chain_body(state, ability, events, depth)?;
             if state.waiting_for != initial_waiting_for {
                 park_repeat_until_after_inner_pause(
@@ -9597,7 +9597,7 @@ pub fn resolve_ability_chain(
                 // iteration's stale result.
                 state.resolution_coin_flip = None;
                 let initial_waiting_for = state.waiting_for.clone();
-                let stack_depth_before_iteration = state.resolution_stack.len();
+                let stack_depth_before_iteration = state.resolution_stack.capture_child_boundary();
                 resolve_chain_body(state, ability, events, depth)?;
                 if state.waiting_for != initial_waiting_for {
                     // Inner pause: stash the loop ability with its remaining cap
@@ -11193,7 +11193,7 @@ fn resolve_chain_body(
                     } else {
                         effective
                     };
-                let stack_depth_before_iteration = state.resolution_stack.len();
+                let stack_depth_before_iteration = state.resolution_stack.capture_child_boundary();
                 // CR 608.2d: A kind-driven or member-driven iteration whose action
                 // is optional fires its per-iteration "you may" gate through the
                 // full chain. All other iterations resolve the effect directly —

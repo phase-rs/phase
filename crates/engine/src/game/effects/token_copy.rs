@@ -21,6 +21,7 @@ use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::proposed_event::{
     CopyTokenSpec, EtbTapState, ProposedEvent, TokenCharacteristics,
 };
+use crate::types::resolution::ChildStackDepth;
 use crate::types::resolved_commands::{
     ResolvedCopyBodyModifications, ResolvedTokenBody, ResolvedTokenCreationCommand,
 };
@@ -285,7 +286,7 @@ fn drain_copy_token_resolution(
         if batch.count == 0 {
             continue;
         }
-        let stack_depth_before_batch = state.resolution_stack.len();
+        let stack_depth_before_batch = state.resolution_stack.capture_child_boundary();
         let spec = super::token::copy_probe_spec_for(
             batch.copy.source_id,
             batch.copy.controller,
@@ -357,9 +358,13 @@ fn drain_copy_token_resolution(
 fn park_copy_token_after_current_batch(
     state: &mut GameState,
     pending: PendingCopyTokenResolution,
-    stack_depth_before_batch: usize,
+    stack_depth_before_batch: ChildStackDepth,
 ) {
-    match state.resolution_stack.len().cmp(&stack_depth_before_batch) {
+    match state
+        .resolution_stack
+        .capture_child_boundary()
+        .cmp(&stack_depth_before_batch)
+    {
         std::cmp::Ordering::Less => {
             panic!("copy-token batch removed a parent frame before it could be re-parked")
         }

@@ -18,19 +18,25 @@
 //! [`FrameVec::above`] and [`FrameVec::by_id`], which are the three sanctioned
 //! access modes above, plus [`FrameVec::slot_at_captured_depth`].
 //!
-//! Reading or mutating a frame requires a slot. A `usize` obtained by scanning
-//! — `iter().position(..)`, arithmetic on `len()`, a literal — still compiles,
-//! and the only thing that will accept it is `slot_at_captured_depth`, whose
-//! argument is contractually a stack length recorded before a child producer
-//! ran. So the guarantee is precisely this: positional addressing cannot be
-//! reached by accident or by ordinary-looking code, and the single way to reach
-//! it deliberately names itself at the call site. That is weaker than "no way
-//! to spend it" and stronger than a lint, and the difference matters enough to
-//! state exactly — see that method for why the door cannot close while the
-//! depth arrives as a bare `usize`.
+//! [`ChildStackDepth`] is the module's second opaque value, minted by exactly
+//! one method: [`FrameVec::capture_depth`], which takes no argument and reads
+//! the stack's own length.
 //!
-//! [`FrameVec::frame_at_offset`] takes a `usize` too, but returns a frame and
-//! never a slot, so it cannot widen addressing.
+//! Reading or mutating a frame requires a slot. The one depth-addressed door,
+//! [`FrameVec::slot_at_captured_depth`], requires a [`ChildStackDepth`], and so
+//! does [`FrameVec::insert_at_child_boundary`]. A `usize` obtained by scanning
+//! — `iter().position(..)`, arithmetic on `len()`, a literal — still compiles,
+//! and it can no longer be spent on a mutation: it is neither a slot nor a
+//! depth, and neither can be built from one. The one method that still accepts
+//! one hands back a frame to read.
+//!
+//! [`FrameVec::frame_at_offset`] is the only method here that still takes a
+//! bare `usize`. It returns a frame and never a slot, so it cannot widen
+//! addressing, and `scripts/check-resolution-frame-boundaries.sh` fails if a
+//! second bare-`usize` parameter appears in this module, wherever in the
+//! parameter list it sits — behind a closure parameter or a generic list
+//! included. That check is a text scan, so it does not see, for example, a
+//! `usize` renamed by a type alias or a method a macro generated.
 //!
 //! Two operations are absent rather than restricted. `remove`, `swap_remove`,
 //! `retain`, `drain`, `truncate` and `clear` have no wrapper here because the
@@ -62,6 +68,34 @@ use super::ResolutionFrame;
 /// addressing one that has since moved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct FrameSlot(usize);
+
+/// A resolution-stack DEPTH recorded before a child producer ran.
+///
+/// The field is private to this module, so a `ChildStackDepth` can only come
+/// from [`FrameVec::capture_depth`] — a real read of the current frame count.
+/// A `usize` from `iter().position(..)`, from arithmetic on `len()`, or from a
+/// literal cannot become one, which is what closes the last positional door
+/// into frame addressing: [`FrameVec::slot_at_captured_depth`] and
+/// [`FrameVec::insert_at_child_boundary`] are its only consumers, and neither
+/// accepts a bare `usize` any more.
+///
+/// Ordering compares depths, so a capture taken now can be compared against one
+/// taken earlier to ask how far the stack has grown — the only arithmetic any
+/// caller performs on it.
+///
+/// A depth is a recorded length, not a handle. Frames can retire below it while
+/// the child producer runs, so the consumers return [`Option`] and `bool`
+/// rather than asserting. The type proves the number came from a real stack
+/// read; it does not prove the boundary is still live, and — since two nested
+/// producers each hold one — it does not prove you are spending the right one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ChildStackDepth(usize);
+
+impl std::fmt::Display for ChildStackDepth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 /// The backing storage for [`ResolutionStack`]'s frames.
 ///
@@ -144,25 +178,31 @@ impl FrameVec {
             .map(FrameSlot)
     }
 
+    /// Record the current stack depth, before running a child producer.
+    ///
+    /// The sole constructor of [`ChildStackDepth`]. It takes no argument by
+    /// design: the value is the stack's own length, so there is no number a
+    /// caller could supply.
+    pub(super) fn capture_depth(&self) -> ChildStackDepth {
+        ChildStackDepth(self.frames.len())
+    }
+
     /// The slot at a stack DEPTH captured before a child producer ran.
     ///
-    /// This is the ONLY method that turns a `usize` into an addressable
+    /// This is the only method that turns a captured depth into an addressable
     /// position, and it exists because the depth originates far outside this
-    /// module: an effect records `resolution_stack.len()`, runs a child
-    /// producer, and hands the recorded length back so the owner can be parked
-    /// beneath the child stack that producer raised. `game/effects/`,
-    /// `game/casting_costs.rs` and their neighbours capture it in roughly
-    /// thirty-five places.
+    /// module: an effect calls `ResolutionStack::capture_child_boundary`, runs a
+    /// child producer, and hands the recorded depth back so the owner can be
+    /// parked beneath the child stack that producer raised. Fifteen origins
+    /// capture it that way — five files under `game/effects/`, plus
+    /// `game/engine_debug.rs`.
     ///
-    /// The argument must be such a captured length. Passing a scan result would
-    /// compile — the door cannot be closed entirely while the depth arrives as
-    /// a bare `usize` — but it would read as `slot_at_captured_depth(position)`,
-    /// which states the violation at the call site instead of hiding it behind
-    /// an ordinary-looking `get(i)`. Closing it completely means giving that
-    /// captured depth its own type at every one of those origins, which is a
-    /// separate change with a much wider blast radius than this one.
-    pub(super) fn slot_at_captured_depth(&self, depth: usize) -> Option<FrameSlot> {
-        (depth < self.frames.len()).then_some(FrameSlot(depth))
+    /// The argument is a [`ChildStackDepth`], which only
+    /// [`FrameVec::capture_depth`] produces, so a scan result cannot be passed
+    /// here at all: the door that used to be open at the call site is now closed
+    /// at the type. Each origin holds its depth from capture to spend.
+    pub(super) fn slot_at_captured_depth(&self, depth: ChildStackDepth) -> Option<FrameSlot> {
+        (depth.0 < self.frames.len()).then_some(FrameSlot(depth.0))
     }
 
     /// Read the frame at a raw offset during a full-stack walk.
@@ -209,18 +249,20 @@ impl FrameVec {
     /// frames above it are exactly the child stack the producer created. It
     /// returns nothing addressable, so a depth cannot be laundered into a
     /// [`FrameSlot`] by inserting with it.
+    /// The depth itself is unforgeable now, so both directions are closed: a
+    /// scanned `usize` cannot become a depth, and a depth cannot become a slot.
     ///
     /// Returns `false` when `depth` does not name a boundary with at least one
     /// child frame above it; the caller reports that as a typed error.
     pub(super) fn insert_at_child_boundary(
         &mut self,
-        depth: usize,
+        depth: ChildStackDepth,
         frame: ResolutionFrame,
     ) -> bool {
-        if depth >= self.frames.len() {
+        if depth.0 >= self.frames.len() {
             return false;
         }
-        self.frames.insert(depth, frame);
+        self.frames.insert(depth.0, frame);
         true
     }
 }
