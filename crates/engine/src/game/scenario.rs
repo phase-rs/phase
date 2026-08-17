@@ -807,6 +807,44 @@ impl GameScenario {
         builder
     }
 
+    /// CR 301.1: Add an artifact card to hand with abilities parsed from Oracle
+    /// text.
+    ///
+    /// Distinct from `add_spell_to_hand_from_oracle(..) + as_artifact()`: that
+    /// pair leaves the Sorcery core type in place, producing a card that
+    /// resolves to the graveyard as a spell and therefore never enters the
+    /// battlefield — so no ETB trigger fires. Any Equipment/artifact test that
+    /// needs an enters-the-battlefield ability must start here.
+    ///
+    /// Subtypes (e.g. Equipment, CR 301.5) are the caller's concern — chain
+    /// `.with_subtypes(..)` on the returned builder.
+    pub fn add_artifact_to_hand_from_oracle(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        oracle_text: &str,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.base_card_types = obj.card_types.clone();
+        // CR 301.1: artifacts have no power/toughness unless they are also creatures.
+
+        let mut builder = CardBuilder {
+            state: &mut self.state,
+            id,
+        };
+        builder.from_oracle_text(oracle_text);
+        builder
+    }
+
     /// Add an instant or sorcery to a player's hand without Oracle text.
     ///
     /// Use `is_instant: true` for instants, `false` for sorceries.

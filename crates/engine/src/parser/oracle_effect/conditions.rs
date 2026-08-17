@@ -10,10 +10,12 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
+use super::super::oracle_nom::condition as nom_condition;
 use super::super::oracle_nom::condition::{
     inject_controller_you, parse_cast_using_teamwork_phrase,
     parse_scoped_player_opponent_and_has_condition, parse_spell_target_superlative_suffix,
     parse_you_put_onto_battlefield_this_way_clause, parse_zone_changed_this_way_clause,
+    DamagedThisWayRecipient,
 };
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
@@ -5574,6 +5576,16 @@ pub(super) fn try_nom_condition_as_ability_condition(
         return Some(condition);
     }
 
+    // CR 120.3 + CR 608.2c: "a Dragon is dealt damage this way" — the plain-damage
+    // channel of the "this way" back-reference, tried immediately after its more
+    // specific `excess` sibling above (the `excess` token stops this arm's verb
+    // tag, so the two can never contend). Both are `all_consuming`, so neither can
+    // partially consume the other's clause.
+    if let Some(condition) = parse_previous_effect_typed_damage_recipient_condition(lower.as_str())
+    {
+        return Some(condition);
+    }
+
     if let Some(condition) = parse_die_result_condition(lower.as_str()) {
         return Some(condition);
     }
@@ -6702,33 +6714,101 @@ fn parse_previous_effect_excess_damage_condition(lower: &str) -> Option<AbilityC
     })
 }
 
-/// CR 120.3 + CR 608.2c: "a player is dealt damage this way" gates a rider
-/// on both the recipient and the damage event emitted by the preceding
-/// instruction. Deal-damage targets are either players or permanents, so a
-/// player target is represented by the negated permanent match; the total
-/// channel prevents the rider from firing when all damage was prevented.
-fn parse_previous_effect_player_damage_condition(lower: &str) -> Option<AbilityCondition> {
-    all_consuming(tag::<_, _, OracleError<'_>>(
-        "a player is dealt damage this way",
-    ))
-    .parse(lower)
-    .ok()?;
-    Some(AbilityCondition::And {
-        conditions: vec![
-            AbilityCondition::PreviousEffectAmount {
-                comparator: Comparator::GT,
-                rhs: QuantityExpr::Fixed { value: 0 },
-                channel: DamageChannel::Total,
-            },
-            AbilityCondition::Not {
-                condition: Box::new(AbilityCondition::TargetMatchesFilter {
-                    filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)),
-                    use_lki: true,
+/// CR 120.3 + CR 608.2c: "[recipient] is dealt damage this way" gates a rider on
+/// both the recipient and the damage event emitted by the preceding instruction.
+/// Recognition is delegated to [`nom_condition::parse_damaged_this_way_clause`],
+/// the single authority for this clause's grammar; this function owns only the
+/// lowering of the recipient axis into an `AbilityCondition`.
+fn parse_previous_effect_damage_recipient_condition(
+    lower: &str,
+) -> Option<DamagedThisWayRecipient> {
+    all_consuming(nom_condition::parse_damaged_this_way_clause)
+        .parse(lower)
+        .ok()
+        .map(|(_, recipient)| recipient)
+}
+
+/// CR 120.3 + CR 615.1: lower a parsed "dealt damage this way" recipient into the
+/// resolution-time gate.
+///
+/// Both arms conjoin `PreviousEffectAmount { GT 0, Total }`: CR 615.1 prevention
+/// shields can reduce the dealt amount to zero, in which case nothing "is dealt
+/// damage this way" and the rider must not fire.
+///
+/// Deal-damage targets are either players or permanents (CR 120.3), so the
+/// player arm is the *negated* permanent match while the typed arm is a positive
+/// filter match. The typed arm additionally conjoins
+/// [`AbilityCondition::HasObjectTarget`]: `TargetMatchesFilter` falls back to
+/// `TargetFilter::TriggeringSource` when the ability carries no object target
+/// (`game/effects/mod.rs`), which in a *triggered* ability would bind the
+/// anaphor to the ability's own source rather than to a damage recipient. `And`
+/// short-circuits, so the guard stops that fallback from ever being consulted
+/// when the damage landed on a player.
+fn previous_effect_damage_recipient_to_condition(
+    recipient: DamagedThisWayRecipient,
+) -> AbilityCondition {
+    let damage_was_dealt = AbilityCondition::PreviousEffectAmount {
+        comparator: Comparator::GT,
+        rhs: QuantityExpr::Fixed { value: 0 },
+        channel: DamageChannel::Total,
+    };
+    match recipient {
+        DamagedThisWayRecipient::Player => AbilityCondition::And {
+            conditions: vec![
+                damage_was_dealt,
+                AbilityCondition::Not {
+                    condition: Box::new(AbilityCondition::TargetMatchesFilter {
+                        filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)),
+                        use_lki: true,
+                        subject_slot: None,
+                    }),
+                },
+            ],
+        },
+        // CR 704.3 + CR 400.7: `use_lki: false`. The rider resolves inside the
+        // same resolution that dealt the damage, and state-based actions are
+        // checked only when a player would receive priority — so the damaged
+        // permanent has not been destroyed yet and is still the same object.
+        // There is no zone change, so last-known information never applies.
+        DamagedThisWayRecipient::Typed(filter) => AbilityCondition::And {
+            conditions: vec![
+                damage_was_dealt,
+                AbilityCondition::HasObjectTarget,
+                AbilityCondition::TargetMatchesFilter {
+                    filter,
+                    use_lki: false,
                     subject_slot: None,
-                }),
-            },
-        ],
-    })
+                },
+            ],
+        },
+    }
+}
+
+/// CR 120.3 + CR 608.2c: the player-recipient arm of the "dealt damage this way"
+/// gate. Kept as a distinct entry point because it is dispatched from the
+/// body-scoped call site rather than the general condition dispatcher — see the
+/// dispatch-asymmetry note on [`DamagedThisWayRecipient`].
+fn parse_previous_effect_player_damage_condition(lower: &str) -> Option<AbilityCondition> {
+    match parse_previous_effect_damage_recipient_condition(lower)? {
+        recipient @ DamagedThisWayRecipient::Player => {
+            Some(previous_effect_damage_recipient_to_condition(recipient))
+        }
+        DamagedThisWayRecipient::Typed(_) => None,
+    }
+}
+
+/// CR 120.3 + CR 608.2c: the typed-recipient arm of the "dealt damage this way"
+/// gate — "if a Dragon is dealt damage this way, destroy it" (The Black Arrow),
+/// "if a creature is dealt damage this way, …". Wired into the general condition
+/// dispatcher so it composes with any rider body; see the dispatch-asymmetry
+/// note on [`DamagedThisWayRecipient`] for why the player arm is not.
+fn parse_previous_effect_typed_damage_recipient_condition(lower: &str) -> Option<AbilityCondition> {
+    match parse_previous_effect_damage_recipient_condition(lower)? {
+        typed @ DamagedThisWayRecipient::Typed(_) => {
+            Some(previous_effect_damage_recipient_to_condition(typed))
+        }
+        DamagedThisWayRecipient::Player => None,
+    }
 }
 
 /// CR 701.8a + CR 608.2c: Vohar's drain checks the card discarded by the
@@ -8852,6 +8932,120 @@ mod tests {
             Some(AbilityCondition::Not { condition })
                 if matches!(*condition, AbilityCondition::SourceMatchesFilter { .. })
         ));
+    }
+
+    /// CR 120.3 + CR 608.2c: The Black Arrow — "If a Dragon is dealt damage this
+    /// way, destroy it." The Dragon gate must survive as a condition; dropping it
+    /// makes the rider destroy every damaged creature.
+    #[test]
+    fn leading_dragon_dealt_damage_this_way_gates_the_rider() {
+        let (condition, body) = strip_leading_general_conditional(
+            "If a Dragon is dealt damage this way, destroy it.",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(body, "destroy it.");
+        let Some(AbilityCondition::And { conditions }) = condition else {
+            panic!("expected a conjunction gate, got {condition:?}");
+        };
+        // CR 615.1: fully prevented damage means nothing was dealt this way.
+        assert!(
+            conditions.contains(&AbilityCondition::PreviousEffectAmount {
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Fixed { value: 0 },
+                channel: DamageChannel::Total,
+            })
+        );
+        // Guards the `TargetMatchesFilter` fallback to the triggering source.
+        assert!(conditions.contains(&AbilityCondition::HasObjectTarget));
+        // CR 704.3 + CR 400.7: present tense, not LKI — SBAs have not run yet.
+        assert!(
+            conditions.iter().any(|condition| matches!(
+                condition,
+                AbilityCondition::TargetMatchesFilter {
+                    filter: TargetFilter::Typed(filter),
+                    use_lki: false,
+                    subject_slot: None,
+                } if filter.type_filters.iter().any(
+                    |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Dragon"))
+                )
+            )),
+            "expected a Dragon recipient filter, got {conditions:?}"
+        );
+    }
+
+    /// The gate is parameterized over the recipient noun and independent of the
+    /// rider body — it is a condition production, not a per-card carve-out.
+    #[test]
+    fn leading_dealt_damage_this_way_covers_the_recipient_class() {
+        for (text, expected_body) in [
+            (
+                "If a creature is dealt damage this way, exile it.",
+                "exile it.",
+            ),
+            (
+                "If an artifact creature is dealt damage this way, destroy it.",
+                "destroy it.",
+            ),
+            (
+                "If a permanent is dealt damage this way, scry 1.",
+                "scry 1.",
+            ),
+        ] {
+            let (condition, body) =
+                strip_leading_general_conditional(text, &mut ParseContext::default());
+            assert_eq!(body, expected_body, "{text:?}");
+            assert!(
+                matches!(condition, Some(AbilityCondition::And { .. })),
+                "{text:?} must produce a gated rider, got {condition:?}"
+            );
+        }
+    }
+
+    /// The player arm keeps its own lowering (negated permanent match) and is not
+    /// claimed by the typed arm — Play with Fire's AST must be unchanged.
+    #[test]
+    fn player_dealt_damage_this_way_keeps_the_negated_permanent_shape() {
+        let condition =
+            parse_previous_effect_player_damage_condition("a player is dealt damage this way")
+                .expect("the player recipient must still lower");
+        let AbilityCondition::And { conditions } = condition else {
+            panic!("expected a conjunction gate");
+        };
+        assert!(conditions.iter().any(|condition| matches!(
+            condition,
+            AbilityCondition::Not { condition }
+                if matches!(condition.as_ref(), AbilityCondition::TargetMatchesFilter {
+                    filter: TargetFilter::Typed(filter),
+                    use_lki: true,
+                    ..
+                } if filter.type_filters == vec![TypeFilter::Permanent])
+        )));
+        assert!(
+            parse_previous_effect_typed_damage_recipient_condition(
+                "a player is dealt damage this way"
+            )
+            .is_none(),
+            "the typed arm must not claim the player recipient"
+        );
+    }
+
+    /// The `excess` channel is the lexically more specific sibling and keeps its
+    /// clause; the plain-damage arm must not shadow it.
+    #[test]
+    fn excess_damage_this_way_still_lowers_to_the_excess_channel() {
+        let (condition, body) = strip_leading_general_conditional(
+            "If a creature is dealt excess damage this way, draw a card.",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(body, "draw a card.");
+        assert_eq!(
+            condition,
+            Some(AbilityCondition::PreviousEffectAmount {
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Fixed { value: 0 },
+                channel: DamageChannel::Excess,
+            })
+        );
     }
 
     #[test]
