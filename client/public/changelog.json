@@ -1,6 +1,19 @@
 {
   "entries": [
     {
+      "id": 193,
+      "date": "2026-08-16",
+      "title": "Resolve All respects every player",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Passive-voice damage triggers now work, so cards such as Smaug the Impenetrable and Innocent Bystander can see themselves being dealt damage\n• Damage thresholds now total simultaneous damage over the whole event when the card calls for it, while still honoring ‘by a single source’ clauses\n• Devour gives the right number of counters for the creatures you actually sacrificed, and Crabomination can emerge by sacrificing an artifact\n\n🛠️ Cards That Now Work Right\n• ‘When you do’ riders only fire when you actually took the optional action — Atraxa’s Skitterfang no longer asks for a target or grants a keyword after it can’t remove an oil counter\n• ‘Cowards can’t block Warriors’ and similar restrictions now constrain the right blockers and attackers (Gornog, the Red Reaper and the wider card class)\n• Tokens keep the literal names their cards give them, even when that name includes the creator’s name (Kher Keep and Selenia’s Curse)\n• Sensei’s Divining Top, M’Baku, Jabari Chieftain; Mister Fantastic; Kang Prime; Heroic Sacrifice; and Palace Jailer now follow their printed abilities more faithfully\n\n⚔️ Combat & Gameplay\n• Deferred and reflexive triggers now reach the stack at the right time instead of leaving a game stalled; several related fixes also prevent freezes during retargeting and mill replacement effects\n• After a mass pump, goad, or control effect, follow-up instructions such as ‘untap those creatures’ now act on the correct group (Jeskai Ascendancy and 15 more cards)\n\n🖥️ Interface\n• Resolve All now asks each player to explicitly authorize standing passes, keeps that consent current, and resumes cleanly after an AI player agrees",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1538799194658050168"
+    },
+    {
       "id": 192,
       "date": "2026-08-15",
       "title": "Wheel of Misfortune spins for real",
