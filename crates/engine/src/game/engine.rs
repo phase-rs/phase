@@ -7691,13 +7691,7 @@ fn install_auto_pass_and_pass_priority(
                 .to_string(),
         ));
     }
-    let stored_mode = match mode {
-        AutoPassRequest::UntilStackEmpty => AutoPassMode::UntilStackEmpty {
-            initial_stack_len: state.stack.len(),
-        },
-        AutoPassRequest::UntilTurnBoundary { until } => AutoPassMode::UntilTurnBoundary { until },
-    };
-    state.auto_pass.insert(auto_pass_owner, stored_mode);
+    store_auto_pass_request(state, auto_pass_owner, mode);
     if !pass_immediately {
         return Ok(ActionResult {
             events: std::mem::take(events),
@@ -7713,6 +7707,20 @@ fn install_auto_pass_and_pass_priority(
     })
 }
 
+fn store_auto_pass_request(
+    state: &mut GameState,
+    auto_pass_owner: PlayerId,
+    mode: AutoPassRequest,
+) {
+    let stored_mode = match mode {
+        AutoPassRequest::UntilStackEmpty => AutoPassMode::UntilStackEmpty {
+            initial_stack_len: state.stack.len(),
+        },
+        AutoPassRequest::UntilTurnBoundary { until } => AutoPassMode::UntilTurnBoundary { until },
+    };
+    state.auto_pass.insert(auto_pass_owner, stored_mode);
+}
+
 /// Stores Resolve All's durable "do not make me pass each frame" intent in
 /// the same engine-owned `UntilStackEmpty` flow as a direct priority request.
 pub(crate) fn install_until_stack_empty_auto_pass_and_pass_priority(
@@ -7726,6 +7734,16 @@ pub(crate) fn install_until_stack_empty_auto_pass_and_pass_priority(
         AutoPassRequest::UntilStackEmpty,
         events,
     )
+}
+
+/// Retains Resolve All's durable no-manual-priority preference when a rules
+/// guard prevents its initial immediate pass. The normal auto-pass loop resumes
+/// after that required action completes.
+pub(crate) fn install_until_stack_empty_auto_pass(
+    state: &mut GameState,
+    auto_pass_owner: PlayerId,
+) {
+    store_auto_pass_request(state, auto_pass_owner, AutoPassRequest::UntilStackEmpty);
 }
 
 /// CR 117.3d + CR 117.4: Declining the optimized Resolve All batch preserves

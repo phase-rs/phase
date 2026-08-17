@@ -138,14 +138,25 @@ pub fn resolve_all_ready_prefix(
     turn_control::invalidate_resolve_all_consent(state);
     if proof_stopped {
         let mut fallback_events = Vec::new();
-        if let Ok(fallback) = super::engine::install_until_stack_empty_auto_pass_and_pass_priority(
+        match super::engine::install_until_stack_empty_auto_pass_and_pass_priority(
             state,
             run.priority_snapshot.waiting_player,
             &mut fallback_events,
         ) {
-            items_resolved += stack_resolved_count(&fallback.events);
-            events.extend(fallback.events);
-            log_entries.extend(fallback.log_entries);
+            Ok(fallback) => {
+                items_resolved += stack_resolved_count(&fallback.events);
+                events.extend(fallback.events);
+                log_entries.extend(fallback.log_entries);
+            }
+            Err(_) => {
+                // A pre-cast shortcut may require a meaningful action before the
+                // current Priority window can pass. Keep the requester's durable
+                // preference so the ordinary loop resumes after that action.
+                super::engine::install_until_stack_empty_auto_pass(
+                    state,
+                    run.priority_snapshot.waiting_player,
+                );
+            }
         }
     }
     finalize_display_state(state);

@@ -810,4 +810,11 @@ fn ready_consent_collapses_the_safe_prefix_before_a_stack_growing_resolution() {
     );
     assert_eq!(state.stack.len(), 1, "the stack-growing item remains live");
     assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(
+        state.auto_pass.get(&P0),
+        Some(&AutoPassMode::UntilStackEmpty {
+            initial_stack_len: 1,
+        }),
+        "a partial proof keeps the original requester as the durable auto-pass owner"
+    );
 }
