@@ -224,7 +224,7 @@ describe("dispatchResolveAll progress", () => {
 
     expect(resolveAll).toHaveBeenCalledWith(0, [], 5);
   });
-  it("uses an empty AI-seat list when the adapter delegates native AI ownership to its server", async () => {
+  it("consumes Ready consent with an empty AI-seat list when the server owns native AI", async () => {
     const resolveAll = vi.fn<EngineResolveAll>().mockResolvedValue(chunk(0, 2));
     const getState = vi.fn().mockResolvedValue(stateWithStack(0));
     const submitAction = vi.fn().mockResolvedValue({ events: [] });
@@ -242,11 +242,8 @@ describe("dispatchResolveAll progress", () => {
 
     await dispatchResolveAll(0, []);
 
-    expect(resolveAll).not.toHaveBeenCalled();
-    expect(submitAction).toHaveBeenCalledWith(
-      { type: "BeginResolveAll", data: { max_resolutions: 5 } },
-      0,
-    );
+    expect(resolveAll).toHaveBeenCalledWith(0, [], 5);
+    expect(submitAction).not.toHaveBeenCalled();
   });
 
   it("silently absorbs a stale Resolve All priority rejection without rejecting the click handler", async () => {
