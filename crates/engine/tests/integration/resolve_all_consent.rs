@@ -828,11 +828,7 @@ fn ready_consent_collapses_the_safe_prefix_before_a_stack_growing_resolution() {
     apply(&mut state, player, GameAction::PassPriority)
         .expect("the ordinary priority action resumes the requester's stored auto-pass");
     assert!(
-        state.stack.is_empty(),
-        "the remaining entry resolves without another manual requester action"
-    );
-    assert!(
         state.auto_pass.is_empty(),
-        "UntilStackEmpty clears when its requested stack drain completes"
+        "a stack-growing resolution interrupts UntilStackEmpty instead of inheriting stale consent"
     );
 }
