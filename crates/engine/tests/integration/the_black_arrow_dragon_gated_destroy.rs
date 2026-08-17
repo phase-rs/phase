@@ -9,14 +9,16 @@
 //! damaged creature.
 
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::{effects, zones::create_object};
 use engine::parser::oracle::parse_oracle_text;
 use engine::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use engine::types::ability::{
-    AbilityCondition, Comparator, DamageChannel, Effect, QuantityExpr, TargetFilter, TargetRef,
+    AbilityCondition, Comparator, DamageChannel, Effect, PreventionAmount, PreventionScope,
+    QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -26,6 +28,10 @@ When The Black Arrow enters, it deals 1 damage to any target. \
 If a Dragon is dealt damage this way, destroy it.\n\
 Equipped creature gets +1/+1 and has reach.\n\
 Equip {1}";
+
+const PERMANENT_DAMAGE_DRAW_RIDER: &str =
+    "When Permanent Rider Source enters, it deals 1 damage to any target. \
+If a permanent is dealt damage this way, draw a card.";
 
 /// The damage recipient the ETB trigger is pointed at.
 enum ArrowTarget {
@@ -135,7 +141,7 @@ fn the_black_arrow_parses_dragon_gated_destroy_rider() {
 
 /// Casts The Black Arrow, points its ETB damage at `target`, and returns
 /// `(victim_zone, victim_damage_marked, defending_player_life)`.
-fn cast_the_black_arrow(target: ArrowTarget) -> (Zone, u32, i32) {
+fn cast_the_black_arrow(target: ArrowTarget, prevent_damage: bool) -> (Zone, u32, i32) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -169,6 +175,34 @@ fn cast_the_black_arrow(target: ArrowTarget) -> (Zone, u32, i32) {
     );
 
     let mut runner = scenario.build();
+    if prevent_damage {
+        assert!(
+            matches!(&target, ArrowTarget::Dragon),
+            "the prevention fixture must protect the Dragon target"
+        );
+        let shield = create_object(
+            runner.state_mut(),
+            CardId(9_903),
+            P1,
+            "Dragon Shield".into(),
+            Zone::Stack,
+        );
+        let prevention = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::ParentTarget,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            },
+            vec![TargetRef::Object(victim)],
+            shield,
+            P1,
+        );
+        effects::resolve_ability_chain(runner.state_mut(), &prevention, &mut vec![], 0)
+            .expect("installing the Dragon prevention shield must succeed");
+    }
     let card_id = runner.state().objects[&arrow].card_id;
     runner
         .act(GameAction::CastSpell {
@@ -215,7 +249,7 @@ fn cast_the_black_arrow(target: ArrowTarget) -> (Zone, u32, i32) {
 
 #[test]
 fn the_black_arrow_destroys_a_damaged_dragon() {
-    let (zone, _, life) = cast_the_black_arrow(ArrowTarget::Dragon);
+    let (zone, _, life) = cast_the_black_arrow(ArrowTarget::Dragon, false);
     assert_eq!(
         zone,
         Zone::Graveyard,
@@ -226,7 +260,7 @@ fn the_black_arrow_destroys_a_damaged_dragon() {
 
 #[test]
 fn the_black_arrow_spares_a_damaged_non_dragon() {
-    let (zone, damage, life) = cast_the_black_arrow(ArrowTarget::NonDragon);
+    let (zone, damage, life) = cast_the_black_arrow(ArrowTarget::NonDragon, false);
     assert_eq!(
         zone,
         Zone::Battlefield,
@@ -238,7 +272,7 @@ fn the_black_arrow_spares_a_damaged_non_dragon() {
 
 #[test]
 fn the_black_arrow_damages_a_player_without_destroying_anything() {
-    let (zone, damage, life) = cast_the_black_arrow(ArrowTarget::Player);
+    let (zone, damage, life) = cast_the_black_arrow(ArrowTarget::Player, false);
     assert_eq!(
         zone,
         Zone::Battlefield,
@@ -246,4 +280,93 @@ fn the_black_arrow_damages_a_player_without_destroying_anything() {
     );
     assert_eq!(damage, 0, "the untargeted creature must take no damage");
     assert_eq!(life, 19, "the targeted player must take 1 damage");
+}
+
+#[test]
+fn the_black_arrow_does_not_destroy_a_dragon_when_damage_is_fully_prevented() {
+    let (zone, damage, life) = cast_the_black_arrow(ArrowTarget::Dragon, true);
+    assert_eq!(
+        damage, 0,
+        "the Dragon shield must fully prevent the ETB damage (reach-guard for the zero-damage boundary)"
+    );
+    assert_eq!(
+        zone,
+        Zone::Battlefield,
+        "a fully prevented damage event must not satisfy the Dragon destroy rider"
+    );
+    assert_eq!(life, 20, "the fixture damages a creature, never a player");
+}
+
+#[test]
+fn a_permanent_rider_does_not_fall_back_to_its_creature_source_for_a_player_target() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_card_to_library_top(P0, "Reach Guard Draw");
+    let source = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Permanent Rider Source",
+            1,
+            3,
+            PERMANENT_DAMAGE_DRAW_RIDER,
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 1,
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(9_904),
+            false,
+            vec![],
+        )],
+    );
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&source].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: source,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting the creature source must succeed");
+
+    for _ in 0..32 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::SelectTargets {
+                        targets: vec![TargetRef::Player(P1)],
+                    })
+                    .expect("selecting the player damage target must succeed");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing priority must succeed");
+            }
+            other => panic!("unexpected permanent-rider prompt: {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        runner.state().players[P1.0 as usize].life,
+        19,
+        "the player target must receive the ETB damage (reach-guard for the typed rider)"
+    );
+    assert_eq!(
+        runner.state().objects[&source].zone,
+        Zone::Battlefield,
+        "the source must be a permanent, so omitting HasObjectTarget would make the fallback match"
+    );
+    assert!(
+        runner.state().players[P0.0 as usize].hand.is_empty(),
+        "a player target must not satisfy the permanent rider through the creature source fallback"
+    );
 }

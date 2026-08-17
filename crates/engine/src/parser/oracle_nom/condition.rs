@@ -18945,6 +18945,30 @@ mod tests {
                 "{input:?} must be a typed recipient, got {recipient:?}"
             );
         }
+
+        let (rest, recipient) =
+            parse_damaged_this_way_clause("a dragon or a wurm is dealt damage this way")
+                .expect("a disjunctive typed recipient must parse");
+        assert_eq!(rest, "", "the disjunctive recipient must be fully consumed");
+        let DamagedThisWayRecipient::Typed(TargetFilter::Or { filters }) = recipient else {
+            panic!("expected a disjunctive typed recipient, got {recipient:?}");
+        };
+        assert_eq!(
+            filters.len(),
+            2,
+            "both disjunctive subtype branches must remain"
+        );
+        for (filter, subtype) in filters.iter().zip(["Dragon", "Wurm"]) {
+            let TargetFilter::Typed(TypedFilter { type_filters, .. }) = filter else {
+                panic!("expected a typed {subtype} branch, got {filter:?}");
+            };
+            assert!(
+                type_filters.iter().any(
+                    |type_filter| matches!(type_filter, TypeFilter::Subtype(name) if name.eq_ignore_ascii_case(subtype))
+                ),
+                "expected the {subtype} subtype branch, got {type_filters:?}"
+            );
+        }
     }
 
     /// The `excess` channel keeps exclusive ownership of its clause: the
