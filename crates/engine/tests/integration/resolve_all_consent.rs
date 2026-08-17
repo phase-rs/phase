@@ -77,7 +77,7 @@ fn no_op_entry(id: u64, controller: PlayerId) -> StackEntry {
 /// shape (Equipment -> targeted creature) from the captured game, rather than
 /// a synthetic spell-only shortcut.
 fn browser_partial_priority_equip_state() -> (GameState, ObjectId, ObjectId) {
-    let mut state = GameState::new(FormatConfig::free_for_all(), 4, 0xA11E_0A1);
+    let mut state = GameState::new(FormatConfig::free_for_all(), 4, 0x0A11_E0A1);
     state.active_player = P2;
     state.priority_player = P0;
     state.waiting_for = WaitingFor::Priority { player: P0 };
