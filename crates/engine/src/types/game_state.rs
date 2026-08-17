@@ -10650,6 +10650,14 @@ impl PersistedGameState {
         // CR 732.2a (FIX-3): drop stale transient loop-detection bookkeeping on load unless the save
         // sits in an object-growth shortcut window whose pending resolution still consumes it.
         state.migrate_transient_loop_sequence();
+        // `pending_trigger_event_batch` is a construction carrier for the
+        // corresponding `pending_trigger`. A historical save can retain the
+        // carrier after its trigger was dropped; it cannot represent live
+        // mid-resolution work and would make every conservative stack batch
+        // reject an otherwise valid Priority checkpoint.
+        if state.pending_trigger.is_none() {
+            state.pending_trigger_event_batch.clear();
+        }
         // CR 109.5 + CR 611.2a: discard any restriction still carrying the raw
         // `SourceController` placeholder — a legitimately-captured state never has
         // one (it is lowered to the activator at creation), so this only sanitizes

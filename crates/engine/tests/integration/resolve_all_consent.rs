@@ -3,24 +3,35 @@
 use engine::ai_support::{candidate_actions, legal_actions_for_viewer};
 use engine::game::elimination::eliminate_player;
 use engine::game::engine::{apply, resolve_all_ready_prefix};
+use engine::game::game_object::AttachTarget;
 use engine::game::interaction::{
     bind_interaction_authority, derive_viewer_interaction, resolve_interaction_response,
 };
 use engine::game::visibility::filter_state_for_viewer;
-use engine::types::ability::{CopyRetargetPermission, Effect, ResolvedAbility, TargetFilter};
+use engine::game::zones::create_object;
+use engine::types::ability::{
+    ControllerRef, CopyRetargetPermission, Effect, ResolvedAbility, TargetFilter, TargetRef,
+    TypedFilter,
+};
 use engine::types::actions::{GameAction, ResolveAllConsentDecision};
+use engine::types::card_type::CoreType;
+use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
-use engine::types::game_state::{GameState, StackEntry, StackEntryKind, WaitingFor};
-use engine::types::identifiers::ObjectId;
+use engine::types::game_state::{
+    AutoPassMode, GameState, PersistedGameState, StackEntry, StackEntryKind, WaitingFor,
+};
+use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::interaction::{
     InteractionOpportunityResponse, InteractionResponse, InteractionSessionId,
     InteractionSubmission,
 };
 use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
 
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
 const P2: PlayerId = PlayerId(2);
+const P3: PlayerId = PlayerId(3);
 
 fn begin(state: &mut GameState) -> u64 {
     apply(
@@ -42,6 +53,253 @@ fn begin(state: &mut GameState) -> u64 {
         }
         ref other => panic!("expected queued consent, got {other:?}"),
     }
+}
+
+fn no_op_entry(id: u64, controller: PlayerId) -> StackEntry {
+    StackEntry {
+        id: ObjectId(id),
+        source_id: ObjectId(id),
+        controller,
+        kind: StackEntryKind::ActivatedAbility {
+            source_id: ObjectId(id),
+            ability: Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                vec![],
+                ObjectId(id),
+                controller,
+            )),
+        },
+    }
+}
+
+/// Mirrors the live browser failure: P2 has already passed, P0 holds priority,
+/// and a fourth seat has been eliminated. The stack item is the same Equip
+/// shape (Equipment -> targeted creature) from the captured game, rather than
+/// a synthetic spell-only shortcut.
+fn browser_partial_priority_equip_state() -> (GameState, ObjectId, ObjectId) {
+    let mut state = GameState::new(FormatConfig::free_for_all(), 4, 0xA11E_0A1);
+    state.active_player = P2;
+    state.priority_player = P0;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+    state.priority_pass_count = 1;
+    state.priority_passes.insert(P2);
+    state.players[P3.0 as usize].is_eliminated = true;
+
+    let equipment = create_object(
+        &mut state,
+        CardId(140),
+        P2,
+        "Sigiled Sword of Valeron".to_string(),
+        Zone::Battlefield,
+    );
+    let creature = create_object(
+        &mut state,
+        CardId(289),
+        P2,
+        "Cold-Eyed Selkie".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let equipment_object = state
+            .objects
+            .get_mut(&equipment)
+            .expect("fixture Equipment exists");
+        equipment_object.card_types.core_types = vec![CoreType::Artifact];
+        equipment_object.card_types.subtypes = vec!["Equipment".to_string()];
+        equipment_object.base_card_types = equipment_object.card_types.clone();
+    }
+    {
+        let creature_object = state
+            .objects
+            .get_mut(&creature)
+            .expect("fixture creature exists");
+        creature_object.card_types.core_types = vec![CoreType::Creature];
+        creature_object.base_card_types = creature_object.card_types.clone();
+    }
+    state.stack.push_back(StackEntry {
+        id: ObjectId(461),
+        source_id: equipment,
+        controller: P2,
+        kind: StackEntryKind::ActivatedAbility {
+            source_id: equipment,
+            ability: Box::new(ResolvedAbility::new(
+                Effect::Attach {
+                    attachment: TargetFilter::SelfRef,
+                    target: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ),
+                },
+                vec![TargetRef::Object(creature)],
+                equipment,
+                P2,
+            )),
+        },
+    });
+    (state, equipment, creature)
+}
+
+#[test]
+fn browser_partial_priority_equip_grants_then_resolves_at_the_public_batch_seam() {
+    let (mut state, equipment, creature) = browser_partial_priority_equip_state();
+
+    apply(
+        &mut state,
+        P0,
+        GameAction::BeginResolveAll {
+            max_resolutions: 100,
+        },
+    )
+    .expect("the human priority holder starts the browser Resolve All flow");
+    let epoch = match state.waiting_for {
+        WaitingFor::ResolveAllConsent {
+            epoch,
+            representative: P1,
+        } => epoch,
+        ref waiting_for => panic!("P1 should consent first, got {waiting_for:?}"),
+    };
+    apply(
+        &mut state,
+        P1,
+        GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Grant,
+        },
+    )
+    .expect("the first AI grants consent");
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::ResolveAllConsent {
+            epoch: next_epoch,
+            representative: P2,
+        } if next_epoch == epoch
+    ));
+    apply(
+        &mut state,
+        P2,
+        GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Grant,
+        },
+    )
+    .expect("the final AI grants consent");
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::ResolveAllReady { epoch: ready_epoch } if ready_epoch == epoch
+    ));
+
+    let result = resolve_all_ready_prefix(&mut state, P2);
+
+    assert_eq!(
+        result.items_resolved, 1,
+        "a granted browser Resolve All must not return to manual priority with the Equip still on the stack"
+    );
+    assert!(state.stack.is_empty());
+    assert_eq!(
+        state.objects[&equipment].attached_to,
+        Some(AttachTarget::Object(creature)),
+        "the resolved Equip attaches to its already-selected creature target"
+    );
+}
+
+#[test]
+fn browser_partial_priority_equip_keeps_the_requesters_no_manual_resolution_intent_when_a_pending_event_blocks_batch_proof(
+) {
+    let (mut state, equipment, creature) = browser_partial_priority_equip_state();
+    // This is the latent combat-damage event carrier present in the live game.
+    // It makes the proof checkpoint intentionally fail closed, but it must not
+    // erase the human request to continue through ordinary engine auto-pass.
+    state.pending_trigger_event_batch = vec![GameEvent::DamageDealt {
+        source_id: ObjectId(398),
+        target: TargetRef::Player(P0),
+        amount: 4,
+        is_combat: true,
+        excess: 0,
+    }];
+
+    apply(
+        &mut state,
+        P0,
+        GameAction::BeginResolveAll {
+            max_resolutions: 100,
+        },
+    )
+    .expect("the human priority holder starts Resolve All");
+    let epoch = match state.waiting_for {
+        WaitingFor::ResolveAllConsent {
+            epoch,
+            representative: P1,
+        } => epoch,
+        ref waiting_for => panic!("P1 should consent first, got {waiting_for:?}"),
+    };
+    for representative in [P1, P2] {
+        apply(
+            &mut state,
+            representative,
+            GameAction::RespondResolveAllConsent {
+                epoch,
+                decision: ResolveAllConsentDecision::Grant,
+            },
+        )
+        .expect("each AI representative grants the live Resolve All prompt");
+    }
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::ResolveAllReady { epoch: ready_epoch } if ready_epoch == epoch
+    ));
+
+    let result = resolve_all_ready_prefix(&mut state, P2);
+
+    assert_eq!(
+        result.items_resolved, 0,
+        "the conservative batch proof must not consume an unsettled checkpoint"
+    );
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::Priority { player: P1 },
+    ));
+    assert_eq!(
+        state.auto_pass.get(&P0),
+        Some(&AutoPassMode::UntilStackEmpty {
+            initial_stack_len: 1,
+        }),
+        "the failed proof becomes the requester's ordinary standing auto-pass"
+    );
+    apply(&mut state, P1, GameAction::PassPriority)
+        .expect("the next AI's ordinary pass continues the requester's auto-pass");
+    assert!(
+        state.stack.is_empty(),
+        "the Equip resolves without another manual P0 action"
+    );
+    assert_eq!(
+        state.objects[&equipment].attached_to,
+        Some(AttachTarget::Object(creature)),
+    );
+    assert!(state.auto_pass.is_empty());
+}
+
+#[test]
+fn restored_mid_stack_priority_discards_an_orphaned_trigger_event_carrier() {
+    let (mut state, _, _) = browser_partial_priority_equip_state();
+    state.pending_trigger_event_batch = vec![GameEvent::DamageDealt {
+        source_id: ObjectId(398),
+        target: TargetRef::Player(P0),
+        amount: 4,
+        is_combat: true,
+        excess: 0,
+    }];
+    assert!(state.pending_trigger.is_none());
+
+    let persisted = PersistedGameState::capture(state);
+    let encoded = serde_json::to_string(&persisted).expect("mid-stack state serializes");
+    let persisted: PersistedGameState =
+        serde_json::from_str(&encoded).expect("mid-stack state deserializes");
+    let restored = persisted.into_game_state();
+
+    assert!(
+        restored.pending_trigger_event_batch.is_empty(),
+        "a saved orphan carrier is not active stack work and must not poison Resolve All after reload"
+    );
+    assert!(restored.pending_trigger.is_none());
 }
 
 #[test]
@@ -74,10 +332,9 @@ fn consent_queue_reaches_inert_ready_only_after_every_representative_grants() {
 }
 
 #[test]
-fn stale_epoch_and_decline_restore_the_exact_priority_snapshot() {
+fn stale_epoch_and_decline_continue_through_the_requesters_engine_auto_pass() {
     let mut state = GameState::new_two_player(43);
-    state.priority_pass_count = 3;
-    state.priority_passes.insert(P0);
+    state.stack.push_back(no_op_entry(1, P0));
     let epoch = begin(&mut state);
 
     assert!(apply(
@@ -89,7 +346,7 @@ fn stale_epoch_and_decline_restore_the_exact_priority_snapshot() {
         },
     )
     .is_err());
-    apply(
+    let decline = apply(
         &mut state,
         P1,
         GameAction::RespondResolveAllConsent {
@@ -99,10 +356,15 @@ fn stale_epoch_and_decline_restore_the_exact_priority_snapshot() {
     )
     .expect("queued representative may decline");
 
-    assert!(matches!(&state.waiting_for, WaitingFor::Priority { player } if *player == P0));
-    assert_eq!(state.priority_player, P0);
-    assert_eq!(state.priority_pass_count, 3);
-    assert!(state.priority_passes.contains(&P0));
+    assert!(
+        state.stack.is_empty(),
+        "the two-player auto-pass resolves the stack immediately"
+    );
+    assert!(decline.events.iter().any(|event| matches!(
+        event,
+        engine::types::events::GameEvent::EffectResolved { .. }
+    )));
+    assert!(state.auto_pass.is_empty());
     assert!(state.resolve_all_consent_run.is_none());
     assert!(apply(
         &mut state,
@@ -113,6 +375,106 @@ fn stale_epoch_and_decline_restore_the_exact_priority_snapshot() {
         },
     )
     .is_err());
+}
+
+#[test]
+fn persisted_pending_consent_keeps_the_initiators_auto_pass_fallback() {
+    let mut state = GameState::new_two_player(430);
+    state.stack.push_back(no_op_entry(1, P0));
+    let epoch = begin(&mut state);
+
+    let persisted = PersistedGameState::capture(state);
+    let encoded = serde_json::to_string(&persisted).expect("pending consent serializes");
+    let persisted: PersistedGameState =
+        serde_json::from_str(&encoded).expect("pending consent deserializes");
+    let mut restored = persisted.into_game_state();
+    assert!(matches!(
+        restored.waiting_for,
+        WaitingFor::ResolveAllConsent { epoch: restored_epoch, representative } if restored_epoch == epoch && representative == P1
+    ));
+
+    let decline = apply(
+        &mut restored,
+        P1,
+        GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Decline,
+        },
+    )
+    .expect("restored responder may decline");
+    assert!(
+        decline.events.iter().any(|event| matches!(
+            event,
+            engine::types::events::GameEvent::EffectResolved { .. }
+        )),
+        "declining after a save resumes the normal auto-pass pipeline"
+    );
+    assert!(restored.stack.is_empty());
+    assert!(restored.auto_pass.is_empty());
+}
+
+#[test]
+fn restored_mid_stack_priority_can_start_a_new_resolve_all_consent_run() {
+    let mut state = GameState::new_two_player(431);
+    state.stack.push_back(no_op_entry(1, P0));
+    let persisted = PersistedGameState::capture(state);
+    let encoded = serde_json::to_string(&persisted).expect("mid-stack priority serializes");
+    let persisted: PersistedGameState =
+        serde_json::from_str(&encoded).expect("mid-stack priority deserializes");
+    let mut restored = persisted.into_game_state();
+
+    let epoch = begin(&mut restored);
+    assert!(matches!(
+        restored.waiting_for,
+        WaitingFor::ResolveAllConsent { epoch: restored_epoch, representative } if restored_epoch == epoch && representative == P1
+    ));
+}
+
+#[test]
+fn decline_auto_pass_is_owned_by_the_semantic_priority_seat_under_turn_control() {
+    let mut state = GameState::new_two_player(432);
+    state.active_player = P0;
+    state.turn_decision_controller = Some(P1);
+    state.priority_player = P1;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+    state.stack.push_back(no_op_entry(1, P0));
+
+    apply(
+        &mut state,
+        P1,
+        GameAction::BeginResolveAll { max_resolutions: 7 },
+    )
+    .expect("the controller may begin Resolve All for the controlled priority seat");
+    let epoch = match state.waiting_for {
+        WaitingFor::ResolveAllConsent {
+            epoch,
+            representative,
+        } => {
+            assert_eq!(representative, P1);
+            epoch
+        }
+        ref waiting_for => panic!("expected queued consent, got {waiting_for:?}"),
+    };
+
+    let decline = apply(
+        &mut state,
+        P1,
+        GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Decline,
+        },
+    )
+    .expect("the responder may decline");
+
+    assert!(
+        state.stack.is_empty(),
+        "the semantic priority seat P0 was passed immediately; using submitter P1 would leave the stack intact"
+    );
+    assert!(decline.events.iter().any(|event| matches!(
+        event,
+        engine::types::events::GameEvent::EffectResolved { .. }
+    )));
+    assert!(state.auto_pass.is_empty());
 }
 
 #[test]
@@ -142,6 +504,7 @@ fn eliminating_a_consent_representative_drops_the_run_and_restores_living_priori
     assert_eq!(state.priority_player, P0);
     assert_eq!(state.priority_pass_count, 0);
     assert!(state.priority_passes.is_empty());
+    assert!(state.auto_pass.is_empty());
     assert!(!state.players[P2.0 as usize].is_eliminated);
 }
 
@@ -273,6 +636,7 @@ fn granted_representative_can_revoke_off_queue_and_private_run_is_not_visible() 
     .expect("a granted representative may revoke from Ready");
     assert!(matches!(&state.waiting_for, WaitingFor::Priority { player } if *player == P0));
     assert!(state.resolve_all_consent_run.is_none());
+    assert!(state.auto_pass.is_empty());
 }
 
 #[test]

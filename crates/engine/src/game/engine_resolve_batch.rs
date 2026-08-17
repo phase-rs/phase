@@ -69,6 +69,7 @@ pub fn resolve_all_ready_prefix(
     let mut log_entries = Vec::new();
     let mut recorded_actions = Vec::new();
     let mut items_resolved = 0;
+    let mut proof_stopped = false;
 
     let Some(run) = ready_consent_run(state, requester).cloned() else {
         if matches!(&state.waiting_for, WaitingFor::ResolveAllReady { .. }) {
@@ -104,6 +105,7 @@ pub fn resolve_all_ready_prefix(
         let stack_before = proof.stack.len();
         let Some((boundary, mut actions)) = materialize_one_consented_resolution(&mut proof, &run)
         else {
+            proof_stopped = true;
             break;
         };
 
@@ -117,6 +119,7 @@ pub fn resolve_all_ready_prefix(
             || !stack::priority_checkpoint_is_settled(&proof)
             || !consent_authorization_matches(&proof, &run)
         {
+            proof_stopped = true;
             break;
         }
 
@@ -127,10 +130,24 @@ pub fn resolve_all_ready_prefix(
         *state = proof;
     }
 
-    // Authorization is one run only. Once the proved prefix ends (including
-    // a zero-length or cap boundary), return the remaining stack to ordinary
-    // priority; no later stack entry inherits this consent.
+    // Authorization is one run only. Once the proved prefix ends, no later
+    // stack entry inherits this consent. A proof failure is different from a
+    // requested cap: it only rejects collapsing this sequence, not the
+    // requester's durable intent to avoid manual priority passes. Continue
+    // through the ordinary `UntilStackEmpty` engine path in that case.
     turn_control::invalidate_resolve_all_consent(state);
+    if proof_stopped {
+        let mut fallback_events = Vec::new();
+        if let Ok(fallback) = super::engine::install_until_stack_empty_auto_pass_and_pass_priority(
+            state,
+            run.priority_snapshot.waiting_player,
+            &mut fallback_events,
+        ) {
+            items_resolved += stack_resolved_count(&fallback.events);
+            events.extend(fallback.events);
+            log_entries.extend(fallback.log_entries);
+        }
+    }
     finalize_display_state(state);
     interaction::ensure_interaction_authority(state);
 

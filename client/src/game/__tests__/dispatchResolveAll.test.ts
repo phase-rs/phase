@@ -6,7 +6,7 @@ import { useGameStore } from "../../stores/gameStore";
 import { useAppNotificationStore } from "../../stores/appToastStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { buildGameState, buildPriorityWaitingFor, buildStackEntry } from "../../test/factories/gameStateFactory";
-import { dispatchResolveAll } from "../dispatch";
+import { dispatchAction, dispatchResolveAll } from "../dispatch";
 
 // A Priority-on-the-storming-player WaitingFor (active player holds priority).
 const priorityWf: BatchResolveResult["waitingFor"] = buildPriorityWaitingFor();
@@ -66,6 +66,7 @@ describe("dispatchResolveAll progress", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
   });
 
   it("reports the engine-proved prefix once and clears progress at the end", async () => {
@@ -223,6 +224,73 @@ describe("dispatchResolveAll progress", () => {
     await dispatchResolveAll(0, []);
 
     expect(resolveAll).toHaveBeenCalledWith(0, [], 5);
+  });
+
+  it("submits a Resolve All click queued behind a fresh Priority snapshot", async () => {
+    vi.useFakeTimers();
+    usePreferencesStore.setState({ animationSpeedMultiplier: 1 });
+
+    const initialPriority = buildPriorityWaitingFor();
+    const freshPriority = buildPriorityWaitingFor();
+    const priorityState = buildGameState({
+      waiting_for: initialPriority,
+      stack: [buildStackEntry({ id: 1 })],
+    });
+    const postPassState = buildGameState({
+      waiting_for: freshPriority,
+      stack: [buildStackEntry({ id: 1 })],
+    });
+    const consentState = buildGameState({
+      waiting_for: { type: "ResolveAllConsent", data: { epoch: 1, representative: 1 } },
+      stack: [buildStackEntry({ id: 1 })],
+    });
+    const submitAction = vi
+      .fn()
+      .mockResolvedValueOnce({
+        events: [{ type: "LifeChanged", data: { player_id: 0, amount: -1 } }],
+        log_entries: [],
+      })
+      .mockResolvedValue({ events: [], log_entries: [] });
+    const getSnapshot = vi
+      .fn<() => Promise<EngineSnapshot>>()
+      .mockResolvedValueOnce({
+        state: postPassState,
+        legalResult: { actions: [{ type: "PassPriority" }], autoPassRecommended: false },
+        seq: nextSnapshotSeq(),
+      })
+      .mockResolvedValueOnce({
+        state: consentState,
+        legalResult: { actions: [], autoPassRecommended: false },
+        seq: nextSnapshotSeq(),
+      })
+      .mockResolvedValue({
+        state: consentState,
+        legalResult: { actions: [], autoPassRecommended: false },
+        seq: nextSnapshotSeq(),
+      });
+
+    useGameStore.setState({
+      gameState: priorityState,
+      waitingFor: initialPriority,
+      legalActions: [{ type: "PassPriority" }],
+      adapter: { submitAction, getSnapshot, resolveAll: vi.fn() } as never,
+    });
+
+    const pass = dispatchAction({ type: "PassPriority" }, 0);
+    await vi.advanceTimersByTimeAsync(0);
+    const resolveAll = dispatchResolveAll(0, [{ playerId: 1, difficulty: "Medium" }]);
+    const cancelAutoPass = dispatchAction({ type: "CancelAutoPass" }, 0);
+
+    await vi.runAllTimersAsync();
+    await pass;
+    await resolveAll;
+    await cancelAutoPass;
+
+    expect(submitAction).toHaveBeenNthCalledWith(2, {
+      type: "BeginResolveAll",
+      data: { max_resolutions: 5 },
+    }, 0);
+    expect(submitAction).toHaveBeenNthCalledWith(3, { type: "CancelAutoPass" }, 0);
   });
   it("consumes Ready consent with an empty AI-seat list when the server owns native AI", async () => {
     const resolveAll = vi.fn<EngineResolveAll>().mockResolvedValue(chunk(0, 2));

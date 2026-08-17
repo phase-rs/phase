@@ -217,6 +217,7 @@ function queuedLocalActionStillApplies(next: PendingLocalAction): boolean {
   if (
     next.action.type === "SetPhaseStops"
     || next.action.type === "SetPriorityPassingMode"
+    || next.action.type === "CancelAutoPass"
   ) {
     return true;
   }
@@ -224,8 +225,10 @@ function queuedLocalActionStillApplies(next: PendingLocalAction): boolean {
   if (Object.is(next.waitingFor, waitingFor)) return true;
   if (!waitingForActorMatches(waitingFor, gameState, next.actor)) return false;
   if (legalActions.some((action) => actionsEqual(action, next.action))) return true;
+  // Resolve All begins from Priority but is deliberately absent from normal
+  // legal actions: it opens its own engine-authored consent protocol.
   return (
-    next.action.type === "PassPriority" &&
+    (next.action.type === "PassPriority" || next.action.type === "BeginResolveAll") &&
     waitingFor?.type === "Priority" &&
     gameState != null
   );

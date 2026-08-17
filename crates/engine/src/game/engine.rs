@@ -7590,11 +7590,7 @@ fn begin_resolve_all_consent(
     priority_player: PlayerId,
     max_resolutions: u32,
 ) -> Result<WaitingFor, EngineError> {
-    if state.priority_player
-        != turn_control::authorized_submitter_for_player(state, priority_player)
-    {
-        return Err(EngineError::NotYourPriority);
-    }
+    super::priority::pass_priority_legality(state, priority_player)?;
     let current_representative =
         super::topology::priority_pass_representative(state, priority_player);
     let mut representatives = super::topology::priority_pass_participants(state);
@@ -7657,8 +7653,9 @@ fn resolve_all_consent_waiting_for(state: &GameState) -> Option<WaitingFor> {
     )
 }
 
-// CR 117.3d + CR 117.4: A declined shortcut resumes the exact ordinary
-// priority-pass sequence it interrupted; no spell or ability has resolved.
+// CR 117.3d + CR 117.4: A declined optimized batch restores the exact
+// priority-pass sequence it interrupted before ordinary priority handling
+// resumes; this restoration itself resolves no stack object.
 fn restore_resolve_all_priority_snapshot(state: &mut GameState) -> Result<WaitingFor, EngineError> {
     let run = state.resolve_all_consent_run.take().ok_or_else(|| {
         EngineError::InvalidAction("Resolve All consent is not active".to_string())
@@ -7670,6 +7667,91 @@ fn restore_resolve_all_priority_snapshot(state: &mut GameState) -> Result<Waitin
     Ok(WaitingFor::Priority {
         player: snapshot.waiting_player,
     })
+}
+
+/// Installs one player's requested auto-pass mode and, when that player holds
+/// the current Priority window, consumes it through the ordinary pipeline.
+///
+/// `SetAutoPass` and a declined Resolve All consent share this exact reducer
+/// path: both preserve the current stack baseline and must obey the same
+/// shortened-precast-pass restriction.
+fn install_auto_pass_and_pass_priority(
+    state: &mut GameState,
+    auto_pass_owner: PlayerId,
+    mode: AutoPassRequest,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    let WaitingFor::Priority { player } = &state.waiting_for else {
+        unreachable!("auto-pass may only be installed from a Priority window");
+    };
+    let pass_immediately = *player == auto_pass_owner;
+    if pass_immediately && super::precast_copy_shortcut::blocks_pass(state, *player) {
+        return Err(EngineError::ActionNotAllowed(
+            "A shortened pre-cast shortcut requires a different meaningful action before passing"
+                .to_string(),
+        ));
+    }
+    let stored_mode = match mode {
+        AutoPassRequest::UntilStackEmpty => AutoPassMode::UntilStackEmpty {
+            initial_stack_len: state.stack.len(),
+        },
+        AutoPassRequest::UntilTurnBoundary { until } => AutoPassMode::UntilTurnBoundary { until },
+    };
+    state.auto_pass.insert(auto_pass_owner, stored_mode);
+    if !pass_immediately {
+        return Ok(ActionResult {
+            events: std::mem::take(events),
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        });
+    }
+    let waiting_for = pass_priority_once_with_pipeline(state, events, None)?;
+    Ok(ActionResult {
+        events: std::mem::take(events),
+        waiting_for,
+        log_entries: vec![],
+    })
+}
+
+/// Stores Resolve All's durable "do not make me pass each frame" intent in
+/// the same engine-owned `UntilStackEmpty` flow as a direct priority request.
+pub(crate) fn install_until_stack_empty_auto_pass_and_pass_priority(
+    state: &mut GameState,
+    auto_pass_owner: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    install_auto_pass_and_pass_priority(
+        state,
+        auto_pass_owner,
+        AutoPassRequest::UntilStackEmpty,
+        events,
+    )
+}
+
+/// CR 117.3d + CR 117.4: Declining the optimized Resolve All batch preserves
+/// the requester's intent by switching to the ordinary engine auto-pass flow.
+fn decline_resolve_all_consent_with_auto_pass(
+    state: &mut GameState,
+    epoch: u64,
+    representative: PlayerId,
+    response_epoch: u64,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    let waiting_for = respond_resolve_all_consent(
+        state,
+        epoch,
+        representative,
+        response_epoch,
+        ResolveAllConsentDecision::Decline,
+    )?;
+    let WaitingFor::Priority { player } = waiting_for else {
+        unreachable!("declined Resolve All consent must restore Priority");
+    };
+    // `pass_priority_once_with_pipeline` derives the semantic priority seat
+    // from this state. Install the captured Priority window before reusing the
+    // normal SetAutoPass path, rather than passing from the consent prompt.
+    state.waiting_for = WaitingFor::Priority { player };
+    install_until_stack_empty_auto_pass_and_pass_priority(state, player, events)
 }
 
 fn respond_resolve_all_consent(
@@ -8173,6 +8255,24 @@ fn apply_action(
         }
         (WaitingFor::Priority { player }, GameAction::BeginResolveAll { max_resolutions }) => {
             begin_resolve_all_consent(state, *player, max_resolutions)?
+        }
+        (
+            WaitingFor::ResolveAllConsent {
+                epoch,
+                representative,
+            },
+            GameAction::RespondResolveAllConsent {
+                epoch: response_epoch,
+                decision: ResolveAllConsentDecision::Decline,
+            },
+        ) => {
+            return decline_resolve_all_consent_with_auto_pass(
+                state,
+                *epoch,
+                *representative,
+                response_epoch,
+                &mut events,
+            );
         }
         (
             WaitingFor::ResolveAllConsent {
@@ -11863,28 +11963,7 @@ fn apply_action(
             GameAction::PassParadigmOffer,
         ) => WaitingFor::Priority { player: *player },
         (WaitingFor::Priority { player }, GameAction::SetAutoPass { mode }) => {
-            if super::precast_copy_shortcut::blocks_pass(state, *player) {
-                return Err(EngineError::ActionNotAllowed(
-                    "A shortened pre-cast shortcut requires a different meaningful action before passing"
-                        .to_string(),
-                ));
-            }
-            // Convert request to stored mode, capturing engine state as needed.
-            let stored_mode = match mode {
-                AutoPassRequest::UntilStackEmpty => AutoPassMode::UntilStackEmpty {
-                    initial_stack_len: state.stack.len(),
-                },
-                AutoPassRequest::UntilTurnBoundary { until } => {
-                    AutoPassMode::UntilTurnBoundary { until }
-                }
-            };
-            state.auto_pass.insert(*player, stored_mode);
-            let wf = pass_priority_once_with_pipeline(state, &mut events, None)?;
-            return Ok(ActionResult {
-                events,
-                waiting_for: wf,
-                log_entries: vec![],
-            });
+            return install_auto_pass_and_pass_priority(state, *player, mode, &mut events);
         }
         // CR 701.34a: Proliferate — player selected targets to proliferate.
         (
