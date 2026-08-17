@@ -3994,8 +3994,8 @@ fn resolve_ref(
             // (Contest of Claws). 0 when the preceding effect dealt no excess.
             DamageChannel::Excess => state.last_effect_excess_amount.unwrap_or(0),
         },
-        // CR 608.2c: Reads the preceding resolution-local choice count directly;
-        // unlike EventContextAmount, an enclosing trigger cannot shadow it.
+        // Read the preceding continuation-local effect count directly.
+        // An unavailable count resolves to zero; an enclosing trigger cannot shadow it.
         QuantityRef::PreviousEffectCount => state.last_effect_count.unwrap_or(0),
         // CR 608.2c: "for each [thing] this way" — read the most recent tracked set size.
         QuantityRef::TrackedSetSize => state

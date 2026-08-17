@@ -8418,8 +8418,8 @@ pub fn synthesize_devour(face: &mut CardFace) {
         let quality_noun = type_filter_noun(quality, false);
         let quality_noun_plural = type_filter_noun(quality, true);
 
-        // CR 122.1: N +1/+1 counters per creature sacrificed this way. The
-        // per-creature count is `PreviousEffectCount` (the number the ranged
+        // CR 702.82a / CR 702.82c: N +1/+1 counters per sacrificed permanent. The
+        // per-sacrifice count is `PreviousEffectCount` (the number the ranged
         // Sacrifice choice stamped into `last_effect_count`); for
         // N > 1 it is scaled by `factor: n`.
         let counter_count = if n == 1 {

@@ -452,7 +452,7 @@ fn devour_2_one_sacrifice_places_two_counters() {
     );
 }
 
-/// CR 702.82a + CR 614.1c + CR 122.1: Devour's continuation count is distinct
+/// CR 702.82a + CR 614.16: Devour's continuation count is distinct
 /// from a concurrently live enclosing event amount. Two sacrifices for Mycoloth
 /// (Devour 2) make four counters, then the AddCounter doubler makes eight.
 #[test]
