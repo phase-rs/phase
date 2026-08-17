@@ -15121,6 +15121,27 @@ pub enum Effect {
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
         phase: Phase,
+        /// CR 500.8: the phase the insertion is added directly after.
+        ///
+        /// `after: Phase::PreCombatMain` is a RESOLUTION-TIME SENTINEL meaning
+        /// "the phase this effect resolves in" (CR 608.2c), remapped by
+        /// `additional_phase::resolve` via `turns::last_step_of_phase(state.phase)`.
+        /// It NEVER means a literal precombat-main anchor, and no producer may
+        /// emit it as one. Any new producer of a literal precombat-main anchor
+        /// must introduce a typed `PhaseAnchor` first.
+        ///
+        /// The sentinel is deliberately class-agnostic and therefore carries NO
+        /// precondition of its own. The "after this **main** phase" wording (10
+        /// cards: Relentless Assault, Fury of the Horde, Full Throttle, …) has
+        /// one — it creates NOTHING when the effect resolves outside a main
+        /// phase (Gatherer, Fury of the Horde: "If it's somehow not a main phase
+        /// when [this] resolves, all it does is untap all creatures that attacked
+        /// that turn. No new phases are created.") — and that precondition is
+        /// carried as an `AbilityCondition::CurrentPhaseIs` gate attached to the
+        /// clause by `oracle_effect::imperative::this_phase_anchor_gate`, NOT by
+        /// this field. A producer that emits the sentinel for a phase-type-named
+        /// wording MUST attach that gate too, or the effect will wrongly schedule
+        /// a phase outside the named phase type.
         after: Phase,
         #[serde(default)]
         followed_by: Vec<Phase>,

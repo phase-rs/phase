@@ -39,7 +39,7 @@ expression: "&lowered"
               "type": "Controller"
             },
             "phase": "BeginCombat",
-            "after": "EndCombat",
+            "after": "PreCombatMain",
             "followed_by": [],
             "count": {
               "type": "Fixed",

@@ -10,8 +10,8 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
-    AutoPassMode, ExtraPhase, ExtraTurn, GameState, LoopCollapseAxis, PayableResource,
-    PendingCounterAddition, PendingEffectResolved, TurnBoundary, WaitingFor,
+    AutoPassMode, ExtraPhase, ExtraPhaseResume, ExtraTurn, GameState, LoopCollapseAxis,
+    PayableResource, PendingCounterAddition, PendingEffectResolved, TurnBoundary, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::Phase;
@@ -55,7 +55,8 @@ pub(crate) fn last_step_of_phase(phase: Phase) -> Phase {
     match phase {
         // CR 501.1: beginning phase = untap, upkeep, draw.
         Phase::Untap | Phase::Upkeep | Phase::Draw => Phase::Draw,
-        // CR 505.1: each main phase is a single step.
+        // CR 500.1 + CR 505.1: a main phase has no steps, so it is its own last
+        // "step" for anchoring purposes.
         Phase::PreCombatMain => Phase::PreCombatMain,
         // CR 506.1: combat phase = begin, declare attackers/blockers, damage, end.
         Phase::BeginCombat
@@ -66,6 +67,56 @@ pub(crate) fn last_step_of_phase(phase: Phase) -> Phase {
         Phase::PostCombatMain => Phase::PostCombatMain,
         // CR 512.1: ending phase = end, cleanup.
         Phase::End | Phase::Cleanup => Phase::Cleanup,
+    }
+}
+
+/// CR 500.8 + CR 500.10: The step whose end finishes an *inserted* phase, given
+/// the phase value the insertion was scheduled with. This is NOT
+/// [`last_step_of_phase`]: that answers "which step ends the phase CONTAINING
+/// this one" for a phase in natural progression, whereas an inserted entry only
+/// runs the steps the insertion actually creates.
+///
+/// The match is deliberately exhaustive with no wildcard — a new `Phase` variant
+/// must be a compile error here, not silently treated as a one-step insert.
+pub(crate) fn inserted_phase_terminal_step(inserted: Phase) -> Phase {
+    match inserted {
+        // CR 501.1: `Untap` is the inserted-BEGINNING-PHASE marker (no other
+        // producer emits it), so the whole untap → upkeep → draw phase runs and
+        // the draw step ends it.
+        Phase::Untap => Phase::Draw,
+        // CR 500.10: an inserted STEP ("there is an additional upkeep step" —
+        // Paradox Haze; "there is an additional end step" — Y'shtola Rhul)
+        // creates the phase that normally contains that step, and "any other
+        // steps that phase would normally have are skipped". So the inserted
+        // step both begins and ends the insertion.
+        //
+        // KNOWN GAP (pre-existing, deliberately NOT closed here): the parser
+        // arms for those two wordings (`oracle_effect/imperative.rs`,
+        // "additional upkeep step" / "additional end step") hard-code
+        // `after: Upkeep` / `after: End` and were left out of the "after this
+        // phase" sentinel unification. Paradox Haze works because its trigger
+        // resolves at upkeep, but Obeka, Splitter of Seconds ("there are that
+        // many additional upkeep steps after this phase") resolves in the
+        // combat damage step, so her entries are anchored in the PAST and never
+        // fire. Obeka is therefore NOT covered by this function's callers; do
+        // not cite her as a witness for the inserted-step path.
+        Phase::Upkeep => Phase::Upkeep,
+        Phase::Draw => Phase::Draw,
+        Phase::DeclareAttackers => Phase::DeclareAttackers,
+        Phase::DeclareBlockers => Phase::DeclareBlockers,
+        Phase::CombatDamage => Phase::CombatDamage,
+        Phase::EndCombat => Phase::EndCombat,
+        Phase::End => Phase::End,
+        Phase::Cleanup => Phase::Cleanup,
+        // CR 506.1: `BeginCombat` schedules a whole additional COMBAT PHASE
+        // (Aurelia, Moraug, Relentless Assault); its five steps run in order and
+        // the end-of-combat step ends it.
+        Phase::BeginCombat => Phase::EndCombat,
+        // CR 500.1 + CR 505.1: a main phase has NO steps (only the beginning,
+        // combat and ending phases are broken into steps), so an inserted main
+        // phase begins and ends as that one phase.
+        Phase::PreCombatMain => Phase::PreCombatMain,
+        Phase::PostCombatMain => Phase::PostCombatMain,
     }
 }
 
@@ -136,47 +187,114 @@ pub(in crate::game) fn advance_phase_once(
     let leaving = state.phase;
     let removed: Option<ExtraPhase>;
     let next: Phase;
-    if leaving == Phase::Draw && !state.extra_phase_resume.is_empty() {
-        // CR 501.1: an inserted beginning phase's draw step is ending.
-        let anchor = *state.extra_phase_resume.last().unwrap();
-        if let Some(i) = state
-            .extra_phases
-            .iter()
-            .rposition(|ep| ep.anchor == anchor && ep.phase == Phase::Untap)
-        {
-            // CR 500.8: another beginning phase was queued after the same phase —
-            // run it next (the resume anchor stays on the stack). The anchor phase
-            // is never re-entered, so its beginning-of-phase triggers (Temple's
-            // postcombat-main trigger) do not re-fire.
-            state.extra_phases.remove(i);
-            removed = None;
-            next = Phase::Untap;
-        } else {
-            // CR 500.8: no more queued beginning phases — resume the turn after
-            // "this phase" (the anchor's natural successor).
-            state.extra_phase_resume.pop();
-            removed = None;
-            next = next_phase(anchor);
+
+    // CR 500.8: an entry anchored at the phase we are LEAVING is inserted
+    // directly after it and takes precedence — this is the innermost, most
+    // recent insertion point. `rposition` keeps "the most recently created phase
+    // will occur first".
+    let taken = state
+        .extra_phases
+        .iter()
+        .rposition(|ep| ep.anchor == leaving)
+        .map(|i| state.extra_phases.remove(i));
+
+    if let Some(ep) = taken {
+        next = ep.phase;
+        match state.extra_phase_resume.last_mut() {
+            // CR 500.8: continuing the bundle already anchored here reuses its
+            // frame (two Aurelia-style combats, Obeka's N upkeeps, two Temple
+            // beginning phases) rather than nesting a redundant return point —
+            // the turn still resumes exactly once, at this anchor's natural
+            // successor.
+            Some(frame) if frame.anchor == leaving => frame.inserted = ep.phase,
+            // CR 500.8: any other insertion point gets its OWN frame, pushed on
+            // top of whatever is already running. In particular, when the frame
+            // below is EXHAUSTED (this step is the one that ends its insertion)
+            // its return point is still owed, and the new insertion is anchored
+            // *here*, not at the outer frame's anchor — so the outer frame must
+            // be kept intact rather than having the new insertion written over
+            // it. Overwriting it (the previous "inherit the exhausted frame"
+            // behavior) makes every remaining entry anchored at `leaving`
+            // unreachable: the unwind below looks for siblings at the frame's
+            // anchor, and after the overwrite no frame carries `leaving` any
+            // more. Reproducer: Aggravated Assault activated in the precombat
+            // main and again in the additional main phase that activation
+            // created — the second bundle's follow-up main was deferred past the
+            // turn's natural combat instead of running directly after its own
+            // combat. The stranding hazard the overwrite was protecting against
+            // is handled by threading the unwind boundary through popped
+            // anchors; see the `boundary` walk below.
+            _ => state.extra_phase_resume.push(ExtraPhaseResume {
+                anchor: leaving,
+                inserted: ep.phase,
+            }),
         }
+        removed = Some(ep);
     } else {
-        let taken = state
-            .extra_phases
-            .iter()
-            .rposition(|ep| ep.anchor == leaving)
-            .map(|i| state.extra_phases.remove(i));
-        next = taken
-            .as_ref()
-            .map(|ep| ep.phase)
-            .unwrap_or_else(|| next_phase(leaving));
-        // CR 501.1: entering a freshly-inserted beginning phase — remember where
-        // to resume once its draw step ends. (No other producer emits `phase:
-        // Untap`, so this uniquely identifies an inserted beginning phase.)
-        if let Some(ep) = &taken {
-            if ep.phase == Phase::Untap {
-                state.extra_phase_resume.push(ep.anchor);
+        // CR 500.8: nothing is queued after the phase we are leaving. If we are
+        // inside one or more inserted phases whose terminal step this is, unwind
+        // them: an insertion is "directly after" its anchor, so once it (and
+        // every insertion nested inside it that ends at the same step) is
+        // exhausted, the turn continues from the OUTERMOST exhausted anchor's
+        // natural successor — never from the inserted phase's own default
+        // successor.
+        //
+        // The unwind (rather than a single top-frame inspection) is what keeps
+        // the natural combat phase alive when a combat-triggered extra combat
+        // (Port Razer, Combat Celebrant, Scourge of the Throne) nests inside a
+        // main-phase-anchored extra combat (Moraug, Relentless Assault): both
+        // frames end at the same `EndCombat`, and only the outer one knows the
+        // turn still owes its natural combat.
+        //
+        // `boundary` is the step at which the insertion the walk is currently
+        // looking at came to an end. It starts as the step we are leaving, and
+        // after each frame is popped it becomes THAT frame's anchor — because a
+        // frame anchored at `A` was only ever pushed while leaving `A`, so the
+        // frame directly beneath it was, at that moment, either exhausted
+        // (its terminal step was `A`) or still running (its terminal step was
+        // not). Comparing the outer frame's terminal step against `A` therefore
+        // asks exactly "was this frame already exhausted when the one above it
+        // was pushed?", which is what lets the walk keep unwinding through a
+        // frame whose insertion ended at an EARLIER step than the innermost one
+        // (Aggravated Assault's main-anchored bundle underneath World at War's
+        // `EndCombat`-anchored bundle: the outer insertion ended at
+        // `PostCombatMain`, the inner at `EndCombat`). Without that threading
+        // the walk stops at the outer frame and its anchor's natural successor
+        // — the turn's own combat phase — is never reached.
+        let mut resumed_anchor: Option<Phase> = None;
+        let mut chained: Option<ExtraPhase> = None;
+        let mut boundary = leaving;
+        while let Some(frame) = state.extra_phase_resume.last().copied() {
+            if inserted_phase_terminal_step(frame.inserted) != boundary {
+                break;
             }
+            // CR 500.8: another phase queued after the SAME anchor runs next
+            // ("the most recently created phase will occur first"), before the
+            // turn resumes. The anchor phase itself is never re-entered, so its
+            // beginning-of-phase triggers do not re-fire.
+            if let Some(i) = state
+                .extra_phases
+                .iter()
+                .rposition(|ep| ep.anchor == frame.anchor)
+            {
+                let ep = state.extra_phases.remove(i);
+                if let Some(top) = state.extra_phase_resume.last_mut() {
+                    top.inserted = ep.phase;
+                }
+                chained = Some(ep);
+                break;
+            }
+            state.extra_phase_resume.pop();
+            resumed_anchor = Some(frame.anchor);
+            boundary = frame.anchor;
         }
-        removed = taken;
+        next = match (&chained, resumed_anchor) {
+            (Some(ep), _) => ep.phase,
+            // CR 500.8: resume after the outermost exhausted insertion point.
+            (None, Some(anchor)) => next_phase(anchor),
+            (None, None) => next_phase(leaving),
+        };
+        removed = chained;
     }
 
     // CR 511.3: End Combat teardown happens when the step ends, after its
@@ -185,10 +303,33 @@ pub(in crate::game) fn advance_phase_once(
         complete_end_combat_teardown(state);
     }
 
-    // If wrapping from Cleanup to Untap, start next turn. Turn-level skip
-    // replacements (CR 614.10) are handled inside `start_next_turn` — the
-    // per-phase pipeline below runs only for within-turn phase advances.
-    if state.phase == Phase::Cleanup && next == Phase::Untap {
+    // CR 500.1 + CR 500.8: the turn is over exactly when the cleanup step's
+    // NATURAL successor is reached — `next_phase(Cleanup)` is the only source of
+    // `Phase::Untap` that is not an inserted entry, so `next == Untap` together
+    // with "no extra phase was consumed on this hop" is the precise predicate.
+    // Turn-level skip replacements (CR 614.10) are handled inside
+    // `start_next_turn`; the per-phase pipeline below runs only for within-turn
+    // phase advances.
+    //
+    // The phase we are LEAVING is not a reliable witness in either direction:
+    //   * A phase inserted directly after the cleanup step makes the turn resume
+    //     from that insertion's TERMINAL step, so `state.phase` is (say)
+    //     `EndCombat` and the old `state.phase == Cleanup` test missed the
+    //     boundary entirely: no `start_next_turn`, so no turn increment, no
+    //     active-player rotation, and every per-turn ledger left stale — a free
+    //     extra turn. Any bare "after this phase" effect resolving in the end or
+    //     cleanup step produces exactly that anchor (`last_step_of_phase` maps
+    //     both `End` and `Cleanup` to `Cleanup`; CR 514.3 permits a cleanup-step
+    //     cast). No printed card reaches it today — every instant in that class
+    //     carries a "cast only during combat" restriction the caster enforces —
+    //     but this change routes 36 more cards through the sentinel, so the guard
+    //     is keyed on the machinery rather than on a phase value that only
+    //     happens to be right for the anchors in use.
+    //   * Conversely, an inserted BEGINNING phase anchored at the cleanup step
+    //     produces `next == Untap` from a real entry while leaving `Cleanup`; the
+    //     old test wrapped the turn and `start_next_turn` silently ate the
+    //     insertion. `removed.is_none()` is what rules that out.
+    if next == Phase::Untap && removed.is_none() {
         start_next_turn(state, events);
     } else {
         // CR 614.1b + CR 614.10 + CR 500.11: Route phase/step starts through the
@@ -205,6 +346,21 @@ pub(in crate::game) fn advance_phase_once(
             // as though it didn't exist." Advance `state.phase` past the skipped
             // phase so the next loop iteration computes the phase AFTER it, then
             // let the outer advance loop compute the phase AFTER it.
+            //
+            // CR 500.8 + CR 500.11: the resume frame created (or continued) just
+            // above is deliberately LEFT IN PLACE. The frame does not record
+            // "an inserted phase is running"; it records where the turn continues
+            // once this insertion point is exhausted, and skipping the inserted
+            // phase does not repay that debt. Dropping it here would resume the
+            // turn at the skipped phase's own default successor — exactly the
+            // defect this change removes (a skipped inserted combat scheduled in
+            // a postcombat main would fall into a second postcombat main; a
+            // skipped inserted untap step would send a Temple of Atropos turn to
+            // the precombat main phase instead of the end step, which is also the
+            // behavior the pre-change code had, since it never popped here
+            // either). The frame is consumed by the unwind above when the
+            // insertion's terminal step ends, and unconditionally cleared at
+            // every turn boundary.
             state.phase = next;
             return AdvancePhaseOnce::Skipped;
         }
@@ -3032,14 +3188,21 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // CR 614.10a + CR 614.1b: Other "skip your draw step" effects
             // (replacements or static abilities) also remove the whole step.
             // CR 103.8a: only the STARTING player's FIRST (natural) draw step
-            // is skipped. An inserted beginning phase's draw step
-            // (`extra_phase_resume` non-empty) is not that first draw and must
-            // not be skipped (Temple of Atropos as the turn-1 starting plane).
+            // is skipped. An inserted beginning phase's draw step is not that
+            // first draw and must not be skipped (Temple of Atropos as the
+            // turn-1 starting plane). Test for an inserted BEGINNING phase
+            // specifically (CR 501.1: `inserted == Untap` is the beginning-phase
+            // marker) — the resume stack also carries inserted combat, main and
+            // step insertions, which never coexist with a natural draw step but
+            // must not be allowed to answer this question by accident.
             // `should_skip_step_now` (continuous "skip your draw step" effects,
             // CR 614.10a) is intentionally NOT exempted — those skip every draw.
             if (state.turn_number == 1
                 && first_player_skips_first_draw(state)
-                && state.extra_phase_resume.is_empty())
+                && !state
+                    .extra_phase_resume
+                    .iter()
+                    .any(|frame| frame.inserted == Phase::Untap))
                 || should_skip_step_now(state, Phase::Draw)
             {
                 let _ = advance_phase_once(state, events);
@@ -4731,12 +4894,20 @@ mod tests {
         assert!(state.extra_phases.is_empty());
     }
 
-    /// CR 500.8: World at War / Combat Celebrant exert variant — additional
-    /// combat phase followed by additional main phase. Both push with
-    /// anchor = EndCombat; LIFO ordering (`rposition` from the end)
-    /// consumes BeginCombat (most recent push) on the FIRST EndCombat
-    /// transition, then PostCombatMain on the SECOND EndCombat transition
-    /// (after the extra combat finishes).
+    /// CR 500.8 + CR 505.1a: World at War — an additional combat phase followed
+    /// by an additional main phase, both anchored at `EndCombat`. LIFO ordering
+    /// (`rposition` from the end) consumes BeginCombat (most recent push) on the
+    /// FIRST EndCombat transition, then PostCombatMain on the SECOND EndCombat
+    /// transition (after the extra combat finishes).
+    ///
+    /// The turn then resumes at the ANCHOR's natural successor
+    /// (`next_phase(EndCombat) == PostCombatMain`), so the turn's own postcombat
+    /// main phase still happens after the inserted one. That is CR 505.1a
+    /// verbatim: "[this] is also true of a turn in which an effect has caused an
+    /// additional combat phase and an additional main phase to be created" — the
+    /// inserted main is *additional to* the natural postcombat main, and the
+    /// natural one was previously swallowed because the turn resumed at the
+    /// inserted main phase's own default successor instead.
     #[test]
     fn cr_500_8_with_main_phase_lifo_anchor_ordering() {
         use crate::types::game_state::ExtraPhase;
@@ -4782,11 +4953,16 @@ mod tests {
                 Phase::EndCombat,
                 // Second EndCombat consumes the remaining push: PostCombatMain.
                 Phase::PostCombatMain,
+                // CR 500.8: the turn's OWN postcombat main phase still occurs —
+                // the turn resumes at `next_phase(EndCombat)`, the anchor's
+                // natural successor.
+                Phase::PostCombatMain,
                 // Natural successor — no entries left.
                 Phase::End,
             ]
         );
         assert!(state.extra_phases.is_empty());
+        assert!(state.extra_phase_resume.is_empty());
     }
 
     /// CR 500.8: Multiple extra combats stacked with the same anchor are
@@ -4824,6 +5000,754 @@ mod tests {
         advance_phase(&mut state, &mut events);
         assert_eq!(state.phase, Phase::BeginCombat);
         assert_eq!(state.extra_phases.len(), 1);
+    }
+
+    /// CR 500.8: an extra combat inserted after the PRECOMBAT MAIN phase is
+    /// inserted *directly after that phase* — the turn's own combat phase still
+    /// follows it. Before the resume frame existed, the turn resumed at the
+    /// inserted combat's own successor (`next_phase(EndCombat)`), so the natural
+    /// combat phase was silently swallowed (Moraug, Overpowering Attack,
+    /// Relentless Assault cast precombat).
+    #[test]
+    fn cr_500_8_main_anchored_extra_combat_precedes_the_natural_combat() {
+        use crate::types::game_state::ExtraPhase;
+
+        let mut state = setup();
+        state.phase = Phase::PreCombatMain;
+        state.extra_phases.push(ExtraPhase {
+            anchor: Phase::PreCombatMain,
+            phase: Phase::BeginCombat,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
+        });
+
+        let mut events = Vec::new();
+        let mut sequence = Vec::new();
+        for _ in 0..16 {
+            advance_phase(&mut state, &mut events);
+            sequence.push(state.phase);
+            if state.phase == Phase::End {
+                break;
+            }
+        }
+
+        assert_eq!(
+            sequence,
+            vec![
+                // The inserted combat runs first (CR 500.8: directly after the
+                // precombat main phase).
+                Phase::BeginCombat,
+                Phase::DeclareAttackers,
+                Phase::DeclareBlockers,
+                Phase::CombatDamage,
+                Phase::EndCombat,
+                // …then the turn resumes at the ANCHOR's natural successor: its
+                // own combat phase.
+                Phase::BeginCombat,
+                Phase::DeclareAttackers,
+                Phase::DeclareBlockers,
+                Phase::CombatDamage,
+                Phase::EndCombat,
+                Phase::PostCombatMain,
+                Phase::End,
+            ]
+        );
+        assert!(state.extra_phase_resume.is_empty());
+    }
+
+    /// CR 500.8 (the nested-insertion case): an extra combat triggered *inside*
+    /// a main-anchored extra combat (Port Razer / Combat Celebrant / Scourge of
+    /// the Throne connecting during a Moraug combat) is created directly after
+    /// the step that ENDS the outer insertion, so the outer frame is exhausted
+    /// while its return point is still owed. `advance_phase_once` pushes a frame
+    /// for the new insertion point on top of it; the turn must still resume at
+    /// the OUTERMOST anchor's successor and run its natural combat phase.
+    /// Resuming at the innermost `next_phase(EndCombat)` loses it.
+    ///
+    /// Both insertions here end at the SAME step (`EndCombat`). The
+    /// differing-terminal-step case — where the unwind has to keep walking past
+    /// a frame whose insertion ended earlier — is
+    /// `cr_500_8_unwind_walks_past_a_frame_whose_insertion_ended_at_an_earlier_step`.
+    #[test]
+    fn cr_500_8_nested_extra_combat_unwinds_to_the_outermost_anchor() {
+        use crate::types::game_state::ExtraPhase;
+
+        let mut state = setup();
+        state.phase = Phase::PreCombatMain;
+        state.extra_phases.push(ExtraPhase {
+            anchor: Phase::PreCombatMain,
+            phase: Phase::BeginCombat,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
+        });
+
+        let mut events = Vec::new();
+        let mut sequence = Vec::new();
+        let mut injected = false;
+        for _ in 0..24 {
+            advance_phase(&mut state, &mut events);
+            sequence.push(state.phase);
+            // During the FIRST inserted combat, a combat-damage trigger schedules
+            // another combat after "this phase" (anchor = EndCombat).
+            if !injected && state.phase == Phase::CombatDamage {
+                injected = true;
+                state.extra_phases.push(ExtraPhase {
+                    anchor: Phase::EndCombat,
+                    phase: Phase::BeginCombat,
+                    attacker_restriction: None,
+                    attacker_restriction_source: None,
+                });
+            }
+            if state.phase == Phase::End {
+                break;
+            }
+        }
+
+        let combat = || {
+            [
+                Phase::BeginCombat,
+                Phase::DeclareAttackers,
+                Phase::DeclareBlockers,
+                Phase::CombatDamage,
+                Phase::EndCombat,
+            ]
+        };
+        let mut expected: Vec<Phase> = Vec::new();
+        expected.extend(combat()); // main-anchored insert
+        expected.extend(combat()); // nested insert, anchored at its EndCombat
+        expected.extend(combat()); // the turn's own natural combat — still owed
+        expected.push(Phase::PostCombatMain);
+        expected.push(Phase::End);
+        assert_eq!(sequence, expected);
+        assert!(
+            state.extra_phase_resume.is_empty(),
+            "every return point is repaid by the end of the turn"
+        );
+    }
+
+    /// CR 500.8 — the differing-terminal-step regression. Aggravated Assault
+    /// (`{3}{R}{R}: … After this main phase, there is an additional combat phase
+    /// followed by an additional main phase.`) activated in the precombat main
+    /// anchors both of its entries there; World at War (`After the second main
+    /// phase this turn, there's an additional combat phase followed by an
+    /// additional main phase.` — a CR 505.1b ordinal anchor, so it keeps the
+    /// legacy `EndCombat` default) cast in the same main phase anchors both of
+    /// its entries at `EndCombat`.
+    ///
+    /// At the first inserted combat's end-of-combat step, World at War's combat
+    /// is created directly after a step that ENDS the outer, main-anchored
+    /// insertion. The frame pushed for it ends at `EndCombat`, but the outer,
+    /// main-anchored frame ends at `PostCombatMain` — an EARLIER step in the
+    /// walk's order. If the unwind compared every frame's terminal step against
+    /// the step being left, it would pop the inner frame when World at War's
+    /// follow-up main ends and then stop, because the outer frame's terminal
+    /// step (`EndCombat`) no longer matches. The turn then ran two combats and
+    /// two postcombat mains, and both `extra_phases` and `extra_phase_resume`
+    /// were left permanently non-empty — Aggravated Assault's own follow-up main
+    /// was never consumed.
+    ///
+    /// Threading the unwind boundary through each popped frame's anchor repays
+    /// every bundle instead: three combat phases and three postcombat main
+    /// phases, both stacks drained.
+    #[test]
+    fn cr_500_8_unwind_walks_past_a_frame_whose_insertion_ended_at_an_earlier_step() {
+        use crate::types::game_state::ExtraPhase;
+
+        let entry = |anchor: Phase, phase: Phase| ExtraPhase {
+            anchor,
+            phase,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
+        };
+
+        let mut state = setup();
+        state.phase = Phase::PreCombatMain;
+        // Aggravated Assault resolves first: follow-up main pushed before the
+        // combat so the LIFO scan takes the combat first (CR 500.8).
+        state
+            .extra_phases
+            .push(entry(Phase::PreCombatMain, Phase::PostCombatMain));
+        state
+            .extra_phases
+            .push(entry(Phase::PreCombatMain, Phase::BeginCombat));
+        // World at War resolves second, in the same main phase.
+        state
+            .extra_phases
+            .push(entry(Phase::EndCombat, Phase::PostCombatMain));
+        state
+            .extra_phases
+            .push(entry(Phase::EndCombat, Phase::BeginCombat));
+
+        let mut events = Vec::new();
+        let mut sequence = Vec::new();
+        for _ in 0..40 {
+            advance_phase(&mut state, &mut events);
+            sequence.push(state.phase);
+            if state.phase == Phase::End {
+                break;
+            }
+        }
+
+        let combat = || {
+            [
+                Phase::BeginCombat,
+                Phase::DeclareAttackers,
+                Phase::DeclareBlockers,
+                Phase::CombatDamage,
+                Phase::EndCombat,
+            ]
+        };
+        let mut expected: Vec<Phase> = Vec::new();
+        expected.extend(combat()); // Aggravated Assault's combat
+        expected.extend(combat()); // World at War's combat, after its EndCombat
+        expected.push(Phase::PostCombatMain); // World at War's follow-up main
+        expected.push(Phase::PostCombatMain); // Aggravated Assault's follow-up main
+        expected.extend(combat()); // the turn's OWN combat phase — still owed
+        expected.push(Phase::PostCombatMain); // the turn's own postcombat main
+        expected.push(Phase::End);
+        assert_eq!(
+            sequence, expected,
+            "CR 500.8: every bundle is inserted directly after its own anchor and \
+             none of them displaces a phase the turn already has",
+        );
+        assert_eq!(
+            sequence
+                .iter()
+                .filter(|p| **p == Phase::BeginCombat)
+                .count(),
+            3,
+            "two additional combat phases plus the turn's own",
+        );
+        assert!(
+            state.extra_phases.is_empty(),
+            "no entry may be stranded: {:?}",
+            state.extra_phases,
+        );
+        assert!(
+            state.extra_phase_resume.is_empty(),
+            "no return point may be stranded: {:?}",
+            state.extra_phase_resume,
+        );
+    }
+
+    /// The five steps of one combat phase (CR 506.1), in order. Shared by the
+    /// insertion-ordering tests below so an expected phase sequence reads as the
+    /// list of phases the turn is supposed to contain.
+    fn combat_steps() -> [Phase; 5] {
+        [
+            Phase::BeginCombat,
+            Phase::DeclareAttackers,
+            Phase::DeclareBlockers,
+            Phase::CombatDamage,
+            Phase::EndCombat,
+        ]
+    }
+
+    fn extra_phase_entry(anchor: Phase, phase: Phase) -> crate::types::game_state::ExtraPhase {
+        crate::types::game_state::ExtraPhase {
+            anchor,
+            phase,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
+        }
+    }
+
+    /// Drive `advance_phase` to the end step (or the given hop budget), pushing a
+    /// re-activation bundle each time an additional main phase is entered, up to
+    /// `activations` times. Models Aggravated Assault being activated again in
+    /// the very main phase its previous activation created: "After this main
+    /// phase" anchors the new bundle at `last_step_of_phase(PostCombatMain) ==
+    /// PostCombatMain` (CR 500.1 + CR 505.1 — a main phase has no steps).
+    fn run_reactivating_in_each_additional_main(
+        state: &mut GameState,
+        mut activations: usize,
+    ) -> Vec<Phase> {
+        let mut events = Vec::new();
+        let mut sequence = Vec::new();
+        for _ in 0..120 {
+            advance_phase(state, &mut events);
+            sequence.push(state.phase);
+            if activations > 0 && state.phase == Phase::PostCombatMain {
+                activations -= 1;
+                // Follow-up main pushed first so the LIFO scan (CR 500.8: "the
+                // most recently created phase will occur first") takes the
+                // combat phase first.
+                state.extra_phases.push(extra_phase_entry(
+                    Phase::PostCombatMain,
+                    Phase::PostCombatMain,
+                ));
+                state
+                    .extra_phases
+                    .push(extra_phase_entry(Phase::PostCombatMain, Phase::BeginCombat));
+            }
+            if state.phase == Phase::End {
+                break;
+            }
+        }
+        sequence
+    }
+
+    /// CR 500.8 — Aggravated Assault's primary line. `{3}{R}{R}: Untap all
+    /// creatures you control. After this main phase, there is an additional
+    /// combat phase followed by an additional main phase.` activated in the
+    /// natural precombat main, then activated AGAIN during the additional main
+    /// phase the first activation created.
+    ///
+    /// CR 500.8 is positional: each bundle is added "directly after the specified
+    /// phase", and the second activation's specified phase is the ADDITIONAL MAIN
+    /// it was activated in — not the precombat main. So the second combat and its
+    /// follow-up main run back to back, before the turn's own combat phase, which
+    /// is still owed from the first bundle's anchor.
+    ///
+    /// Regression: the second bundle's follow-up main was deferred past the
+    /// natural combat phase (`… C2, natural combat, natural main, extra main …`).
+    /// Both stacks still drained, so this was pure mis-ORDERING: the second
+    /// activation's insertion point was written over the first activation's
+    /// resume frame, leaving no frame carrying `PostCombatMain` for the unwind's
+    /// sibling scan to find, so the follow-up main was only picked up much later
+    /// by the natural postcombat main's own anchor scan.
+    #[test]
+    fn cr_500_8_reactivation_inside_an_additional_main_runs_directly_after_its_own_combat() {
+        let mut state = setup();
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.extra_phases.push(extra_phase_entry(
+            Phase::PreCombatMain,
+            Phase::PostCombatMain,
+        ));
+        state
+            .extra_phases
+            .push(extra_phase_entry(Phase::PreCombatMain, Phase::BeginCombat));
+
+        let sequence = run_reactivating_in_each_additional_main(&mut state, 1);
+
+        let mut expected: Vec<Phase> = Vec::new();
+        expected.extend(combat_steps()); // first activation's combat
+        expected.push(Phase::PostCombatMain); // first activation's main (re-activated here)
+        expected.extend(combat_steps()); // second activation's combat
+        expected.push(Phase::PostCombatMain); // second activation's main
+        expected.extend(combat_steps()); // the turn's OWN combat phase — still owed
+        expected.push(Phase::PostCombatMain); // the turn's own postcombat main
+        expected.push(Phase::End);
+        assert_eq!(
+            sequence, expected,
+            "CR 500.8: the second bundle is inserted directly after the main phase \
+             it was created in, not after the first bundle's anchor",
+        );
+        assert!(
+            state.extra_phases.is_empty(),
+            "no entry may be stranded: {:?}",
+            state.extra_phases,
+        );
+        assert!(
+            state.extra_phase_resume.is_empty(),
+            "no return point may be stranded: {:?}",
+            state.extra_phase_resume,
+        );
+    }
+
+    /// CR 500.8 — the same Aggravated Assault line taken to three activations,
+    /// each in the additional main phase the previous one created. The insertion
+    /// points nest three deep, and every one of them must be repaid in order:
+    /// four combat phases and four postcombat main phases (three additional plus
+    /// the turn's own of each), with the natural pair LAST.
+    #[test]
+    fn cr_500_8_three_chained_reactivations_each_run_directly_after_their_own_combat() {
+        let mut state = setup();
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.extra_phases.push(extra_phase_entry(
+            Phase::PreCombatMain,
+            Phase::PostCombatMain,
+        ));
+        state
+            .extra_phases
+            .push(extra_phase_entry(Phase::PreCombatMain, Phase::BeginCombat));
+
+        let sequence = run_reactivating_in_each_additional_main(&mut state, 2);
+
+        let mut expected: Vec<Phase> = Vec::new();
+        for _ in 0..4 {
+            expected.extend(combat_steps());
+            expected.push(Phase::PostCombatMain);
+        }
+        expected.push(Phase::End);
+        assert_eq!(
+            sequence, expected,
+            "CR 500.8: three additional combat/main bundles run back to back, then \
+             the turn's own combat phase and postcombat main",
+        );
+        assert!(state.extra_phases.is_empty(), "{:?}", state.extra_phases);
+        assert!(
+            state.extra_phase_resume.is_empty(),
+            "{:?}",
+            state.extra_phase_resume,
+        );
+    }
+
+    /// CR 500.8 + CR 501.1 — a bundle created INSIDE an inserted beginning phase.
+    /// Fixture: a beginning phase inserted after the postcombat main (Temple of
+    /// Atropos / Sphinx of the Second Sun shape, CR 501.1 — `Phase::Untap` is the
+    /// inserted-beginning-phase marker), and during its DRAW step an "after this
+    /// phase" combat + main bundle is created. `last_step_of_phase(Draw) == Draw`
+    /// (CR 501.1: the draw step ends the beginning phase), so the bundle is
+    /// anchored there and runs directly after the inserted beginning phase.
+    ///
+    /// The two insertions end at DIFFERENT steps — the beginning phase at `Draw`,
+    /// the bundle at `PostCombatMain` — which is the shape that strands the outer
+    /// return point if the unwind only ever compares against the step being left.
+    /// The turn must still resume at `next_phase(PostCombatMain)`, the END step:
+    /// the postcombat main phase this whole insertion was anchored to has already
+    /// happened.
+    #[test]
+    fn cr_500_8_bundle_created_inside_an_inserted_beginning_phase_resumes_at_the_outer_anchor() {
+        let mut state = setup();
+        state.phase = Phase::PostCombatMain;
+        state.active_player = PlayerId(0);
+        state
+            .extra_phases
+            .push(extra_phase_entry(Phase::PostCombatMain, Phase::Untap));
+
+        let mut events = Vec::new();
+        let mut sequence = Vec::new();
+        let mut injected = false;
+        for _ in 0..60 {
+            advance_phase(&mut state, &mut events);
+            sequence.push(state.phase);
+            if !injected && state.phase == Phase::Draw {
+                injected = true;
+                state
+                    .extra_phases
+                    .push(extra_phase_entry(Phase::Draw, Phase::PostCombatMain));
+                state
+                    .extra_phases
+                    .push(extra_phase_entry(Phase::Draw, Phase::BeginCombat));
+            }
+            if state.phase == Phase::End {
+                break;
+            }
+        }
+
+        let mut expected = vec![Phase::Untap, Phase::Upkeep, Phase::Draw];
+        expected.extend(combat_steps());
+        expected.push(Phase::PostCombatMain);
+        expected.push(Phase::End);
+        assert_eq!(
+            sequence, expected,
+            "CR 500.8: the bundle runs directly after the inserted beginning phase, \
+             then the turn resumes after the postcombat main the beginning phase \
+             was itself inserted after",
+        );
+        assert!(state.extra_phases.is_empty(), "{:?}", state.extra_phases);
+        assert!(
+            state.extra_phase_resume.is_empty(),
+            "{:?}",
+            state.extra_phase_resume,
+        );
+    }
+
+    /// CR 500.8 — three levels of nesting through the SAME terminal step. A
+    /// main-anchored extra combat (Moraug / Relentless Assault), a second combat
+    /// created at its end-of-combat step, and a third created at that one's
+    /// (Port Razer / Combat Celebrant / Scourge of the Throne connecting in each
+    /// inserted combat). Every level unwinds to the outermost anchor, so the
+    /// turn's own combat phase is the fourth and is still followed by its own
+    /// postcombat main.
+    #[test]
+    fn cr_500_8_three_levels_of_nested_extra_combats_all_unwind_to_the_outermost_anchor() {
+        let mut state = setup();
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state
+            .extra_phases
+            .push(extra_phase_entry(Phase::PreCombatMain, Phase::BeginCombat));
+
+        let mut events = Vec::new();
+        let mut sequence = Vec::new();
+        let mut injections = 0;
+        for _ in 0..60 {
+            advance_phase(&mut state, &mut events);
+            sequence.push(state.phase);
+            if state.phase == Phase::CombatDamage && injections < 2 {
+                injections += 1;
+                state
+                    .extra_phases
+                    .push(extra_phase_entry(Phase::EndCombat, Phase::BeginCombat));
+            }
+            if state.phase == Phase::End {
+                break;
+            }
+        }
+
+        let mut expected: Vec<Phase> = Vec::new();
+        for _ in 0..4 {
+            expected.extend(combat_steps());
+        }
+        expected.push(Phase::PostCombatMain);
+        expected.push(Phase::End);
+        assert_eq!(
+            sequence, expected,
+            "CR 500.8: three inserted combat phases, then the turn's own",
+        );
+        assert!(state.extra_phases.is_empty(), "{:?}", state.extra_phases);
+        assert!(
+            state.extra_phase_resume.is_empty(),
+            "{:?}",
+            state.extra_phase_resume,
+        );
+    }
+
+    /// CR 500.11 + CR 614.10: a skip replacement over an INSERTED phase. The
+    /// `ReplacementResult::Prevented` arm of `advance_phase_once` deliberately
+    /// leaves the resume frame in place: the frame records where the turn
+    /// CONTINUES once this insertion point is exhausted, and "proceeding past the
+    /// phase as though it didn't exist" does not repay that debt.
+    ///
+    /// Fixture: a main-anchored extra combat phase (Moraug / Overpowering Attack
+    /// shape) on a turn bound by a turn-scoped combat skip (False Peace / Empty
+    /// City Ruse, CR 614.10a). Every combat step — inserted and natural — is
+    /// prevented, so the turn goes straight from the precombat main phase to the
+    /// postcombat main phase and the end step, and no return point is left owed.
+    ///
+    /// Dropping the frame in the `Prevented` arm instead would resume the turn at
+    /// the SKIPPED phase's own default successor, i.e. at a second postcombat
+    /// main phase for this fixture.
+    #[test]
+    fn skipped_inserted_phase_keeps_its_return_point_and_repays_it() {
+        use crate::types::game_state::ExtraPhase;
+
+        let mut state = setup();
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.combat_phase_skip_next_turn[0].active = true;
+        state.extra_phases.push(ExtraPhase {
+            anchor: Phase::PreCombatMain,
+            phase: Phase::BeginCombat,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
+        });
+
+        let mut events = Vec::new();
+        let mut sequence = Vec::new();
+        for _ in 0..24 {
+            advance_phase(&mut state, &mut events);
+            sequence.push(state.phase);
+            if state.phase == Phase::End {
+                break;
+            }
+        }
+
+        assert_eq!(
+            sequence,
+            vec![Phase::PostCombatMain, Phase::End],
+            "CR 500.11: every combat step of the turn is proceeded past as though \
+             it didn't exist — including the inserted one — and the turn resumes \
+             ONCE at the anchor's natural successor",
+        );
+        assert!(state.extra_phases.is_empty());
+        assert!(
+            state.extra_phase_resume.is_empty(),
+            "the return point created for the skipped insertion is still repaid",
+        );
+    }
+
+    /// CR 500.11 + CR 500.8 — the discriminating pair for the test above, which
+    /// cannot tell the two behaviors apart: there, the anchor's natural successor
+    /// and the skipped insertion's own default successor both lead to the
+    /// postcombat main phase.
+    ///
+    /// Here they diverge. A combat phase inserted after the CLEANUP step (CR
+    /// 512.1: `last_step_of_phase(End) == Cleanup`, the anchor
+    /// `additional_phase::resolve` produces for a bare "after this phase" effect
+    /// resolving in the end or cleanup step) is skipped by a turn-scoped combat
+    /// skip (CR 614.10a). Keeping the return point resumes the turn at
+    /// `next_phase(Cleanup)` and the turn ends. Dropping it in the `Prevented`
+    /// arm resumes at the skipped combat's OWN default successor — a postcombat
+    /// main phase after the cleanup step, and a turn that never ends.
+    #[test]
+    fn a_skipped_insertion_resumes_at_its_anchor_not_at_its_own_successor() {
+        let mut state = setup();
+        state.phase = Phase::End;
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.combat_phase_skip_next_turn[0].active = true;
+        state
+            .extra_phases
+            .push(extra_phase_entry(Phase::Cleanup, Phase::BeginCombat));
+
+        let mut events = Vec::new();
+        let mut sequence = Vec::new();
+        for _ in 0..24 {
+            advance_phase(&mut state, &mut events);
+            sequence.push(state.phase);
+            if state.phase == Phase::Untap {
+                break;
+            }
+        }
+
+        assert_eq!(
+            sequence,
+            vec![Phase::Cleanup, Phase::Untap],
+            "CR 500.11: the inserted combat phase is proceeded past as though it \
+             didn't exist, and the turn resumes at the cleanup step's natural \
+             successor — NOT at the skipped combat's own successor",
+        );
+        assert_eq!(
+            state.turn_number, 3,
+            "CR 500.1: the turn boundary still fires",
+        );
+        assert!(state.extra_phases.is_empty());
+        assert!(state.extra_phase_resume.is_empty());
+    }
+
+    /// CR 500.8 + CR 500.1: an extra phase anchored at the CLEANUP step — what
+    /// `additional_phase::resolve` produces for any bare "after this phase"
+    /// effect resolving in the end step or the cleanup step (CR 512.1:
+    /// `last_step_of_phase(End) == Cleanup`; CR 514.3 allows a cleanup-step cast)
+    /// — must run, and the turn must still END afterwards.
+    ///
+    /// Regression: the wrap was keyed on `state.phase == Cleanup && next ==
+    /// Untap`. Leaving `Cleanup`, the insertion made `next == BeginCombat`, so
+    /// the guard missed; when the inserted combat ended, the unwind computed
+    /// `next_phase(Cleanup) == Untap` but `state.phase` was `EndCombat`, so the
+    /// guard missed AGAIN. `start_next_turn` never ran: no turn increment, no
+    /// active-player rotation, and every per-turn ledger left stale — the active
+    /// player got a free extra turn.
+    #[test]
+    fn cleanup_anchored_insertion_still_ends_the_turn() {
+        use crate::types::game_state::ExtraPhase;
+
+        let mut state = setup();
+        state.phase = Phase::End;
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.extra_phases.push(ExtraPhase {
+            anchor: Phase::Cleanup,
+            phase: Phase::BeginCombat,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
+        });
+
+        let mut events = Vec::new();
+        let mut sequence = Vec::new();
+        for _ in 0..16 {
+            advance_phase(&mut state, &mut events);
+            sequence.push(state.phase);
+            if state.phase == Phase::Untap {
+                break;
+            }
+        }
+
+        assert_eq!(
+            sequence,
+            vec![
+                Phase::Cleanup,
+                // CR 500.8: the insertion runs directly after the cleanup step.
+                Phase::BeginCombat,
+                Phase::DeclareAttackers,
+                Phase::DeclareBlockers,
+                Phase::CombatDamage,
+                Phase::EndCombat,
+                // …and then the turn is over.
+                Phase::Untap,
+            ],
+        );
+        assert_eq!(
+            state.turn_number, 3,
+            "CR 500.1: the turn boundary must still fire",
+        );
+        assert_eq!(
+            state.active_player,
+            PlayerId(1),
+            "CR 102.1: the active player must still rotate",
+        );
+        assert!(state.extra_phases.is_empty());
+        assert!(state.extra_phase_resume.is_empty());
+    }
+
+    /// CR 500.8 (the other half of the same guard): a BEGINNING phase anchored at
+    /// the cleanup step produces `next == Untap` from a real entry, not from
+    /// `next_phase(Cleanup)`. The turn must NOT wrap — the insertion has to run.
+    /// The old `state.phase == Cleanup && next == Untap` test could not tell the
+    /// two apart, wrapped the turn, and `start_next_turn` silently cleared the
+    /// entry.
+    #[test]
+    fn cleanup_anchored_beginning_phase_is_not_eaten_by_the_turn_boundary() {
+        use crate::types::game_state::ExtraPhase;
+
+        let mut state = setup();
+        state.phase = Phase::Cleanup;
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.extra_phases.push(ExtraPhase {
+            anchor: Phase::Cleanup,
+            phase: Phase::Untap,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
+        });
+
+        let mut events = Vec::new();
+        advance_phase(&mut state, &mut events);
+
+        assert_eq!(
+            state.phase,
+            Phase::Untap,
+            "the inserted beginning phase runs"
+        );
+        assert_eq!(
+            state.turn_number, 2,
+            "the turn has not ended — this untap step belongs to the insertion",
+        );
+        assert_eq!(state.active_player, PlayerId(0));
+        assert_eq!(
+            state.extra_phase_resume,
+            vec![ExtraPhaseResume {
+                anchor: Phase::Cleanup,
+                inserted: Phase::Untap,
+            }],
+            "the return point is owed",
+        );
+    }
+
+    /// CR 500.10 + CR 501.1 + CR 505.1 + CR 506.1: exhaustive inserted-phase →
+    /// terminal-step mapping. An inserted STEP ends with itself (CR 500.10: the
+    /// phase's other steps are skipped); the `Untap` beginning-phase marker ends
+    /// at the draw step; an inserted combat phase ends at end of combat.
+    #[test]
+    fn inserted_phase_terminal_step_maps_each_insertion_to_its_final_step() {
+        assert_eq!(inserted_phase_terminal_step(Phase::Untap), Phase::Draw);
+        assert_eq!(inserted_phase_terminal_step(Phase::Upkeep), Phase::Upkeep);
+        assert_eq!(inserted_phase_terminal_step(Phase::Draw), Phase::Draw);
+        assert_eq!(
+            inserted_phase_terminal_step(Phase::PreCombatMain),
+            Phase::PreCombatMain
+        );
+        assert_eq!(
+            inserted_phase_terminal_step(Phase::BeginCombat),
+            Phase::EndCombat
+        );
+        assert_eq!(
+            inserted_phase_terminal_step(Phase::DeclareAttackers),
+            Phase::DeclareAttackers
+        );
+        assert_eq!(
+            inserted_phase_terminal_step(Phase::DeclareBlockers),
+            Phase::DeclareBlockers
+        );
+        assert_eq!(
+            inserted_phase_terminal_step(Phase::CombatDamage),
+            Phase::CombatDamage
+        );
+        assert_eq!(
+            inserted_phase_terminal_step(Phase::EndCombat),
+            Phase::EndCombat
+        );
+        assert_eq!(
+            inserted_phase_terminal_step(Phase::PostCombatMain),
+            Phase::PostCombatMain
+        );
+        assert_eq!(inserted_phase_terminal_step(Phase::End), Phase::End);
+        assert_eq!(inserted_phase_terminal_step(Phase::Cleanup), Phase::Cleanup);
     }
 
     /// Negative test — extra-turn / extra-step mechanics that did NOT use
@@ -7607,15 +8531,19 @@ mod tests {
 
     /// CR 103.8a: the turn-1 draw skip applies only to the starting player's
     /// FIRST (natural) draw step. An inserted beginning phase's draw step
-    /// (`extra_phase_resume` non-empty) must still perform the turn-based draw,
-    /// even on turn 1 in a 2-player game (Temple of Atropos as the starting plane).
+    /// (a resume frame whose `inserted` is the CR 501.1 beginning-phase marker)
+    /// must still perform the turn-based draw, even on turn 1 in a 2-player game
+    /// (Temple of Atropos as the starting plane).
     #[test]
     fn inserted_beginning_phase_draw_not_skipped_on_first_turn() {
         let mut state = setup(); // 2-player, turn_number = 1
         state.phase = Phase::Draw;
         state.active_player = PlayerId(0);
         // Simulate being inside an inserted beginning phase.
-        state.extra_phase_resume = vec![Phase::PostCombatMain];
+        state.extra_phase_resume = vec![ExtraPhaseResume {
+            anchor: Phase::PostCombatMain,
+            inserted: Phase::Untap,
+        }];
 
         let id = create_object(
             &mut state,
@@ -7633,6 +8561,39 @@ mod tests {
             "CR 103.8a: an inserted beginning phase's draw must not be skipped",
         );
         assert!(!state.players[0].library.contains(&id));
+    }
+
+    /// CR 103.8a (the discriminating pair for the test above): the exemption is
+    /// keyed on an inserted BEGINNING phase, not on "the resume stack is
+    /// non-empty". A frame for any other insertion (here an inserted combat
+    /// phase) must NOT exempt the starting player's first natural draw step.
+    /// Reverting the predicate to `extra_phase_resume.is_empty()` flips this.
+    #[test]
+    fn non_beginning_phase_resume_frame_does_not_exempt_the_first_turn_draw_skip() {
+        let mut state = setup(); // 2-player, turn_number = 1
+        state.phase = Phase::Draw;
+        state.active_player = PlayerId(0);
+        state.extra_phase_resume = vec![ExtraPhaseResume {
+            anchor: Phase::PostCombatMain,
+            inserted: Phase::BeginCombat,
+        }];
+
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card".to_string(),
+            Zone::Library,
+        );
+
+        let mut events = Vec::new();
+        auto_advance(&mut state, &mut events);
+
+        assert!(
+            state.players[0].library.contains(&id),
+            "CR 103.8a: the starting player's first natural draw is still skipped",
+        );
+        assert!(!state.players[0].hand.contains(&id));
     }
 
     #[test]

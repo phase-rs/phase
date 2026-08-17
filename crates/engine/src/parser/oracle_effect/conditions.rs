@@ -6,7 +6,7 @@ use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::char;
 use nom::character::complete::multispace0;
 use nom::combinator::{all_consuming, map, opt, peek, value};
-use nom::sequence::{preceded, terminated};
+use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
@@ -3816,6 +3816,20 @@ fn parse_phase_name_set(
         ),
         value(vec![Phase::PreCombatMain], tag("precombat main phase")),
         value(vec![Phase::PostCombatMain], tag("postcombat main phase")),
+        // CR 506.1: the combat phase is its five steps — "it's your combat
+        // phase" (Great Train Heist) is true during any of them. Ordinal
+        // refinements ("the first combat phase this turn", CR 505.1b) are not
+        // phase NAMES and deliberately stay unparsed here.
+        value(
+            vec![
+                Phase::BeginCombat,
+                Phase::DeclareAttackers,
+                Phase::DeclareBlockers,
+                Phase::CombatDamage,
+                Phase::EndCombat,
+            ],
+            tag("combat phase"),
+        ),
         value(vec![Phase::Upkeep], tag("upkeep")),
         value(vec![Phase::Draw], tag("draw step")),
         value(vec![Phase::BeginCombat], tag("beginning of combat step")),
@@ -3829,37 +3843,72 @@ fn parse_phase_name_set(
     .parse(input)
 }
 
-/// CR 505.1 + CR 102.1 + CR 608.2c: "it is[n't] your [phase/step]" — the
+/// CR 102.1: which player's phase the determiner names. A typed axis rather
+/// than a bool: the possessive and the indefinite article select genuinely
+/// different rules checks, and the type says which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PhasePossessive {
+    /// "your <phase>" — CR 102.1: additionally requires that the controller is
+    /// the active player.
+    Yours,
+    /// "a <phase>" — whichever phase of the turn is current, whoever the active
+    /// player is.
+    Any,
+}
+
+/// CR 505.1 + CR 102.1 + CR 608.2c: "it is[n't] {your|a} [phase/step]" — the
 /// resolution-time current-phase gate (CR 608.2c: read the whole text when the
-/// ability resolves). The "your [phase]" possessive decomposes into two
+/// ability resolves). The possessive "your [phase]" decomposes into two
 /// orthogonal checks: `CurrentPhaseIs { phases }` (the live phase, via
 /// `parse_phase_name_set`) AND `IsYourTurn` (CR 102.1: the active player is the
-/// controller — "your" phase means a phase of your turn). The polarity prefix
-/// selects negation, wrapping the conjunction in `Not`. NON-`all_consuming`:
-/// the dispatcher wraps with `all_consuming` so the whole clause must be
-/// consumed, which (together with the expletive "it") rules out any anaphoric
-/// mis-binding.
+/// controller — "your" phase means a phase of your turn). The indefinite
+/// article does NOT add that check: "a main phase" (Sokenzan, Valor's Reach) is
+/// satisfied by whichever main phase of the turn is current, whoever the active
+/// player is — those planes' chaos abilities can trigger on any player's turn.
+/// The polarity prefix selects negation, wrapping the whole condition in `Not`.
+/// NON-`all_consuming`: the dispatcher wraps with `all_consuming` so the whole
+/// clause must be consumed, which (together with the expletive "it") rules out
+/// any anaphoric mis-binding.
 fn parse_current_phase_condition(
     input: &str,
 ) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
-    let (rest, negated) = alt((
-        value(
-            true,
-            alt((
-                tag::<_, _, OracleError<'_>>("it isn't your "),
-                tag("it is not your "),
-                tag("it's not your "),
-            )),
+    // Compose the two axes (polarity × determiner) instead of enumerating their
+    // product: each polarity form is followed by the shared determiner axis.
+    let determiner = || {
+        alt((
+            value(
+                PhasePossessive::Yours,
+                tag::<_, _, OracleError<'_>>("your "),
+            ),
+            value(PhasePossessive::Any, tag("a ")),
+        ))
+    };
+    let (rest, (negated, possessive)) = alt((
+        pair(
+            value(
+                true,
+                alt((
+                    tag::<_, _, OracleError<'_>>("it isn't "),
+                    tag("it is not "),
+                    tag("it's not "),
+                )),
+            ),
+            determiner(),
         ),
-        value(false, alt((tag("it is your "), tag("it's your ")))),
+        pair(
+            value(false, alt((tag("it is "), tag("it's ")))),
+            determiner(),
+        ),
     ))
     .parse(input)?;
     let (rest, phases) = parse_phase_name_set(rest)?;
-    let condition = AbilityCondition::And {
-        conditions: vec![
-            AbilityCondition::CurrentPhaseIs { phases },
-            AbilityCondition::IsYourTurn,
-        ],
+    let current_phase_is = AbilityCondition::CurrentPhaseIs { phases };
+    let condition = match possessive {
+        // CR 102.1: "your" phase — the controller must also be the active player.
+        PhasePossessive::Yours => AbilityCondition::And {
+            conditions: vec![current_phase_is, AbilityCondition::IsYourTurn],
+        },
+        PhasePossessive::Any => current_phase_is,
     };
     Ok((rest, maybe_negate(condition, negated)))
 }
@@ -7902,11 +7951,73 @@ mod tests {
             Some(your_phase(vec![Phase::End])),
         );
 
+        // CR 505.1 + CR 102.1: the indefinite article is a DIFFERENT check —
+        // "a main phase" (the planes Sokenzan and Valor's Reach: "Whenever chaos
+        // ensues, untap all creatures that attacked this turn. If it's a main
+        // phase, there is an additional combat phase after this phase, followed
+        // by an additional main phase.") is satisfied by whichever main phase is
+        // current, on anybody's turn, so it must NOT carry `IsYourTurn`.
+        //
+        // Before this arm existed the shape returned `None`, so
+        // `strip_leading_general_conditional` dropped the head, the clause was
+        // flagged as a swallowed conditional, and NO `AdditionalPhase` was
+        // emitted at all — those planes got no extra combat phase rather than an
+        // ungated one. This is coverage work (it makes the class parse), not a
+        // prerequisite of the anchor fix.
+        let any_main = || AbilityCondition::CurrentPhaseIs {
+            phases: vec![Phase::PreCombatMain, Phase::PostCombatMain],
+        };
+        assert_eq!(parse("it's a main phase"), Some(any_main()));
+        assert_eq!(parse("it is a main phase"), Some(any_main()));
+        assert_eq!(
+            parse("it isn't a main phase"),
+            Some(AbilityCondition::Not {
+                condition: Box::new(any_main()),
+            }),
+        );
+        // The discriminating assertion for the two determiner arms: the article
+        // arm must not swallow the possessive arm (and vice versa).
+        assert_ne!(
+            parse("it's your main phase"),
+            parse("it's a main phase"),
+            "CR 102.1: 'your main phase' additionally requires the active-player check",
+        );
+
+        // CR 506.1: "combat phase" names all five combat steps. Great Train
+        // Heist's "If it's your combat phase, there is an additional combat phase
+        // after this phase" had no phase-name arm before this fix, so the whole
+        // conditional head failed to lower and the clause was swallowed — the
+        // Spree mode produced no extra combat phase at all. With the arm in
+        // place the mode both parses AND carries its CR 506.1 gate, which is what
+        // keeps it from granting an extra combat phase when the mode is chosen in
+        // a main phase.
+        assert_eq!(
+            parse("it's your combat phase"),
+            Some(your_phase(vec![
+                Phase::BeginCombat,
+                Phase::DeclareAttackers,
+                Phase::DeclareBlockers,
+                Phase::CombatDamage,
+                Phase::EndCombat,
+            ])),
+        );
+
         // Negative: an unrelated condition must NOT be captured by this arm.
         assert_ne!(
             parse("it is your turn"),
             Some(main()),
             "bare 'your turn' (no phase name) must not match the current-phase arm",
+        );
+        // The new indefinite-article axis must not swallow an unrelated "it's a
+        // <noun>" clause: `parse_phase_name_set` still has to match a phase
+        // NAME. ("it's a creature" is claimed by the revealed-card-type arm, so
+        // the assertion is on the shape, not on `None`.)
+        assert!(
+            !matches!(
+                parse("it's a creature"),
+                Some(AbilityCondition::CurrentPhaseIs { .. })
+            ),
+            "the determiner arm must not capture a non-phase noun phrase",
         );
     }
 

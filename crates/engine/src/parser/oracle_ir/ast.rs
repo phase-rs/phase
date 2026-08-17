@@ -828,6 +828,19 @@ pub(crate) enum ImperativeFamilyAst {
     /// CR 701.56a: Time travel — add or remove time counters.
     TimeTravel,
     GainKeyword(Effect),
+    /// CR 608.2c: an effect leaf that carries its OWN resolution-time gate,
+    /// derived from the instruction's own grammar rather than from a leading
+    /// "If …, " head. Lowers to the effect plus
+    /// [`ParsedEffectClause::condition`], so the gate scopes to this clause
+    /// alone and sibling clauses in the same chain are unaffected.
+    ///
+    /// Producer: the "after this **main** phase" additional-phase grammar, whose
+    /// named phase type is an implicit precondition on the phase the effect
+    /// resolves in (`imperative::this_phase_anchor_gate`).
+    GatedEffect {
+        effect: Box<Effect>,
+        condition: Box<crate::types::ability::AbilityCondition>,
+    },
     LoseKeyword(Effect),
     /// CR 104.3a: "[target player] lose(s) the game"
     LoseTheGame,

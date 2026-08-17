@@ -9836,18 +9836,107 @@ fn parse_additional_phase_count(lower: &str) -> QuantityExpr {
         terminated(alt((event_bound, literal)), tag(" additional")).parse(input)
     }
 
-    let mut remaining = lower;
-    while !remaining.is_empty() {
-        if let Ok((_rest, qty)) = count_combinator(remaining) {
-            return qty;
-        }
-        // Advance to the next word boundary so the combinator stays anchored
-        // to candidate quantifier positions.
-        remaining = remaining
-            .find(' ')
-            .map_or("", |i| remaining[i + 1..].trim_start());
+    // The scan is the shared `scan_at_word_boundaries` building block: try the
+    // composed combinator at each word boundary, first match wins.
+    nom_primitives::scan_at_word_boundaries(lower, count_combinator)
+        .unwrap_or(QuantityExpr::Fixed { value: 1 })
+}
+
+/// CR 500.8 + CR 608.2c: which phase type an "after this … phase" clause names.
+///
+/// A typed axis rather than a discarded `opt()`: the qualifier is the ONLY
+/// information distinguishing two different rules classes that share one anchor
+/// value, so throwing it away merges them at zero information gain and leaves
+/// the resolver unable to re-derive which one it holds.
+///
+/// Census over `data/mtgjson/AtomicCards.json`, restricted to faces that also
+/// contain "additional combat phase" (the only wording that reaches this
+/// production): 36 unqualified, 10 main-qualified, 1 combat-qualified. The bare
+/// phrase "after this phase" appears on 42 card faces in total; the other six
+/// are beginning-phase and upkeep-step insertions claimed by the sibling arms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThisPhaseQualifier {
+    /// "after this phase" — no phase type is named, so the clause applies in
+    /// whichever phase the effect resolves in (36 cards: Aurelia, Godo,
+    /// Overpowering Attack, Take the Bait, Moraug, Najeela, …).
+    Unqualified,
+    /// "after this **main** phase" (10 card faces: Aggravated Assault, Drench
+    /// the Soil in Their Blood, Full Throttle, Fury of the Horde, Last Night
+    /// Together, Relentless Assault, the Resurgence face of Response //
+    /// Resurgence, Seize the Day, Waves of Aggression, Wyll of the Blade Pact).
+    Main,
+    /// "after this **combat** phase" (1 card: Raphael, Tag Team Tough).
+    Combat,
+}
+
+/// CR 500.8 + CR 608.2c: "after this [main|combat] phase" — the insertion point
+/// is the phase the effect RESOLVES in, not a phase named on the card. One
+/// production covers all three surface forms; the optional qualifier is a single
+/// `alt` axis (Overpowering Attack "after this phase", Relentless Assault "after
+/// this main phase", Raphael, Tag Team Tough "after this combat phase"). Ordinal
+/// anchors ("after the first combat phase this turn" — Swinging Ship; "after the
+/// second main phase this turn" — World at War, CR 505.1b) deliberately do NOT
+/// match: they name a specific phase of the turn rather than the resolving one.
+fn parse_this_phase_anchor(input: &str) -> OracleResult<'_, ThisPhaseQualifier> {
+    map(
+        (
+            tag::<_, _, OracleError<'_>>("after this "),
+            opt(alt((
+                value(ThisPhaseQualifier::Main, tag("main ")),
+                value(ThisPhaseQualifier::Combat, tag("combat ")),
+            ))),
+            tag("phase"),
+        ),
+        |(_, qualifier, _)| qualifier.unwrap_or(ThisPhaseQualifier::Unqualified),
+    )
+    .parse(input)
+}
+
+/// CR 608.2c + CR 500.8: the implicit precondition carried by a qualified
+/// "after this **main** phase" clause.
+///
+/// CR 500.8 adds an extra phase "directly after the specified phase". When the
+/// clause names a phase TYPE and the effect resolves outside that type, there is
+/// no specified phase to add anything after, so nothing is created — CR 608.2c
+/// ("read the whole text and apply the rules of English"). Gatherer states this
+/// verbatim for the whole class:
+///
+///   * Fury of the Horde / Waves of Aggression — "If it's somehow not a main
+///     phase when [this] resolves, all it does is untap all creatures that
+///     attacked that turn. No new phases are created."
+///   * Relentless Assault — "creates an additional combat and main phase only if
+///     it resolves during a main phase."
+///   * Full Throttle — "If you somehow cast this spell when it's not a main
+///     phase, the second ability still takes effect, but there are no additional
+///     combat phases this turn."
+///
+/// This is reachable: Vedalken Orrery / Leyline of Anticipation let these
+/// resolve mid-combat or in the end step.
+///
+/// The gate is the BARE `CurrentPhaseIs` — deliberately not
+/// `And([CurrentPhaseIs, IsYourTurn])`. Relentless Assault's other ruling
+/// confirms an opponent's main phase works: "If you manage to cast this during a
+/// main phase of your opponent's turn, that opponent's creatures will untap and
+/// that opponent will be able to attack again." That makes the implicit
+/// precondition converge on exactly the representation the explicit
+/// "If it's a main phase, …" grammar already produces (`conditions.rs`,
+/// `PhasePossessive::Any`).
+///
+/// The gate attaches to the additional-phase clause ONLY, never to the whole
+/// ability: the rulings are explicit that the untap still happens.
+///
+/// `Combat` intentionally carries no gate. Its single card (Raphael, Tag Team
+/// Tough) triggers on combat damage, so the gate could never be false, and no
+/// ruling establishes the reading for that wording — adding one would be an
+/// unwitnessed behavior change. The mapping lives here so a future producer only
+/// has to fill in this arm.
+fn this_phase_anchor_gate(qualifier: ThisPhaseQualifier) -> Option<AbilityCondition> {
+    match qualifier {
+        ThisPhaseQualifier::Main => Some(AbilityCondition::CurrentPhaseIs {
+            phases: vec![Phase::PreCombatMain, Phase::PostCombatMain],
+        }),
+        ThisPhaseQualifier::Unqualified | ThisPhaseQualifier::Combat => None,
     }
-    QuantityExpr::Fixed { value: 1 }
 }
 
 /// CR 701.4a: Recognize a "behold a [quality]" effect leaf. "Behold a [quality]"
@@ -10120,16 +10209,26 @@ pub(super) fn parse_imperative_family_ast(
     if nom_primitives::scan_contains(lower, "additional combat phase") {
         let with_main =
             nom_primitives::scan_contains(lower, "followed by an additional main phase");
-        // CR 500.8 (Full Throttle): "After this main phase, there are N additional
-        // combat phases" anchors to whichever main phase the spell resolves in.
-        // `PreCombatMain` is a resolution-time sentinel remapped in
-        // `effects/additional_phase.rs` when the active phase is a main phase.
-        let after = if nom_primitives::scan_contains(lower, "after this main phase") {
+        // CR 500.8 + CR 608.2c: "after this phase" anchors to whichever phase the
+        // effect resolves in. `Phase::PreCombatMain` is a resolution-time
+        // SENTINEL that `game/effects/additional_phase.rs` remaps via
+        // `last_step_of_phase(state.phase)`; it never means the literal precombat
+        // main phase. Wording with no "after this …" clause (World at War,
+        // Swinging Ship — CR 505.1b ordinal anchors) keeps the legacy
+        // end-of-combat default.
+        //
+        // The qualifier is carried, not discarded: a "main"-qualified clause
+        // additionally gates the scheduling on the resolving phase actually being
+        // a main phase (see `this_phase_anchor_gate` for the CR + Gatherer
+        // authority). The gate rides on THIS clause only, so a Group A card's
+        // untap still happens outside a main phase.
+        let qualifier = nom_primitives::scan_at_word_boundaries(lower, parse_this_phase_anchor);
+        let after = if qualifier.is_some() {
             Phase::PreCombatMain
         } else {
             Phase::EndCombat
         };
-        return Some(ImperativeFamilyAst::GainKeyword(Effect::AdditionalPhase {
+        let effect = Effect::AdditionalPhase {
             target: TargetFilter::Controller,
             phase: Phase::BeginCombat,
             after,
@@ -10140,7 +10239,14 @@ pub(super) fn parse_imperative_family_ast(
             },
             count: parse_additional_phase_count(lower),
             attacker_restriction: None,
-        }));
+        };
+        return Some(match qualifier.and_then(this_phase_anchor_gate) {
+            Some(condition) => ImperativeFamilyAst::GatedEffect {
+                effect: Box::new(effect),
+                condition: Box::new(condition),
+            },
+            None => ImperativeFamilyAst::GainKeyword(effect),
+        });
     }
     if nom_primitives::scan_contains(lower, "additional upkeep step") {
         return Some(ImperativeFamilyAst::GainKeyword(Effect::AdditionalPhase {
@@ -12880,6 +12986,14 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             )));
             clause
         }
+        // CR 608.2c: the gate belongs to THIS clause, not to the ability — a
+        // sibling clause in the same chain ("Untap all creatures that attacked
+        // this turn.") must still resolve when the gate is false.
+        ImperativeFamilyAst::GatedEffect { effect, condition } => {
+            let mut clause = parsed_clause(*effect);
+            clause.condition = Some(*condition);
+            clause
+        }
         // All other arms produce a bare Effect with no sub_ability chain.
         other => parsed_clause(lower_imperative_family_effect(other)),
     }
@@ -13127,6 +13241,16 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         // CR 701.4a: Behold a [quality] — reveal-or-choose keyword action.
         ImperativeFamilyAst::Behold(filter) => Effect::Behold { filter },
         ImperativeFamilyAst::GainKeyword(effect) => effect,
+        // The gate is carried by the CLAUSE, not the effect, so this node cannot
+        // be lowered to a bare `Effect` without silently DROPPING a rules-bearing
+        // condition. Panicking (as `Recruit`/`Assimilate` already do for the same
+        // reason) keeps that impossible: production always goes through
+        // `lower_imperative_family_ast`, and any probe that reaches for the bare
+        // effect is told to do the same instead of quietly testing an ungated
+        // shape.
+        ImperativeFamilyAst::GatedEffect { .. } => {
+            unreachable!("GatedEffect lowering carries a clause-scoped condition")
+        }
         ImperativeFamilyAst::LoseKeyword(effect) => effect,
         ImperativeFamilyAst::LoseTheGame => Effect::LoseTheGame { target: None },
         ImperativeFamilyAst::WinTheGame => Effect::WinTheGame { target: None },
@@ -17829,6 +17953,11 @@ mod tests {
         }
     }
 
+    /// CR 500.8 + CR 608.2c (Full Throttle's verbatim first line): the
+    /// main-qualified anchor binds the current-phase sentinel AND its implicit
+    /// precondition. Routed through `lower_imperative_family_ast` — the
+    /// production lowering — because the gate rides on the clause, not the
+    /// effect.
     #[test]
     fn parse_additional_phase_after_this_main_phase_anchors_to_main() {
         let text = "After this main phase, there are two additional combat phases.";
@@ -17838,10 +17967,10 @@ mod tests {
             result.is_some(),
             "Should parse main-phase-anchored additional combats"
         );
-        let effect = lower_imperative_family_effect(result.unwrap());
+        let clause = lower_imperative_family_ast(result.unwrap());
         assert!(
             matches!(
-                effect,
+                clause.effect,
                 Effect::AdditionalPhase {
                     phase: Phase::BeginCombat,
                     after: Phase::PreCombatMain,
@@ -17850,10 +17979,24 @@ mod tests {
                     ..
                 } if followed_by.is_empty()
             ),
-            "Expected AdditionalPhase anchored to main phase with count 2, got {effect:?}"
+            "Expected AdditionalPhase anchored to main phase with count 2, got {:?}",
+            clause.effect
+        );
+        assert_eq!(
+            clause.condition,
+            Some(AbilityCondition::CurrentPhaseIs {
+                phases: vec![Phase::PreCombatMain, Phase::PostCombatMain],
+            }),
+            "CR 608.2c: \"after this MAIN phase\" creates nothing outside a main phase",
         );
     }
 
+    /// CR 500.8 + CR 608.2c: bare "after this phase" anchors to the phase the
+    /// effect RESOLVES in, emitted as the `PreCombatMain` resolution-time
+    /// sentinel (remapped by `additional_phase::resolve` via
+    /// `last_step_of_phase(state.phase)`). Before the fix this fell through to a
+    /// hard-coded `EndCombat`, so a spell resolving in a main phase scheduled its
+    /// extra combat after a combat phase that had already ended (or never came).
     #[test]
     fn parse_additional_phase_phase() {
         let text = "there is an additional combat phase after this phase";
@@ -17866,13 +18009,111 @@ mod tests {
                 effect,
                 Effect::AdditionalPhase {
                     phase: Phase::BeginCombat,
-                    after: Phase::EndCombat,
+                    after: Phase::PreCombatMain,
                     ref followed_by,
                     ..
                 } if followed_by.is_empty()
             ),
-            "Expected AdditionalPhase without main phase, got {effect:?}"
+            "Expected AdditionalPhase with the current-phase sentinel, got {effect:?}"
         );
+    }
+
+    /// CR 500.8 + CR 608.2c: all three real surface forms of the "after this …
+    /// phase" anchor reach the same current-phase sentinel — one production, one
+    /// optional qualifier axis — but the QUALIFIER is not discarded: naming a
+    /// phase type is an implicit precondition on the resolving phase, carried as
+    /// a clause-scoped `CurrentPhaseIs` gate. Verbatim Oracle clauses:
+    ///   * Overpowering Attack / Aurelia — "after this phase" (no gate)
+    ///   * Relentless Assault / Full Throttle — "after this main phase" (gated)
+    ///   * Raphael, Tag Team Tough — "after this combat phase" (no gate today —
+    ///     see `this_phase_anchor_gate`)
+    ///
+    /// Routed through `lower_imperative_family_ast`, the PRODUCTION lowering
+    /// (`oracle_effect::mod.rs`'s clause loop calls exactly this), because the
+    /// gate lives on the clause, not on the effect. This is the discriminating
+    /// test for `this_phase_anchor_gate`: returning `None` from its `Main` arm
+    /// turns the middle row red.
+    #[test]
+    fn parse_this_phase_anchor_covers_bare_main_and_combat_qualifiers() {
+        let main_phase_gate = AbilityCondition::CurrentPhaseIs {
+            phases: vec![Phase::PreCombatMain, Phase::PostCombatMain],
+        };
+        for (text, expected_condition) in [
+            ("there is an additional combat phase after this phase", None),
+            (
+                "after this main phase, there is an additional combat phase",
+                Some(main_phase_gate.clone()),
+            ),
+            (
+                "after this combat phase, there is an additional combat phase",
+                None,
+            ),
+        ] {
+            let lower = text.to_lowercase();
+            let clause = lower_imperative_family_ast(
+                parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+                    .unwrap_or_else(|| panic!("{text:?} should parse as AdditionalPhase")),
+            );
+            assert!(
+                matches!(
+                    clause.effect,
+                    Effect::AdditionalPhase {
+                        phase: Phase::BeginCombat,
+                        after: Phase::PreCombatMain,
+                        ..
+                    }
+                ),
+                "{text:?} must bind the current-phase sentinel, got {:?}",
+                clause.effect
+            );
+            assert_eq!(
+                clause.condition, expected_condition,
+                "{text:?}: CR 608.2c gate mismatch — a phase-type-qualified anchor \
+                 must carry its implicit precondition, and an unqualified one must not",
+            );
+        }
+    }
+
+    /// CR 505.1b: ordinal anchors name a SPECIFIC phase of the turn ("the first
+    /// combat phase this turn" — Swinging Ship; "the second main phase this turn"
+    /// — World at War), not the phase the effect resolves in, so they must NOT
+    /// take the current-phase sentinel. Paired positive reach-guard: each input
+    /// must first produce a real `AdditionalPhase { phase: BeginCombat }`, so the
+    /// negative cannot pass merely because the line failed to parse.
+    #[test]
+    fn ordinal_phase_anchors_do_not_take_the_current_phase_sentinel() {
+        for text in [
+            "after the first combat phase this turn, there's an additional combat phase",
+            "after the second main phase this turn, there's an additional combat phase followed by an additional main phase",
+        ] {
+            let lower = text.to_lowercase();
+            let effect = lower_imperative_family_effect(
+                parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+                    .unwrap_or_else(|| panic!("{text:?} should parse as AdditionalPhase")),
+            );
+            // Reach guard: a real additional-combat effect, not Unimplemented.
+            assert!(
+                matches!(
+                    effect,
+                    Effect::AdditionalPhase {
+                        phase: Phase::BeginCombat,
+                        ..
+                    }
+                ),
+                "{text:?} must still parse as an additional combat phase, got {effect:?}"
+            );
+            // The discriminating assertion: no current-phase sentinel.
+            assert!(
+                matches!(
+                    effect,
+                    Effect::AdditionalPhase {
+                        after: Phase::EndCombat,
+                        ..
+                    }
+                ),
+                "{text:?} is a CR 505.1b ordinal anchor and must keep the legacy default, got {effect:?}"
+            );
+        }
     }
 
     #[test]
@@ -17966,6 +18207,10 @@ mod tests {
         }
     }
 
+    /// No "after this …" clause at all: the wording keeps the legacy
+    /// end-of-combat default (CR 500.8). This is the no-anchor-clause arm of the
+    /// `after` decision, complementing
+    /// `parse_this_phase_anchor_covers_bare_main_and_combat_qualifiers`.
     #[test]
     fn parse_additional_phase_with_main_phase() {
         let text = "there is an additional combat phase followed by an additional main phase";
