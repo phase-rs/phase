@@ -296,9 +296,6 @@ fn candidate_discards_controller(ctx: &PolicyContext<'_>) -> bool {
         | GameAction::GrantDebugPermission { .. }
         | GameAction::RevokeDebugPermission { .. }
         | GameAction::Concede { .. }
-        | GameAction::BeginResolveAll { .. }
-        | GameAction::RespondResolveAllConsent { .. }
-        | GameAction::RevokeResolveAllConsent { .. }
         | GameAction::DeclareShortcut { .. }
         | GameAction::RespondToShortcut { .. }
         | GameAction::DeclineShortcut

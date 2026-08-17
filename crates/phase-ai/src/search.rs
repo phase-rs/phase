@@ -1251,23 +1251,6 @@ pub fn fallback_action(
         // Priority is the only state where PassPriority is valid.
         WaitingFor::Priority { .. } => Some(GameAction::PassPriority),
 
-        // The consent protocol's engine-issued action domain carries the
-        // epoch and representative authority. Decline conservatively rather
-        // than reconstructing either from the prompt; once every participant
-        // has granted, revoke the AI's issued consent to return to priority.
-        WaitingFor::ResolveAllConsent { .. } => issued(|action| {
-            matches!(
-                action,
-                GameAction::RespondResolveAllConsent {
-                    decision: engine::types::actions::ResolveAllConsentDecision::Decline,
-                    ..
-                }
-            )
-        }),
-        WaitingFor::ResolveAllReady { .. } => {
-            issued(|action| matches!(action, GameAction::RevokeResolveAllConsent { .. }))
-        }
-
         // CR 732.2a: if tactical scoring found no choice, take the conservative legal escape
         // from the engine's candidate set. The AI is never forced to propose a shortcut.
         WaitingFor::LoopShortcut { .. } => {
