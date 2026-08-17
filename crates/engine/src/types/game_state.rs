@@ -13318,7 +13318,7 @@ impl WaitingFor {
             // in `proposer` (not a `player` field) — dedicated arm like `AssistPayment`.
             WaitingFor::LoopShortcut { proposer, .. } => Some(*proposer),
             WaitingFor::PrecastCopyShortcutOffer { proposer, .. } => Some(*proposer),
-            WaitingFor::ResolveAllReady { .. } | WaitingFor::GameOver { .. } => None,
+            WaitingFor::GameOver { .. } => None,
         }
     }
 
