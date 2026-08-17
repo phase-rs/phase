@@ -2418,15 +2418,37 @@ fn damage_done_applier(
     // batch the shield matches at most one event (it is consumed on apply), so
     // the per-event `DamagePrevented` + `last_effect_count` stamp fires the
     // rider once with the exact prevented amount.
+    //
+    // CR 120.8: A 0-damage event is not damage at all — it has no event to
+    // replace. The shield must not "prevent" it (no DamagePrevented, no
+    // `last_effect_count` stamp, no Prevented), and by CR 609.7b the shield is
+    // not used up by a prevention that prevents no damage. Fall through to the
+    // pass-through below so the unmodified event proceeds. The upstream
+    // `pre_replacement_damage_gate` (CR 120.8) already drops 0-damage events
+    // before the pipeline on every production path; this guard exists because
+    // the pipeline itself is a public, testable seam (`replace_event`) and a
+    // 0-damage `ProposedEvent::Damage` must be a no-op here, never a shield
+    // burn. (The event is still returned as `Modified(event)` — unchanged —
+    // which by design does not trigger the dispatcher's `consume_on_apply`
+    // consumption, since the event took no modification.)
     if matches!(shield_kind, Some(ShieldKind::PreventionOneShot)) {
         if let ProposedEvent::Damage {
             source_id,
             target,
             amount: dmg,
-            is_combat: _,
-            applied: _,
+            is_combat,
+            applied,
         } = event
         {
+            if dmg == 0 {
+                return ApplyResult::Modified(ProposedEvent::Damage {
+                    source_id,
+                    target,
+                    amount: dmg,
+                    is_combat,
+                    applied,
+                });
+            }
             events.push(GameEvent::DamagePrevented {
                 source_id,
                 target: target.clone(),
@@ -8490,6 +8512,22 @@ fn apply_single_replacement(
         _ => None,
     };
     let replacement_applied = proposed.applied_set().clone();
+    // CR 614.5 + CR 609.7b: a one-shot replacement is consumed when it
+    // *successfully applies*. The single exception is a `PreventionOneShot`
+    // damage shield whose applier returns the event UNMODIFIED — the
+    // CR 120.8 0-damage pass-through, which prevented nothing. A shield that
+    // prevents no damage is not used up (CR 609.7b), so it must survive for
+    // the next nonzero damage event. Snapshot the pre-applier event for
+    // exactly these shields (every other consume_on_apply replacement —
+    // draw count-modifiers and full-substitution shields — carries its
+    // application in the definition, not in the returned event, and consumes
+    // as before).
+    let pre_applier_event = (consume_on_apply
+        && matches!(
+            shield_kind_for_rid(state, rid),
+            Some(ShieldKind::PreventionOneShot)
+        ))
+    .then(|| proposed.clone());
 
     // CR 614.6 + CR 614.12a: Optional `Prevent` replacements (Obstinate Familiar,
     // Island Sanctuary — "you may skip that draw") suppress the event only on
@@ -8575,7 +8613,18 @@ fn apply_single_replacement(
                         _ => {}
                     }
                 }
-                if consume_on_apply {
+                // CR 614.5 + CR 609.7b: a `Modified` result that left the
+                // `PreventionOneShot` event unchanged applied nothing —
+                // consuming the shield would burn a "the next time"
+                // opportunity on a 0-damage event that did not happen
+                // (CR 120.8). `pre_applier_event` is `Some` exactly for those
+                // shields (see the snapshot above); every other
+                // `consume_on_apply` replacement consumes unconditionally.
+                if pre_applier_event
+                    .as_ref()
+                    .is_some_and(|before| new_event != *before)
+                    || (pre_applier_event.is_none() && consume_on_apply)
+                {
                     mark_replacement_consumed(state, rid);
                 }
                 // CR 614.12a: Stash the mandatory execute ability as a post-replacement

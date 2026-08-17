@@ -6607,7 +6607,18 @@ fn parse_oneshot_target_source_prevent(norm_lower: &str, ctx: &ParseContext) -> 
     // CR 511.2: "this turn" → UntilEndOfTurn (expires at cleanup, CR 514.2);
     // "this combat" → UntilEndOfCombat (combat-scoped one-shots). The shared
     // `parse_duration` authority recognizes both via `parse_current_phase_duration`.
-    let duration = nom_primitives::scan_preceded(body, parse_duration).map(|(_, d, _)| d);
+    //
+    // The duration is MANDATORY for this branch: the sentence already proved a
+    // "this turn" / "this combat" phrase at the gate above, so a parse failure
+    // here means the phrase shape is one this branch must not claim — return
+    // `None` (fail-closed, fall through to the generic one-shot branch) rather
+    // than emitting a `prevention_duration: None` shield that would resolve
+    // without an EndOfCombat expiry and let a "this combat" effect bleed past
+    // the end of combat (CR 511.2).
+    let duration: Option<Duration> = match nom_primitives::scan_preceded(body, parse_duration) {
+        Some((_, d, _)) => Some(d),
+        None => return None,
+    };
 
     // CR 506.2: "combat damage" narrows the scope to combat damage only.
     let scope = if nom_primitives::scan_contains(would_clause, "combat damage") {
@@ -22934,6 +22945,99 @@ mod snapshot_tests {
             }
             other => panic!("expected PreventDamage, got {other:?}"),
         }
+    }
+
+    /// Blocker-2 regression (review #7334): this branch must NEVER emit a
+    /// `PreventionOneShot`-class shield with `prevention_duration: None` — the
+    /// resolver keys the EndOfCombat expiry (CR 511.2) off the parsed
+    /// duration, and a "this combat" shield without one would bleed past the
+    /// end of combat. The duration parse is therefore MANDATORY for the
+    /// branch: `scan_preceded(body, parse_duration)` failing means the branch
+    /// returns `None` (fail-closed, falls through to the generic one-shot
+    /// branch) instead of lowering with a `None` duration.
+    ///
+    /// Reachability note (honest): with today's `parse_duration` coverage the
+    /// fail-closed arm is defensive rather than reachable — the branch's own
+    /// gate (`scan_contains` on "this turn"/"this combat") and
+    /// `parse_current_phase_duration` recognize exactly the same phrases, so a
+    /// gate-passing sentence always resolves a duration. The `?` is the
+    /// tripwire for the day `parse_duration` coverage drifts (e.g. a "this
+    /// combat" arm removed): the branch then fails closed to `None` instead of
+    /// silently shipping a `None`-duration shield. These assertions pin that
+    /// contract at its observable surface: every canonical one-shot
+    /// target-source form carries `Some(duration)`, and the no-phrase form is
+    /// `None` (the existing gate, CR 511.2).
+    #[test]
+    fn target_source_prevent_duration_failure_falls_through_to_none() {
+        // "this turn" form → Some(UntilEndOfTurn), never None.
+        let turn = parse_oneshot_damage_replacement(
+            "the next time target creature would deal damage this turn, prevent that damage",
+            &ParseContext::default(),
+        )
+        .expect("'this turn' form must parse");
+        let Effect::PreventDamage {
+            prevention_duration,
+            ..
+        } = &turn
+        else {
+            panic!("expected PreventDamage, got {turn:?}");
+        };
+        assert_eq!(
+            *prevention_duration,
+            Some(Duration::UntilEndOfTurn),
+            "CR 514.2: 'this turn' ends at cleanup — a None duration would leave the \
+             shield without an expiry"
+        );
+
+        // "this combat" form → Some(UntilEndOfCombat), never None.
+        let combat = parse_oneshot_damage_replacement(
+            "the next time target creature would deal combat damage to one or more players this combat, prevent that damage",
+            &ParseContext::default(),
+        )
+        .expect("'this combat' form must parse");
+        let Effect::PreventDamage {
+            prevention_duration,
+            ..
+        } = &combat
+        else {
+            panic!("expected PreventDamage, got {combat:?}");
+        };
+        assert_eq!(
+            *prevention_duration,
+            Some(Duration::UntilEndOfCombat),
+            "CR 511.2: 'this combat' expires at end of combat — a None duration would let \
+             the shield bleed into a later combat"
+        );
+
+        // "that creature" subject with "this turn" → Some as well.
+        let that_creature = parse_oneshot_damage_replacement(
+            "the next time that creature would deal damage this turn, prevent that damage",
+            &ParseContext::default(),
+        )
+        .expect("'that creature' form must parse");
+        let Effect::PreventDamage {
+            prevention_duration,
+            ..
+        } = &that_creature
+        else {
+            panic!("expected PreventDamage, got {that_creature:?}");
+        };
+        assert_eq!(
+            *prevention_duration,
+            Some(Duration::UntilEndOfTurn),
+            "the anaphor form must carry the duration too, never None"
+        );
+
+        // Negative: no duration phrase at all — the gate (CR 511.2 window
+        // requirement) rejects the sentence before the duration step.
+        assert!(
+            parse_oneshot_damage_replacement(
+                "the next time target creature would deal damage, prevent that damage",
+                &ParseContext::default(),
+            )
+            .is_none(),
+            "a target-source prevention without a this turn/this combat phrase must be None"
+        );
     }
 
     /// "that creature" subject, non-trigger context: the anaphor lowers to the

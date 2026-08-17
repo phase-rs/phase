@@ -101,6 +101,114 @@ fn awe_strike_prevents_first_source_damage_once_then_lets_second_through() {
     );
 }
 
+/// CR 120.8 + CR 609.7b (fix round 2, review #7334): a 0-damage event must
+/// not consume the one-shot shield and must not fire the "damage prevented
+/// this way" rider. A 0-damage source deals no damage at all (CR 120.8) — the
+/// prevention has no event to replace — and a shield that prevents no damage
+/// is not used up (CR 609.7b). This test drives the replacement pipeline with
+/// a genuine 0-amount `ProposedEvent::Damage` from the chosen creature (the
+/// public `replace_event` seam, reached by `deal_damage`'s gate on every
+/// production path), then proves the shield still stops a later 3-damage event
+/// with the rider firing exactly once (+3, and the 0-damage pass produced no
+/// life gain and no `DamagePrevented` event).
+#[test]
+fn awe_strike_zero_damage_event_does_not_consume_shield_or_fire_rider() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let b1 = scenario.add_creature(P1, "B1", 3, 3).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Awe Strike", true, AWE_STRIKE)
+        .id();
+
+    let mut runner = scenario.build();
+    let p0_before = runner.life(P0);
+    let _outcome = runner.cast(spell).target_objects(&[b1]).resolve();
+    let shield = runner
+        .state()
+        .pending_damage_replacements
+        .iter()
+        .find(|r| r.shield_kind == ShieldKind::PreventionOneShot)
+        .expect("the one-shot shield must be installed");
+    assert!(
+        !shield.is_consumed,
+        "reach guard: the shield starts unconsumed"
+    );
+
+    // Zero-damage event from the chosen creature (CR 120.8: deals no damage).
+    let mut events = Vec::new();
+    let result = engine::game::replacement::replace_event(
+        runner.state_mut(),
+        engine::types::proposed_event::ProposedEvent::Damage {
+            source_id: b1,
+            target: TargetRef::Player(P0),
+            amount: 0,
+            is_combat: false,
+            applied: std::collections::HashSet::new(),
+        },
+        &mut events,
+    );
+    assert!(
+        matches!(
+            result,
+            engine::game::replacement::ReplacementResult::Execute(_)
+        ),
+        "a 0-damage event must pass through unmodified, got {result:?}"
+    );
+    assert_eq!(
+        runner.life(P0),
+        p0_before,
+        "a 0-damage event must not change life (no prevention, no rider gain)"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, GameEvent::DamagePrevented { .. })),
+        "a 0-damage event must not emit DamagePrevented"
+    );
+    let shield = runner
+        .state()
+        .pending_damage_replacements
+        .iter()
+        .find(|r| r.shield_kind == ShieldKind::PreventionOneShot)
+        .expect("the shield must still exist after the 0-damage event");
+    assert!(
+        !shield.is_consumed,
+        "CR 609.7b: a shield that prevented no damage must not be used up"
+    );
+
+    // The shield survives: the next nonzero event from the chosen creature is
+    // still prevented and the rider fires exactly once (+3).
+    let p0_now = runner.life(P0);
+    let mut events = Vec::new();
+    deal_damage::resolve(
+        runner.state_mut(),
+        &damage_ability(b1, TargetRef::Player(P0), 3),
+        &mut events,
+    )
+    .expect("b1's 3-damage resolves");
+    assert_eq!(
+        runner.life(P0),
+        p0_now + 3,
+        "the surviving shield must still prevent the later 3-damage event and \
+         gain life equal to the damage prevented this way"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, GameEvent::DamagePrevented { amount: 3, .. })),
+        "the 3-damage event must emit DamagePrevented(3)"
+    );
+    let shield = runner
+        .state()
+        .pending_damage_replacements
+        .iter()
+        .find(|r| r.shield_kind == ShieldKind::PreventionOneShot);
+    assert!(
+        shield.is_none() || shield.is_some_and(|r| r.is_consumed),
+        "after the 3-damage prevention the one-shot shield must be consumed (CR 615.3)"
+    );
+}
+
 /// CR 609.7a + CR 609.7b: the shield binds to the CHOSEN creature only — a
 /// different source's damage goes through untouched, and the shield survives.
 #[test]
