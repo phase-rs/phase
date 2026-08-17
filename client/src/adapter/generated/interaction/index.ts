@@ -17,7 +17,7 @@ export type InteractionSlotKind = "single" | "mulligan" | "openingBottom";
 
 export type ActiveInteractionSlot = { semanticOwner: number, slotKind: InteractionSlotKind, interactionId: InteractionId, };
 
-export type SimultaneousDecisionKind = "mulligan" | "openingBottom";
+export type SimultaneousDecisionKind = "mulligan" | "openingBottom" | "resolveAllConsent";
 
 export type InteractionWaitingForCode = "terminal" | "mulligan" | "openingBottom" | "choose" | "select" | "sequence" | "relations" | "manaGroups" | "text" | "deckPartition" | "number" | "shortcut" | "assignAmounts" | "assignDamage";
 
