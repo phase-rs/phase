@@ -967,7 +967,6 @@ const BATCH_CHUNK_SIZE = 5;
 // pathological stacks.
 const BATCH_CHUNK_INSTANT = 5_000;
 let batchResolveInProgress = false;
-let pendingResolveAllSeats: { playerId: number; difficulty: string }[] | null = null;
 
 export async function dispatchResolveAll(
   requester: number,
@@ -1009,7 +1008,6 @@ export async function dispatchResolveAll(
   // after Ready consumes that already-issued authorization; it never starts a
   // second run or asks a future AI decision speculatively.
   if (waitingFor?.type !== "ResolveAllReady") {
-    pendingResolveAllSeats = aiSeats;
     const stackLen = useGameStore.getState().gameState?.stack.length ?? 0;
     const maxResolutions =
       stackPressureFromLength(stackLen) === "Instant"
@@ -1021,8 +1019,6 @@ export async function dispatchResolveAll(
     );
     return;
   }
-
-  const resolvedSeats = pendingResolveAllSeats ?? aiSeats;
 
   batchResolveInProgress = true;
   const { setIsResolvingAll, setResolutionProgress } = useGameStore.getState();
@@ -1041,7 +1037,7 @@ export async function dispatchResolveAll(
         ? BATCH_CHUNK_INSTANT
         : BATCH_CHUNK_SIZE;
     const batchResult: BatchResolveResult = await batchAdapter.resolveAll(
-      requester, resolvedSeats, maxResolutions,
+      requester, aiSeats, maxResolutions,
     );
 
     if (latchedTotal === 0) latchedTotal = batchResult.total;
@@ -1072,6 +1068,5 @@ export async function dispatchResolveAll(
     batchResolveInProgress = false;
     setIsResolvingAll(false);
     setResolutionProgress(null);
-    pendingResolveAllSeats = null;
   }
 }

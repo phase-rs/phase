@@ -181,7 +181,7 @@ describe("dispatchResolveAll progress", () => {
     expect(submitAction).not.toHaveBeenCalled();
   });
 
-    it("begins consent before the batch drain and retains its AI seats until Ready", async () => {
+  it("does not retain AI seats across the consent and Ready calls", async () => {
     const seats = [{ playerId: 1, difficulty: "Medium" }];
     const submitAction = vi.fn().mockResolvedValue({ events: [] });
     const consent = buildGameState({
@@ -222,7 +222,7 @@ describe("dispatchResolveAll progress", () => {
 
     await dispatchResolveAll(0, []);
 
-    expect(resolveAll).toHaveBeenCalledWith(0, seats, 5);
+    expect(resolveAll).toHaveBeenCalledWith(0, [], 5);
   });
   it("uses an empty AI-seat list when the adapter delegates native AI ownership to its server", async () => {
     const resolveAll = vi.fn<EngineResolveAll>().mockResolvedValue(chunk(0, 2));
