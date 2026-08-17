@@ -817,4 +817,22 @@ fn ready_consent_collapses_the_safe_prefix_before_a_stack_growing_resolution() {
         }),
         "a partial proof keeps the original requester as the durable auto-pass owner"
     );
+
+    let WaitingFor::Priority { player } = state.waiting_for else {
+        panic!("the unproved entry must return to the ordinary priority pipeline");
+    };
+    assert_ne!(
+        player, P0,
+        "the requester has already passed; another seat now owns the live priority window"
+    );
+    apply(&mut state, player, GameAction::PassPriority)
+        .expect("the ordinary priority action resumes the requester's stored auto-pass");
+    assert!(
+        state.stack.is_empty(),
+        "the remaining entry resolves without another manual requester action"
+    );
+    assert!(
+        state.auto_pass.is_empty(),
+        "UntilStackEmpty clears when its requested stack drain completes"
+    );
 }
