@@ -3995,7 +3995,7 @@ fn resolve_ref(
             DamageChannel::Excess => state.last_effect_excess_amount.unwrap_or(0),
         },
         // Read the preceding continuation-local effect count directly.
-        // An unavailable count resolves to zero; an enclosing trigger cannot shadow it.
+        // An unavailable count resolves to zero.
         QuantityRef::PreviousEffectCount => state.last_effect_count.unwrap_or(0),
         // CR 608.2c: "for each [thing] this way" — read the most recent tracked set size.
         QuantityRef::TrackedSetSize => state
