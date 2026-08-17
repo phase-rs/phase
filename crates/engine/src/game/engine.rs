@@ -19012,9 +19012,11 @@ mod stage2_injector_tests {
                 // Identity re-established, not assumed: `9869a19f28c791ee`,
                 // `2bc316e3aa0297f8`, `8df98486627bfe15` at the new coordinates — the same
                 // three digests this log has carried since the first merge.
-                "game/effects/mod.rs:7002".to_string(),
-                "game/effects/mod.rs:7079".to_string(),
-                "game/effects/mod.rs:10317".to_string(),
+                // `PreviousEffectCount` classification adds one line above all three producers,
+                // so they move uniformly to `:7003/:7080/:10318`; no prompt site changes.
+                "game/effects/mod.rs:7003".to_string(),
+                "game/effects/mod.rs:7080".to_string(),
+                "game/effects/mod.rs:10318".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
