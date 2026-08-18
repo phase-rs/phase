@@ -8,8 +8,8 @@ use crate::types::actions::GameAction;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    AutoMayChoice, GameState, MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingTriggerOrder,
-    TriggerOrderGroup, WaitingFor, ZoneChangeRecord,
+    AutoMayChoice, GameState, MayTriggerAutoChoiceKey, MayTriggerOrigin, WaitingFor,
+    ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::phase::Phase;
