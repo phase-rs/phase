@@ -2705,6 +2705,9 @@ fn settle_sacrifice_for_cost_events(
     current_end: usize,
 ) {
     if let Some(collection) = pending.activation_trigger_collection.as_mut() {
+        if crate::game::triggers::pending_trigger_order_owns_event(state, &deferred_cost_events) {
+            return;
+        }
         // CR 602.2b + CR 603.2: an announced target-bearing activation owns
         // replacement-paused cost events until its stack commit. Earlier action
         // fragments are not present in this action's event buffer, while the
