@@ -2717,6 +2717,9 @@ fn settle_sacrifice_for_cost_events(
     }
 
     deferred_cost_events.extend_from_slice(&events[current_start..current_end]);
+    if crate::game::triggers::pending_trigger_order_owns_event(state, &deferred_cost_events) {
+        return;
+    }
     if !deferred_cost_events.is_empty() {
         crate::game::triggers::collect_triggers_into_deferred(state, &deferred_cost_events);
     }
