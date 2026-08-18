@@ -9894,7 +9894,7 @@ pub(crate) fn filter_consumed_trigger_events(
     filter_consumed_trigger_events_from(events, 0, consumed)
 }
 
-/// CR 603.3b: True when an in-flight ordering pass already owns one of the
+/// CR 603.2c + CR 603.3b: True when an in-flight ordering pass already owns one of the
 /// events in `events` through its pending trigger contexts. A cost handler may
 /// return through an ordering prompt after its own contexts were collected; it
 /// must not park those same events again, while unrelated ordering prompts must

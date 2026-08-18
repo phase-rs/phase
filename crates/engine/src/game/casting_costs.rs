@@ -2618,6 +2618,9 @@ fn park_deferred_cost_triggers_if_paused(
         .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
         .cloned()
         .collect();
+    if crate::game::triggers::pending_trigger_order_owns_event(state, &cost_events) {
+        return;
+    }
     crate::game::triggers::collect_triggers_into_deferred(state, &cost_events);
 }
 
