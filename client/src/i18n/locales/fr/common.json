@@ -96,6 +96,7 @@
     "cardDataTitle": "Données de cartes : {{date}}"
   },
   "volume": {
+    "deviceBlocked": "Audio indisponible — le serveur audio du système ne répond pas. Redémarrez l'application pour réessayer.",
     "mute": "Couper le son",
     "unmute": "Rétablir le son",
     "volume": "Volume"

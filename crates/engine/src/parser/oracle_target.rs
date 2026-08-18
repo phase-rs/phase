@@ -4274,7 +4274,10 @@ fn stack_spell_filter(mut typed: TypedFilter) -> TargetFilter {
     }
 }
 
-fn distribute_shared_properties(filter: TargetFilter, shared_props: &[FilterProp]) -> TargetFilter {
+pub(super) fn distribute_shared_properties(
+    filter: TargetFilter,
+    shared_props: &[FilterProp],
+) -> TargetFilter {
     match filter {
         TargetFilter::Typed(mut typed) => {
             for prop in shared_props {

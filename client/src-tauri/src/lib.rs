@@ -1,5 +1,6 @@
 use tauri::{Manager, WebviewWindowBuilder};
 
+mod audio_probe;
 mod migration;
 mod native_bridge;
 mod native_engine;
@@ -26,6 +27,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
+            audio_probe::audio_boot_health,
             migration::stash_legacy_storage,
             migration::set_channel_preference,
             migration::take_legacy_storage,
@@ -39,6 +41,9 @@ pub fn run() {
             native_bridge::native_engine_bridge_close
         ])
         .setup(|app| {
+            // Kick off the audio-device probe before the webview exists so the
+            // verdict is usually cached by the time the page asks for it.
+            audio_probe::prewarm();
             // `create: false` on the "main" window in tauri.conf.json defers
             // window creation to here so we can pin an explicit, always-writable
             // `data_directory` on Windows. WebView2 otherwise derives its

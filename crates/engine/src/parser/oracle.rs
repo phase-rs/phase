@@ -4598,6 +4598,7 @@ pub(crate) fn parse_oracle_ir(
         // Must run before keyword extraction so "Spree" header + follow-on `+` lines
         // are consumed as a modal block, not swallowed as a keyword-only line.
         if let Some((block, next_i)) = parse_oracle_block(&lines, i) {
+            let mut next_i = next_i;
             match lower_oracle_block_ir(block, card_name, ctx.host_self_reference.clone(), &mut ctx)
             {
                 OracleBlockIr::Activated(ability) => {
@@ -4613,7 +4614,12 @@ pub(crate) fn parse_oracle_ir(
                     }
                     emitter.modal_at(item_line, choice);
                 }
-                OracleBlockIr::Triggered(triggers) => {
+                OracleBlockIr::Triggered(mut triggers) => {
+                    // CR 706.3b: a triggered modal consumes its bullet modes
+                    // before this boundary, so table rows follow `next_i`, not
+                    // the trigger header. Retain them on the trigger IR until
+                    // lowering can attach them to the chain that owns the roll.
+                    next_i = attach_trigger_die_result_branches(&mut triggers, &lines, next_i);
                     for trigger in triggers {
                         emitter.trigger_ir_at(item_line, TriggerNodeIr::Parsed(Box::new(trigger)));
                     }

@@ -708,7 +708,7 @@ pub(crate) fn rewrite_quantity_expr_rounding(expr: &mut QuantityExpr, mode: Roun
     }
 }
 
-/// Typed signal distinguishing which count-word `parse_count_expr` consumed.
+/// Typed signal distinguishing which count-word a quantifier grammar consumed.
 ///
 /// The numeric value of a count is the same whether the text said "a", "an",
 /// "1", "any", or "another" — all yield `QuantityExpr::Fixed { value: 1 }`. But
@@ -718,6 +718,11 @@ pub(crate) fn rewrite_quantity_expr_rounding(expr: &mut QuantityExpr, mode: Roun
 /// distinguish the exclusion word from an ordinary article without re-matching
 /// the raw string at the call site (CLAUDE.md forbids stringly-typed dispatch).
 /// This enum is that typed signal.
+///
+/// Every grammar that consumes the qualifier reports it, not just
+/// [`parse_count_expr_with_exclusion`]: `parse_oracle_cost`'s tap-cost branch
+/// reports it from its own leading-quantifier `alt` ("tap another untapped
+/// Merfolk you control", #7522).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CountWord {
     /// The count word was the source-exclusion "another" — the consuming caller
