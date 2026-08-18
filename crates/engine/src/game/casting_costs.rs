@@ -2723,8 +2723,8 @@ fn settle_sacrifice_for_cost_events(
         // Earlier action fragments carry no ordinal in THIS buffer, so the
         // consumed journal — whose ordinals are absolute within the current
         // action — must not be applied to them. The queued-context witness is
-        // occurrence-exact independently of any buffer (CR 400.7:
-        // `turn_zone_change_index` separates distinct occurrences within a turn).
+        // occurrence-exact independently of any buffer; `turn_zone_change_index`
+        // separates distinct occurrences within a turn.
         let unclaimed_cost_events =
             crate::game::triggers::filter_already_collected_trigger_events_from(
                 state,
