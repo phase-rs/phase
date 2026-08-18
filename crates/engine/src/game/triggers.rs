@@ -9894,20 +9894,76 @@ pub(crate) fn filter_consumed_trigger_events(
     filter_consumed_trigger_events_from(events, 0, consumed)
 }
 
-/// CR 603.2c + CR 603.3b: True when an in-flight ordering pass already owns one of the
-/// events in `events` through its pending trigger contexts. A cost handler may
-/// return through an ordering prompt after its own contexts were collected; it
-/// must not park those same events again, while unrelated ordering prompts must
-/// not suppress legitimate cost-event parking.
-pub(crate) fn pending_trigger_order_owns_event(state: &GameState, events: &[GameEvent]) -> bool {
-    state
-        .pending_trigger_order
-        .as_ref()
-        .into_iter()
-        .flat_map(|order| order.groups.iter())
+/// CR 603.2 + CR 603.2c: The occurrence identities an in-flight ordering pass
+/// already holds through its pending trigger contexts.
+///
+/// A context's `trigger_events` lists the occurrences that one observer saw, so
+/// occurrence identity within a single context is positional exactly as
+/// [`trigger_event_occurrence`] defines it. CR 603.2 fires one ability per
+/// observer per occurrence, so observers that saw the same batch REPEAT those
+/// identities rather than adding new ones: the union across contexts — not their
+/// concatenation — is the set the ordering pass owns.
+///
+/// THE ORDINALS ARE PER-CONTEXT, AND THE CONSUMER'S ARE PER-BATCH. Contexts do
+/// not carry an action-buffer index, so this reduces to "for each event value,
+/// the pass owns its first `max`-over-contexts copies", and
+/// [`filter_pending_trigger_order_owned_events`] drops that many leading copies
+/// from the batch. That is exact whenever byte identity implies one occurrence —
+/// which `ZoneChanged` guarantees within a turn through
+/// `ZoneChangeRecord::turn_zone_change_index` (proved on
+/// [`filter_already_collected_trigger_events_from`]) and which every one-shot
+/// departure event (`PermanentSacrificed`, `PermanentDestroyed`) guarantees by
+/// construction. The residual is a repeatable non-zone event (`PermanentTapped`
+/// for one object across a tap/untap/tap span) whose earlier copy the pass owns
+/// but whose batch no longer carries it: the newer copy then takes ordinal 0 and
+/// is dropped. Closing that needs the pass to record its occurrences against the
+/// action buffer at collection time, not ownership re-derived here; until then
+/// this stays strictly narrower than the whole-batch skip it replaces.
+///
+/// This is a third "already collected" witness alongside the two on
+/// [`filter_already_collected_trigger_events_from`], and deliberately not folded
+/// into them: that authority consumes ZoneChanged witnesses only, while a cost
+/// span parks non-zone occurrences (`PermanentSacrificed`) that an ordering pass
+/// owns just as firmly.
+fn pending_trigger_order_owned_occurrences(
+    state: &GameState,
+) -> Vec<ConsumedTriggerEventOccurrence> {
+    let Some(order) = state.pending_trigger_order.as_ref() else {
+        return Vec::new();
+    };
+    order
+        .groups
+        .iter()
         .flat_map(|group| group.triggers.iter())
-        .flat_map(|context| context.trigger_events.iter())
-        .any(|trigger_event| events.iter().any(|event| event == trigger_event))
+        .flat_map(|context| {
+            context
+                .trigger_events
+                .iter()
+                .enumerate()
+                .map(|(index, event)| ConsumedTriggerEventOccurrence {
+                    event: event.clone(),
+                    occurrence: trigger_event_occurrence(&context.trigger_events, index),
+                })
+        })
+        .fold(Vec::new(), |mut owned, candidate| {
+            if !owned.contains(&candidate) {
+                owned.push(candidate);
+            }
+            owned
+        })
+}
+
+/// CR 603.2c + CR 603.3b: Drop from `events` only the occurrences an in-flight
+/// ordering pass already owns. A cost handler may return through an ordering
+/// prompt after its own contexts were collected; it must not park those same
+/// occurrences again. Every other occurrence in the batch — a newer event from
+/// the resumed fragment, or a further occurrence of an equal-shaped event — is a
+/// distinct trigger event under CR 603.2c and still parks normally.
+pub(crate) fn filter_pending_trigger_order_owned_events(
+    state: &GameState,
+    events: &[GameEvent],
+) -> Vec<GameEvent> {
+    filter_consumed_trigger_events(events, &pending_trigger_order_owned_occurrences(state))
 }
 
 /// CR 603.2c: Remove from `events[event_start..]` the occurrences a trigger
@@ -14358,8 +14414,8 @@ pub mod tests {
         GameState::new_two_player(42)
     }
 
-    fn ordering_with_event(event: GameEvent) -> PendingTriggerOrder {
-        let mut pending = PendingTrigger::ordinary(
+    fn ordering_context(trigger_events: Vec<GameEvent>) -> PendingTriggerContext {
+        let pending = PendingTrigger::ordinary(
             ObjectId(1),
             PlayerId(0),
             None,
@@ -14374,38 +14430,122 @@ pub mod tests {
             )),
             0,
         );
-        pending.trigger_event = Some(event);
+        PendingTriggerContext::batched(pending, trigger_events)
+    }
+
+    fn ordering_with_groups(groups: Vec<Vec<PendingTriggerContext>>) -> PendingTriggerOrder {
         PendingTriggerOrder {
-            groups: vec![TriggerOrderGroup {
-                controller: PlayerId(0),
-                triggers: vec![PendingTriggerContext::single(pending)],
-                ordered: false,
-            }],
+            groups: groups
+                .into_iter()
+                .map(|triggers| TriggerOrderGroup {
+                    controller: PlayerId(0),
+                    triggers,
+                    ordered: false,
+                })
+                .collect(),
             resume_after_ordering: None,
         }
     }
 
-    #[test]
-    fn pending_trigger_order_owns_matching_event() {
-        let event = GameEvent::GameStarted;
-        let mut state = setup();
-        state.pending_trigger_order = Some(ordering_with_event(event.clone()));
-
-        assert!(pending_trigger_order_owns_event(&state, &[event]));
+    fn tapped(object_id: ObjectId) -> GameEvent {
+        GameEvent::PermanentTapped {
+            object_id,
+            caused_by: None,
+        }
     }
 
     #[test]
-    fn pending_trigger_order_does_not_own_unrelated_event() {
+    fn pending_trigger_order_filters_only_the_owned_occurrence_from_a_mixed_batch() {
+        let owned = tapped(ObjectId(7));
+        let unowned = tapped(ObjectId(8));
         let mut state = setup();
-        state.pending_trigger_order = Some(ordering_with_event(GameEvent::GameStarted));
+        state.pending_trigger_order =
+            Some(ordering_with_groups(vec![vec![ordering_context(vec![
+                owned.clone(),
+            ])]]));
 
-        assert!(!pending_trigger_order_owns_event(
-            &state,
-            &[GameEvent::TurnStarted {
-                player_id: PlayerId(0),
-                turn_number: 1,
-            }],
-        ));
+        assert_eq!(
+            filter_pending_trigger_order_owned_events(&state, &[owned, unowned.clone()]),
+            vec![unowned],
+        );
+    }
+
+    /// CR 603.2c: one event may contain multiple occurrences, so an ordering
+    /// pass holding a single occurrence must not swallow an equal-shaped second
+    /// one from the resumed fragment.
+    #[test]
+    fn pending_trigger_order_keeps_the_unowned_duplicate_shaped_occurrence() {
+        let repeated = tapped(ObjectId(7));
+        let mut state = setup();
+        state.pending_trigger_order =
+            Some(ordering_with_groups(vec![vec![ordering_context(vec![
+                repeated.clone(),
+            ])]]));
+
+        assert_eq!(
+            filter_pending_trigger_order_owned_events(
+                &state,
+                &[repeated.clone(), repeated.clone()]
+            ),
+            vec![repeated],
+        );
+    }
+
+    /// A batch observer records every occurrence it saw, so both equal-shaped
+    /// occurrences are owned while a third one is not.
+    #[test]
+    fn pending_trigger_order_owns_every_occurrence_a_batch_context_recorded() {
+        let repeated = tapped(ObjectId(7));
+        let mut state = setup();
+        state.pending_trigger_order =
+            Some(ordering_with_groups(vec![vec![ordering_context(vec![
+                repeated.clone(),
+                repeated.clone(),
+            ])]]));
+
+        assert_eq!(
+            filter_pending_trigger_order_owned_events(
+                &state,
+                &[repeated.clone(), repeated.clone(), repeated.clone()],
+            ),
+            vec![repeated],
+        );
+    }
+
+    /// Two observers of the same occurrence repeat one identity rather than
+    /// claiming two, and ownership spans every group in the ordering pass.
+    #[test]
+    fn pending_trigger_order_unions_occurrences_across_groups_and_observers() {
+        let first = tapped(ObjectId(7));
+        let second = tapped(ObjectId(8));
+        let unowned = tapped(ObjectId(9));
+        let mut state = setup();
+        state.pending_trigger_order = Some(ordering_with_groups(vec![
+            vec![
+                ordering_context(vec![first.clone()]),
+                ordering_context(vec![first.clone()]),
+            ],
+            vec![ordering_context(vec![second.clone()])],
+        ]));
+
+        assert_eq!(
+            filter_pending_trigger_order_owned_events(
+                &state,
+                &[first.clone(), first.clone(), second, unowned.clone()],
+            ),
+            vec![first, unowned],
+        );
+    }
+
+    #[test]
+    fn pending_trigger_order_absent_leaves_the_batch_intact() {
+        let state = setup();
+        let batch = vec![tapped(ObjectId(7)), tapped(ObjectId(8))];
+
+        assert_eq!(
+            filter_pending_trigger_order_owned_events(&state, &batch),
+            batch,
+        );
     }
 
     #[test]

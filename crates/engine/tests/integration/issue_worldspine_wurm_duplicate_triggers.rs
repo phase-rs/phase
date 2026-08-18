@@ -2,7 +2,7 @@
 //! Recurring Nightmare activation.
 
 use engine::database::card_db::CardDatabase;
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
@@ -18,8 +18,9 @@ fn card_db() -> &'static CardDatabase {
     shared_card_db().expect("integration card fixture must load")
 }
 
-#[test]
-fn worldspine_wurm_sacrifice_creates_each_trigger_once() {
+/// Sacrifice Worldspine Wurm to a Recurring Nightmare activation, optionally
+/// under extra battlefield observers, and drive the activation to priority.
+fn activate_recurring_nightmare(observers: &[&str]) -> (GameRunner, ObjectId, Vec<ObjectId>) {
     let db = card_db();
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -37,6 +38,10 @@ fn worldspine_wurm_sacrifice_creates_each_trigger_once() {
     let graveyard_creature = scenario.add_real_card(P0, "Grizzly Bears", Zone::Graveyard, db);
     let _other_graveyard_creature =
         scenario.add_real_card(P0, "Elvish Mystic", Zone::Graveyard, db);
+    let observer_ids: Vec<ObjectId> = observers
+        .iter()
+        .map(|name| scenario.add_real_card(P0, name, Zone::Battlefield, db))
+        .collect();
     let mut runner = scenario.build();
     let ability_index = runner.state().objects[&nightmare]
         .abilities
@@ -87,27 +92,68 @@ fn worldspine_wurm_sacrifice_creates_each_trigger_once() {
 
     assert!(saw_sacrifice, "activation must sacrifice Worldspine Wurm");
     assert!(saw_target, "activation must choose a graveyard creature");
+    (runner, wurm, observer_ids)
+}
 
-    // Without the cost-event ownership check, the sacrifice event is parked a
-    // second time while this ordering prompt is being returned, producing four
-    // Wurm trigger entries instead of the two below.
-    let wurm_triggers: Vec<_> = runner
+fn trigger_descriptions(runner: &GameRunner, source_id: ObjectId) -> Vec<String> {
+    runner
         .state()
         .stack
         .iter()
-        .filter(|entry| entry.source_id == wurm)
+        .filter(|entry| entry.source_id == source_id)
         .filter_map(|entry| match &entry.kind {
             StackEntryKind::TriggeredAbility { description, .. } => description.clone(),
             _ => None,
         })
-        .collect();
+        .collect()
+}
+
+#[test]
+fn worldspine_wurm_sacrifice_creates_each_trigger_once() {
+    let (runner, wurm, _) = activate_recurring_nightmare(&[]);
+
+    // Without the cost-event ownership filter, the sacrifice event is parked a
+    // second time while this ordering prompt is being returned, producing four
+    // Wurm trigger entries instead of the two below.
     assert_eq!(
-        wurm_triggers,
+        trigger_descriptions(&runner, wurm),
         vec![
             "When ~ dies, create three 5/5 green Wurm creature tokens with trample.".to_string(),
             "When ~ is put into a graveyard from anywhere, shuffle it into its owner's library."
                 .to_string(),
         ],
         "a single Battlefield-to-Graveyard move must create one of each Wurm trigger",
+    );
+}
+
+/// CR 603.2c: the same parked cost span carries three distinct occurrences — the
+/// Wurm's death, its sacrifice, and Recurring Nightmare's own return to hand —
+/// and the in-flight ordering pass owns all three here. This pins that the
+/// ownership filter suppresses exactly those and nothing else, so every observer
+/// of the span still reaches the stack once. Without any ownership check the Wurm
+/// triggers double; the whole-span skip this replaces is indistinguishable at
+/// THIS seam (the pass is formed over the same span), so the occurrence-level
+/// discrimination is pinned by the unit rows on
+/// `filter_pending_trigger_order_owned_events` instead.
+#[test]
+fn paused_cost_resume_keeps_every_occurrence_in_the_span_exactly_once() {
+    let (runner, wurm, observers) =
+        activate_recurring_nightmare(&["Korvold, Fae-Cursed King", "Justice, Vance Astrovik"]);
+    let (korvold, justice) = (observers[0], observers[1]);
+
+    assert_eq!(
+        trigger_descriptions(&runner, wurm).len(),
+        2,
+        "the owned sacrifice occurrence must still produce exactly one of each Wurm trigger",
+    );
+    assert_eq!(
+        trigger_descriptions(&runner, korvold).len(),
+        1,
+        "the sacrifice occurrence in the same span must trigger its other observer once",
+    );
+    assert_eq!(
+        trigger_descriptions(&runner, justice).len(),
+        1,
+        "the return-to-hand occurrence in the same span must still trigger once",
     );
 }

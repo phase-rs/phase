@@ -1917,7 +1917,9 @@ fn park_cost_payment_triggers_if_paused(
         .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
         .cloned()
         .collect();
-    if crate::game::triggers::pending_trigger_order_owns_event(state, &cost_events) {
+    let cost_events =
+        crate::game::triggers::filter_pending_trigger_order_owned_events(state, &cost_events);
+    if cost_events.is_empty() {
         return;
     }
     if let Some(mut collection) = state.take_pending_activation_trigger_collection() {
@@ -2618,9 +2620,8 @@ fn park_deferred_cost_triggers_if_paused(
         .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
         .cloned()
         .collect();
-    if crate::game::triggers::pending_trigger_order_owns_event(state, &cost_events) {
-        return;
-    }
+    let cost_events =
+        crate::game::triggers::filter_pending_trigger_order_owned_events(state, &cost_events);
     crate::game::triggers::collect_triggers_into_deferred(state, &cost_events);
 }
 
@@ -2705,40 +2706,45 @@ fn settle_sacrifice_for_cost_events(
     current_end: usize,
 ) {
     if let Some(collection) = pending.activation_trigger_collection.as_mut() {
-        if crate::game::triggers::pending_trigger_order_owns_event(state, &deferred_cost_events) {
-            return;
-        }
+        let unclaimed_cost_events =
+            crate::game::triggers::filter_pending_trigger_order_owned_events(
+                state,
+                &deferred_cost_events,
+            );
         // CR 602.2b + CR 603.2: an announced target-bearing activation owns
         // replacement-paused cost events until its stack commit. Earlier action
         // fragments are not present in this action's event buffer, while the
         // current fragment is collected once by the eventual stack boundary (or
         // the next pending-action staging pass).
-        if !deferred_cost_events.is_empty() {
-            collection.collect(state, &deferred_cost_events);
+        if !unclaimed_cost_events.is_empty() {
+            collection.collect(state, &unclaimed_cost_events);
         }
         return;
     }
 
     deferred_cost_events.extend_from_slice(&events[current_start..current_end]);
-    if crate::game::triggers::pending_trigger_order_owns_event(state, &deferred_cost_events) {
-        return;
-    }
+    let deferred_cost_events = crate::game::triggers::filter_pending_trigger_order_owned_events(
+        state,
+        &deferred_cost_events,
+    );
     if !deferred_cost_events.is_empty() {
         crate::game::triggers::collect_triggers_into_deferred(state, &deferred_cost_events);
     }
+    // The journal claims the whole current fragment, not just what was collected
+    // above: an occurrence the filter dropped is one the in-flight ordering pass
+    // already collected, so the Priority pipeline must not reach it either.
     let occurrences = events[current_start..current_end]
         .iter()
         .enumerate()
-        .map(|(offset, event)| {
-            let index = current_start + offset;
-            crate::game::triggers::ConsumedTriggerEventOccurrence {
+        .map(
+            |(offset, event)| crate::game::triggers::ConsumedTriggerEventOccurrence {
                 event: event.clone(),
-                occurrence: events[..index]
-                    .iter()
-                    .filter(|prior| *prior == event)
-                    .count(),
-            }
-        })
+                occurrence: crate::game::triggers::trigger_event_occurrence(
+                    events,
+                    current_start + offset,
+                ),
+            },
+        )
         .collect();
     crate::game::triggers::resolve_and_apply_trigger_collection(
         state,
