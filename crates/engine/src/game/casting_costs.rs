@@ -1912,13 +1912,20 @@ fn park_cost_payment_triggers_if_paused(
         return;
     }
 
-    let cost_events: Vec<GameEvent> = events[cost_event_start..cost_event_end]
-        .iter()
+    // CR 603.2c + CR 603.3b: the announcement drain inside
+    // `finish_pending_cost_or_cast` can already have collected this span and moved
+    // its contexts into an in-flight ordering pass, so route the span through the
+    // already-collected authority instead of re-parking it wholesale.
+    let cost_events: Vec<GameEvent> =
+        crate::game::triggers::filter_already_collected_trigger_events_from(
+            state,
+            &events[..cost_event_end],
+            cost_event_start,
+            &state.consumed_before_priority_trigger_events,
+        )
+        .into_iter()
         .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
-        .cloned()
         .collect();
-    let cost_events =
-        crate::game::triggers::filter_pending_trigger_order_owned_events(state, &cost_events);
     if cost_events.is_empty() {
         return;
     }
@@ -2615,13 +2622,16 @@ fn park_deferred_cost_triggers_if_paused(
     let Some((start, end)) = cost_event_range else {
         return;
     };
-    let cost_events: Vec<GameEvent> = events[start..end]
-        .iter()
+    let cost_events: Vec<GameEvent> =
+        crate::game::triggers::filter_already_collected_trigger_events_from(
+            state,
+            &events[..end],
+            start,
+            &state.consumed_before_priority_trigger_events,
+        )
+        .into_iter()
         .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
-        .cloned()
         .collect();
-    let cost_events =
-        crate::game::triggers::filter_pending_trigger_order_owned_events(state, &cost_events);
     crate::game::triggers::collect_triggers_into_deferred(state, &cost_events);
 }
 
@@ -2707,9 +2717,11 @@ fn settle_sacrifice_for_cost_events(
 ) {
     if let Some(collection) = pending.activation_trigger_collection.as_mut() {
         let unclaimed_cost_events =
-            crate::game::triggers::filter_pending_trigger_order_owned_events(
+            crate::game::triggers::filter_already_collected_trigger_events_from(
                 state,
                 &deferred_cost_events,
+                0,
+                &state.consumed_before_priority_trigger_events,
             );
         // CR 602.2b + CR 603.2: an announced target-bearing activation owns
         // replacement-paused cost events until its stack commit. Earlier action
@@ -2723,9 +2735,11 @@ fn settle_sacrifice_for_cost_events(
     }
 
     deferred_cost_events.extend_from_slice(&events[current_start..current_end]);
-    let deferred_cost_events = crate::game::triggers::filter_pending_trigger_order_owned_events(
+    let deferred_cost_events = crate::game::triggers::filter_already_collected_trigger_events_from(
         state,
         &deferred_cost_events,
+        0,
+        &state.consumed_before_priority_trigger_events,
     );
     if !deferred_cost_events.is_empty() {
         crate::game::triggers::collect_triggers_into_deferred(state, &deferred_cost_events);
