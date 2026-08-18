@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-08-17T00:00:00Z",
+  "updated": "2026-08-18T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -1332,68 +1332,8 @@
       ],
       "main": [
         {
-          "count": 2,
-          "name": "All Is Dust"
-        },
-        {
-          "count": 2,
-          "name": "Chalice of the Void"
-        },
-        {
           "count": 4,
-          "name": "Devourer of Destiny"
-        },
-        {
-          "count": 2,
-          "name": "Dismember"
-        },
-        {
-          "count": 4,
-          "name": "Eldrazi Temple"
-        },
-        {
-          "count": 4,
-          "name": "Expedition Map"
-        },
-        {
-          "count": 4,
-          "name": "Glaring Fleshraker"
-        },
-        {
-          "count": 4,
-          "name": "Karn, the Great Creator"
-        },
-        {
-          "count": 4,
-          "name": "Kozilek's Command"
-        },
-        {
-          "count": 3,
-          "name": "Mind Stone"
-        },
-        {
-          "count": 2,
-          "name": "Sire of Seven Deaths"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 4,
-          "name": "Thought-Knot Seer"
-        },
-        {
-          "count": 3,
-          "name": "Ugin, Eye of the Storms"
-        },
-        {
-          "count": 4,
-          "name": "Ugin's Labyrinth"
-        },
-        {
-          "count": 4,
-          "name": "Urza's Mine"
+          "name": "Urza's Tower"
         },
         {
           "count": 4,
@@ -1401,45 +1341,89 @@
         },
         {
           "count": 4,
-          "name": "Urza's Tower"
+          "name": "Urza's Mine"
+        },
+        {
+          "count": 4,
+          "name": "Eldrazi Temple"
+        },
+        {
+          "count": 4,
+          "name": "Ugin's Labyrinth"
         },
         {
           "count": 1,
-          "name": "Wastes"
+          "name": "Swamp"
+        },
+        {
+          "count": 1,
+          "name": "Snow-Covered Wastes"
+        },
+        {
+          "count": 4,
+          "name": "Ugin, Eye of the Storms"
+        },
+        {
+          "count": 4,
+          "name": "Karn, the Great Creator"
+        },
+        {
+          "count": 4,
+          "name": "Thought-Knot Seer"
+        },
+        {
+          "count": 1,
+          "name": "Vexing Bauble"
+        },
+        {
+          "count": 1,
+          "name": "Trinisphere"
+        },
+        {
+          "count": 4,
+          "name": "Mind Stone"
+        },
+        {
+          "count": 4,
+          "name": "Expedition Map"
+        },
+        {
+          "count": 4,
+          "name": "Kozilek's Command"
+        },
+        {
+          "count": 2,
+          "name": "Sire of Seven Deaths"
+        },
+        {
+          "count": 1,
+          "name": "Ulamog, the Ceaseless Hunger"
+        },
+        {
+          "count": 4,
+          "name": "Devourer of Destiny"
+        },
+        {
+          "count": 3,
+          "name": "Glaring Fleshraker"
+        },
+        {
+          "count": 2,
+          "name": "Dismember"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Chalice of the Void"
+          "name": "Extinguisher Battleship"
         },
         {
           "count": 1,
-          "name": "Cityscape Leveler"
+          "name": "The Filigree Sylex"
         },
         {
           "count": 1,
-          "name": "Cursed Totem"
-        },
-        {
-          "count": 1,
-          "name": "Disruptor Flute"
-        },
-        {
-          "count": 1,
-          "name": "Grafdigger's Cage"
-        },
-        {
-          "count": 1,
-          "name": "Liquimetal Coating"
-        },
-        {
-          "count": 1,
-          "name": "Soulless Jailer"
-        },
-        {
-          "count": 1,
-          "name": "The Stone Brain"
+          "name": "Trinisphere"
         },
         {
           "count": 1,
@@ -1447,19 +1431,43 @@
         },
         {
           "count": 1,
+          "name": "Skysovereign, Consul Flagship"
+        },
+        {
+          "count": 1,
+          "name": "Walking Ballista"
+        },
+        {
+          "count": 1,
           "name": "Torpor Orb"
         },
         {
-          "count": 2,
-          "name": "Trinisphere"
-        },
-        {
-          "count": 2,
-          "name": "Warping Wail"
+          "count": 1,
+          "name": "Chalice of the Void"
         },
         {
           "count": 1,
           "name": "Ensnaring Bridge"
+        },
+        {
+          "count": 1,
+          "name": "Liquimetal Coating"
+        },
+        {
+          "count": 1,
+          "name": "The Stone Brain"
+        },
+        {
+          "count": 1,
+          "name": "Grafdigger's Cage"
+        },
+        {
+          "count": 2,
+          "name": "Disruptor Flute"
+        },
+        {
+          "count": 1,
+          "name": "Snow-Covered Wastes"
         }
       ]
     }
