@@ -128,13 +128,11 @@ fn worldspine_wurm_sacrifice_creates_each_trigger_once() {
 
 /// CR 603.2c: the same parked cost span carries three distinct occurrences — the
 /// Wurm's death, its sacrifice, and Recurring Nightmare's own return to hand —
-/// and the in-flight ordering pass owns all three here. This pins that the
-/// ownership filter suppresses exactly those and nothing else, so every observer
-/// of the span still reaches the stack once. Without any ownership check the Wurm
-/// triggers double; the whole-span skip this replaces is indistinguishable at
-/// THIS seam (the pass is formed over the same span), so the occurrence-level
-/// discrimination is pinned by the unit rows on
-/// `filter_pending_trigger_order_owned_events` instead.
+/// and `finish_pending_cost_or_cast`'s announcement drain has already claimed
+/// all three in `consumed_before_priority_trigger_events` by the time the span
+/// is parked. This pins that the parking helper suppresses exactly the claimed
+/// occurrences and nothing else, so every observer of the span still reaches the
+/// stack once. Without the filter the Wurm triggers double.
 #[test]
 fn paused_cost_resume_keeps_every_occurrence_in_the_span_exactly_once() {
     let (runner, wurm, observers) =

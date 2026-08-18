@@ -1912,10 +1912,11 @@ fn park_cost_payment_triggers_if_paused(
         return;
     }
 
-    // CR 603.2c + CR 603.3b: the announcement drain inside
-    // `finish_pending_cost_or_cast` can already have collected this span and moved
-    // its contexts into an in-flight ordering pass, so route the span through the
-    // already-collected authority instead of re-parking it wholesale.
+    // CR 603.2c + CR 603.3b: `finish_pending_cost_or_cast`'s announcement drain
+    // can already have collected this span, claiming its occurrences in
+    // `consumed_before_priority_trigger_events`. Route the span through the
+    // already-collected authority so those exact occurrences are not parked a
+    // second time, rather than re-collecting the span wholesale.
     let cost_events: Vec<GameEvent> =
         crate::game::triggers::filter_already_collected_trigger_events_from(
             state,
@@ -2622,6 +2623,9 @@ fn park_deferred_cost_triggers_if_paused(
     let Some((start, end)) = cost_event_range else {
         return;
     };
+    // CR 603.2c + CR 603.3b: same authority as `park_cost_payment_triggers_if_paused`
+    // — a deferred sacrifice span whose occurrences an earlier collector already
+    // claimed must not be parked again.
     let cost_events: Vec<GameEvent> =
         crate::game::triggers::filter_already_collected_trigger_events_from(
             state,
@@ -2710,18 +2714,23 @@ fn pause_sacrifice_for_cost(
 fn settle_sacrifice_for_cost_events(
     state: &mut GameState,
     pending: &mut PendingCast,
-    mut deferred_cost_events: Vec<GameEvent>,
+    deferred_cost_events: Vec<GameEvent>,
     events: &[GameEvent],
     current_start: usize,
     current_end: usize,
 ) {
     if let Some(collection) = pending.activation_trigger_collection.as_mut() {
+        // Earlier action fragments carry no ordinal in THIS buffer, so the
+        // consumed journal — whose ordinals are absolute within the current
+        // action — must not be applied to them. The queued-context witness is
+        // occurrence-exact independently of any buffer (CR 400.7:
+        // `turn_zone_change_index` separates distinct occurrences within a turn).
         let unclaimed_cost_events =
             crate::game::triggers::filter_already_collected_trigger_events_from(
                 state,
                 &deferred_cost_events,
                 0,
-                &state.consumed_before_priority_trigger_events,
+                &[],
             );
         // CR 602.2b + CR 603.2: an announced target-bearing activation owns
         // replacement-paused cost events until its stack commit. Earlier action
@@ -2734,19 +2743,33 @@ fn settle_sacrifice_for_cost_events(
         return;
     }
 
-    deferred_cost_events.extend_from_slice(&events[current_start..current_end]);
-    let deferred_cost_events = crate::game::triggers::filter_already_collected_trigger_events_from(
+    // Two occurrence bases, filtered separately and never rebased into each
+    // other: the carried fragments against the buffer-independent queued-context
+    // witness, the current fragment against this action's buffer with its
+    // absolute `current_start` offset — the basis `filter_consumed_trigger_events_from`
+    // requires, and the same one the journal below records.
+    let carried_cost_events = crate::game::triggers::filter_already_collected_trigger_events_from(
         state,
         &deferred_cost_events,
         0,
+        &[],
+    );
+    let current_cost_events = crate::game::triggers::filter_already_collected_trigger_events_from(
+        state,
+        &events[..current_end],
+        current_start,
         &state.consumed_before_priority_trigger_events,
     );
+    let deferred_cost_events: Vec<GameEvent> = carried_cost_events
+        .into_iter()
+        .chain(current_cost_events)
+        .collect();
     if !deferred_cost_events.is_empty() {
         crate::game::triggers::collect_triggers_into_deferred(state, &deferred_cost_events);
     }
-    // The journal claims the whole current fragment, not just what was collected
-    // above: an occurrence the filter dropped is one the in-flight ordering pass
-    // already collected, so the Priority pipeline must not reach it either.
+    // The journal claims the whole current fragment, not just what survived the
+    // filter: an occurrence the filter dropped is one an earlier collector
+    // already took, so the Priority pipeline must not reach it either.
     let occurrences = events[current_start..current_end]
         .iter()
         .enumerate()
