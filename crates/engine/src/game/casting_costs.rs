@@ -1917,6 +1917,9 @@ fn park_cost_payment_triggers_if_paused(
         .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
         .cloned()
         .collect();
+    if crate::game::triggers::pending_trigger_order_owns_event(state, &cost_events) {
+        return;
+    }
     if let Some(mut collection) = state.take_pending_activation_trigger_collection() {
         // CR 602.2b + CR 603.3b: A target-first activation owns cost-trigger
         // collection until its stack entry exists, even when a later payment

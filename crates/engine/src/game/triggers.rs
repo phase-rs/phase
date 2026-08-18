@@ -9894,6 +9894,22 @@ pub(crate) fn filter_consumed_trigger_events(
     filter_consumed_trigger_events_from(events, 0, consumed)
 }
 
+/// CR 603.3b: True when an in-flight ordering pass already owns one of the
+/// events in `events` through its pending trigger contexts. A cost handler may
+/// return through an ordering prompt after its own contexts were collected; it
+/// must not park those same events again, while unrelated ordering prompts must
+/// not suppress legitimate cost-event parking.
+pub(crate) fn pending_trigger_order_owns_event(state: &GameState, events: &[GameEvent]) -> bool {
+    state
+        .pending_trigger_order
+        .as_ref()
+        .into_iter()
+        .flat_map(|order| order.groups.iter())
+        .flat_map(|group| group.triggers.iter())
+        .flat_map(|context| context.trigger_events.iter())
+        .any(|trigger_event| events.iter().any(|event| event == trigger_event))
+}
+
 /// CR 603.2c: Remove from `events[event_start..]` the occurrences a trigger
 /// collector has already taken, so a second collector over the same raw slice
 /// cannot fire the same observers twice.
@@ -14324,8 +14340,8 @@ pub mod tests {
     use crate::types::game_state::{
         DamageRecord, DeferredLifeCostResume, DelayedTrigger, DistributionUnit, GameState,
         LayersDirty, LoopDetectionMode, NamedChoiceSourceBinding, PendingCast,
-        PendingCostMoveResume, SpellCastRecord, StackEntry, StackEntryKind,
-        TransientContinuousEffect, WaitingFor, ZoneChangeRecord,
+        PendingCostMoveResume, PendingTriggerOrder, SpellCastRecord, StackEntry, StackEntryKind,
+        TransientContinuousEffect, TriggerOrderGroup, WaitingFor, ZoneChangeRecord,
     };
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ObjectId,
@@ -14340,6 +14356,56 @@ pub mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    fn ordering_with_event(event: GameEvent) -> PendingTriggerOrder {
+        let mut pending = PendingTrigger::ordinary(
+            ObjectId(1),
+            PlayerId(0),
+            None,
+            Box::new(ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                Vec::new(),
+                ObjectId(1),
+                PlayerId(0),
+            )),
+            0,
+        );
+        pending.trigger_event = Some(event);
+        PendingTriggerOrder {
+            groups: vec![TriggerOrderGroup {
+                controller: PlayerId(0),
+                triggers: vec![PendingTriggerContext::single(pending)],
+                ordered: false,
+            }],
+            resume_after_ordering: None,
+        }
+    }
+
+    #[test]
+    fn pending_trigger_order_owns_matching_event() {
+        let event = GameEvent::GameStarted;
+        let mut state = setup();
+        state.pending_trigger_order = Some(ordering_with_event(event.clone()));
+
+        assert!(pending_trigger_order_owns_event(&state, &[event]));
+    }
+
+    #[test]
+    fn pending_trigger_order_does_not_own_unrelated_event() {
+        let mut state = setup();
+        state.pending_trigger_order = Some(ordering_with_event(GameEvent::GameStarted));
+
+        assert!(!pending_trigger_order_owns_event(
+            &state,
+            &[GameEvent::TurnStarted {
+                player_id: PlayerId(0),
+                turn_number: 1,
+            }],
+        ));
     }
 
     #[test]
