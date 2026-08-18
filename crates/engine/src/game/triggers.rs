@@ -5280,7 +5280,8 @@ fn collect_pending_triggers_with_collection(
                     let draw_ability =
                         ResolvedAbility::new(draw_effect, Vec::new(), ObjectId(0), monarch_id);
                     let trig_def = TriggerDefinition::new(TriggerMode::Phase)
-                        .description("Monarch draw (CR 725.2)".to_string());
+                        // CR 725.2: the label a viewer sees for this sourceless ability.
+                        .description("The Monarch".to_string());
                     pending.push(PendingTriggerContext::single(PendingTrigger {
                         source_id: ObjectId(0),
                         controller: monarch_id,
@@ -5316,7 +5317,9 @@ fn collect_pending_triggers_with_collection(
                     let venture_ability =
                         ResolvedAbility::new(venture_effect, Vec::new(), ObjectId(0), init_holder);
                     let trig_def = TriggerDefinition::new(TriggerMode::Phase)
-                        .description("Initiative upkeep venture (CR 725.2)".to_string());
+                        // CR 726.2 (NOT 725.2, which is the monarch): the label a viewer
+                        // sees for this sourceless ability.
+                        .description("The Initiative".to_string());
                     pending.push(PendingTriggerContext::single(PendingTrigger {
                         source_id: ObjectId(0),
                         controller: init_holder,
@@ -5456,7 +5459,7 @@ fn collect_pending_triggers_with_collection(
                         );
                         take_init.set_trigger_source_recursive(source_context);
                         let trig_def = TriggerDefinition::new(TriggerMode::DamageDone)
-                            .description("Initiative steal (CR 725.2)".to_string());
+                            .description("Initiative steal (CR 726.2)".to_string());
                         pending.push(PendingTriggerContext::single(PendingTrigger {
                             source_id: *source_id,
                             controller: new_holder,
@@ -5502,7 +5505,8 @@ fn collect_pending_triggers_with_collection(
                     trigger_controller,
                 );
                 let trig_def = TriggerDefinition::new(TriggerMode::LifeLost)
-                    .description("Start your engines! (CR 702.179d)".to_string());
+                    // CR 702.179d: the label a viewer sees for this sourceless ability.
+                    .description("Start your engines!".to_string());
                 pending.push(PendingTriggerContext::single(PendingTrigger {
                     source_id: speed_key_source(),
                     controller: trigger_controller,
@@ -5550,7 +5554,8 @@ fn collect_pending_triggers_with_collection(
                     active,
                 );
                 let trig_def = TriggerDefinition::new(TriggerMode::Phase)
-                    .description("Rad counters (CR 728.1)".to_string());
+                    // CR 728.1: the label a viewer sees for this sourceless ability.
+                    .description("Rad counters".to_string());
                 pending.push(PendingTriggerContext::single(PendingTrigger {
                     source_id: ObjectId(0),
                     controller: active,
@@ -6887,6 +6892,48 @@ pub fn drain_order_triggers_with_identity(
 /// CR 603.3b: Build the next `WaitingFor::OrderTriggers` prompt by finding
 /// the earliest unordered group in APNAP order.
 /// Returns `None` if every group is `ordered` (caller should dispatch).
+/// The name a viewer shows for a triggered ability's source.
+///
+/// CR 113.7 defines an ability's source as the object that generated it; CR
+/// 113.8 instead defines an ability's controller. The inherent ability rules
+/// modeled here directly make four abilities sourceless: CR 725.2 (the monarch),
+/// CR 726.2 (the initiative), CR 728.1 (rad counters), and CR 702.179d (speed).
+/// CR 901.8 separately makes Planechase's planeswalking ability sourceless. The
+/// engine models the four triggers here faithfully, which leaves the wire with
+/// nothing to name.
+///
+/// A sourceless ability names itself: the rule that mints it IS its identity,
+/// which is what `description` already carries — the same short label
+/// ("Prowess", "Storm", "Cascade") every other engine-authored trigger uses.
+/// Printed helper cards do exactly this too, standing a card face in for a rule
+/// that has no object behind it.
+///
+/// Single authority on purpose: the ordering prompt and the stack entry ask the
+/// same question and must not answer it differently. Neither may push the
+/// question to the display layer, which is not allowed to derive game-facing
+/// content.
+fn trigger_source_display_name(
+    state: &GameState,
+    source_id: ObjectId,
+    ability: &ResolvedAbility,
+    description: Option<&str>,
+) -> String {
+    // CR 400.7 + CR 113.7a: the trigger's own captured source is the most
+    // faithful answer, and the only one that survives the source leaving its
+    // zone — `lki()` is what makes "From <name>" still right for a dead source.
+    if let Some(source) = ability.trigger_source.as_ref() {
+        return source.source_read(state).lki().name;
+    }
+    // CR 603.7d: a delayed trigger carries no captured source, but `source_id`
+    // still points at the live object that set it up. Reading the objects map
+    // here is what the ordering prompt did before this helper existed, and
+    // dropping it would have blanked every delayed and co-triggered entry.
+    if let Some(object) = state.objects.get(&source_id) {
+        return object.name.clone();
+    }
+    description.unwrap_or_default().to_string()
+}
+
 fn build_next_order_triggers_prompt(
     state: &GameState,
 ) -> Option<crate::types::game_state::WaitingFor> {
@@ -6899,11 +6946,12 @@ fn build_next_order_triggers_prompt(
         .iter()
         .map(|ctx| PendingTriggerSummary {
             source_id: ctx.pending.source_id,
-            source_name: state
-                .objects
-                .get(&ctx.pending.source_id)
-                .map(|o| o.name.clone())
-                .unwrap_or_default(),
+            source_name: trigger_source_display_name(
+                state,
+                ctx.pending.source_id,
+                &ctx.pending.ability,
+                ctx.pending.description.as_deref(),
+            ),
             description: ctx.pending.description.clone().unwrap_or_default(),
         })
         .collect();
@@ -7431,13 +7479,31 @@ fn push_pending_trigger_to_stack_with_firing_and_duration_events(
             .insert(entry_id, trigger_events);
     }
     // Capture the observed source name at stack-push time so viewers can render
-    // "From <name>" without rebinding an old trigger to a reused id. Synthetic
-    // game-rule triggers carry no trigger source and deliberately display no name.
-    let source_name = ability
-        .trigger_source
-        .as_ref()
-        .map(|source| source.source_read(state).lki().name)
-        .unwrap_or_default();
+    // "From <name>" without rebinding an old trigger to a reused id.
+    let source_name =
+        trigger_source_display_name(state, source_id, &ability, description.as_deref());
+    // The four source-less inherent triggers constructed here (CR 725.2 monarch,
+    // CR 726.2 initiative, CR 728.1 rad counters, CR 702.179d speed) use the
+    // `ObjectId(0)` no-source sentinel. CR 113.7 governs source; CR 113.8 governs
+    // controller, while CR 901.8 separately makes the planeswalking ability
+    // sourceless. A viewer cannot dereference the sentinel, so such an entry MUST
+    // carry its own name or the display layer is left to invent one.
+    //
+    // Keyed on the sentinel rather than on a list of the four rules, so a fifth
+    // sourceless rule is covered the day it is written.
+    //
+    // Two weaker-looking scopes were measured and rejected as the wrong shape:
+    // `!source_name.is_empty()` for every trigger fails 53 existing tests
+    // (delayed triggers, CR 603.7d, carry neither a captured source nor a
+    // description), and `state.objects.contains_key(&source_id)` fails 10 more
+    // whose fixtures name a source id they never insert. Both of those entries
+    // are still nameable — the first from `source_id`, the second in a real game
+    // where the id exists — so neither is this defect. See the PR's open-gap note.
+    debug_assert!(
+        source_id != ObjectId(0) || !source_name.is_empty(),
+        "a source-less rule ability must carry its own name — the display layer \
+         has no object from which to read one"
+    );
     let crime_candidate = super::casting::targets_commit_crime(
         state,
         &super::ability_utils::flatten_targets_in_chain(&ability),

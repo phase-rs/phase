@@ -165,6 +165,7 @@ pub(crate) fn parse_quantity_ref_with_context(
         if try_parse_counters_removed_this_way(rest) {
             return Some(QuantityRef::PreviousEffectAmount {
                 channel: crate::types::ability::DamageChannel::Total,
+                aggregate: AggregateFunction::Sum,
             });
         }
     }
@@ -1267,7 +1268,7 @@ fn parse_owned_cards_in_zones_quantity(
     Ok((rest, expr))
 }
 
-/// CR 608.2c + CR 120.6 / CR 120.10: "[the] <numeric result> this way", reporting
+/// CR 608.2c + CR 120.10: "[the] <numeric result> this way", reporting
 /// WHICH damage channel the phrase named.
 ///
 /// The damage arm carries a channel because "excess" is an independent qualifier
@@ -1782,14 +1783,17 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     //   - counter-removal chains: "counters removed", "counter removed"
     //     (Sensational Spider-Man's "stun counters removed this way";
     //     `state.last_effect_amount` is stamped by the preceding RemoveCounter).
-    // PreviousEffectAmount reads `state.last_effect_amount` (CR 120.6) or
+    // PreviousEffectAmount reads `state.last_effect_amount` or
     // `state.last_effect_excess_amount` (CR 120.10), whichever channel the phrase
     // named — the combinator reports it rather than the caller assuming `Total`.
     // Assuming Total here is precisely what made "the excess damage dealt this
     // way" gain the FULL damage instead of the overkill (Razor Rings).
     if let Ok((_, channel)) = parse_previous_effect_amount_this_way(lower) {
         return Some(QuantityExpr::Ref {
-            qty: QuantityRef::PreviousEffectAmount { channel },
+            qty: QuantityRef::PreviousEffectAmount {
+                channel,
+                aggregate: AggregateFunction::Sum,
+            },
         });
     }
 
@@ -1812,21 +1816,14 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
         });
     }
 
-    if nom::combinator::all_consuming((
-        tag::<_, _, OracleError<'_>>("the "),
-        alt((tag("greatest "), tag("highest "))),
-        tag("number of cards "),
-        nom::combinator::opt(alt((tag("a player "), tag("any player ")))),
-        tag("discarded this way"),
-    ))
-    .parse(lower)
-    .is_ok()
-    {
-        return Some(QuantityExpr::Ref {
-            qty: QuantityRef::PreviousEffectAmount {
-                channel: crate::types::ability::DamageChannel::Total,
-            },
-        });
+    // CR 608.2c + CR 608.2i: "the greatest number of cards a player discarded
+    // this way" — the superlative IS the aggregate axis and is REPORTED by the
+    // combinator, never matched and discarded. Grammar lives in
+    // `oracle_nom/quantity.rs` per the parser skill's single-authority
+    // doctrine; `Ok(("", …))` is the same full-consumption requirement the
+    // deleted `all_consuming` tuple expressed.
+    if let Ok(("", qty)) = nom_quantity::parse_greatest_discarded_this_way(lower) {
+        return Some(QuantityExpr::Ref { qty });
     }
 
     // CR 614.1a: "that much/many [noun] (plus|minus) N" — Offset over the
@@ -3211,6 +3208,7 @@ fn parse_for_each_clause_with_they_controller(
     {
         return Some(QuantityRef::PreviousEffectAmount {
             channel: crate::types::ability::DamageChannel::Total,
+            aggregate: AggregateFunction::Sum,
         });
     }
 
@@ -3334,6 +3332,7 @@ fn parse_for_each_clause_with_they_controller(
         if try_parse_counters_removed_this_way(&lower) {
             return Some(QuantityRef::PreviousEffectAmount {
                 channel: crate::types::ability::DamageChannel::Total,
+                aggregate: AggregateFunction::Sum,
             });
         }
         // CR 608.2c + CR 400.7: "nontoken creature you controlled that was
@@ -4522,6 +4521,7 @@ mod tests {
                 qty,
                 QuantityRef::PreviousEffectAmount {
                     channel: crate::types::ability::DamageChannel::Total,
+                    aggregate: AggregateFunction::Sum,
                 },
                 "{phrase:?} ({note})"
             );
@@ -4535,6 +4535,7 @@ mod tests {
             qty,
             QuantityRef::PreviousEffectAmount {
                 channel: crate::types::ability::DamageChannel::Total,
+                aggregate: AggregateFunction::Sum,
             }
         );
     }
@@ -5920,7 +5921,7 @@ mod tests {
         );
     }
 
-    /// CR 120.6: the TOTAL channel. Every phrase here names an unqualified
+    /// The TOTAL channel. Every phrase here names an unqualified
     /// numeric result — no "excess" qualifier — so it reads `last_effect_amount`.
     #[test]
     fn parse_event_context_quantity_previous_effect_this_way_variants() {
@@ -5935,11 +5936,72 @@ mod tests {
                 Some(QuantityExpr::Ref {
                     qty: QuantityRef::PreviousEffectAmount {
                         channel: crate::types::ability::DamageChannel::Total,
+                        aggregate: AggregateFunction::Sum,
                     },
                 }),
                 "phrase {phrase:?} must map to PreviousEffectAmount on the TOTAL channel"
             );
         }
+    }
+
+    /// V7a — CR 608.2c + CR 608.2i: the PRODUCTION path reports the aggregate.
+    ///
+    /// `parse_event_context_quantity` is `pub(crate)`, so this guard must live
+    /// in-crate. It pins the delegation added at the deleted legacy block's
+    /// exact position: the superlative form must now carry
+    /// `AggregateFunction::Max` instead of the bare (Sum-equivalent) ref that
+    /// made Windfall draw the cross-player SUM. Revert the combinator's `Max`
+    /// to `Sum` and all three positives FAIL.
+    #[test]
+    fn parse_event_context_quantity_greatest_discarded_this_way_reports_max() {
+        for phrase in [
+            "the greatest number of cards a player discarded this way",
+            "the highest number of cards a player discarded this way",
+            "the greatest number of cards any player discarded this way",
+        ] {
+            assert_eq!(
+                parse_event_context_quantity(phrase),
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: crate::types::ability::DamageChannel::Total,
+                        aggregate: AggregateFunction::Max,
+                    },
+                }),
+                "phrase {phrase:?} must report the MAX aggregate, not a bare ref"
+            );
+        }
+    }
+
+    /// V7a paired negatives — the superlative-free neighbours keep their
+    /// MEASURED shapes, so the new delegation cannot have stolen them. Each
+    /// `.expect(…)`s first, so neither can pass on a parse failure.
+    #[test]
+    fn parse_event_context_quantity_superlative_free_discard_phrases_are_unchanged() {
+        let bare = parse_event_context_quantity("the number of cards discarded this way")
+            .expect("superlative-free bare form must still parse");
+        assert!(
+            matches!(
+                bare,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::FilteredTrackedSetSize {
+                        caused_by: Some(ThisWayCause::Discarded),
+                        ..
+                    }
+                }
+            ),
+            "bare form must stay a filtered tracked-set read, got {bare:?}"
+        );
+
+        let per_player =
+            parse_event_context_quantity("the number of cards a player discarded this way")
+                .expect("superlative-free per-player form must still parse");
+        assert_eq!(
+            per_player,
+            QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize
+            },
+            "per-player superlative-free form must stay a tracked-set read"
+        );
     }
 
     #[test]
@@ -5989,6 +6051,7 @@ mod tests {
                 Some(QuantityExpr::Ref {
                     qty: QuantityRef::PreviousEffectAmount {
                         channel: crate::types::ability::DamageChannel::Excess,
+                        aggregate: AggregateFunction::Sum,
                     },
                 }),
                 "phrase {phrase:?} names EXCESS damage (CR 120.10) and must read the \

@@ -3508,6 +3508,7 @@ mod tests {
                     QuantityExpr::Ref {
                         qty: QuantityRef::PreviousEffectAmount {
                             channel: crate::types::ability::DamageChannel::Total,
+                            aggregate: crate::types::ability::AggregateFunction::Sum,
                         }
                     },
                     "for-each tail must dispatch to PreviousEffectAmount"

@@ -2178,7 +2178,21 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             },
         },
         QuantityRef::ExiledFromHandThisResolution => Axes::NONE,
-        QuantityRef::PreviousEffectAmount { .. } => Axes::NONE,
+        // CR 608.2c + CR 608.2i: every channel and every aggregate reads
+        // resolution-local state — `last_effect_amount` /
+        // `last_effect_excess_amount` / `last_effect_counts_by_player` /
+        // `clause_minimum_snapshot`, the last read FIRST (`game/quantity.rs`,
+        // the `PreviousEffectAmount` arm) as the CR 608.2h frozen value. All are
+        // cleared at depth-0 chain entry (`resolve_ability_chain`); `apply()`
+        // additionally clears `last_effect_count` and the per-player table at
+        // every player action. None is a triggering-event characteristic
+        // (event), a board-scoped mutable aggregate a sibling copy could mutate
+        // (sibling), or a player-level per-turn projected resource (projected).
+        // Destructured without `..` so a future field forces re-classification.
+        QuantityRef::PreviousEffectAmount {
+            channel: _,
+            aggregate: _,
+        } => Axes::NONE,
         QuantityRef::PreviousEffectCount => Axes::NONE,
         QuantityRef::LifeLostThisTurn { player } => {
             let mut acc = Axes {

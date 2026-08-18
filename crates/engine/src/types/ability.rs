@@ -6976,7 +6976,7 @@ pub enum QuantityRef {
     /// behind — the same axis, and the same `DamageChannel`, already carried by
     /// the condition peer [`AbilityCondition::PreviousEffectAmount`]:
     ///
-    /// - [`DamageChannel::Total`] (default): the total amount (CR 120.6), via
+    /// - [`DamageChannel::Total`] (default): the total amount, via
     ///   `GameState::last_effect_amount`. Every non-damage producer (life lost,
     ///   counters removed, cards drawn) stamps only this channel.
     /// - [`DamageChannel::Excess`]: the EXCESS amount (CR 120.10) — damage dealt
@@ -6987,14 +6987,56 @@ pub enum QuantityRef {
     ///
     /// A sibling `PreviousEffectExcessAmount` variant would be the textbook
     /// sibling-cluster smell: the channel is a leaf parameterization of one
-    /// structural axis, and it lies wholly inside CR 120 (120.6 total /
-    /// 120.10 excess), so it is a parameterization, not a new leaf.
+    /// structural axis, so it is a parameterization, not a new leaf.
+    ///
+    /// The categorical boundary is CR 608.2c / CR 608.2i — this reference's OWN
+    /// section. Both channels are readings of the same look-back at the one
+    /// completed instruction; they differ only in which tally that instruction
+    /// left behind. (An earlier revision justified the boundary as "both
+    /// channels lie wholly inside CR 120". That is wrong and is struck: CR 120
+    /// is Damage, while the `Total` channel is stamped by non-damage producers —
+    /// life lost, counters removed, cards drawn — as three lines above already
+    /// say. CR 120.10 is cited only where it does apply, for what "excess"
+    /// means.)
     ///
     /// `Total` is serde-elided, so every pre-existing serialized card is
-    /// byte-identical.
+    /// byte-identical — a parse-diff fidelity property, not a save-compatibility
+    /// promise.
     PreviousEffectAmount {
         #[serde(default, skip_serializing_if = "is_total_damage_channel")]
         channel: DamageChannel,
+        /// CR 608.2c + CR 608.2i: how the completed instruction's per-player
+        /// result table (`GameState::last_effect_counts_by_player`) is reduced
+        /// to the one number this look-back reference reads.
+        ///
+        /// - `Sum` (default): the cross-player TOTAL, read from
+        ///   `GameState::last_effect_amount` — which
+        ///   `install_previous_effect_counts_by_player`
+        ///   (`game/effects/mod.rs`) stamps as the sum of the table, and the
+        ///   ONLY channel a non-per-player producer (damage, life, counters,
+        ///   draw, die roll) leaves behind. Byte-identical to the
+        ///   pre-`aggregate` behaviour for every existing consumer.
+        /// - `Max`: the GREATEST single player's contribution — Windfall,
+        ///   Jace's Archivist, Whispering Madness ("draws cards equal to the
+        ///   greatest number of cards a player discarded this way"). Scryfall
+        ///   census 2026-08-15 returns exactly these three.
+        /// - `Min`: no printed card uses it (same census: zero
+        ///   "least/fewest … this way" cards). Present because
+        ///   `AggregateFunction` is a shared 3-valued enum matched
+        ///   exhaustively; the arm is a one-line `.min()`, not a stub.
+        ///
+        /// The `Excess` channel (CR 120.10) publishes a scalar, not a table
+        /// (`GameState::last_effect_excess_amount`), so on that channel
+        /// Max/Min/Sum of the single value coincide — degenerate by
+        /// construction, not silently ignored.
+        ///
+        /// `Sum` is serde-elided, so every pre-existing serialized card,
+        /// scenario and IR snapshot is byte-identical.
+        #[serde(
+            default = "default_sum_aggregate",
+            skip_serializing_if = "is_sum_aggregate"
+        )]
+        aggregate: AggregateFunction,
     },
     /// Engine bookkeeping for the immediately preceding resolution-local effect
     /// count. This reads `GameState::last_effect_count` directly, defaults an
@@ -7202,8 +7244,8 @@ pub enum QuantityRef {
         source: Box<TargetFilter>,
         target: Box<TargetFilter>,
         #[serde(
-            default = "default_damage_aggregate",
-            skip_serializing_if = "is_default_damage_aggregate"
+            default = "default_sum_aggregate",
+            skip_serializing_if = "is_sum_aggregate"
         )]
         aggregate: AggregateFunction,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -9384,6 +9426,18 @@ pub enum ParsedCondition {
     HasCityBlessing,
     /// CR 702.195b: True when the activating player has the enduring story designation.
     HasEnduringStory,
+    /// CR 702.178a: True when the SOURCE's player has max speed — its
+    /// controller on the battlefield, its owner anywhere else, per the "Max
+    /// Speed" glossary entry (sense 2). Unlike its designation siblings above,
+    /// this leaf does NOT read the activating player: CR 702.178a's "your" is
+    /// addressed to the object, and CR 602.2's "unless the object specifically
+    /// says otherwise" lets an `activator_filter` of `PlayerFilter::All` make
+    /// the activator someone else entirely.
+    /// Evaluation delegates to `game::speed::has_max_speed`, the same authority
+    /// `StaticCondition::HasMaxSpeed` uses in `layers.rs`, so CR 702.179e's
+    /// speed-is-4 test and the CR 101.1 card-over-rule override that raises that
+    /// cap cannot diverge between the static and restriction readings.
+    HasMaxSpeed,
     /// CR 102.1: "The active player is the player whose turn it is." True when
     /// the scoped player is the active player — gates a casting/restriction
     /// predicate on "if it's your turn". For "if it's not your turn" the parser
@@ -15457,7 +15511,7 @@ fn default_counter_transfer_mode() -> CounterTransferMode {
     CounterTransferMode::Move
 }
 
-fn default_damage_aggregate() -> AggregateFunction {
+fn default_sum_aggregate() -> AggregateFunction {
     AggregateFunction::Sum
 }
 
@@ -15526,7 +15580,7 @@ fn default_most_prevalent_scope() -> ControllerRef {
     ControllerRef::You
 }
 
-fn is_default_damage_aggregate(a: &AggregateFunction) -> bool {
+fn is_sum_aggregate(a: &AggregateFunction) -> bool {
     matches!(a, AggregateFunction::Sum)
 }
 
@@ -21440,19 +21494,27 @@ pub enum AbilityCondition {
         comparator: Comparator,
         rhs: QuantityExpr,
     },
-    /// CR 608.2c + CR 120.6 + CR 120.10: Compares the numeric result tracked from
+    /// CR 608.2c + CR 120.10: Compares the numeric result tracked from
     /// the previous instruction in the same resolution against `rhs`. The
     /// `channel` selects which resolution-local tally is read:
-    /// - `DamageChannel::Total` (default): the *total* amount (CR 120.6) via
+    /// - `DamageChannel::Total` (default): the total amount via
     ///   `last_effect_amount` — the same channel that feeds
-    ///   `QuantityRef::PreviousEffectAmount` / `EventContextAmount`.
+    ///   `QuantityRef::PreviousEffectAmount` / `EventContextAmount`. Every
+    ///   non-damage producer (life lost, counters removed, cards drawn) stamps
+    ///   only this channel, so no CR 120 rule governs it; the look-back itself
+    ///   is CR 608.2c.
     /// - `DamageChannel::Excess`: the *excess* amount (CR 120.10) via
     ///   `last_effect_excess_amount` — damage dealt beyond lethal
     ///   ("if excess damage was dealt … this way").
+    ///
+    /// CR 120.6 was cited here for the `Total` channel and is struck: it governs
+    /// marked damage persisting until cleanup, not an amount left behind by a
+    /// preceding effect. Mirrors the identical correction on the `QuantityRef`
+    /// peer — the two must not disagree about the same channel.
     PreviousEffectAmount {
         comparator: Comparator,
         rhs: QuantityExpr,
-        /// CR 120.6 / CR 120.10: which resolution-local channel to compare
+        /// CR 608.2c / CR 120.10: which resolution-local channel to compare
         /// against. Reuses the committed `DamageChannel`; `Total` is serde-elided
         /// so every existing card is byte-identical.
         #[serde(default, skip_serializing_if = "is_total_damage_channel")]
@@ -30173,7 +30235,7 @@ mod tests {
         let modern_total = QuantityRef::DamageDealtThisTurn {
             source: Box::new(TargetFilter::Any),
             target: Box::new(TargetFilter::Any),
-            aggregate: default_damage_aggregate(),
+            aggregate: default_sum_aggregate(),
             group_by: None,
             damage_kind: default_damage_kind(),
             channel: DamageChannel::Total,
@@ -30214,7 +30276,7 @@ mod tests {
         let modern_excess = QuantityRef::DamageDealtThisTurn {
             source: Box::new(TargetFilter::Any),
             target: Box::new(TargetFilter::Any),
-            aggregate: default_damage_aggregate(),
+            aggregate: default_sum_aggregate(),
             group_by: None,
             damage_kind: default_damage_kind(),
             channel: DamageChannel::Excess,

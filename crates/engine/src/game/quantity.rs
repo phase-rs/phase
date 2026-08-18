@@ -3982,23 +3982,78 @@ fn resolve_ref(
             }
             count
         }
-        // CR 608.2c: Numeric result from the preceding effect in a sub_ability chain.
-        // The resolver stamps this from the parent effect's semantic event class.
-        //
-        // CR 120.6 / CR 120.10: `channel` picks WHICH tally the preceding effect
-        // left behind. Both are stamped by the damage effects and cleared at
-        // depth-0, so the two channels are read from the same resolution scope —
-        // this arm only chooses between them. Mirrors the condition peer
-        // `AbilityCondition::PreviousEffectAmount`, which already reads both.
-        QuantityRef::PreviousEffectAmount { channel } => match channel {
-            // CR 120.6: the total amount dealt/lost/removed.
-            DamageChannel::Total => state.last_effect_amount.unwrap_or(0),
-            // CR 120.10: only the damage dealt BEYOND lethal — "the amount of
-            // excess damage dealt to that creature this way" (Goblin
-            // Negotiation, Hell to Pay, Lacerate Flesh), "that excess damage"
-            // (Contest of Claws). 0 when the preceding effect dealt no excess.
-            DamageChannel::Excess => state.last_effect_excess_amount.unwrap_or(0),
-        },
+        // CR 608.2c + CR 608.2i: a "this way" look-back at the numeric result of
+        // the preceding instruction in this resolution. `channel` selects WHICH
+        // tally that instruction left behind; `aggregate` selects how the
+        // per-player table is reduced to the one number this reference reads.
+        QuantityRef::PreviousEffectAmount { channel, aggregate } => {
+            // CR 608.2h + CR 608.2e: if this clause's `player_scope` link
+            // captured a snapshot, the answer was determined ONCE when the
+            // effect was applied (608.2h) and the whole fan-out is one action
+            // processed simultaneously (608.2e) — so every player in the
+            // fan-out must read that frozen value, not the scalar their own
+            // completed action re-stamped. CR 121.2c: the serialization of the
+            // multiplayer draw is itself correct; only the leaked count is not.
+            // Mirrors the snapshot-first shape of the `HandSize { AllPlayers }`
+            // and `ControlledByEachPlayer` arms. Placed before the channel
+            // match because the snapshot is keyed on the WHOLE `QuantityRef`
+            // (`ClauseMinimumSnapshot::get`), so it is channel- and
+            // aggregate-correct by key.
+            if let Some(v) = state
+                .clause_minimum_snapshot
+                .as_ref()
+                .and_then(|s| s.get(qty))
+            {
+                return v;
+            }
+            match channel {
+                DamageChannel::Total => {
+                    let total = state.last_effect_amount.unwrap_or(0);
+                    let per_player = state.last_effect_counts_by_player.values().copied();
+                    match aggregate {
+                        AggregateFunction::Sum => total,
+                        // An absent table means the producer published NO per-player
+                        // breakdown: only `Effect::Discard | DiscardCard |
+                        // ChangeZoneAll` populate it; every other producer takes the
+                        // `None` arm in `install_previous_effect_counts_by_player`,
+                        // which clears it. For a SINGLE-subject producer the scalar
+                        // IS the extremum, so the fallback is exact. For a
+                        // MULTI-subject non-count producer — `Effect::DamageEachPlayer`,
+                        // `Effect::DamageAll`, `Effect::LoseLife` under `player_scope`
+                        // — the scalar is a cross-player SUM and a Max read would
+                        // over-report. Unreachable today, measured: the Scryfall
+                        // census (2026-08-15) returns exactly 3 cards in the Max
+                        // class and all 3 follow an `Effect::Discard`, a count
+                        // producer. The real-zero case is also safe: the discard
+                        // fan-out zero-fills an empty producer table with one entry
+                        // per matching player, so a discard-of-nothing yields a
+                        // non-empty all-zero table (Max = 0), never the fallback.
+                        //
+                        // The mirror-image hazard is a STALE PRESERVED table, not
+                        // an absent one: `install_previous_effect_counts_by_player`
+                        // KEEPS the prior table on its `None` arm when
+                        // `preserve_counts_for_current_consumer` (`player_scope.is_none()
+                        // && effect_consumes_event_context_amount`). In a chain
+                        // A(count producer) -> B(EventContextAmount consumer, no
+                        // player_scope) -> C(PreviousEffectAmount{Max}), C would
+                        // fold A's table while `Sum` reads B's re-stamped scalar.
+                        // Unreachable for the closed Max/Min class, measured: all 3
+                        // class cards are `Discard{All} -> Draw{PEA}` with the
+                        // consumer in the IMMEDIATELY following link, so no B can
+                        // interpose; and `Sum` is unaffected either way because it
+                        // reads `last_effect_amount`, exactly as before this change.
+                        AggregateFunction::Max => per_player.max().unwrap_or(total),
+                        AggregateFunction::Min => per_player.min().unwrap_or(total),
+                    }
+                }
+                // CR 120.10: only the damage dealt BEYOND lethal — "the amount of
+                // excess damage dealt to that creature this way" (Goblin
+                // Negotiation, Hell to Pay, Lacerate Flesh), "that excess damage"
+                // (Contest of Claws). A scalar channel with no per-player table,
+                // so every aggregate reduces to it. 0 when no excess was dealt.
+                DamageChannel::Excess => state.last_effect_excess_amount.unwrap_or(0),
+            }
+        }
         // Read the preceding continuation-local effect count directly.
         // An unavailable count resolves to zero.
         QuantityRef::PreviousEffectCount => state.last_effect_count.unwrap_or(0),
@@ -17522,6 +17577,110 @@ mod tests {
         state.clause_minimum_snapshot = Some(snap);
         let qty = QuantityExpr::Ref { qty: qref };
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 5);
+    }
+
+    #[test]
+    fn previous_effect_amount_prefers_clause_snapshot() {
+        // CR 608.2h: the third class admitted to the clause freeze. The live
+        // tally is deliberately set to a DIFFERENT value than the frozen one, so
+        // the assertion fails if the snapshot read is removed or ordered after
+        // the channel match. This is the unit-level peer of the integration
+        // test `windfall_short_library_does_not_shrink_later_players_draws`,
+        // where the live value is what a completed draw re-stamped.
+        let mut state = GameState::new_two_player(42);
+        let qref = QuantityRef::PreviousEffectAmount {
+            channel: DamageChannel::Total,
+            aggregate: AggregateFunction::Max,
+        };
+        let mut snap = crate::types::game_state::ClauseMinimumSnapshot::default();
+        snap.insert(qref.clone(), 8);
+        state.clause_minimum_snapshot = Some(snap);
+        // Live state says 5 — the post-fan-out value the freeze must override.
+        state.last_effect_amount = Some(5);
+        state.last_effect_counts_by_player.insert(PlayerId(0), 5);
+        let qty = QuantityExpr::Ref { qty: qref };
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 8);
+    }
+
+    #[test]
+    fn previous_effect_amount_live_when_no_snapshot() {
+        // The fallback arm: with no clause snapshot the ref reads live state, so
+        // `Max` over the per-player table {P0:8, P1:3} is 8. Pairs with the test
+        // above — together they show the snapshot is PREFERRED, not the only
+        // path, so a fix that always returned the snapshot would fail here.
+        let mut state = GameState::new_two_player(42);
+        state.last_effect_amount = Some(11);
+        state.last_effect_counts_by_player.insert(PlayerId(0), 8);
+        state.last_effect_counts_by_player.insert(PlayerId(1), 3);
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::PreviousEffectAmount {
+                channel: DamageChannel::Total,
+                aggregate: AggregateFunction::Max,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 8);
+    }
+
+    /// All three reductions of ONE table must be mutually distinguishable, or a
+    /// test that pins any of them proves nothing about the others. Table
+    /// {8,7,3} with `last_effect_amount` 18: Sum 18 / Max 8 / Min 3 — three
+    /// distinct values, so each assertion below fails if its arm is swapped for
+    /// either sibling.
+    #[test]
+    fn previous_effect_amount_aggregates_are_mutually_distinct() {
+        let mut state = GameState::new_two_player(42);
+        state.last_effect_amount = Some(18);
+        for (p, n) in [(0, 8), (1, 7), (2, 3)] {
+            state.last_effect_counts_by_player.insert(PlayerId(p), n);
+        }
+        let read = |agg| {
+            resolve_quantity(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: DamageChannel::Total,
+                        aggregate: agg,
+                    },
+                },
+                PlayerId(0),
+                ObjectId(0),
+            )
+        };
+        assert_eq!(read(AggregateFunction::Sum), 18, "Sum reads the total");
+        assert_eq!(read(AggregateFunction::Max), 8, "Max reads the greatest");
+        assert_eq!(read(AggregateFunction::Min), 3, "Min reads the least");
+    }
+
+    /// CR 608.2c: a player the clause applied to who contributed NOTHING still
+    /// contributed zero *this way*, so the table must carry them.
+    ///
+    /// This is the resolver half of the producer fix: given a table that
+    /// includes the zero-contributor, `Min` must be 0. The producer half — that
+    /// the table actually gets that entry — is
+    /// `windfall_empty_hand_player_is_in_the_per_player_table`.
+    ///
+    /// Board 8/7/3/**0**. Before the producer fix the table omitted the
+    /// zero-contributor and published {8,7,3}, so `Min` answered 3. `Max` is
+    /// immune to the omission (zeros cannot raise a maximum) and `Sum` reads
+    /// `last_effect_amount`, which is why the shipped Max class never saw it.
+    #[test]
+    fn previous_effect_amount_min_counts_the_zero_contributor() {
+        let mut state = GameState::new_two_player(42);
+        state.last_effect_amount = Some(18);
+        for (p, n) in [(0, 8), (1, 7), (2, 3), (3, 0)] {
+            state.last_effect_counts_by_player.insert(PlayerId(p), n);
+        }
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::PreviousEffectAmount {
+                channel: DamageChannel::Total,
+                aggregate: AggregateFunction::Min,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)),
+            0,
+            "the empty-handed player discarded 0 this way; the minimum is 0, not 3"
+        );
     }
 
     #[test]

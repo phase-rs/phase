@@ -9910,6 +9910,7 @@ pub fn parse_you_draw_this_way_condition(input: &str) -> OracleResult<'_, Abilit
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::PreviousEffectAmount {
                     channel: crate::types::ability::DamageChannel::Total,
+                    aggregate: AggregateFunction::Sum,
                 },
             },
             comparator: Comparator::GE,

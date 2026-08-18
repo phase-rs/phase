@@ -913,6 +913,37 @@ fn do_eliminate(
             }
         }
     }
+    // CR 800.4a: "all objects … owned by that player leave the game", so a
+    // departed seat has no hand left to discard and iterating it can only be a
+    // no-op. Drop it from the discard fan-out's not-yet-prompted roster — the
+    // same treatment the scoped-library-search roster above already gets.
+    //
+    // `matching_players` is deliberately NOT pruned, and the reason is PARITY
+    // rather than a rule: the un-paused driver computes its reduction domain
+    // once at clause entry and never re-derives it, so a paused clause that
+    // pruned would answer differently from an identical unpaused one — which is
+    // precisely the divergence this repair exists to remove. CR 800.4i is what
+    // makes the retained seat well-defined: "the effect uses the last known
+    // information about that player before they left the game." The seat's
+    // truthful contribution is zero, and dropping it would silently change a
+    // `Min` answer.
+    //
+    // (Deliberately NOT cited: CR 608.2f, which an earlier revision leaned on.
+    // Read in full it is about simultaneity and APNAP ORDER — it latches no
+    // domain, and both its examples are about ordering. Same class of stretch as
+    // the CR 608.2b citation removed from `discard.rs`.)
+    //
+    // PINNED BY `effects/mod.rs`'s
+    // `eliminating_a_seat_prunes_the_paused_roster_but_not_its_reduction_domain`,
+    // which lives there to reuse the fan-out fixture. It asserts BOTH halves,
+    // so pruning the second list too is a red test rather than a silent change.
+    if let Some(fan_out) = state
+        .pending_discard_batch
+        .as_mut()
+        .and_then(|batch| batch.fan_out.as_mut())
+    {
+        fan_out.remaining_players.retain(|seat| *seat != player);
+    }
     if let Some(crate::types::game_state::PendingBatchDeliveries {
         completion:
             Some(crate::types::game_state::BatchCompletion::LibrarySearchDeliverySettled {

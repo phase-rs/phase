@@ -251,6 +251,20 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // The replacement-resume cursor is server authority and can retain private
     // object IDs and last-known snapshots from a cost payment.
     filtered.pending_cost_move_resume = None;
+    // The EFFECT layer's twin of the cursor above, redacted for the same
+    // reason: `PendingDiscardBatch` retains the object IDs of cards still in a
+    // hand (a hidden zone, CR 400.2), the instruction's pre-pause event span,
+    // and full `ResolvedAbility` clones of the paused clause. The projected
+    // `WaitingFor::ReplacementChoice` is the complete viewer-facing interaction
+    // surface, so no viewer — including the choosing player — needs the carrier
+    // itself. Viewer projections are display-only clones; the authoritative
+    // state the drain resumes from is never filtered.
+    filtered.pending_discard_batch = None;
+    // CR 608.2h: a paused player-scope clause retains its frozen aggregate in
+    // authoritative state so save/restore resumes the same application. The
+    // value can encode hidden-zone information (for example, hand sizes), so it
+    // belongs with the private discard cursor rather than any viewer payload.
+    filtered.clause_minimum_snapshot = None;
     // Deferred life-cost owners can embed a complete PendingCast, including
     // hidden card and target context. The projected WaitingFor is the only
     // viewer-facing interaction surface.
@@ -6171,6 +6185,77 @@ mod tests {
         assert!(
             state.pending_deferred_life_cost_resume.is_some(),
             "filtering must not alter the authoritative deferred life-cost continuation"
+        );
+    }
+
+    /// CR 400.2 + CR 608.2c: `pending_discard_batch` is the EFFECT layer's twin
+    /// of the cost cursor above. It retains the object IDs of cards still in a
+    /// HAND — a hidden zone — plus the instruction's pre-pause event span, so it
+    /// must be absent from every viewer projection, including the projection of
+    /// the player who owns the live replacement prompt. `hide_card` is an
+    /// allowlist, so a new state carrier defaults to LEAKED and this has to be
+    /// measured rather than assumed.
+    ///
+    /// REVERT PROBE (RUN, not reasoned): delete
+    /// `filtered.pending_discard_batch = None;` from `filter_state_for_viewer`.
+    /// Observed first failure — "viewer PlayerId(0) must not receive the parked
+    /// discard batch". The later per-viewer and wire-string assertions never run
+    /// (the first panic ends the test), so it is that one which discriminates.
+    #[test]
+    fn parked_discard_batch_is_absent_from_every_viewer_projection() {
+        let mut state = GameState::new_two_player(42);
+        let hidden = create_object(
+            &mut state,
+            CardId(70_007),
+            PlayerId(0),
+            "Hand Secret".to_string(),
+            Zone::Hand,
+        );
+        state.pending_discard_batch =
+            Some(Box::new(crate::types::game_state::PendingDiscardBatch {
+                player: PlayerId(0),
+                cursor: crate::types::game_state::DiscardBatchCursor::All {
+                    remaining: vec![hidden],
+                },
+                completion: crate::types::game_state::PendingDiscardBatchCompletion::Standard,
+                source_id: ObjectId(9_300),
+                effect_kind: crate::types::ability::EffectKind::Discard,
+                paused_card: crate::types::identifiers::ObjectIncarnationRef::of(hidden, 0),
+                discard_frame: None,
+                fan_out: None,
+                preceding_events: Vec::new(),
+            }));
+        state.clause_minimum_snapshot =
+            Some(crate::types::game_state::ClauseMinimumSnapshot::default());
+
+        let authoritative = serde_json::to_string(&state.pending_discard_batch)
+            .expect("the authoritative batch serializes");
+        assert!(
+            authoritative.contains(&hidden.0.to_string()),
+            "reach guard: the authoritative carrier really does hold the hand card's ID"
+        );
+
+        for viewer in [PlayerId(0), PlayerId(1)] {
+            let view = filter_state_for_viewer(&state, viewer);
+            assert!(
+                view.pending_discard_batch.is_none(),
+                "viewer {viewer:?} must not receive the parked discard batch"
+            );
+            assert!(
+                view.clause_minimum_snapshot.is_none(),
+                "viewer {viewer:?} must not receive the paused clause's private aggregate"
+            );
+            let wire = serde_json::to_string(&view).expect("the filtered snapshot serializes");
+            assert!(
+                !wire.contains("\"pendingDiscardBatch\":{")
+                    && !wire.contains("\"pending_discard_batch\":{"),
+                "viewer {viewer:?}'s snapshot must not serialize the carrier at all"
+            );
+        }
+
+        assert!(
+            state.pending_discard_batch.is_some(),
+            "filtering must not alter the authoritative server carrier"
         );
     }
 

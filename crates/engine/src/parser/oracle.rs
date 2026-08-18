@@ -2909,6 +2909,48 @@ fn ability_word_to_condition(word: &str) -> Option<crate::types::ability::Static
     }
 }
 
+/// CR 207.2c vs. CR 702: which em-dash prefix on an ACTIVATED ability gates it.
+///
+/// Both kinds of prefix reach `ability_word_to_condition` through the same
+/// `strip_ability_word_with_name` path, but they mean opposite things:
+///
+/// - An **ability word** (CR 207.2c — threshold, metalcraft, delirium, spell
+///   mastery, revolt, ferocious) "has no rules meaning". The condition it names
+///   is printed in the ability's own text ("Activate only as long as you control
+///   three or more artifacts" — Mox Opal), where `strip_activated_constraints`
+///   already lowers it. Adding a second gate from the label would apply the
+///   printed one twice, and on the cards whose label gates only the EFFECT it
+///   would refuse an activation the card allows. So: `None`.
+/// - A **keyword ability** prefix carries the whole gate and the text prints no
+///   other one. CR 702.186b: ∞ — "As long as this permanent is harnessed, it has
+///   [ability]". CR 702.178a: Max speed — "As long as your speed is 4, this
+///   object has '[Ability]'." In both, the ability is ABSENT while the gate is
+///   unmet, which is an activation restriction (CR 602.5) and NOT an
+///   intervening-if `condition` (CR 608.2c + the Shelldock Isle ruling, which the
+///   engine deliberately does not use for activation legality).
+///
+/// The `_ => None` arm is the CR 207.2c class: `ability_word_to_condition`'s
+/// remaining entries are ability words, every one of which lowers to a
+/// `QuantityComparison` its own ability text also states.
+fn keyword_prefix_activation_restriction(
+    condition: Option<&StaticCondition>,
+) -> Option<ActivationRestriction> {
+    match condition? {
+        StaticCondition::SourceIsHarnessed => Some(ActivationRestriction::SourceIsHarnessed),
+        // CR 702.178a's glossary line names whose speed: "that permanent's
+        // controller (or that card's owner, if it isn't on the battlefield)".
+        // `ParsedCondition::HasMaxSpeed` resolves that from the SOURCE rather
+        // than from the activating player, who CR 602.2 allows to be a
+        // different person: "Only an object's controller ... can activate its
+        // activated ability unless the object specifically says otherwise"
+        // ("Any player may activate this ability" is that otherwise).
+        StaticCondition::HasMaxSpeed => Some(ActivationRestriction::RequiresCondition {
+            condition: Some(ParsedCondition::HasMaxSpeed),
+        }),
+        _ => None,
+    }
+}
+
 /// Convert an ability-word `StaticCondition` to an `AbilityCondition` for spell effects.
 /// CR 608.2c: Bridge an ability-word / "instead if" `StaticCondition` to its
 /// effect-resolution `AbilityCondition` form. Delegates to the single
@@ -5154,18 +5196,14 @@ pub(crate) fn parse_oracle_ir(
                 Some(PrintedAbilityIndex::placeholder()),
                 &mut ctx,
             );
-            // CR 702.186b: ∞ ("As long as harnessed, it has [ability]") gates an
-            // activated ability's legality (the ability is absent while
-            // unharnessed) — an activation restriction, NOT an intervening-if
-            // `condition` (a resolution-time gate, CR 608.2c + Shelldock Isle
-            // ruling, which the engine deliberately does not use for activation
-            // legality). Applied AFTER the call because
+            // A KEYWORD prefix ("as long as [gate], this object has [ability]")
+            // gates the ability's very presence, so it lowers to an activation
+            // restriction. Applied AFTER the call because
             // `parse_activated_ability_ir` captures the cost-text constraints in
             // the activation shell before this outer router stamp is applied.
-            if matches!(aw_condition, Some(StaticCondition::SourceIsHarnessed)) {
-                ir.shell
-                    .activation_restrictions
-                    .push(ActivationRestriction::SourceIsHarnessed);
+            if let Some(restriction) = keyword_prefix_activation_restriction(aw_condition.as_ref())
+            {
+                ir.shell.activation_restrictions.push(restriction);
             }
             if ability_cant_be_copied {
                 ir.shell.cant_be_copied = true;

@@ -1081,6 +1081,12 @@ fn condition_reads_only_memo_safe_state(c: &ParsedCondition) -> bool {
         | ParsedCondition::PlayerCountAtLeast { .. }
         | ParsedCondition::HasCityBlessing
         | ParsedCondition::HasEnduringStory
+        // CR 702.179e: reads the controller's `speed` plus a controller-scoped
+        // battlefield scan for the CR 101.1 cap-raising static (via
+        // `game::speed`) — the same two apply()-constant sources as the
+        // designation predicates above and `ControlsCommander` below. No combat,
+        // damage, or pending-cast history.
+        | ParsedCondition::HasMaxSpeed
         // CR 903.3 / CR 903.3d: a controller-scoped battlefield scan for a commander
         // (via `game::commander`), like the other `YouControl*` predicates — reads no
         // combat/damage/pending-cast history, so it is memo-safe.

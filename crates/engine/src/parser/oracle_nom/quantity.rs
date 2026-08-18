@@ -778,6 +778,7 @@ fn parse_excess_damage_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     value(
         QuantityRef::PreviousEffectAmount {
             channel: DamageChannel::Excess,
+            aggregate: AggregateFunction::Sum,
         },
         (
             opt(alt((tag("the amount of "), tag("the ")))),
@@ -792,6 +793,35 @@ fn parse_excess_damage_ref(input: &str) -> OracleResult<'_, QuantityRef> {
                 tag("it"),
             )),
             tag(" this way"),
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 608.2c + CR 608.2i: "the greatest number of cards a player discarded this
+/// way" — a look-back read of the completed discard instruction whose
+/// SUPERLATIVE names the cross-player reduction. Windfall, Jace's Archivist,
+/// Whispering Madness (Scryfall census 2026-08-15: exactly these three,
+/// identical clause; zero "least/fewest" counterparts exist).
+///
+/// The superlative is the AGGREGATE AXIS and must be REPORTED, not consumed and
+/// thrown away: the legacy `oracle_quantity.rs` arm matched `greatest|highest`
+/// and emitted a bare (Sum-equivalent) ref, so a four-player board with hands
+/// 8/7/3/3 drew 21 — the cross-player SUM — instead of 8. Reuses the shipped
+/// `parse_max_extremum_adjective` so `greatest`, `highest` and `largest` stay
+/// ONE axis rather than three enumerated phrases.
+pub(crate) fn parse_greatest_discarded_this_way(input: &str) -> OracleResult<'_, QuantityRef> {
+    value(
+        QuantityRef::PreviousEffectAmount {
+            channel: DamageChannel::Total,
+            aggregate: AggregateFunction::Max,
+        },
+        (
+            opt(tag("the ")),
+            parse_max_extremum_adjective,
+            tag(" number of cards "),
+            opt(alt((tag("a player "), tag("any player ")))),
+            tag("discarded this way"),
         ),
     )
     .parse(input)
@@ -1447,7 +1477,7 @@ fn parse_the_number_of(input: &str) -> OracleResult<'_, QuantityRef> {
     parse_number_of_inner(rest)
 }
 
-/// CR 107.1: The maximizing extremum adjective. Oracle text prints several
+/// The maximizing extremum adjective. Oracle text prints several
 /// interchangeable superlatives for the same `AggregateFunction::Max`
 /// ("greatest power", "highest mana value"); they are one axis, not one phrase
 /// each. Verdant Rejuvenation prints "highest".
@@ -12178,6 +12208,59 @@ mod tests {
         assert!(
             matches!(q, QuantityRef::TargetObjectManaValue { .. }),
             "targeted of-form must stay TargetObjectManaValue, got {q:?}"
+        );
+    }
+
+    /// V7b — CR 608.2c + CR 608.2i: the widened "greatest number of cards a
+    /// player discarded this way" grammar, exercised where it lives.
+    ///
+    /// Both widenings over the deleted legacy arm are pinned here: the
+    /// superlative axis (`largest`, which the legacy `alt((greatest, highest))`
+    /// rejected) and the now-optional determiner. Revert
+    /// `parse_max_extremum_adjective` to `alt((greatest, highest))` and the
+    /// first two FAIL; make `tag("the ")` mandatory and the first FAILS.
+    #[test]
+    fn greatest_discarded_this_way_reports_the_max_aggregate() {
+        let max_ref = QuantityRef::PreviousEffectAmount {
+            channel: DamageChannel::Total,
+            aggregate: AggregateFunction::Max,
+        };
+
+        // Determiner-less AND widened adjective, both at once.
+        assert_eq!(
+            parse_greatest_discarded_this_way(
+                "largest number of cards a player discarded this way"
+            )
+            .expect("determiner-less widened form must bind"),
+            ("", max_ref.clone())
+        );
+        assert_eq!(
+            parse_greatest_discarded_this_way(
+                "the largest number of cards any player discarded this way"
+            )
+            .expect("widened adjective with determiner must bind"),
+            ("", max_ref.clone())
+        );
+        // The shipped production phrase.
+        assert_eq!(
+            parse_greatest_discarded_this_way(
+                "the greatest number of cards a player discarded this way"
+            )
+            .expect("production Windfall phrase must bind"),
+            ("", max_ref)
+        );
+    }
+
+    /// V7b negative — the combinator cannot capture the superlative-free
+    /// `TrackedSetSize` phrase. Direct proof that adding this arm does not
+    /// steal "the number of cards a player discarded this way", which parses to
+    /// a tracked-set shape elsewhere.
+    #[test]
+    fn greatest_discarded_this_way_rejects_the_superlative_free_phrase() {
+        assert!(
+            parse_greatest_discarded_this_way("the number of cards a player discarded this way")
+                .is_err(),
+            "no superlative means no aggregate axis — must not match"
         );
     }
 }

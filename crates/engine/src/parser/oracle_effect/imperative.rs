@@ -1848,6 +1848,7 @@ pub(super) fn parse_targeted_action_ast(
                 count = QuantityExpr::Ref {
                     qty: QuantityRef::PreviousEffectAmount {
                         channel: crate::types::ability::DamageChannel::Total,
+                        aggregate: crate::types::ability::AggregateFunction::Sum,
                     },
                 };
             }

@@ -7064,6 +7064,7 @@ fn x_spell_doubled_lose_life_drains_opponents_and_gains_controller() {
                     amount: QuantityExpr::Ref {
                         qty: QuantityRef::PreviousEffectAmount {
                             channel: crate::types::ability::DamageChannel::Total,
+                            aggregate: AggregateFunction::Sum,
                         },
                     },
                     player: TargetFilter::Controller,

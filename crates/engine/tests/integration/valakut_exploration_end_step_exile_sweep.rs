@@ -3,7 +3,9 @@
 //! tests drive the real Oracle parser and trigger-resolution pipeline.
 
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::types::ability::{DamageChannel, Effect, PlayerFilter, QuantityExpr, QuantityRef};
+use engine::types::ability::{
+    AggregateFunction, DamageChannel, Effect, PlayerFilter, QuantityExpr, QuantityRef,
+};
 use engine::types::game_state::{ExileLink, ExileLinkKind};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
@@ -62,6 +64,7 @@ fn assert_queued_total_damage_continuation(
                 amount: QuantityExpr::Ref {
                     qty: QuantityRef::PreviousEffectAmount {
                         channel: DamageChannel::Total,
+                        aggregate: AggregateFunction::Sum,
                     },
                 },
                 player_filter: PlayerFilter::Opponent,

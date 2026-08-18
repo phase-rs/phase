@@ -5,7 +5,7 @@ use rand::seq::SliceRandom;
 
 use crate::types::ability::{
     AbilityCost, ChoiceType, ChosenAttribute, DigRestOrder, Effect, EffectKind, GuessOutcome,
-    LibraryPosition, QuantityExpr, QuantityRef, ResolvedAbility, TargetRef, ThisWayCause,
+    LibraryPosition, QuantityExpr, QuantityRef, ResolvedAbility, TargetRef,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
@@ -628,6 +628,24 @@ fn batch_or_drain_observer_triggers(
             .collect();
         super::triggers::collect_triggers_into_deferred(state, &trigger_events);
         None
+    }
+}
+
+/// CR 603.2 + CR 603.3b: Preserve triggers from events that occurred while a
+/// resolution choice paused; they trigger now and wait for the next priority
+/// window's APNAP placement rather than being lost with the action's event slice.
+pub(crate) fn defer_observer_triggers_for_paused_choice(
+    state: &mut GameState,
+    events: &[GameEvent],
+    event_start: usize,
+) {
+    let trigger_events: Vec<GameEvent> = events[event_start..]
+        .iter()
+        .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
+        .cloned()
+        .collect();
+    if !trigger_events.is_empty() {
+        super::triggers::collect_triggers_into_deferred(state, &trigger_events);
     }
 }
 
@@ -4674,6 +4692,15 @@ pub(super) fn handle_resolution_choice(
                 }
             }
 
+            // CR 608.2d: A resolving player can't choose one eligible card
+            // more than once to satisfy a multi-card discard selection.
+            let unique_chosen: HashSet<ObjectId> = chosen.iter().copied().collect();
+            if unique_chosen.len() != chosen.len() {
+                return Err(EngineError::InvalidAction(
+                    "Selected cards must be distinct".to_string(),
+                ));
+            }
+
             let current_hand: std::collections::HashSet<ObjectId> = state
                 .players
                 .iter()
@@ -4694,8 +4721,14 @@ pub(super) fn handle_resolution_choice(
                 }
             }
 
+            let chosen_refs = chosen
+                .iter()
+                .filter_map(|id| state.objects.get(id))
+                .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
+                .collect::<Vec<_>>();
+
             let events_before_effect = events.len();
-            for &card_id in &chosen {
+            for (index, &card_id) in chosen.iter().enumerate() {
                 if let effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) =
                     effects::discard::discard_caused_by_effect_with_source_and_frame(
                         state,
@@ -4708,100 +4741,43 @@ pub(super) fn handle_resolution_choice(
                 {
                     state.waiting_for =
                         super::replacement::replacement_choice_waiting_for(choice_player, state);
+                    state.pending_discard_batch = Some(Box::new(
+                        crate::types::game_state::PendingDiscardBatch {
+                            player,
+                            cursor: crate::types::game_state::DiscardBatchCursor::Ordered {
+                                remaining: chosen_refs[index + 1..].to_vec(),
+                            },
+                            completion:
+                                crate::types::game_state::PendingDiscardBatchCompletion::DiscardChoice {
+                                    chosen: chosen_refs,
+                                },
+                            source_id,
+                            effect_kind,
+                            paused_card: crate::types::identifiers::ObjectIncarnationRef::of(
+                                card_id,
+                                state.objects[&card_id].incarnation,
+                            ),
+                            discard_frame,
+                            fan_out: None,
+                            preceding_events: events[events_before_effect..].to_vec(),
+                        },
+                    ));
+                    defer_observer_triggers_for_paused_choice(state, events, events_before_effect);
                     return Ok(action_result_outcome(events, state.waiting_for.clone()));
                 }
             }
             let events_after_move = events.len();
 
-            // CR 608.2e + CR 608.2c: APNAP discard steps accumulate into one
-            // tracked set. The discard handler is the single authority for
-            // recording the cards it moved — `discard_as_cost_with_source`
-            // runs outside `resolve_effect`, so its non-interactive sibling's
-            // `next_sub_needs_tracked_set` publish never fires for it. Publish
-            // the cards that reached the graveyard here; `chain_tracked_set_id`
-            // is preserved across the per-opponent continuation pause, so each
-            // opponent's publish extends the same set and the "draw a card for
-            // each card discarded this way" tail reads the union.
-            // CR 701.9c: only graveyard-bound cards count — a replacement
-            // redirect (Madness) to another zone is excluded by the filter.
-            let discarded_to_graveyard: Vec<ObjectId> = events[events_before_effect..]
-                .iter()
-                .filter_map(|ev| match ev {
-                    GameEvent::ZoneChanged {
-                        object_id,
-                        to: Zone::Graveyard,
-                        ..
-                    } => Some(*object_id),
-                    _ => None,
-                })
-                .collect();
-            if !discarded_to_graveyard.is_empty() {
-                // CR 608.2c: A `ZoneChangedThisWay` reflexive gate ("When you
-                // discard a card this way, …" — Talion's Messenger, The Ancient
-                // One) reads `last_zone_changed_ids`. The synchronous resolve path
-                // populates that ledger from the discard's `ZoneChanged` events
-                // (`effects/mod.rs`), but a discard that paused for an interactive
-                // `DiscardChoice` (hand > 1) moves the chosen card HERE, after the
-                // parent effect already returned. Re-publish the just-moved cards
-                // into the ledger so the deferred gate, re-evaluated when the
-                // stashed continuation drains, sees the discarded objects.
-                state.last_zone_changed_ids = discarded_to_graveyard.clone();
-                // CR 701.9a + CR 608.2c: stamp these members with the producer
-                // action `Discarded` so a `caused_by: Some(Discarded)` "discarded
-                // this way" consumer counts them while a `caused_by: None`
-                // consumer still reads the whole id-only set. The cause is the
-                // action, independent of final zone (CR 614.6).
-                let with_causes = discarded_to_graveyard
-                    .into_iter()
-                    .map(|id| (id, Some(ThisWayCause::Discarded)))
-                    .collect();
-                effects::publish_tracked_set_with_causes(state, with_causes);
-            }
-
-            // CR 608.2c: "discard a card. If you do, [effect]" — the IfYouDo
-            // sub_ability condition evaluates against optional_effect_performed.
-            // Set it on the stashed continuation before draining so the gate
-            // evaluates true when at least one card was actually discarded.
-            // Mirrors the recursive AutoMayChoice::Accept path in effects/mod.rs.
-            if !chosen.is_empty() {
-                if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                    frame
-                        .pending
-                        .chain
-                        .set_optional_effect_performed_recursive(true);
-                }
-            }
-
-            // CR 701.9a + CR 608.2c: A Recruit discard that paused for card
-            // selection now has its terminal LKI result in the operation-owned
-            // frame. Stamp that result only onto the deferred direct child before
-            // the continuation drains; the ordinary parent→child hand-off clears
-            // it again for grandchildren.
-            if let Some(frame_id) = discard_frame {
-                effects::discard::hand_off_recruit_discard_result(state, frame_id);
-            }
-
-            // CR 608.2c + CR 400.7j: A reflexive sub deferred across this
-            // interactive discard may name the discarded card anaphorically —
-            // "When you discard a card this way, target player mills cards equal
-            // to ITS mana value" (The Ancient One). The synchronous resolve path
-            // captures that referent via `parent_referent_context_from_events`
-            // (`effects/mod.rs`); the interactive path moves the card here, after
-            // the parent returned, so capture it now and stamp it onto the stashed
-            // continuation. The discarded card is in the public graveyard, so its
-            // characteristics are read live. Mirrors the `EffectZoneChoice` path.
-            if let Some(snapshot) =
-                effects::parent_referent_context_from_events(state, &events[events_before_effect..])
-            {
-                if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                    frame
-                        .pending
-                        .chain
-                        .set_effect_context_object_recursive(snapshot);
-                }
-            }
-
-            state.last_effect_count = Some(chosen.len() as i32);
+            let completion =
+                crate::types::game_state::PendingDiscardBatchCompletion::DiscardChoice {
+                    chosen: chosen_refs,
+                };
+            effects::finalize_discard_choice_completion(
+                state,
+                &completion,
+                discard_frame,
+                &events[events_before_effect..],
+            );
             events.push(GameEvent::EffectResolved {
                 kind: effect_kind,
                 source_id,

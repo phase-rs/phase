@@ -22031,6 +22031,113 @@ fn city_blessing_activation_restriction_does_not_emit_condition_warning() {
         )));
 }
 
+/// CR 702.178a: "Max speed — [Ability]" means "As long as your speed is 4, this
+/// object has '[Ability]'." The ability is ABSENT below max speed, so the prefix
+/// lowers to an activation restriction (CR 602.5) — the same treatment CR 702.186b
+/// already gets for ∞.
+///
+/// Starting Column carries both shapes on one card, so a single parse shows the
+/// gate landing on the right ability: its plain `{T}: Add one mana of any color`
+/// must stay activatable at any speed.
+#[test]
+fn max_speed_prefix_gates_only_the_ability_it_labels() {
+    let oracle = "Start your engines! (If you have no speed, it starts at 1. It increases once on each of your turns when an opponent loses life. Max speed is 4.)\n{T}: Add one mana of any color.\nMax speed — {T}, Sacrifice this artifact: Draw two cards, then discard a card.";
+    let parsed = parse(oracle, "Starting Column", &[], &["Artifact"], &[]);
+
+    let gate = ActivationRestriction::RequiresCondition {
+        condition: Some(ParsedCondition::HasMaxSpeed),
+    };
+
+    let draw_ability = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(*ability.effect, Effect::Draw { .. }))
+        .expect("expected the labeled draw ability");
+    assert!(
+        draw_ability.activation_restrictions.contains(&gate),
+        "the labeled ability must be gated: {:?}",
+        draw_ability.activation_restrictions
+    );
+
+    let mana_ability = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(*ability.effect, Effect::Mana { .. }))
+        .expect("expected the unlabeled mana ability");
+    assert!(
+        !mana_ability.activation_restrictions.contains(&gate),
+        "the UNLABELED ability on the same card must stay ungated: {:?}",
+        mana_ability.activation_restrictions
+    );
+}
+
+/// The gate is not specific to the draw class: Howlsquad Heavy's labeled ability
+/// is a mana ability, which bypasses the stack (CR 605.3a), so an ungated one puts
+/// real mana in the pool with nothing to respond to.
+#[test]
+fn max_speed_prefix_gates_a_labeled_mana_ability() {
+    let oracle = "Start your engines!\nOther Goblins you control have haste.\nAt the beginning of combat on your turn, create a 1/1 red Goblin creature token. That token attacks this combat if able.\nMax speed — {T}: Add {R} for each Goblin you control.";
+    let parsed = parse(
+        oracle,
+        "Howlsquad Heavy",
+        &[],
+        &["Creature"],
+        &["Goblin", "Mercenary"],
+    );
+
+    let mana_ability = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(*ability.effect, Effect::Mana { .. }))
+        .expect("expected the labeled mana ability");
+    assert!(
+        mana_ability
+            .activation_restrictions
+            .contains(&ActivationRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::HasMaxSpeed),
+            }),
+        "{:?}",
+        mana_ability.activation_restrictions
+    );
+}
+
+/// CR 207.2c: an ability WORD "has no rules meaning". The condition it names is
+/// printed in the ability's own text, so the label must contribute no second gate
+/// — otherwise the printed one is applied twice, and a card whose label gates only
+/// the EFFECT would have a legal activation refused.
+///
+/// Mox Opal is the counterpart to the two rows above: same em-dash prefix grammar,
+/// same `strip_ability_word_with_name` path, opposite correct outcome. Exactly one
+/// restriction survives, and it is the printed clause.
+#[test]
+fn an_ability_word_prefix_contributes_no_activation_gate() {
+    let oracle =
+        "Metalcraft — {T}: Add one mana of any color. Activate only if you control three or more artifacts.";
+    let parsed = parse(oracle, "Mox Opal", &[], &["Artifact"], &[]);
+
+    let mana_ability = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(*ability.effect, Effect::Mana { .. }))
+        .expect("expected the mana ability");
+    assert_eq!(
+        mana_ability.activation_restrictions.len(),
+        1,
+        "the label must not add a gate beside the printed clause: {:?}",
+        mana_ability.activation_restrictions
+    );
+    assert!(
+        matches!(
+            mana_ability.activation_restrictions[0],
+            ActivationRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::QuantityComparison { .. })
+            }
+        ),
+        "the surviving gate must be the printed artifact count: {:?}",
+        mana_ability.activation_restrictions
+    );
+}
+
 #[test]
 fn normalized_source_power_activation_restriction_does_not_emit_condition_warning() {
     let oracle = "{T}: This creature deals 4 damage to target creature. Activate only if this creature's power is 4 or greater.";

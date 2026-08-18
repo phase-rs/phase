@@ -19401,9 +19401,35 @@ mod stage2_injector_tests {
                 // #7496's parked Cipher frame extends the exhaustive resume dispatch above
                 // all three producers. It adds six lines without assigning an optional-effect
                 // prompt, so the measured production producers move uniformly by `+6`.
-                "game/effects/mod.rs:7267".to_string(),
-                "game/effects/mod.rs:7344".to_string(),
-                "game/effects/mod.rs:10624".to_string(),
+                // Incarnation-pin round and the port across main, adjudicated together
+                // because the port is what moved the pre-port coordinates.
+                //
+                // The port's conflict resolution kept BOTH sides of this list: main's
+                // `:7267/:7344/:10624` and the branch's `:11124`, giving FOUR
+                // `effects/mod.rs` entries. There are only THREE producers in that file,
+                // so the union could not match a census computed from source, and it
+                // contradicted the `(5, 8, 28)` partition assert directly above. A union
+                // is the wrong merge for a list whose LENGTH is asserted: these entries
+                // are not additive facts, they are one coordinate per producer.
+                //
+                // Re-measured in the ported tree BY DIGEST, not by arithmetic: each
+                // producer's 9-line block was hashed at `upstream/main`
+                // (`f9098299`/`96338f0e`/`bc850c67`) and each digest is found at exactly
+                // ONE coordinate here. `:7267/:7344/:10624` => `:7325/:7402/:11131`.
+                //
+                // The shift is NON-UNIFORM (`+58/+58/+507`): this branch's insertions are
+                // not all above the first producer, and the third sits below every
+                // discard-carrier and test addition. `bc850c67` is byte-identical to its
+                // value before the port — the same digest that pinned this producer at
+                // `:11103` and `:11124` earlier in this log — which is the evidence that
+                // it MOVED rather than being replaced.
+                // #7494 finish: `:11131 => :11229`, +98. The ordered-discard
+                // resume/finalization helpers are above this existing producer;
+                // they do not mint an optional-effect prompt. The census above
+                // still finds exactly the same five production producers.
+                "game/effects/mod.rs:7325".to_string(),
+                "game/effects/mod.rs:7402".to_string(),
+                "game/effects/mod.rs:11229".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.

@@ -144,6 +144,73 @@ describe("StackEntry", () => {
     expect(screen.getByText("Revoke")).toBeInTheDocument();
   });
 
+  it("labels a sourceless rule ability with the engine's name and invents nothing", () => {
+    // CR 113.7 defines an ability's source; the rules for these engine-modeled
+    // inherent abilities (CR 725.2 monarch, CR 726.2 initiative, CR 728.1 rad
+    // counters, CR 702.179d speed) give them none. CR 113.8 instead defines an
+    // ability's controller, and CR 901.8 separately does the same for
+    // Planechase's planeswalking ability. `objects` holds nothing for this
+    // entry, so the name has to come off the wire — this line used to fall
+    // through to a literal "Unknown", which is game-facing text no rule produces.
+    const entry: StackEntryType = buildStackEntry({
+      id: 91,
+      source_id: 0,
+      controller: 0,
+      kind: {
+        type: "TriggeredAbility",
+        data: { source_id: 0, ability: { targets: [] }, source_name: "Start your engines!" },
+      },
+    });
+    const gameState = createGameState({ objects: {}, stack: [entry] });
+
+    act(() => {
+      useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    });
+
+    render(
+      <StackEntry entry={entry} index={0} isTop isPending cardSize={{ width: 120, height: 168 }} />,
+    );
+
+    // Asserted on the image's alt text, not on rendered copy: the file-level
+    // `useCardImage` mock always hands back a src, so this entry takes the
+    // `<img>` branch and `sourceName` surfaces as `alt`. Same variable either
+    // way — the `CardArtFallback` branch feeds it the identical string.
+    expect(screen.getByAltText("Start your engines!")).toBeInTheDocument();
+    expect(screen.queryByAltText("Unknown")).not.toBeInTheDocument();
+  });
+
+  it("invents no name when the wire carries none", () => {
+    // The row above cannot reach the deleted `|| "Unknown"` literal: it supplies
+    // a `source_name`, so the fallback chain short-circuits before the last
+    // term. This row is the one that exercises it — an entry with no source
+    // object AND no name, which is exactly the wire shape that produced the
+    // reported blank "Unknown" card.
+    //
+    // An empty label is the honest answer here. Inventing game-facing text is
+    // not the display layer's call, and the engine-side guard is what should
+    // fail if a name ever goes missing again.
+    const entry: StackEntryType = buildStackEntry({
+      id: 92,
+      source_id: 0,
+      controller: 0,
+      kind: {
+        type: "TriggeredAbility",
+        data: { source_id: 0, ability: { targets: [] }, source_name: "" },
+      },
+    });
+    const gameState = createGameState({ objects: {}, stack: [entry] });
+
+    act(() => {
+      useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    });
+
+    render(
+      <StackEntry entry={entry} index={0} isTop isPending cardSize={{ width: 120, height: 168 }} />,
+    );
+
+    expect(screen.queryByAltText("Unknown")).not.toBeInTheDocument();
+  });
+
   it("shows a discoverable yield button on a triggered ability and opens the menu on tap", () => {
     const entry: StackEntryType = buildStackEntry({
       id: 88,

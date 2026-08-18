@@ -22,11 +22,11 @@ use crate::types::ability::{
 use crate::types::ability::{AttackScope, AttackSubject};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
-    AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, GameState, LKISnapshot,
-    ManaAbilityResume, MayTriggerAutoChoiceKey, PendingContinuation, PendingCopyTokenBatch,
-    PendingCostMoveResume, PendingPlayerScopeSacrificeChoice,
-    PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp, WaitingFor,
-    ZoneChangeRecord,
+    AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, DiscardBatchCursor, GameState,
+    LKISnapshot, ManaAbilityResume, MayTriggerAutoChoiceKey, PendingContinuation,
+    PendingCopyTokenBatch, PendingCostMoveResume, PendingDiscardBatchCompletion,
+    PendingPlayerScopeSacrificeChoice, PendingPlayerScopeSacrificeCompletion,
+    PendingPlayerScopeSacrificeFollowUp, WaitingFor, ZoneChangeRecord,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -4457,12 +4457,14 @@ fn detach_after_multi_target_player_local_chain(
     tail
 }
 
-/// CR 608.2e: Collect cross-player equalization quantity references from a
-/// `QuantityExpr`. These are the refs whose value would shift as an APNAP
-/// fan-out mutates the board — `ControlledByEachPlayer` (battlefield extremum)
-/// and `HandSize { AllPlayers }` (hand extremum). The per-player `left` operand
-/// of a `Difference` is intentionally NOT collected: it must re-resolve per
-/// iterating player.
+/// CR 608.2h + CR 608.2e: Collect the quantity references whose answer is
+/// determined only once, when the clause is applied (608.2h), across an APNAP
+/// fan-out that is one action processed simultaneously (608.2e). Three classes
+/// are admitted: `ControlledByEachPlayer` (battlefield extremum),
+/// `HandSize { AllPlayers }` (hand extremum), and `PreviousEffectAmount`
+/// (a look-back at a COMPLETED instruction's result — see the arm below). The
+/// per-player `left` operand of a `Difference` is intentionally NOT collected:
+/// it must re-resolve per iterating player.
 fn collect_clause_minimum_refs<'a>(expr: &'a QuantityExpr, out: &mut Vec<&'a QuantityRef>) {
     match expr {
         QuantityExpr::Ref { qty } => {
@@ -4472,6 +4474,57 @@ fn collect_clause_minimum_refs<'a>(expr: &'a QuantityExpr, out: &mut Vec<&'a Qua
                     | QuantityRef::HandSize {
                         player: PlayerScope::AllPlayers { .. }
                     }
+                    // CR 608.2h: "the answer is determined only once, when the
+                    // effect is applied." A `PreviousEffectAmount` is a look-back
+                    // (CR 608.2i) at a COMPLETED instruction's result — it has no
+                    // per-iteration reading at all (that reading is
+                    // `EventContextAmount`, `game/quantity.rs`'s
+                    // `QuantityRef::EventContextAmount` arm), so every channel
+                    // and every aggregate is clause-frozen. Without this, each
+                    // player's own completed action re-stamps the shared scalar
+                    // (`install_previous_effect_counts_by_player`'s post-stamp →
+                    // `previous_effect_amount_from_events`' `Effect::Draw` arm)
+                    // and a later player inherits an earlier player's DELIVERED
+                    // count — Windfall with a short library drew [5,5,5,5]
+                    // instead of [5,8,8,8]. CR 608.2e supports it (one action,
+                    // processed simultaneously); CR 121.2c confirms the
+                    // SERIALIZATION of the multiplayer draw is itself correct —
+                    // only the leaked count is not.
+                    //
+                    // PRECONDITION, unenforced by construction: this admission is
+                    // unconditional, and `capture_clause_minimum_snapshot` walks
+                    // the WHOLE scoped sub-chain, so it rests on the convention
+                    // stated above — `PreviousEffectAmount` is clause-wide,
+                    // `EventContextAmount` is per-iteration. A sub-link RETAINED
+                    // inside the scoped template whose `PreviousEffectAmount` is
+                    // meant to read *that iteration's* preceding effect would be
+                    // frozen at the pre-clause value instead.
+                    //
+                    // No card does this today, measured over the corpus: 44 CARDS
+                    // carry both a `player_scope` and a `PreviousEffectAmount`
+                    // somewhere. 3 of them (Parallax Nexus/Tide/Wave) hold it
+                    // only OUTSIDE the scoped subtree, in a condition, so they
+                    // never reach this arm. The other 41 hold it inside the
+                    // scoped subtree in a quantity position — 42 NODES, because
+                    // Thorna and Twigtooth holds two. (Node and card counts
+                    // differ here; an earlier revision of this comment conflated
+                    // them and mis-partitioned the result.)
+                    //
+                    // The split that discriminates is which effect carries the
+                    // ref: 38 `GainLife` — the drain tail, which DETACHES because
+                    // `effect_has_iteration_bound_recipient` has no `GainLife`
+                    // arm — 3 `Draw` (Windfall, Jace's Archivist, Whispering
+                    // Madness), and 1 `LoseLife` (Thorna).
+                    //
+                    // Thorna is the only RETAINED-side carrier, so it is the one
+                    // card that could falsify the precondition — it does not:
+                    // "each opponent loses X life ... where X is the number of
+                    // counters removed this way" fixes X once for the whole
+                    // clause, which is exactly the pre-clause value the freeze
+                    // supplies. If a future card needs a per-iteration reading
+                    // here, it wants `EventContextAmount`, not a guard on this
+                    // arm.
+                    | QuantityRef::PreviousEffectAmount { .. }
             ) {
                 out.push(qty);
             }
@@ -4497,11 +4550,14 @@ fn collect_clause_minimum_refs<'a>(expr: &'a QuantityExpr, out: &mut Vec<&'a Qua
     }
 }
 
-/// CR 608.2e (§8): Capture this `player_scope` link's equalization extrema
-/// against the board as it stands NOW — before the APNAP fan-out begins. The
-/// snapshot is stored on `state.clause_minimum_snapshot` and consulted by the
-/// `ControlledByEachPlayer` / `HandSize { AllPlayers }` resolver arms so every
-/// player in the fan-out sees the same pre-clause minimum.
+/// CR 608.2h + CR 608.2e (§8): Capture this `player_scope` link's clause-frozen
+/// quantities against the board as it stands NOW — before the APNAP fan-out
+/// begins — because the answer is determined only once, when the effect is
+/// applied (608.2h), and the fan-out is one action processed simultaneously
+/// (608.2e). The snapshot is stored on `state.clause_minimum_snapshot` and
+/// consulted by the `ControlledByEachPlayer` / `HandSize { AllPlayers }` /
+/// `PreviousEffectAmount` resolver arms so every player in the fan-out sees the
+/// same pre-clause value.
 ///
 /// Always overwrites `state.clause_minimum_snapshot` — to `Some` when the
 /// clause carries a cross-player extremum, to `None` otherwise. This makes
@@ -4522,8 +4578,10 @@ fn collect_clause_minimum_refs<'a>(expr: &'a QuantityExpr, out: &mut Vec<&'a Qua
 /// structural rather than relying on the three cards' clauses using
 /// pairwise-distinct `QuantityRef` keys.
 fn capture_clause_minimum_snapshot(state: &mut GameState, scoped_template: &ResolvedAbility) {
-    // CR 608.2e: values are locked when the clause starts resolving, so each
-    // clause must capture against its own pre-clause board.
+    // CR 608.2h + CR 608.2e: the answer is determined only once, when the
+    // effect is applied, and the clause's fan-out is one action processed
+    // simultaneously — so values are locked when the clause starts resolving
+    // and each clause must capture against its own pre-clause board.
     //
     // Per-link reset: clear any previous clause's snapshot before resolving so
     // the live-resolve below sees a clean slate and a stale value is never
@@ -8513,17 +8571,24 @@ fn previous_effect_excess_amount_from_events(
     (excess > 0).then_some(excess)
 }
 
+/// The per-player table a completed instruction leaves behind for a later
+/// look-back (CR 608.2i), derived from the terminal event window.
+///
+/// Keyed by `EffectKind` rather than `&Effect`: both selections this function
+/// makes — which effects are count producers, and how each producer's counts are
+/// derived — are kind-level facts, and a batch parked across a replacement
+/// pause holds only the kind. Passing the kind is what lets the paused and
+/// un-paused paths share ONE count authority instead of growing a second,
+/// drifting counter.
 fn previous_effect_counts_by_player_from_events(
-    effect: &Effect,
+    kind: EffectKind,
     source_id: ObjectId,
     events: &[GameEvent],
 ) -> Option<HashMap<PlayerId, i32>> {
-    let kind = match effect {
-        Effect::Discard { .. } | Effect::DiscardCard { .. } | Effect::ChangeZoneAll { .. } => {
-            EffectKind::from(effect)
-        }
+    match kind {
+        EffectKind::Discard | EffectKind::DiscardCard | EffectKind::ChangeZoneAll => {}
         _ => return None,
-    };
+    }
     // CR 608.2c: An effect's terminal marker bounds exactly its own completed
     // instruction. The supplied slice is already scoped to the current parent
     // or player-scope pass; events later in that slice belong to later work and
@@ -8540,11 +8605,11 @@ fn previous_effect_counts_by_player_from_events(
     })?;
 
     let mut counts = HashMap::new();
-    match effect {
+    match kind {
         // CR 701.9a: `Discarded::source_id` is the causal source authority.
         // A same-window discard from another effect cannot be attributed to
         // this instruction merely because it happened before this marker.
-        Effect::Discard { .. } | Effect::DiscardCard { .. } => {
+        EffectKind::Discard | EffectKind::DiscardCard => {
             for event in &events[..=resolved_index] {
                 if let GameEvent::Discarded {
                     player_id,
@@ -8562,7 +8627,7 @@ fn previous_effect_counts_by_player_from_events(
         // the move event. This collects all cards moved by the completed
         // ChangeZoneAll instruction, including zero-card players as an empty
         // map when the terminal marker is present.
-        Effect::ChangeZoneAll { .. } => {
+        EffectKind::ChangeZoneAll => {
             for event in &events[..=resolved_index] {
                 if let GameEvent::ZoneChanged { record, .. } = event {
                     *counts.entry(record.owner).or_insert(0) += 1;
@@ -8572,6 +8637,32 @@ fn previous_effect_counts_by_player_from_events(
         _ => unreachable!("producer kind was selected above"),
     }
     Some(counts)
+}
+
+/// CR 608.2c: give every player the clause applied to an entry in the
+/// completed-instruction table, defaulting a non-contributor to zero.
+///
+/// The table is built from emitted events, so a player who contributed nothing —
+/// an empty hand facing "each player discards their hand" — emits no event and
+/// would otherwise be absent. They still discarded zero *this way*, and the
+/// table is what an aggregate reduces over, so an omission is a wrong reduction
+/// domain rather than a missing convenience.
+///
+/// The omission is invisible to two of the three aggregates, which is why it
+/// survived: `Sum` reads `last_effect_amount` (and adding zeros could not move a
+/// sum anyway) and `Max` cannot be raised by zeros. Only `Min` sees it — hands
+/// 8/7/3/**0** publish `{8,7,3}` and answer 3 where the answer is 0. The defect
+/// is the domain, not the `Min` arm.
+///
+/// Existing entries are never overwritten: a player who contributed 3 keeps 3.
+fn fill_zero_contributors(
+    mut counts_by_player: HashMap<PlayerId, i32>,
+    matching_players: &[PlayerId],
+) -> HashMap<PlayerId, i32> {
+    for player in matching_players.iter().copied() {
+        counts_by_player.entry(player).or_insert(0);
+    }
+    counts_by_player
 }
 
 /// CR 608.2c: Install the terminal-window per-player counts for a completed
@@ -8603,6 +8694,97 @@ fn install_previous_effect_counts_by_player(
             }
             false
         }
+    }
+}
+
+/// Publish one COMPLETED `player_scope` clause's terminal results: the
+/// per-player table (zero-filled over `zero_fill_domain`), the scalar/excess
+/// fallback, the tracked set, and `last_zone_changed_ids`.
+///
+/// CR 608.2f: a clause is one action taken on multiple players; when a
+/// replacement-application choice makes it non-simultaneous it is processed per
+/// player, but it stays ONE action and therefore has exactly ONE terminal
+/// result. This function is extracted so a clause that finished inside the
+/// driver and a clause that finished inside a resumed
+/// [`drain_pending_discard_batch`] publish through the same authority and
+/// cannot drift.
+///
+/// `scoped_events` is the clause's full event span. The driver passes its live
+/// slice; a resumed batch passes its pre-pause span reunited with the resumed
+/// action's buffer.
+fn publish_player_scope_clause_results(
+    state: &mut GameState,
+    outer: &ResolvedAbility,
+    scoped_template: &ResolvedAbility,
+    zero_fill_domain: &[PlayerId],
+    after_scope_needs_linked_exile: bool,
+    scoped_events: &[GameEvent],
+) {
+    let counts_by_player = previous_effect_counts_by_player_from_events(
+        EffectKind::from(&scoped_template.effect),
+        scoped_template.source_id,
+        scoped_events,
+    );
+    let counts_by_player =
+        counts_by_player.map(|counts| fill_zero_contributors(counts, zero_fill_domain));
+    if !install_previous_effect_counts_by_player(state, counts_by_player, false) {
+        if let Some(amount) =
+            previous_effect_amount_from_events(state, scoped_template, scoped_events)
+        {
+            state.last_effect_amount = Some(amount);
+            // CR 120.10: stamp the resolution-local excess channel alongside
+            // the running total so a follow-up "if excess damage was dealt
+            // this way" condition reads overkill-beyond-lethal. CR 120.6 was
+            // cited for that total and is struck: it governs damage MARKED on
+            // a creature until the cleanup step, not the amount one clause
+            // leaves for a later clause in the same resolution — that
+            // carry-forward is CR 608.2c.
+            let excess =
+                previous_effect_excess_amount_from_events(state, scoped_template, scoped_events);
+            state.last_effect_excess_amount = excess;
+        }
+    }
+    let affected_with_causes =
+        if next_sub_needs_tracked_set(outer) || after_scope_needs_linked_exile {
+            affected_objects_with_causes(
+                state,
+                scoped_template,
+                &scoped_template.effect,
+                scoped_events,
+            )
+        } else {
+            Vec::new()
+        };
+    let affected_ids: Vec<ObjectId> = affected_with_causes.iter().map(|(id, _)| *id).collect();
+    if after_scope_needs_linked_exile {
+        for id in &affected_ids {
+            if state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.zone == crate::types::zones::Zone::Exile)
+            {
+                crate::game::exile_links::push_tracked_by_source(state, *id, outer.source_id);
+            }
+        }
+    }
+    // CR 608.2c: After a `player_scope: All` sacrifice clause completes,
+    // publish the full scoped event slice so downstream "if you sacrificed
+    // a permanent this way" / ZoneChangedThisWay gates see every player's
+    // sacrifice — not only the last iteration's overwrite of
+    // `last_zone_changed_ids`.
+    let mut ids: Vec<ObjectId> = scoped_events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged { object_id, .. }
+            | GameEvent::PermanentSacrificed { object_id, .. } => Some(*object_id),
+            _ => None,
+        })
+        .collect();
+    ids.sort_unstable_by_key(|id| id.0);
+    ids.dedup();
+    state.last_zone_changed_ids = ids;
+    if next_sub_needs_tracked_set(outer) {
+        publish_tracked_set_with_causes(state, affected_with_causes);
     }
 }
 
@@ -9253,6 +9435,413 @@ pub(crate) fn drain_pending_player_scope_sacrifice_after_replacement(
             sacrificed_count,
         }),
     }
+}
+
+pub(crate) enum PendingDiscardBatchOutcome {
+    /// No batch was parked; nothing was done.
+    Idle,
+    /// The batch (or the fan-out behind it) paused again. `state.waiting_for`
+    /// carries the new prompt.
+    PausedForReplacement,
+    /// The whole instruction settled and published its terminal results.
+    Completed,
+}
+
+/// Finish a discard instruction that a replacement-application choice parked
+/// mid-batch, and publish its terminal result ONCE.
+///
+/// CR 614.1: the replacement application pauses the event as it happens. CR
+/// 608.2f is why the remainder belongs here and not on the generic continuation
+/// queue: the clause is one action taken on several players, processed per
+/// player only because it could not be processed simultaneously — so it still
+/// has exactly one terminal result.
+///
+/// Composability: an arbitrary number of sequential re-pauses compose, because
+/// each resume re-enters this same function through the same hook.
+pub(crate) fn drain_pending_discard_batch(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<PendingDiscardBatchOutcome, EffectError> {
+    let Some(mut batch) = state.pending_discard_batch.take() else {
+        return Ok(PendingDiscardBatchOutcome::Idle);
+    };
+
+    stamp_resumed_discard_if_unrecorded(state, &batch, events);
+
+    // Finish what this seat still owes. The cursor is replaced with an empty
+    // one so a re-park below installs a fresh remainder rather than mutating a
+    // borrowed value.
+    let cursor = std::mem::replace(
+        &mut batch.cursor,
+        DiscardBatchCursor::All {
+            remaining: Vec::new(),
+        },
+    );
+    match cursor {
+        DiscardBatchCursor::All { remaining } => {
+            for (i, obj_id) in remaining.iter().enumerate() {
+                if let discard::DiscardOutcome::NeedsReplacementChoice(chooser) =
+                    discard::discard_caused_by_effect_with_source_and_frame(
+                        state,
+                        *obj_id,
+                        batch.player,
+                        Some(batch.source_id),
+                        batch.discard_frame,
+                        events,
+                    )
+                {
+                    batch.cursor = DiscardBatchCursor::All {
+                        remaining: remaining[i + 1..].to_vec(),
+                    };
+                    // CR 400.7: pin the pre-move occurrence, matching the park
+                    // the `Random` arm below already receives from
+                    // `discard_at_random`.
+                    batch.paused_card = discard::pin_paused_occurrence(state, *obj_id);
+                    repark_discard_batch(state, batch, events, chooser);
+                    return Ok(PendingDiscardBatchOutcome::PausedForReplacement);
+                }
+            }
+        }
+        DiscardBatchCursor::Random { pool, remaining } => {
+            if let discard::RandomDiscardOutcome::NeedsReplacementChoice {
+                remaining_eligible,
+                remaining_count,
+                paused_card,
+                chooser,
+            } = discard::discard_at_random(
+                state,
+                discard::RandomDiscardRequest {
+                    player: batch.player,
+                    source_id: batch.source_id,
+                    count: remaining,
+                    eligible: pool,
+                    cause: discard::DiscardCause::Effect,
+                    discard_frame: batch.discard_frame,
+                },
+                events,
+            ) {
+                batch.cursor = DiscardBatchCursor::Random {
+                    pool: remaining_eligible,
+                    remaining: remaining_count,
+                };
+                batch.paused_card = paused_card;
+                // The chooser comes from the authority that raised the choice,
+                // exactly as the `All` arm above threads its own.
+                // It was `batch.player` here, which happens to agree today
+                // because a hand card's `affected_player` is its controller —
+                // but `replacement_choice_player`'s commander carve-out proves
+                // the engine already has cases where chooser != affected seat,
+                // and re-deriving at the call site is how those drift.
+                repark_discard_batch(state, batch, events, chooser);
+                return Ok(PendingDiscardBatchOutcome::PausedForReplacement);
+            }
+        }
+        DiscardBatchCursor::Ordered { remaining } => {
+            for (i, card) in remaining.iter().enumerate() {
+                if !card.is_current(state)
+                    || state.objects.get(&card.object_id).map(|object| object.zone)
+                        != Some(Zone::Hand)
+                {
+                    continue;
+                }
+                let player = state.objects[&card.object_id].owner;
+                if let discard::DiscardOutcome::NeedsReplacementChoice(chooser) =
+                    discard::discard_caused_by_effect_with_source_and_frame(
+                        state,
+                        card.object_id,
+                        player,
+                        Some(batch.source_id),
+                        batch.discard_frame,
+                        events,
+                    )
+                {
+                    batch.cursor = DiscardBatchCursor::Ordered {
+                        remaining: remaining[i + 1..].to_vec(),
+                    };
+                    batch.player = player;
+                    batch.paused_card = *card;
+                    repark_discard_batch(state, batch, events, chooser);
+                    return Ok(PendingDiscardBatchOutcome::PausedForReplacement);
+                }
+            }
+        }
+    }
+
+    if matches!(
+        &batch.completion,
+        PendingDiscardBatchCompletion::DiscardChoice { .. }
+    ) {
+        let mut window = batch.preceding_events.clone();
+        window.extend_from_slice(events);
+        finalize_discard_choice_completion(state, &batch.completion, batch.discard_frame, &window);
+    }
+
+    // CR 608.2c: the terminal marker the pre-pause action could not emit,
+    // because it returned from inside the batch loop. Without it this seat's
+    // count is underivable — `previous_effect_counts_by_player_from_events`
+    // early-returns at its `rposition`.
+    events.push(GameEvent::EffectResolved {
+        kind: batch.effect_kind,
+        source_id: batch.source_id,
+        subject: None,
+    });
+
+    // CR 608.2f + CR 101.4: run the clause's remaining seats, in the APNAP
+    // order latched at the pause.
+    if let Some(fan_out) = batch.fan_out.take() {
+        let fan_out = *fan_out;
+        let initial_waiting_for = state.waiting_for.clone();
+        for (i, pid) in fan_out.remaining_players.iter().enumerate() {
+            let mut scoped = (*fan_out.scoped_template).clone();
+            // CR 608.2c + CR 101.3: each scoped iteration is a fresh
+            // sub-resolution of the scoped template, so the cost-payment-failed
+            // signal is per-iteration. This is the same resumption boundary the
+            // driver's own loop resets; without it an earlier seat's mandatory
+            // failure (an empty-handed seat's `count == 0 && !up_to` arm) leaks
+            // into a later seat's `IfCurrentScopeSucceeded` read, for cards like
+            // Refurbished Familiar and Aclazotz, Deepest Betrayal.
+            state.cost_payment_failed_flag = false;
+            scoped.set_original_controller_recursive(fan_out.original_controller);
+            scoped.set_controller_recursive(*pid);
+            scoped.set_scoped_player_recursive(*pid);
+            resolve_ability_chain(state, &scoped, events, 1)?;
+            if state.waiting_for == initial_waiting_for {
+                continue;
+            }
+            // This seat paused. If it parked its OWN discard batch, move the
+            // clause remainder onto that batch so the instruction still ends in
+            // one publication.
+            if let Some(next) = state.pending_discard_batch.as_mut() {
+                if next.fan_out.is_none()
+                    && next.source_id == fan_out.scoped_template.source_id
+                    && next.player == *pid
+                {
+                    let mut window = std::mem::take(&mut batch.preceding_events);
+                    window.extend_from_slice(events);
+                    next.preceding_events = window;
+                    next.fan_out = Some(Box::new(crate::types::game_state::PendingDiscardFanOut {
+                        remaining_players: fan_out.remaining_players[i + 1..].to_vec(),
+                        ..fan_out.clone()
+                    }));
+                    return Ok(PendingDiscardBatchOutcome::PausedForReplacement);
+                }
+            }
+            // BOUNDARY (measured, and deliberately not repaired here): the seat
+            // paused on something that is not a batch pause — an interactive
+            // `WaitingFor::DiscardChoice`, or any other resolution choice. Hand
+            // the remaining seats back to the generic continuation queue exactly
+            // as the driver does, and publish NOTHING: those legs each publish
+            // node-locally, which is the pre-existing behaviour this change does
+            // not extend to the interactive path.
+            let mut tail: Option<Box<ResolvedAbility>> = None;
+            for &remaining_pid in fan_out.remaining_players[i + 1..].iter().rev() {
+                let mut remaining_scoped = (*fan_out.scoped_template).clone();
+                remaining_scoped.set_original_controller_recursive(fan_out.original_controller);
+                remaining_scoped.set_controller_recursive(remaining_pid);
+                remaining_scoped.set_scoped_player_recursive(remaining_pid);
+                remaining_scoped.sub_link = SubAbilityLink::SequentialSibling;
+                if let Some(prev) = tail {
+                    super::ability_utils::append_to_sub_chain(&mut remaining_scoped, *prev);
+                }
+                tail = Some(Box::new(remaining_scoped));
+            }
+            if tail.is_some() {
+                append_to_pending_continuation(state, tail);
+            }
+            return Ok(PendingDiscardBatchOutcome::PausedForReplacement);
+        }
+
+        // CR 608.2i: the look-back window is everything this instruction did,
+        // on both sides of the pause. `preceding_events` was copied rather than
+        // drained, so `events` still holds only the resumed action's own span.
+        let mut window = std::mem::take(&mut batch.preceding_events);
+        window.extend_from_slice(events);
+        publish_player_scope_clause_results(
+            state,
+            &fan_out.outer,
+            &fan_out.scoped_template,
+            &fan_out.matching_players,
+            fan_out.after_scope_needs_linked_exile,
+            &window,
+        );
+        // CR 608.2h: the clause has completed, so clear its frozen values before
+        // the parked tail runs — a following `player_scope` clause captures its
+        // own snapshot against the post-this-clause board.
+        state.clause_minimum_snapshot = None;
+        return Ok(PendingDiscardBatchOutcome::Completed);
+    }
+
+    // Single-subject discard: no fan-out, so no reduction domain to zero-fill.
+    // Mirrors the non-`player_scope` publication site, whose `preserve` argument
+    // is provably irrelevant here — it is read only on the `None` arm, and the
+    // marker pushed above guarantees `Some`.
+    let mut window = std::mem::take(&mut batch.preceding_events);
+    window.extend_from_slice(events);
+    install_previous_effect_counts_by_player(
+        state,
+        previous_effect_counts_by_player_from_events(batch.effect_kind, batch.source_id, &window),
+        false,
+    );
+    if !matches!(
+        &batch.completion,
+        PendingDiscardBatchCompletion::DiscardChoice { .. }
+    ) {
+        state.last_zone_changed_ids = window
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .collect();
+    }
+    Ok(PendingDiscardBatchOutcome::Completed)
+}
+
+/// Finish the choice-specific bookkeeping that must precede a discard effect's
+/// terminal marker, whether the selected cards settled synchronously or after
+/// one or more replacement choices.
+pub(crate) fn finalize_discard_choice_completion(
+    state: &mut GameState,
+    completion: &PendingDiscardBatchCompletion,
+    discard_frame: Option<crate::types::identifiers::DiscardFrameId>,
+    events: &[GameEvent],
+) {
+    let PendingDiscardBatchCompletion::DiscardChoice { chosen } = completion else {
+        return;
+    };
+    let discarded_to_graveyard: Vec<ObjectId> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Graveyard,
+                ..
+            } => Some(*object_id),
+            _ => None,
+        })
+        .collect();
+    if !discarded_to_graveyard.is_empty() {
+        state.last_zone_changed_ids = discarded_to_graveyard.clone();
+        publish_tracked_set_with_causes(
+            state,
+            discarded_to_graveyard
+                .into_iter()
+                .map(|id| (id, Some(ThisWayCause::Discarded)))
+                .collect(),
+        );
+    }
+    if !chosen.is_empty() {
+        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+            frame
+                .pending
+                .chain
+                .set_optional_effect_performed_recursive(true);
+        }
+    }
+    if let Some(frame_id) = discard_frame {
+        discard::hand_off_recruit_discard_result(state, frame_id);
+    }
+    if let Some(snapshot) = parent_referent_context_from_events(state, events) {
+        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+            frame
+                .pending
+                .chain
+                .set_effect_context_object_recursive(snapshot);
+        }
+    }
+    state.last_effect_count = Some(chosen.len() as i32);
+}
+
+/// Re-park a batch that paused again, carrying the resumed action's span into
+/// the pre-pause window so the terminal count still covers the whole
+/// instruction.
+fn repark_discard_batch(
+    state: &mut GameState,
+    mut batch: Box<crate::types::game_state::PendingDiscardBatch>,
+    events: &[GameEvent],
+    chooser: PlayerId,
+) {
+    let mut window = std::mem::take(&mut batch.preceding_events);
+    window.extend_from_slice(events);
+    batch.preceding_events = window;
+    state.pending_discard_batch = Some(batch);
+    state.waiting_for = crate::game::replacement::replacement_choice_waiting_for(chooser, state);
+}
+
+/// Stamp the terminal `Discarded` for the card whose replacement just resolved,
+/// when the resume path could not emit one.
+///
+/// CR 614.6: "If an event is replaced, it never happens. A modified event occurs
+/// instead." A hand → graveyard `Moved` redirect (Rest in Peace class) therefore
+/// still discarded the card per CR 701.9a, and a Madness redirect explicitly
+/// does (CR 702.35a: "that player discards it, but exiles it instead of putting
+/// it into their graveyard"). But that resume returns through terminal zone
+/// delivery, which emits `Discarded` only for a provenance-framed discard — so
+/// for every unframed discard the card leaves the hand and is never counted.
+///
+/// The already-emitted guard is what makes the OTHER gate idempotent: a
+/// `ReplacementEvent::Discard` pause (Library of Leng class) resumes through
+/// `complete_discard_to_graveyard`, which does emit the event. This is the
+/// direct analogue of the sacrifice batch's `!completion.sacrificed.contains(id)`
+/// guard.
+fn stamp_resumed_discard_if_unrecorded(
+    state: &mut GameState,
+    batch: &crate::types::game_state::PendingDiscardBatch,
+    events: &mut Vec<GameEvent>,
+) {
+    let paused = batch.paused_card;
+    let card = paused.object_id;
+    let already_recorded = events.iter().any(|event| {
+        matches!(
+            event,
+            GameEvent::Discarded { object_id, .. } if *object_id == card
+        )
+    });
+    if already_recorded {
+        return;
+    }
+    // CR 400.7: "An object that moves from one zone to another becomes a new
+    // object with no memory of, or relation to, its previous existence." The
+    // departure that settles this pause is the parked occurrence leaving the
+    // hand — not any hand departure that happens to reuse the `ObjectId`. A
+    // same-id round trip (the card returns to hand and leaves again) produces a
+    // later occurrence, and stamping this batch's `Discarded` from it would
+    // credit the discard to an object the pause never parked.
+    //
+    // The departing occurrence is already on the wire: every production record
+    // is built by `GameObject::snapshot_for_zone_change` BEFORE the incarnation
+    // bump, so `trigger_source_context.identity` is exactly the pre-move
+    // occurrence and its `expected_zone` is the zone it left. A record without
+    // that context is legacy/hand-built; it fails closed here rather than
+    // falling back to the id, which is the same policy the record's own doc
+    // states ("Callers must not reconstruct a source from a current object").
+    let left_hand = events.iter().any(|event| {
+        matches!(
+            event,
+            GameEvent::ZoneChanged {
+                from: Some(crate::types::zones::Zone::Hand),
+                record,
+                ..
+            } if record
+                .trigger_source_context()
+                .is_some_and(|context| context.identity.reference == paused)
+        )
+    });
+    if !left_hand {
+        return;
+    }
+    crate::game::restrictions::record_discard(state, batch.player);
+    // CR 702.187b: the Mayhem marker is stamped only when the card actually
+    // landed in the graveyard — a redirect leaves it elsewhere, matching the
+    // un-paused path's own condition.
+    if state.objects.get(&card).map(|o| o.zone) == Some(crate::types::zones::Zone::Graveyard) {
+        crate::game::restrictions::record_card_discarded(state, card);
+    }
+    events.push(GameEvent::Discarded {
+        player_id: batch.player,
+        object_id: card,
+        source_id: Some(batch.source_id),
+    });
 }
 
 /// Resolve an ability and follow its sub_ability chain using typed nested structs.
@@ -10081,6 +10670,37 @@ fn resolve_chain_body(
 
         let initial_waiting_for = state.waiting_for.clone();
         let mut paused = false;
+        // CR 608.2c: the zero-fill's reduction domain is the set of players the
+        // clause has actually applied to. A mid-fan-out pause leaves the tail
+        // unresolved, so filling them as zero would publish a contribution they
+        // have not had the chance to make. Narrow the domain to the players who
+        // COMPLETED before the pause — the pausing player is excluded too: they
+        // are sitting on a choice they have not answered, so a `Min` read taken
+        // mid-pause must not see them as a zero contributor. A seat that already
+        // holds an entry is unaffected either way — `fill_zero_contributors` is
+        // `or_insert(0)`, so it is PRESENCE in the table, not completion, that
+        // makes the fill a no-op for them.
+        //
+        // WHAT THIS DOES NOT FIX, measured on the tree this comment ships in:
+        // each resumed continuation leg REPLACES the table rather than extending
+        // it — `install_previous_effect_counts_by_player`'s `Some` arm assigns
+        // `last_effect_counts_by_player` outright, and `split_player_scope_chain`
+        // clears `player_scope` on the resumed legs, so each leg publishes only
+        // its own entry. A four-seat fan-out pausing on seat 1 measures
+        // `[(0, 1)]` at the pause and `[(3, 1)]` once the continuation runs — the
+        // remaining seats chain into ONE leg, so even seat 2's publication is
+        // replaced before the fan-out ends, and `last_effect_amount` reads
+        // `Some(1)` where an accumulating table would give 4. That is
+        // PRE-EXISTING and
+        // not specific to an aggregate: `last_effect_amount` is derived from the
+        // same table (`.values().sum()`), so the `Sum` class loses the same
+        // counts. It is reachable here because the forced whole-hand discard
+        // branch can still pause on a replacement choice
+        // (`effects/discard.rs`, which documents its own related
+        // `EffectResolved` gap at that site). Repairing it means making the
+        // per-clause table accumulate across continuation legs, which is
+        // resume-machinery work well outside a draw-count change.
+        let mut applied_domain_end = matching_players.len();
         // CR 608.2e: each clause's equalization minimum is fixed when that
         // clause begins; the snapshot is per `player_scope` link, captured
         // before fan-out (the board is now exactly the clause's pre-clause
@@ -10122,6 +10742,54 @@ fn resolve_chain_body(
                 if after_scope_needs_linked_exile {
                     mark_exile_choice_tracks_by_source(state, ability.source_id);
                 }
+                // CR 608.2f: this fan-out paused because THIS seat's discard
+                // batch is parked. The clause's remaining seats belong to that
+                // batch, not to the generic continuation queue, so the whole
+                // instruction publishes ONE per-player table instead of one
+                // table per resumed leg. Mirrors
+                // `start_player_scope_sacrifice_choices`, which likewise keeps
+                // `remaining_players` on its pending state and parks only the
+                // unscoped tail.
+                //
+                // The identity triple is checked BEFORE the hand-off and never
+                // inferred from payload shape: a batch parked by a different
+                // source, by a different seat, or one that a nested clause has
+                // already handed off, fails a conjunct and the driver falls
+                // through to the ordinary per-seat leg path below, unchanged.
+                let handed_to_discard_batch =
+                    state.pending_discard_batch.as_ref().is_some_and(|batch| {
+                        batch.source_id == scoped_template.source_id
+                            && batch.player == *pid
+                            && batch.fan_out.is_none()
+                    });
+                if handed_to_discard_batch {
+                    if let Some(batch) = state.pending_discard_batch.as_mut() {
+                        // Widen the batch's pre-pause window from this seat's
+                        // own emissions to the whole clause's span: the earlier
+                        // seats' discards are part of the same instruction.
+                        // Copied, not drained — the pre-pause action still
+                        // returns them to its caller.
+                        batch.preceding_events = events[scoped_events_before..].to_vec();
+                        batch.fan_out =
+                            Some(Box::new(crate::types::game_state::PendingDiscardFanOut {
+                                scoped_template: Box::new(scoped_template.clone()),
+                                outer: Box::new(ability.clone()),
+                                original_controller: controller,
+                                remaining_players: matching_players[i + 1..].to_vec(),
+                                matching_players: matching_players.clone(),
+                                after_scope_needs_linked_exile,
+                            }));
+                    }
+                    // Only the unscoped tail goes to the generic continuation;
+                    // the per-seat legs do not exist on this path.
+                    if after_scope.is_some() {
+                        append_to_pending_continuation(state, after_scope.clone());
+                    }
+                    // Deliberately skips the clause postlude below: the batch
+                    // owns that publication now, and running it here as well
+                    // would publish a truncated table first.
+                    return Ok(());
+                }
                 let remaining = &matching_players[i + 1..];
                 let mut tail = after_scope.clone();
                 // Build continuation chain for remaining players in APNAP order.
@@ -10160,85 +10828,22 @@ fn resolve_chain_body(
                 if tail.is_some() {
                     append_to_pending_continuation(state, tail);
                 }
+                // `i`, not `i + 1`: player `i` is the one who just paused, so
+                // they have NOT completed the clause and must not be filled as
+                // a zero contributor.
+                applied_domain_end = i;
                 paused = true;
                 break;
             }
         }
-        let scoped_events = &events[scoped_events_before..];
-        let counts_by_player = previous_effect_counts_by_player_from_events(
-            &scoped_template.effect,
-            scoped_template.source_id,
-            scoped_events,
+        publish_player_scope_clause_results(
+            state,
+            ability,
+            &scoped_template,
+            &matching_players[..applied_domain_end],
+            after_scope_needs_linked_exile,
+            &events[scoped_events_before..],
         );
-        // CR 608.2c: A completed scoped count producer that moved/discarded
-        // nothing still produced a zero for every player in this fan-out. Keep
-        // that provenance distinct from the absence of a count producer: the
-        // nonempty zero table takes precedence over an enclosing scalar event
-        // when the detached scoped "that many" consumer resolves.
-        let counts_by_player = counts_by_player.map(|mut counts_by_player| {
-            if counts_by_player.is_empty() {
-                counts_by_player.extend(matching_players.iter().copied().map(|player| (player, 0)));
-            }
-            counts_by_player
-        });
-        if !install_previous_effect_counts_by_player(state, counts_by_player, false) {
-            if let Some(amount) =
-                previous_effect_amount_from_events(state, &scoped_template, scoped_events)
-            {
-                state.last_effect_amount = Some(amount);
-                // CR 120.10: stamp the resolution-local excess channel alongside the
-                // CR 120.6 total so a follow-up "if excess damage was dealt this way"
-                // condition reads overkill-beyond-lethal.
-                let excess = previous_effect_excess_amount_from_events(
-                    state,
-                    &scoped_template,
-                    scoped_events,
-                );
-                state.last_effect_excess_amount = excess;
-            }
-        }
-        let affected_with_causes =
-            if next_sub_needs_tracked_set(ability) || after_scope_needs_linked_exile {
-                affected_objects_with_causes(
-                    state,
-                    &scoped_template,
-                    &scoped_template.effect,
-                    scoped_events,
-                )
-            } else {
-                Vec::new()
-            };
-        let affected_ids: Vec<ObjectId> = affected_with_causes.iter().map(|(id, _)| *id).collect();
-        if after_scope_needs_linked_exile {
-            for id in &affected_ids {
-                if state
-                    .objects
-                    .get(id)
-                    .is_some_and(|obj| obj.zone == crate::types::zones::Zone::Exile)
-                {
-                    crate::game::exile_links::push_tracked_by_source(state, *id, ability.source_id);
-                }
-            }
-        }
-        // CR 608.2c: After a `player_scope: All` sacrifice clause completes,
-        // publish the full scoped event slice so downstream "if you sacrificed
-        // a permanent this way" / ZoneChangedThisWay gates see every player's
-        // sacrifice — not only the last iteration's overwrite of
-        // `last_zone_changed_ids`.
-        let mut ids: Vec<ObjectId> = scoped_events
-            .iter()
-            .filter_map(|event| match event {
-                GameEvent::ZoneChanged { object_id, .. }
-                | GameEvent::PermanentSacrificed { object_id, .. } => Some(*object_id),
-                _ => None,
-            })
-            .collect();
-        ids.sort_unstable_by_key(|id| id.0);
-        ids.dedup();
-        state.last_zone_changed_ids = ids;
-        if next_sub_needs_tracked_set(ability) {
-            publish_tracked_set_with_causes(state, affected_with_causes);
-        }
         if !paused {
             // CR 608.2e: this `player_scope` clause has completed. Clear its
             // frozen values before running any following instruction; if the
@@ -11318,10 +11923,15 @@ fn resolve_chain_body(
     // many" chains (Tolarian Winds) stamp `last_effect_count`.
     let parent_events = &events[events_before..];
     let counts_by_player = previous_effect_counts_by_player_from_events(
-        &ability.effect,
+        EffectKind::from(&ability.effect),
         ability.source_id,
         parent_events,
     );
+    // No `fill_zero_contributors` here, unlike the `player_scope` loop: the
+    // reduction domain of a fan-out is the set of players the clause applied to,
+    // and this path has no such set to fill from — a bare effect applies to whom
+    // its own target names, and a player who emitted no event was never in the
+    // domain rather than being a zero contributor within it.
     let preserve_counts_for_current_consumer =
         ability.player_scope.is_none() && effect_consumes_event_context_amount(&ability.effect);
     if !install_previous_effect_counts_by_player(
@@ -11332,8 +11942,11 @@ fn resolve_chain_body(
         if let Some(amount) = previous_effect_amount_from_events(state, ability, parent_events) {
             state.last_effect_amount = Some(amount);
             // CR 120.10: stamp the resolution-local excess channel alongside the
-            // CR 120.6 total so a follow-up "if excess damage was dealt this way"
-            // condition reads overkill-beyond-lethal.
+            // running total so a follow-up "if excess damage was dealt this way"
+            // condition reads overkill-beyond-lethal. CR 120.6 was cited for that
+            // total and is struck: it governs damage MARKED on a creature until
+            // the cleanup step, not the amount one clause leaves for a later
+            // clause in the same resolution — that carry-forward is CR 608.2c.
             let excess = previous_effect_excess_amount_from_events(state, ability, parent_events);
             state.last_effect_excess_amount = excess;
         }
@@ -18781,6 +19394,758 @@ mod tests {
         )));
     }
 
+    /// CR 608.2c: the PRODUCER half of the zero-contributor fix. A player the
+    /// clause applied to who emitted no event still discarded zero *this way*
+    /// and must hold an entry, or an aggregate reduces over a domain that omits
+    /// them.
+    ///
+    /// Board 8/7/3/**0**: P3's empty hand emits no discard event, so the
+    /// event-built table arrives as `{8,7,3}`. Discriminating on the axis that
+    /// matters — `Min` over the filled table is 0, over the unfilled one 3.
+    /// (`Sum` and `Max` are provably blind to the omission, which is why this
+    /// needs its own test rather than riding an existing one.)
+    #[test]
+    fn fill_zero_contributors_adds_the_absent_player_as_zero() {
+        let mut counts = HashMap::new();
+        counts.insert(PlayerId(0), 8);
+        counts.insert(PlayerId(1), 7);
+        counts.insert(PlayerId(2), 3);
+        let seats = [PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)];
+
+        let unfilled_min = counts.values().copied().min();
+        let filled = fill_zero_contributors(counts, &seats);
+
+        let mut rows: Vec<(u8, i32)> = filled.iter().map(|(p, n)| (p.0, *n)).collect();
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![(0, 8), (1, 7), (2, 3), (3, 0)],
+            "the absent player is present holding 0"
+        );
+        assert_eq!(unfilled_min, Some(3), "control: unfilled, Min answers 3");
+        assert_eq!(
+            filled.values().copied().min(),
+            Some(0),
+            "filled, Min answers 0 — the whole point of the fix"
+        );
+    }
+
+    /// Contributors are never overwritten, and an already-complete table is
+    /// unchanged — so the fill cannot corrupt the common case it runs on every
+    /// time.
+    #[test]
+    fn fill_zero_contributors_preserves_existing_counts() {
+        let mut counts = HashMap::new();
+        counts.insert(PlayerId(0), 5);
+        counts.insert(PlayerId(1), 2);
+        let seats = [PlayerId(0), PlayerId(1)];
+
+        let filled = fill_zero_contributors(counts, &seats);
+
+        assert_eq!(filled.get(&PlayerId(0)).copied(), Some(5));
+        assert_eq!(filled.get(&PlayerId(1)).copied(), Some(2));
+        assert_eq!(filled.len(), 2, "no phantom entries added");
+    }
+
+    /// The previously-handled case still behaves identically: an entirely empty
+    /// table becomes an all-zero table, one entry per matching player.
+    #[test]
+    fn fill_zero_contributors_fills_an_entirely_empty_table() {
+        let seats = [PlayerId(0), PlayerId(1), PlayerId(2)];
+        let filled = fill_zero_contributors(HashMap::new(), &seats);
+        let mut rows: Vec<(u8, i32)> = filled.iter().map(|(p, n)| (p.0, *n)).collect();
+        rows.sort();
+        assert_eq!(rows, vec![(0, 0), (1, 0), (2, 0)]);
+    }
+
+    /// CR 608.2c: the PRODUCTION wire, not the helper. The three tests above call
+    /// `fill_zero_contributors` directly, so they stay green even if the driver
+    /// stops calling it — this one drives a real `player_scope` fan-out through
+    /// `resolve_ability_chain` and reads the table the driver actually published.
+    ///
+    /// Four seats, hands 1/1/1/**0**: the empty-handed seat emits no discard event
+    /// and is therefore absent from the event-derived table. It is still a player
+    /// the clause applied to, so the published reduction domain must carry it as a
+    /// zero rather than omit it.
+    #[test]
+    fn player_scope_fan_out_publishes_a_zero_for_the_empty_handed_seat() {
+        let mut state = GameState::new(FormatConfig::standard(), 4, 42);
+        for seat in 0..3u8 {
+            create_object(
+                &mut state,
+                CardId(10 + u64::from(seat)),
+                PlayerId(seat),
+                format!("P{seat} Card"),
+                Zone::Hand,
+            );
+        }
+        // PlayerId(3) is dealt no card: the zero contributor under test.
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ScopedPlayer,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::All);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        let mut rows: Vec<(u8, i32)> = state
+            .last_effect_counts_by_player
+            .iter()
+            .map(|(p, n)| (p.0, *n))
+            .collect();
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![(0, 1), (1, 1), (2, 1), (3, 0)],
+            "the driver must publish the empty-handed seat as a zero contributor, \
+             not omit it from the reduction domain"
+        );
+    }
+
+    /// CR 608.2c: the zero-fill's domain on a PAUSED fan-out. Seat 1 holds two
+    /// cards facing a "discard a card" fan-out, so its iteration stops on a
+    /// `DiscardChoice` it has not answered. Seat 0 completed; seats 1..3 did not.
+    ///
+    /// The bound is `i`, not `i + 1`: publishing the pausing seat as a zero says
+    /// it contributed nothing, when in fact it has not yet been given the chance
+    /// to contribute — a `Min` read taken mid-pause would answer 0 off that.
+    ///
+    /// This pins the domain only. It deliberately does NOT assert that the table
+    /// survives the continuation: each resumed leg replaces it rather than
+    /// extending it, which is pre-existing and documented at the fill site.
+    #[test]
+    fn paused_fan_out_excludes_the_seat_that_has_not_answered_its_choice() {
+        let mut state = GameState::new(FormatConfig::standard(), 4, 42);
+        // Seat 0: exactly one card — a forced discard, no choice, completes.
+        // Seat 1: two cards — must choose, so the fan-out pauses here.
+        for (seat, cards) in [(0u8, 1u32), (1, 2), (2, 1), (3, 1)] {
+            for n in 0..cards {
+                create_object(
+                    &mut state,
+                    CardId(100 + u64::from(seat) * 10 + u64::from(n)),
+                    PlayerId(seat),
+                    format!("P{seat} Card {n}"),
+                    Zone::Hand,
+                );
+            }
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ScopedPlayer,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::All);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(
+            matches!(
+                state.waiting_for,
+                crate::types::game_state::WaitingFor::DiscardChoice { .. }
+            ),
+            "reach guard: the fan-out must actually be paused on seat 1's choice, \
+             got {:?}",
+            state.waiting_for
+        );
+
+        let mut rows: Vec<(u8, i32)> = state
+            .last_effect_counts_by_player
+            .iter()
+            .map(|(p, n)| (p.0, *n))
+            .collect();
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![(0, 1)],
+            "only the seat that COMPLETED before the pause belongs to the domain; \
+             the paused seat has not had the chance to contribute and must not be \
+             published as a zero"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // The discard-batch carrier (CR 608.2c parked order + CR 614.6 replacement).
+    // ---------------------------------------------------------------------
+
+    /// A `player_scope: All` "each player discards a card" clause template.
+    fn scoped_discard_one(source_id: ObjectId) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ScopedPlayer,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::All);
+        ability
+    }
+
+    fn deal_hand(state: &mut GameState, seat: u8, cards: u32) -> Vec<ObjectId> {
+        (0..cards)
+            .map(|n| {
+                create_object(
+                    state,
+                    CardId(500 + u64::from(seat) * 10 + u64::from(n)),
+                    PlayerId(seat),
+                    format!("P{seat} Card {n}"),
+                    Zone::Hand,
+                )
+            })
+            .collect()
+    }
+
+    fn park_batch(
+        state: &mut GameState,
+        source_id: ObjectId,
+        player: PlayerId,
+        remaining: Vec<ObjectId>,
+        fan_out: Option<Box<crate::types::game_state::PendingDiscardFanOut>>,
+    ) {
+        state.pending_discard_batch =
+            Some(Box::new(crate::types::game_state::PendingDiscardBatch {
+                player,
+                cursor: DiscardBatchCursor::All { remaining },
+                completion: crate::types::game_state::PendingDiscardBatchCompletion::Standard,
+                source_id,
+                effect_kind: EffectKind::Discard,
+                paused_card: crate::types::identifiers::ObjectIncarnationRef::of(
+                    ObjectId(9_999_999),
+                    0,
+                ),
+                discard_frame: None,
+                fan_out,
+                preceding_events: Vec::new(),
+            }));
+    }
+
+    fn fan_out_of(
+        source_id: ObjectId,
+        remaining_players: Vec<PlayerId>,
+        matching_players: Vec<PlayerId>,
+    ) -> Box<crate::types::game_state::PendingDiscardFanOut> {
+        let template = scoped_discard_one(source_id);
+        let mut scoped = template.clone();
+        scoped.player_scope = None;
+        Box::new(crate::types::game_state::PendingDiscardFanOut {
+            scoped_template: Box::new(scoped),
+            outer: Box::new(template),
+            original_controller: PlayerId(0),
+            remaining_players,
+            matching_players,
+            after_scope_needs_linked_exile: false,
+        })
+    }
+
+    /// CR 608.2c: the terminal marker the pre-pause action could not emit,
+    /// because it returned from inside the batch loop.
+    ///
+    /// Without it the seat's count is underivable —
+    /// `previous_effect_counts_by_player_from_events` early-returns at its
+    /// `rposition`, so `install_previous_effect_counts_by_player` takes the arm
+    /// that CLEARS the table. The window spans the pause: one pre-pause discard
+    /// carried in `preceding_events` plus the two the drain still owes.
+    ///
+    /// REVERT PROBE (RUN, not reasoned): delete the
+    /// `events.push(GameEvent::EffectResolved { .. })` in
+    /// `drain_pending_discard_batch`. Observed first failure — "exactly one
+    /// terminal marker, matching the un-paused path's one per seat / left: 0 /
+    /// right: 1". The `last_effect_count` assertion below is downstream of that
+    /// one and never gets to run, so it is the marker count that discriminates.
+    #[test]
+    fn drained_discard_batch_emits_its_terminal_marker_and_counts_across_the_pause() {
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(100);
+        let hand = deal_hand(&mut state, 0, 2);
+        let already_discarded = ObjectId(9_001);
+
+        park_batch(&mut state, source, PlayerId(0), hand.clone(), None);
+        state
+            .pending_discard_batch
+            .as_mut()
+            .unwrap()
+            .preceding_events = vec![GameEvent::Discarded {
+            player_id: PlayerId(0),
+            object_id: already_discarded,
+            source_id: Some(source),
+        }];
+
+        let mut events = Vec::new();
+        let outcome = drain_pending_discard_batch(&mut state, &mut events).unwrap();
+
+        assert!(
+            matches!(outcome, PendingDiscardBatchOutcome::Completed),
+            "the batch owed two cards and no replacement intervened"
+        );
+        // Reach guard: the two owed cards really were discarded, so the count
+        // below cannot be a stale read from a run that did nothing.
+        assert_eq!(
+            hand.iter()
+                .filter(|id| state.objects[id].zone == Zone::Graveyard)
+                .count(),
+            2,
+            "reach guard: the drain must finish the parked cursor"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    GameEvent::EffectResolved { kind: EffectKind::Discard, source_id: s, .. }
+                        if *s == source
+                ))
+                .count(),
+            1,
+            "exactly one terminal marker, matching the un-paused path's one per seat"
+        );
+        assert_eq!(
+            state.last_effect_count,
+            Some(3),
+            "the published count spans the pause: 1 pre-pause discard + 2 owed"
+        );
+    }
+
+    /// Drive one `ObjectId` through hand → graveyard → hand → graveyard with the
+    /// production zone authority, returning the live occurrence pinned before
+    /// each hand departure together with that departure's real `ZoneChanged`.
+    ///
+    /// Both records are produced by `GameObject::snapshot_for_zone_change`, so
+    /// the identity under test is the one production writes, not a hand-built
+    /// stand-in. The batch itself is still parked directly because no card in
+    /// the corpus returns a card to hand mid-instruction — see the PR notes.
+    fn hand_departures_across_a_round_trip(
+        state: &mut GameState,
+        card: ObjectId,
+    ) -> [(crate::types::identifiers::ObjectIncarnationRef, GameEvent); 2] {
+        let mut departures = Vec::new();
+        for to in [Zone::Graveyard, Zone::Hand, Zone::Graveyard] {
+            let before =
+                crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&card]);
+            let from_hand = state.objects[&card].zone == Zone::Hand;
+            let mut moved = Vec::new();
+            crate::game::zones::move_to_zone(state, card, to, &mut moved);
+            if from_hand {
+                let event = moved
+                    .into_iter()
+                    .find(|event| {
+                        matches!(
+                            event,
+                            GameEvent::ZoneChanged { object_id, from: Some(Zone::Hand), .. }
+                                if *object_id == card
+                        )
+                    })
+                    .expect("a hand departure emits its ZoneChanged");
+                departures.push((before, event));
+            }
+        }
+        let [first, second]: [_; 2] = departures
+            .try_into()
+            .unwrap_or_else(|_| panic!("the round trip makes exactly two hand departures"));
+        assert_ne!(
+            first.0.incarnation, second.0.incarnation,
+            "reach guard: the round trip must really advance the incarnation, \
+             otherwise the two arms below are the same test twice"
+        );
+        [first, second]
+    }
+
+    /// CR 400.7: "An object that moves from one zone to another becomes a new
+    /// object with no memory of, or relation to, its previous existence."
+    ///
+    /// The parked batch pins the occurrence whose replacement paused. After a
+    /// same-`ObjectId` round trip, a LATER occurrence's hand departure must not
+    /// settle that pause — stamping it would credit the parked discard to an
+    /// object the batch never parked. The matched positive arm proves the pin
+    /// still accepts its own departure, so the negative arm is a discriminator
+    /// and not a blanket refusal to stamp.
+    ///
+    /// REVERT PROBE (RUN, not reasoned): restore the bare-id predicate in
+    /// `stamp_resumed_discard_if_unrecorded` —
+    /// `GameEvent::ZoneChanged { object_id, from: Some(Zone::Hand), .. } if
+    /// *object_id == card`. Observed failure — "a later incarnation's hand
+    /// departure must not settle this pause / left: 1 / right: 0". The positive
+    /// arm keeps passing under the revert, which is what makes the negative arm
+    /// the discriminating one.
+    #[test]
+    fn resumed_discard_stamp_rejects_a_later_incarnation_of_the_paused_card() {
+        let stamped_discards = |state: &mut GameState,
+                                card: ObjectId,
+                                pin: crate::types::identifiers::ObjectIncarnationRef,
+                                departure: GameEvent| {
+            let source = ObjectId(100);
+            park_batch(state, source, PlayerId(0), Vec::new(), None);
+            state.pending_discard_batch.as_mut().unwrap().paused_card = pin;
+            let mut events = vec![departure];
+            drain_pending_discard_batch(state, &mut events).unwrap();
+            events
+                .iter()
+                .filter(|event| {
+                    matches!(event, GameEvent::Discarded { object_id, .. } if *object_id == card)
+                })
+                .count()
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(4_000),
+            PlayerId(0),
+            "Round Tripper".to_string(),
+            Zone::Hand,
+        );
+        let [(first_pin, first_departure), (later_pin, later_departure)] =
+            hand_departures_across_a_round_trip(&mut state, card);
+
+        // Negative arm: the pause parked the FIRST occurrence; the resume window
+        // carries only the LATER occurrence's departure.
+        assert_eq!(
+            stamped_discards(&mut state, card, first_pin, later_departure),
+            0,
+            "a later incarnation's hand departure must not settle this pause"
+        );
+
+        // Positive arm: the same pin, offered its own departure, still stamps.
+        assert_eq!(
+            stamped_discards(&mut state, card, first_pin, first_departure.clone()),
+            1,
+            "the parked occurrence's own departure must still stamp exactly one \
+             Discarded, or the negative arm above proves nothing"
+        );
+
+        // The later pin is equally bound: it accepts its own departure and not
+        // the earlier one, so the predicate is an equality on the occurrence
+        // rather than an ordering test.
+        assert_eq!(
+            stamped_discards(&mut state, card, later_pin, first_departure),
+            0,
+            "an earlier incarnation's departure must not settle a later pause"
+        );
+    }
+
+    /// CR 608.2c + CR 101.3: the drain's per-seat resumption boundary.
+    ///
+    /// `cost_payment_failed_flag` is per-iteration. Seat 1 is empty-handed, so
+    /// its mandatory discard fails (`discard.rs`'s `count == 0 && !up_to` arm)
+    /// and raises the flag; seat 2 then succeeds. Without the reset, seat 1's
+    /// failure leaks into seat 2's `IfCurrentScopeSucceeded` read — the same
+    /// leak the driver's own loop resets against for Refurbished Familiar and
+    /// Aclazotz, Deepest Betrayal.
+    ///
+    /// REVERT PROBE (RUN, not reasoned): delete
+    /// `state.cost_payment_failed_flag = false;` from the drain's fan-out loop.
+    /// Observed failure — "an earlier seat's mandatory failure must not leak
+    /// into a later seat".
+    #[test]
+    fn drained_fan_out_resets_the_cost_payment_failure_between_seats() {
+        let mut state = GameState::new(FormatConfig::standard(), 4, 42);
+        let source = ObjectId(100);
+        // Seat 1 empty (raises the flag); seat 2 holds one card, so its forced
+        // discard succeeds. The roster deliberately ends on the succeeding seat.
+        let seat2 = deal_hand(&mut state, 2, 1);
+
+        park_batch(&mut state, source, PlayerId(0), Vec::new(), None);
+        state.pending_discard_batch.as_mut().unwrap().fan_out = Some(fan_out_of(
+            source,
+            vec![PlayerId(1), PlayerId(2)],
+            vec![PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)],
+        ));
+
+        let mut events = Vec::new();
+        drain_pending_discard_batch(&mut state, &mut events).unwrap();
+
+        // Reach guards: both seats really ran. Without them the `false` below
+        // could hold vacuously on a roster that was never iterated.
+        assert_eq!(
+            state.objects[&seat2[0]].zone,
+            Zone::Graveyard,
+            "reach guard: the later seat's forced discard must have run"
+        );
+        assert!(
+            state.players[1].hand.is_empty(),
+            "reach guard: the earlier seat must be the empty-handed one"
+        );
+        assert!(
+            !state.cost_payment_failed_flag,
+            "an earlier seat's mandatory failure must not leak into a later seat"
+        );
+    }
+
+    /// CR 800.4a ("all objects (see rule 109) owned by that player leave the
+    /// game …") vs CR 800.4i ("the effect uses the last known information about
+    /// that player before they left the game"): a seat that leaves mid-pause is
+    /// dropped from the ITERATION roster and kept in the reduction DOMAIN.
+    ///
+    /// The asymmetry is the whole point of the test: the two lists look like
+    /// duplicates, so the natural "tidy-up" is to prune both. Latching the
+    /// domain is PARITY with the un-paused driver (which derives it once at
+    /// clause entry) rather than a rule; CR 800.4i is what keeps the departed
+    /// seat well-defined in it.
+    ///
+    /// WHAT THIS PINS, stated precisely because the honest scope is narrower
+    /// than the motivation: it pins the SHAPE of the two lists after an
+    /// elimination, and nothing downstream of them. The consequence that makes
+    /// the shape matter — a domain short one zero-contributor changes what a
+    /// `Min` over it answers (`fill_zero_contributors`; `Sum` and `Max` are
+    /// blind to zeros) — is NOT exercised here: no seat in this fixture holds a
+    /// hand, so the drain never runs. Treat that consequence as the reason the
+    /// pin exists, not as something this test measures.
+    ///
+    /// Lives here rather than beside the prune so it can reuse the fan-out
+    /// fixture; `elimination.rs` carries a pointer to it at the prune site.
+    ///
+    /// REVERT PROBES (both RUN, not reasoned):
+    ///   * delete `fan_out.remaining_players.retain(..)` in `elimination.rs`
+    ///     -> the roster assertion fails;
+    ///   * add a matching `fan_out.matching_players.retain(..)` beside it
+    ///     -> the domain assertion fails.
+    #[test]
+    fn eliminating_a_seat_prunes_the_paused_roster_but_not_its_reduction_domain() {
+        let mut state = GameState::new(FormatConfig::standard(), 4, 42);
+        let source = ObjectId(100);
+        let seats = vec![PlayerId(1), PlayerId(2), PlayerId(3)];
+
+        park_batch(&mut state, source, PlayerId(0), Vec::new(), None);
+        state.pending_discard_batch.as_mut().unwrap().fan_out =
+            Some(fan_out_of(source, seats.clone(), seats.clone()));
+
+        let mut events = Vec::new();
+        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+
+        let fan_out = state
+            .pending_discard_batch
+            .as_ref()
+            .expect("the batch survives an unrelated seat leaving")
+            .fan_out
+            .as_ref()
+            .expect("so does its fan-out");
+        assert_eq!(
+            fan_out.remaining_players,
+            vec![PlayerId(1), PlayerId(3)],
+            "CR 800.4a: a departed seat's objects leave the game, so it has no \
+             hand left and iterating it can only be a no-op"
+        );
+        assert_eq!(
+            fan_out.matching_players, seats,
+            "CR 800.4i: the reduction domain is latched at the pause and keeps \
+             the departed seat, whose truthful contribution is zero"
+        );
+    }
+
+    /// CR 608.2f: BOUNDARY. A later seat that pauses on something which is NOT
+    /// a batch pause — here an interactive `WaitingFor::DiscardChoice` — hands
+    /// the remaining seats back to the generic continuation queue exactly as the
+    /// driver does, and leaves no stale batch live.
+    ///
+    /// That interactive route is the one this change deliberately does NOT
+    /// repair; this test pins that it is handed back cleanly rather than
+    /// corrupted.
+    ///
+    /// REVERT PROBE: delete the leg-rebuild loop in the drain's non-batch pause
+    /// fallback. The remaining seats are silently dropped and
+    /// `active_ability_continuation().is_some()` fails.
+    #[test]
+    fn drained_fan_out_returns_an_interactive_seat_to_the_continuation_path() {
+        let mut state = GameState::new(FormatConfig::standard(), 4, 42);
+        let source = ObjectId(100);
+        // Seat 1 holds two cards facing "discard a card": it must choose.
+        deal_hand(&mut state, 1, 2);
+        deal_hand(&mut state, 2, 1);
+        deal_hand(&mut state, 3, 1);
+
+        park_batch(&mut state, source, PlayerId(0), Vec::new(), None);
+        state.pending_discard_batch.as_mut().unwrap().fan_out = Some(fan_out_of(
+            source,
+            vec![PlayerId(1), PlayerId(2), PlayerId(3)],
+            vec![PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)],
+        ));
+
+        let mut events = Vec::new();
+        let outcome = drain_pending_discard_batch(&mut state, &mut events).unwrap();
+
+        assert!(
+            matches!(outcome, PendingDiscardBatchOutcome::PausedForReplacement),
+            "an unfinished clause must report a pause, not completion"
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::DiscardChoice { .. }),
+            "reach guard: seat 1 must actually be sitting on its choice, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            state.pending_discard_batch.is_none(),
+            "no stale batch may be left live once the clause left this path"
+        );
+        assert!(
+            state.active_ability_continuation().is_some(),
+            "seats 2 and 3 must be returned to the generic continuation queue"
+        );
+    }
+
+    /// MULTI-AUTHORITY. The driver hand-off's identity triple must reject a
+    /// batch that is not the one this clause's seat just parked.
+    ///
+    /// The reachable hostile shape: the running clause's seat pauses on an
+    /// INTERACTIVE `DiscardChoice` (which parks no batch) while an unrelated
+    /// batch already sits in the single-slot carrier. Without the triple the
+    /// driver would hand this clause's roster to that stranger.
+    ///
+    /// REVERT PROBES (all three RUN, not reasoned), one per conjunct in the
+    /// driver's `handed_to_discard_batch` predicate. Each independently reddens
+    /// exactly one arm, and all three land on the SAME assertion — the
+    /// sentinel-roster one — with only the arm label differing:
+    ///   (a) delete `batch.source_id == scoped_template.source_id` → observed
+    ///       "foreign_source: a parked batch's roster must not be overwritten by
+    ///       this clause / left: [PlayerId(1), PlayerId(2), PlayerId(3)] /
+    ///       right: [PlayerId(3)]".
+    ///   (b) delete `batch.player == *pid` → same assertion, "foreign_seat:".
+    ///   (c) delete `batch.fan_out.is_none()` → same assertion,
+    ///       "already_handed_off:".
+    #[test]
+    fn hand_off_identity_triple_rejects_a_foreign_batch() {
+        // Sentinel roster, distinguishable from the clause's real remainder
+        // [P1, P2, P3], so an unwanted hand-off is visible.
+        const SENTINEL: [PlayerId; 1] = [PlayerId(3)];
+
+        for arm in ["foreign_source", "foreign_seat", "already_handed_off"] {
+            let mut state = GameState::new(FormatConfig::standard(), 4, 42);
+            let clause_source = ObjectId(100);
+            // Seat 0 holds two cards facing "discard a card": it must choose,
+            // so the fan-out pauses WITHOUT parking a batch of its own.
+            deal_hand(&mut state, 0, 2);
+            deal_hand(&mut state, 1, 1);
+            deal_hand(&mut state, 2, 1);
+            deal_hand(&mut state, 3, 1);
+
+            let (stale_source, stale_player, stale_fan_out) = match arm {
+                "foreign_source" => (ObjectId(999), PlayerId(0), None),
+                "foreign_seat" => (clause_source, PlayerId(1), None),
+                _ => (
+                    clause_source,
+                    PlayerId(0),
+                    Some(fan_out_of(
+                        clause_source,
+                        SENTINEL.to_vec(),
+                        SENTINEL.to_vec(),
+                    )),
+                ),
+            };
+            park_batch(
+                &mut state,
+                stale_source,
+                stale_player,
+                Vec::new(),
+                stale_fan_out,
+            );
+
+            let mut events = Vec::new();
+            resolve_ability_chain(
+                &mut state,
+                &scoped_discard_one(clause_source),
+                &mut events,
+                0,
+            )
+            .unwrap();
+
+            assert!(
+                matches!(state.waiting_for, WaitingFor::DiscardChoice { .. }),
+                "{arm}: reach guard — the clause must actually pause on seat 0's choice, \
+                 got {:?}",
+                state.waiting_for
+            );
+            let batch = state
+                .pending_discard_batch
+                .as_ref()
+                .unwrap_or_else(|| panic!("{arm}: the stale batch must still be parked"));
+            assert_eq!(
+                batch.source_id, stale_source,
+                "{arm}: the stale batch's identity must be untouched"
+            );
+            match &batch.fan_out {
+                None => assert_ne!(
+                    arm, "already_handed_off",
+                    "the already-handed-off arm must keep its own fan-out"
+                ),
+                Some(fan_out) => assert_eq!(
+                    fan_out.remaining_players, SENTINEL,
+                    "{arm}: a parked batch's roster must not be overwritten by this clause"
+                ),
+            }
+            assert!(
+                state.active_ability_continuation().is_some(),
+                "{arm}: the driver must fall through to the ordinary per-seat leg path"
+            );
+        }
+    }
+
+    /// Kind-keying `previous_effect_counts_by_player_from_events` is
+    /// behaviour-preserving: the producer set is exactly Discard / DiscardCard /
+    /// ChangeZoneAll, and nothing else opens a count window.
+    ///
+    /// REVERT PROBE (RUN, not reasoned): add `EffectKind::Draw` to the producer
+    /// arm of the opening `match kind`. Observed failure is NOT a test assertion
+    /// — it is the production `unreachable!("producer kind was selected above")`
+    /// in the inner match, because opening the outer gate without adding the
+    /// matching inner arm makes the two disagree. Still discriminating (the run
+    /// goes red on Draw's row and cannot go green), but a reader should expect a
+    /// panic from production rather than an `assert!` message.
+    #[test]
+    fn count_authority_producer_set_is_closed_over_effect_kind() {
+        let source = ObjectId(10);
+        for kind in [
+            EffectKind::Discard,
+            EffectKind::DiscardCard,
+            EffectKind::ChangeZoneAll,
+        ] {
+            assert!(
+                previous_effect_counts_by_player_from_events(
+                    kind,
+                    source,
+                    &[resolved_event(kind, source)],
+                )
+                .is_some(),
+                "{kind:?} is a count producer"
+            );
+        }
+        for kind in [
+            EffectKind::Draw,
+            EffectKind::LoseLife,
+            EffectKind::DealDamage,
+        ] {
+            assert!(
+                previous_effect_counts_by_player_from_events(
+                    kind,
+                    source,
+                    &[resolved_event(kind, source)],
+                )
+                .is_none(),
+                "{kind:?} publishes no per-player table"
+            );
+        }
+    }
+
     #[test]
     fn previous_effect_amount_for_damage_ignores_counter_side_effects() {
         let mut state = GameState::new_two_player(42);
@@ -18804,6 +20169,7 @@ mod tests {
                 amount: QuantityExpr::Ref {
                     qty: QuantityRef::PreviousEffectAmount {
                         channel: crate::types::ability::DamageChannel::Total,
+                        aggregate: AggregateFunction::Sum,
                     },
                 },
                 player: TargetFilter::Controller,
@@ -23187,8 +24553,20 @@ mod tests {
         assert_eq!(state.players[1].graveyard.len(), 1);
     }
 
-    #[test]
-    fn player_scope_discard_then_windfall_draws_greatest_discard_count() {
+    /// CR 608.2c + CR 701.9a + CR 121.2: the discard→draw "this way"
+    /// back-reference, exercised on ONE board across both aggregates.
+    ///
+    /// Libraries hold 6 (not 3, as the vacuous predecessor did) so neither
+    /// aggregate is library-capped: hands 3/1 make MAX 3, SUM 4, MIN 1 and the
+    /// per-player reading 3/1 four mutually distinguishable outcomes. The
+    /// predecessor seeded 3-card libraries, so MAX 3 and SUM 4 both capped at 3
+    /// and its assertions held under either aggregate — which is why #7277
+    /// shipped with the bug.
+    ///
+    /// Returns `(hands, graveyards)` per seat.
+    fn run_player_scope_discard_then_draw(
+        aggregate: AggregateFunction,
+    ) -> (Vec<usize>, Vec<usize>) {
         let mut state = GameState::new_two_player(42);
         for i in 0..3 {
             create_object(
@@ -23198,6 +24576,8 @@ mod tests {
                 format!("P0 Hand {i}"),
                 Zone::Hand,
             );
+        }
+        for i in 0..6 {
             create_object(
                 &mut state,
                 CardId(60 + i),
@@ -23243,6 +24623,7 @@ mod tests {
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::PreviousEffectAmount {
                         channel: crate::types::ability::DamageChannel::Total,
+                        aggregate,
                     },
                 },
                 target: TargetFilter::Controller,
@@ -23257,10 +24638,45 @@ mod tests {
         let mut events = Vec::new();
         resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
 
-        assert_eq!(state.players[0].hand.len(), 3);
-        assert_eq!(state.players[1].hand.len(), 3);
-        assert_eq!(state.players[0].graveyard.len(), 3);
-        assert_eq!(state.players[1].graveyard.len(), 1);
+        (
+            vec![state.players[0].hand.len(), state.players[1].hand.len()],
+            vec![
+                state.players[0].graveyard.len(),
+                state.players[1].graveyard.len(),
+            ],
+        )
+    }
+
+    /// V6 discriminator — CR 608.2c + CR 608.2i: `Max` reads the GREATEST single
+    /// player's discard (3), not the cross-player total. Flip this test's
+    /// `aggregate` to `Sum` and the hands become `[4, 4]` ⇒ FAILS. That field
+    /// swap on an otherwise byte-identical board IS the discrimination evidence;
+    /// neither member compiles at BASE, where the field does not exist.
+    #[test]
+    fn player_scope_discard_then_draw_greatest_uses_max_aggregate() {
+        let (hands, graveyards) = run_player_scope_discard_then_draw(AggregateFunction::Max);
+        assert_eq!(
+            hands,
+            vec![3, 3],
+            "Max must draw the greatest single player's discard (3), not the sum (4)"
+        );
+        // CR 701.9a reach guard: the discard step really ran and moved 3 and 1
+        // cards to the graveyards, so this cannot pass on an unresolved chain.
+        assert_eq!(graveyards, vec![3, 1], "both players must have discarded");
+    }
+
+    /// V6 same-board control — the `Sum` default keeps reading the cross-player
+    /// total (4) on the identical board, so the Max assertion above is pinned by
+    /// a measured contrast rather than by a single reading.
+    #[test]
+    fn player_scope_discard_then_draw_total_uses_sum_aggregate() {
+        let (hands, graveyards) = run_player_scope_discard_then_draw(AggregateFunction::Sum);
+        assert_eq!(
+            hands,
+            vec![4, 4],
+            "Sum must draw the cross-player total (3 + 1), the pre-change behaviour"
+        );
+        assert_eq!(graveyards, vec![3, 1], "both players must have discarded");
     }
 
     /// CR 608.2c + CR 118.12 + CR 701.9: Read the Runes — draw X, then for
@@ -23754,6 +25170,7 @@ mod tests {
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::PreviousEffectAmount {
                         channel: crate::types::ability::DamageChannel::Total,
+                        aggregate: AggregateFunction::Sum,
                     },
                 },
                 target: TargetFilter::Controller,
@@ -30310,14 +31727,17 @@ mod tests {
             },
         ];
 
-        let counts =
-            previous_effect_counts_by_player_from_events(&discard_count_effect(), source, &events)
-                .expect("the exact discard terminal marker is present");
+        let counts = previous_effect_counts_by_player_from_events(
+            EffectKind::from(&discard_count_effect()),
+            source,
+            &events,
+        )
+        .expect("the exact discard terminal marker is present");
         assert_eq!(counts, HashMap::from([(PlayerId(0), 1)]));
 
         assert!(
             previous_effect_counts_by_player_from_events(
-                &discard_count_effect(),
+                EffectKind::from(&discard_count_effect()),
                 source,
                 &[resolved_event(EffectKind::ChangeZoneAll, source)],
             )
@@ -30326,7 +31746,7 @@ mod tests {
         );
         assert!(
             previous_effect_counts_by_player_from_events(
-                &discard_count_effect(),
+                EffectKind::from(&discard_count_effect()),
                 source,
                 &[resolved_event(EffectKind::Discard, other_source)],
             )
@@ -30335,7 +31755,7 @@ mod tests {
         );
         assert!(
             previous_effect_counts_by_player_from_events(
-                &discard_count_effect(),
+                EffectKind::from(&discard_count_effect()),
                 source,
                 &events[..2],
             )
@@ -30357,7 +31777,11 @@ mod tests {
             zone_changed_event(ObjectId(2), PlayerId(1)),
         ];
         assert_eq!(
-            previous_effect_counts_by_player_from_events(&effect, source, &before_then_after),
+            previous_effect_counts_by_player_from_events(
+                EffectKind::from(&effect),
+                source,
+                &before_then_after
+            ),
             Some(HashMap::from([(PlayerId(0), 1)])),
             "zone changes after the final marker belong to later work"
         );
@@ -30369,14 +31793,18 @@ mod tests {
             resolved_event(EffectKind::ChangeZoneAll, source),
         ];
         assert_eq!(
-            previous_effect_counts_by_player_from_events(&effect, source, &two_same_source_moves),
+            previous_effect_counts_by_player_from_events(
+                EffectKind::from(&effect),
+                source,
+                &two_same_source_moves
+            ),
             Some(HashMap::from([(PlayerId(0), 1), (PlayerId(1), 1)])),
             "the final same-source marker aggregates the completed scoped moves"
         );
 
         assert_eq!(
             previous_effect_counts_by_player_from_events(
-                &effect,
+                EffectKind::from(&effect),
                 source,
                 &[resolved_event(EffectKind::ChangeZoneAll, source)],
             ),
@@ -30932,6 +32360,7 @@ mod tests {
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::PreviousEffectAmount {
                         channel: DamageChannel::Total,
+                        aggregate: AggregateFunction::Sum,
                     },
                 },
                 target: TargetFilter::Controller,
@@ -31249,6 +32678,7 @@ mod tests {
                 amount: QuantityExpr::Ref {
                     qty: QuantityRef::PreviousEffectAmount {
                         channel: DamageChannel::Total,
+                        aggregate: AggregateFunction::Sum,
                     },
                 },
                 target: None,
@@ -31264,6 +32694,7 @@ mod tests {
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::PreviousEffectAmount {
                         channel: DamageChannel::Total,
+                        aggregate: AggregateFunction::Sum,
                     },
                 },
                 target: TargetFilter::Controller,
@@ -31340,6 +32771,7 @@ mod tests {
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::PreviousEffectAmount {
                         channel: DamageChannel::Total,
+                        aggregate: AggregateFunction::Sum,
                     },
                 },
                 target: TargetFilter::SelfRef,

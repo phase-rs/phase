@@ -19077,6 +19077,7 @@ fn trigger_coalition_relic_charge_counter_drain() {
                         QuantityExpr::Ref {
                             qty: QuantityRef::PreviousEffectAmount {
                                 channel: crate::types::ability::DamageChannel::Total,
+                                aggregate: AggregateFunction::Sum,
                             }
                         },
                         "for-each tail must dispatch to PreviousEffectAmount"
@@ -28677,6 +28678,7 @@ fn valakut_exploration_end_step_trigger_hoists_gate_and_keeps_damage_shape() {
                     qty:
                         QuantityRef::PreviousEffectAmount {
                             channel: DamageChannel::Total,
+                            aggregate: AggregateFunction::Sum,
                         },
                 },
             player_filter: PlayerFilter::Opponent,

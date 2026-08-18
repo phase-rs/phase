@@ -1036,6 +1036,40 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
+            // CR 608.2c: a discard instruction parked mid-batch by a
+            // replacement-application choice finishes what it still owes BEFORE
+            // any parked continuation runs. The resolving effect follows its
+            // instructions in written order, so later instructions cannot resume
+            // until this action has settled and published its terminal result.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.pending_discard_batch.is_some()
+            {
+                match effects::drain_pending_discard_batch(state, events)
+                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+                {
+                    effects::PendingDiscardBatchOutcome::Idle => {}
+                    effects::PendingDiscardBatchOutcome::PausedForReplacement => {
+                        waiting_for = state.waiting_for.clone();
+                        super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                            state,
+                            events,
+                            replacement_action_event_start,
+                        );
+                    }
+                    effects::PendingDiscardBatchOutcome::Completed => {
+                        effects::drain_pending_continuation(state, events);
+                        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                            waiting_for = state.waiting_for.clone();
+                            super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                                state,
+                                events,
+                                replacement_action_event_start,
+                            );
+                        }
+                    }
+                }
+            }
+
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && (state.active_ability_continuation().is_some()
                     || state.active_change_zone_frame().is_some())
@@ -7681,6 +7715,146 @@ mod tests {
         assert!(
             !resident_is_dispatching(&direct),
             "half (iii)'s own positive control: with no dispatch live the same direct call retires it"
+        );
+    }
+
+    /// CR 701.9a vs CR 701.21a: the two adjacent post-replacement drains in
+    /// `handle_choose_replacement` publish their completion DIFFERENTLY, and the
+    /// asymmetry is deliberate. The sacrifice drain stamps
+    /// `ThisWayCause::Sacrificed`; the discard drain immediately below stamps
+    /// nothing, because the UN-paused discard path does not stamp either
+    /// (`grep stamp_active_player_action_completion effects/discard.rs` -> 0), so
+    /// a stamping resume would give a paused discard a provenance its own
+    /// un-paused twin never has.
+    ///
+    /// Nothing else pins this. A reader "fixing the inconsistency" between two
+    /// blocks twenty-five lines apart would silently change `Discarded`-this-way
+    /// provenance for the whole class.
+    ///
+    /// A SOURCE census rather than a behavioural assertion, and that is measured:
+    /// `stamp_active_player_action_completion` early-returns unless an active
+    /// ability continuation frame holds a `CompletePlayerAction` chain, so in a
+    /// drain unit test -- which has neither -- adding the call would change no
+    /// observable state and a behavioural assertion would itself be vacuous.
+    ///
+    /// THE WINDOWS ARE BRACE-BALANCED, NOT END-ANCHORED, and that is the whole
+    /// difficulty of this instrument. An earlier revision ended each slice at a
+    /// guessed marker; the marker for the second window happened to sit inside
+    /// the arm, so the "guarded" region collapsed to **36 characters of a
+    /// five-line arm** and the named revert probe only flipped if a stamp landed
+    /// as the arm's very first statement. A census whose window is wrong reports
+    /// a zero that means nothing, and it reports it silently.
+    ///
+    /// Three defences, because a negative result needs all of them, plus one
+    /// CLOSURE that is deliberately not counted among them:
+    ///   0. the text scanned is the CODE half only, via the shared
+    ///      `source_census` authority. MEASURED INERT on today's tree: raw and
+    ///      stripped text are byte-identical for every quantity this test reads
+    ///      (both anchors and the needle at 1, sacrifice window 716 chars,
+    ///      discard window 281, `drain_pending_continuation` present in both —
+    ///      those two char counts are a SNAPSHOT and will rot on any edit to
+    ///      either arm body; the durable claim is the raw/stripped IDENTITY, not
+    ///      the numbers),
+    ///      which is exactly what `source_census.rs` predicts of any census that
+    ///      scans the real tree. It discriminates nothing here and is listed
+    ///      apart from 1-3 for that reason: it closes a shape not currently
+    ///      present rather than catching one that is;
+    ///   1. each anchor must match EXACTLY ONCE in the file, so a deleted
+    ///      production arm cannot let the scan retarget some other text (this
+    ///      doc comment deliberately never spells an anchor literally);
+    ///   2. each window is closed by brace balance, so it always spans the whole
+    ///      arm body;
+    ///   3. each window asserts its OWN non-degeneracy. The positive control on
+    ///      the sacrifice arm proves the file and that anchor are real, but it
+    ///      says nothing about the extent of the DISCARD window -- and the
+    ///      discard window is the one whose zero carries the claim.
+    ///
+    /// REVERT PROBES:
+    ///   * add a stamp call ANYWHERE in the discard arm -- first statement, last
+    ///     statement, or nested inside its `if` -- and half (b) fails. Only the
+    ///     brace-balanced window makes all three positions equivalent.
+    ///   * delete the sacrifice arm's existing stamp -> half (a) fails.
+    ///   * delete either arm outright -> the exactly-once assertion fails, rather
+    ///     than the scan silently sliding onto other text.
+    #[test]
+    fn the_resumed_discard_drain_does_not_stamp_a_completion_while_its_sacrifice_sibling_does() {
+        /// The arm body that follows `anchor`, delimited by brace balance.
+        fn arm_body<'a>(source: &'a str, anchor: &str) -> &'a str {
+            assert_eq!(
+                source.matches(anchor).count(),
+                1,
+                "anchor {anchor:?} must identify exactly one site; a second \
+                 occurrence lets a deleted arm retarget the scan silently"
+            );
+            let after = source.find(anchor).expect("anchor present") + anchor.len();
+            let open = after
+                + source[after..]
+                    .find('{')
+                    .expect("the arm opens a block after its anchor");
+            let mut depth = 0usize;
+            for (offset, ch) in source[open..].char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return &source[open..=open + offset];
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            panic!("unbalanced braces after {anchor:?}");
+        }
+
+        // Routed through the shared comment authority rather than scanned raw,
+        // and this census is exactly the case that module exists for: half (b)
+        // is a NEGATIVE, so a deleted stamp whose spelling survived in a
+        // trailing `//` inside the discard arm would HOLD the zero and hide the
+        // regression, while a comment merely naming the needle would flip it red
+        // on a pure prose edit.
+        //
+        // SCOPE, because "stripping comments" would overclaim: `code_lines`
+        // removes whole-line and trailing `//` comments and a LEADING block
+        // comment. The interior lines of a multi-line `/* … */` survive and are
+        // still scanned — `source_census.rs` says so in its own doc. So a block
+        // comment inside the discard arm naming the needle would still flip
+        // half (b) red. That residue is fail-CLOSED (spurious red, never a
+        // missed site), which is the direction a census may fail in.
+        let source = &crate::source_census::code_lines(include_str!("engine_replacement.rs"));
+        let needle = concat!("stamp_active_player_action_", "completion(");
+        let sacrifice_anchor = concat!("PendingPlayerScopeSacrifice", "Outcome::Completed {");
+        let discard_anchor = concat!("PendingDiscardBatch", "Outcome::Completed =>");
+
+        let sacrifice = arm_body(source, sacrifice_anchor);
+        let discard = arm_body(source, discard_anchor);
+
+        // (0) Non-degeneracy, asserted per window. Both arms run a multi-line
+        // body ending in a `drain_pending_continuation` call guarded by a
+        // `waiting_for` re-check, so a window that cannot see that call has not
+        // spanned its arm and any verdict drawn from it is worthless.
+        for (label, window) in [("sacrifice", sacrifice), ("discard", discard)] {
+            assert!(
+                window.contains("drain_pending_continuation"),
+                "{label} window must span its whole arm body; it stops before the \
+                 arm's last statement, so a scan of it proves nothing (got {} chars)",
+                window.len()
+            );
+        }
+
+        // (a) Positive control: proves the instrument finds a stamp where one
+        // exists. Necessary but NOT sufficient for (b) -- different window.
+        assert!(
+            sacrifice.contains(needle),
+            "(a) positive control: the sacrifice arm must stamp, or this scan is \
+             reading the wrong region and (b)'s zero would mean nothing"
+        );
+
+        // (b) The claim.
+        assert!(
+            !discard.contains(needle),
+            "(b) the resumed discard must publish exactly what the un-paused \
+             discard publishes -- no CompletePlayerAction stamp"
         );
     }
 }

@@ -164,6 +164,14 @@ fn random_discard_cost_resumes_its_payment_after_an_accepted_replacement() {
         runner.state().pending_cost_move_resume.is_some(),
         "the unless-payment continuation must be persisted while the choice is open"
     );
+    // NEGATIVE, paired with the positive reach guard directly above: the EFFECT
+    // layer's batch carrier must stay empty for a COST payment. The assertion is
+    // non-vacuous precisely because the line above proves a random discard batch
+    // really did pause here — only the layer differs.
+    assert!(
+        runner.state().pending_discard_batch.is_none(),
+        "a cost-layer random discard must not park an EFFECT batch (DiscardCause::Cost)"
+    );
     let accept_idx = candidates
         .iter()
         .position(|c| c.description == "Accept")
@@ -314,5 +322,84 @@ fn random_discard_cost_with_no_cards_still_sacrifices() {
     assert!(
         runner.state().pending_cost_move_resume.is_none(),
         "nothing may be left parked"
+    );
+}
+
+/// Hymn to Tourach's printed Oracle text (Scryfall, verified verbatim
+/// 2026-08-16) — the EFFECT layer's multi-pick random discard, and the only
+/// selection mode besides the forced whole-hand branch that can lose cards to a
+/// mid-batch pause.
+const HYMN_TO_TOURACH: &str = "Target player discards two cards at random.";
+
+/// CR 701.9b + CR 608.2c: an EFFECT-caused random discard that pauses on its
+/// first pick must still make its second one.
+///
+/// This is the random sibling of the forced whole-hand arm in
+/// `windfall_greatest_discard_aggregate.rs`. The gate-2 `Moved` redirect fires
+/// on every VICTIM card, so the batch pauses on pick 1, resumes, pauses again on
+/// pick 2, and resumes — two prompts, two cards gone.
+///
+/// FIXTURE NOTE (measured, not assumed). The redirect is narrowed with
+/// `Not { SpecificObject { id: hymn } }` rather than left at `valid_card: None`.
+/// An unnarrowed redirect also watches the SPELL's own CR 608.2n stack →
+/// graveyard move, and that move happens while the first pick's choice is still
+/// parked: `pending_replacement` is a single slot, so the spell's move overwrote
+/// the victim's parked choice and the victim never left the hand. Measured on
+/// this fixture at this tip — prompt #0's `pending_replacement` was
+/// `ZoneChange { object_id: <Hymn>, from: Stack, to: Graveyard }`, and the
+/// first-picked victim stayed in `Zone::Hand` for the rest of the game. The
+/// overwrite was already in place at prompt #0, i.e. before any resume code
+/// runs, so it is a single-slot `pending_replacement` defect independent of the
+/// batch cursor this test covers. It is NOT repaired here; the fixture excludes
+/// the spell instead of silently absorbing it.
+///
+/// Discriminating: at the pre-fix tip the effect layer threw the returned cursor
+/// away, so exactly ONE card left the hand and exactly ONE prompt was raised.
+/// The prompt count is the reach guard — a run that raised no prompt never
+/// exercised the pause path and could satisfy a bare zone check for the wrong
+/// reason.
+#[test]
+fn effect_random_discard_finishes_its_batch_after_a_replacement_pause() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+    let hymn = scenario
+        .add_spell_to_hand_from_oracle(P0, "Hymn to Tourach", false, HYMN_TO_TOURACH)
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+    scenario
+        .add_creature(P1, "Graveyard Warden", 1, 1)
+        .with_replacement_definition(optional_graveyard_exile_replacement().valid_card(
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::SpecificObject { id: hymn }),
+            },
+        ));
+    let hand: Vec<ObjectId> = (0..4)
+        .map(|i| scenario.add_card_to_hand(P1, &format!("Victim Card {i}")))
+        .collect();
+    let mut runner = scenario.build();
+
+    runner.cast(hymn).target_player(P1).resolve();
+
+    let mut prompts = 0;
+    for _ in 0..16 {
+        let WaitingFor::ReplacementChoice { candidates, .. } = runner.state().waiting_for.clone()
+        else {
+            break;
+        };
+        let decline = candidates
+            .iter()
+            .position(|c| c.description == "Decline")
+            .expect("a Decline option");
+        prompts += 1;
+        runner
+            .act(GameAction::ChooseReplacement { index: decline })
+            .expect("declining the redirect must be accepted");
+    }
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        (prompts, moved_out_of_hand(&runner, &hand)),
+        (2, 2),
+        "both random picks must be made across the pause (prompts, cards gone)"
     );
 }
