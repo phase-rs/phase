@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-08-18T00:00:00Z",
+  "updated": "2026-08-19T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -730,6 +730,116 @@
       ]
     },
     {
+      "name": "Mono-Green Landfall",
+      "author": "MTGGoldfish",
+      "colors": [
+        "G"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Esper Origins"
+        },
+        {
+          "count": 3,
+          "name": "Ba Sing Se"
+        },
+        {
+          "count": 4,
+          "name": "Earthbender Ascension"
+        },
+        {
+          "count": 4,
+          "name": "Escape Tunnel"
+        },
+        {
+          "count": 4,
+          "name": "Fabled Passage"
+        },
+        {
+          "count": 1,
+          "name": "Meltstrider's Resolve"
+        },
+        {
+          "count": 2,
+          "name": "Keen-Eyed Curator"
+        },
+        {
+          "count": 1,
+          "name": "Surrak, Elusive Hunter"
+        },
+        {
+          "count": 3,
+          "name": "Mightform Harmonizer"
+        },
+        {
+          "count": 1,
+          "name": "Demolition Field"
+        },
+        {
+          "count": 4,
+          "name": "Sapling Nursery"
+        },
+        {
+          "count": 4,
+          "name": "Sazh's Chocobo"
+        },
+        {
+          "count": 14,
+          "name": "Forest"
+        },
+        {
+          "count": 4,
+          "name": "Llanowar Elves"
+        },
+        {
+          "count": 4,
+          "name": "Icetill Explorer"
+        },
+        {
+          "count": 1,
+          "name": "Lumbering Worldwagon"
+        },
+        {
+          "count": 2,
+          "name": "Shared Roots"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Leatherhead, Swamp Stalker"
+        },
+        {
+          "count": 2,
+          "name": "Surrak, Elusive Hunter"
+        },
+        {
+          "count": 4,
+          "name": "Mossborn Hydra"
+        },
+        {
+          "count": 3,
+          "name": "Torpor Orb"
+        },
+        {
+          "count": 2,
+          "name": "Meltstrider's Resolve"
+        },
+        {
+          "count": 1,
+          "name": "Keen-Eyed Curator"
+        },
+        {
+          "count": 2,
+          "name": "Warg Tactics"
+        }
+      ]
+    },
+    {
       "name": "Azorius Tempo",
       "author": "MTGGoldfish",
       "colors": [
@@ -853,116 +963,6 @@
         {
           "count": 1,
           "name": "King T'Challa"
-        }
-      ]
-    },
-    {
-      "name": "Mono-Green Landfall",
-      "author": "MTGGoldfish",
-      "colors": [
-        "G"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 3,
-          "name": "Ba Sing Se"
-        },
-        {
-          "count": 4,
-          "name": "Esper Origins"
-        },
-        {
-          "count": 4,
-          "name": "Fabled Passage"
-        },
-        {
-          "count": 4,
-          "name": "Icetill Explorer"
-        },
-        {
-          "count": 4,
-          "name": "Escape Tunnel"
-        },
-        {
-          "count": 4,
-          "name": "Earthbender Ascension"
-        },
-        {
-          "count": 1,
-          "name": "Meltstrider's Resolve"
-        },
-        {
-          "count": 3,
-          "name": "Mightform Harmonizer"
-        },
-        {
-          "count": 1,
-          "name": "Royal Treatment"
-        },
-        {
-          "count": 1,
-          "name": "Demolition Field"
-        },
-        {
-          "count": 4,
-          "name": "Sazh's Chocobo"
-        },
-        {
-          "count": 2,
-          "name": "Shared Roots"
-        },
-        {
-          "count": 1,
-          "name": "Surrak, Elusive Hunter"
-        },
-        {
-          "count": 14,
-          "name": "Forest"
-        },
-        {
-          "count": 2,
-          "name": "Keen-Eyed Curator"
-        },
-        {
-          "count": 4,
-          "name": "Llanowar Elves"
-        },
-        {
-          "count": 4,
-          "name": "Sapling Nursery"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 3,
-          "name": "Torpor Orb"
-        },
-        {
-          "count": 1,
-          "name": "Leatherhead, Swamp Stalker"
-        },
-        {
-          "count": 2,
-          "name": "Meltstrider's Resolve"
-        },
-        {
-          "count": 2,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 4,
-          "name": "Mossborn Hydra"
-        },
-        {
-          "count": 2,
-          "name": "Surrak, Elusive Hunter"
-        },
-        {
-          "count": 1,
-          "name": "Keen-Eyed Curator"
         }
       ]
     },
@@ -1238,31 +1238,7 @@
       "main": [
         {
           "count": 4,
-          "name": "Burst Lightning"
-        },
-        {
-          "count": 4,
-          "name": "Greasewrench Goblin"
-        },
-        {
-          "count": 2,
-          "name": "Tersa Lightshatter"
-        },
-        {
-          "count": 4,
-          "name": "Nova Hellkite"
-        },
-        {
-          "count": 2,
-          "name": "Sunspine Lynx"
-        },
-        {
-          "count": 2,
-          "name": "Hexing Squelcher"
-        },
-        {
-          "count": 3,
-          "name": "Zhao, the Moon Slayer"
+          "name": "Sarkhan, Dragon Ascendant"
         },
         {
           "count": 4,
@@ -1270,27 +1246,59 @@
         },
         {
           "count": 4,
-          "name": "Shock"
+          "name": "Smaug the Magnificent"
+        },
+        {
+          "count": 4,
+          "name": "Magda, the Hoardmaster"
+        },
+        {
+          "count": 2,
+          "name": "Magmatic Hellkite"
+        },
+        {
+          "count": 2,
+          "name": "Sunspine Lynx"
         },
         {
           "count": 3,
           "name": "Soulstone Sanctuary"
         },
         {
-          "count": 1,
-          "name": "Tersa Lightshatter"
+          "count": 2,
+          "name": "Channeled Dragonfire"
         },
         {
           "count": 4,
-          "name": "Emberheart Challenger"
+          "name": "Burst Lightning"
+        },
+        {
+          "count": 1,
+          "name": "Taurean Mauler"
+        },
+        {
+          "count": 1,
+          "name": "Scorching Shot"
+        },
+        {
+          "count": 2,
+          "name": "Lightning Strike"
+        },
+        {
+          "count": 4,
+          "name": "Nova Hellkite"
+        },
+        {
+          "count": 1,
+          "name": "Taurean Mauler"
         },
         {
           "count": 20,
           "name": "Mountain"
         },
         {
-          "count": 3,
-          "name": "Channeled Dragonfire"
+          "count": 2,
+          "name": "Shock"
         }
       ],
       "sideboard": [
@@ -1300,26 +1308,34 @@
         },
         {
           "count": 1,
-          "name": "Sunspine Lynx"
+          "name": "Scorching Shot"
+        },
+        {
+          "count": 2,
+          "name": "The Legend of Roku"
+        },
+        {
+          "count": 1,
+          "name": "Slagstorm"
+        },
+        {
+          "count": 1,
+          "name": "Sear"
         },
         {
           "count": 2,
           "name": "Ghost Vacuum"
         },
         {
-          "count": 3,
-          "name": "Scorching Shot"
-        },
-        {
-          "count": 2,
+          "count": 1,
           "name": "Slagstorm"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "Sear"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Sunspine Lynx"
         }
       ]
