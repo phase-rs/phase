@@ -7,18 +7,19 @@ export function loadDeck(deckName: string): ParsedDeck | null {
   return loadSavedDeck(deckName);
 }
 
-export function getDeckColorIdentity(deckName: string): string[] {
+export function getDeckColorIdentity(deckName: string): string[] | null {
   const feedId = getDeckFeedOrigin(deckName);
   if (feedId) {
     const feed = getCachedFeed(feedId);
     const feedDeck = feed?.decks.find((d) => d.name === deckName);
     if (feedDeck) return feedDeck.colors;
   }
-  return [];
+  return null;
 }
 
-/** Mana-symbol shards for a deck's color identity. Empty identities are colorless. */
-export function getDeckColorIdentityPips(colors: string[]): string[] {
+/** Mana-symbol shards for a resolved deck identity. Empty identities are colorless. */
+export function getDeckColorIdentityPips(colors: string[] | null): string[] | null {
+  if (colors === null) return null;
   return colors.length > 0 ? colors : ["C"];
 }
 

@@ -252,7 +252,7 @@ export function GameSetupPage() {
     [activeDeckName],
   );
   const { src: deckArtSrc } = useCardImage(representativeCard ?? "", { size: "art_crop" });
-  const colors = selectedCompat?.color_identity ?? [];
+  const colorPips = getDeckColorIdentityPips(selectedCompat?.color_identity ?? null);
 
   return (
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
@@ -407,11 +407,13 @@ export function GameSetupPage() {
                     </button>
                   </div>
                   <div className="mt-1 flex items-center gap-2">
-                    <div className="flex items-center gap-1 rounded-full bg-black/35 px-1.5 py-1 ring-1 ring-white/10">
-                      {getDeckColorIdentityPips(colors).map((color) => (
-                        <ManaSymbol key={color} shard={color} size="xs" />
-                      ))}
-                    </div>
+                    {colorPips && (
+                      <div className="flex items-center gap-1 rounded-full bg-black/35 px-1.5 py-1 ring-1 ring-white/10">
+                        {colorPips.map((color) => (
+                          <ManaSymbol key={color} shard={color} size="xs" />
+                        ))}
+                      </div>
+                    )}
                     <span className="text-xs text-gray-300">{t("gameSetup.deckPreview.cardCount", { count: deckCardCount })}</span>
                   </div>
                   {selectedCompat && (

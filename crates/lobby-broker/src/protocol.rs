@@ -43,6 +43,11 @@ pub enum ServerErrorCode {
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
 ///
+/// 32 — `DerivedViews::legend_candidate_identities` publishes the engine-authored
+///      original/copy/token-copy identity for each active legend-rule choice. The
+///      field is `#[serde(default)]`, but the client deliberately no longer derives
+///      this rules-sensitive identity from raw objects; an older server would
+///      silently omit every choice identity.
 /// 31 — `WaitingFor::LoopShortcut` publishes the engine-issued `declaration`, and
 ///      `InteractionResponseSpec::Shortcut` publishes `preview`, the per-axis
 ///      consequence of the offered count. Both are `Option` and neither type sets
@@ -94,7 +99,7 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 31;
+pub const PROTOCOL_VERSION: u32 = 32;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake. Lobby traffic has a one-version rollout window; full game servers
@@ -431,12 +436,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 31);
+        assert_eq!(PROTOCOL_VERSION, 32);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which is what refuses an older full-game peer whose GameState cannot
         // understand a success acknowledgment the submitting client awaits.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 30);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 31);
     }
 
     #[test]

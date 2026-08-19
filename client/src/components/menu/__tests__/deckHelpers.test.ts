@@ -10,4 +10,8 @@ describe("getDeckColorIdentityPips", () => {
   it("preserves colored identity symbols", () => {
     expect(getDeckColorIdentityPips(["U", "R"])).toEqual(["U", "R"]);
   });
+
+  it("does not label an unresolved identity as colorless", () => {
+    expect(getDeckColorIdentityPips(null)).toBeNull();
+  });
 });

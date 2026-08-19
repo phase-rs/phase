@@ -2527,7 +2527,7 @@ function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
   const gameState = useGameStore((s) => s.gameState);
   const objects = gameState?.objects;
   const turnNumber = gameState?.turn_number;
-  const copiedPermanents = gameState?.derived?.copied_permanents ?? [];
+  const legendCandidateIdentities = gameState?.derived?.legend_candidate_identities;
   const hoverProps = useInspectHoverProps();
 
   if (!objects) return null;
@@ -2541,19 +2541,15 @@ function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
         {data.candidates.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
+          const identity = legendCandidateIdentities?.[String(id)];
+          if (!identity) return null;
           const isCurrentTurnEntry =
             turnNumber != null && obj.entered_battlefield_turn === turnNumber;
           const entryLabel = isCurrentTurnEntry
             ? t("cardChoice.legend.statusJustEntered")
             : t("cardChoice.legend.statusAlready");
-          const isTokenCopy =
-            !obj.face_down && obj.is_token === true && obj.display_source !== "Token";
-          const isCopy = isTokenCopy || (!obj.face_down && copiedPermanents.includes(id));
-          const identityLabel = isTokenCopy
-            ? t("cardChoice.legend.identityTokenCopy")
-            : isCopy
-              ? t("cardChoice.legend.identityCopy")
-              : t("cardChoice.legend.identityOriginal");
+          const identityLabel = t(`cardChoice.legend.identity${identity}`);
+          const isCopy = identity !== "Original";
           return (
             <motion.button
               key={id}

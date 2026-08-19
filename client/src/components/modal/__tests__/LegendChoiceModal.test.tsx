@@ -47,6 +47,12 @@ function makeState(): GameState {
     objects: buildObjectMap(existing, newCopy),
     next_object_id: 12,
     battlefield: [10, 11],
+    derived: {
+      legend_candidate_identities: {
+        "10": "Original",
+        "11": "TokenCopy",
+      },
+    },
     waiting_for: {
       type: "ChooseLegend",
       data: {
