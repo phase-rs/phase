@@ -2209,11 +2209,13 @@ pub(super) fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
                 ..
             }
         );
-        let attach_uses_moved_card_as_attachment_to_last_created = parent_moves_to_battlefield
-            && rebind_attach_attachment_to_forwarded_source_if_last_created_target(&mut sub.effect);
+        let attach_anaphor_names_moved_card = parent_moves_to_battlefield
+            && rebind_attach_attachment_to_forwarded_source_if_anaphor_names_moved_card(
+                &mut sub.effect,
+            );
         if parent_moves_to_battlefield
             && (sub_is_attach_with_zone_changed_cond
-                || attach_uses_moved_card_as_attachment_to_last_created
+                || attach_anaphor_names_moved_card
                 || sub_targets_moved_card(sub))
         {
             def.forward_result = true;
@@ -2227,18 +2229,59 @@ pub(super) fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
     }
 }
 
-fn rebind_attach_attachment_to_forwarded_source_if_last_created_target(
+/// CR 400.7j + CR 608.2c + CR 701.3a: in "<move a card to the battlefield>, then
+/// attach it to <referent>", the bare-"it" attachment operand names the card the
+/// parent instruction just moved — CR 400.7j lets the rest of that effect find the
+/// object it put into a public zone. Encode it as `SelfRef`: the runtime
+/// `forward_result` branch rebinds the sub-ability's `source_id` to the moved
+/// object, and `change_zone::resolve_forward_result_search_attach_host` gates the
+/// pre-entry host stamp on exactly that `SelfRef` encoding.
+///
+/// Two recipient encodings prove the attachment anaphor is the moved card:
+///
+/// * `LastCreated` — the recipient is a token this chain created (Ratonhnhaké꞉ton,
+///   Forum Filibuster), so the attachment cannot be it.
+/// * the SAME filter node as the attachment — the sentence's two referents
+///   collapsed onto one anaphor (Sword of the Meek). Attaching an object to
+///   itself is a guaranteed no-op whatever the operand resolves to — CR 301.5c
+///   ("An Equipment can't equip itself"), CR 301.6 (the same for Fortifications),
+///   CR 303.4d ("An Aura can't enchant itself"), and CR 704.5p for anything else
+///   — so rebinding can only turn a dead node live; it can never take working
+///   behavior away.
+///
+/// Note the delivery this rebind selects: `SelfRef` also satisfies
+/// `change_zone::resolve_forward_result_search_attach_host`'s attachment gate, so
+/// the host is stamped as `enter_attached_to` and the card enters already
+/// attached. The trailing `Attach` sub still resolves and still emits its
+/// `EffectKind::Attach`, so `TriggerMode::Attached` observers are unaffected.
+/// It is a CR 301.5c self-attach — the sub's `ParentTarget` host falls back to
+/// the source — which `attach::attachment_illegality_projected` rejects before
+/// any edit: no state change, no timestamp bump.
+///
+/// Caller-gated on the parent moving a card to the battlefield. That gate is why
+/// this cannot live in `parse_attachment_anaphor` (`imperative.rs`): the parent
+/// effect is unknown at parse time, and rebinding there would regress Stonehewer
+/// Giant / Quest for the Holy Relic / Armored Skyhunter / Adaptive Armorer, whose
+/// "it" names a searched Equipment rather than the source. The same gate keeps the
+/// equal-operand pairs under `GainControl` (Ogre Geargrabber, Thieving Skydiver)
+/// and under `CopyTokenOf` untouched: no public-zone move, so no CR 400.7j
+/// referent to rebind to.
+pub(super) fn rebind_attach_attachment_to_forwarded_source_if_anaphor_names_moved_card(
     effect: &mut Effect,
 ) -> bool {
     let Effect::Attach { attachment, target } = effect else {
         return false;
     };
-    if matches!(target, TargetFilter::LastCreated)
-        && matches!(
-            attachment,
-            TargetFilter::ParentTarget | TargetFilter::TriggeringSource
-        )
-    {
+    // Hoisted so the operand-identity test below can never fire for a
+    // `SelfRef`/`SelfRef` pair (Nim Deathmantle, Boonweaver Giant, Hakim,
+    // Light-Paws, Magnetic Snuffler, Runed Crown).
+    if !matches!(
+        attachment,
+        TargetFilter::ParentTarget | TargetFilter::TriggeringSource
+    ) {
+        return false;
+    }
+    if matches!(target, TargetFilter::LastCreated) || *target == *attachment {
         *attachment = TargetFilter::SelfRef;
         return true;
     }
