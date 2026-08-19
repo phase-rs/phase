@@ -4249,6 +4249,97 @@ mod tests {
         );
     }
 
+    /// Adjacent-shape hostiles for `has_unambiguous_self_sacrifice_component`,
+    /// which is also the classifier the mana-display legality fast path
+    /// (`mana_abilities::legality_simulation_is_redundant`) composes. Covers only
+    /// what `led_shaped_discard_sacrifice_stays_off_auto_tap` above does not —
+    /// that test already pins Gold, Treasure, LED and LED-reordered.
+    ///
+    /// The point of the negative rows is that **none of them needs a guard**: the
+    /// literal `SelfRef` / `Count { count: 1 }` struct pattern excludes every one
+    /// of them by construction. In particular `SacrificeRequirement::Aggregate`
+    /// (Phyrexian Dreadnought class) cannot match `Count { count: 1 }`, so it can
+    /// never reach a fast path — pinned here so a later "simplification" of the
+    /// pattern into a wildcard is caught.
+    #[test]
+    fn self_sacrifice_classifier_excludes_hostile_shapes() {
+        use crate::types::ability::{
+            Comparator, SacrificeAggregateStat, SacrificeRequirement, TargetFilter, TypedFilter,
+        };
+
+        // Positive controls first: without these, every `!` below could pass on a
+        // classifier that returns `false` unconditionally.
+        assert!(
+            has_unambiguous_self_sacrifice_component(&Some(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Tap,
+                    AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+                ],
+            })),
+            "positive control: Treasure's {{T}} + single self-sacrifice is accepted"
+        );
+        assert!(
+            has_unambiguous_self_sacrifice_component(&Some(AbilityCost::Sacrifice(
+                SacrificeCost::count(TargetFilter::SelfRef, 1)
+            ))),
+            "positive control: Gold's bare single self-sacrifice is accepted"
+        );
+
+        // CR 701.21: sacrificing TWO of this permanent is not the deterministic
+        // single-self shape — `Count { count: 2 }` does not match `Count { count: 1 }`.
+        assert!(
+            !has_unambiguous_self_sacrifice_component(&Some(AbilityCost::Sacrifice(
+                SacrificeCost::count(TargetFilter::SelfRef, 2)
+            ))),
+            "Count {{ count: 2 }} is excluded by construction"
+        );
+
+        // CR 701.21: an aggregate requirement (Phyrexian Dreadnought class) needs a
+        // player-chosen SET of permanents — excluded by construction, no guard.
+        assert!(
+            !has_unambiguous_self_sacrifice_component(&Some(AbilityCost::Sacrifice(
+                SacrificeCost::new(
+                    TargetFilter::SelfRef,
+                    SacrificeRequirement::Aggregate {
+                        stat: SacrificeAggregateStat::TotalPower,
+                        comparator: Comparator::GE,
+                        value: 12,
+                    },
+                )
+            ))),
+            "SacrificeRequirement::Aggregate is excluded by construction"
+        );
+
+        // A non-self target (Phyrexian Altar class) may have no legal victim, so
+        // its payability is NOT decided by the cost's shape.
+        assert!(
+            !has_unambiguous_self_sacrifice_component(&Some(AbilityCost::Sacrifice(
+                SacrificeCost::count(TargetFilter::Typed(TypedFilter::creature()), 1)
+            ))),
+            "a non-self Sacrifice target is not an unambiguous self-sacrifice"
+        );
+
+        // A pure {T} cost is choice-free but carries NO self-sacrifice component,
+        // so this predicate must not claim it.
+        assert!(
+            !has_unambiguous_self_sacrifice_component(&Some(AbilityCost::Composite {
+                costs: vec![AbilityCost::Tap],
+            })),
+            "a {{T}}-only cost has no self-sacrifice component to classify"
+        );
+
+        // The degenerate empty Composite is vacuously choice-free, but requiring a
+        // self-sacrifice component to be PRESENT rejects it — which is why this
+        // predicate needs no `{T}`/`{Q}` anchor of its own.
+        assert!(
+            !has_unambiguous_self_sacrifice_component(&Some(AbilityCost::Composite {
+                costs: vec![],
+            })),
+            "the degenerate empty Composite is rejected because a self-sacrifice \
+             component is required to be present"
+        );
+    }
+
     #[test]
     fn life_payment_mana_source_marks_controller_harm() {
         let mut state = GameState::new_two_player(42);
