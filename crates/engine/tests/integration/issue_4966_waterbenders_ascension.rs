@@ -3,13 +3,8 @@
 //! actually made the targeted creature unblockable, because the engine
 //! wrongly refused to let the player activate it in the first place.
 //!
-//! Oracle text (reconstructed prose — `data/mtgish-cards.json` stores typed
-//! rule trees, not prose; the "Waterbender Ascension" entry there was
-//! checked instead: an activated ability with cost
-//! `{"_Cost":"Waterbend","args":[{"_ManaSymbol":"ManaCostGeneric","args":4}]}`
-//! and a `CreatePermanentRuleEffectUntil` / `CantBeBlocked` /
-//! `UntilEndOfTurn` action on a target creature; the reminder text below is
-//! the CR 701.67a wording from `docs/MagicCompRules.txt`):
+//! Oracle text and reminder wording were verified against the card and CR
+//! 701.67a in `docs/MagicCompRules.txt`:
 //! "Whenever a creature you control deals combat damage to a player, put a
 //! quest counter on this enchantment. Then if it has four or more quest
 //! counters on it, draw a card.

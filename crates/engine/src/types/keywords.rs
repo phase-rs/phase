@@ -2218,8 +2218,7 @@ fn extract_companion_subtypes(text: &str) -> Vec<String> {
 }
 
 /// CR 702.167b: Public re-export of the default craft materials filter (the
-/// creature class) so external crates (the dormant `mtgish-import` converter)
-/// and the keyword deserializers can request it without reaching into the
+/// creature class) so keyword deserializers can request it without reaching into the
 /// `pub(crate)` parser module. The single authority remains
 /// `parser::oracle_keyword::craft_materials_filter`.
 pub fn craft_materials_default() -> TargetFilter {

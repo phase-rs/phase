@@ -71,7 +71,6 @@ client/coverage/
 data/*
 !data/standard-cards.txt
 !data/mtgjson/
-!data/mtgish-cards.json
 data/mtgjson/AtomicCards.json
 data/mtgjson/CardTypes.json
 data/mtgjson/Meta.json
@@ -118,10 +117,6 @@ replay_dtypes.py
 parser-batch-plan.md
 parser-fallback-plan.md
 tmp/
-
-# External reference / scratch
-mtgish/
-mtgish*.tgz
 
 # Python bytecode cache
 __pycache__/

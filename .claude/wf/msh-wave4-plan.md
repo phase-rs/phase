@@ -2,7 +2,6 @@
 
 **Scope:** 3 cards on the `main` checkout, one coherent wave.
 **Cards:** Dragon Man, Reformed Robot (Cluster C, CDA) · Wolverine, Claws Out (Cluster C, combat-damage assignment) · Ms. Marvel, Elastic Ally (Cluster H, new FilterProp).
-**mtgish:** OUT OF BOUNDS. No step in this plan touches `mtgish/`, `crates/mtgish-import/`, or `data/mtgish-*`. No mtgish mirroring is required for any of these changes.
 **Skills applied:** `/add-static-ability`, `/add-trigger`, `/add-engine-variant`, `/oracle-parser`.
 
 ---
@@ -260,4 +259,4 @@ Only `oracle_static/` is touched by two cards, in **different files/functions** 
 3. **Dedicated vs parameterized self-comparison (Ms. Marvel).** Plan recommends the dedicated `PowerExceedsBase` (2 siblings < threshold; mirrors `ToughnessGTPower`; avoids a multi-site refactor under concurrent edits). Reviewer may mandate `PtSelfComparison` instead — explicit decision point; categorical boundary (CR 208) holds either way.
 4. **`Aggregate` doc-comment** says "battlefield objects" but the resolver is zone-general — correct it as part of Dragon Man (prevents the next agent repeating the recon error).
 5. **Inert-until-regen.** All three are parser changes; `from_oracle_text` unit tests pass even with stale deployed data. Tests MUST use `add_real_card` + rehydrate to exercise the real card-data path; regenerate card-data before claiming "supported".
-6. **No stop-and-return blockers.** No mtgish dependency, no missing infrastructure — all three implementable on `main` now.
+6. **No stop-and-return blockers.** No missing infrastructure — all three are implementable on `main` now.

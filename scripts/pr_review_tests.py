@@ -3102,7 +3102,6 @@ class PrReviewTests(unittest.TestCase):
                 "crates/engine/src/game/casting.rs",
                 "crates/engine/src/types/ability.rs",
                 "crates/phase-ai/src/policies/payment_selection.rs",
-                "crates/mtgish-import/src/convert/action.rs",
             ],
             policy,
             {},

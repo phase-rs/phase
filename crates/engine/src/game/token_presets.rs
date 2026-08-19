@@ -84,7 +84,7 @@ pub enum TokenCategory {
     Artifact,
 }
 
-/// How completely this preset's body represents the source mtgish entry.
+/// How completely this preset's body represents its source data.
 /// `Full` means a vanilla body + simple keywords + (for predefined-ability
 /// subtypes) the engine-attached abilities cover the printed rules text.
 /// `PartialMissingAbilities` flags presets where the source entry has

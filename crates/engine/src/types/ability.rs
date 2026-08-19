@@ -6154,7 +6154,7 @@ impl PlayerScope {
     ///
     /// Any resolver reachable from DESERIALIZED data must reject them here
     /// rather than reaching that `unreachable!()`: `IsMonarch { player }` is
-    /// serde-constructible from `card-data.json` and from mtgish input, so a
+    /// serde-constructible from `card-data.json`, so a
     /// malformed or hand-authored row must fail closed, not panic the engine
     /// inside a trigger-condition check.
     pub(crate) fn duration_timing_only(&self) -> bool {
@@ -15608,8 +15608,8 @@ fn default_distinct_names() -> Vec<SharedQuality> {
 /// producers were `parse_number_of_distinct_colors_among_permanents_tail`
 /// (craft materials → `And { [ExiledBySource, Typed] }`, or a `parse_type_phrase`
 /// object filter) and `parse_for_each_distinct_colors_among_permanents`
-/// (`parse_type_phrase` only), plus the mtgish-import converter (`Typed`) —
-/// none of which can yield a BARE `ExiledBySource` / `TrackedSet` filter.
+/// (`parse_type_phrase` only) — neither can yield a BARE `ExiledBySource` /
+/// `TrackedSet` filter.
 fn deserialize_distinct_colors_population<'de, D>(
     deserializer: D,
 ) -> Result<CardTypeSetSource, D::Error>
@@ -24670,9 +24670,8 @@ pub enum DamageModification {
     /// any amount; the replacement is not consumed — continuous, not
     /// shield-style, distinct from `ShieldKind::Prevention { All }`).
     ///
-    /// Provenance is a sibling variant rather than a field on `Minus` because
-    /// the dormant, contributor-frozen `crates/mtgish-import` constructs
-    /// `Minus { value }` literals that a new mandatory field would break.
+    /// Provenance is a sibling variant rather than a field on `Minus` to
+    /// preserve the established `Minus { value }` construction shape.
     PreventionMinus { value: u32 },
     /// CR 614.1a: Conditional — if amount < source's power, set amount = source's power.
     /// References the replacement source's (not the damage source's) current post-layer power.
