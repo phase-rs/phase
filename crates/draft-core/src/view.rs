@@ -65,6 +65,12 @@ pub enum DraftPoolGroupKind {
     Planeswalker,
     Land,
     Other,
+    Mythic,
+    Rare,
+    Uncommon,
+    Common,
+    /// Rarities outside the standard four (Scryfall "special" / "bonus").
+    RarityOther,
     ManaValue0,
     ManaValue1,
     ManaValue2,
@@ -79,6 +85,15 @@ pub enum DraftPoolGroupKind {
 pub struct DraftPoolEntry {
     pub card: DraftCardInstance,
     pub count: usize,
+    /// Every collapsed copy's instance id, in entry order. The collapse keys on
+    /// the NAME, but same-name instances can differ in classification on
+    /// another axis (a reprint at a different rarity), so a consumer that
+    /// filters or addresses copies must key on these ids — the representative
+    /// `card.instance_id` speaks for only one of them (#7546 review).
+    /// `default` keeps pre-v11 serialized entries deserializable; the client
+    /// normalizer upgrades an empty list to the representative id.
+    #[serde(default)]
+    pub instance_ids: Vec<String>,
 }
 
 /// One ordered display group in a limited pool.
@@ -107,6 +122,23 @@ pub struct DraftPoolGroups {
     pub color_groups: Vec<DraftPoolGroup>,
     pub type_groups: Vec<DraftPoolGroup>,
     pub cmc_groups: Vec<DraftPoolGroup>,
+    /// Rarity is the fourth engine-owned pool axis (#7507), so a display never
+    /// has to re-derive it from the instance's raw `rarity` string.
+    /// `default` keeps pre-v11 serialized views (no rarity axis) deserializable.
+    #[serde(default)]
+    pub rarity_groups: Vec<DraftPoolGroup>,
+    /// Engine-owned option list for a type-filter control: every type bucket
+    /// any pool member belongs to (CR 205.2b: multi-valued), in engine order.
+    /// The exclusive `type_groups` axis stays a presentation/sorting shape.
+    /// `default` keeps pre-v11 serialized views deserializable.
+    #[serde(default)]
+    pub type_filter_options: Vec<DraftPoolGroupKind>,
+    /// Engine-owned option list for a color-filter control: every color bucket
+    /// any pool member belongs to (CR 105.2: one or more colors), in engine
+    /// order. The exclusive `color_groups` axis stays a presentation shape.
+    /// `default` keeps pre-v11 serialized views deserializable.
+    #[serde(default)]
+    pub color_filter_options: Vec<DraftPoolGroupKind>,
     pub color_counts: DraftPoolColorCounts,
 }
 
@@ -118,9 +150,81 @@ impl DraftPoolGroups {
             color_groups: groups_for(pool, &COLOR_GROUP_ORDER, color_group, true),
             type_groups: groups_for(pool, &TYPE_GROUP_ORDER, type_group, true),
             cmc_groups: groups_for(pool, &CMC_GROUP_ORDER, mana_value_group, false),
+            rarity_groups: groups_for(pool, &RARITY_GROUP_ORDER, rarity_group, true),
+            type_filter_options: type_filter_options(pool),
+            color_filter_options: color_filter_options(pool),
             color_counts: color_counts(pool),
         }
     }
+}
+
+/// Typed filter contract for a limited-pool display (#7546 review): the
+/// display sends WHAT it asks for; the engine decides WHICH instances match.
+/// An empty axis does not constrain; within an axis selections OR, across
+/// axes they AND; `query` is a case-insensitive name substring.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoolFilter {
+    #[serde(default)]
+    pub query: String,
+    #[serde(default)]
+    pub types: Vec<DraftPoolGroupKind>,
+    #[serde(default)]
+    pub colors: Vec<DraftPoolGroupKind>,
+    #[serde(default)]
+    pub rarities: Vec<DraftPoolGroupKind>,
+}
+
+impl PoolFilter {
+    pub fn is_active(&self) -> bool {
+        !self.query.trim().is_empty()
+            || !self.types.is_empty()
+            || !self.colors.is_empty()
+            || !self.rarities.is_empty()
+    }
+}
+
+fn axis_matches(selected: &[DraftPoolGroupKind], kind: DraftPoolGroupKind) -> bool {
+    selected.is_empty() || selected.contains(&kind)
+}
+
+/// The single filtering authority for a limited-pool display (#7546 review):
+/// narrow `listing` (any subset of the pool — the build screen passes the pool
+/// minus the cards already moved to the deck) and return the kept instance ids
+/// in listing order. The display renders exactly this result; it never
+/// interprets the game data itself.
+///
+/// Each instance is classified HERE, by the same per-card classifiers the
+/// group builder uses — not looked up in wire-delivered groups. That keeps one
+/// classification authority for every message vintage: a legacy (pre-v11)
+/// view whose serialized groups cannot address all collapsed copies still
+/// filters every copy correctly, because the groups are not consulted at all
+/// (review round 3). Classification is total (every axis has a residual
+/// bucket), so an unclassifiable listing entry cannot exist.
+pub fn filter_pool_listing(listing: &[DraftCardInstance], filter: &PoolFilter) -> Vec<String> {
+    if !filter.is_active() {
+        return listing
+            .iter()
+            .map(|card| card.instance_id.clone())
+            .collect();
+    }
+    let query = filter.query.trim().to_lowercase();
+
+    listing
+        .iter()
+        .filter(|card| {
+            (query.is_empty() || card.name.to_lowercase().contains(&query))
+                && (filter.types.is_empty()
+                    || type_memberships(card)
+                        .iter()
+                        .any(|kind| filter.types.contains(kind)))
+                && (filter.colors.is_empty()
+                    || color_memberships(card)
+                        .iter()
+                        .any(|kind| filter.colors.contains(kind)))
+                && axis_matches(&filter.rarities, rarity_group(card))
+        })
+        .map(|card| card.instance_id.clone())
+        .collect()
 }
 
 /// Filtered draft state for a specific player. Built from scratch (not a reference
@@ -441,6 +545,14 @@ const TYPE_GROUP_ORDER: [DraftPoolGroupKind; 8] = [
     DraftPoolGroupKind::Other,
 ];
 
+const RARITY_GROUP_ORDER: [DraftPoolGroupKind; 5] = [
+    DraftPoolGroupKind::Mythic,
+    DraftPoolGroupKind::Rare,
+    DraftPoolGroupKind::Uncommon,
+    DraftPoolGroupKind::Common,
+    DraftPoolGroupKind::RarityOther,
+];
+
 const CMC_GROUP_ORDER: [DraftPoolGroupKind; 7] = [
     DraftPoolGroupKind::ManaValue0,
     DraftPoolGroupKind::ManaValue1,
@@ -493,8 +605,14 @@ fn sorted_entries(mut cards: Vec<DraftCardInstance>, sort_by_cmc: bool) -> Vec<D
             .filter(|entry| entry.card.name == card.name)
         {
             entry.count += 1;
+            entry.instance_ids.push(card.instance_id.clone());
         } else {
-            entries.push(DraftPoolEntry { card, count: 1 });
+            let instance_ids = vec![card.instance_id.clone()];
+            entries.push(DraftPoolEntry {
+                card,
+                count: 1,
+                instance_ids,
+            });
         }
     }
     entries
@@ -515,24 +633,160 @@ fn color_group(card: &DraftCardInstance) -> DraftPoolGroupKind {
     }
 }
 
+/// EVERY color bucket `card` belongs to, in `COLOR_GROUP_ORDER` — CR 105.2:
+/// "an object can be one or more of the five colors", so a white-blue card is
+/// a member of White AND Blue AND (CR 105.2b) Multicolor; a colorless card is
+/// a member of Colorless (CR 105.2c). This is the FILTERING membership; the
+/// exclusive `color_group` stays the sorted display's one-bucket-per-card
+/// shape (a multicolor card sorts under Multicolor alone).
+fn color_memberships(card: &DraftCardInstance) -> Vec<DraftPoolGroupKind> {
+    if card.colors.is_empty() {
+        return vec![DraftPoolGroupKind::Colorless];
+    }
+    let mut memberships: Vec<DraftPoolGroupKind> = [
+        (DraftPoolGroupKind::White, "W"),
+        (DraftPoolGroupKind::Blue, "U"),
+        (DraftPoolGroupKind::Black, "B"),
+        (DraftPoolGroupKind::Red, "R"),
+        (DraftPoolGroupKind::Green, "G"),
+    ]
+    .into_iter()
+    .filter(|(_, symbol)| card.colors.iter().any(|color| color == symbol))
+    .map(|(kind, _)| kind)
+    .collect();
+    if card.colors.len() >= 2 {
+        memberships.push(DraftPoolGroupKind::Multicolor);
+    }
+    if memberships.is_empty() {
+        // Colors outside WUBRG cannot occur in real data; classify totally
+        // rather than silently dropping the card from the axis.
+        memberships.push(DraftPoolGroupKind::Colorless);
+    }
+    memberships
+}
+
+/// Every color bucket ANY pool member belongs to, in `COLOR_GROUP_ORDER` —
+/// the engine-owned option list a color-filter control offers. A pool of
+/// white-blue cards offers White, Blue AND Multicolor chips even though its
+/// sorted display has only a Multicolor group.
+fn color_filter_options(pool: &[DraftCardInstance]) -> Vec<DraftPoolGroupKind> {
+    let mut present: Vec<DraftPoolGroupKind> = Vec::new();
+    for card in pool {
+        for kind in color_memberships(card) {
+            if !present.contains(&kind) {
+                present.push(kind);
+            }
+        }
+    }
+    COLOR_GROUP_ORDER
+        .iter()
+        .copied()
+        .filter(|kind| present.contains(kind))
+        .collect()
+}
+
+/// Every rarity bucket any pool member belongs to, in `RARITY_GROUP_ORDER` —
+/// the engine-owned option list a rarity-filter control offers. Rarity is
+/// single-valued per printing, so this equals the non-empty `rarity_groups`
+/// kinds; carried here so a legacy view's controls can be rebuilt from the
+/// pool alone.
+fn rarity_filter_options(pool: &[DraftCardInstance]) -> Vec<DraftPoolGroupKind> {
+    RARITY_GROUP_ORDER
+        .iter()
+        .copied()
+        .filter(|kind| pool.iter().any(|card| rarity_group(card) == *kind))
+        .collect()
+}
+
+/// The complete engine-owned option lists for a limited-pool filter control,
+/// computable from the pool instances alone. The stateless path a display
+/// uses when its delivered view predates the option fields (review round 5:
+/// legacy controls must come from the engine, not from the lossy exclusive
+/// presentation buckets, and never be reconstructed in the display layer).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoolFilterOptions {
+    pub types: Vec<DraftPoolGroupKind>,
+    pub colors: Vec<DraftPoolGroupKind>,
+    pub rarities: Vec<DraftPoolGroupKind>,
+}
+
+pub fn pool_filter_options(pool: &[DraftCardInstance]) -> PoolFilterOptions {
+    PoolFilterOptions {
+        types: type_filter_options(pool),
+        colors: color_filter_options(pool),
+        rarities: rarity_filter_options(pool),
+    }
+}
+
+/// The EXCLUSIVE presentation bucket for the sorted pool display — a card
+/// appears in exactly one group, so the priority chain picks its most salient
+/// type. Filtering must NOT use this: see [`type_memberships`].
 fn type_group(card: &DraftCardInstance) -> DraftPoolGroupKind {
+    *type_memberships(card)
+        .first()
+        .expect("type membership is total — the Other bucket catches the rest")
+}
+
+/// EVERY type bucket `card` belongs to, in `TYPE_GROUP_ORDER` — CR 205.2b:
+/// an object with more than one card type "satisfies the criteria for any
+/// effect that applies to any of their card types", so an Artifact Creature
+/// is a member of BOTH the Artifact and the Creature bucket. This is the FILTERING membership
+/// (review round 4: the exclusive bucket silently excluded multi-type cards
+/// from every non-primary type selection); the exclusive presentation bucket
+/// is its first element, keeping the two views of the same card consistent
+/// by construction.
+fn type_memberships(card: &DraftCardInstance) -> Vec<DraftPoolGroupKind> {
     let type_line = card.type_line.to_ascii_lowercase();
-    if type_line.contains("creature") {
-        DraftPoolGroupKind::Creature
-    } else if type_line.contains("instant") {
-        DraftPoolGroupKind::Instant
-    } else if type_line.contains("sorcery") {
-        DraftPoolGroupKind::Sorcery
-    } else if type_line.contains("enchantment") {
-        DraftPoolGroupKind::Enchantment
-    } else if type_line.contains("artifact") {
-        DraftPoolGroupKind::Artifact
-    } else if type_line.contains("planeswalker") {
-        DraftPoolGroupKind::Planeswalker
-    } else if type_line.contains("land") {
-        DraftPoolGroupKind::Land
+    let memberships: Vec<DraftPoolGroupKind> = [
+        (DraftPoolGroupKind::Creature, "creature"),
+        (DraftPoolGroupKind::Instant, "instant"),
+        (DraftPoolGroupKind::Sorcery, "sorcery"),
+        (DraftPoolGroupKind::Enchantment, "enchantment"),
+        (DraftPoolGroupKind::Artifact, "artifact"),
+        (DraftPoolGroupKind::Planeswalker, "planeswalker"),
+        (DraftPoolGroupKind::Land, "land"),
+    ]
+    .into_iter()
+    .filter(|(_, needle)| type_line.contains(needle))
+    .map(|(kind, _)| kind)
+    .collect();
+    if memberships.is_empty() {
+        vec![DraftPoolGroupKind::Other]
     } else {
-        DraftPoolGroupKind::Other
+        memberships
+    }
+}
+
+/// Every type bucket ANY pool member belongs to, in `TYPE_GROUP_ORDER` — the
+/// engine-owned option list a type-filter control offers. Distinct from the
+/// exclusive `type_groups` axis: a pool of Artifact Creatures offers BOTH
+/// chips even though its sorted display has only a Creature group.
+fn type_filter_options(pool: &[DraftCardInstance]) -> Vec<DraftPoolGroupKind> {
+    let mut present: Vec<DraftPoolGroupKind> = Vec::new();
+    for card in pool {
+        for kind in type_memberships(card) {
+            if !present.contains(&kind) {
+                present.push(kind);
+            }
+        }
+    }
+    TYPE_GROUP_ORDER
+        .iter()
+        .copied()
+        .filter(|kind| present.contains(kind))
+        .collect()
+}
+
+/// Buckets the instance's raw rarity string into the standard four, with
+/// everything else ("special", "bonus", unknown) collected under `RarityOther`
+/// rather than silently dropped from the axis.
+fn rarity_group(card: &DraftCardInstance) -> DraftPoolGroupKind {
+    match card.rarity.to_ascii_lowercase().as_str() {
+        "mythic" => DraftPoolGroupKind::Mythic,
+        "rare" => DraftPoolGroupKind::Rare,
+        "uncommon" => DraftPoolGroupKind::Uncommon,
+        "common" => DraftPoolGroupKind::Common,
+        _ => DraftPoolGroupKind::RarityOther,
     }
 }
 
@@ -848,6 +1102,398 @@ mod tests {
         assert_eq!(groups.type_groups[0].cards[0].count, 2);
         assert_eq!(groups.color_counts.white, 2);
         assert_eq!(groups.color_counts.red, 2);
+    }
+
+    #[test]
+    fn rarity_groups_bucket_the_standard_four_and_collect_the_rest() {
+        let mut mythic = draft_card("Dragon", &["R"], 6, "Creature — Dragon");
+        mythic.rarity = "mythic".to_string();
+        let mut rare = draft_card("Relic", &[], 2, "Artifact");
+        rare.rarity = "Rare".to_string(); // case-insensitive bucketing
+        let mut special = draft_card("Oddity", &["U"], 3, "Sorcery");
+        special.rarity = "special".to_string();
+        let common_a = draft_card("Adept", &["W"], 2, "Creature — Wizard");
+        let common_b = draft_card("Adept", &["W"], 2, "Creature — Wizard");
+
+        let groups = DraftPoolGroups::from_pool(&[mythic, rare, special, common_a, common_b]);
+
+        assert_eq!(
+            groups
+                .rarity_groups
+                .iter()
+                .map(|group| group.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                DraftPoolGroupKind::Mythic,
+                DraftPoolGroupKind::Rare,
+                DraftPoolGroupKind::Common,
+                DraftPoolGroupKind::RarityOther,
+            ],
+            "engine order, empty buckets omitted, non-standard rarities collected"
+        );
+        assert_eq!(groups.rarity_groups[2].cards[0].count, 2);
+        assert_eq!(groups.rarity_groups[2].total, 2);
+    }
+
+    #[test]
+    fn filter_pool_listing_is_the_single_filtering_authority() {
+        let pool = vec![
+            draft_card("Adept", &["W"], 2, "Creature — Wizard"),
+            draft_card("Adept", &["W"], 2, "Creature — Wizard"),
+            draft_card("Bolt", &["R"], 1, "Instant"),
+            draft_card("Charm", &["U", "R"], 3, "Sorcery"),
+        ];
+        // Distinct instance ids for the duplicate copies.
+        let mut pool = pool;
+        pool[0].instance_id = "adept-1".to_string();
+        pool[1].instance_id = "adept-2".to_string();
+        pool[3].rarity = "rare".to_string();
+
+        // Inactive filter: the whole listing, in order.
+        assert_eq!(
+            filter_pool_listing(&pool, &PoolFilter::default()),
+            vec!["adept-1", "adept-2", "Bolt", "Charm"]
+        );
+
+        // One axis narrows and covers every duplicate copy.
+        let creatures = PoolFilter {
+            types: vec![DraftPoolGroupKind::Creature],
+            ..PoolFilter::default()
+        };
+        assert_eq!(
+            filter_pool_listing(&pool, &creatures),
+            vec!["adept-1", "adept-2"]
+        );
+
+        // OR within an axis, AND across axes.
+        let across = PoolFilter {
+            colors: vec![DraftPoolGroupKind::Red, DraftPoolGroupKind::Multicolor],
+            rarities: vec![DraftPoolGroupKind::Rare],
+            ..PoolFilter::default()
+        };
+        assert_eq!(filter_pool_listing(&pool, &across), vec!["Charm"]);
+
+        // Case-insensitive name query on top of an axis.
+        let query = PoolFilter {
+            query: "aDePt".to_string(),
+            types: vec![DraftPoolGroupKind::Creature],
+            ..PoolFilter::default()
+        };
+        assert_eq!(
+            filter_pool_listing(&pool, &query),
+            vec!["adept-1", "adept-2"]
+        );
+
+        // Classification is total: an instance added to the listing after the
+        // wire groups were built still classifies (here: a common stray joins
+        // the commons) — no membership lookup exists to go stale.
+        let mut with_stray = pool.clone();
+        with_stray.push(draft_card("Stray", &[], 1, "Instant"));
+        let commons = PoolFilter {
+            rarities: vec![DraftPoolGroupKind::Common],
+            ..PoolFilter::default()
+        };
+        assert_eq!(
+            filter_pool_listing(&with_stray, &commons),
+            vec!["adept-1", "adept-2", "Bolt", "Stray"]
+        );
+    }
+
+    #[test]
+    fn filter_pool_listing_keeps_each_same_name_copy_its_own_rarity() {
+        // A reprint at a different rarity: the copies share a NAME but sit in
+        // different rarity groups; each rarity selection keeps exactly ITS
+        // copy (#7546 review — a name-keyed lookup hid the wrong card).
+        let mut common = draft_card("Adept", &["W"], 2, "Creature — Wizard");
+        common.instance_id = "adept-common".to_string();
+        let mut rare = draft_card("Adept", &["W"], 2, "Creature — Wizard");
+        rare.instance_id = "adept-rare".to_string();
+        rare.rarity = "rare".to_string();
+        let pool = vec![common, rare];
+
+        let rare_only = PoolFilter {
+            rarities: vec![DraftPoolGroupKind::Rare],
+            ..PoolFilter::default()
+        };
+        assert_eq!(filter_pool_listing(&pool, &rare_only), vec!["adept-rare"]);
+        let common_only = PoolFilter {
+            rarities: vec![DraftPoolGroupKind::Common],
+            ..PoolFilter::default()
+        };
+        assert_eq!(
+            filter_pool_listing(&pool, &common_only),
+            vec!["adept-common"]
+        );
+        // The shared axis still covers both copies.
+        let creatures = PoolFilter {
+            types: vec![DraftPoolGroupKind::Creature],
+            ..PoolFilter::default()
+        };
+        assert_eq!(
+            filter_pool_listing(&pool, &creatures),
+            vec!["adept-common", "adept-rare"]
+        );
+    }
+
+    #[test]
+    fn multi_type_cards_match_every_type_they_carry() {
+        // CR 205.2a: card types are multi-valued. Review round 4: the
+        // exclusive presentation bucket (Creature-first priority) must not be
+        // the filtering membership — an Artifact Creature belongs to BOTH
+        // selections, and the option list offers both chips.
+        let artifact_creature = draft_card("Golem", &[], 3, "Artifact Creature — Golem");
+        let enchantment_creature = draft_card("Nymph", &["G"], 2, "Enchantment Creature — Nymph");
+        let artifact_land = draft_card("Tomb", &[], 0, "Artifact Land");
+        let plain_instant = draft_card("Bolt", &["R"], 1, "Instant");
+        let pool = vec![
+            artifact_creature,
+            enchantment_creature,
+            artifact_land,
+            plain_instant,
+        ];
+
+        let by = |kind: DraftPoolGroupKind| {
+            filter_pool_listing(
+                &pool,
+                &PoolFilter {
+                    types: vec![kind],
+                    ..PoolFilter::default()
+                },
+            )
+        };
+        assert_eq!(
+            by(DraftPoolGroupKind::Artifact),
+            vec!["Golem", "Tomb"],
+            "the Artifact selection reaches the Artifact Creature AND the Artifact Land"
+        );
+        assert_eq!(
+            by(DraftPoolGroupKind::Creature),
+            vec!["Golem", "Nymph"],
+            "both multi-type creatures stay reachable through Creature"
+        );
+        assert_eq!(by(DraftPoolGroupKind::Enchantment), vec!["Nymph"]);
+        assert_eq!(by(DraftPoolGroupKind::Land), vec!["Tomb"]);
+
+        // The engine-owned option list offers every membership, in engine
+        // order — while the exclusive presentation axis keeps one bucket per
+        // card (the Artifact Land sorts under Artifact, not Land).
+        let groups = DraftPoolGroups::from_pool(&pool);
+        assert_eq!(
+            groups.type_filter_options,
+            vec![
+                DraftPoolGroupKind::Creature,
+                DraftPoolGroupKind::Instant,
+                DraftPoolGroupKind::Enchantment,
+                DraftPoolGroupKind::Artifact,
+                DraftPoolGroupKind::Land,
+            ]
+        );
+        assert_eq!(
+            groups
+                .type_groups
+                .iter()
+                .map(|group| group.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                DraftPoolGroupKind::Creature,
+                DraftPoolGroupKind::Instant,
+                DraftPoolGroupKind::Artifact,
+            ],
+            "the sorted display keeps its exclusive one-bucket-per-card shape"
+        );
+    }
+
+    #[test]
+    fn multi_color_cards_match_every_color_they_carry() {
+        // CR 105.2 + CR 105.2b + CR 105.2c: a white-blue card IS white and IS
+        // blue (and multicolored); a colorless card is colorless. The filter
+        // membership must say so — the exclusive Multicolor display bucket is
+        // a sorting shape, not the card's colors.
+        let azorius = draft_card("Charm", &["W", "U"], 2, "Instant");
+        let mono = draft_card("Pacifism", &["W"], 2, "Enchantment — Aura");
+        let artifact = draft_card("Sphere", &[], 1, "Artifact");
+        let pool = vec![azorius, mono, artifact];
+
+        let by = |kind: DraftPoolGroupKind| {
+            filter_pool_listing(
+                &pool,
+                &PoolFilter {
+                    colors: vec![kind],
+                    ..PoolFilter::default()
+                },
+            )
+        };
+        assert_eq!(
+            by(DraftPoolGroupKind::White),
+            vec!["Charm", "Pacifism"],
+            "the White selection reaches the white-blue card too"
+        );
+        assert_eq!(by(DraftPoolGroupKind::Blue), vec!["Charm"]);
+        assert_eq!(by(DraftPoolGroupKind::Multicolor), vec!["Charm"]);
+        assert_eq!(by(DraftPoolGroupKind::Colorless), vec!["Sphere"]);
+
+        // The option list offers every membership; the sorted display keeps
+        // its exclusive shape (Charm sorts under Multicolor alone).
+        let groups = DraftPoolGroups::from_pool(&pool);
+        assert_eq!(
+            groups.color_filter_options,
+            vec![
+                DraftPoolGroupKind::White,
+                DraftPoolGroupKind::Blue,
+                DraftPoolGroupKind::Multicolor,
+                DraftPoolGroupKind::Colorless,
+            ]
+        );
+        assert_eq!(
+            groups
+                .color_groups
+                .iter()
+                .map(|group| group.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                DraftPoolGroupKind::White,
+                DraftPoolGroupKind::Multicolor,
+                DraftPoolGroupKind::Colorless,
+            ]
+        );
+    }
+
+    #[test]
+    fn pool_filter_options_rebuild_every_membership_from_the_pool_alone() {
+        // Review round 5: a legacy view's controls come from THIS stateless
+        // path — the exclusive display buckets would hide the Artifact chip
+        // of an Artifact Creature pool and the White/Blue chips of a
+        // white-blue pool.
+        let pool = vec![draft_card("Golem", &[], 3, "Artifact Creature — Golem"), {
+            let mut charm = draft_card("Charm", &["W", "U"], 2, "Instant");
+            charm.rarity = "rare".to_string();
+            charm
+        }];
+        assert_eq!(
+            pool_filter_options(&pool),
+            PoolFilterOptions {
+                types: vec![
+                    DraftPoolGroupKind::Creature,
+                    DraftPoolGroupKind::Instant,
+                    DraftPoolGroupKind::Artifact,
+                ],
+                colors: vec![
+                    DraftPoolGroupKind::White,
+                    DraftPoolGroupKind::Blue,
+                    DraftPoolGroupKind::Multicolor,
+                    DraftPoolGroupKind::Colorless,
+                ],
+                rarities: vec![DraftPoolGroupKind::Rare, DraftPoolGroupKind::Common],
+            }
+        );
+    }
+
+    #[test]
+    fn a_legacy_view_filters_every_collapsed_copy() {
+        // Review round 3: a persisted/replayed v10 view collapses duplicates
+        // into a `count: 2` entry whose wire shape carries no instance ids.
+        // Filtering must not depend on that shape: both copies pass a
+        // constrained axis, because each instance is classified here rather
+        // than looked up in the legacy groups.
+        let mut first = draft_card("Adept", &["W"], 2, "Creature — Wizard");
+        first.instance_id = "adept-1".to_string();
+        let mut second = draft_card("Adept", &["W"], 2, "Creature — Wizard");
+        second.instance_id = "adept-2".to_string();
+        let listing = vec![first, second];
+
+        // The legacy groups deserialize (see the shape test below) but are
+        // NOT an input to the filter — there is no path for them to drop a
+        // copy.
+        let creatures = PoolFilter {
+            types: vec![DraftPoolGroupKind::Creature],
+            ..PoolFilter::default()
+        };
+        assert_eq!(
+            filter_pool_listing(&listing, &creatures),
+            vec!["adept-1", "adept-2"]
+        );
+        let commons = PoolFilter {
+            rarities: vec![DraftPoolGroupKind::Common],
+            ..PoolFilter::default()
+        };
+        assert_eq!(
+            filter_pool_listing(&listing, &commons),
+            vec!["adept-1", "adept-2"]
+        );
+    }
+
+    #[test]
+    fn pre_v11_pool_group_json_still_deserializes() {
+        // A v10 wire shape: no `rarity_groups`, entries without `instance_ids`.
+        let old = r#"{
+            "color_groups": [],
+            "type_groups": [{
+                "kind": "creature",
+                "total": 1,
+                "cards": [{
+                    "card": {
+                        "instance_id": "a", "name": "Adept", "set_code": "TST",
+                        "collector_number": "1", "rarity": "common",
+                        "colors": ["W"], "cmc": 2, "type_line": "Creature"
+                    },
+                    "count": 1
+                }]
+            }],
+            "cmc_groups": [],
+            "color_counts": {"white": 1, "blue": 0, "black": 0, "red": 0, "green": 0}
+        }"#;
+        let groups: DraftPoolGroups = serde_json::from_str(old).expect("old shape deserializes");
+        assert!(groups.rarity_groups.is_empty());
+        assert!(groups.type_groups[0].cards[0].instance_ids.is_empty());
+    }
+
+    #[test]
+    fn same_name_instances_keep_their_own_rarity_group() {
+        // A reprint at a different rarity: same NAME, distinct instances. The
+        // name-keyed collapse must not merge them across groups, and each
+        // group's entry must carry ITS copies' instance ids (#7546 review).
+        let mut common = draft_card("Adept", &["W"], 2, "Creature — Wizard");
+        common.instance_id = "adept-common".to_string();
+        let mut rare = draft_card("Adept", &["W"], 2, "Creature — Wizard");
+        rare.instance_id = "adept-rare".to_string();
+        rare.rarity = "rare".to_string();
+
+        let groups = DraftPoolGroups::from_pool(&[common, rare]);
+
+        assert_eq!(
+            groups
+                .rarity_groups
+                .iter()
+                .map(|group| (group.kind, group.cards[0].instance_ids.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (DraftPoolGroupKind::Rare, vec!["adept-rare".to_string()]),
+                (DraftPoolGroupKind::Common, vec!["adept-common".to_string()]),
+            ],
+            "each rarity group addresses exactly its own copy"
+        );
+        // The shared-classification axis still collapses both copies into one
+        // entry — and that entry addresses BOTH instances.
+        assert_eq!(
+            groups.type_groups[0].cards[0].instance_ids,
+            vec!["adept-common".to_string(), "adept-rare".to_string()]
+        );
+        assert_eq!(groups.type_groups[0].cards[0].count, 2);
+    }
+
+    #[test]
+    fn rarity_group_kinds_match_the_wire_contract() {
+        let values = [
+            (DraftPoolGroupKind::Mythic, "mythic"),
+            (DraftPoolGroupKind::Rare, "rare"),
+            (DraftPoolGroupKind::Uncommon, "uncommon"),
+            (DraftPoolGroupKind::Common, "common"),
+            (DraftPoolGroupKind::RarityOther, "rarity_other"),
+        ];
+
+        for (kind, expected) in values {
+            assert_eq!(serde_json::to_value(kind).unwrap(), expected);
+        }
     }
 
     #[test]

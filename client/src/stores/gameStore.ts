@@ -77,9 +77,26 @@ export type EngineAuthority = "client" | "wire";
  *  nothing they do can desync a peer or leak hidden info across a wire. */
 export type TableCompany = "solo" | "remote-humans";
 
+/** Where this client's OWN seat number comes from.
+ *
+ * `"seat-zero"` — a solo game. There is one local human and the engine seats
+ * them at 0 by construction; nothing on a wire can say otherwise, so a stale
+ * `activePlayerId` left behind by an earlier online game must not be read.
+ *
+ * `"wire-assigned"` — somebody else hands this client its seat: a server
+ * (`playerIdentity` from `WebSocketAdapter`), a P2P host (`game_setup`'s
+ * `assignedPlayerId`), or the pod that paired this match
+ * (`setupDraftMatchAvatars`). `multiplayerStore.activePlayerId` carries it.
+ *
+ * `"no-seat"` — a spectator holds no seat at all. The two seat resolvers in
+ * `usePlayerId.ts` deliberately answer this case differently; see the comment
+ * there for the contract `HudBadges.tsx` depends on. */
+export type SeatSource = "seat-zero" | "wire-assigned" | "no-seat";
+
 interface GameModeTraits {
   readonly authority: EngineAuthority;
   readonly company: TableCompany;
+  readonly seat: SeatSource;
 }
 
 /**
@@ -93,15 +110,15 @@ interface GameModeTraits {
  *
  * `spectate` is `remote-humans` by the *game* it observes, not by the observer.
  */
-const GAME_MODE_TRAITS: Record<GameMode, GameModeTraits> = {
-  "ai": { authority: "client", company: "solo" },
-  "local": { authority: "client", company: "solo" },
-  "native-ai": { authority: "wire", company: "solo" },
-  "online": { authority: "wire", company: "remote-humans" },
-  "p2p-host": { authority: "wire", company: "remote-humans" },
-  "p2p-join": { authority: "wire", company: "remote-humans" },
-  "draft-match": { authority: "wire", company: "remote-humans" },
-  "spectate": { authority: "wire", company: "remote-humans" },
+export const GAME_MODE_TRAITS: Record<GameMode, GameModeTraits> = {
+  "ai": { authority: "client", company: "solo", seat: "seat-zero" },
+  "local": { authority: "client", company: "solo", seat: "seat-zero" },
+  "native-ai": { authority: "wire", company: "solo", seat: "seat-zero" },
+  "online": { authority: "wire", company: "remote-humans", seat: "wire-assigned" },
+  "p2p-host": { authority: "wire", company: "remote-humans", seat: "wire-assigned" },
+  "p2p-join": { authority: "wire", company: "remote-humans", seat: "wire-assigned" },
+  "draft-match": { authority: "wire", company: "remote-humans", seat: "wire-assigned" },
+  "spectate": { authority: "wire", company: "remote-humans", seat: "no-seat" },
 };
 
 /** True when the authoritative engine state lives off this client — i.e. the
@@ -142,6 +159,22 @@ export function isAuthorityRemote(mode: GameMode | null): boolean {
  */
 export function hasRemoteHumans(mode: GameMode | null): boolean {
   return mode !== null && GAME_MODE_TRAITS[mode].company === "remote-humans";
+}
+
+/**
+ * The seat axis of the census: where this client's own seat number comes from.
+ *
+ * Read this instead of testing `gameMode` against a list at the call site. The
+ * list form is what seated a pod-draft guest at 0: `"draft-match"` joined the
+ * union long after `usePlayerId`'s list was written, and nothing made the two
+ * meet. A mode added to `GAME_MODE_TRAITS` cannot compile without declaring
+ * its seat source, so it can never again default into somebody else's chair.
+ *
+ * `null` — no game yet — is `"seat-zero"`: nothing has assigned this client
+ * anything.
+ */
+export function seatSource(mode: GameMode | null): SeatSource {
+  return mode === null ? "seat-zero" : GAME_MODE_TRAITS[mode].seat;
 }
 
 interface GameStoreState {

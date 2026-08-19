@@ -31,6 +31,11 @@ export type DraftPoolGroupKind =
   | "planeswalker"
   | "land"
   | "other"
+  | "mythic"
+  | "rare"
+  | "uncommon"
+  | "common"
+  | "rarity_other"
   | "mana_value0"
   | "mana_value1"
   | "mana_value2"
@@ -42,6 +47,10 @@ export type DraftPoolGroupKind =
 export interface DraftPoolEntry {
   card: DraftCardInstance;
   count: number;
+  /** Every collapsed copy's instance id — the collapse keys on the name, so
+   * same-name instances (a reprint at a different rarity) are only
+   * addressable through these. */
+  instance_ids: string[];
 }
 
 export interface DraftPoolGroup {
@@ -58,10 +67,37 @@ export interface DraftPoolColorCounts {
   green: number;
 }
 
+/** Typed filter contract mirroring `draft_core::view::PoolFilter` (#7546):
+ * the display sends WHAT it asks for; the engine decides WHICH instances
+ * match. Empty axis = unconstrained. */
+export interface PoolFilter {
+  query: string;
+  types: DraftPoolGroupKind[];
+  colors: DraftPoolGroupKind[];
+  rarities: DraftPoolGroupKind[];
+}
+
+/** Engine-computed filter option lists (`draft_core::view::PoolFilterOptions`):
+ * the stateless path for views that predate the option fields. */
+export interface PoolFilterOptions {
+  types: DraftPoolGroupKind[];
+  colors: DraftPoolGroupKind[];
+  rarities: DraftPoolGroupKind[];
+}
+
 export interface DraftPoolGroups {
   color_groups: DraftPoolGroup[];
   type_groups: DraftPoolGroup[];
   cmc_groups: DraftPoolGroup[];
+  rarity_groups: DraftPoolGroup[];
+  /** Engine-owned option list for a type-filter control: every type bucket
+   * any pool member belongs to (multi-valued), in engine order. The exclusive
+   * `type_groups` axis stays a presentation/sorting shape. */
+  type_filter_options: DraftPoolGroupKind[];
+  /** Engine-owned option list for a color-filter control (CR 105.2: a card
+   * can be one or more colors). The exclusive `color_groups` axis stays a
+   * presentation shape. */
+  color_filter_options: DraftPoolGroupKind[];
   color_counts: DraftPoolColorCounts;
 }
 
@@ -70,6 +106,9 @@ export const EMPTY_DRAFT_POOL_GROUPS: DraftPoolGroups = {
   color_groups: [],
   type_groups: [],
   cmc_groups: [],
+  rarity_groups: [],
+  type_filter_options: [],
+  color_filter_options: [],
   color_counts: { white: 0, blue: 0, black: 0, red: 0, green: 0 },
 };
 
@@ -261,6 +300,34 @@ export class DraftAdapter {
   ): Promise<DraftPlayerView> {
     const wasm = await ensureDraftWasm();
     return wasm.start_quick_draft(setPoolJson, difficulty, seed) as DraftPlayerView;
+  }
+
+  /**
+   * Narrow a limited-pool listing through the ENGINE's filtering authority
+   * (#7546 review). Each instance is classified inside draft-core — the
+   * wire-delivered groups are not an input, so a legacy (pre-v11) view
+   * filters every collapsed copy correctly. Stateless — works for P2P
+   * guests; no draft session is required.
+   */
+  async filterPoolListing(
+    listing: DraftCardInstance[],
+    filter: PoolFilter,
+  ): Promise<string[]> {
+    const wasm = await ensureDraftWasm();
+    return wasm.filter_pool_listing(
+      JSON.stringify(listing),
+      JSON.stringify(filter),
+    ) as string[];
+  }
+
+  /**
+   * The engine-owned filter option lists, computed from the pool instances
+   * alone — for views whose delivered groups predate the option fields
+   * (review round 5). Never reconstructed in the display layer.
+   */
+  async poolFilterOptions(pool: DraftCardInstance[]): Promise<PoolFilterOptions> {
+    const wasm = await ensureDraftWasm();
+    return wasm.pool_filter_options(JSON.stringify(pool)) as PoolFilterOptions;
   }
 
   async initializeSealed(

@@ -10,8 +10,78 @@ import type { DraftP2PMessage } from "../draftProtocol";
 
 describe("draftProtocol", () => {
   describe("DRAFT_PROTOCOL_VERSION", () => {
-    it("is version 10", () => {
-      expect(DRAFT_PROTOCOL_VERSION).toBe(10);
+    it("is version 11", () => {
+      expect(DRAFT_PROTOCOL_VERSION).toBe(11);
+    });
+  });
+
+  describe("pool-group shape upgrade (v10 → v11)", () => {
+    const card = {
+      instance_id: "adept-1",
+      name: "Adept",
+      set_code: "TST",
+      collector_number: "1",
+      rarity: "common",
+      colors: ["W"],
+      cmc: 2,
+      type_line: "Creature",
+    };
+
+    it("upgrades a v10 view: fills the rarity axis and the entry instance ids", () => {
+      const msg = validateDraftMessage({
+        type: "draft_state_update",
+        view: {
+          status: "Deckbuilding",
+          draft_effects: [],
+          seats: [],
+          pool: [card],
+          // v10 shape: no rarity_groups, entry without instance_ids
+          pool_groups: {
+            color_groups: [],
+            type_groups: [{ kind: "creature", total: 1, cards: [{ card, count: 1 }] }],
+            cmc_groups: [],
+            color_counts: { white: 1, blue: 0, black: 0, red: 0, green: 0 },
+          },
+        },
+      }) as { view: { pool_groups: { rarity_groups: unknown[]; type_groups: Array<{ cards: Array<{ instance_ids: string[] }> }> } } };
+
+      expect(msg.view.pool_groups.rarity_groups).toEqual([]);
+      const upgraded = msg.view.pool_groups as unknown as {
+        type_filter_options: unknown[];
+        color_filter_options: unknown[];
+      };
+      expect(upgraded.type_filter_options).toEqual([]);
+      expect(upgraded.color_filter_options).toEqual([]);
+      expect(msg.view.pool_groups.type_groups[0].cards[0].instance_ids).toEqual(["adept-1"]);
+    });
+
+    it("passes a v11 view through unchanged", () => {
+      const entry = { card, count: 2, instance_ids: ["adept-1", "adept-2"] };
+      const msg = validateDraftMessage({
+        type: "draft_state_update",
+        view: {
+          status: "Deckbuilding",
+          draft_effects: [],
+          seats: [],
+          pool: [card],
+          pool_groups: {
+            color_groups: [],
+            type_groups: [{ kind: "creature", total: 2, cards: [entry] }],
+            cmc_groups: [],
+            rarity_groups: [{ kind: "common", total: 2, cards: [entry] }],
+            color_counts: { white: 2, blue: 0, black: 0, red: 0, green: 0 },
+          },
+        },
+      }) as { view: { pool_groups: { rarity_groups: Array<{ cards: Array<{ instance_ids: string[] }> }>; type_groups: Array<{ cards: Array<{ instance_ids: string[] }> }> } } };
+
+      expect(msg.view.pool_groups.type_groups[0].cards[0].instance_ids).toEqual([
+        "adept-1",
+        "adept-2",
+      ]);
+      expect(msg.view.pool_groups.rarity_groups[0].cards[0].instance_ids).toEqual([
+        "adept-1",
+        "adept-2",
+      ]);
     });
   });
 
@@ -237,7 +307,7 @@ describe("draftProtocol", () => {
               colors: ["W"],
               cmc: 1,
               type_line: "Creature — Test",
-            }, count: 1 }] },
+            }, count: 1, instance_ids: ["pack-1-card-1"] }] },
             { kind: "blue", total: 1, cards: [{ card: {
               instance_id: "pack-2-card-1",
               name: "Second Pull",
@@ -247,7 +317,7 @@ describe("draftProtocol", () => {
               colors: ["U"],
               cmc: 2,
               type_line: "Instant",
-            }, count: 1 }] },
+            }, count: 1, instance_ids: ["pack-2-card-1"] }] },
           ],
           type_groups: [
             { kind: "creature", total: 1, cards: [{ card: {
@@ -259,7 +329,7 @@ describe("draftProtocol", () => {
               colors: ["W"],
               cmc: 1,
               type_line: "Creature — Test",
-            }, count: 1 }] },
+            }, count: 1, instance_ids: ["pack-1-card-1"] }] },
             { kind: "instant", total: 1, cards: [{ card: {
               instance_id: "pack-2-card-1",
               name: "Second Pull",
@@ -269,7 +339,7 @@ describe("draftProtocol", () => {
               colors: ["U"],
               cmc: 2,
               type_line: "Instant",
-            }, count: 1 }] },
+            }, count: 1, instance_ids: ["pack-2-card-1"] }] },
           ],
           cmc_groups: [
             { kind: "mana_value1", total: 1, cards: [{ card: {
@@ -281,7 +351,7 @@ describe("draftProtocol", () => {
               colors: ["W"],
               cmc: 1,
               type_line: "Creature — Test",
-            }, count: 1 }] },
+            }, count: 1, instance_ids: ["pack-1-card-1"] }] },
             { kind: "mana_value2", total: 1, cards: [{ card: {
               instance_id: "pack-2-card-1",
               name: "Second Pull",
@@ -291,8 +361,32 @@ describe("draftProtocol", () => {
               colors: ["U"],
               cmc: 2,
               type_line: "Instant",
-            }, count: 1 }] },
+            }, count: 1, instance_ids: ["pack-2-card-1"] }] },
           ],
+          rarity_groups: [
+            { kind: "common", total: 1, cards: [{ card: {
+              instance_id: "pack-1-card-1",
+              name: "First Pull",
+              set_code: "TST",
+              collector_number: "101",
+              rarity: "common",
+              colors: ["W"],
+              cmc: 1,
+              type_line: "Creature — Test",
+            }, count: 1, instance_ids: ["pack-1-card-1"] }] },
+            { kind: "uncommon", total: 1, cards: [{ card: {
+              instance_id: "pack-2-card-1",
+              name: "Second Pull",
+              set_code: "TST",
+              collector_number: "102",
+              rarity: "uncommon",
+              colors: ["U"],
+              cmc: 2,
+              type_line: "Instant",
+            }, count: 1, instance_ids: ["pack-2-card-1"] }] },
+          ],
+          type_filter_options: ["creature", "instant"],
+          color_filter_options: ["white", "blue"],
           color_counts: { white: 1, blue: 1, black: 0, red: 0, green: 0 },
         },
         sealed_packs: [

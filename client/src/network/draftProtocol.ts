@@ -41,8 +41,9 @@ import type {
  *   8 — add Sealed event kind and deckbuilding-first start flow
  *   9 — add engine-owned limited-pool presentation groups
  *  10 — add authenticated draft-effect pick actions
+ *  11 — instance-addressable pool entries (`instance_ids`) + engine rarity axis
  */
-export const DRAFT_PROTOCOL_VERSION = 10 as const;
+export const DRAFT_PROTOCOL_VERSION = 11 as const;
 
 /**
  * Typed reason for a draft pause, used over the wire and on the i18n key path.
@@ -448,6 +449,53 @@ function normalizeSeatPublicView(raw: unknown): SeatPublicView {
   } as SeatPublicView;
 }
 
+/** v10 → v11: an old-shape entry carries no `instance_ids`. Upgrade it to the
+ * representative id — the one instance the old wire shape can address. A
+ * collapsed multi-copy entry from a v10 message therefore addresses only its
+ * representative; the other copies' ids were never serialized and cannot be
+ * reconstructed here (re-deriving them would make this normalizer a second
+ * classification authority). */
+function normalizePoolEntry(raw: unknown): Record<string, unknown> {
+  if (typeof raw !== "object" || raw === null) {
+    throw new Error("Invalid draft message: malformed pool entry");
+  }
+  const entry = raw as Record<string, unknown>;
+  if (Array.isArray(entry.instance_ids)) return entry;
+  const card = entry.card as { instance_id?: unknown } | undefined;
+  const id = typeof card?.instance_id === "string" ? [card.instance_id] : [];
+  return { ...entry, instance_ids: id };
+}
+
+function normalizePoolGroup(raw: unknown): Record<string, unknown> {
+  if (typeof raw !== "object" || raw === null) {
+    throw new Error("Invalid draft message: malformed pool group");
+  }
+  const group = raw as Record<string, unknown>;
+  return {
+    ...group,
+    cards: normalizeArrayField(group, "cards").map(normalizePoolEntry),
+  };
+}
+
+/** v10 → v11: fill the missing rarity axis (empty — the old host never
+ * classified it) and upgrade every group entry. */
+function normalizePoolGroups(raw: unknown): Record<string, unknown> | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object") {
+    throw new Error("Invalid draft message: malformed pool groups");
+  }
+  const groups = raw as Record<string, unknown>;
+  return {
+    ...groups,
+    color_groups: normalizeArrayField(groups, "color_groups").map(normalizePoolGroup),
+    type_groups: normalizeArrayField(groups, "type_groups").map(normalizePoolGroup),
+    cmc_groups: normalizeArrayField(groups, "cmc_groups").map(normalizePoolGroup),
+    rarity_groups: normalizeArrayField(groups, "rarity_groups").map(normalizePoolGroup),
+    type_filter_options: normalizeArrayField(groups, "type_filter_options"),
+    color_filter_options: normalizeArrayField(groups, "color_filter_options"),
+  };
+}
+
 function normalizeDraftPlayerView(raw: unknown): DraftPlayerView {
   if (raw === undefined) {
     return { draft_effects: [], seats: [] } as unknown as DraftPlayerView;
@@ -456,11 +504,13 @@ function normalizeDraftPlayerView(raw: unknown): DraftPlayerView {
     throw new Error("Invalid draft message: malformed player view");
   }
   const view = raw as Record<string, unknown>;
+  const pool_groups = normalizePoolGroups(view.pool_groups);
   return {
     ...view,
+    ...(pool_groups !== undefined ? { pool_groups } : {}),
     draft_effects: normalizeArrayField(view, "draft_effects"),
     seats: normalizeArrayField(view, "seats").map(normalizeSeatPublicView),
-  } as DraftPlayerView;
+  } as unknown as DraftPlayerView;
 }
 
 /** Validate a parsed object as a DraftP2PMessage. Throws on malformed data. */

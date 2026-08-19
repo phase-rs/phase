@@ -82,6 +82,8 @@ export function get_draft_view_for_seat(seat_index: number): any;
 /**
  * Get the current DraftPlayerView without mutation.
  */
+export function filter_pool_listing(listing_json: string, filter_json: string): any;
+export function pool_filter_options(pool_json: string): any;
 export function get_view(): any;
 
 /**

@@ -6,7 +6,22 @@ import { useCardImage } from "../../hooks/useCardImage";
 import { useLongPress } from "../../hooks/useLongPress";
 import { useDraftStore } from "../../stores/draftStore";
 import { menuButtonClass } from "../menu/buttonStyles";
-import type { DraftCardInstance, DraftPlayerView } from "../../adapter/draft-adapter";
+import type {
+  DraftCardInstance,
+  DraftPlayerView,
+  DraftPoolGroupKind,
+} from "../../adapter/draft-adapter";
+import { EMPTY_DRAFT_POOL_GROUPS } from "../../adapter/draft-adapter";
+import {
+  axisKinds,
+  EMPTY_POOL_FILTER,
+  fetchPoolFilterOptions,
+  filterPoolListing,
+  poolFilterActive,
+  toggleKind,
+} from "../../viewmodel/limitedPoolFilter";
+import type { PoolFilter, PoolFilterOptions } from "../../adapter/draft-adapter";
+import { POOL_GROUP_LABEL_KEYS } from "./poolGroupLabels";
 import type { CardHoverInfo } from "../card/CardPreview";
 import { HoverCardPreview } from "../card/HoverCardPreview";
 import { ManaCurve } from "./ManaCurve";
@@ -233,6 +248,11 @@ export function LimitedDeckBuilder({
 
   const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
   const [addableQuery, setAddableQuery] = useState("");
+  const [poolFilter, setPoolFilter] = useState<PoolFilter>(EMPTY_POOL_FILTER);
+  const [keptInstanceIds, setKeptInstanceIds] = useState<string[] | null>(null);
+  const [poolFilterFailed, setPoolFilterFailed] = useState(false);
+  const [legacyFilterOptions, setLegacyFilterOptions] =
+    useState<PoolFilterOptions | null>(null);
   const [localSubmissionError, setLocalSubmissionError] = useState<string | null>(null);
 
   const pool = useMemo(() => view?.pool ?? [], [view?.pool]);
@@ -241,6 +261,84 @@ export function LimitedDeckBuilder({
     () => computeRemainingPool(pool, mainDeck),
     [pool, mainDeck],
   );
+
+  // #7507 + #7546 review: the ENGINE is the single filtering authority. The
+  // display sends the listing, the engine-delivered groups and the typed
+  // filter; it renders exactly the returned instance ids. React holds only
+  // the presentation state (which chips are pressed, the query text).
+  const poolGroups = view?.pool_groups ?? EMPTY_DRAFT_POOL_GROUPS;
+  useEffect(() => {
+    if (!poolFilterActive(poolFilter)) {
+      setKeptInstanceIds(null);
+      setPoolFilterFailed(false);
+      return;
+    }
+    let stale = false;
+    filterPoolListing(remainingPool, poolFilter)
+      .then((ids) => {
+        if (stale) return;
+        setKeptInstanceIds(ids);
+        setPoolFilterFailed(false);
+      })
+      .catch(() => {
+        if (stale) return;
+        // Engine unavailable: show the unfiltered listing rather than an
+        // empty grid — the display must not interpret the data itself — and
+        // SAY so, so the grid cannot silently contradict the active controls
+        // (review round 3).
+        setKeptInstanceIds(null);
+        setPoolFilterFailed(true);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [remainingPool, poolFilter]);
+  // Review round 5: a view that predates the option fields (legacy) gets its
+  // control options from the ENGINE's stateless path — never from the lossy
+  // exclusive presentation buckets, and never reconstructed here. A v11 view
+  // with a non-empty pool always carries non-empty option lists
+  // (classification is total), so empty lists + a non-empty pool identify
+  // the legacy shape. While the call is pending or failed, the axes stay
+  // hidden rather than mis-offered.
+  const isLegacyView =
+    pool.length > 0 &&
+    poolGroups.type_filter_options.length === 0 &&
+    poolGroups.color_filter_options.length === 0;
+  useEffect(() => {
+    if (!isLegacyView) {
+      setLegacyFilterOptions(null);
+      return;
+    }
+    // Do not display the prior legacy pool's engine-owned options while this
+    // pool's stateless request is pending.
+    setLegacyFilterOptions(null);
+    let stale = false;
+    fetchPoolFilterOptions(pool)
+      .then((options) => {
+        if (!stale) setLegacyFilterOptions(options);
+      })
+      .catch(() => {
+        if (!stale) setLegacyFilterOptions(null);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [isLegacyView, pool]);
+  const typeChipKinds = isLegacyView
+    ? (legacyFilterOptions?.types ?? [])
+    : poolGroups.type_filter_options;
+  const colorChipKinds = isLegacyView
+    ? (legacyFilterOptions?.colors ?? [])
+    : poolGroups.color_filter_options;
+  const rarityChipKinds = isLegacyView
+    ? (legacyFilterOptions?.rarities ?? [])
+    : axisKinds(poolGroups.rarity_groups);
+
+  const displayedPool = useMemo(() => {
+    if (keptInstanceIds === null) return remainingPool;
+    const kept = new Set(keptInstanceIds);
+    return remainingPool.filter((card) => kept.has(card.instance_id));
+  }, [remainingPool, keptInstanceIds]);
 
   const deckGroups = useMemo(
     () => groupByName(pool, mainDeck),
@@ -297,9 +395,50 @@ export function LimitedDeckBuilder({
             <h3 className="mb-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
               {t("limitedDeck.poolHeading", { count: remainingPool.length })}
             </h3>
+            <div className="mb-3 flex flex-col gap-2">
+              <input
+                type="search"
+                value={poolFilter.query}
+                onChange={(event) =>
+                  setPoolFilter((prev) => ({ ...prev, query: event.target.value }))
+                }
+                placeholder={t("limitedDeck.searchPool")}
+                aria-label={t("limitedDeck.searchPool")}
+                className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none placeholder:text-white/25 focus:border-emerald-400/50"
+              />
+              <PoolFilterChips
+                kinds={typeChipKinds}
+                selected={poolFilter.types}
+                onToggle={(kind) =>
+                  setPoolFilter((prev) => ({ ...prev, types: toggleKind(prev.types, kind) }))
+                }
+              />
+              <PoolFilterChips
+                kinds={colorChipKinds}
+                selected={poolFilter.colors}
+                onToggle={(kind) =>
+                  setPoolFilter((prev) => ({ ...prev, colors: toggleKind(prev.colors, kind) }))
+                }
+              />
+              <PoolFilterChips
+                kinds={rarityChipKinds}
+                selected={poolFilter.rarities}
+                onToggle={(kind) =>
+                  setPoolFilter((prev) => ({
+                    ...prev,
+                    rarities: toggleKind(prev.rarities, kind),
+                  }))
+                }
+              />
+              {poolFilterFailed && (
+                <p role="alert" className="text-xs text-amber-300/80">
+                  {t("limitedDeck.filterUnavailable")}
+                </p>
+              )}
+            </div>
             <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7">
               <AnimatePresence mode="popLayout" initial={false}>
-                {remainingPool.map((card) => (
+                {displayedPool.map((card) => (
                   <motion.div key={card.instance_id} {...CARD_MOTION}>
                     <CardTile
                       card={card}
@@ -311,8 +450,15 @@ export function LimitedDeckBuilder({
                 ))}
               </AnimatePresence>
             </div>
-            {remainingPool.length === 0 && (
+            {remainingPool.length === 0 ? (
               <p className="py-4 text-sm text-white/30">{t("limitedDeck.allAdded")}</p>
+            ) : (
+              displayedPool.length === 0 &&
+              poolFilterActive(poolFilter) && (
+                <p className="py-4 text-sm text-white/30">
+                  {t("limitedDeck.noFilterMatches")}
+                </p>
+              )
             )}
           </section>
 
@@ -459,6 +605,49 @@ function DeckStatus({ spells, lands, min }: { spells: number; lands: number; min
           style={{ width: `${pct}%` }}
         />
       </div>
+    </div>
+  );
+}
+
+// ── Pool filter chips (#7507) ───────────────────────────────────────────
+
+/**
+ * One filter axis as toggle chips. The offered kinds are exactly the groups
+ * the engine delivered for this pool (`axisKinds`), in engine order; labels
+ * come from the shared engine-kind label map. An axis with fewer than two
+ * groups offers no narrowing and renders nothing.
+ */
+function PoolFilterChips({
+  kinds,
+  selected,
+  onToggle,
+}: {
+  kinds: DraftPoolGroupKind[];
+  selected: DraftPoolGroupKind[];
+  onToggle: (kind: DraftPoolGroupKind) => void;
+}) {
+  const { t } = useTranslation("draft");
+  if (kinds.length < 2) return null;
+  return (
+    <div className="flex flex-wrap gap-1">
+      {kinds.map((kind) => (
+        <button
+          key={kind}
+          type="button"
+          aria-pressed={selected.includes(kind)}
+          onClick={() => onToggle(kind)}
+          // 44pt coarse-pointer floor in BOTH dimensions (index.css),
+          // relaxed only for fine pointers — a wide touch device keeps the
+          // full target (review round 4).
+          className={`min-h-[44px] min-w-[44px] rounded-full px-3 py-1 text-xs transition-colors pointer-fine:min-h-0 pointer-fine:min-w-0 pointer-fine:px-2.5 ${
+            selected.includes(kind)
+              ? "bg-white/10 text-white"
+              : "text-white/40 hover:bg-white/5 hover:text-white/70"
+          }`}
+        >
+          {t(POOL_GROUP_LABEL_KEYS[kind])}
+        </button>
+      ))}
     </div>
   );
 }
