@@ -31,6 +31,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
+use engine::types::game_state::LoopDetectSample;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
@@ -81,6 +82,11 @@ fn gain_life_replacement(amount: QuantityExpr) -> ReplacementDefinition {
         },
     ))
 }
+
+/// The "you gain twice that much life instead" half of the non-commuting pair.
+const DOUBLER: &str = "Rhox Faithmender";
+/// The "you gain that much life plus 1 instead" half of the non-commuting pair.
+const OFFSET: &str = "Leyline of Hope";
 
 /// Install the non-commuting CR 616.1 pair on `player`.
 fn install_competing_life_gain_replacements(scenario: &mut GameScenario, player: PlayerId) {
@@ -193,22 +199,63 @@ fn attack_into_damage(
     }
 }
 
-/// Answer every CR 616.1 ordering prompt that opens, starting with `first`
-/// (CR 616.1f repeats the process until no applicable effects remain). Later
-/// prompts take index 0 — with one candidate left there is only one.
-fn answer_ordering_prompts(runner: &mut GameRunner, first: usize) -> (usize, Vec<GameEvent>) {
+/// Answer every CR 616.1 ordering prompt that opens, applying the effect from
+/// the source named `first_source` FIRST. CR 616.1f repeats the process until
+/// no applicable effects remain; later prompts take index 0, because with one
+/// applicable effect left there is only one.
+///
+/// The candidate is located by NAME rather than by a hardcoded position.
+/// `WaitingFor::ReplacementChoice.candidates` is ordered by the replacement
+/// index's scan ordinal (`ReplacementIndexEntry.ordinal`), which is NOT
+/// creation order: the same two sources, created in the same order, were
+/// OBSERVED at `[Leyline, Rhox]` on the single-attacker board and at
+/// `[Rhox, Leyline]` on the two-controller board. A positional premise would
+/// therefore pin an incidental registration order rather than the CR 616.1
+/// choice these tests exist to discriminate, and would go silently red on any
+/// unrelated change to that order.
+fn answer_ordering_prompts(runner: &mut GameRunner, first_source: &str) -> (usize, Vec<GameEvent>) {
     let mut answered = 0;
     let mut events = Vec::new();
-    let mut index = first;
     for _ in 0..12 {
         match runner.state().waiting_for.clone() {
-            WaitingFor::ReplacementChoice { .. } => {
+            WaitingFor::ReplacementChoice { candidates, .. } => {
+                // CR 616.1: the affected player chooses one applicable effect to
+                // apply; `continue_replacement` applies `candidates[index]`
+                // immediately and then repeats (CR 616.1f).
+                //
+                // `first_source` is selected EVERY time it is applicable, not
+                // just on this call's first prompt. One call can span more than
+                // one life-gain event — a batch with two lifelink sources
+                // (CR 702.15e), or a first-strike batch whose resume runs the
+                // regular sub-step (CR 510.4) — and each such event opens its
+                // own first prompt. Keying on "the first prompt I see" would
+                // silently answer the SECOND event's opening choice with a bare
+                // index 0 and make each event's total depend on candidate order
+                // again.
+                //
+                // When `first_source` is absent the prompt is a CR 616.1f repeat:
+                // CR 614.5 gives each effect one opportunity per event, so the
+                // already-applied effect is no longer among the candidates and
+                // index 0 is the sole remaining effect.
+                let index = match candidates
+                    .iter()
+                    .position(|candidate| candidate.source_name == first_source)
+                {
+                    Some(index) => index,
+                    None => {
+                        assert!(
+                            answered > 0,
+                            "reach guard: CR 616.1 — {first_source} must be an applicable \
+                             candidate on an event's opening prompt; got {candidates:?}"
+                        );
+                        0
+                    }
+                };
                 let result = runner
                     .act(GameAction::ChooseReplacement { index })
                     .expect("the CR 616.1 ordering choice must be answerable");
                 events.extend(result.events);
                 answered += 1;
-                index = 0;
             }
             WaitingFor::OrderTriggers { triggers, .. } => {
                 let order = (0..triggers.len()).collect();
@@ -281,7 +328,7 @@ fn gain_survives_and_honors_doubler_first() {
     );
     assert_eq!(runner.life(P1), 17, "CR 510.2: the damage is already dealt");
 
-    let (answered, _) = answer_ordering_prompts(&mut runner, 0);
+    let (answered, _) = answer_ordering_prompts(&mut runner, DOUBLER);
     assert!(
         answered >= 1,
         "CR 616.1f: the process repeats until no applicable effects remain"
@@ -319,7 +366,7 @@ fn gain_survives_and_honors_offset_first() {
         "CR 616.1: both life-gain replacements are co-applicable candidates"
     );
 
-    let _ = answer_ordering_prompts(&mut runner, 1);
+    let _ = answer_ordering_prompts(&mut runner, OFFSET);
 
     assert_eq!(
         runner.life(P0),
@@ -363,7 +410,7 @@ fn second_lifelink_source_in_batch_is_not_lost() {
         "the first source's gain parks"
     );
 
-    let (answered, _) = answer_ordering_prompts(&mut runner, 0);
+    let (answered, _) = answer_ordering_prompts(&mut runner, DOUBLER);
     assert!(
         answered >= 2,
         "CR 702.15e: each source's gain is its own event and raises its own \
@@ -423,9 +470,9 @@ fn first_strike_pause_still_runs_the_regular_sub_step() {
         "CR 510.4: the regular sub-step has not run yet"
     );
 
-    let _ = answer_ordering_prompts(&mut runner, 0);
+    let _ = answer_ordering_prompts(&mut runner, DOUBLER);
     advance_through_combat_damage(&mut runner);
-    let _ = answer_ordering_prompts(&mut runner, 0);
+    let _ = answer_ordering_prompts(&mut runner, DOUBLER);
 
     assert_eq!(
         runner.life(P1),
@@ -457,10 +504,9 @@ fn life_gain_trigger_joins_the_combat_damage_trigger_batch() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let lifelinker = add_lifelinker(&mut scenario, P0, "Lifelinker", 3, 3);
-    let magpie = {
-        let mut builder = scenario.add_creature_from_oracle(P0, "Thieving Magpie", 1, 3, MAGPIE);
-        builder.id()
-    };
+    let magpie = scenario
+        .add_creature_from_oracle(P0, "Thieving Magpie", 1, 3, MAGPIE)
+        .id();
     scenario.add_creature_from_oracle(P0, "Ajani's Pridemate", 2, 2, PRIDEMATE);
     let blocker = scenario.add_creature(P1, "Chump", 1, 1).id();
     install_competing_life_gain_replacements(&mut scenario, P0);
@@ -498,7 +544,7 @@ fn life_gain_trigger_joins_the_combat_damage_trigger_batch() {
         "no trigger may be put on the stack before the batch completes (CR 603.3b)"
     );
 
-    let _ = answer_ordering_prompts(&mut runner, 0);
+    let _ = answer_ordering_prompts(&mut runner, DOUBLER);
 
     assert!(
         runner.life(P0) > 20,
@@ -586,7 +632,7 @@ fn resume_keeps_the_batch_whole_through_every_door() {
         "premise P1 still holds immediately before the drain"
     );
 
-    let _ = answer_ordering_prompts(&mut runner, 0);
+    let _ = answer_ordering_prompts(&mut runner, DOUBLER);
 
     assert!(
         runner.state().pending_combat_lifelink.is_none(),
@@ -611,7 +657,7 @@ fn resume_keeps_the_batch_whole_through_every_door() {
 #[test]
 fn no_pending_replacement_or_parked_record_leaks() {
     let (mut runner, _) = parked_board();
-    let (_, events) = answer_ordering_prompts(&mut runner, 0);
+    let (_, events) = answer_ordering_prompts(&mut runner, DOUBLER);
 
     assert_eq!(
         positive_life_changes(&events, P0),
@@ -669,7 +715,7 @@ fn two_lifelink_controllers_credit_their_own_snapshotted_controller() {
         runner.state().waiting_for
     );
 
-    let _ = answer_ordering_prompts(&mut runner, 0);
+    let _ = answer_ordering_prompts(&mut runner, DOUBLER);
 
     assert_eq!(
         runner.life(P1),
@@ -689,42 +735,49 @@ fn two_lifelink_controllers_credit_their_own_snapshotted_controller() {
 // H2 — CR 614.7's actual subject: an event that never happens
 // ---------------------------------------------------------------------------
 
-/// H2 — a fully prevented lifelink attacker deals no damage, so there is no
-/// life-gain event to replace (CR 614.7) and no prompt is raised. The first
-/// production branch reached is `remaining` being EMPTY — nothing is pushed
-/// into `lifelink_by_source` unless `actual_amount > 0` — so `pop_front()`
-/// returns `None` on the first iteration and `apply_life_gain` is never called.
+/// H2 — a lifelink attacker that deals NO combat damage causes no life-gain
+/// event, so the competing replacements have nothing to replace (CR 614.7a)
+/// and no prompt is raised. The first production branch reached is `remaining`
+/// being EMPTY — nothing is pushed into `lifelink_by_source` unless
+/// `actual_amount > 0` — so `pop_front()` returns `None` on the first iteration
+/// and `apply_life_gain` is never called.
 ///
-/// PAIRED POSITIVE CONTROL in the same test: the identical board WITHOUT the
-/// prevention does raise the prompt, so the negative cannot pass vacuously.
+/// The zero comes from the creature's PRINTED power (CR 510.1a: a creature that
+/// would assign 0 or less combat damage assigns none). It deliberately does not
+/// come from writing `object.power` directly: that field is a projected
+/// characteristic, and the continuous-effects recalculation restores it from the
+/// base power before combat damage is assigned — OBSERVED, a poked `Some(0)`
+/// reads back as `Some(3)` by the time the batch runs, so such a fixture proves
+/// nothing about the zero-damage branch.
+///
+/// PAIRED POSITIVE CONTROL in the same test: the identical board with a nonzero
+/// power does raise the prompt, so the negative cannot pass vacuously.
 #[test]
-fn fully_prevented_lifelink_raises_no_prompt() {
-    // Negative: damage prevented by a protection-style total gate.
+fn zero_damage_lifelink_raises_no_prompt() {
+    // Negative: the attacker assigns no combat damage at all.
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let lifelinker = add_lifelinker(&mut scenario, P0, "Lifelinker", 3, 3);
+    let lifelinker = add_lifelinker(&mut scenario, P0, "Powerless Lifelinker", 0, 3);
     install_competing_life_gain_replacements(&mut scenario, P0);
     let mut runner = scenario.build();
-    // CR 510.1a: a 0-power attacker assigns no combat damage, so no damage is
-    // dealt and no life-gain event exists to replace. Same first production
-    // branch as a fully prevented source: nothing is pushed into
-    // `lifelink_by_source` unless `actual_amount > 0`.
-    runner
-        .state_mut()
-        .objects
-        .get_mut(&lifelinker)
-        .expect("the attacker exists")
-        .power = Some(0);
 
     attack_into_damage(&mut runner, &[lifelinker], P1, &[]);
     advance_through_combat_damage(&mut runner);
 
+    // Reach guard for the MECHANISM: the branch under test is "no damage was
+    // dealt". If the attacker had somehow dealt damage, the negatives below
+    // would be testing a different board.
+    assert_eq!(
+        runner.life(P1),
+        20,
+        "CR 510.1a: a 0-power attacker assigns no combat damage"
+    );
     assert!(
         !matches!(
             runner.state().waiting_for,
             WaitingFor::ReplacementChoice { .. }
         ),
-        "CR 614.7: an event that never happens has nothing to replace"
+        "CR 614.7a: an event that never happens has nothing to replace"
     );
     assert!(
         runner.state().pending_combat_lifelink.is_none(),
@@ -740,6 +793,11 @@ fn fully_prevented_lifelink_raises_no_prompt() {
     let mut control = scenario.build();
     attack_into_damage(&mut control, &[lifelinker], P1, &[]);
     advance_through_combat_damage(&mut control);
+    assert_eq!(
+        control.life(P1),
+        17,
+        "positive control: the identical board WITH power does deal damage"
+    );
     assert!(
         matches!(
             control.state().waiting_for,
@@ -775,6 +833,14 @@ fn conceding_active_attacker_does_not_skip_the_next_turns_combat_damage() {
     let lifelinker = add_lifelinker(&mut scenario, P0, "Lifelinker", 3, 3);
     install_competing_life_gain_replacements(&mut scenario, P0);
     let p1_attacker = scenario.add_creature(P1, "Next Turn Attacker", 2, 2).id();
+    // CR 704.5b: this is the only test here that runs a SECOND turn, so it is the
+    // only one whose seats reach a draw step. A scenario seat starts with an empty
+    // library and a player who drew from an empty library loses the game — without
+    // these cards P1 is eliminated on its own draw step and the game ends
+    // (OBSERVED: `GameOver { winner: P2 }` at `Phase::Draw`) before the following
+    // turn's combat damage can be reached at all.
+    scenario.with_library_top(P1, &["Filler A", "Filler B", "Filler C"]);
+    scenario.with_library_top(P2, &["Filler A", "Filler B", "Filler C"]);
     let mut runner = scenario.build();
     assert_eq!(
         runner.state().active_player,
@@ -801,11 +867,14 @@ fn conceding_active_attacker_does_not_skip_the_next_turns_combat_damage() {
         .act(GameAction::Concede { player_id: P0 })
         .expect("CR 800.4: a player may concede at any time");
 
-    // (i) the record must not outlive its combat.
-    assert!(
-        runner.state().pending_combat_lifelink.is_none(),
-        "CR 500.4: entering another step abandons the combat-damage batch"
-    );
+    // (i) the record must not outlive its combat. The abandonment authority is
+    // `turns::enter_phase`, so the record is cleared when the game actually
+    // ENTERS the next step — not by the `Concede` action itself, which only
+    // performs the CR 800.4a departure and reconciles priority (the phase is
+    // still `CombatDamage` and `active_player` is still the departed seat when
+    // that action returns). The assertion is therefore made once the concede has
+    // settled through `skip_eliminated_active_turn` -> `advance_phase_once` ->
+    // `start_next_turn` -> `enter_phase`, exactly as the plan's H3 specifies.
 
     // (ii) the FOLLOWING turn's combat damage must actually be dealt.
     for _ in 0..64 {
@@ -832,6 +901,10 @@ fn conceding_active_attacker_does_not_skip_the_next_turns_combat_damage() {
         P1,
         "CR 800.4: the game continues with the next player's turn"
     );
+    assert!(
+        runner.state().pending_combat_lifelink.is_none(),
+        "CR 500.4: entering another step abandons the combat-damage batch"
+    );
 
     let p2_life_before = runner.life(P2);
     attack_into_damage(&mut runner, &[p1_attacker], P2, &[]);
@@ -857,14 +930,25 @@ fn conceding_active_attacker_does_not_skip_the_next_turns_combat_damage() {
 // H4 — CR 800.4a: a NON-ACTIVE controller leaves; the batch still completes
 // ---------------------------------------------------------------------------
 
-/// H4 — the per-entry `retain` in `elimination`.
+/// H4 — the latched-chooser teardown in `elimination::handle_player_left_game`,
+/// and the anti-livelock drain.
 ///
-/// The competing replacements sit on the NON-ACTIVE blocker's controller (P1),
-/// so P1 is the chooser and P1's gain is the one that parks. P1 leaves the game
-/// while the prompt is open; the active player P0 stays. P1's owed gain is
-/// dropped (a leaving player gains no life) while P0's still lands and the
-/// batch completes — a blanket null would lose P0's gain too, and a
-/// non-draining guard would hang on `priority.rs`'s completeness gate.
+/// SCOPE CORRECTION, stated rather than implied: this row does NOT reach the
+/// per-entry `record.remaining.retain(..)` there, despite earlier docstrings
+/// claiming it. The departing seat P1 controls exactly ONE lifelink source, so it
+/// owns exactly one gain, and that gain is the one that PARKED — which
+/// `drain_combat_lifelink` deliberately never re-queues into `remaining`. P1
+/// therefore owns no entry in `remaining` at the concede and the `retain` filters
+/// nothing on this board. `departed_seat_forfeits_a_still_queued_gain_and_the_batch_still_completes`
+/// below is the row that reaches it.
+///
+/// What this row DOES cover: the competing replacements sit on the NON-ACTIVE
+/// blocker's controller (P1), so P1 is the latched CR 616.1 chooser. P1 leaves
+/// while the prompt is open, which clears `pending_replacement` and abandons its
+/// post-replacement continuation; the parked gain is forfeited with it (a leaving
+/// player gains no life). The batch must then still drain to completion so its
+/// CR 603.3b triggers fire — a non-draining guard would hang on `priority.rs`'s
+/// completeness gate — and the surviving active seat P0's gain must still land.
 ///
 /// Termination is asserted on the drained record and the completion flag, never
 /// on wall-clock.
@@ -896,9 +980,45 @@ fn departed_nonactive_controller_forfeits_its_gain_and_the_batch_still_completes
         "CR 800.4a: no life-gain event may be emitted for the departed seat"
     );
 
-    assert!(
-        runner.state().pending_combat_lifelink.is_none(),
-        "CR 800.4a: the batch drains rather than stranding — no livelock"
+    // CR 800.4a departs the seat and reconciles priority; it does not itself
+    // re-enter `resolve_combat_damage`, so the record is still parked when the
+    // action returns. The NEXT priority window re-enters, and the re-entry
+    // guard's completion branch finishes the batch. Pump a bounded number of
+    // windows and record the completion state at the exact beat the record is
+    // consumed — this is the anti-livelock assertion, made on the drained
+    // record and the sub-step flag rather than on wall-clock.
+    let mut completion_at_drain = None;
+    for _ in 0..16 {
+        if runner.state().pending_combat_lifelink.is_none() {
+            completion_at_drain = Some(
+                runner
+                    .state()
+                    .combat
+                    .as_ref()
+                    .map(|c| c.regular_damage_done),
+            );
+            break;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order = (0..triggers.len()).collect();
+                if runner.act(GameAction::OrderTriggers { order }).is_err() {
+                    break;
+                }
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+            }
+            other => panic!("no further prompt is owed after the departure: {other:?}"),
+        }
+    }
+    assert_eq!(
+        completion_at_drain,
+        Some(Some(true)),
+        "CR 800.4a: the batch drains rather than stranding — no livelock — and \
+         the sub-step it owns is marked complete on its OWN live CombatState"
     );
     assert_eq!(
         runner
@@ -917,13 +1037,482 @@ fn departed_nonactive_controller_forfeits_its_gain_and_the_batch_still_completes
         "the surviving controller's gain still lands — the retain is per-entry, \
          never a blanket null"
     );
+}
+
+// ---------------------------------------------------------------------------
+// H5 — CR 800.4a: the departing seat owns a STILL-QUEUED gain
+// ---------------------------------------------------------------------------
+
+/// H5 — the discriminating owner of the per-entry `retain` in
+/// `elimination::handle_player_left_game`
+/// (`record.remaining.retain(|gain| gain.controller != player)`).
+///
+/// H4 above cannot reach that `retain` — see its own docstring. This board gives
+/// the departing seat a gain that is still IN `remaining` when it concedes:
+///
+///   * `lifelink_attacker` (P0, lifelink) is blocked by `first_blocker` -> P0 is
+///     owed 3;
+///   * `plain_attacker` (P0, NO lifelink) is blocked by `second_blocker`, so it
+///     contributes no gain of its own and no CR 510.1c damage-division choice
+///     opens — CR 510.1c only asks the attacker's controller to divide when TWO
+///     or more creatures block it, and here each attacker has exactly one;
+///   * `first_blocker` and `second_blocker` (both P1, both lifelink) are each
+///     owed 2.
+///
+/// Three CR 702.15b gains, TWO of them P1's. The competing replacements sit on
+/// P1, so the FIRST of P1's two gains to be drained parks (CR 616.1) and is
+/// deliberately never re-queued — which leaves P1's SECOND gain sitting in
+/// `remaining`, whatever order the batch drained in. That is the entry the
+/// `retain` exists to drop, and the reach guard below asserts it is really there
+/// before the concede rather than assuming it.
+///
+/// REVERT-FAILING ASSERTION: `runner.life(P1) == 20` / the empty
+/// `positive_life_changes(.., P1)`. Delete the `retain` and P1's still-queued
+/// gain is applied on the resume to a seat that has left the game.
+///
+/// The departed seat's gain is asserted SPECIFICALLY — on P1's own life total and
+/// on P1-keyed `LifeChanged` events — never on a batch total that P0's surviving
+/// gain could satisfy on its own.
+#[test]
+fn departed_seat_forfeits_a_still_queued_gain_and_the_batch_still_completes() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let lifelink_attacker = add_lifelinker(&mut scenario, P0, "Attacking Lifelinker", 3, 6);
+    let plain_attacker = scenario.add_creature(P0, "Plain Attacker", 1, 6).id();
+    let first_blocker = add_lifelinker(&mut scenario, P1, "First Blocking Lifelinker", 2, 5);
+    let second_blocker = add_lifelinker(&mut scenario, P1, "Second Blocking Lifelinker", 2, 5);
+    install_competing_life_gain_replacements(&mut scenario, P1);
+    let mut runner = scenario.build();
+
+    attack_into_damage(
+        &mut runner,
+        &[lifelink_attacker, plain_attacker],
+        P1,
+        &[
+            (first_blocker, lifelink_attacker),
+            (second_blocker, plain_attacker),
+        ],
+    );
+    advance_through_combat_damage(&mut runner);
+
+    let chooser = match runner.state().waiting_for.clone() {
+        WaitingFor::ReplacementChoice { player, .. } => player,
+        other => panic!("expected P1's CR 616.1 prompt, got {other:?}"),
+    };
+    assert_eq!(
+        chooser, P1,
+        "reach guard: the NON-ACTIVE seat must be the one that parks"
+    );
+
+    // THE reach guard that separates this row from H4: the departing seat must
+    // still OWN an entry in `remaining`, or the `retain` filters nothing and this
+    // fixture would certify a guard it never reaches.
+    let queued_for_departing: Vec<u32> = runner
+        .state()
+        .pending_combat_lifelink
+        .as_ref()
+        .expect("reach guard: the batch is parked, so the record exists")
+        .remaining
+        .iter()
+        .filter(|gain| gain.controller == P1)
+        .map(|gain| gain.amount)
+        .collect();
+    assert!(
+        !queued_for_departing.is_empty(),
+        "reach guard: the departing seat must own a STILL-QUEUED gain — this is the \
+         entry the CR 800.4a per-entry retain exists to drop, and H4 never has one"
+    );
+
+    let departure = runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("CR 800.4: a player may leave at any time");
+    let mut life_events = departure.events;
+
+    let mut completed = false;
+    for _ in 0..16 {
+        if runner.state().pending_combat_lifelink.is_none() {
+            completed = true;
+            break;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order = (0..triggers.len()).collect();
+                match runner.act(GameAction::OrderTriggers { order }) {
+                    Ok(result) => life_events.extend(result.events),
+                    Err(_) => break,
+                }
+            }
+            WaitingFor::Priority { .. } => match runner.act(GameAction::PassPriority) {
+                Ok(result) => life_events.extend(result.events),
+                Err(_) => break,
+            },
+            other => panic!("no further prompt is owed after the departure: {other:?}"),
+        }
+    }
+    assert!(
+        completed,
+        "CR 800.4a: the batch drains rather than stranding — no livelock"
+    );
+
+    assert_eq!(
+        positive_life_changes(&life_events, P1),
+        Vec::<i32>::new(),
+        "CR 800.4a: the departed seat's STILL-QUEUED gain must be dropped, not applied \
+         — no life-gain event may be emitted for it"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .players
+            .iter()
+            .find(|player| player.id == P1)
+            .map(|player| player.life)
+            .expect("the departed seat keeps its row in the fixed seat vector"),
+        20,
+        "CR 800.4a: a leaving player gains no life — asserted on the DEPARTED seat's own \
+         total, which a surviving seat's gain cannot satisfy"
+    );
+    assert_eq!(
+        runner.life(P0),
+        23,
+        "the surviving controller's gain still lands — the retain is per-entry, never a \
+         blanket null"
+    );
     assert!(
         runner
             .state()
             .combat
             .as_ref()
             .map(|combat| combat.regular_damage_done)
-            .unwrap_or(true),
-        "the combat-damage sub-step completes rather than re-entering forever"
+            .unwrap_or(false),
+        "CR 510.2: the sub-step this batch owns is marked complete on its own live \
+         CombatState"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P1 — the prevention rider crosses the pause with the batch
+// ---------------------------------------------------------------------------
+
+/// Weeping Angel's prevention shield, verbatim from
+/// `weeping_angel_combat_prevention.rs` (itself pinned by
+/// `weeping_angel_prevention_scopes_to_creature_and_rewrites_anaphors`), so this
+/// exercises the real parse -> combat -> prevention pipeline.
+const PREVENTION_SHIELD: &str =
+    "If this creature would deal combat damage to a creature, prevent that \
+     damage and that creature's owner shuffles it into their library.";
+
+/// P1 — CR 615.5 + CR 615.13: the batch's aggregate prevention tally survives a
+/// CR 616.1 pause and Phase D fires it exactly once, in the drain's completion
+/// tail, AFTER the resume.
+///
+/// This covers the seam this change actually modified:
+/// `fire_combat_prevention_riders`' parameter became
+/// `&[(AppliedReplacementKey, i32)]` and its call site now reads
+/// `&record.prevention_tally` / `&mut record.batch_events` — i.e. the tally is
+/// carried across the park inside `PendingCombatLifelink` instead of living in
+/// two locals that never crossed a pause. A zero-damage fixture cannot reach it:
+/// nothing is prevented, so the tally is empty and Phase D has nothing to fire.
+///
+/// One batch, two attackers:
+///   * the 3/3 lifelinker is unblocked -> 3 damage to P1, whose lifelink gain
+///     meets the non-commuting pair and PARKS (CR 616.1);
+///   * the 4/4 shielded attacker is blocked by a 1/1, so its 4 combat damage to
+///     that creature is fully prevented -> the tally holds 4.
+///
+/// REVERT-FAILING ASSERTIONS: `last_effect_count` is NOT yet the prevented total
+/// at the pause but IS after the resume, and the aggregate `DamagePrevented`
+/// appears exactly once in the ANSWERING action's events. Drop
+/// `prevention_tally` from the parked record (or fire Phase D before the drain
+/// rather than in its completion tail) and both go red.
+#[test]
+fn prevention_tally_survives_the_pause_and_fires_once_after_the_resume() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // CR 615.5: the shield's rider shuffles a library, so give both seats cards
+    // for it to operate on.
+    for &pid in &[P0, P1] {
+        scenario.with_library_top(pid, &["Card A", "Card B", "Card C"]);
+    }
+    let lifelinker = add_lifelinker(&mut scenario, P0, "Lifelinker", 3, 3);
+    // 4/4 so it survives the 1/1 blocker's damage and the batch is not perturbed
+    // by a state-based death.
+    let shielded = scenario
+        .add_creature_from_oracle(P0, "Weeping Angel", 4, 4, PREVENTION_SHIELD)
+        .id();
+    let victim = scenario.add_creature(P1, "Potential Victim", 1, 1).id();
+    install_competing_life_gain_replacements(&mut scenario, P0);
+    let mut runner = scenario.build();
+
+    attack_into_damage(
+        &mut runner,
+        &[lifelinker, shielded],
+        P1,
+        &[(victim, shielded)],
+    );
+    // Capture the PAUSING action's own events, so "Phase D had not fired yet" is
+    // an observation rather than an absence nobody looked for.
+    let mut pause_events = Vec::new();
+    for _ in 0..96 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order = (0..triggers.len()).collect();
+                match runner.act(GameAction::OrderTriggers { order }) {
+                    Ok(result) => pause_events.extend(result.events),
+                    Err(_) => break,
+                }
+            }
+            WaitingFor::Priority { .. } => {
+                if matches!(
+                    runner.state().phase,
+                    Phase::EndCombat | Phase::PostCombatMain
+                ) {
+                    break;
+                }
+                match runner.act(GameAction::PassPriority) {
+                    Ok(result) => pause_events.extend(result.events),
+                    Err(_) => break,
+                }
+            }
+            _ => break,
+        }
+    }
+
+    // Reach guards: the batch really did park, with damage already dealt and the
+    // gain not yet applied.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "reach guard: the lifelink gain must park; got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().pending_combat_lifelink.is_some(),
+        "reach guard: the unfinished tail — including the prevention tally — is parked"
+    );
+    assert_eq!(runner.life(P1), 17, "CR 510.2: the damage is already dealt");
+    assert_eq!(
+        runner.life(P0),
+        20,
+        "no life is gained while the prompt is open"
+    );
+
+    // The discriminating half: Phase D lives in the drain's COMPLETION tail, so
+    // NO aggregate `DamagePrevented` may have been emitted by the action that
+    // parked the batch.
+    assert!(
+        !pause_events
+            .iter()
+            .any(|event| matches!(event, GameEvent::DamagePrevented { .. })),
+        "CR 615.5: Phase D must not fire while the CR 616.1 prompt is open — the \
+         parking action emitted an aggregate DamagePrevented: {pause_events:?}"
+    );
+
+    let (answered, events) = answer_ordering_prompts(&mut runner, DOUBLER);
+    assert!(answered >= 1, "the ordering choice was answered");
+
+    // CR 615.13: exactly ONE aggregate `DamagePrevented` for the shield, carrying
+    // the whole batch total, emitted in the ANSWERING action — i.e. Phase D ran
+    // from the parked tally after the resume, not from a lost local.
+    let prevented: Vec<u32> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DamagePrevented { amount, .. } => Some(*amount),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        prevented,
+        vec![4],
+        "CR 615.5 + CR 615.13: the parked tally fires exactly once, after the \
+         resume, against the batch's whole prevented amount"
+    );
+
+    // The prevention did not disturb the CR 616.1 ordering the player chose.
+    assert_eq!(
+        runner.life(P0),
+        27,
+        "CR 616.1: doubler first then +1 — 3 -> 6 -> 7 — alongside the prevention"
+    );
+    assert!(
+        runner.state().pending_combat_lifelink.is_none(),
+        "the batch completes and the record is consumed"
+    );
+    // CR 615.1a: the shield really did prevent, rather than the attacker simply
+    // dealing no damage — the blocked creature left the battlefield through the
+    // shield's own CR 615.5 follow-up.
+    assert_eq!(
+        runner.state().objects[&victim].zone,
+        Zone::Library,
+        "CR 615.5: the shield's follow-up moved the blocked creature to its \
+         owner's library, so the prevention genuinely applied"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// V9 — the CR 732.2a loop-detection ring observes the batch's own life movement
+// ---------------------------------------------------------------------------
+
+/// Seed one frame into the CR 732.2a shortcut sampler so a later CLEAR is
+/// observable. `GameState::record_loop_detect_sample` is `pub(crate)` and out of
+/// reach from an integration binary, so the frame is built directly; the ring's
+/// CONTENTS are irrelevant here — every consumer scans it for a satisfying prior,
+/// so all this fixture needs is a non-empty ring whose disappearance is a verdict.
+fn seed_loop_detect_ring(runner: &mut GameRunner) {
+    let snapshot = runner.state().clone();
+    runner
+        .state_mut()
+        .loop_detect_ring
+        .push_back(std::sync::Arc::new(LoopDetectSample {
+            normalized: snapshot.clone(),
+            live: snapshot,
+        }));
+}
+
+/// Declare `attacker` as the lone attacker against `P1` and return IMMEDIATELY,
+/// with combat damage NOT yet dealt. `P1` controls no creatures on these boards,
+/// so no `DeclareBlockers` window ever opens (OBSERVED: the engine goes from the
+/// declare-attackers answer to a `Priority` window and then straight into the
+/// CR 510.2 batch) — this helper therefore stops at the declaration itself, which
+/// is the last beat guaranteed to precede the damage.
+fn declare_lone_attacker(runner: &mut GameRunner, attacker: ObjectId) {
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { .. }
+        ) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("passing to the declare-attackers window must succeed");
+    }
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+}
+
+/// V9 — CR 732.2a + CR 119.3: the life snapshot the loop-detection ring is
+/// invalidated against is taken BEFORE the batch deals damage and is carried in
+/// `PendingCombatLifelink`, so the guard call on the PAUSE path still observes
+/// the CR 120.3a life loss this batch has already caused.
+///
+/// A CR 616.1 ordering prompt can stay open arbitrarily long. CR 732.2a lets a
+/// player propose a shortcut only from "predictable results", and a ring frame
+/// recorded before the batch no longer describes the board once combat damage
+/// has moved a life total — so the ring must not survive the pause.
+///
+/// REVERT-FAILING ASSERTION: `loop_detect_ring.is_empty()` at the prompt.
+/// Snapshot `lives_before` at `drain_combat_lifelink`'s entry instead of carrying
+/// the pre-batch vector in the record and the drain-entry vector already equals
+/// the post-damage board, the pause-path guard observes NO move, and the stale
+/// ring survives the prompt.
+///
+/// SCOPE, stated rather than implied: this owns the PAUSE-path guard call only.
+/// The completion-path call is NOT observable through the action API on a resume
+/// — `apply()` unconditionally clears `loop_detect_ring` for every action that is
+/// neither `PassPriority`/`OrderTriggers`/`BeginResolveAll`/`Respond`- or
+/// `RevokeResolveAllConsent` nor an answer to a `WaitingFor::is_forced_cascade_window`,
+/// and `WaitingFor::ReplacementChoice` is in neither set. So `ChooseReplacement`
+/// empties the ring before `drain_combat_lifelink` is ever re-entered, and any
+/// post-resume ring assertion would be vacuously green. See fix-round-2's probe
+/// (e) entry.
+#[test]
+fn parked_batch_invalidates_the_loop_ring_against_the_pre_batch_snapshot() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let lifelinker = add_lifelinker(&mut scenario, P0, "Lifelinker", 3, 3);
+    install_competing_life_gain_replacements(&mut scenario, P0);
+    let mut runner = scenario.build();
+
+    declare_lone_attacker(&mut runner, lifelinker);
+
+    // Seed AFTER the declaration: every action from here to the prompt is a
+    // `PassPriority`, which is exempt from `apply()`'s blanket ring clear, so the
+    // fate of the ring at the prompt is attributable to the guard alone.
+    seed_loop_detect_ring(&mut runner);
+    assert_eq!(
+        (runner.life(P0), runner.life(P1)),
+        (20, 20),
+        "reach guard: the seed must predate the batch — CR 510.2 damage is not yet dealt"
+    );
+    assert!(
+        !runner.state().loop_detect_ring.is_empty(),
+        "reach guard: the ring is seeded, else the assertion below is vacuous"
+    );
+
+    advance_through_combat_damage(&mut runner);
+
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "reach guard: the batch must PARK on the CR 616.1 ordering choice; got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.life(P1),
+        17,
+        "reach guard: CR 120.3a — the batch has already moved a life total"
+    );
+    assert_eq!(
+        runner.life(P0),
+        20,
+        "reach guard: CR 702.15b — the lifelink gain has NOT been applied yet, so the \
+         only delta the pause-path guard can see is the damage"
+    );
+
+    assert!(
+        runner.state().loop_detect_ring.is_empty(),
+        "CR 732.2a: the batch moved a life total (CR 120.3a) before parking, so the \
+         pre-batch ring frame no longer predicts the board and must be dropped for the \
+         duration of the CR 616.1 pause"
+    );
+}
+
+/// ZERO-CENSUS POSITIVE CONTROL for the row above: the identical drive over a
+/// batch that moves NO life must RETAIN the ring. Without this, a ring cleared by
+/// the pumping machinery itself — rather than by
+/// `invalidate_loop_ring_on_unobserved_life_move` — would read as a pass.
+///
+/// CR 510.1a: a 0-power attacker assigns no combat damage, so no life moves, no
+/// life-gain event is raised, and no CR 616.1 prompt opens. The drain runs with an
+/// empty queue and its completion guard compares an unchanged board.
+#[test]
+fn a_batch_that_moves_no_life_retains_the_loop_ring() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let powerless = add_lifelinker(&mut scenario, P0, "Powerless Lifelinker", 0, 3);
+    install_competing_life_gain_replacements(&mut scenario, P0);
+    let mut runner = scenario.build();
+
+    declare_lone_attacker(&mut runner, powerless);
+    seed_loop_detect_ring(&mut runner);
+
+    advance_through_combat_damage(&mut runner);
+
+    assert_eq!(
+        (runner.life(P0), runner.life(P1)),
+        (20, 20),
+        "reach guard: CR 510.1a — a 0-power attacker moved no life total at all"
+    );
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "reach guard: no life-gain event, so no CR 616.1 prompt"
+    );
+    assert!(
+        !runner.state().loop_detect_ring.is_empty(),
+        "positive control: the guard observed NO life move, so the ring must SURVIVE \
+         this identical drive — this is what proves the row above records a verdict \
+         rather than an incidental wipe by the pump"
     );
 }
