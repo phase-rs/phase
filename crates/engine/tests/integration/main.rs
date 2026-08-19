@@ -103,6 +103,7 @@ mod coalition_relic_integration;
 mod colorless_spell_cost_reduction;
 mod combat_celebrant_exert;
 mod combat_damage_order_triggers_no_hang;
+mod combat_lifelink_replacement_ordering;
 mod combat_target_support;
 mod combo_infinite_pile;
 mod comeuppance;

@@ -336,6 +336,26 @@ fn enter_phase(
 ) -> PhaseEntryOutcome {
     use std::collections::VecDeque;
 
+    // CR 500.4 + CR 510.2: a combat-damage batch parked on a CR 616.1 life-gain
+    // ordering choice belongs to the combat-damage step's turn-based action. The
+    // game is entering another step, so that action can no longer be performed and
+    // the record is abandoned — its still-owed gains are forfeit.
+    //
+    // Unconditional, and it can only ever see a STRANDED record: the drain owns the
+    // record by value while it runs and writes it back only on the pause path
+    // (`combat_damage::drain_combat_lifelink`), so the field is `None` for the whole
+    // time a drain is executing. A `Some` observed HERE is therefore necessarily a
+    // record whose answer can never arrive, never a live batch — which is why this
+    // clear cannot destroy work in progress. The three doors that can strand one
+    // all pass through here: CR 800.4 `skip_eliminated_active_turn` (the active player
+    // conceded or lost while their own CR 616.1 prompt was open), CR 724.1d
+    // `end_turn_to_cleanup`, and CR 724.2d `end_combat_phase_to_postcombat`. Without
+    // this, the stale record is drained by `resolve_combat_damage`'s guard on a LATER
+    // turn's combat-damage step, re-emitting that batch's events and then writing
+    // `regular_damage_done` on the new combat — silently skipping that turn's combat
+    // damage (CR 510.2 / CR 510.4).
+    state.pending_combat_lifelink = None;
+
     state.phase = next;
     if next == Phase::BeginCombat {
         state.combat_phases_started_this_turn =

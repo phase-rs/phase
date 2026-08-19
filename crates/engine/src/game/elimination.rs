@@ -1056,6 +1056,17 @@ fn do_eliminate(
         super::replacement::abandon_post_replacement_continuation(state);
     }
 
+    // CR 800.4a: a leaving player gains no life. Drop only THAT seat's owed
+    // lifelink gains — the rest of the batch belongs to other controllers and
+    // must still land, and the batch itself must still complete so its
+    // CR 603.3b triggers fire. Per-entry, mirroring `abandon_pending_spell_casts`,
+    // never a blanket null. When the seat that left is the ACTIVE player the batch
+    // can no longer complete at all; that case is owned by the phase-entry
+    // abandonment in `turns::enter_phase`, not here.
+    if let Some(record) = state.pending_combat_lifelink.as_mut() {
+        record.remaining.retain(|gain| gain.controller != player);
+    }
+
     // CR 800.4a: A coupled ETB spell-resolution context can outlive its
     // `pending_replacement` (nested `ContinueZoneDeliveryTail` early-return,
     // engine_replacement.rs), so it is torn down under its OWN controller-keyed

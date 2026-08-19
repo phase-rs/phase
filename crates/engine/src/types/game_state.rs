@@ -9205,6 +9205,11 @@ fn visit_persisted_live_zone_changed_records(
         // records, whose `turn_zone_change_index` must be rebound on load —
         // exactly the reason its sacrifice sibling is listed above.
         "pending_discard_batch",
+        // `PendingCombatLifelink::batch_events` holds the parked combat-damage
+        // batch's events, which can include `ZoneChanged` records created by a
+        // prevention shield's rider (CR 615.5) — their `turn_zone_change_index`
+        // must be rebound on load for the same reason as the siblings above.
+        "pending_combat_lifelink",
         "stack",
         "waiting_for",
         "resolution_stack",
@@ -13117,6 +13122,82 @@ pub enum CombatDamageAssignmentMode {
     AsThoughUnblocked,
 }
 
+/// CR 510.4: which of the two combat-damage sub-steps a simultaneous batch
+/// belongs to. First strike / double strike creates a first sub-step; the
+/// remaining attackers and blockers assign in a mandatory second sub-step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CombatDamageSubStep {
+    FirstStrike,
+    Regular,
+}
+
+/// CR 702.15b: one lifelink source's owed life gain, bound at the moment the
+/// damage was dealt. Snapshotted, not live (CR 702.15c LKI): a control change
+/// while the CR 616.1 prompt is open must not redirect or void the gain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingLifelinkGain {
+    pub controller: PlayerId,
+    pub amount: u32,
+}
+
+/// CR 510.2 + CR 616.1 + CR 702.15b: the unfinished tail of ONE simultaneous
+/// combat-damage batch, parked because a lifelink life-gain event met two or
+/// more co-applicable replacement effects and the gaining player must choose
+/// which applies first.
+///
+/// CR 510.2 forbids *casting spells and activating abilities* between combat
+/// damage being assigned and dealt — a priority window. It does NOT forbid a
+/// CR 616.1 choice made while the event is being applied, which opens no
+/// priority window and puts nothing on the stack. The belief that it did is
+/// what dropped the gain: the choice cannot be answered inside the turn-based
+/// action, so 100% of that source's gain — and every later lifelink source in
+/// the same batch — was discarded.
+///
+/// What CR 510.2 *does* forbid is replaying the batch: it is one event. So the
+/// damage is never re-dealt; only the unstarted tail is parked.
+///
+/// The tail is parked whole, in emission order, so the completing batch's event
+/// stream is byte-identical to the un-paused one: per-source gains, then the
+/// per-player `CombatDamageDealtToPlayer` aggregate, then Phase D's prevention
+/// riders. Deferring Phase D rather than hoisting it is what makes it
+/// impossible for a rider's own continuation (CR 615.5) to run while the
+/// CR 616.1 prompt is open.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCombatLifelink {
+    /// CR 702.15e: per-source gains still owed, in batch order — separate life
+    /// gain events, never merged.
+    ///
+    /// The source whose gain PAUSED is deliberately absent: its
+    /// `ProposedEvent::LifeGain` is owned by `state.pending_replacement` and is
+    /// completed by `engine_replacement::handle_replacement_choice`. Re-queueing
+    /// it here would gain the life twice.
+    pub remaining: VecDeque<PendingLifelinkGain>,
+    /// CR 510.2 + CR 603.3b: every event this batch has produced. Each resume
+    /// appends the events its own replacement round trip produced, so the
+    /// lifelink `LifeChanged` and the combat-damage events reach
+    /// `process_combat_damage_triggers` as ONE batch — CR 702.15b makes the gain
+    /// simultaneous with the damage, and no player received priority for the
+    /// CR 616.1 choice.
+    pub batch_events: Vec<GameEvent>,
+    /// CR 510.2: the per-player `CombatDamageDealtToPlayer` aggregate, built in
+    /// Phase C and emitted AFTER the lifelink gains — the position it occupies
+    /// today. Carried so a pause cannot reorder it ahead of a resumed gain.
+    pub damage_to_players: Vec<GameEvent>,
+    /// CR 615.5 + CR 615.13: each shield's aggregate prevented amount, so the
+    /// completion tail can fire every rider exactly once against the amount THIS
+    /// batch prevented. A `Vec` rather than the producer's `HashMap`: an enum key
+    /// is not a JSON map key, and the record is serialized.
+    pub prevention_tally: Vec<(AppliedReplacementKey, i32)>,
+    /// CR 732.2a: the pre-batch life totals the loop-detection ring keys on.
+    /// Carried here rather than re-snapshotted at resume time, so the guard's
+    /// window spans the pause and observes the paused source's own gain (applied
+    /// by `engine_replacement.rs` after the answer).
+    pub lives_before: Vec<i32>,
+    /// CR 510.4: which sub-step owns this batch. Snapshotted because
+    /// `combat.first_strike_done` mutates during the resume.
+    pub sub_step: CombatDamageSubStep,
+}
+
 /// CR 510.1c: A blocker with its lethal damage threshold for UI display.
 /// `lethal_minimum` is only enforced as a hard constraint before trample excess (CR 702.19b).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15526,6 +15607,13 @@ declare_game_state! {
 
     // Replacement effects
     pub pending_replacement: Option<PendingReplacement>,
+    /// CR 510.2 + CR 616.1: see [`PendingCombatLifelink`]. Boxed like its
+    /// `pending_discard_batch` sibling — `GameState` is moved by value through
+    /// the server action and AI paths and has a hard stack budget
+    /// (`game_state_size.rs`), so a multi-`Vec` parked record rides behind a
+    /// pointer, not inline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_combat_lifelink: Option<Box<PendingCombatLifelink>>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
     pub liminal_entries: HashMap<ObjectId, LiminalEntry>,
@@ -21541,6 +21629,7 @@ impl GameState {
             max_lands_per_turn: 1,
             priority_pass_count: 0,
             pending_replacement: None,
+            pending_combat_lifelink: None,
             liminal_entries: HashMap::new(),
             pending_liminal_entry_resume: None,
             entering_aura_authority: None,
@@ -23390,6 +23479,13 @@ fn _gamestate_partition_is_total(s: &GameState) {
         max_lands_per_turn: _,
         priority_pass_count: _,
         pending_replacement: _,
+        //   - `pending_combat_lifelink`: COMPARED (hand-written `impl PartialEq` conjunct) — the
+        //     parked tail of one CR 510.2 combat-damage batch. `remaining` only SHRINKS and
+        //     `batch_events` only GROWS within a batch, so two states differing in this field are
+        //     genuinely different points in the same turn-based action and COMPARING it can never
+        //     suppress a legitimate loop's detection. Classified identically to its
+        //     `pending_discard_batch` sibling below.
+        pending_combat_lifelink: _,
         replacement_may_cost_paused: _,
         post_replacement_token_choice_applied: _,
         deferred_entry_events: _,
@@ -23890,6 +23986,7 @@ impl PartialEq for GameState {
             && self.pending_player_scope_sacrifice_choice
                 == other.pending_player_scope_sacrifice_choice
             && self.pending_discard_batch == other.pending_discard_batch
+            && self.pending_combat_lifelink == other.pending_combat_lifelink
             && self.pending_mass_library_order_choice
                 == other.pending_mass_library_order_choice
             && self.pending_scoped_library_search == other.pending_scoped_library_search
@@ -26133,6 +26230,162 @@ mod tests {
              prompt rebuilt with different contents — so the inconsistency stays \
              observable to a caller instead of being silently rewritten into a \
              plausible-looking state"
+        );
+    }
+
+    /// A mid-pause combat-damage batch carrying one current-turn `ZoneChanged`
+    /// in `batch_events` — the shape a prevention shield's CR 615.5 rider
+    /// produces (Inkshield's tokens) inside a batch that then parks.
+    fn parked_combat_lifelink(record: ZoneChangeRecord) -> Box<PendingCombatLifelink> {
+        Box::new(PendingCombatLifelink {
+            remaining: VecDeque::from(vec![PendingLifelinkGain {
+                controller: PlayerId(1),
+                amount: 3,
+            }]),
+            batch_events: vec![persisted_zone_change_event(record)],
+            damage_to_players: vec![GameEvent::CombatDamageDealtToPlayer {
+                player_id: PlayerId(1),
+                source_amounts: vec![(ObjectId(9_401), 3)],
+                total_damage: 3,
+            }],
+            prevention_tally: vec![(
+                AppliedReplacementKey::Object {
+                    source: ObjectId(9_402),
+                    index: 0,
+                },
+                2,
+            )],
+            lives_before: vec![20, 20],
+            sub_step: CombatDamageSubStep::Regular,
+        })
+    }
+
+    /// Registration surfaces 4 and 5 for `pending_combat_lifelink`: the
+    /// hand-written `PartialEq` conjunct, and membership in
+    /// `LIVE_EVENT_CARRIER_FIELDS`.
+    ///
+    /// REVERT PROBES:
+    ///   * delete `"pending_combat_lifelink"` from `LIVE_EVENT_CARRIER_FIELDS` →
+    ///     the visitor reaches no record and `erased > 0` fails inside
+    ///     `erase_persisted_event_occurrence_fields`.
+    ///   * delete the `self.pending_combat_lifelink == other.pending_combat_lifelink`
+    ///     conjunct → the `assert_ne!` below sees two states as equal.
+    #[test]
+    fn parked_combat_lifelink_is_a_live_event_carrier_and_a_compared_field() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 19;
+        let record = persisted_zone_change_record(ObjectId(9_401), 19, 0);
+        state.zone_changes_this_turn.push_back(record.clone());
+        state.pending_combat_lifelink = Some(parked_combat_lifelink(record));
+
+        let bare = {
+            let mut bare = state.clone();
+            bare.pending_combat_lifelink = None;
+            bare
+        };
+        assert_ne!(
+            state, bare,
+            "a parked combat-damage batch is interaction state and must be COMPARED"
+        );
+
+        let mut persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("fixture serializes");
+        // Asserts internally that the traversal reached at least one record —
+        // which it can only do if the field is a declared live-event carrier.
+        erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
+        let restored = serde_json::from_value::<PersistedGameState>(persisted)
+            .expect("the parked batch's records reconcile")
+            .into_game_state();
+        let parked = restored
+            .pending_combat_lifelink
+            .as_ref()
+            .expect("the parked batch survives the round trip");
+        let GameEvent::ZoneChanged { record, .. } = &parked.batch_events[0] else {
+            panic!("the fixture stores one ZoneChanged");
+        };
+        assert_eq!(
+            (record.recorded_turn_number, record.turn_zone_change_index),
+            (19, 0),
+            "the carried record is rebound to this turn's ledger on load"
+        );
+        assert_eq!(
+            parked.remaining,
+            VecDeque::from(vec![PendingLifelinkGain {
+                controller: PlayerId(1),
+                amount: 3,
+            }]),
+            "the owed per-source gains round-trip unchanged"
+        );
+        assert_eq!(
+            parked.prevention_tally,
+            vec![(
+                AppliedReplacementKey::Object {
+                    source: ObjectId(9_402),
+                    index: 0,
+                },
+                2,
+            )],
+            "the prevention tally round-trips as a Vec — an enum key is not a JSON map key"
+        );
+    }
+
+    /// Registration surface 1's save-compat property for the parked
+    /// combat-damage batch: a save written before this field existed must load
+    /// as `None` rather than failing deserialization, and the prompt it was
+    /// paused on must survive VERBATIM. Modelled on
+    /// `absent_pending_discard_batch_deserializes_as_none`, including its
+    /// mid-pause input requirement — a fixture whose `waiting_for` is already
+    /// `Priority` would restate an input property instead of measuring one.
+    ///
+    /// REVERT PROBES:
+    ///   * remove the `ReplacementChoice` install below → the prompt assertion
+    ///     stops discriminating.
+    ///   * add a load-time "repair" that resets `waiting_for` to `Priority` when
+    ///     `pending_combat_lifelink` is absent, in
+    ///     `PersistedGameState::into_game_state()` → the same assertion fails.
+    #[test]
+    fn absent_pending_combat_lifelink_deserializes_as_none() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 19;
+        let record = persisted_zone_change_record(ObjectId(9_401), 19, 0);
+        state.zone_changes_this_turn.push_back(record.clone());
+        state.pending_combat_lifelink = Some(parked_combat_lifelink(record));
+        // CR 616.1: the ordering prompt a parked batch is waiting on. Without it
+        // the save is not mid-pause and this test measures nothing.
+        state.waiting_for = WaitingFor::ReplacementChoice {
+            player: PlayerId(0),
+            candidate_count: 2,
+            candidates: Vec::new(),
+        };
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "reach guard: the INPUT must not already satisfy the property under test"
+        );
+
+        let mut wire = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
+            .expect("fixture serializes");
+        assert!(
+            wire.as_object_mut()
+                .expect("a raw persisted state is an object")
+                .remove("pending_combat_lifelink")
+                .is_some(),
+            "reach guard: the field must actually have been serialized to remove"
+        );
+
+        let restored = serde_json::from_value::<PersistedGameState>(wire)
+            .expect("an absent parked batch defaults to None")
+            .into_game_state();
+        assert!(restored.pending_combat_lifelink.is_none());
+        assert!(
+            matches!(
+                restored.waiting_for,
+                WaitingFor::ReplacementChoice {
+                    player,
+                    candidate_count,
+                    ..
+                } if player == PlayerId(0) && candidate_count == 2
+            ),
+            "a batch-less mid-pause save must round-trip its prompt VERBATIM"
         );
     }
 

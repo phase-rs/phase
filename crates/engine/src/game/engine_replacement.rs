@@ -112,7 +112,48 @@ pub(crate) fn drain_pending_connive_reentry(
     }
 }
 
+/// CR 616.1 + CR 510.2 + CR 702.15b: the CR 616.1 round trip, plus the one
+/// turn-based action that can be parked waiting on it.
+///
+/// A simultaneous combat-damage batch (CR 510.2) parks in
+/// `state.pending_combat_lifelink` when a lifelink life gain meets two or more
+/// co-applicable replacements. This is the only boundary that knows where THIS
+/// action's events begin, and the resumed `LifeChanged` must join the batch's own
+/// CR 603.3b trigger batch — so the anchor is captured here, as a LOCAL, and the
+/// drain lives here rather than in the generic priority-boundary resumer
+/// (`engine::resume_pending_continuation_if_priority`, which has no such anchor).
+///
+/// The anchor is deliberately not stored on the record: a persisted index into a
+/// finished action's event vector has no owner that can clear it on every exit
+/// path, and a stale one either panics or folds unrelated events into the batch.
+/// A local cannot go stale, and `action_event_start <= events.len()` holds by
+/// construction.
+///
+/// A wrapper rather than in-arm insertions: the inner handler's `Prevented` arm
+/// alone has eleven early `return Ok(..)` paths. One wrapper is a single
+/// authority covering `Execute`, `Prevented`, `NeedsChoice`, and every early
+/// return. A no-op whenever nothing is parked.
 pub(super) fn handle_replacement_choice(
+    state: &mut GameState,
+    index: usize,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let action_event_start = events.len();
+    let waiting_for = handle_replacement_choice_inner(state, index, events)?;
+    // CR 616.1f: a second ordering choice, or any nested prompt, leaves the record
+    // parked for the next answer; only a settled round trip may close the batch.
+    // Nothing is left behind on this path — the anchor is a local that dies here.
+    if !matches!(waiting_for, WaitingFor::Priority { .. }) {
+        return Ok(waiting_for);
+    }
+    state.waiting_for = waiting_for.clone();
+    Ok(
+        super::combat_damage::resume_pending_combat_lifelink(state, action_event_start, events)
+            .unwrap_or(waiting_for),
+    )
+}
+
+fn handle_replacement_choice_inner(
     state: &mut GameState,
     index: usize,
     events: &mut Vec<GameEvent>,
