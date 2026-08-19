@@ -1820,7 +1820,12 @@ fn mana_ability_ready_without_simulation_gated(
 /// without simulating, so the two divergences an earlier component can
 /// introduce are guarded explicitly. Both guards are conservative: a `true`
 /// declines the fast path and falls through to the unchanged simulation, so a
-/// spurious guard costs performance, never correctness.
+/// spurious guard costs performance, never correctness. Note that Guard 2's
+/// granularity is the whole board rather than this source: `static_kind_present`
+/// is a board-global `StaticModeKind` presence read (CR 604.1), so a single
+/// `CantPayCost` permanent anywhere on the battlefield (Yasharn, Impeccable Sire)
+/// returns EVERY mana source to the clone path, not only the sources a
+/// prohibition could actually name.
 ///
 /// Two divergences deliberately need NO guard:
 /// * CR 616.1 — a replacement on the sacrifice's battlefield -> graveyard move
