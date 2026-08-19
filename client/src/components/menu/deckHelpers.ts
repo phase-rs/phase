@@ -3,14 +3,6 @@ import { getDeckFeedOrigin, getCachedFeed } from "../../services/feedService";
 import type { ParsedDeck } from "../../services/deckParser";
 import { BASIC_LAND_NAMES } from "../../constants/game";
 
-export const COLOR_DOT_CLASS: Record<string, string> = {
-  W: "bg-amber-200",
-  U: "bg-blue-400",
-  B: "bg-gray-600",
-  R: "bg-red-500",
-  G: "bg-green-500",
-};
-
 export function loadDeck(deckName: string): ParsedDeck | null {
   return loadSavedDeck(deckName);
 }
@@ -23,6 +15,11 @@ export function getDeckColorIdentity(deckName: string): string[] {
     if (feedDeck) return feedDeck.colors;
   }
   return [];
+}
+
+/** Mana-symbol shards for a deck's color identity. Empty identities are colorless. */
+export function getDeckColorIdentityPips(colors: string[]): string[] {
+  return colors.length > 0 ? colors : ["C"];
 }
 
 export function getDeckCardCount(deckName: string): number {

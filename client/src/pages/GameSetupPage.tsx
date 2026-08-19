@@ -19,10 +19,11 @@ import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
 import { MyDecks, StatusBadge } from "../components/menu/MyDecks";
 import { ModalPanelShell } from "../components/ui/ModalPanelShell";
 import {
-  COLOR_DOT_CLASS,
   getRepresentativeCard,
   getDeckCardCount,
+  getDeckColorIdentityPips,
 } from "../components/menu/deckHelpers";
+import { ManaSymbol } from "../components/mana/ManaSymbol";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import {
   ACTIVE_DECK_KEY,
@@ -407,15 +408,9 @@ export function GameSetupPage() {
                   </div>
                   <div className="mt-1 flex items-center gap-2">
                     <div className="flex items-center gap-1 rounded-full bg-black/35 px-1.5 py-1 ring-1 ring-white/10">
-                      {colors.map((c) => (
-                        <span
-                          key={c}
-                          className={`inline-block h-2.5 w-2.5 rounded-full ${COLOR_DOT_CLASS[c] ?? "bg-gray-400"}`}
-                        />
+                      {getDeckColorIdentityPips(colors).map((color) => (
+                        <ManaSymbol key={color} shard={color} size="xs" />
                       ))}
-                      {colors.length === 0 && (
-                        <span className="inline-block h-2.5 w-2.5 rounded-full bg-gray-500" />
-                      )}
                     </div>
                     <span className="text-xs text-gray-300">{t("gameSetup.deckPreview.cardCount", { count: deckCardCount })}</span>
                   </div>

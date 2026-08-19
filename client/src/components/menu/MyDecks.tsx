@@ -57,6 +57,7 @@ import { useSetSymbol } from "../../hooks/useSetSymbols";
 import {
   getDeckCardCount,
   getDeckColorIdentity,
+  getDeckColorIdentityPips,
   getRepresentativeCard,
   isBundledDeck,
 } from "./deckHelpers";
@@ -286,7 +287,7 @@ const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onC
             A dark backing chip keeps the bright pips legible over any card art —
             without it the gold/white symbols wash out against light artwork. */}
         <div className="absolute right-2 top-2 z-10 flex items-center gap-0.5 rounded-full bg-black/75 px-2 py-1 shadow-[0_2px_8px_rgba(0,0,0,0.6)] ring-1 ring-white/20 backdrop-blur-sm">
-          {(colors.length ? colors : ["C"]).map((color) => (
+          {getDeckColorIdentityPips(colors).map((color) => (
             <ManaSymbol key={color} shard={color} size="xs" />
           ))}
         </div>

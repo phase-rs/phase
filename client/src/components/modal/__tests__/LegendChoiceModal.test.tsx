@@ -31,6 +31,8 @@ function makeState(): GameState {
     card_id: 11,
     name: "Thalia, Guardian of Thraben",
     entered_battlefield_turn: 2,
+    is_token: true,
+    display_source: "Card",
     card_types: {
       supertypes: ["Legendary"],
       core_types: ["Creature"],
@@ -73,11 +75,13 @@ describe("LegendChoiceModal", () => {
     cleanup();
   });
 
-  it("labels existing and newly entered legendary candidates", () => {
+  it("identifies the original and token-copy legend candidates", () => {
     render(<CardChoiceModal />);
 
     expect(screen.getByText("Already on battlefield")).toBeInTheDocument();
     expect(screen.getByText("Just entered")).toBeInTheDocument();
+    expect(screen.getByText("Original")).toBeInTheDocument();
+    expect(screen.getByText("Token copy")).toBeInTheDocument();
   });
 
   it("dispatches the selected legend to keep", () => {
@@ -85,7 +89,7 @@ describe("LegendChoiceModal", () => {
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Keep Thalia, Guardian of Thraben (Just entered)",
+        name: "Keep Thalia, Guardian of Thraben (Token copy, Just entered)",
       }),
     );
 

@@ -13,6 +13,7 @@ import { useCardDataStore } from "../../../stores/cardDataStore";
 import {
   getDeckCardCount,
   getDeckColorIdentity,
+  getDeckColorIdentityPips,
   getRepresentativeCard,
 } from "../deckHelpers";
 
@@ -213,9 +214,9 @@ function ActiveDeckCard() {
         <div className={`${SECTION_LABEL} absolute left-3 top-2.5 z-10 drop-shadow-[0_1px_2px_rgba(0,0,0,0.7)]`}>
           {t("home.dashboard.activeDeck")}
         </div>
-        {colors.length > 0 && (
+        {!randomDeckSelected && (
           <div className="absolute right-2.5 top-2.5 z-10 flex items-center gap-0.5 rounded-full bg-black/75 px-2 py-1 shadow-[0_2px_8px_rgba(0,0,0,0.6)] ring-1 ring-white/20 backdrop-blur-sm">
-            {colors.map((c) => <ManaSymbol key={c} shard={c} size="xs" />)}
+            {getDeckColorIdentityPips(colors).map((color) => <ManaSymbol key={color} shard={color} size="xs" />)}
           </div>
         )}
       </div>

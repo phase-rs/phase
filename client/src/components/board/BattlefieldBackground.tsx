@@ -17,7 +17,7 @@ function pickRandomImage(): string {
   return BATTLEFIELDS[Math.floor(Math.random() * BATTLEFIELDS.length)].image;
 }
 
-function resolveBackground(
+export function resolveBackground(
   boardBackground: BoardBackground,
   customUrl: string,
   deckColor: ManaColor | null,
@@ -37,9 +37,10 @@ function resolveBackground(
   }
 
   if (boardBackground === "auto-wubrg") {
-    // Lock in a color-matched image on first color detection (includes full deck)
-    if (deckColor && !lockedRef.current) {
-      lockedRef.current = getRandomBattlefield(deckColor).image;
+    // Lock in a color-matched image on first color detection (includes full deck).
+    // Colorless decks have no WUBRG color to match, so use the normal random pool.
+    if (!lockedRef.current) {
+      lockedRef.current = deckColor ? getRandomBattlefield(deckColor).image : pickRandomImage();
     }
     return lockedRef.current ? { kind: "image", src: lockedRef.current } : null;
   }
