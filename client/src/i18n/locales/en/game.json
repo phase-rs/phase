@@ -1677,7 +1677,10 @@
     "legend": {
       "title": "Legend Rule",
       "subtitle": "Choose which \"{{name}}\" to keep",
-      "keepAria": "Keep {{name}} ({{status}})",
+      "keepAria": "Keep {{name}} ({{identity}}, {{status}})",
+      "identityOriginal": "Original",
+      "identityCopy": "Copy",
+      "identityTokenCopy": "Token copy",
       "statusJustEntered": "Just entered",
       "statusAlready": "Already on battlefield"
     },
@@ -1897,7 +1900,8 @@
         "card": "a card",
         "treasure": "a Treasure",
         "food": "a Food",
-        "tappedFish": "a tapped Fish"
+        "tappedFish": "a tapped Fish",
+        "extraTurn": "an extra turn"
       }
     }
   },

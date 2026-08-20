@@ -1633,7 +1633,10 @@
     "legend": {
       "title": "Règle de la légende",
       "subtitle": "Choisissez quel(le) « {{name}} » garder",
-      "keepAria": "Garder {{name}} ({{status}})",
+      "keepAria": "Garder {{name}} ({{identity}}, {{status}})",
+      "identityOriginal": "Original",
+      "identityCopy": "Copie",
+      "identityTokenCopy": "Copie de jeton",
       "statusJustEntered": "Vient d'arriver",
       "statusAlready": "Déjà sur le champ de bataille"
     },
@@ -1853,7 +1856,8 @@
         "card": "une carte",
         "treasure": "un Trésor",
         "food": "un Aliment",
-        "tappedFish": "un Poisson engagé"
+        "tappedFish": "un Poisson engagé",
+        "extraTurn": "un tour supplémentaire"
       }
     }
   },

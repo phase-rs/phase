@@ -119,4 +119,31 @@ describe("OptionalCostModalContent (issue #454)", () => {
       data: { pay: false },
     });
   });
+
+  // CR 702.174g: the one promised gift that is not an object. The label switch
+  // falls back to "a card" for anything it does not name, so an unlabelled kind
+  // does not look unlabelled — it looks like a DIFFERENT promise (#7286).
+  it("Gift an extra turn is named, not folded into the card fallback", () => {
+    const waitingFor: OptionalCostWaitingFor = {
+      type: "OptionalCostChoice",
+      data: {
+        player: 0,
+        cost: {
+          type: "Optional",
+          data: {
+            cost: { type: "Mana", cost: { type: "Cost", shards: [], generic: 0 } },
+            repeatable: false,
+          },
+        },
+        times_kicked: 0,
+        origin: "Gift",
+        gift_kind: { type: "ExtraTurn" },
+        pending_cast: {} as OptionalCostWaitingFor["data"]["pending_cast"],
+      },
+    };
+    renderModal(waitingFor);
+
+    expect(screen.getByRole("button", { name: /promise an extra turn/i })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /promise a card/i })).toBeNull();
+  });
 });

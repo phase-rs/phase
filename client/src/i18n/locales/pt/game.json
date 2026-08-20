@@ -1633,7 +1633,10 @@
     "legend": {
       "title": "Regra das Lendas",
       "subtitle": "Escolha qual \"{{name}}\" manter",
-      "keepAria": "Manter {{name}} ({{status}})",
+      "keepAria": "Manter {{name}} ({{identity}}, {{status}})",
+      "identityOriginal": "Original",
+      "identityCopy": "Cópia",
+      "identityTokenCopy": "Cópia de ficha",
       "statusJustEntered": "Acabou de entrar",
       "statusAlready": "Já está no campo de batalha"
     },
@@ -1853,7 +1856,8 @@
         "card": "um card",
         "treasure": "um Tesouro",
         "food": "um Alimento",
-        "tappedFish": "um Peixe virado"
+        "tappedFish": "um Peixe virado",
+        "extraTurn": "um turno extra"
       }
     }
   },

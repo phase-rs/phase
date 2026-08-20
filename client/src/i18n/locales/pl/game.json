@@ -1633,7 +1633,10 @@
     "legend": {
       "title": "Zasada legend",
       "subtitle": "Wybierz, którego „{{name}}” zatrzymać",
-      "keepAria": "Zatrzymaj {{name}} ({{status}})",
+      "keepAria": "Zatrzymaj {{name}} ({{identity}}, {{status}})",
+      "identityOriginal": "Oryginał",
+      "identityCopy": "Kopia",
+      "identityTokenCopy": "Kopia żetonu",
       "statusJustEntered": "Właśnie wszedł",
       "statusAlready": "Już na polu bitwy"
     },
@@ -1853,7 +1856,8 @@
         "card": "kartę",
         "treasure": "Skarb",
         "food": "Pożywienie",
-        "tappedFish": "zakręconą Rybę"
+        "tappedFish": "zakręconą Rybę",
+        "extraTurn": "dodatkową turę"
       }
     }
   },

@@ -84,7 +84,7 @@ pub enum TokenCategory {
     Artifact,
 }
 
-/// How completely this preset's body represents the source mtgish entry.
+/// How completely this preset's body represents its source data.
 /// `Full` means a vanilla body + simple keywords + (for predefined-ability
 /// subtypes) the engine-attached abilities cover the printed rules text.
 /// `PartialMissingAbilities` flags presets where the source entry has
@@ -372,24 +372,60 @@ fn find_token_ref_with_mode(
         return first.token_image_ref.clone();
     }
 
-    let mut matches = known_token_presets().iter().filter(|preset| {
-        if !token_body_matches(&preset.body, body) {
-            return false;
-        }
-        if let Some(oracle_id) = source_oracle {
-            return token_preset_has_source_ref(preset, oracle_id, source_face);
-        }
-        if let Some(name) = source_name {
-            return preset
-                .source_card_names
-                .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(name));
-        }
-        false
-    });
+    let source_gated: Vec<&TokenPreset> = known_token_presets()
+        .iter()
+        .filter(|preset| {
+            if !token_body_matches(&preset.body, body) {
+                return false;
+            }
+            if let Some(oracle_id) = source_oracle {
+                return token_preset_has_source_ref(preset, oracle_id, source_face);
+            }
+            if let Some(name) = source_name {
+                return preset
+                    .source_card_names
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(name));
+            }
+            false
+        })
+        .collect();
+    if !source_gated.is_empty() {
+        // Same CR 111.10 dedup the related-ids path applies: multiple presets
+        // that are semantically identical differ only in printing — the pick
+        // is presentation-only, so take the first deterministically instead of
+        // silently resolving nothing (a Role exists on two flip sheets, so a
+        // source listed on both used to land here).
+        return semantically_unique_ref(&source_gated);
+    }
 
-    let first = matches.next()?;
-    if matches.next().is_some() {
+    // No preset lists this source. When EVERY body-matching preset is
+    // semantically identical, the token's identity is fully determined by its
+    // body alone (the live face: a Role token — CR 111.10 fixes all seven
+    // kinds by name, and `role_normalized_display_name` already reconciled the
+    // engine's "<Role> Role" naming). The source gate would add nothing but a
+    // silent `None`, which strands the display on a name search no printing
+    // can satisfy (#7552). Bodies with semantically DIFFERENT presets (art
+    // variants with different abilities) still resolve nothing here — the
+    // gate's ambiguity protection is preserved.
+    let body_only: Vec<&TokenPreset> = known_token_presets()
+        .iter()
+        .filter(|preset| token_body_matches(&preset.body, body))
+        .collect();
+    semantically_unique_ref(&body_only)
+}
+
+/// The shared "all remaining candidates agree" reduction: `Some` ref iff every
+/// preset in `matches` is semantically identical to the first — the choice is
+/// then presentation-only and deterministic. Empty or disagreeing sets resolve
+/// nothing.
+fn semantically_unique_ref(matches: &[&TokenPreset]) -> Option<TokenImageRef> {
+    let first = matches.first()?;
+    if !matches
+        .iter()
+        .skip(1)
+        .all(|preset| token_preset_semantics_match(first, preset))
+    {
         return None;
     }
     first.token_image_ref.clone()

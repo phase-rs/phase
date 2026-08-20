@@ -3278,6 +3278,22 @@ pub(crate) fn resume_mana_ability_root(
         ManaAbilityResume::CompanionToHand { player, cost } => {
             super::companion::resume_companion_to_hand_payment(state, player, cost, events)
         }
+        // CR 116.2b + CR 605.3b: NOT compiler-forced either — the `resume =>`
+        // catch-all below would route a paused turn-face-up payment into
+        // `resume_waiting_for`, which `unreachable!()`s for this family.
+        ManaAbilityResume::TurnFaceUp {
+            player,
+            object_id,
+            cost,
+            announced_x,
+        } => super::morph::resume_turn_face_up_payment(
+            state,
+            player,
+            object_id,
+            cost,
+            announced_x,
+            events,
+        ),
         // CR 116.2c + CR 605.3b: NOT compiler-forced — the `resume =>` catch-all
         // below would silently route a paused pay-to-end payment into
         // `resume_waiting_for`, which `unreachable!()`s for this family.
@@ -3393,6 +3409,14 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
         ManaAbilityResume::CompanionToHand { player, .. } => Ok(
             super::companion::finish_paid_companion_to_hand(state, player, events),
         ),
+        ManaAbilityResume::TurnFaceUp {
+            player,
+            object_id,
+            announced_x,
+            ..
+        // CR 702.37e + CR 107.3d: payment has completed, so commit the
+        // turn-face-up action with its already-announced X value.
+        } => super::morph::finish_paid_turn_face_up(state, player, object_id, announced_x, events),
         ManaAbilityResume::EndContinuousEffect { player, group, .. } => Ok(
             super::end_continuous_effect::finish_paid_end_continuous_effect(
                 state, player, group, events,
@@ -4766,9 +4790,11 @@ pub(crate) fn resume_waiting_for(
         | ManaAbilityResume::PhyrexianCastPayment { .. }
         | ManaAbilityResume::FinalizePendingManaPayment { .. }
         | ManaAbilityResume::CompanionToHand { .. }
-        // CR 116.2c: like `CompanionToHand`, the pay-to-end special action is
-        // resumed by `resume_mana_ability_root`'s named arm, never here.
-        | ManaAbilityResume::EndContinuousEffect { .. } => {
+        // CR 116.2c + CR 116.2b: like `CompanionToHand`, the pay-to-end and
+        // turn-face-up special actions are resumed by
+        // `resume_mana_ability_root`'s named arms, never here.
+        | ManaAbilityResume::EndContinuousEffect { .. }
+        | ManaAbilityResume::TurnFaceUp { .. } => {
             unreachable!("effect-cost resume is handled by resume_mana_ability_root")
         }
     }

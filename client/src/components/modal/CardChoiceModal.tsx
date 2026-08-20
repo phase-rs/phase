@@ -2527,6 +2527,7 @@ function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
   const gameState = useGameStore((s) => s.gameState);
   const objects = gameState?.objects;
   const turnNumber = gameState?.turn_number;
+  const legendCandidateIdentities = gameState?.derived?.legend_candidate_identities;
   const hoverProps = useInspectHoverProps();
 
   if (!objects) return null;
@@ -2540,17 +2541,22 @@ function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
         {data.candidates.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
+          const identity = legendCandidateIdentities?.[String(id)];
+          if (!identity) return null;
           const isCurrentTurnEntry =
             turnNumber != null && obj.entered_battlefield_turn === turnNumber;
           const entryLabel = isCurrentTurnEntry
             ? t("cardChoice.legend.statusJustEntered")
             : t("cardChoice.legend.statusAlready");
+          const identityLabel = t(`cardChoice.legend.identity${identity}`);
+          const isCopy = identity !== "Original";
           return (
             <motion.button
               key={id}
               aria-label={t("cardChoice.legend.keepAria", {
                 name: obj.name,
                 status: entryLabel,
+                identity: identityLabel,
               })}
               className="relative rounded-lg transition hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
               initial={{ opacity: 0, y: 60, scale: 0.85 }}
@@ -2567,13 +2573,20 @@ function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
                 size="normal"
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
-              <div className="absolute top-2 left-1/2 -translate-x-1/2">
+              <div className="absolute top-2 left-1/2 flex -translate-x-1/2 flex-col items-center gap-1">
                 <span
                   className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-bold text-white shadow ${
                     isCurrentTurnEntry ? "bg-amber-500/95" : "bg-sky-700/95"
                   }`}
                 >
                   {entryLabel}
+                </span>
+                <span
+                  className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-bold text-white shadow ${
+                    isCopy ? "bg-indigo-600/95" : "bg-emerald-600/95"
+                  }`}
+                >
+                  {identityLabel}
                 </span>
               </div>
             </motion.button>

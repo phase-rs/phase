@@ -1633,7 +1633,10 @@
     "legend": {
       "title": "Regola delle leggende",
       "subtitle": "Scegli quale \"{{name}}\" tenere",
-      "keepAria": "Tieni {{name}} ({{status}})",
+      "keepAria": "Tieni {{name}} ({{identity}}, {{status}})",
+      "identityOriginal": "Originale",
+      "identityCopy": "Copia",
+      "identityTokenCopy": "Copia pedina",
       "statusJustEntered": "Appena entrata",
       "statusAlready": "Già sul campo di battaglia"
     },
@@ -1853,7 +1856,8 @@
         "card": "una carta",
         "treasure": "un Tesoro",
         "food": "un Cibo",
-        "tappedFish": "un Pesce TAPpato"
+        "tappedFish": "un Pesce TAPpato",
+        "extraTurn": "un turno extra"
       }
     }
   },

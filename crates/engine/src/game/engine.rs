@@ -11702,91 +11702,11 @@ fn apply_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
-            let p = *player;
-            let announced_x = x;
-            // CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b + CR 106.6: turning
-            // a face-down permanent face up is a special action whose morph/disguise/
-            // manifest cost must be paid *before* the flip. `turn_face_up_prepare`
-            // validates the action and derives that cost; payment routes through
-            // `PaymentContext::SpecialAction(TurnFaceUp)` so spend-restricted mana
-            // ("only to turn permanents face up", Overgrown Zealot / Tin Street
-            // Gossip) is eligible here while other-context mana is rejected. Mirrors
-            // the `UnlockDoor` special-action handler.
-            let cost = super::morph::turn_face_up_prepare(state, object_id, p)?;
-            let mut cost = casting::apply_special_action_cost_reduction(
-                state,
-                p,
-                crate::types::mana::SpecialAction::TurnFaceUp,
-                cost,
-            );
-
-            // CR 107.3d: "If a cost associated with a special action, such as a suspend
-            // cost or a morph cost, has an {X} ... in it, the value of X is chosen by the
-            // player taking the special action immediately before they pay that cost."
-            // The announcement happens HERE — inside the action, with no priority window
-            // between choosing X and paying it, exactly as the rule describes.
-            //
-            // Warbreak Trumpeter (Morph {X}{X}{R}), Bane of the Living (Morph {X}{B}{B})
-            // and Aurelia's Vindicator (Disguise {X}{3}{W}) are the live faces.
-            let has_x = casting_costs::cost_has_x(&cost);
-            if has_x {
-                // CR 118.3: a player can't announce an X they cannot pay for. The cap is
-                // computed with `object_id: None` deliberately — this is a SPECIAL ACTION,
-                // not a cast, so cast-time cost modifiers and floors must not apply (the
-                // special-action reduction was already applied above).
-                let max_x = casting_costs::max_x_value(state, p, &cost, None);
-                if announced_x > max_x {
-                    return Err(EngineError::InvalidAction(format!(
-                        "X={announced_x} exceeds the maximum payable value of {max_x} for this \
-                         turn-face-up cost"
-                    )));
-                }
-                // CR 107.1b + CR 601.2f: each `{X}` shard becomes `announced_x` generic, so
-                // Warbreak Trumpeter's `{X}{X}{R}` costs 2X + {R}. Without this the X shards
-                // reach mana payment unresolved and are dropped — the permanent flips for
-                // its non-X remainder alone.
-                cost.concretize_x(announced_x);
-            } else if announced_x != 0 {
-                // A cost with no {X} admits no choice: CR 107.3d only grants one "if a cost
-                // ... has an {X} ... in it". Reject rather than silently ignore, so a client
-                // bug cannot masquerade as a legal flip.
-                return Err(EngineError::InvalidAction(
-                    "This permanent's turn-face-up cost has no {X}, so X must be 0".to_string(),
-                ));
-            }
-            casting::pay_special_action_mana_cost(
-                state,
-                p,
-                Some(object_id),
-                &cost,
-                crate::types::mana::SpecialAction::TurnFaceUp,
-                &mut events,
-            )?;
-
-            // CR 702.37f (morph) / CR 702.168e (disguise): "If a permanent's morph cost
-            // includes X, other abilities of that permanent may also refer to X. The value
-            // of X in those abilities is equal to the value of X chosen as the morph special
-            // action was taken." Publish the announced X on the source-keyed carrier BEFORE
-            // the flip emits `TurnedFaceUp`, so `triggers::build_triggered_ability` — the
-            // single trigger-instantiation authority — stamps it onto the turn-face-up
-            // trigger's `chosen_x`.
-            //
-            // The stamp must land at INSTANTIATION, not resolution: Aurelia's Vindicator
-            // spends its X in `multi_target.max` ("exile up to X other target creatures"),
-            // which is consumed during target selection, before the trigger ever resolves.
-            //
-            // Published only when the cost actually HAS an {X} (CR 107.3d grants a choice
-            // only then). A no-X flip leaves the carrier untouched rather than clobbering it
-            // with `Some((.., 0))`: an unrelated activated ability of ANOTHER object may be
-            // on the stack with its own announced X in flight, and that value must survive.
-            // The carrier is cleared at the start of the next `resolve_top`, so this
-            // publication cannot outlive the trigger it is for.
-            if has_x {
-                state.announced_source_x = Some((object_id, announced_x));
-            }
-
-            super::morph::turn_face_up(state, p, object_id, &mut events)?;
-            WaitingFor::Priority { player: p }
+            // CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b: the whole action —
+            // legality, the CR 106.6 spend-restricted payment, CR 107.3d's X
+            // announcement and the flip — belongs to one authority, shared with the
+            // CR 616.1 resume that finishes a payment whose mana source paused.
+            super::morph::handle_turn_face_up(state, *player, object_id, x, &mut events)?
         }
         (
             WaitingFor::TriggerTargetSelection {
@@ -20179,7 +20099,12 @@ mod stage2_injector_tests {
                 //   Resolve All consent adds its frozen-authority protocol above this producer:
                 //   `:12912 ⇒ :13113`. It does not create a CR 603.5 prompt, and the pinned
                 //   line remains the same `OptionalEffectChoice` construction.
-                "game/engine.rs:13210".to_string(),
+                //   Folding the turn-face-up special action into `morph::handle_turn_face_up`
+                //   removed 80 lines from the reducer above this producer:
+                //   `:13210 ⇒ :13130`. It creates no CR 603.5 prompt either — a special
+                //   action does not use the stack (CR 116.1) — and the pinned line is again
+                //   the same `OptionalEffectChoice` construction, moved wholesale.
+                "game/engine.rs:13130".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \

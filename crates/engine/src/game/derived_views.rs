@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::analysis::resource::ResourceAxis;
 use crate::game::ability_utils::flatten_targets_in_chain;
 use crate::game::filter::{matches_target_filter, FilterContext};
-use crate::game::game_object::AttachTarget;
+use crate::game::game_object::{AttachTarget, DisplaySource};
 use crate::game::stack::{effective_stack_ability, stack_display_groups, StackDisplayGroup};
 use crate::types::ability::{
     ContinuousModification, Duration, GameRestriction, KeywordAction, ProhibitedActivity,
@@ -505,6 +505,20 @@ pub struct DebugLibraryCardView {
     pub name: String,
 }
 
+/// Engine-authored identity for a candidate in a legend-rule choice.
+///
+/// The frontend renders this value without inspecting token, copy-effect, or
+/// face-down state. `TokenCopy` takes precedence when a copied permanent spell
+/// resolved as a token; `Copy` is a live Layer 1a copy effect; `Original` is
+/// every other candidate, including a face-down object whose copy status must
+/// remain hidden.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegendCandidateIdentity {
+    Original,
+    Copy,
+    TokenCopy,
+}
+
 /// Engine-authored projections used by the display layer. Keep this struct
 /// small — every field becomes mandatory payload on every state snapshot
 /// the client receives. Add a new field only when the frontend would
@@ -569,6 +583,12 @@ pub struct DerivedViews {
     /// Sorted for stable serialization; absent when nothing is a copy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub copied_permanents: Vec<ObjectId>,
+
+    /// The engine-classified identity for every current legend-rule candidate.
+    /// This is intentionally scoped to the active choice so the client can
+    /// label each option without deriving copy status from raw object fields.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub legend_candidate_identities: BTreeMap<ObjectId, LegendCandidateIdentity>,
 
     /// Commander damage grouped by the attacking commander's current
     /// controller. Each inner entry preserves per-commander identity so
@@ -1139,6 +1159,29 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // answer.
     views.copied_permanents.sort_unstable();
     views.cant_be_blocked.sort_unstable();
+
+    if let crate::types::game_state::WaitingFor::ChooseLegend { candidates, .. } =
+        &state.waiting_for
+    {
+        for &candidate_id in candidates {
+            let Some(candidate) = state.objects.get(&candidate_id) else {
+                continue;
+            };
+            let identity = if !candidate.face_down
+                && candidate.is_token
+                && candidate.display_source != DisplaySource::Token
+            {
+                LegendCandidateIdentity::TokenCopy
+            } else if !candidate.face_down && object_has_copy_effect(state, candidate_id) {
+                LegendCandidateIdentity::Copy
+            } else {
+                LegendCandidateIdentity::Original
+            };
+            views
+                .legend_candidate_identities
+                .insert(candidate_id, identity);
+        }
+    }
 
     // CR 702.40a: viewer-scoped prospective Storm copy counts (own hand only → leak-proof).
     if let Some(viewer) = viewer {
@@ -2515,7 +2558,6 @@ fn zone_label(zone: Option<Zone>) -> &'static str {
 mod tests {
     use super::*;
     use crate::game::combat::CombatState;
-    use crate::game::game_object::DisplaySource;
     use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
     use crate::game::zones::create_object;
     use crate::types::ability::{
@@ -3170,6 +3212,18 @@ mod tests {
             "Phantasmal Image".into(),
             Zone::Battlefield,
         );
+        let token_copy = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Reveillark".into(),
+            Zone::Battlefield,
+        );
+        {
+            let token = state.objects.get_mut(&token_copy).unwrap();
+            token.is_token = true;
+            token.display_source = DisplaySource::Card;
+        }
 
         let values = crate::game::printed_cards::intrinsic_copiable_values(
             state.objects.get(&original).unwrap(),
@@ -3187,6 +3241,11 @@ mod tests {
             }],
             None,
         );
+        state.waiting_for = crate::types::game_state::WaitingFor::ChooseLegend {
+            player: PlayerId(0),
+            legend_name: "Reveillark".into(),
+            candidates: vec![original, clone, token_copy],
+        };
 
         let views = derive_views(&state, None);
 
@@ -3195,6 +3254,15 @@ mod tests {
             vec![clone],
             "only the permanent the copy effect applies to is a copy; the \
              original it copied is not"
+        );
+        assert_eq!(
+            views.legend_candidate_identities,
+            BTreeMap::from([
+                (original, LegendCandidateIdentity::Original),
+                (clone, LegendCandidateIdentity::Copy),
+                (token_copy, LegendCandidateIdentity::TokenCopy),
+            ]),
+            "each legend-rule option receives an engine-authored identity"
         );
     }
 

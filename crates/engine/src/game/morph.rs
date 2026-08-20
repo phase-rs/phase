@@ -3,7 +3,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
@@ -42,39 +42,72 @@ pub(in crate::game) enum PriorityTurnFaceUpCandidate {
     RequiresChosenX,
 }
 
+/// Whether `player` may take the turn-face-up special action on `object_id`
+/// right now, and in which shape.
+///
+/// The single admission authority for the action, shared by the Priority
+/// preflight (which only asks "is any action available?") and by the
+/// legal-action enumeration the client renders. Splitting those two would let
+/// the engine's own progress gate and its offer list disagree about what a
+/// player can do — which is exactly how the action came to be accepted by the
+/// reducer and offered nowhere (#6732).
+///
+/// `turn_face_up_prepare` remains the legality and cost authority; this adds
+/// the action-specific cost reduction and the affordability probe the reducer
+/// would apply.
+pub(crate) fn turn_face_up_offer(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<TurnFaceUpOffer> {
+    let cost = turn_face_up_prepare(state, object_id, player).ok()?;
+    let cost = super::casting::apply_special_action_cost_reduction(
+        state,
+        player,
+        crate::types::mana::SpecialAction::TurnFaceUp,
+        cost,
+    );
+    super::casting::can_pay_special_action_mana_cost_after_auto_tap(
+        state,
+        player,
+        Some(object_id),
+        &cost,
+        crate::types::mana::SpecialAction::TurnFaceUp,
+    )
+    .then_some(())?;
+    Some(if super::casting_costs::cost_has_x(&cost) {
+        TurnFaceUpOffer::RequiresChosenX
+    } else {
+        TurnFaceUpOffer::Ready
+    })
+}
+
+/// The shape of an available turn-face-up action. `RequiresChosenX` carries no
+/// value on purpose: CR 107.3d says the player chooses X immediately before
+/// paying, so neither the progress gate nor the offer list may guess one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnFaceUpOffer {
+    Ready,
+    RequiresChosenX,
+}
+
 /// Enumerates the current holder's face-up special-action outcomes in
-/// battlefield order. `turn_face_up_prepare` remains the single legality and
-/// cost authority; priority applies the reducer's action-specific cost
-/// adjustment and affordability check before offering a primer.
+/// battlefield order, from the shared admission authority above.
 pub(in crate::game) fn priority_turn_face_up_candidates(
     state: &GameState,
     principal: &PriorityPrincipal,
 ) -> Vec<PriorityTurnFaceUpCandidate> {
+    let player = principal.semantic_holder();
     state
         .battlefield
         .iter()
         .copied()
         .filter_map(|object_id| {
-            let player = principal.semantic_holder();
-            let cost = turn_face_up_prepare(state, object_id, player).ok()?;
-            let cost = super::casting::apply_special_action_cost_reduction(
-                state,
-                player,
-                crate::types::mana::SpecialAction::TurnFaceUp,
-                cost,
-            );
-            super::casting::can_pay_special_action_mana_cost_after_auto_tap(
-                state,
-                player,
-                Some(object_id),
-                &cost,
-                crate::types::mana::SpecialAction::TurnFaceUp,
-            )
-            .then_some(())?;
-            Some(if super::casting_costs::cost_has_x(&cost) {
-                PriorityTurnFaceUpCandidate::RequiresChosenX
-            } else {
-                PriorityTurnFaceUpCandidate::Ready(PriorityTurnFaceUpAnnouncement::new(object_id))
+            Some(match turn_face_up_offer(state, player, object_id)? {
+                TurnFaceUpOffer::RequiresChosenX => PriorityTurnFaceUpCandidate::RequiresChosenX,
+                TurnFaceUpOffer::Ready => PriorityTurnFaceUpCandidate::Ready(
+                    PriorityTurnFaceUpAnnouncement::new(object_id),
+                ),
             })
         })
         .collect()
@@ -436,6 +469,189 @@ pub(crate) fn turn_face_up_prepare(
         .ok_or_else(|| {
             EngineError::InvalidAction("Card cannot be turned face up (no morph cost)".to_string())
         })
+}
+
+/// CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b: take the turn-face-up
+/// special action — derive its cost, announce CR 107.3d's `{X}`, pay, and flip.
+///
+/// Single authority for the action, shared by the `GameAction::TurnFaceUp`
+/// reducer arm and by the CR 616.1 resume below, so the two cannot drift about
+/// what was paid or what X was announced.
+///
+/// A paused payment is a real outcome, not an error:
+/// `pay_special_action_mana_cost_with_resume` returns `Paused` when an
+/// auto-tapped mana source's own cost surfaces a replacement choice
+/// (CR 605.3b + CR 616.1). The permanent stays face down and the prompt is
+/// returned; [`resume_turn_face_up_payment`] finishes the action once the choice
+/// is answered. The compatibility wrapper `pay_special_action_mana_cost` turns
+/// that state into an error, which is why this action may not use it.
+pub(crate) fn handle_turn_face_up(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    announced_x: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // CR 116.2b: `turn_face_up_prepare` is the single legality and cost
+    // authority, shared with the Priority offer enumeration.
+    let cost = turn_face_up_prepare(state, object_id, player)?;
+    let mut cost = super::casting::apply_special_action_cost_reduction(
+        state,
+        player,
+        crate::types::mana::SpecialAction::TurnFaceUp,
+        cost,
+    );
+
+    // CR 107.3d: "If a cost associated with a special action, such as a suspend
+    // cost or a morph cost, has an {X} … in it, the value of X is chosen by the
+    // player taking the special action immediately before they pay that cost."
+    // The announcement happens HERE — inside the action, with no priority window
+    // between choosing X and paying it, exactly as the rule describes.
+    //
+    // Warbreak Trumpeter (Morph {X}{X}{R}), Bane of the Living (Morph {X}{B}{B})
+    // and Aurelia's Vindicator (Disguise {X}{3}{W}) are the live faces.
+    let has_x = super::casting_costs::cost_has_x(&cost);
+    if has_x {
+        // CR 118.3: a player can't announce an X they cannot pay for. The cap is
+        // computed with `object_id: None` deliberately — this is a SPECIAL
+        // ACTION, not a cast, so cast-time cost modifiers and floors must not
+        // apply (the special-action reduction was already applied above).
+        let max_x = super::casting_costs::max_x_value(state, player, &cost, None);
+        if announced_x > max_x {
+            return Err(EngineError::InvalidAction(format!(
+                "X={announced_x} exceeds the maximum payable value of {max_x} for this \
+                 turn-face-up cost"
+            )));
+        }
+        // CR 107.1b + CR 601.2f: each `{X}` shard becomes `announced_x` generic,
+        // so Warbreak Trumpeter's `{X}{X}{R}` costs 2X + {R}. Without this the X
+        // shards reach mana payment unresolved and are dropped — the permanent
+        // flips for its non-X remainder alone.
+        cost.concretize_x(announced_x);
+    } else if announced_x != 0 {
+        // A cost with no {X} admits no choice: CR 107.3d only grants one "if a
+        // cost … has an {X} … in it". Reject rather than silently ignore, so a
+        // client bug cannot masquerade as a legal flip.
+        return Err(EngineError::InvalidAction(
+            "This permanent's turn-face-up cost has no {X}, so X must be 0".to_string(),
+        ));
+    }
+
+    let announced_x = has_x.then_some(announced_x);
+    match pay_turn_face_up_cost(state, player, object_id, &cost, announced_x, events)? {
+        super::casting::SpecialActionManaPayment::Paid => {
+            finish_paid_turn_face_up(state, player, object_id, announced_x, events)
+        }
+        // The permanent is still face down and nothing has been committed: the
+        // mana source's replacement choice owns the window now.
+        super::casting::SpecialActionManaPayment::Paused => Ok(state.waiting_for.clone()),
+    }
+}
+
+/// CR 116.2b + CR 106.6: pay the already-derived turn-face-up cost through
+/// `PaymentContext::SpecialAction(TurnFaceUp)`, so spend-restricted mana ("only
+/// to turn permanents face up" — Overgrown Zealot, Tin Street Gossip) is
+/// eligible here while other-context mana is rejected.
+fn pay_turn_face_up_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: &ManaCost,
+    announced_x: Option<u32>,
+    events: &mut Vec<GameEvent>,
+) -> Result<super::casting::SpecialActionManaPayment, EngineError> {
+    let resume = crate::types::game_state::ManaAbilityResume::TurnFaceUp {
+        player,
+        object_id,
+        cost: cost.clone(),
+        announced_x,
+    };
+    super::casting::pay_special_action_mana_cost_with_resume(
+        state,
+        player,
+        Some(object_id),
+        cost,
+        crate::types::mana::SpecialAction::TurnFaceUp,
+        Some(&resume),
+        events,
+    )
+}
+
+/// CR 605.3b + CR 616.1: finish a turn-face-up whose mana-source cost paused.
+/// `cost` was locked at initiation, so this must not re-derive it against a
+/// board that changed while the replacement choice was pending.
+pub(crate) fn resume_turn_face_up_payment(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: ManaCost,
+    announced_x: Option<u32>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // The locked cost already had CR 107.3d's `{X}` concretized, so its shards
+    // no longer say X. Keep the pre-concretization fact separately: X=0 is a
+    // real announcement and must still bind to the resulting trigger.
+    match pay_turn_face_up_cost(state, player, object_id, &cost, announced_x, events)? {
+        super::casting::SpecialActionManaPayment::Paid => {
+            finish_paid_turn_face_up(state, player, object_id, announced_x, events)
+        }
+        super::casting::SpecialActionManaPayment::Paused => Ok(state.waiting_for.clone()),
+    }
+}
+
+/// CR 702.37e: commit the flip, and only once the whole payment has succeeded.
+pub(crate) fn finish_paid_turn_face_up(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    announced_x: Option<u32>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // CR 702.37f (morph) / CR 702.168e (disguise): "If a permanent's morph cost
+    // includes X, other abilities of that permanent may also refer to X. The
+    // value of X in those abilities is equal to the value of X chosen as the
+    // morph special action was taken." Publish the announced X on the
+    // source-keyed carrier BEFORE the flip emits `TurnedFaceUp`, so
+    // `triggers::build_triggered_ability` — the single trigger-instantiation
+    // authority — stamps it onto the turn-face-up trigger's `chosen_x`.
+    //
+    // The stamp must land at INSTANTIATION, not resolution: Aurelia's Vindicator
+    // spends its X in `multi_target.max` ("exile up to X other target
+    // creatures"), which is consumed during target selection, before the trigger
+    // ever resolves.
+    //
+    // Published only when the cost actually HAS an {X} (CR 107.3d grants a
+    // choice only then). A no-X flip leaves the carrier untouched rather than
+    // clobbering it with `Some((.., 0))`: an unrelated activated ability of
+    // ANOTHER object may be on the stack with its own announced X in flight, and
+    // that value must survive. The carrier is cleared at the start of the next
+    // `resolve_top`, so this publication cannot outlive the trigger it is for.
+    if let Some(announced_x) = announced_x {
+        state.announced_source_x = Some((object_id, announced_x));
+    }
+
+    // CR 614.1e + CR 708.11 + CR 616.1: the "As ~ is turned face up" replacement
+    // pipeline inside `turn_face_up` resolves its execute through
+    // `resolve_ability_chain`, which can install an interactive `WaitingFor`
+    // (measured: two materially-ordered counter-addition replacements turn the
+    // execute's `AddCounter` into a CR 616.1 ordering prompt). Seed the settled
+    // outcome FIRST, then hand back whatever the pipeline left: `Priority` when
+    // nothing interfered, the live choice when something did. Seeding also
+    // covers the paused-payment resume route, where `state.waiting_for` still
+    // holds the mana source's just-answered replacement prompt — returning THAT
+    // would resurrect a dead prompt. An `Err` from `turn_face_up` cannot leak
+    // the seed: every dispatch into this completion runs under the action
+    // boundary, which restores the whole pre-action state on `Err`.
+    state.waiting_for = WaitingFor::Priority { player };
+    turn_face_up(state, player, object_id, events)?;
+    // CR 603.2 + CR 603.3b: when the pipeline paused, the reducer's settled
+    // epilogue will not run for this action, so the `TurnedFaceUp` observer
+    // triggers in `events` would be lost (measured: the "when turned face up"
+    // draw never reached the stack). Park them into `deferred_triggers` — the
+    // established authority for exactly this shape — for the drain once the
+    // interposed choice settles. A no-op when the flip completed undisturbed.
+    crate::game::triggers::park_observer_triggers_if_paused(state, events, 0);
+    Ok(state.waiting_for.clone())
 }
 
 /// CR 702.37e: Turning a face-down permanent face up ends the morph effect and

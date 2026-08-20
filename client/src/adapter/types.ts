@@ -2989,6 +2989,9 @@ export interface DebugLibraryCardView {
   name: string;
 }
 
+/** Engine-classified identity for a candidate in a legend-rule choice. */
+export type LegendCandidateIdentity = "Original" | "Copy" | "TokenCopy";
+
 /**
  * Engine-authored projections computed at each state snapshot. Rides
  * alongside GameState through every adapter path. Frontend components
@@ -3035,6 +3038,12 @@ export interface DerivedViews {
    * Face-down permanents are excluded per CR 708.2. Absent when empty.
    */
   copied_permanents?: ObjectId[];
+  /**
+   * CR 704.5j + CR 707.2 / CR 708.2: identity for every current legend-rule
+   * candidate. The choice modal renders this engine-authored map directly.
+   * Keyed by ObjectId-as-string and omitted when no legend choice is pending.
+   */
+  legend_candidate_identities?: Record<string, LegendCandidateIdentity>;
   /** Keyed by attacking commander's current controller (PlayerId as string). */
   commander_damage_by_attacker?: Record<string, CommanderDamageView[]>;
   /**

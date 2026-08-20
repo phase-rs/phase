@@ -17,10 +17,10 @@ function pickRandomImage(): string {
   return BATTLEFIELDS[Math.floor(Math.random() * BATTLEFIELDS.length)].image;
 }
 
-function resolveBackground(
+export function resolveBackground(
   boardBackground: BoardBackground,
   customUrl: string,
-  deckColor: ManaColor | null,
+  deckColor: ManaColor | null | undefined,
   lockedRef: React.RefObject<string | null>,
 ): ResolvedBackground | null {
   if (boardBackground === "none") return null;
@@ -37,9 +37,12 @@ function resolveBackground(
   }
 
   if (boardBackground === "auto-wubrg") {
-    // Lock in a color-matched image on first color detection (includes full deck)
-    if (deckColor && !lockedRef.current) {
-      lockedRef.current = getRandomBattlefield(deckColor).image;
+    if (deckColor === undefined) return null;
+
+    // Lock in a color-matched image on first color detection (includes full deck).
+    // Colorless decks have no WUBRG color to match, so use the normal random pool.
+    if (!lockedRef.current) {
+      lockedRef.current = deckColor ? getRandomBattlefield(deckColor).image : pickRandomImage();
     }
     return lockedRef.current ? { kind: "image", src: lockedRef.current } : null;
   }
@@ -81,10 +84,10 @@ export function BattlefieldBackground() {
     // (lockedRef). For every other background mode, and on every action after
     // the lock, the result is discarded. Without this guard the scan re-ran on
     // every gameState change (mana tap, phase tick, priority pass) for nothing.
-    if (boardBackground !== "auto-wubrg" || lockedRef.current) return null;
-    if (!gameState) return null;
+    if (boardBackground !== "auto-wubrg" || lockedRef.current) return undefined;
+    if (!gameState) return undefined;
     const player = gameState.players[playerId];
-    if (!player) return null;
+    if (!player) return undefined;
     return getDeckDominantColor(
       player.library,
       player.hand,

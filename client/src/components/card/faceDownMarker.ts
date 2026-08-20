@@ -47,6 +47,27 @@ const MARKERS: Partial<Record<FaceDownCause, TokenImageRef>> = {
   // printed for it, so it keeps the generic card back.
 };
 
+/** Printed token names, for the tile's name bar and the preview caption. */
+const MARKER_NAMES: Partial<Record<FaceDownCause, string>> = {
+  Manifest: "Manifest",
+  Morph: "Morph",
+  Cloak: "A Mysterious Creature",
+  Disguise: "A Mysterious Creature",
+};
+
+/**
+ * The printed marker token's NAME for a face-down permanent, or `null` when
+ * none applies. Shown on the battlefield tile instead of the generic
+ * "Face-down card" label.
+ */
+export function faceDownMarkerName(
+  faceDown: boolean,
+  cause: FaceDownCause | null | undefined,
+): string | null {
+  if (!faceDown || !cause) return null;
+  return MARKER_NAMES[cause] ?? null;
+}
+
 /**
  * The marker printing for a face-down permanent, or `null` when none applies —
  * the permanent is face up, the engine did not record a cause (older saves), or

@@ -65,6 +65,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(() => {
     inspectObject(entry.source_id);
     setPreviewSticky(true);
+    onHoverChange?.(true);
   });
 
   const sourceObj = objects?.[entry.source_id];

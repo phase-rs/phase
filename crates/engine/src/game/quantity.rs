@@ -2113,8 +2113,8 @@ pub(crate) fn resolve_quantity_for_trigger_check(
 /// boundary rejects the condition rather than substituting the controller.
 ///
 /// Duration-timing-only scopes are rejected BEFORE delegating: because
-/// `IsMonarch { player }` is serde-constructible from `card-data.json` and from
-/// mtgish input, `PlayerScope::AnyTurn` / `SpecificPlayer` can reach this
+/// `IsMonarch { player }` is serde-constructible from `card-data.json`, so
+/// `PlayerScope::AnyTurn` / `SpecificPlayer` can reach this
 /// function from a malformed row, and `resolve_single_player_scope` answers
 /// those with `unreachable!()`. Returning `None` here makes a bad row fail
 /// closed instead of panicking the engine inside a trigger check. (Validating
