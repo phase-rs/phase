@@ -792,15 +792,20 @@ fn handle_unlock_room_door(
                 "That door is already unlocked".to_string(),
             ));
         }
-        match door {
-            crate::game::game_object::RoomDoor::Left => obj.mana_cost.clone(),
-            crate::game::game_object::RoomDoor::Right => obj
-                .back_face
+        // CR 709.5e: the unlock cost is the locked HALF's mana cost. Doors are
+        // printed halves, not live/back slots — after the back half was cast
+        // (`modal_back_face`), the LIVE face is the right door and the left
+        // door's cost lives on `back_face`. `room::live_face_door` is the
+        // single orientation authority (same mapping as CR 709.5d entry).
+        if door == super::room::live_face_door(obj) {
+            obj.mana_cost.clone()
+        } else {
+            obj.back_face
                 .as_ref()
                 .map(|face| face.mana_cost.clone())
                 .ok_or_else(|| {
-                    EngineError::ActionNotAllowed("Room has no right door face".to_string())
-                })?,
+                    EngineError::ActionNotAllowed("Room has no second door face".to_string())
+                })?
         }
     };
 
@@ -19347,9 +19352,9 @@ mod stage2_injector_tests {
                 // resume/finalization helpers are above this existing producer;
                 // they do not mint an optional-effect prompt. The census above
                 // still finds exactly the same five production producers.
-                "game/effects/mod.rs:7325".to_string(),
-                "game/effects/mod.rs:7402".to_string(),
-                "game/effects/mod.rs:11229".to_string(),
+                "game/effects/mod.rs:7344".to_string(),
+                "game/effects/mod.rs:7421".to_string(),
+                "game/effects/mod.rs:11248".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
@@ -20104,7 +20109,7 @@ mod stage2_injector_tests {
                 //   `:13210 ⇒ :13130`. It creates no CR 603.5 prompt either — a special
                 //   action does not use the stack (CR 116.1) — and the pinned line is again
                 //   the same `OptionalEffectChoice` construction, moved wholesale.
-                "game/engine.rs:13130".to_string(),
+                "game/engine.rs:13135".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \

@@ -1699,6 +1699,187 @@ fn unlock_room_door_special_action_marks_door_and_emits_trigger_event() {
     )));
 }
 
+/// CR 709.5h: unlocking a particular half triggers THAT half's "when you
+/// unlock this door" ability. The cast half (left, unlocked on entry) carries
+/// a GainLife-3 marker trigger; the locked right half carries GainLife 7.
+/// Paying the right door's unlock cost must put the RIGHT half's trigger on
+/// the stack — not re-fire the cast half's (Moldering Gym // Weight Room:
+/// paying Weight Room's {5}{G} ran Moldering Gym's land search a second time
+/// and Weight Room's ability never existed for the engine).
+#[test]
+fn unlocking_the_right_door_fires_the_right_halfs_trigger() {
+    let mut state = setup_game_at_main_phase();
+    let room = create_object(
+        &mut state,
+        CardId(901),
+        PlayerId(0),
+        "Moldering Gym".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        let front_trigger =
+            TriggerDefinition::new(TriggerMode::UnlockDoor).execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    player: TargetFilter::Controller,
+                },
+            ));
+        obj.trigger_definitions.push(front_trigger.clone());
+        Arc::make_mut(&mut obj.base_trigger_definitions).push(front_trigger);
+        let mut back = room_back_face("Weight Room");
+        back.trigger_definitions
+            .push(
+                TriggerDefinition::new(TriggerMode::UnlockDoor).execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 7 },
+                        player: TargetFilter::Controller,
+                    },
+                )),
+            );
+        obj.back_face = Some(back);
+        // The real ETB pipeline stamps and installs both halves' door text
+        // (`reset_for_battlefield_entry` → `install_room_door_text`).
+        obj.reset_for_battlefield_entry(1, 1);
+        // The front half was the cast half: its door entered unlocked.
+        obj.room_unlocks = Some(crate::game::game_object::RoomUnlockState {
+            left_unlocked: true,
+            right_unlocked: false,
+        });
+    }
+
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Right,
+        },
+    )
+    .unwrap();
+
+    let fired: Vec<i32> = state
+        .stack
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility { ability, .. } => match &ability.effect {
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value },
+                    ..
+                } => Some(*value),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        fired,
+        vec![7],
+        "CR 709.5h: the just-unlocked RIGHT half's trigger (marker 7) must fire, \
+         and the cast half's (marker 3) must not"
+    );
+}
+
+/// CR 709.5e + CR 709.5j: doors are PRINTED halves, not live/back slots.
+/// After the back half was cast (`modal_back_face`), the LEFT door's unlock
+/// cost is the back_face's mana cost and its trigger is the back_face's —
+/// `room::live_face_door` is the shared orientation authority. Before the fix
+/// the cost lookup read `obj.mana_cost` for Left unconditionally (the WRONG
+/// half once the faces swapped), and the trigger re-fired the live half.
+#[test]
+fn after_casting_the_back_half_the_left_door_uses_the_front_halfs_cost_and_trigger() {
+    let mut state = setup_game_at_main_phase();
+    let room = create_object(
+        &mut state,
+        CardId(902),
+        PlayerId(0),
+        "Weight Room".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        // The right (second printed) half was cast: faces are swapped.
+        obj.modal_back_face = true;
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        };
+        let live_trigger =
+            TriggerDefinition::new(TriggerMode::UnlockDoor).execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 7 },
+                    player: TargetFilter::Controller,
+                },
+            ));
+        obj.trigger_definitions.push(live_trigger.clone());
+        Arc::make_mut(&mut obj.base_trigger_definitions).push(live_trigger);
+        let mut front = room_back_face("Moldering Gym");
+        front.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        };
+        front
+            .trigger_definitions
+            .push(
+                TriggerDefinition::new(TriggerMode::UnlockDoor).execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 3 },
+                        player: TargetFilter::Controller,
+                    },
+                )),
+            );
+        obj.back_face = Some(front);
+        obj.reset_for_battlefield_entry(1, 1);
+        obj.room_unlocks = Some(crate::game::game_object::RoomUnlockState {
+            left_unlocked: false,
+            right_unlocked: true,
+        });
+    }
+    // Exactly the FRONT half's {G} in the pool: the unlock succeeds only if
+    // the Left door resolves to the back_face slot (the front-printed half).
+    state.players[0]
+        .mana_pool
+        .add(ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]));
+
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Left,
+        },
+    )
+    .expect("the left door's unlock cost is the front half's {G}");
+
+    assert!(state.objects[&room].room_unlocks.unwrap().left_unlocked);
+    let fired: Vec<i32> = state
+        .stack
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility { ability, .. } => match &ability.effect {
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value },
+                    ..
+                } => Some(*value),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        fired,
+        vec![3],
+        "CR 709.5h: the LEFT door's trigger is the front-printed half's (marker 3), \
+         not the live half's (marker 7)"
+    );
+}
+
 /// CR 106.6 + CR 116.2m + CR 709.5e: Smoky Lounge produces {R}{R} restricted
 /// to "cast Room spells and unlock doors". The door-unlock half lowers to
 /// `OnlyForSpecialAction(UnlockDoor)`; paying a Room's unlock cost routes

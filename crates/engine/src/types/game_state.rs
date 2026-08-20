@@ -5338,6 +5338,16 @@ pub enum BatchCompletion {
         /// must too. `None` for the kept-choice / dig paths, which emit their own
         /// `EffectResolved` before the pause (or rely on the continuation).
         emit_reveal_until_resolved: Option<ObjectId>,
+        /// CR 608.2c + CR 701.62a (#7467): a paused manifest-dread entry's
+        /// chosen object. The completion drain publishes it as the chain's
+        /// fresh tracked set — only once the entry has actually finished
+        /// (battlefield gate) and right before the parked consumer drains —
+        /// the deferred mirror of the synchronous `ManifestDreadChoice`
+        /// publish. Deliberately separate from `publish_tracked_set`, whose
+        /// presence doubles as the dig-vs-reveal ROUTING selector for the rest
+        /// pile. `None` for every non-manifest rest pile.
+        #[serde(default)]
+        manifested_for_continuation: Option<ObjectId>,
     },
     /// CR 608.2c + CR 616.1: The rest half of a deterministic mass Dig settled
     /// after a replacement choice. Resume its selected-card delivery only now,

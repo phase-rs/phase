@@ -2500,7 +2500,48 @@ impl GameObject {
         }
         if self.card_types.subtypes.iter().any(|s| s == "Room") {
             self.room_unlocks = Some(RoomUnlockState::default());
+            self.install_room_door_text();
         }
+    }
+
+    /// CR 709.5 + CR 709.5h: stamp each Room half's trigger definitions with
+    /// its door and install the OTHER half's triggers alongside the live
+    /// face's — into the BASE set, so layer recomputation and base
+    /// re-materialization preserve them. Which half's text currently
+    /// *functions* is then decided by the unlock designations
+    /// (`functioning_abilities::active_trigger_definitions`), not by face
+    /// residency; the unlock trigger matcher additionally fires a stamped
+    /// trigger only for its own door's event.
+    ///
+    /// The live face's door follows the cast orientation (`modal_back_face`
+    /// records that the right half is showing — the CR 709.5d mapping,
+    /// see `room::live_face_door`). Idempotent: a `None` stamp is claimed
+    /// once, and the other half is merged only while absent.
+    fn install_room_door_text(&mut self) {
+        let live_door = crate::game::room::live_face_door(self);
+        let other_door = match live_door {
+            RoomDoor::Left => RoomDoor::Right,
+            RoomDoor::Right => RoomDoor::Left,
+        };
+        let base = Arc::make_mut(&mut self.base_trigger_definitions);
+        for definition in base.iter_mut() {
+            if definition.room_door.is_none() {
+                definition.room_door = Some(live_door);
+            }
+        }
+        if let Some(back) = &self.back_face {
+            if !base
+                .iter()
+                .any(|definition| definition.room_door == Some(other_door))
+            {
+                base.extend(back.trigger_definitions.iter_all().map(|printed| {
+                    let mut definition = printed.clone();
+                    definition.room_door = Some(other_door);
+                    definition
+                }));
+            }
+        }
+        self.materialize_base_trigger_definitions();
     }
 
     /// CR 613.1 + CR 400.7: Revert layer-derived characteristics to the object's

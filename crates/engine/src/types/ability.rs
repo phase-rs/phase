@@ -23620,6 +23620,13 @@ pub struct TriggerDefinition {
     /// controller (see `ClashResult::for_player` / `match_clash`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clash_result: Option<ClashResult>,
+    /// CR 709.5 + CR 709.5h: The Room half (door) this trigger's printed text
+    /// lives on. Stamped when a split Room's two halves are wired onto a game
+    /// object; a door's trigger functions only while that half is unlocked,
+    /// and an unlock trigger fires only for its own door's event. `None` for
+    /// every non-Room trigger: no door gating.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_door: Option<crate::game::game_object::RoomDoor>,
 }
 
 /// CR 605.1b: Which aggregate mana output a mana-ability trigger requires.
@@ -24156,11 +24163,18 @@ impl TriggerDefinition {
             taps_for_mana_produced: None,
             mana_ability_produced: None,
             clash_result: None,
+            room_door: None,
         }
     }
 
     pub fn execute(mut self, ability: AbilityDefinition) -> Self {
         self.execute = Some(Box::new(ability));
+        self
+    }
+
+    /// CR 709.5: tag this trigger as living on the given Room half.
+    pub fn room_door(mut self, door: crate::game::game_object::RoomDoor) -> Self {
+        self.room_door = Some(door);
         self
     }
 
@@ -29488,6 +29502,7 @@ mod tests {
             taps_for_mana_produced: None,
             mana_ability_produced: None,
             clash_result: None,
+            room_door: Some(crate::game::game_object::RoomDoor::Left),
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: TriggerDefinition = serde_json::from_str(&json).unwrap();

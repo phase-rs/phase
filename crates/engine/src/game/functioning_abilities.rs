@@ -417,6 +417,20 @@ pub fn active_trigger_definitions<'a>(
             .iter_all()
             .enumerate()
             .filter(move |(_, entry)| {
+                // CR 709.5: on the battlefield a locked half's rules text does
+                // not function — a door-stamped trigger contributes only while
+                // its Room half is unlocked. (CR 709.5h needs no exception:
+                // the designation is granted BEFORE the unlock event is
+                // matched, so the just-unlocked half already passes.) Off the
+                // battlefield there are no lock designations and both halves'
+                // text exists, so the gate applies only there.
+                if zone == Zone::Battlefield {
+                    if let Some(door) = entry.definition().room_door {
+                        if !obj.room_unlocks.unwrap_or_default().is_unlocked(door) {
+                            return false;
+                        }
+                    }
+                }
                 if zone == Zone::Command && !is_emblem {
                     return non_emblem_command_zone_trigger_functions(obj, entry.definition());
                 }
