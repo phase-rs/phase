@@ -4187,6 +4187,7 @@ fn ordered_delayed_tail_drains_after_trigger_target_selection_without_recipient(
     let ordinary_source = continuation_source(&mut state, "Targeting ordinary");
     let delayed_source = continuation_source(&mut state, "Delayed observer");
     let target = make_creature(&mut state, PlayerId(1), "Target", 1, 1);
+    let alternative_target = make_creature(&mut state, PlayerId(1), "Alternative target", 1, 1);
     let ordinary = continuation_pending(
         ordinary_source,
         ResolvedAbility::new(
@@ -4207,10 +4208,18 @@ fn ordered_delayed_tail_drains_after_trigger_target_selection_without_recipient(
         PendingTriggerContext::single(ordinary),
         delayed_tail_context(delayed_source),
     );
-    assert!(matches!(
-        state.waiting_for,
-        WaitingFor::TriggerTargetSelection { .. }
-    ));
+    let WaitingFor::TriggerTargetSelection { target_slots, .. } = &state.waiting_for else {
+        panic!("ambiguous trigger target must pause through TriggerTargetSelection");
+    };
+    assert!(
+        target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(target))
+            && target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(alternative_target)),
+        "the fixture must keep target selection interactive rather than auto-assigning it"
+    );
     assert_eq!(state.deferred_triggers.len(), 1);
     assert!(state
         .pending_trigger_construction_priority_recipient
@@ -4351,6 +4360,7 @@ fn empty_deferred_tail_is_inert_after_trigger_target_selection_without_recipient
     state.priority_player = PlayerId(0);
     let source = continuation_source(&mut state, "Targeting ordinary");
     let target = make_creature(&mut state, PlayerId(1), "Target", 1, 1);
+    let _alternative_target = make_creature(&mut state, PlayerId(1), "Alternative target", 1, 1);
     let ordinary = continuation_pending(
         source,
         ResolvedAbility::new(
