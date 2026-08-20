@@ -684,6 +684,7 @@ fn life_gain_trigger_joins_the_combat_damage_trigger_batch() {
 fn delayed_life_gain_trigger_joins_the_first_combat_ordering_transaction() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Magpie Draw"]);
     let lifelinker = add_lifelinker(&mut scenario, P0, "Lifelinker", 3, 3);
     let magpie = scenario
         .add_creature_from_oracle(P0, "Thieving Magpie", 1, 3, MAGPIE)
