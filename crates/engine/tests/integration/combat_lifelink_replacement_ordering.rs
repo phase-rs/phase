@@ -25,17 +25,19 @@
 
 use super::rules::{AttackTarget, GameRunner, GameScenario, Phase, WaitingFor, Zone, P0, P1};
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, QuantityExpr, QuantityRef, ReplacementDefinition,
-    TargetFilter,
+    AbilityDefinition, AbilityKind, DelayedTriggerCondition, DelayedTriggerLifetime, Effect,
+    QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility, TargetFilter,
+    TriggerDefinition,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{LoopDetectSample, StackEntryKind};
+use engine::types::game_state::{DelayedTrigger, LoopDetectSample, StackEntryKind};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
+use engine::types::triggers::TriggerMode;
 
 const P2: PlayerId = PlayerId(2);
 
@@ -280,6 +282,83 @@ fn positive_life_changes(events: &[GameEvent], player: PlayerId) -> Vec<i32> {
             _ => None,
         })
         .collect()
+}
+
+/// Install a one-shot delayed LifeGained observer through the engine's delayed
+/// trigger machinery. Its counter receipt lets the test distinguish collection
+/// from eventual resolution without creating another life-change event.
+fn install_delayed_life_gain_counter_receipt(runner: &mut GameRunner, source: ObjectId) {
+    let mut ability = ResolvedAbility::new(
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    let source_context = engine::game::triggers::trigger_source_context_for_latch(
+        runner.state(),
+        runner
+            .state()
+            .objects
+            .get(&source)
+            .expect("delayed LifeGained receipt source"),
+    );
+    ability.set_trigger_source_recursive(source_context);
+
+    runner
+        .state_mut()
+        .delayed_triggers
+        .push(DelayedTrigger::new(
+            DelayedTriggerCondition::WhenNextEvent {
+                trigger: Box::new(
+                    TriggerDefinition::new(TriggerMode::LifeGained)
+                        .valid_target(TargetFilter::Controller),
+                ),
+                or_trigger: None,
+                lifetime: DelayedTriggerLifetime::ThisTurn,
+            },
+            Box::new(ability),
+            P0,
+            source,
+            true,
+        ));
+}
+
+/// Resolve the CR 616.1 replacement choices, but stop at the first trigger
+/// ordering prompt so the caller can inspect the one CR 603.3b transaction.
+fn answer_replacements_until_first_trigger_order(
+    runner: &mut GameRunner,
+    first_source: &str,
+) -> usize {
+    let mut answered = 0;
+    for _ in 0..12 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { candidates, .. } => {
+                let index = candidates
+                    .iter()
+                    .position(|candidate| candidate.source_name == first_source)
+                    .unwrap_or_else(|| {
+                        assert!(
+                            answered > 0,
+                            "reach guard: {first_source} must be applicable on the first CR 616.1 choice; got {candidates:?}"
+                        );
+                        0
+                    });
+                runner
+                    .act(GameAction::ChooseReplacement { index })
+                    .expect("the CR 616.1 replacement choice must be answerable");
+                answered += 1;
+            }
+            WaitingFor::OrderTriggers { .. } => return answered,
+            waiting_for => panic!(
+                "expected a CR 616.1 replacement choice or the initial trigger ordering prompt, got {waiting_for:?}"
+            ),
+        }
+    }
+    panic!("the combat batch did not reach its first trigger ordering prompt");
 }
 
 /// Drive T1's board to the CR 616.1 pause and return `(runner, lifelinker)`.
@@ -593,6 +672,148 @@ fn life_gain_trigger_joins_the_combat_damage_trigger_batch() {
         count_triggers(magpie),
         1,
         "CR 603.2: the combat-damage observer joins the same batch exactly once"
+    );
+}
+
+/// CR 510.3a + CR 603.3b + CR 603.7b: an independently installed delayed
+/// LifeGained observer and ordinary combat observers from the completed damage
+/// batch must enter the *first* ordering transaction together. This observes
+/// the live pending group before submitting `OrderTriggers`; a later priority
+/// scan would be too late to prove simultaneous trigger collection.
+#[test]
+fn delayed_life_gain_trigger_joins_the_first_combat_ordering_transaction() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let lifelinker = add_lifelinker(&mut scenario, P0, "Lifelinker", 3, 3);
+    let magpie = scenario
+        .add_creature_from_oracle(P0, "Thieving Magpie", 1, 3, MAGPIE)
+        .id();
+    let pridemate = scenario
+        .add_creature_from_oracle(P0, "Ajani's Pridemate", 2, 2, PRIDEMATE)
+        .id();
+    let delayed_receipt = scenario.add_creature(P0, "Delayed Receipt", 1, 1).id();
+    let blocker = scenario.add_creature(P1, "Chump", 1, 1).id();
+    install_competing_life_gain_replacements(&mut scenario, P0);
+    let mut runner = scenario.build();
+    install_delayed_life_gain_counter_receipt(&mut runner, delayed_receipt);
+
+    attack_into_damage(
+        &mut runner,
+        &[lifelinker, magpie],
+        P1,
+        &[(blocker, lifelinker)],
+    );
+    advance_through_combat_damage(&mut runner);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "reach guard: the lifelink replacement must pause before trigger collection"
+    );
+
+    let replacement_choices = answer_replacements_until_first_trigger_order(&mut runner, DOUBLER);
+    assert!(
+        replacement_choices >= 1,
+        "reach guard: the CR 616.1 replacement process must have been exercised"
+    );
+
+    let order = runner
+        .state()
+        .pending_trigger_order
+        .as_ref()
+        .expect("the first OrderTriggers prompt must retain its pending group");
+    let group = order
+        .groups
+        .iter()
+        .find(|group| group.controller == P0)
+        .expect("P0 must own the combined combat trigger group");
+    assert!(
+        group.triggers.iter().any(|context| {
+            context.pending.source_id == pridemate
+                && context.dispatch_origin
+                    == engine::game::triggers::PendingTriggerDispatchOrigin::Normal
+        }),
+        "reach guard: the ordinary LifeGained observer must be in the initial ordering group"
+    );
+    assert!(
+        group.triggers.iter().any(|context| {
+            context.pending.source_id == magpie
+                && context.dispatch_origin
+                    == engine::game::triggers::PendingTriggerDispatchOrigin::Normal
+        }),
+        "reach guard: the ordinary combat-damage observer must be in the initial ordering group"
+    );
+    assert!(
+        group.triggers.iter().any(|context| {
+            context.pending.source_id == delayed_receipt
+                && context.dispatch_origin
+                    == engine::game::triggers::PendingTriggerDispatchOrigin::Delayed
+        }),
+        "CR 603.3b + CR 603.7b: the delayed LifeGained observer must join this FIRST group; the phase-only collector leaves it absent"
+    );
+    assert!(
+        runner.state().delayed_triggers.is_empty(),
+        "CR 603.7b: the matching one-shot delayed trigger is consumed during collection, before ordering"
+    );
+
+    let order = match runner.state().waiting_for.clone() {
+        WaitingFor::OrderTriggers { triggers, .. } => (0..triggers.len()).collect(),
+        waiting_for => panic!("expected the inspected OrderTriggers prompt, got {waiting_for:?}"),
+    };
+    runner
+        .act(GameAction::OrderTriggers { order })
+        .expect("the combined trigger ordering must be answerable");
+
+    let mut stack_drained = false;
+    for _ in 0..96 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { triggers, .. } => runner
+                .act(GameAction::OrderTriggers {
+                    order: (0..triggers.len()).collect(),
+                })
+                .expect("follow-up trigger ordering must be answerable"),
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => {
+                stack_drained = true;
+                break;
+            }
+            WaitingFor::Priority { .. } => runner
+                .act(GameAction::PassPriority)
+                .expect("priority pass must resolve the combined trigger batch"),
+            waiting_for => panic!(
+                "unexpected wait while resolving the combined combat trigger batch: {waiting_for:?}"
+            ),
+        }
+    }
+    assert!(
+        stack_drained,
+        "the combined trigger batch must settle within its safety bound"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .objects
+            .get(&delayed_receipt)
+            .expect("delayed receipt source remains on the battlefield")
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        1,
+        "the independently delayed LifeGained receipt resolves exactly once"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .objects
+            .get(&pridemate)
+            .expect("Pridemate remains on the battlefield")
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        1,
+        "the ordinary Pridemate receipt still resolves exactly once"
     );
 }
 

@@ -89,7 +89,7 @@ fn process_combat_damage_triggers(
     // player before constructing the APNAP ordering pass.
     pending.retain(|ctx| crate::game::players::is_alive(state, ctx.pending.controller));
 
-    triggers::process_collected_triggers_with_delayed_phase_events(
+    triggers::process_collected_triggers_with_delayed_events(
         state,
         pending,
         &before_priority_events,
