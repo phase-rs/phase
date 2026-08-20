@@ -6183,6 +6183,7 @@ fn parse_gendered_dies_event_object_condition<'a>(
     .parse(rest)?;
     let (rest, polarity) = alt((
         value(PastCopulaPolarity::Negative, tag("wasn't ")),
+        value(PastCopulaPolarity::Negative, tag("wasn’t ")),
         value(PastCopulaPolarity::Negative, tag("was not ")),
         value(PastCopulaPolarity::Positive, tag("was ")),
     ))

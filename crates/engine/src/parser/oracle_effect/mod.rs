@@ -11558,7 +11558,7 @@ fn parse_retained_type_clause(tp: TextPair) -> Option<ParsedRetainedTypeClause> 
         (false, format!("{article}{descriptor}"))
     } else {
         let (_, descriptor) = nom_on_lower(tp.original, tp.lower, |input| {
-            value((), tag("they're still ")).parse(input)
+            alt((tag("they're still "), tag("they’re still "))).parse(input)
         })?;
         (true, descriptor.to_string())
     };
@@ -36571,6 +36571,7 @@ mod gendered_still_type_tests {
             "It's still a land.",
             "That's still an artifact.",
             "They're still lands.",
+            "They’re still lands.",
             "She's still a creature.",
         ] {
             let clause = try_parse_still_a_type(TextPair::new(text, &text.to_lowercase()))

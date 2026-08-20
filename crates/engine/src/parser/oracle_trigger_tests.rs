@@ -1982,6 +1982,14 @@ fn gendered_dies_condition_factors_pronoun_copula_article_and_descriptor() {
             true,
         ),
         (
+            "he",
+            "wasn’t",
+            "an",
+            "Artifact",
+            vec![TypeFilter::Artifact],
+            true,
+        ),
+        (
             "she",
             "was not",
             "a",

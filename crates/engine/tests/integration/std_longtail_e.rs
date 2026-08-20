@@ -1524,8 +1524,8 @@ const CAVERNOUS_MAW_ORACLE: &str = "{T}: Add {C}.\n{2}: This land becomes a 3/3 
 
 fn all_modifications(def: &AbilityDefinition) -> Vec<&ContinuousModification> {
     let mut result = Vec::new();
-    let mut cursor = Some(def);
-    while let Some(node) = cursor {
+    let mut pending = vec![def];
+    while let Some(node) = pending.pop() {
         if let Effect::GenericEffect {
             static_abilities, ..
         } = node.effect.as_ref()
@@ -1536,7 +1536,8 @@ fn all_modifications(def: &AbilityDefinition) -> Vec<&ContinuousModification> {
                     .flat_map(|static_def| static_def.modifications.iter()),
             );
         }
-        cursor = node.sub_ability.as_deref();
+        pending.extend(node.sub_ability.as_deref());
+        pending.extend(node.else_ability.as_deref());
     }
     result
 }
