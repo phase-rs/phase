@@ -783,7 +783,7 @@ fn delayed_life_gain_trigger_joins_the_first_combat_ordering_transaction() {
             waiting_for => panic!(
                 "unexpected wait while resolving the combined combat trigger batch: {waiting_for:?}"
             ),
-        }
+        };
     }
     assert!(
         stack_drained,
