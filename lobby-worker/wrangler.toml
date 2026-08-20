@@ -23,13 +23,27 @@ compatibility_date = "2026-05-01"
 #      written into a watched directory retriggers the watcher that produced
 #      it. That is an unbounded loop, not merely a slow start. Keep any future
 #      codegen out of the watched tree for the same reason.
-#   2. watch_dir names the build's INPUT, the Rust crate this command compiles,
-#      rather than the default ./src. Worker TypeScript still hot-reloads:
-#      wrangler watches the bundle's module graph for that, independently. The
-#      only thing this suppresses is a pointless wasm rebuild on every .ts save.
+#   2. watch_dir names the Rust build inputs, rather than the default ./src.
+#      This includes the standalone crate, both path dependencies, and the
+#      workspace/config inputs their manifests inherit. Worker TypeScript still
+#      hot-reloads: wrangler watches the bundle's module graph for that,
+#      independently. The only thing this suppresses is a pointless wasm
+#      rebuild on every .ts save.
 [build]
 command = "bash ../scripts/build-broker-wasm.sh release"
-watch_dir = "broker-wasm/src"
+watch_dir = [
+  "broker-wasm/src",
+  "broker-wasm/Cargo.toml",
+  "broker-wasm/Cargo.lock",
+  "broker-wasm/.cargo/config.toml",
+  "../crates/lobby-broker/src",
+  "../crates/lobby-broker/Cargo.toml",
+  "../crates/engine/src",
+  "../crates/engine/Cargo.toml",
+  "../Cargo.toml",
+  "../.cargo/config.toml",
+  "../scripts/build-broker-wasm.sh",
+]
 
 # Single global lobby = one DO instance addressed by a fixed name ("global").
 [[durable_objects.bindings]]
