@@ -622,6 +622,82 @@ fn life_gain_trigger_joins_the_combat_damage_trigger_batch() {
     );
 }
 
+/// CR 119.9 + CR 603.2c: the resumed combat batch's ordinary collection is
+/// claimed before priority, so its generic ordinary scan cannot fire this one
+/// observer twice. The CR 616.1 pause is required to reach that scheduler path.
+#[test]
+fn resumed_lifelink_gain_triggers_single_pridemate_once() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let lifelinker = add_lifelinker(&mut scenario, P0, "Lifelinker", 3, 3);
+    let pridemate = scenario
+        .add_creature_from_oracle(P0, "Ajani's Pridemate", 2, 2, PRIDEMATE)
+        .id();
+    let blocker = scenario.add_creature(P1, "Chump", 1, 1).id();
+    install_competing_life_gain_replacements(&mut scenario, P0);
+    let mut runner = scenario.build();
+
+    attack_into_damage(&mut runner, &[lifelinker], P1, &[(blocker, lifelinker)]);
+    advance_through_combat_damage(&mut runner);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "reach guard: the lifelink gain must pause for a real CR 616.1 choice"
+    );
+
+    let _ = answer_ordering_prompts(&mut runner, DOUBLER);
+    let mut stack_drained = false;
+    for _ in 0..96 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("trigger ordering must be answerable");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => {
+                stack_drained = true;
+                break;
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority pass must resolve the trigger");
+            }
+            waiting_for => panic!("unexpected wait while draining Pridemate: {waiting_for:?}"),
+        }
+    }
+    assert!(
+        stack_drained,
+        "the test must drain the stack within its safety bound"
+    );
+
+    assert!(
+        runner.life(P0) > 20,
+        "the resumed lifelink gain must be positive"
+    );
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::GameOver { .. }),
+        "the completed combat must not end the game"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .objects
+            .get(&pridemate)
+            .expect("Pridemate remains on the battlefield")
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        1,
+        "CR 119.9: exactly one life-gain trigger firing adds one counter"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // T6 — the record's lifecycle: never stale, never stranded, never a bare Priority
 // ---------------------------------------------------------------------------

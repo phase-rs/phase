@@ -337,8 +337,27 @@ pub(crate) fn resume_pending_combat_lifelink(
         }
         CombatDamageBatch::Complete(damage_events) => {
             events.extend_from_slice(&damage_events[owed_from..]);
-            if let Some(wf) = finish_combat_damage_sub_step(state, sub_step, &damage_events, events)
-            {
+            let waiting_for =
+                finish_combat_damage_sub_step(state, sub_step, &damage_events, events);
+            // CR 510.3a + CR 603.2c: the completed resumed batch has already
+            // collected its ordinary triggers before any player receives priority.
+            // Claim only this answering action's full-buffer occurrences; delayed
+            // triggers retain them for their own CR 603.7b collection below.
+            let occurrences = (action_event_start..events.len())
+                .map(|index| triggers::ConsumedTriggerEventOccurrence {
+                    event: events[index].clone(),
+                    occurrence: triggers::trigger_event_occurrence(events, index),
+                    scope: triggers::ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
+                })
+                .collect();
+            triggers::resolve_and_apply_trigger_collection(
+                state,
+                crate::types::resolved_commands::ResolvedTriggerCollection::ConsumeBeforePriority {
+                    occurrences,
+                },
+            )
+            .expect("resumed combat consumed-before-priority trigger journal cause must be live");
+            if let Some(wf) = waiting_for {
                 return Some(wf);
             }
             // CR 510.4: the second combat damage step is MANDATORY. Re-enter so a

@@ -2780,6 +2780,7 @@ fn settle_sacrifice_for_cost_events(
                     events,
                     current_start + offset,
                 ),
+                scope: crate::game::triggers::ConsumedTriggerEventScope::AllCollectors,
             },
         )
         .collect();
@@ -5603,6 +5604,7 @@ pub(super) fn push_ability_entry(
                 crate::game::triggers::ConsumedTriggerEventOccurrence {
                     event: event.clone(),
                     occurrence: crate::game::triggers::trigger_event_occurrence(events, index),
+                    scope: crate::game::triggers::ConsumedTriggerEventScope::AllCollectors,
                 }
             }));
     }

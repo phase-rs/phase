@@ -366,6 +366,7 @@ fn run_post_action_pipeline_from_with_policy(
             std::mem::take(&mut state.consumed_before_priority_trigger_events);
         let unconsumed_exile_return_events = triggers::filter_consumed_trigger_events(
             &exile_return_events,
+            triggers::TriggerCollectionRequester::Ordinary,
             &consumed_exile_return_events,
         );
         // CR 603.3b: Exile-return triggers also join a terminal batch so they
@@ -441,7 +442,11 @@ fn run_post_action_pipeline_from_with_policy(
     consumed_trigger_events.extend(std::mem::take(
         &mut state.consumed_before_priority_trigger_events,
     ));
-    let delayed_input = triggers::filter_consumed_trigger_events(events, &consumed_trigger_events);
+    let delayed_input = triggers::filter_consumed_trigger_events(
+        events,
+        triggers::TriggerCollectionRequester::Delayed,
+        &consumed_trigger_events,
+    );
     let delayed_events = triggers::check_delayed_triggers(state, &delayed_input);
     events.extend(delayed_events);
     state.consumed_before_priority_trigger_events.clear();
@@ -542,6 +547,7 @@ fn stage_pending_activation_trigger_events(
             triggers::ConsumedTriggerEventOccurrence {
                 event: event.clone(),
                 occurrence: triggers::trigger_event_occurrence(events, event_start + offset),
+                scope: triggers::ConsumedTriggerEventScope::AllCollectors,
             }
         }));
 }

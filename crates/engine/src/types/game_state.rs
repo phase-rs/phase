@@ -16006,11 +16006,10 @@ declare_game_state! {
     /// only when the marking owner passed the whole, un-reordered action buffer;
     /// one `zone_pipeline.rs` owner passes a sub-slice (rebased ordinals) and the
     /// other marks after its buffer has been re-assembled by the batch drain.
-    /// NOTE: this ledger is ALSO the delayed-trigger input filter
-    /// (`engine_priority.rs`) — claiming an occurrence hides it from
-    /// `check_delayed_triggers` too, which is why only three of the seven logical
-    /// zone-change owners mark (CR 603.7b). Transient engine coordination,
-    /// cleared at action/pipeline boundaries.
+    /// NOTE: an all-collector row also hides its occurrence from the delayed-trigger
+    /// input filter (`engine_priority.rs`), while an ordinary-only row leaves it for
+    /// `check_delayed_triggers` (CR 603.7b). Transient engine coordination, cleared
+    /// at action/pipeline boundaries.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub consumed_before_priority_trigger_events:
         Vec<crate::game::triggers::ConsumedTriggerEventOccurrence>,

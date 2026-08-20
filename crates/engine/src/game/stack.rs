@@ -3017,6 +3017,7 @@ fn consumed_trigger_event_occurrences(
             crate::game::triggers::ConsumedTriggerEventOccurrence {
                 event: event.clone(),
                 occurrence,
+                scope: crate::game::triggers::ConsumedTriggerEventScope::AllCollectors,
             }
         })
         .collect()

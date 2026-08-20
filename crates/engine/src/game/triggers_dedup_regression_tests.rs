@@ -3880,6 +3880,7 @@ fn owner_collected_filter_honors_consumed_ledger_with_empty_queue() {
     let consumed = vec![ConsumedTriggerEventOccurrence {
         event: claimed.clone(),
         occurrence: 0,
+        scope: ConsumedTriggerEventScope::AllCollectors,
     }];
     let survivors = filter_already_collected_trigger_events_from(&state, &events, 0, &consumed);
     assert_eq!(
