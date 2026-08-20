@@ -13189,9 +13189,24 @@ pub struct PendingCombatLifelink {
     /// is not a JSON map key, and the record is serialized.
     pub prevention_tally: Vec<(AppliedReplacementKey, i32)>,
     /// CR 732.2a: the pre-batch life totals the loop-detection ring keys on.
-    /// Carried here rather than re-snapshotted at resume time, so the guard's
-    /// window spans the pause and observes the paused source's own gain (applied
-    /// by `engine_replacement.rs` after the answer).
+    ///
+    /// Carried here rather than re-snapshotted at resume time. What that buys is
+    /// the PAUSE-path guard call: the pause is reached under `PassPriority`, which
+    /// `apply()` exempts from its blanket ring clear, so a pre-batch snapshot is
+    /// what lets that call observe the CR 120.3a damage this batch has already
+    /// dealt. Re-snapshotting at drain entry would make the comparison vacuous
+    /// there — `parked_batch_invalidates_the_loop_ring_against_the_pre_batch_snapshot`
+    /// is the fixture that fails when it is.
+    ///
+    /// It buys NOTHING on the resume, and this is MEASURED, not assumed:
+    /// `apply()` clears `loop_detect_ring` for every action that is neither in its
+    /// exemption list nor an answer to a `WaitingFor::is_forced_cascade_window`,
+    /// and `GameAction::ChooseReplacement` / `WaitingFor::ReplacementChoice` are in
+    /// neither set. The ring is therefore already empty before the drain is
+    /// re-entered, so the completion-path call cannot be observed to clear
+    /// anything on that path. Do not write, or rely on, a claim that this window
+    /// "observes the paused source's own gain" — arithmetically it spans it, but
+    /// no observer survives to see it.
     pub lives_before: Vec<i32>,
     /// CR 510.4: which sub-step owns this batch. Snapshotted because
     /// `combat.first_strike_done` mutates during the resume.

@@ -187,6 +187,31 @@ fn run_post_action_pipeline_from_with_policy(
                 retained_logical_zone_events.extend(&paused_current.delivery_events);
             }
         }
+        // CR 510.3a + CR 603.3b: a combat-damage batch parked on a CR 616.1
+        // life-gain ordering choice still OWNS every event it has emitted. The
+        // record's `batch_events` is replayed through
+        // `process_combat_damage_triggers` (combat_damage.rs) when the batch
+        // completes, and that replay is the SINGLE authority for the batch's
+        // CR 603.3b trigger collection — CR 702.15b makes the lifelink gain a
+        // result of the damage event, so the gain observer and the damage
+        // observers must be ordered as one batch by their controller, and
+        // CR 510.3a puts them all on the stack together before the active
+        // player gets priority.
+        //
+        // The generic post-action scan must therefore not rediscover them.
+        // Collecting here as well as at completion fires every observer in the
+        // batch TWICE: `collect_triggers_into_deferred` writes nothing to
+        // `consumed_before_priority_trigger_events`, and
+        // `process_combat_damage_triggers` consults no ledger at all, so nothing
+        // downstream would dedup them.
+        //
+        // Same shape and same reason as `retained_logical_zone_events` above: a
+        // paused owner's retained events are invisible to the generic scan.
+        let parked_combat_damage_events: Vec<&GameEvent> = state
+            .pending_combat_lifelink
+            .as_deref()
+            .map(|record| record.batch_events.iter().collect())
+            .unwrap_or_default();
         // A completed logical owner has already collected its segment and
         // settlement contexts into the deferred queue, and a paused owner that
         // drained may instead have claimed them in the consumed ledger.
@@ -205,6 +230,7 @@ fn run_post_action_pipeline_from_with_policy(
                 !matches!(event, GameEvent::PhaseChanged { .. })
                     && !state.deferred_entry_events.contains(event)
                     && !retained_logical_zone_events.contains(event)
+                    && !parked_combat_damage_events.contains(event)
             })
             .cloned()
             .collect();
@@ -221,7 +247,41 @@ fn run_post_action_pipeline_from_with_policy(
         // back to Priority. Mirrors `batch_or_drain_observer_triggers`' B2 branch.
         // CR 603.3b: Terminal-resolution observers join the deferred batch so
         // they are ordered only after the resolving ability has completed.
+        // CR 704.3 + CR 117.5 + CR 510.3a: triggered abilities waiting to be put
+        // on the stack are put there only when a player WOULD receive priority,
+        // and combat-damage triggers specifically go on the stack BEFORE the
+        // active player gets priority (CR 510.3a). A parked replacement
+        // (a CR 616.1 ordering choice, a CR 616.1b entry-controller choice, or
+        // any prompt raised while answering one) is a mid-event pause: the event
+        // that triggered these abilities has not finished happening and no player
+        // receives priority for the choice. Park the batch instead, so it reaches
+        // the stack as ONE CR 603.3b batch once the answer settles resolution
+        // back to Priority — splitting it would deny the controller the ordering
+        // choice over the whole batch.
+        //
+        // Keyed on `state.pending_replacement`, NOT on a
+        // `WaitingFor::ReplacementChoice` match and NOT by admitting that variant
+        // to `engine_resolution_choices::handles`:
+        //   * The field is set BEFORE the wait is installed. `replacement.rs`'s
+        //     pipeline_loop parks the record and returns `NeedsChoice` with no
+        //     write to `waiting_for`; the caller installs the wait afterwards. A
+        //     `matches!` on the variant is blind inside that window; the field is
+        //     not. It also covers `EntryControllerChoice`, which `handles` does
+        //     not admit either.
+        //   * `handles` is consulted by four other seams (the reducer's dispatch
+        //     arm in engine.rs, `replacement.rs::park_waiting_for`,
+        //     `triggers.rs::resolution_completion_can_settle`, and
+        //     `park_cast_during_resolution_cast_observers`). Admitting
+        //     `ReplacementChoice` there would silently re-home the replacement
+        //     pause's whole action-dispatch surface and would make a CHAINED
+        //     replacement choice fail to install its own candidate list.
+        //
+        // Not over-broad: on the ANSWERING path the field is already cleared —
+        // `continue_replacement_impl` `.take()`s it as its first statement — so
+        // the disjunct is inert at the reducer's own pipeline call and bites only
+        // at the unguarded `pass_priority_once_with_pipeline` seam.
         if super::engine_resolution_choices::handles(&state.waiting_for)
+            || state.pending_replacement.is_some()
             || state.pending_resolution_completion.is_some()
         {
             triggers::collect_triggers_into_deferred(state, &filtered_events);

@@ -510,6 +510,13 @@ fn life_gain_trigger_joins_the_combat_damage_trigger_batch() {
     scenario.add_creature_from_oracle(P0, "Ajani's Pridemate", 2, 2, PRIDEMATE);
     let blocker = scenario.add_creature(P1, "Chump", 1, 1).id();
     install_competing_life_gain_replacements(&mut scenario, P0);
+    // CR 704.5b: Thieving Magpie is UNBLOCKED here, so its combat-damage trigger
+    // draws. Without a library that draw eliminates P0 the moment SBAs next run,
+    // ending the game before the CR 119.9 observer below can resolve — OBSERVED:
+    // the identical board without these cards reaches a GameOver wait with the
+    // Pridemate trigger still on the stack. The cards exist only to keep P0 in the
+    // game; nothing in this test reads them.
+    scenario.with_library_top(P0, &["Filler A", "Filler B", "Filler C", "Filler D"]);
     let mut runner = scenario.build();
 
     attack_into_damage(
@@ -560,20 +567,57 @@ fn life_gain_trigger_joins_the_combat_damage_trigger_batch() {
         Zone::Graveyard,
         "CR 704.5g: the lethally-damaged blocker dies once SBAs finally run"
     );
-    // CR 119.9: the life-gain receipt the user's board never got.
-    assert!(
-        runner
-            .state()
-            .objects
-            .values()
-            .any(|obj| obj.name == "Ajani's Pridemate"
-                && obj
-                    .counters
-                    .get(&CounterType::Plus1Plus1)
-                    .copied()
-                    .unwrap_or(0)
-                    >= 1),
-        "CR 119.9: the 'whenever you gain life' observer must fire exactly once \
+    // CR 603.3b: the observers are ON the stack at this point, not resolved —
+    // `answer_ordering_prompts` returns at the first `Priority` window and passes
+    // no priority. Drain the stack so the CR 119.9 receipt below is readable.
+    // Bounded, and terminates on state rather than on wall-clock.
+    for _ in 0..48 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order = (0..triggers.len()).collect();
+                if runner.act(GameAction::OrderTriggers { order }).is_err() {
+                    break;
+                }
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+            }
+            other => panic!("no further prompt is owed while draining: {other:?}"),
+        }
+    }
+
+    // CR 119.9 + CR 702.15b: the batch contains exactly ONE life-gain event —
+    // the Lifelinker is the only source with lifelink (Thieving Magpie has none),
+    // and CR 119.9 reads the ability as "whenever a SOURCE causes you to gain
+    // life". One source, one event, therefore EXACTLY ONE trigger and exactly one
+    // +1/+1 counter. The count is DERIVED from those rules, not tuned to output.
+    //
+    // `==`, never `>=`: a `>=` here cannot distinguish one fire from two, and a
+    // double fire is a live residual on this seam (a single-observer board with a
+    // CR 616.1 pause measures 2 — tracked as a follow-up). An assertion
+    // nominated to guard "exactly once" must be able to fail in BOTH directions.
+    let pridemate_counters: u32 = runner
+        .state()
+        .objects
+        .values()
+        .filter(|obj| obj.name == "Ajani's Pridemate")
+        .map(|obj| {
+            obj.counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0)
+        })
+        .sum();
+    assert_eq!(
+        pridemate_counters, 1,
+        "CR 119.9: the 'whenever you gain life' observer must fire EXACTLY once \
          for the resumed gain"
     );
 }
@@ -1514,5 +1558,157 @@ fn a_batch_that_moves_no_life_retains_the_loop_ring() {
         "positive control: the guard observed NO life move, so the ring must SURVIVE \
          this identical drive — this is what proves the row above records a verdict \
          rather than an incidental wipe by the pump"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The fix's own claim, measured where it is made: on the stack, at the pause
+// boundary — no drain, no library, no resolution
+// ---------------------------------------------------------------------------
+
+/// CR 603.3b + CR 510.3a: the batch's observers reach the stack TOGETHER, each
+/// exactly once, only after the CR 616.1 answer settles.
+///
+/// This is the durable guard for what the gating change actually produces.
+/// `life_gain_trigger_joins_the_combat_damage_trigger_batch` is the end-to-end
+/// row and has to drain the stack and keep P0 alive to read a resolved receipt;
+/// this row reads the stack itself, so it is immune to both of those hazards and
+/// to anything that happens during resolution.
+///
+/// REVERT-FAILING ASSERTION: the pause-time `stack.is_empty()`. Delete the
+/// `|| state.pending_replacement.is_some()` disjunct in `engine_priority.rs` and
+/// the damage observer is put on the stack DURING the pause, so the count is 1
+/// before the answer instead of 0.
+#[test]
+fn combat_batch_observers_reach_the_stack_once_as_one_group() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let lifelinker = add_lifelinker(&mut scenario, P0, "Lifelinker", 3, 3);
+    let magpie = scenario
+        .add_creature_from_oracle(P0, "Thieving Magpie", 1, 3, MAGPIE)
+        .id();
+    scenario.add_creature_from_oracle(P0, "Ajani's Pridemate", 2, 2, PRIDEMATE);
+    let blocker = scenario.add_creature(P1, "Chump", 1, 1).id();
+    install_competing_life_gain_replacements(&mut scenario, P0);
+    let mut runner = scenario.build();
+
+    attack_into_damage(
+        &mut runner,
+        &[lifelinker, magpie],
+        P1,
+        &[(blocker, lifelinker)],
+    );
+    advance_through_combat_damage(&mut runner);
+
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "reach guard: the batch must PARK on the CR 616.1 choice; got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.life(P0),
+        20,
+        "reach guard: CR 702.15b — the gain has not been applied yet"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "CR 704.3: no triggered ability may be put on the stack while the CR 616.1 \
+         prompt is open — no player has received priority"
+    );
+
+    let _ = answer_ordering_prompts(&mut runner, DOUBLER);
+
+    // Identities, not just a count: a count alone cannot tell "both observers,
+    // once each" from "one observer twice".
+    let mut names = runner.stack_names();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "Ajani's Pridemate".to_string(),
+            "Thieving Magpie".to_string()
+        ],
+        "CR 510.3a + CR 603.3b: the CR 119.9 gain observer and the CR 603.2 \
+         combat-damage observer reach the stack together, each EXACTLY once"
+    );
+    assert!(
+        runner.state().deferred_triggers.is_empty(),
+        "nothing may be left parked in the deferred queue once the batch completes"
+    );
+}
+
+/// CR 119.9 on the UNPAUSED combat-damage batch: one lifelink source causes one
+/// life-gain event, so a single "whenever you gain life" observer fires exactly
+/// once. No competing replacements, so no CR 616.1 choice is raised and the batch
+/// never parks.
+///
+/// This is the correct-behaviour half of a known asymmetry. The same board WITH a
+/// CR 616.1 pause measures 2, a live CR 119.9 violation tracked as a follow-up
+/// (see docs/plans/R1-duplicate-life-gain-trigger.md). Keeping this row green
+/// pins the boundary: the double fire is specific to the pause/resume path and is
+/// NOT intrinsic to the combat-damage batch.
+#[test]
+fn single_observer_gain_receipt_fires_once_without_a_pause() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let lifelinker = add_lifelinker(&mut scenario, P0, "Lifelinker", 3, 3);
+    scenario.add_creature_from_oracle(P0, "Ajani's Pridemate", 2, 2, PRIDEMATE);
+    let mut runner = scenario.build();
+
+    attack_into_damage(&mut runner, &[lifelinker], P1, &[]);
+    advance_through_combat_damage(&mut runner);
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "reach guard: with no competing pair there is no CR 616.1 choice to make"
+    );
+    assert_eq!(
+        runner.life(P0),
+        23,
+        "reach guard: CR 702.15b — the gain applied inline, so a life-gain event \
+         really did occur for the observer to see"
+    );
+    for _ in 0..48 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order = (0..triggers.len()).collect();
+                if runner.act(GameAction::OrderTriggers { order }).is_err() {
+                    break;
+                }
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+            }
+            other => panic!("no further prompt is owed while draining: {other:?}"),
+        }
+    }
+    let counters: u32 = runner
+        .state()
+        .objects
+        .values()
+        .filter(|obj| obj.name == "Ajani's Pridemate")
+        .map(|obj| {
+            obj.counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0)
+        })
+        .sum();
+    assert_eq!(
+        counters, 1,
+        "CR 119.9: one source, one life-gain event, one fire — on the path that \
+         never parks"
     );
 }

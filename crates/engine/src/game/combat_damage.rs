@@ -1764,9 +1764,14 @@ fn drain_combat_lifelink(
     // The batch moves life in three places and only a call here sees all three:
     // Phase C's `apply_damage_after_replacement` (CR 120.3a), the per-source
     // lifelink gains above, and a prevention rider's `runtime_execute` (CR 615.5).
-    // `lives_before` is the PRE-BATCH snapshot carried in the record, so on a resume
-    // this window also spans the paused source's own gain, which
-    // `engine_replacement.rs` applied before the drain was re-entered.
+    // `lives_before` is the PRE-BATCH snapshot carried in the record. On a resume
+    // this window arithmetically spans the paused source's own gain, which
+    // `engine_replacement.rs` applied before the drain was re-entered — but that
+    // span has no observable consequence: `apply()` has already cleared
+    // `loop_detect_ring` on the answering `ChooseReplacement`, which sits in
+    // neither its action exemption list nor `WaitingFor::is_forced_cascade_window`.
+    // MEASURED, not inferred. The load-bearing call is the PAUSE-path one above,
+    // reached under the exempt `PassPriority`.
     state.invalidate_loop_ring_on_unobserved_life_move(&record.lives_before);
     CombatDamageBatch::Complete(record.batch_events)
 }
