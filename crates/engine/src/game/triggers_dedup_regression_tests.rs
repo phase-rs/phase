@@ -4120,6 +4120,33 @@ fn continuation_pending(
     }
 }
 
+/// Builds a continuation fixture through the same definition-to-resolved path
+/// that collected triggers use, preserving definition-owned interaction data.
+fn definition_backed_continuation_pending(
+    state: &GameState,
+    source_id: ObjectId,
+    execute: AbilityDefinition,
+    description: &str,
+) -> PendingTrigger {
+    let definition = TriggerDefinition::new(TriggerMode::ChangesZone).execute(execute);
+    let execute = definition
+        .execute
+        .as_ref()
+        .expect("fixture trigger definition must have an execute body");
+    let mut pending = continuation_pending(
+        source_id,
+        super::build_triggered_ability(state, &definition, source_id, PlayerId(0)),
+        description,
+    );
+    pending
+        .target_constraints
+        .clone_from(&execute.target_constraints);
+    pending.distribute.clone_from(&execute.distribute);
+    pending.modal.clone_from(&execute.modal);
+    pending.mode_abilities.clone_from(&execute.mode_abilities);
+    pending
+}
+
 fn delayed_tail_context(source_id: ObjectId) -> PendingTriggerContext {
     PendingTriggerContext::delayed(
         continuation_pending(
@@ -4290,21 +4317,23 @@ fn ordered_delayed_tail_drains_after_trigger_distribution_without_recipient() {
     let delayed_source = continuation_source(&mut state, "Delayed observer");
     let target_a = make_creature(&mut state, PlayerId(1), "Target A", 1, 3);
     let target_b = make_creature(&mut state, PlayerId(1), "Target B", 1, 3);
-    let mut ability = ResolvedAbility::new(
+    let ability = AbilityDefinition::new(
+        AbilityKind::Database,
         Effect::DealDamage {
             amount: QuantityExpr::Fixed { value: 2 },
             target: TargetFilter::Typed(TypedFilter::creature()),
             damage_source: None,
             excess: None,
         },
-        vec![TargetRef::Object(target_a), TargetRef::Object(target_b)],
+    )
+    .multi_target(crate::types::ability::MultiTargetSpec::fixed(2, 2))
+    .distribute(crate::types::game_state::DistributionUnit::Damage);
+    let ordinary = definition_backed_continuation_pending(
+        &state,
         ordinary_source,
-        PlayerId(0),
+        ability,
+        "Ordinary divided trigger",
     );
-    ability.multi_target = Some(crate::types::ability::MultiTargetSpec::fixed(2, 2));
-    ability.distribute = Some(crate::types::game_state::DistributionUnit::Damage);
-    let mut ordinary = continuation_pending(ordinary_source, ability, "Ordinary divided trigger");
-    ordinary.distribute = Some(crate::types::game_state::DistributionUnit::Damage);
 
     begin_paused_continuation_batch(
         &mut state,
@@ -4313,12 +4342,24 @@ fn ordered_delayed_tail_drains_after_trigger_distribution_without_recipient() {
     );
     assert!(matches!(
         state.waiting_for,
-        WaitingFor::DistributeAmong { .. }
+        WaitingFor::TriggerTargetSelection { .. }
     ));
     assert_eq!(state.deferred_triggers.len(), 1);
     assert!(state
         .pending_trigger_construction_priority_recipient
         .is_none());
+
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(target_a), TargetRef::Object(target_b)],
+        },
+    )
+    .expect("public trigger target-selection reducer must lead into distribution");
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::DistributeAmong { .. }
+    ));
 
     crate::game::engine::apply_as_current(
         &mut state,
@@ -4336,12 +4377,19 @@ fn ordered_delayed_tail_drains_after_trigger_distribution_without_recipient() {
 
 fn begin_empty_continuation_batch(state: &mut GameState, ordinary: PendingTrigger) {
     let mut events = Vec::new();
-    process_collected_triggers_with_delayed_events(
+    let outcome = process_collected_triggers_with_delayed_events(
         state,
         vec![PendingTriggerContext::single(ordinary)],
         &[],
         &mut events,
     );
+    assert!(
+        outcome.fired,
+        "the ordinary trigger fixture must reach trigger construction"
+    );
+    state.waiting_for = crate::game::engine::begin_pending_trigger_target_selection(state)
+        .expect("a real pending trigger must begin construction")
+        .expect("the interactive trigger fixture must surface its public prompt");
     assert!(
         state.deferred_triggers.is_empty(),
         "the empty-tail control must begin with no deferred context"
@@ -4361,17 +4409,16 @@ fn empty_deferred_tail_is_inert_after_trigger_target_selection_without_recipient
     let source = continuation_source(&mut state, "Targeting ordinary");
     let target = make_creature(&mut state, PlayerId(1), "Target", 1, 1);
     let _alternative_target = make_creature(&mut state, PlayerId(1), "Alternative target", 1, 1);
-    let ordinary = continuation_pending(
+    let ordinary = definition_backed_continuation_pending(
+        &state,
         source,
-        ResolvedAbility::new(
+        AbilityDefinition::new(
+            AbilityKind::Database,
             Effect::SetTapState {
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 scope: EffectScope::Single,
                 state: TapStateChange::Tap,
             },
-            Vec::new(),
-            source,
-            PlayerId(0),
         ),
         "Ordinary target trigger",
     );
@@ -4408,19 +4455,17 @@ fn empty_deferred_tail_is_inert_after_triggered_mode_choice_without_recipient() 
     state.active_player = PlayerId(0);
     state.priority_player = PlayerId(0);
     let source = continuation_source(&mut state, "Modal ordinary");
-    let mut ordinary = continuation_pending(
-        source,
-        ResolvedAbility::new(Effect::NoOp, Vec::new(), source, PlayerId(0)),
-        "Ordinary modal trigger",
-    );
-    ordinary.modal = Some(ModalChoice {
+    let mut execute = AbilityDefinition::new(AbilityKind::Database, Effect::NoOp);
+    execute.modal = Some(ModalChoice {
         min_choices: 1,
         max_choices: 1,
         mode_count: 1,
         mode_descriptions: vec!["Do nothing".to_string()],
         ..Default::default()
     });
-    ordinary.mode_abilities = vec![AbilityDefinition::new(AbilityKind::Database, Effect::NoOp)];
+    execute.mode_abilities = vec![AbilityDefinition::new(AbilityKind::Database, Effect::NoOp)];
+    let ordinary =
+        definition_backed_continuation_pending(&state, source, execute, "Ordinary modal trigger");
 
     begin_empty_continuation_batch(&mut state, ordinary);
     assert!(matches!(
@@ -4451,23 +4496,32 @@ fn empty_deferred_tail_is_inert_after_trigger_distribution_without_recipient() {
     let source = continuation_source(&mut state, "Distribution ordinary");
     let target_a = make_creature(&mut state, PlayerId(1), "Target A", 1, 3);
     let target_b = make_creature(&mut state, PlayerId(1), "Target B", 1, 3);
-    let mut ability = ResolvedAbility::new(
+    let ability = AbilityDefinition::new(
+        AbilityKind::Database,
         Effect::DealDamage {
             amount: QuantityExpr::Fixed { value: 2 },
             target: TargetFilter::Typed(TypedFilter::creature()),
             damage_source: None,
             excess: None,
         },
-        vec![TargetRef::Object(target_a), TargetRef::Object(target_b)],
-        source,
-        PlayerId(0),
-    );
-    ability.multi_target = Some(crate::types::ability::MultiTargetSpec::fixed(2, 2));
-    ability.distribute = Some(crate::types::game_state::DistributionUnit::Damage);
-    let mut ordinary = continuation_pending(source, ability, "Ordinary divided trigger");
-    ordinary.distribute = Some(crate::types::game_state::DistributionUnit::Damage);
+    )
+    .multi_target(crate::types::ability::MultiTargetSpec::fixed(2, 2))
+    .distribute(crate::types::game_state::DistributionUnit::Damage);
+    let ordinary =
+        definition_backed_continuation_pending(&state, source, ability, "Ordinary divided trigger");
 
     begin_empty_continuation_batch(&mut state, ordinary);
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::TriggerTargetSelection { .. }
+    ));
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(target_a), TargetRef::Object(target_b)],
+        },
+    )
+    .expect("target selection with an empty deferred tail must lead into distribution");
     assert!(matches!(
         state.waiting_for,
         WaitingFor::DistributeAmong { .. }
