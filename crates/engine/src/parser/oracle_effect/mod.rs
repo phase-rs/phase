@@ -11557,8 +11557,8 @@ fn parse_retained_type_clause(tp: TextPair) -> Option<ParsedRetainedTypeClause> 
         }
         (false, format!("{article}{descriptor}"))
     } else {
-        let (_, descriptor) = nom_on_lower(tp.original, tp.lower, |input| {
-            alt((tag("they're still "), tag("they’re still "))).parse(input)
+        let (descriptor, ()) = nom_on_lower(tp.original, tp.lower, |input| {
+            value((), alt((tag("they're still "), tag("they’re still ")))).parse(input)
         })?;
         (true, descriptor.to_string())
     };
