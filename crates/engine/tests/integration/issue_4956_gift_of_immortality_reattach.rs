@@ -196,8 +196,8 @@ fn gift_delayed_attach_host(parsed: &engine::parser::oracle::ParsedAbilities) ->
     }
 }
 
-fn drain_priority(runner: &mut GameRunner) {
-    drain_priority_preferring(runner, &[]);
+fn drain_priority(runner: &mut GameRunner) -> bool {
+    drain_priority_preferring(runner, &[])
 }
 
 /// Drain priority/resolution prompts, preferring `preferred` object ids when
@@ -205,10 +205,13 @@ fn drain_priority(runner: &mut GameRunner) {
 fn drain_priority_preferring(
     runner: &mut GameRunner,
     preferred: &[engine::types::identifiers::ObjectId],
-) {
+) -> bool {
+    let mut consumed_effect_zone_choice = false;
     for _ in 0..256 {
         match &runner.state().waiting_for {
-            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => {
+                return consumed_effect_zone_choice;
+            }
             WaitingFor::ReturnAsAuraTarget {
                 legal_targets,
                 returned_id,
@@ -247,6 +250,7 @@ fn drain_priority_preferring(
                     .expect("accept optional");
             }
             WaitingFor::EffectZoneChoice { cards, .. } => {
+                consumed_effect_zone_choice = true;
                 let pick = preferred
                     .iter()
                     .copied()
@@ -318,7 +322,7 @@ fn drain_priority_preferring(
             }
             _ => {
                 if runner.act(GameAction::PassPriority).is_err() {
-                    return;
+                    return consumed_effect_zone_choice;
                 }
             }
         }
@@ -1407,7 +1411,7 @@ fn sword_of_the_meek_attaches_to_entering_one_one_not_the_prior_host() {
         &mut etb_events,
     );
     process_triggers(runner.state_mut(), &etb_events);
-    drain_priority(&mut runner);
+    let consumed_effect_zone_choice = drain_priority(&mut runner);
 
     // Positive reach-guard: the return ran, so execution reached the Attach.
     assert_eq!(
@@ -1429,11 +1433,8 @@ fn sword_of_the_meek_attaches_to_entering_one_one_not_the_prior_host() {
         "the entering 1/1 must list the Sword as attached"
     );
     assert!(
-        !matches!(
-            runner.state().waiting_for,
-            WaitingFor::EffectZoneChoice { .. }
-        ),
-        "a SelfRef attachment must not open a resolution-time attachment choice"
+        !consumed_effect_zone_choice,
+        "a SelfRef attachment must not consume a resolution-time attachment choice"
     );
 }
 

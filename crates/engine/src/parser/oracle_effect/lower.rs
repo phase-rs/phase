@@ -2245,7 +2245,7 @@ pub(super) fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
 ///   collapsed onto one anaphor (Sword of the Meek). Attaching an object to
 ///   itself is a guaranteed no-op whatever the operand resolves to — CR 301.5c
 ///   ("An Equipment can't equip itself"), CR 301.6 (the same for Fortifications),
-///   CR 303.4d ("An Aura can't enchant itself"), and CR 704.5p for anything else
+///   CR 303.4d ("An Aura can't enchant itself"), and CR 701.3b for anything else
 ///   — so rebinding can only turn a dead node live; it can never take working
 ///   behavior away.
 ///
