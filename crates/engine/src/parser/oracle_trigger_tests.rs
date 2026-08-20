@@ -2037,7 +2037,14 @@ fn gendered_past_type_condition_does_not_hoist_outside_leading_dies_position() {
         "When this creature dies, if she was a land, draw a card.",
         "Leading Probe",
     );
-    assert!(leading.condition.is_some(), "positive reach guard");
+    assert_dies_event_object_filter(
+        leading
+            .condition
+            .as_ref()
+            .expect("positive leading-dies reach guard"),
+        &[TypeFilter::Land],
+        false,
+    );
     assert!(matches!(
         leading
             .execute
@@ -2050,16 +2057,97 @@ fn gendered_past_type_condition_does_not_hoist_outside_leading_dies_position() {
         "When this creature enters, if she was a land, draw a card.",
         "Non-Dies Probe",
     );
+    assert_eq!(non_dies.mode, TriggerMode::ChangesZone);
+    assert_eq!(non_dies.destination, Some(Zone::Battlefield));
     assert_eq!(non_dies.condition, None);
+    assert!(matches!(
+        non_dies
+            .execute
+            .as_deref()
+            .map(|ability| ability.effect.as_ref()),
+        Some(Effect::Draw { .. })
+    ));
+    let non_dies_card = parse_oracle_text(
+        "When this creature enters, if she was a land, draw a card.",
+        "Non-Dies Probe",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        non_dies_card.parse_warnings.iter().any(|warning| matches!(
+            warning,
+            OracleDiagnostic::SwallowedClause {
+                detector,
+                description,
+                line_index: 0,
+                ..
+            } if detector == "Condition_If"
+                && description == "When this creature enters, if she was a land, draw a card."
+        )),
+        "the non-dies clause must remain an exact honest deferral: {:?}",
+        non_dies_card.parse_warnings
+    );
 
     let trailing = parse_trigger_line(
         "When this creature dies, draw a card if she was a land.",
         "Trailing Probe",
     );
+    assert_eq!(trailing.mode, TriggerMode::ChangesZone);
+    assert_eq!(trailing.origin, Some(Zone::Battlefield));
+    assert_eq!(trailing.destination, Some(Zone::Graveyard));
     assert_eq!(trailing.condition, None);
+    assert!(matches!(
+        trailing
+            .execute
+            .as_deref()
+            .map(|ability| ability.effect.as_ref()),
+        Some(Effect::Draw { .. })
+    ));
+    assert_eq!(
+        trailing
+            .execute
+            .as_deref()
+            .and_then(|ability| ability.condition.clone()),
+        None,
+        "unsupported gendered trailing predicate must not fabricate a resolution condition"
+    );
+    let trailing_card = parse_oracle_text(
+        "When this creature dies, draw a card if she was a land.",
+        "Trailing Probe",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
     assert!(
-        trailing.execute.is_some(),
-        "trailing condition must remain in the effect pipeline"
+        trailing_card.parse_warnings.iter().any(|warning| matches!(
+            warning,
+            OracleDiagnostic::SwallowedClause {
+                detector,
+                description,
+                line_index: 0,
+                ..
+            } if detector == "Condition_If"
+                && description == "When this creature dies, draw a card if she was a land."
+        )),
+        "the trailing predicate must remain an exact honest deferral: {:?}",
+        trailing_card.parse_warnings
+    );
+
+    let leading_card = parse_oracle_text(
+        "When this creature dies, if she was a land, draw a card.",
+        "Leading Probe",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        leading_card.parse_warnings.iter().all(|warning| !matches!(
+            warning,
+            OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+        )),
+        "the paired positive must represent its condition: {:?}",
+        leading_card.parse_warnings
     );
 }
 

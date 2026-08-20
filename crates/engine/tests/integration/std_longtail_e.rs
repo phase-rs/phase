@@ -339,7 +339,7 @@ use engine::game::ability_utils::build_resolved_from_def_with_targets;
 use engine::game::layers::evaluate_layers;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, ContinuousModification, Duration, Effect, ManaProduction,
-    QuantityExpr,
+    PlayerScope, QuantityExpr, StaticCondition,
 };
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::keywords::Keyword;
@@ -1514,6 +1514,13 @@ const TENTH_DISTRICT_HERO_ORACLE: &str = "{1}{W}, Collect evidence 2: This creat
 const CURSE_OF_FENRIC_ORACLE: &str = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — For each player, destroy up to one target creature that player controls. For each creature destroyed this way, its controller creates a 3/3 green Mutant creature token with deathtouch.\nII — Target nontoken creature becomes a 6/6 legendary Horror creature named Fenric and loses all abilities.\nIII — Target Mutant fights another target creature named Fenric.";
 const IRENCRAG_ORACLE: &str = "{T}: Add {C}.\nWhenever a legendary creature you control enters, you may have The Irencrag become a legendary Equipment artifact named Everflame, Heroes' Legacy. If you do, it gains equip {3} and \"Equipped creature gets +3/+3\" and loses all other abilities.";
 const DISTURBED_SLUMBER_ORACLE: &str = "Until end of turn, target land you control becomes a 4/4 Dinosaur creature with reach and haste. It's still a land. It must be blocked this turn if able.";
+const NISSA_VITAL_FORCE_ORACLE: &str = "[+1]: Untap target land you control. Until your next turn, it becomes a 5/5 Elemental creature with haste. It's still a land.\n[−3]: Return target permanent card from your graveyard to your hand.\n[−6]: You get an emblem with \"Whenever a land you control enters, you may draw a card.\"";
+const SYLVAN_AWAKENING_ORACLE: &str = "Until your next turn, all lands you control become 2/2 Elemental creatures with reach, indestructible, and haste. They're still lands.";
+const WRENN_REALMBREAKER_ORACLE: &str = "Lands you control have \"{T}: Add one mana of any color.\"\n[+1]: Up to one target land you control becomes a 3/3 Elemental creature with vigilance, hexproof, and haste until your next turn. It's still a land.\n[−2]: Mill three cards. You may put a permanent card from among the milled cards into your hand.\n[−7]: You get an emblem with \"You may play lands and cast permanent spells from your graveyard.\"";
+const AWAKENER_DRUID_ORACLE: &str = "When this creature enters, target Forest becomes a 4/5 green Treefolk creature for as long as this creature remains on the battlefield. It's still a land.";
+const HEDGE_WHISPERER_ORACLE: &str = "You may choose not to untap this creature during your untap step.\n{3}{G}, {T}, Collect evidence 4: Target land you control becomes a 5/5 green Plant Boar creature with haste for as long as this creature remains tapped. It's still a land. Activate only as a sorcery. (To collect evidence 4, exile cards with total mana value 4 or greater from your graveyard.)";
+const CACOPHONY_UNLEASHED_ORACLE: &str = "When this enchantment enters, if you cast it, destroy all nonenchantment creatures.\nWhenever this enchantment or another enchantment you control enters, until end of turn, this enchantment becomes a legendary 6/6 Nightmare God creature with menace and deathtouch. It's still an enchantment.";
+const CAVERNOUS_MAW_ORACLE: &str = "{T}: Add {C}.\n{2}: This land becomes a 3/3 Elemental creature until end of turn. It's still a Cave land. Activate only if the number of other Caves you control plus the number of Cave cards in your graveyard is three or greater.";
 
 fn all_modifications(def: &AbilityDefinition) -> Vec<&ContinuousModification> {
     let mut result = Vec::new();
@@ -1532,6 +1539,92 @@ fn all_modifications(def: &AbilityDefinition) -> Vec<&ContinuousModification> {
         cursor = node.sub_ability.as_deref();
     }
     result
+}
+
+fn retained_type_definition<'a>(
+    definition: &'a AbilityDefinition,
+    core_type: &CoreType,
+    subtype: Option<&str>,
+) -> Option<&'a AbilityDefinition> {
+    let carries_retained_type = match definition.effect.as_ref() {
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => static_abilities.iter().any(|static_definition| {
+            let has_core_type = static_definition.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::AddType {
+                        core_type: actual
+                    } if actual == core_type
+                )
+            });
+            let has_subtype = subtype.is_none_or(|expected| {
+                static_definition.modifications.iter().any(|modification| {
+                    matches!(
+                        modification,
+                        ContinuousModification::AddSubtype { subtype }
+                            if subtype == expected
+                    )
+                })
+            });
+            has_core_type && has_subtype
+        }),
+        _ => false,
+    };
+    if carries_retained_type {
+        return Some(definition);
+    }
+    definition
+        .sub_ability
+        .as_deref()
+        .and_then(|sub| retained_type_definition(sub, core_type, subtype))
+        .or_else(|| {
+            definition
+                .else_ability
+                .as_deref()
+                .and_then(|otherwise| retained_type_definition(otherwise, core_type, subtype))
+        })
+}
+
+fn parsed_retained_type_definition<'a>(
+    parsed: &'a engine::parser::oracle::ParsedAbilities,
+    core_type: CoreType,
+    subtype: Option<&str>,
+) -> &'a AbilityDefinition {
+    parsed
+        .abilities
+        .iter()
+        .find_map(|definition| retained_type_definition(definition, &core_type, subtype))
+        .or_else(|| {
+            parsed.triggers.iter().find_map(|trigger| {
+                trigger.execute.as_deref().and_then(|definition| {
+                    retained_type_definition(definition, &core_type, subtype)
+                })
+            })
+        })
+        .expect("retained-type production definition")
+}
+
+fn assert_retained_type_duration(
+    parsed: &engine::parser::oracle::ParsedAbilities,
+    name: &str,
+    core_type: CoreType,
+    subtype: Option<&str>,
+    expected_duration: Duration,
+) {
+    assert_zero_unimplemented(parsed, name);
+    let retained = parsed_retained_type_definition(parsed, core_type, subtype);
+    assert_eq!(retained.duration, Some(expected_duration.clone()), "{name}");
+    assert!(
+        matches!(
+            retained.effect.as_ref(),
+            Effect::GenericEffect {
+                duration: Some(actual),
+                ..
+            } if actual == &expected_duration
+        ),
+        "{name}: retained-type effect duration must match the governing animation: {retained:#?}"
+    );
 }
 
 fn assert_exact_text_name(
@@ -1897,6 +1990,104 @@ fn fang_dies_filter_adds_spirit_only_when_it_was_absent() {
         negative.final_waiting_for(),
         WaitingFor::Priority { .. }
     ));
+}
+
+/// Candidate-bound production coverage for every retained-type duration class in
+/// the 79-card projected comparator slice. The 72-card add-Land EOT class keeps
+/// its runtime discriminator below (Disturbed Slumber); these shipped cards pin
+/// all three non-EOT authorities plus the two distinct one-card EOT payloads.
+/// Reverting the preceding-animation binding changes every retained definition
+/// asserted here back to `Permanent`.
+#[test]
+fn shipped_retained_type_duration_classes_follow_the_governing_animation() {
+    let until_next_turn = Duration::UntilNextTurnOf {
+        player: PlayerScope::Controller,
+    };
+    for (name, oracle, types, subtypes) in [
+        (
+            "Nissa, Vital Force",
+            NISSA_VITAL_FORCE_ORACLE,
+            &["Legendary", "Planeswalker"][..],
+            &["Nissa"][..],
+        ),
+        (
+            "Sylvan Awakening",
+            SYLVAN_AWAKENING_ORACLE,
+            &["Sorcery"][..],
+            &[][..],
+        ),
+        (
+            "Wrenn and Realmbreaker",
+            WRENN_REALMBREAKER_ORACLE,
+            &["Legendary", "Planeswalker"][..],
+            &["Wrenn"][..],
+        ),
+    ] {
+        let parsed = parse(oracle, name, &[], types, subtypes);
+        assert_retained_type_duration(&parsed, name, CoreType::Land, None, until_next_turn.clone());
+    }
+
+    let awakener = parse(
+        AWAKENER_DRUID_ORACLE,
+        "Awakener Druid",
+        &[],
+        &["Creature"],
+        &["Human", "Druid"],
+    );
+    assert_retained_type_duration(
+        &awakener,
+        "Awakener Druid",
+        CoreType::Land,
+        None,
+        Duration::UntilHostLeavesPlay,
+    );
+
+    let hedge = parse(
+        HEDGE_WHISPERER_ORACLE,
+        "Hedge Whisperer",
+        &[],
+        &["Creature"],
+        &["Elf", "Druid"],
+    );
+    assert_retained_type_duration(
+        &hedge,
+        "Hedge Whisperer",
+        CoreType::Land,
+        None,
+        Duration::ForAsLongAs {
+            condition: StaticCondition::SourceIsTapped,
+        },
+    );
+
+    let cacophony = parse(
+        CACOPHONY_UNLEASHED_ORACLE,
+        "Cacophony Unleashed",
+        &[],
+        &["Legendary", "Enchantment"],
+        &[],
+    );
+    assert_retained_type_duration(
+        &cacophony,
+        "Cacophony Unleashed",
+        CoreType::Enchantment,
+        None,
+        Duration::UntilEndOfTurn,
+    );
+
+    let cavernous_maw = parse(
+        CAVERNOUS_MAW_ORACLE,
+        "Cavernous Maw",
+        &[],
+        &["Land"],
+        &["Cave"],
+    );
+    assert_retained_type_duration(
+        &cavernous_maw,
+        "Cavernous Maw",
+        CoreType::Land,
+        Some("Cave"),
+        Duration::UntilEndOfTurn,
+    );
 }
 
 /// CR 205.1b + CR 514.2 + CR 611.2a: the separate "It's still a land"
