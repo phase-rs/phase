@@ -161,13 +161,21 @@ pub fn resolve_combat_damage(
         // All first-strike assignments collected — apply simultaneously (CR 510.2).
         let pending = take_pending_damage(state);
         let batch = apply_combat_damage(state, &pending, CombatDamageSubStep::FirstStrike);
+        let batch_event_start = events.len();
         events.extend_from_slice(batch.events());
         match batch {
             // CR 616.1: the batch parked on a life-gain ordering choice. The
             // sub-step flags are deliberately NOT set here — the resume sets them
             // once the batch actually completes, so neither re-entry nor
             // priority.rs's completeness gate can skip the rest of combat damage.
-            CombatDamageBatch::Paused { waiting_for, .. } => return Some(waiting_for),
+            CombatDamageBatch::Paused { waiting_for, .. } => {
+                claim_combat_lifelink_batch_events_for_ordinary_collection(
+                    state,
+                    events,
+                    batch_event_start,
+                );
+                return Some(waiting_for);
+            }
             CombatDamageBatch::Complete(damage_events) => {
                 if let Some(wf) = finish_combat_damage_sub_step(
                     state,
@@ -188,11 +196,19 @@ pub fn resolve_combat_damage(
     // All regular assignments collected — apply simultaneously (CR 510.2).
     let pending = take_pending_damage(state);
     let batch = apply_combat_damage(state, &pending, CombatDamageSubStep::Regular);
+    let batch_event_start = events.len();
     events.extend_from_slice(batch.events());
     match batch {
         // CR 616.1: see the first-strike arm above — the completion flags belong
         // to the resume, not to a batch that has parked.
-        CombatDamageBatch::Paused { waiting_for, .. } => Some(waiting_for),
+        CombatDamageBatch::Paused { waiting_for, .. } => {
+            claim_combat_lifelink_batch_events_for_ordinary_collection(
+                state,
+                events,
+                batch_event_start,
+            );
+            Some(waiting_for)
+        }
         CombatDamageBatch::Complete(damage_events) => finish_combat_damage_sub_step(
             state,
             CombatDamageSubStep::Regular,
@@ -339,24 +355,11 @@ pub(crate) fn resume_pending_combat_lifelink(
             events.extend_from_slice(&damage_events[owed_from..]);
             let waiting_for =
                 finish_combat_damage_sub_step(state, sub_step, &damage_events, events);
-            // CR 510.3a + CR 603.2c: the completed resumed batch has already
-            // collected its ordinary triggers before any player receives priority.
-            // Claim only this answering action's full-buffer occurrences; delayed
-            // triggers retain them for their own CR 603.7b collection below.
-            let occurrences = (action_event_start..events.len())
-                .map(|index| triggers::ConsumedTriggerEventOccurrence {
-                    event: events[index].clone(),
-                    occurrence: triggers::trigger_event_occurrence(events, index),
-                    scope: triggers::ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
-                })
-                .collect();
-            triggers::resolve_and_apply_trigger_collection(
+            claim_combat_lifelink_batch_events_for_ordinary_collection(
                 state,
-                crate::types::resolved_commands::ResolvedTriggerCollection::ConsumeBeforePriority {
-                    occurrences,
-                },
-            )
-            .expect("resumed combat consumed-before-priority trigger journal cause must be live");
+                events,
+                action_event_start,
+            );
             if let Some(wf) = waiting_for {
                 return Some(wf);
             }
@@ -371,6 +374,32 @@ pub(crate) fn resume_pending_combat_lifelink(
             }))
         }
     }
+}
+
+/// CR 510.2 + CR 603.2c: a combat-damage batch parked for a CR 616.1 choice
+/// still owns its ordinary trigger collection. Suppress only the generic
+/// post-action ordinary collector for the exact full-buffer occurrences; the
+/// resumed batch collector receives the retained events, and delayed collectors
+/// retain their CR 603.7b visibility.
+fn claim_combat_lifelink_batch_events_for_ordinary_collection(
+    state: &mut GameState,
+    events: &[GameEvent],
+    event_start: usize,
+) {
+    let occurrences = (event_start..events.len())
+        .map(|index| triggers::ConsumedTriggerEventOccurrence {
+            event: events[index].clone(),
+            occurrence: triggers::trigger_event_occurrence(events, index),
+            scope: triggers::ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
+        })
+        .collect();
+    triggers::resolve_and_apply_trigger_collection(
+        state,
+        crate::types::resolved_commands::ResolvedTriggerCollection::ConsumeBeforePriority {
+            occurrences,
+        },
+    )
+    .expect("combat lifelink ordinary trigger claim must have a live journal cause");
 }
 
 /// Returns a terminal or trigger-ordering state produced while combat damage resolves.

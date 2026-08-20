@@ -31,7 +31,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::LoopDetectSample;
+use engine::types::game_state::{LoopDetectSample, StackEntryKind};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
@@ -507,7 +507,9 @@ fn life_gain_trigger_joins_the_combat_damage_trigger_batch() {
     let magpie = scenario
         .add_creature_from_oracle(P0, "Thieving Magpie", 1, 3, MAGPIE)
         .id();
-    scenario.add_creature_from_oracle(P0, "Ajani's Pridemate", 2, 2, PRIDEMATE);
+    let pridemate = scenario
+        .add_creature_from_oracle(P0, "Ajani's Pridemate", 2, 2, PRIDEMATE)
+        .id();
     let blocker = scenario.add_creature(P1, "Chump", 1, 1).id();
     install_competing_life_gain_replacements(&mut scenario, P0);
     // CR 704.5b: Thieving Magpie is UNBLOCKED here, so its combat-damage trigger
@@ -552,7 +554,6 @@ fn life_gain_trigger_joins_the_combat_damage_trigger_batch() {
     );
 
     let _ = answer_ordering_prompts(&mut runner, DOUBLER);
-
     assert!(
         runner.life(P0) > 20,
         "the lifelink gain lands once the ordering choice is answered"
@@ -567,58 +568,31 @@ fn life_gain_trigger_joins_the_combat_damage_trigger_batch() {
         Zone::Graveyard,
         "CR 704.5g: the lethally-damaged blocker dies once SBAs finally run"
     );
-    // CR 603.3b: the observers are ON the stack at this point, not resolved —
-    // `answer_ordering_prompts` returns at the first `Priority` window and passes
-    // no priority. Drain the stack so the CR 119.9 receipt below is readable.
-    // Bounded, and terminates on state rather than on wall-clock.
-    for _ in 0..48 {
-        if runner.state().stack.is_empty()
-            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
-        {
-            break;
-        }
-        match runner.state().waiting_for.clone() {
-            WaitingFor::OrderTriggers { triggers, .. } => {
-                let order = (0..triggers.len()).collect();
-                if runner.act(GameAction::OrderTriggers { order }).is_err() {
-                    break;
-                }
-            }
-            WaitingFor::Priority { .. } => {
-                if runner.act(GameAction::PassPriority).is_err() {
-                    break;
-                }
-            }
-            other => panic!("no further prompt is owed while draining: {other:?}"),
-        }
-    }
-
-    // CR 119.9 + CR 702.15b: the batch contains exactly ONE life-gain event —
-    // the Lifelinker is the only source with lifelink (Thieving Magpie has none),
-    // and CR 119.9 reads the ability as "whenever a SOURCE causes you to gain
-    // life". One source, one event, therefore EXACTLY ONE trigger and exactly one
-    // +1/+1 counter. The count is DERIVED from those rules, not tuned to output.
-    //
-    // `==`, never `>=`: a `>=` here cannot distinguish one fire from two, and a
-    // double fire is a live residual on this seam (a single-observer board with a
-    // CR 616.1 pause measures 2 — tracked as a follow-up). An assertion
-    // nominated to guard "exactly once" must be able to fail in BOTH directions.
-    let pridemate_counters: u32 = runner
-        .state()
-        .objects
-        .values()
-        .filter(|obj| obj.name == "Ajani's Pridemate")
-        .map(|obj| {
-            obj.counters
-                .get(&CounterType::Plus1Plus1)
-                .copied()
-                .unwrap_or(0)
-        })
-        .sum();
+    // CR 119.9 + CR 603.3b: both observers are placed by the one resolved
+    // batch. Their effects have not resolved yet, so source-scoped stack
+    // entries are the rule-correct receipt here.
+    let count_triggers = |source| {
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.kind,
+                    StackEntryKind::TriggeredAbility { source_id, .. } if source_id == source
+                )
+            })
+            .count()
+    };
     assert_eq!(
-        pridemate_counters, 1,
-        "CR 119.9: the 'whenever you gain life' observer must fire EXACTLY once \
-         for the resumed gain"
+        count_triggers(pridemate),
+        1,
+        "CR 119.9: the resumed life gain creates exactly one Pridemate trigger"
+    );
+    assert_eq!(
+        count_triggers(magpie),
+        1,
+        "CR 603.2: the combat-damage observer joins the same batch exactly once"
     );
 }
 
