@@ -5063,14 +5063,13 @@ fn apply_copy_sublayer_to_fixed_point(
 ///   `add_transient_continuous_effect`, so the effect is `Transient`-keyed.
 /// - `expand_granted_static_effects` sets `def_index: None`, so a granted
 ///   copy-layer static is `GrantedStatic`-keyed.
-/// - Card data is the only other producer of `StaticDefinition`s, and in the
-///   generated pool every copy-layer modification that sits inside one at all sits
-///   inside a `GenericEffect` payload — Awakening of Vitu-Ghazi, Tenth District
-///   Hero, The Curse of Fenric, The Irencrag, all `SetName` — which
-///   `effects::effect` resolves through `register_transient_effect`. No card
-///   carries a copy-layer modification in its printed `static_abilities`, so no
-///   route into an object's `static_definitions` can carry one either: the copy
-///   payload ([`apply_copiable_values`]), the `GrantStaticAbility` graft, and the
+/// - Card data is the only other producer of `StaticDefinition`s. The resolving
+///   name changes on Awakening of Vitu-Ghazi, Tenth District Hero, The Curse of
+///   Fenric, and The Irencrag are `SetTextName` modifications in Layer 3 inside
+///   `GenericEffect` payloads, not copy-layer producers. No card carries a
+///   copy-layer modification in its printed `static_abilities`, so no route into
+///   an object's `static_definitions` can carry one either: the copy payload
+///   ([`apply_copiable_values`]), the `GrantStaticAbility` graft, and the
 ///   `RetainPrintedAbilityFromSource` graft all replay card-data statics.
 ///
 /// The first card to print a copy-layer static ability directly — rather than

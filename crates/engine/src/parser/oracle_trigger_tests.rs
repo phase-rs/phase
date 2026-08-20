@@ -1910,6 +1910,159 @@ fn zone_change_token_predicate_parses_present_and_past_negation_forms() {
     }
 }
 
+fn assert_dies_event_object_filter(
+    condition: &TriggerCondition,
+    expected_types: &[TypeFilter],
+    negated: bool,
+) {
+    let condition = match (condition, negated) {
+        (TriggerCondition::Not { condition }, true) => condition.as_ref(),
+        (condition, false) => condition,
+        (other, expected) => panic!("wrong polarity (negated={expected}): {other:?}"),
+    };
+    let TriggerCondition::ZoneChangeObjectMatchesFilter {
+        origin: Some(Zone::Battlefield),
+        destination: Zone::Graveyard,
+        filter: TargetFilter::Typed(filter),
+    } = condition
+    else {
+        panic!("expected battlefield-to-graveyard event-object filter, got {condition:?}");
+    };
+    assert_eq!(filter.type_filters, expected_types);
+}
+
+#[test]
+fn princess_yue_gendered_dies_condition_keeps_composite_lki_filter() {
+    let def = parse_trigger_line(
+        "When Princess Yue dies, if she was a nonland creature, return this card to the battlefield tapped under your control. She's a land named Moon. She gains \"{T}: Add {C}.\" (She's still legendary.)",
+        "Princess Yue",
+    );
+    assert_eq!(def.constraint, None);
+    assert_dies_event_object_filter(
+        def.condition.as_ref().expect("Princess intervening-if"),
+        &[
+            TypeFilter::Creature,
+            TypeFilter::Non(Box::new(TypeFilter::Land)),
+        ],
+        false,
+    );
+}
+
+#[test]
+fn fang_gendered_dies_condition_keeps_negative_subtype_lki_filter() {
+    let def = parse_trigger_line(
+        "When Fang dies, if he wasn't a Spirit, return this card to the battlefield under your control. He's a Spirit in addition to his other types.",
+        "Fang, Roku's Companion",
+    );
+    assert_eq!(def.constraint, None);
+    assert_dies_event_object_filter(
+        def.condition.as_ref().expect("Fang intervening-if"),
+        &[TypeFilter::Subtype("Spirit".to_string())],
+        true,
+    );
+}
+
+#[test]
+fn gendered_dies_condition_factors_pronoun_copula_article_and_descriptor() {
+    for (pronoun, copula, article, descriptor, expected_types, negated) in [
+        (
+            "it",
+            "was",
+            "a",
+            "Spirit",
+            vec![TypeFilter::Subtype("Spirit".to_string())],
+            false,
+        ),
+        (
+            "he",
+            "wasn't",
+            "an",
+            "Artifact",
+            vec![TypeFilter::Artifact],
+            true,
+        ),
+        (
+            "she",
+            "was not",
+            "a",
+            "Spirit",
+            vec![TypeFilter::Subtype("Spirit".to_string())],
+            true,
+        ),
+        (
+            "she",
+            "was",
+            "a",
+            "nonland creature",
+            vec![
+                TypeFilter::Creature,
+                TypeFilter::Non(Box::new(TypeFilter::Land)),
+            ],
+            false,
+        ),
+    ] {
+        let line = format!(
+            "When this creature dies, if {pronoun} {copula} {article} {descriptor}, draw a card."
+        );
+        let def = parse_trigger_line(&line, "Grammar Probe");
+        assert_dies_event_object_filter(
+            def.condition.as_ref().expect("leading dies condition"),
+            &expected_types,
+            negated,
+        );
+        assert!(matches!(
+            def.execute
+                .as_deref()
+                .map(|ability| ability.effect.as_ref()),
+            Some(Effect::Draw { .. })
+        ));
+    }
+
+    let legacy = parse_trigger_line(
+        "When this creature dies, if it was a creature, draw a card.",
+        "Legacy Bare Core Probe",
+    );
+    assert_eq!(
+        legacy.condition,
+        Some(TriggerCondition::WasType {
+            card_type: CoreType::Creature,
+        }),
+        "positive bare-core `it was` keeps the stable WasType representation"
+    );
+}
+
+#[test]
+fn gendered_past_type_condition_does_not_hoist_outside_leading_dies_position() {
+    let leading = parse_trigger_line(
+        "When this creature dies, if she was a land, draw a card.",
+        "Leading Probe",
+    );
+    assert!(leading.condition.is_some(), "positive reach guard");
+    assert!(matches!(
+        leading
+            .execute
+            .as_deref()
+            .map(|ability| ability.effect.as_ref()),
+        Some(Effect::Draw { .. })
+    ));
+
+    let non_dies = parse_trigger_line(
+        "When this creature enters, if she was a land, draw a card.",
+        "Non-Dies Probe",
+    );
+    assert_eq!(non_dies.condition, None);
+
+    let trailing = parse_trigger_line(
+        "When this creature dies, draw a card if she was a land.",
+        "Trailing Probe",
+    );
+    assert_eq!(trailing.condition, None);
+    assert!(
+        trailing.execute.is_some(),
+        "trailing condition must remain in the effect pipeline"
+    );
+}
+
 #[test]
 fn trigger_dies_if_it_was_enchanted_attaches_attachment_lookback() {
     let def = parse_trigger_line(
@@ -15575,9 +15728,15 @@ fn trigger_may_have_self_become_named_equipment_if_you_do() {
     assert!(
         modifications.iter().any(|modification| matches!(
             modification,
-            ContinuousModification::SetName { name } if name == "Everflame, Heroes' Legacy"
+            ContinuousModification::SetTextName { name } if name == "Everflame, Heroes' Legacy"
         )),
-        "expected SetName in {modifications:?}",
+        "expected SetTextName in {modifications:?}",
+    );
+    assert!(
+        !modifications
+            .iter()
+            .any(|modification| matches!(modification, ContinuousModification::SetName { .. })),
+        "resolving non-copy name changes must not use copy-layer SetName: {modifications:?}",
     );
     assert!(
         modifications.iter().any(|modification| matches!(
