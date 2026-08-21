@@ -1516,6 +1516,9 @@ pub(crate) enum CombatDamageBatch {
     /// paused source's own `LifeGain` and is the resume's authority.
     Paused {
         events: Vec<GameEvent>,
+        /// Boxed: `WaitingFor` is ~1720 bytes against `Complete`'s 24, so an
+        /// inline field would make every `Complete` return pay the pause's size
+        /// (`clippy::large_enum_variant`).
         waiting_for: Box<WaitingFor>,
     },
 }
