@@ -76,8 +76,10 @@ use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use super::zones;
 
 pub use super::engine_resolve_batch::{
-    resolve_all_fast_forward, resolve_all_ready_is_authorized, resolve_all_ready_prefix,
-    ResolveAllCallbackDecision, ResolveAllFastForwardResult,
+    pending_resolve_all_ready_requester, recover_orphaned_resolve_all, resolve_all_fast_forward,
+    resolve_all_ready_access, resolve_all_ready_prefix, resolve_all_ready_prefix_with,
+    ResolveAllCallbackDecision, ResolveAllContinuation, ResolveAllFastForwardResult,
+    ResolveAllReadyAccess,
 };
 
 #[derive(Debug, Clone, Error)]
@@ -20109,7 +20111,37 @@ mod stage2_injector_tests {
                 //   `:13210 ⇒ :13130`. It creates no CR 603.5 prompt either — a special
                 //   action does not use the stack (CR 116.1) — and the pinned line is again
                 //   the same `OptionalEffectChoice` construction, moved wholesale.
-                "game/engine.rs:13135".to_string(),
+                //   ResolveAllReady latch-consumption fix: `:13135 ⇒ :13137`, `+2`.
+                //   The `engine_resolve_batch` re-export block is the whole of it, and
+                //   the symbol delta is ENUMERATED rather than counted: the block goes
+                //   from 5 names to 10. Six arrive —
+                //   `pending_resolve_all_ready_requester`,
+                //   `recover_orphaned_resolve_all`, `resolve_all_ready_access`,
+                //   `resolve_all_ready_prefix_with`, `ResolveAllContinuation`,
+                //   `ResolveAllReadyAccess` — and exactly one leaves,
+                //   `resolve_all_ready_is_authorized`. rustfmt spends two more lines on
+                //   the result. (`ResolveAllReadyAuthority` is NOT in the departure
+                //   column, though a reader tracking this change's history may expect it
+                //   there: `git grep` finds ZERO occurrences of that name anywhere in the
+                //   base tree, so nothing it could have departed from ever held it. That
+                //   is the whole of what is measurable, and this note asserts no more —
+                //   how any earlier wording came to be is drafting history, which git
+                //   cannot answer. Stated because a note whose weight is "MEASURED" earns
+                //   nothing if its enumeration is taken on trust.)
+                //   MEASURED, never carried: `diff -u` on this file between the base tree
+                //   and the candidate has exactly ONE hunk above this producer,
+                //   `@@ -76,8 +76,10 @@` — that block alone. Identity re-established on
+                //   BOTH controls, not assumed: the line at `:13137` is sha256-identical
+                //   (`8a544e87…5cc7d63`) to the producer at `:13135` in the base tree,
+                //   and its offset from `begin_pending_trigger_target_selection` is STILL
+                //   134 — the control that discriminates when the same mint text occurs
+                //   at several coordinates in this crate.
+                //   A re-export mints nothing: it NAMES symbols. None of the Resolve All
+                //   entry points it exposes constructs a CR 603.5 modal — they consume or
+                //   repair a `ResolveAllReady` latch, which `acting_player()` reports as
+                //   having no actor at all. The PRODUCER half stays 5 and the partition
+                //   stays 5/8/28.
+                "game/engine.rs:13137".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \

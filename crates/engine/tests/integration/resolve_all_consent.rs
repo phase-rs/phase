@@ -2,7 +2,11 @@
 
 use engine::ai_support::{candidate_actions, legal_actions_for_viewer};
 use engine::game::elimination::eliminate_player;
-use engine::game::engine::{apply, resolve_all_ready_prefix};
+use engine::game::engine::{
+    apply, pending_resolve_all_ready_requester, recover_orphaned_resolve_all,
+    resolve_all_ready_access, resolve_all_ready_prefix, resolve_all_ready_prefix_with,
+    ResolveAllContinuation, ResolveAllReadyAccess,
+};
 use engine::game::game_object::AttachTarget;
 use engine::game::interaction::{
     bind_interaction_authority, derive_viewer_interaction, resolve_interaction_response,
@@ -830,5 +834,347 @@ fn ready_consent_collapses_the_safe_prefix_before_a_stack_growing_resolution() {
     assert!(
         state.auto_pass.is_empty(),
         "a stack-growing resolution interrupts UntilStackEmpty instead of inheriting stale consent"
+    );
+}
+/// Drives a two-seat run to unanimous consent and returns the latched state.
+fn ready_two_seat_state() -> GameState {
+    let mut state = GameState::new(FormatConfig::free_for_all(), 2, 0x0C0F_FEE0);
+    state.stack.push_back(no_op_entry(1, P1));
+    apply(
+        &mut state,
+        P0,
+        GameAction::BeginResolveAll { max_resolutions: 1 },
+    )
+    .expect("priority holder may begin Resolve All consent");
+    let WaitingFor::ResolveAllConsent { epoch, .. } = state.waiting_for else {
+        panic!(
+            "expected a queued consent prompt, got {:?}",
+            state.waiting_for
+        );
+    };
+    apply(
+        &mut state,
+        P1,
+        GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Grant,
+        },
+    )
+    .expect("the remaining representative may grant");
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::ResolveAllReady { .. }
+    ));
+    state
+}
+
+/// The gate answers ONE question — entitlement — and coherence is answered
+/// elsewhere, by the resolver. This pins that separation from both sides: the
+/// gate's verdict does not move when coherence changes, and
+/// `pending_resolve_all_ready_requester` is what moves instead.
+#[test]
+fn ready_access_refuses_an_unentitled_seat_and_admits_an_incoherent_run() {
+    let mut state = ready_two_seat_state();
+    assert_eq!(
+        resolve_all_ready_access(&state, P0),
+        ResolveAllReadyAccess::Admitted
+    );
+    assert_eq!(
+        pending_resolve_all_ready_requester(&state),
+        Some(P0),
+        "the run's own first participant is the frozen requester"
+    );
+
+    // P0 is a seat at this two-player table; P2 is not, which is exactly the
+    // shape a forged or stale wire request takes: an id the run never froze.
+    assert_eq!(
+        resolve_all_ready_access(&state, P2),
+        ResolveAllReadyAccess::Refused
+    );
+
+    // An installed auto-pass makes the frozen priority snapshot no longer
+    // describe the live game. Entitlement is untouched by that — P0 is still a
+    // frozen submitter — so the gate must not move.
+    state.auto_pass.insert(
+        P1,
+        AutoPassMode::UntilStackEmpty {
+            initial_stack_len: 1,
+        },
+    );
+    assert_eq!(
+        resolve_all_ready_access(&state, P0),
+        ResolveAllReadyAccess::Admitted,
+        "coherence is not this gate's axis; refusing here would strand the latch"
+    );
+    assert_eq!(
+        pending_resolve_all_ready_requester(&state),
+        None,
+        "an incoherent run authorizes no unattended consumption"
+    );
+
+    // With no run at all there is no frozen submitter list, so there is nobody
+    // to check anyone against — including a seat that never was a participant.
+    // Refusing here is what would make the latch permanent.
+    state.resolve_all_consent_run = None;
+    assert_eq!(
+        resolve_all_ready_access(&state, P2),
+        ResolveAllReadyAccess::Admitted,
+        "a run-less latch has no owner to prove; the repair is its only exit"
+    );
+}
+
+/// A Ready latch has no acting player, and once its run is gone it has no
+/// Revoke either — `append_resolve_all_revocations` enumerates grantors from
+/// the run — so a run-less latch leaves the game with no exit whatsoever. The
+/// resolver must repair it rather than refuse, and resolve nothing doing so.
+#[test]
+fn a_ready_latch_with_no_run_repairs_to_priority_without_resolving() {
+    let mut state = ready_two_seat_state();
+    state.resolve_all_consent_run = None;
+    assert!(
+        state.waiting_for.acting_player().is_none(),
+        "the fixture must reproduce the no-actor property that makes this fatal"
+    );
+    assert_eq!(
+        resolve_all_ready_access(&state, P0),
+        ResolveAllReadyAccess::Admitted,
+        "no seat can prove ownership of a run-less latch, so none may be refused"
+    );
+
+    let result = resolve_all_ready_prefix(&mut state, P0);
+
+    assert_eq!(result.items_resolved, 0, "a repair resolves nothing");
+    assert_eq!(state.stack.len(), 1, "the stack entry survives the repair");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "the repair must restore ordinary priority, got {:?}",
+        state.waiting_for
+    );
+    assert!(state.auto_pass.is_empty());
+}
+/// Recovery is the single obligation every restore seam owes, so it must be
+/// inert on the overwhelming majority of states, which carry no latch at all.
+#[test]
+fn recovery_is_inert_on_a_state_carrying_no_latch() {
+    let mut state = GameState::new(FormatConfig::free_for_all(), 2, 0x0C0F_FEE1);
+    state.stack.push_back(no_op_entry(1, P1));
+    let before = state.waiting_for.clone();
+
+    assert!(
+        recover_orphaned_resolve_all(&mut state).is_none(),
+        "no latch means nothing to discharge"
+    );
+    assert_eq!(state.waiting_for, before, "an inert call mutates nothing");
+    assert_eq!(state.stack.len(), 1);
+}
+
+/// A snapshot written while an intact unanimous run was outstanding is
+/// discharged rather than repaired: the players consented to this prefix
+/// before the snapshot existed, and the consent was frozen with it.
+#[test]
+fn recovery_discharges_an_intact_latch() {
+    let mut state = ready_two_seat_state();
+    assert_eq!(
+        pending_resolve_all_ready_requester(&state),
+        Some(P0),
+        "non-vacuity: the fixture must present a consumable latch"
+    );
+
+    let batch =
+        recover_orphaned_resolve_all(&mut state).expect("an intact latch must be discharged");
+
+    assert_eq!(batch.items_resolved, 1, "the consented prefix is collapsed");
+    assert!(state.stack.is_empty(), "the stack entry resolved");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "discharging hands priority back, got {:?}",
+        state.waiting_for
+    );
+}
+
+/// Recovery must leave the interaction layer describing the state it produced,
+/// not the one it repaired away.
+///
+/// A snapshot taken while the latch was live carries one Revoke slot per
+/// grantor (see `ready_state_transport_materializes_each_grantors_frozen_revoke`),
+/// and every restore seam binds interaction authority BEFORE recovery runs.
+/// Repairing `waiting_for` alone would leave each grantor holding an
+/// affordance for a prompt that no longer exists, which
+/// `debug_assert_interaction_consistency` treats as a defect.
+#[test]
+fn recovery_of_an_incoherent_latch_re_derives_the_ready_era_slots() {
+    let mut state = ready_two_seat_state();
+    // The run is present and epoch-matching — so the slots below really are the
+    // Ready set — but the frozen priority snapshot no longer describes the live
+    // game, which is what makes the latch unconsumable.
+    state.auto_pass.insert(
+        P1,
+        AutoPassMode::UntilStackEmpty {
+            initial_stack_len: 1,
+        },
+    );
+    bind_interaction_authority(
+        &mut state,
+        InteractionSessionId("resolve-all-restore".to_string()),
+    )
+    .expect("Ready binds one slot per frozen grantor");
+    let ready_era_slots = state.active_interaction_slots.clone();
+    assert!(
+        !ready_era_slots.is_empty(),
+        "non-vacuity: the fixture must actually carry Ready-era slots"
+    );
+
+    let batch =
+        recover_orphaned_resolve_all(&mut state).expect("a latch is present, so recovery acts");
+
+    assert_eq!(
+        batch.items_resolved, 0,
+        "an incoherent run resolves nothing"
+    );
+    assert_eq!(state.stack.len(), 1, "the stack entry survives the repair");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "recovery must restore ordinary priority, got {:?}",
+        state.waiting_for
+    );
+    assert_ne!(
+        state.active_interaction_slots, ready_era_slots,
+        "the Ready-era Revoke slots must not outlive the prompt they belong to"
+    );
+}
+/// A stack the prefix proof cannot finish, granted and ready. `CopySpell` grows
+/// the stack when it resolves, which is exactly what stops the proof — see
+/// `ready_consent_collapses_the_safe_prefix_before_a_stack_growing_resolution`.
+fn proof_stopping_ready_state() -> GameState {
+    let entry = |id, effect| StackEntry {
+        id: ObjectId(id),
+        source_id: ObjectId(id),
+        controller: P0,
+        kind: StackEntryKind::ActivatedAbility {
+            source_id: ObjectId(id),
+            ability: Box::new(ResolvedAbility::new(effect, vec![], ObjectId(id), P0)),
+        },
+    };
+    let mut state = GameState::new_two_player(48);
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+    state.priority_player = P0;
+    state.stack = vec![
+        entry(
+            1,
+            Effect::CopySpell {
+                target: TargetFilter::SelfRef,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
+                additional_modifications: vec![],
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+        ),
+        entry(2, Effect::NoOp),
+        entry(3, Effect::NoOp),
+    ]
+    .into_iter()
+    .collect();
+    let epoch = begin(&mut state);
+    apply(
+        &mut state,
+        P1,
+        GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Grant,
+        },
+    )
+    .expect("second representative grants");
+    state
+}
+
+/// The two continuations must actually differ, and only on the remainder.
+///
+/// A live session installs `UntilStackEmpty` so the requester's standing intent
+/// survives a proof that stopped short. A restore must not: that auto-pass
+/// resolves the rest of the stack through the ordinary pipeline, which can end
+/// the game — and a restore has no socket attached and no caller positioned to
+/// emit a ranked result or a terminal artifact, so the game would be registered
+/// live while parked in `GameOver`.
+#[test]
+fn the_restore_continuation_installs_no_auto_pass_where_the_live_one_does() {
+    let mut live = proof_stopping_ready_state();
+    let live_batch =
+        resolve_all_ready_prefix_with(&mut live, P0, ResolveAllContinuation::AutoPassRemainder);
+    assert!(
+        !live.auto_pass.is_empty(),
+        "non-vacuity: this fixture must reach the proof-stopped fallback at all"
+    );
+
+    let mut restored = proof_stopping_ready_state();
+    let restored_batch =
+        resolve_all_ready_prefix_with(&mut restored, P0, ResolveAllContinuation::StopAtPriority);
+
+    assert!(
+        restored.auto_pass.is_empty(),
+        "a restore must hand priority back, not run the remainder unattended"
+    );
+    assert!(
+        matches!(restored.waiting_for, WaitingFor::Priority { .. }),
+        "the restore continuation still yields an actionable state, got {:?}",
+        restored.waiting_for
+    );
+    assert_eq!(
+        restored_batch.items_resolved, 2,
+        "the consented prefix is collapsed either way; only the remainder differs"
+    );
+    assert!(
+        live_batch.items_resolved >= restored_batch.items_resolved,
+        "the live continuation may resolve more, never less"
+    );
+    assert!(
+        restored.resolve_all_consent_run.is_none(),
+        "the consent is discarded on both paths"
+    );
+}
+/// Revocation is per-grantor at the ENGINE boundary, not merely in what the
+/// transport offers.
+///
+/// `transport_surfaces_only_each_grantors_own_revoke_and_uses_exact_consent_choices`
+/// pins the surface — which actions a viewer is handed. It does not pin what
+/// `apply` accepts, and those are different contracts: a forged or replayed
+/// wire frame never passes through the transport's action list. The engine's
+/// authorization for this action is a per-TARGET check
+/// (`resolve_all_granted_submitter(state, epoch, representative) ==
+/// Some(actor)`), which no set-membership test over authorized submitters can
+/// express — a set says "you may act here", never "you may act on THIS
+/// representative's consent".
+#[test]
+fn a_grantor_may_revoke_only_its_own_consent_at_the_engine_boundary() {
+    let mut state = ready_two_seat_state();
+    let WaitingFor::ResolveAllReady { epoch } = state.waiting_for else {
+        panic!("fixture must be latched, got {:?}", state.waiting_for);
+    };
+
+    // Positive control first, so the negative below cannot pass because the
+    // action is simply unroutable at Ready: P1's own revoke is accepted.
+    let mut own = state.clone();
+    apply(
+        &mut own,
+        P1,
+        GameAction::RevokeResolveAllConsent {
+            epoch,
+            representative: P1,
+        },
+    )
+    .expect("a grantor may withdraw its own consent while the latch stands");
+
+    // The contract: P1 may not withdraw P0's consent, even though P1 is itself
+    // a frozen submitter of this very run.
+    assert!(
+        apply(
+            &mut state,
+            P1,
+            GameAction::RevokeResolveAllConsent {
+                epoch,
+                representative: P0,
+            },
+        )
+        .is_err(),
+        "one grantor must not be able to revoke another's consent"
     );
 }

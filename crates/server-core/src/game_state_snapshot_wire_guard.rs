@@ -29,6 +29,24 @@ pub const MAX_SNAPSHOT_SPELL_COSTS: usize = 1_000;
 /// Max total legal actions across all per-object buckets in one update.
 pub const MAX_SNAPSHOT_LEGAL_ACTIONS_BY_OBJECT_TOTAL: usize = MAX_ACTION_LIST_LEN;
 
+/// Max engine-authored log lines a collapsed Resolve All batch may attach to a
+/// single wire frame. Well under [`MAX_SNAPSHOT_LOG_ENTRIES`] because the guard
+/// rejects an over-budget frame outright rather than truncating it: a dropped
+/// frame would strand every client on the pre-batch state.
+pub const MAX_RESOLVE_ALL_LOG_ENTRIES: usize = 128;
+
+/// The bounded tail of one collapsed Resolve All batch's engine-authored logs.
+///
+/// A pathological stack produces thousands of entries. Applying the bound at
+/// the producer — rather than trusting the frame to fit — is what keeps the
+/// batch's final, fully-derived state deliverable.
+pub fn bounded_resolve_all_log_tail(mut entries: Vec<GameLogEntry>) -> Vec<GameLogEntry> {
+    if entries.len() > MAX_RESOLVE_ALL_LOG_ENTRIES {
+        entries.drain(..entries.len() - MAX_RESOLVE_ALL_LOG_ENTRIES);
+    }
+    entries
+}
+
 /// Borrowed snapshot components from an [`crate::session::ActionResult`]-shaped tuple.
 pub struct StateSnapshotParts<'a> {
     pub state: &'a GameState,
@@ -237,5 +255,30 @@ mod tests {
         }
         let err = guard_game_state_for_broadcast(&state).unwrap_err();
         assert!(err.contains("state.objects"));
+    }
+    /// The producer-side bound has to leave the frame *under* the guard, since
+    /// the guard rejects rather than truncates. Keeping the tail (not the head)
+    /// is what preserves the batch's most recent, user-visible outcome.
+    #[test]
+    fn resolve_all_log_tail_keeps_the_last_bounded_window() {
+        let entries: Vec<_> = (0..(MAX_RESOLVE_ALL_LOG_ENTRIES as u32 + 7))
+            .map(sample_log_entry)
+            .collect();
+        let last_seq = entries.last().expect("non-empty fixture").seq;
+
+        let tail = bounded_resolve_all_log_tail(entries);
+
+        assert_eq!(tail.len(), MAX_RESOLVE_ALL_LOG_ENTRIES);
+        assert_eq!(
+            tail.last().expect("bounded tail is non-empty").seq,
+            last_seq
+        );
+        assert!(tail.len() <= MAX_SNAPSHOT_LOG_ENTRIES);
+    }
+
+    #[test]
+    fn resolve_all_log_tail_leaves_a_short_batch_whole() {
+        let entries: Vec<_> = (0..3).map(sample_log_entry).collect();
+        assert_eq!(bounded_resolve_all_log_tail(entries.clone()), entries);
     }
 }
