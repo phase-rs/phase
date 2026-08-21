@@ -1639,6 +1639,7 @@
       "title": "Legendenregel",
       "subtitle": "Wähle, welches „{{name}}“ du behältst",
       "keepAria": "{{name}} behalten ({{identity}}, {{status}})",
+      "keepAriaUnknown": "{{name}} behalten ({{status}})",
       "identityOriginal": "Original",
       "identityCopy": "Kopie",
       "identityTokenCopy": "Spielsteinkopie",

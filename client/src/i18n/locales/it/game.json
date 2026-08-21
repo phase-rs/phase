@@ -1639,6 +1639,7 @@
       "title": "Regola delle leggende",
       "subtitle": "Scegli quale \"{{name}}\" tenere",
       "keepAria": "Tieni {{name}} ({{identity}}, {{status}})",
+      "keepAriaUnknown": "Tieni {{name}} ({{status}})",
       "identityOriginal": "Originale",
       "identityCopy": "Copia",
       "identityTokenCopy": "Copia pedina",

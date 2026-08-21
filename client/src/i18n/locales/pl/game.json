@@ -1639,6 +1639,7 @@
       "title": "Zasada legend",
       "subtitle": "Wybierz, którego „{{name}}” zatrzymać",
       "keepAria": "Zatrzymaj {{name}} ({{identity}}, {{status}})",
+      "keepAriaUnknown": "Zatrzymaj {{name}} ({{status}})",
       "identityOriginal": "Oryginał",
       "identityCopy": "Kopia",
       "identityTokenCopy": "Kopia żetonu",

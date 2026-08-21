@@ -2562,16 +2562,25 @@ function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
           const entryLabel = isCurrentTurnEntry
             ? t("cardChoice.legend.statusJustEntered")
             : t("cardChoice.legend.statusAlready");
-          const identityLabel = t(`cardChoice.legend.identity${identity}`);
-          const isCopy = identity !== "Original";
-          return (
-            <motion.button
-              key={id}
-              aria-label={t("cardChoice.legend.keepAria", {
+          const identityLabel =
+            identity === "Unknown"
+              ? undefined
+              : t(`cardChoice.legend.identity${identity}`);
+          const ariaLabel = identityLabel
+            ? t("cardChoice.legend.keepAria", {
                 name: obj.name,
                 status: entryLabel,
                 identity: identityLabel,
-              })}
+              })
+            : t("cardChoice.legend.keepAriaUnknown", {
+                name: obj.name,
+                status: entryLabel,
+              });
+          const isCopy = identity === "Copy" || identity === "TokenCopy";
+          return (
+            <motion.button
+              key={id}
+              aria-label={ariaLabel}
               className="relative rounded-lg transition hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
               initial={{ opacity: 0, y: 60, scale: 0.85 }}
               animate={{ opacity: 0.85, y: 0, scale: 1 }}
@@ -2595,13 +2604,15 @@ function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
                 >
                   {entryLabel}
                 </span>
-                <span
-                  className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-bold text-white shadow ${
-                    isCopy ? "bg-indigo-600/95" : "bg-emerald-600/95"
-                  }`}
-                >
-                  {identityLabel}
-                </span>
+                {identityLabel && (
+                  <span
+                    className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-bold text-white shadow ${
+                      isCopy ? "bg-indigo-600/95" : "bg-emerald-600/95"
+                    }`}
+                  >
+                    {identityLabel}
+                  </span>
+                )}
               </div>
             </motion.button>
           );

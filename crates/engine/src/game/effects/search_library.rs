@@ -370,7 +370,10 @@ pub(crate) struct PreparedEffectiveSearch {
 /// CR 401.4 + CR 608.2c: Report ordered selection only when every reachable
 /// continuation path places the complete selected set on top and no later
 /// instruction destroys that order.
-pub(crate) fn search_ordering_hint(ability: &ResolvedAbility) -> SearchOrderingHint {
+pub(crate) fn search_ordering_hint(
+    ability: &ResolvedAbility,
+    selection_limit: usize,
+) -> SearchOrderingHint {
     let Some(continuation) = ability.sub_ability.as_deref() else {
         return SearchOrderingHint::Unordered;
     };
@@ -380,6 +383,7 @@ pub(crate) fn search_ordering_hint(ability: &ResolvedAbility) -> SearchOrderingH
             selected_targets_bound: true,
             ordering: SearchOrderingHint::Unordered,
             searched_library_owner: known_search_library_owner(ability),
+            selection_limit,
         },
     );
     if outcomes
@@ -397,6 +401,7 @@ struct SearchDisposition {
     selected_targets_bound: bool,
     ordering: SearchOrderingHint,
     searched_library_owner: Option<PlayerId>,
+    selection_limit: usize,
 }
 
 fn known_search_library_owner(ability: &ResolvedAbility) -> Option<PlayerId> {
@@ -490,9 +495,16 @@ fn executed_search_ordering_outcomes(
             count,
             position,
         } if disposition.selected_targets_bound => {
+            let places_all_selected = match count {
+                QuantityExpr::Fixed { value: 0 } => true,
+                QuantityExpr::Fixed { value } => {
+                    usize::try_from(*value).is_ok_and(|count| count >= disposition.selection_limit)
+                }
+                _ => false,
+            };
             disposition.ordering =
                 if matches!(target, TargetFilter::Any | TargetFilter::ParentTarget)
-                    && matches!(count, QuantityExpr::Fixed { value: 0 })
+                    && places_all_selected
                     && matches!(position, LibraryPosition::Top)
                 {
                     SearchOrderingHint::OrderedToLibraryTop
@@ -710,7 +722,7 @@ pub(crate) fn prepare_effective_search(
         split,
         active_search,
         hidden_event,
-        ordering_hint: search_ordering_hint(ability),
+        ordering_hint: search_ordering_hint(ability, count),
         decision: ActiveSearchDecisionControl {
             searcher,
             searched_zone_owner,
@@ -848,6 +860,66 @@ mod tests {
     }
 
     #[test]
+    fn ordering_hint_accepts_fixed_one_for_a_one_card_search() {
+        let top = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let search = make_search_ability(TargetFilter::Any, 1).sub_ability(top);
+
+        assert_eq!(
+            search_ordering_hint(&search, 1),
+            SearchOrderingHint::OrderedToLibraryTop
+        );
+    }
+
+    #[test]
+    fn ordering_hint_accepts_fixed_two_for_a_two_card_search() {
+        let top = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 2 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
+
+        assert_eq!(
+            search_ordering_hint(&search, 2),
+            SearchOrderingHint::OrderedToLibraryTop
+        );
+    }
+
+    #[test]
+    fn ordering_hint_rejects_fixed_one_for_a_two_card_search() {
+        let top = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
+
+        assert_eq!(
+            search_ordering_hint(&search, 2),
+            SearchOrderingHint::Unordered
+        );
+    }
+
+    #[test]
     fn ordering_hint_requires_every_branch_to_order_selected_cards_on_top() {
         let bottom = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
@@ -873,7 +945,10 @@ mod tests {
         conditional_top.else_ability = Some(Box::new(bottom));
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(conditional_top);
 
-        assert_eq!(search_ordering_hint(&search), SearchOrderingHint::Unordered);
+        assert_eq!(
+            search_ordering_hint(&search, 2),
+            SearchOrderingHint::Unordered
+        );
     }
 
     #[test]
@@ -894,7 +969,7 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(conditional_top);
 
         assert_eq!(
-            search_ordering_hint(&search),
+            search_ordering_hint(&search, 2),
             SearchOrderingHint::OrderedToLibraryTop
         );
     }
@@ -925,7 +1000,7 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
 
         assert_eq!(
-            search_ordering_hint(&search),
+            search_ordering_hint(&search, 2),
             SearchOrderingHint::OrderedToLibraryTop
         );
     }
@@ -961,7 +1036,10 @@ mod tests {
         });
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(guarded);
 
-        assert_eq!(search_ordering_hint(&search), SearchOrderingHint::Unordered);
+        assert_eq!(
+            search_ordering_hint(&search, 2),
+            SearchOrderingHint::Unordered
+        );
     }
 
     #[test]
@@ -983,7 +1061,10 @@ mod tests {
         let search =
             make_search_ability(TargetFilter::Any, 2).sub_ability(conditional_optional_top);
 
-        assert_eq!(search_ordering_hint(&search), SearchOrderingHint::Unordered);
+        assert_eq!(
+            search_ordering_hint(&search, 2),
+            SearchOrderingHint::Unordered
+        );
     }
 
     #[test]
@@ -1012,7 +1093,10 @@ mod tests {
         optional.else_ability = Some(Box::new(top));
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(optional);
 
-        assert_eq!(search_ordering_hint(&search), SearchOrderingHint::Unordered);
+        assert_eq!(
+            search_ordering_hint(&search, 2),
+            SearchOrderingHint::Unordered
+        );
     }
 
     #[test]
@@ -1040,7 +1124,10 @@ mod tests {
         .sub_ability(bottom);
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
 
-        assert_eq!(search_ordering_hint(&search), SearchOrderingHint::Unordered);
+        assert_eq!(
+            search_ordering_hint(&search, 2),
+            SearchOrderingHint::Unordered
+        );
     }
 
     #[test]
@@ -1066,7 +1153,10 @@ mod tests {
         .sub_ability(shuffle);
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
 
-        assert_eq!(search_ordering_hint(&search), SearchOrderingHint::Unordered);
+        assert_eq!(
+            search_ordering_hint(&search, 2),
+            SearchOrderingHint::Unordered
+        );
     }
 
     #[test]
@@ -1093,7 +1183,7 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
 
         assert_eq!(
-            search_ordering_hint(&search),
+            search_ordering_hint(&search, 2),
             SearchOrderingHint::OrderedToLibraryTop
         );
     }

@@ -1639,6 +1639,7 @@
       "title": "Regla de leyendas",
       "subtitle": "Elige qué \"{{name}}\" conservar",
       "keepAria": "Conservar {{name}} ({{identity}}, {{status}})",
+      "keepAriaUnknown": "Conservar {{name}} ({{status}})",
       "identityOriginal": "Original",
       "identityCopy": "Copia",
       "identityTokenCopy": "Copia de ficha",

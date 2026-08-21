@@ -1639,6 +1639,7 @@
       "title": "Règle de la légende",
       "subtitle": "Choisissez quel(le) « {{name}} » garder",
       "keepAria": "Garder {{name}} ({{identity}}, {{status}})",
+      "keepAriaUnknown": "Garder {{name}} ({{status}})",
       "identityOriginal": "Original",
       "identityCopy": "Copie",
       "identityTokenCopy": "Copie de jeton",

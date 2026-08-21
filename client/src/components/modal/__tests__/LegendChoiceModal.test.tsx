@@ -39,18 +39,26 @@ function makeState(): GameState {
       subtypes: ["Human", "Soldier"],
     },
   });
+  const hidden = buildGameObject({
+    id: 12,
+    card_id: 12,
+    name: "Face-down permanent",
+    entered_battlefield_turn: 1,
+    face_down: true,
+  });
 
   return buildGameState({
     turn_number: 2,
     players: buildPlayers([0, 1]),
     priority_player: 0,
-    objects: buildObjectMap(existing, newCopy),
-    next_object_id: 12,
-    battlefield: [10, 11],
+    objects: buildObjectMap(existing, newCopy, hidden),
+    next_object_id: 13,
+    battlefield: [10, 11, 12],
     derived: {
       legend_candidate_identities: {
         "10": "Original",
         "11": "TokenCopy",
+        "12": "Unknown",
       },
     },
     waiting_for: {
@@ -58,7 +66,7 @@ function makeState(): GameState {
       data: {
         player: 0,
         legend_name: "Thalia, Guardian of Thraben",
-        candidates: [10, 11],
+        candidates: [10, 11, 12],
       },
     },
     next_timestamp: 3,
@@ -84,10 +92,16 @@ describe("LegendChoiceModal", () => {
   it("identifies the original and token-copy legend candidates", () => {
     render(<CardChoiceModal />);
 
-    expect(screen.getByText("Already on battlefield")).toBeInTheDocument();
+    expect(screen.getAllByText("Already on battlefield")).toHaveLength(2);
     expect(screen.getByText("Just entered")).toBeInTheDocument();
     expect(screen.getByText("Original")).toBeInTheDocument();
     expect(screen.getByText("Token copy")).toBeInTheDocument();
+    expect(screen.queryByText("Unknown")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "Keep Face-down permanent (Already on battlefield)",
+      }),
+    ).toBeInTheDocument();
   });
 
   it("dispatches the selected legend to keep", () => {

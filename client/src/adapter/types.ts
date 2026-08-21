@@ -2992,7 +2992,7 @@ export interface DebugLibraryCardView {
 }
 
 /** Engine-classified identity for a candidate in a legend-rule choice. */
-export type LegendCandidateIdentity = "Original" | "Copy" | "TokenCopy";
+export type LegendCandidateIdentity = "Original" | "Copy" | "TokenCopy" | "Unknown";
 
 /**
  * Engine-authored projections computed at each state snapshot. Rides

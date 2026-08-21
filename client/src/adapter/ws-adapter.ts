@@ -203,6 +203,8 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 33 — LegendCandidateIdentity adds Unknown so face-down legend candidates do
+ *      not publish an affirmative original/copy identity.
  * 32 — DerivedViews.legend_candidate_identities publishes the engine-authored
  *      original/copy/token-copy identity for each active legend-rule choice. The
  *      field is serde-optional, but the client deliberately no longer derives this
@@ -260,7 +262,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 32;
+export const PROTOCOL_VERSION = 33;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

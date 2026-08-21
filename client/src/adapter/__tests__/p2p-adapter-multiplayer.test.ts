@@ -1579,7 +1579,10 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     };
     const manaPaymentShortcutActions: GameAction[] = [{ type: "PassPriority" }];
     const copiedPermanents = [42];
-    const legendCandidateIdentities = { "42": "TokenCopy" as const };
+    const legendCandidateIdentities = {
+      "42": "TokenCopy" as const,
+      "43": "Unknown" as const,
+    };
     // Cast via `unknown` because the hoisted mock's default return is inferred
     // as `{ actions: never[]; autoPassRecommended: boolean }`, which would
     // reject our richer payload. The adapter consumes the full

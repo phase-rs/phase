@@ -1639,6 +1639,7 @@
       "title": "Regra das Lendas",
       "subtitle": "Escolha qual \"{{name}}\" manter",
       "keepAria": "Manter {{name}} ({{identity}}, {{status}})",
+      "keepAriaUnknown": "Manter {{name}} ({{status}})",
       "identityOriginal": "Original",
       "identityCopy": "Cópia",
       "identityTokenCopy": "Cópia de ficha",

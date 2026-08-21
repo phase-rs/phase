@@ -510,13 +510,14 @@ pub struct DebugLibraryCardView {
 /// The frontend renders this value without inspecting token, copy-effect, or
 /// face-down state. `TokenCopy` takes precedence when a copied permanent spell
 /// resolved as a token; `Copy` is a live Layer 1a copy effect; `Original` is
-/// every other candidate, including a face-down object whose copy status must
-/// remain hidden.
+/// every other face-up candidate; `Unknown` withholds affirmative identity for
+/// a face-down candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LegendCandidateIdentity {
     Original,
     Copy,
     TokenCopy,
+    Unknown,
 }
 
 /// Engine-authored projections used by the display layer. Keep this struct
@@ -1167,12 +1168,11 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
             let Some(candidate) = state.objects.get(&candidate_id) else {
                 continue;
             };
-            let identity = if !candidate.face_down
-                && candidate.is_token
-                && candidate.display_source != DisplaySource::Token
-            {
+            let identity = if candidate.face_down {
+                LegendCandidateIdentity::Unknown
+            } else if candidate.is_token && candidate.display_source != DisplaySource::Token {
                 LegendCandidateIdentity::TokenCopy
-            } else if !candidate.face_down && object_has_copy_effect(state, candidate_id) {
+            } else if object_has_copy_effect(state, candidate_id) {
                 LegendCandidateIdentity::Copy
             } else {
                 LegendCandidateIdentity::Original
@@ -3219,10 +3219,18 @@ mod tests {
             "Reveillark".into(),
             Zone::Battlefield,
         );
+        let hidden_copy = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Reveillark".into(),
+            Zone::Battlefield,
+        );
         {
             let token = state.objects.get_mut(&token_copy).unwrap();
             token.is_token = true;
             token.display_source = DisplaySource::Card;
+            state.objects.get_mut(&hidden_copy).unwrap().face_down = true;
         }
 
         let values = crate::game::printed_cards::intrinsic_copiable_values(
@@ -3234,6 +3242,19 @@ mod tests {
             Duration::Permanent,
             TargetFilter::SpecificObject { id: clone },
             vec![ContinuousModification::CopyValues {
+                values: Box::new(values.clone()),
+                display_source: DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            }],
+            None,
+        );
+        state.add_transient_continuous_effect(
+            hidden_copy,
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: hidden_copy },
+            vec![ContinuousModification::CopyValues {
                 values: Box::new(values),
                 display_source: DisplaySource::Card,
                 printed_ref: None,
@@ -3244,7 +3265,7 @@ mod tests {
         state.waiting_for = crate::types::game_state::WaitingFor::ChooseLegend {
             player: PlayerId(0),
             legend_name: "Reveillark".into(),
-            candidates: vec![original, clone, token_copy],
+            candidates: vec![original, clone, token_copy, hidden_copy],
         };
 
         let views = derive_views(&state, None);
@@ -3261,8 +3282,9 @@ mod tests {
                 (original, LegendCandidateIdentity::Original),
                 (clone, LegendCandidateIdentity::Copy),
                 (token_copy, LegendCandidateIdentity::TokenCopy),
+                (hidden_copy, LegendCandidateIdentity::Unknown),
             ]),
-            "each legend-rule option receives an engine-authored identity"
+            "face-down candidates receive no affirmative public identity"
         );
     }
 

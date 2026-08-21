@@ -4523,6 +4523,7 @@ pub struct PreparedScopedLibrarySearchChoice {
     pub up_to: bool,
     pub allows_partial_find: bool,
     pub constraint: SearchSelectionConstraint,
+    /// Whether the client must preserve and display the selected-card order.
     #[serde(default)]
     pub ordering_hint: SearchOrderingHint,
 }
