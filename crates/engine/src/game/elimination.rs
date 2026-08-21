@@ -1060,10 +1060,16 @@ fn do_eliminate(
     // there is no one for the owed CR 702.15b gain to be applied to. NO CR 800.4
     // SUBPART STATES THIS DIRECTLY — a sweep of 800.4 and 800.4a-800.4p returns no
     // mention of life at all, so this sentence carries no citation on purpose. The
-    // nearest analogues are CR 800.4e (combat damage that would be assigned to a
-    // player who has left the game isn't assigned) and CR 614.9 (damage redirected
-    // to or from a player who has left the game does nothing); BOTH are about
-    // damage rather than life gain and neither may be cited as authority here.
+    // nearest analogues are CR 800.4d (a triggered ability that would be controlled
+    // by a player who has left the game isn't put on the stack), CR 800.4e (combat
+    // damage that would be assigned to a player who has left the game isn't
+    // assigned), and CR 614.9 (damage redirected to or from a player who has left
+    // the game does nothing). 800.4d is the closest in SHAPE — an owed effect for a
+    // departed seat simply does not happen — but it is about triggered abilities,
+    // and the other two are about damage; NONE may be cited as authority for life
+    // gain. A re-sweep of 800.4 and 800.4a-800.4p confirms the enumerated subparts
+    // cover objects, control, creation, combat damage, costs, choices, information,
+    // and turns, and none of them life.
     //
     // Drop only THAT seat's owed lifelink gains — the rest of the batch belongs to
     // other controllers and must still land, and the batch itself must still

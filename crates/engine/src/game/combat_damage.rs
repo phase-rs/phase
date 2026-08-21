@@ -1723,6 +1723,26 @@ pub(crate) fn apply_combat_damage(
     // prevention riders, and the CR 732.2a ring guard — lives in the drain, in
     // the order it has always been emitted, so a CR 616.1 pause can suspend it
     // without reordering it.
+    // Deterministic order: the tally arrives as a `HashMap`, but it is stored in
+    // `PendingCombatLifelink` (which is `Serialize`/`Deserialize`, so a parked
+    // batch must round-trip byte-identically) and Phase D fires one CR 615.5
+    // rider per entry IN THIS ORDER. A `HashMap`'s arbitrary iteration order
+    // would let the same batch serialize — and emit its rider events —
+    // differently across saves and AI clones. The ids are not `Ord`, so sort on
+    // their inner integers, exactly as `blocker_ids` is sorted above.
+    let mut prevention_tally: Vec<(AppliedReplacementKey, i32)> =
+        prevention_tally.into_iter().collect();
+    prevention_tally.sort_by_key(|(key, _)| match key {
+        AppliedReplacementKey::Object { source, index } => (0u8, source.0, *index, 0u8),
+        AppliedReplacementKey::Floating { index } => (1, 0, *index, 0),
+        AppliedReplacementKey::StepEndMana { index } => (2, 0, *index, 0),
+        AppliedReplacementKey::EntryControllerChoice {
+            source,
+            index,
+            controller,
+        } => (3, source.0, *index, controller.0),
+    });
+
     drain_combat_lifelink(
         state,
         PendingCombatLifelink {
@@ -1732,7 +1752,7 @@ pub(crate) fn apply_combat_damage(
                 .collect(),
             batch_events: events,
             damage_to_players,
-            prevention_tally: prevention_tally.into_iter().collect(),
+            prevention_tally,
             lives_before,
             sub_step,
         },
