@@ -379,6 +379,7 @@ pub(crate) fn search_ordering_hint(ability: &ResolvedAbility) -> SearchOrderingH
         SearchDisposition {
             selected_targets_bound: true,
             ordering: SearchOrderingHint::Unordered,
+            searched_library_owner: known_search_library_owner(ability),
         },
     );
     if outcomes
@@ -395,6 +396,43 @@ pub(crate) fn search_ordering_hint(ability: &ResolvedAbility) -> SearchOrderingH
 struct SearchDisposition {
     selected_targets_bound: bool,
     ordering: SearchOrderingHint,
+    searched_library_owner: Option<PlayerId>,
+}
+
+fn known_search_library_owner(ability: &ResolvedAbility) -> Option<PlayerId> {
+    if let Some(player) = ability.targets.iter().find_map(|target| match target {
+        TargetRef::Player(player) => Some(*player),
+        TargetRef::Object(_) => None,
+    }) {
+        return Some(player);
+    }
+    match &ability.effect {
+        Effect::SearchLibrary {
+            target_player: None,
+            ..
+        }
+        | Effect::SearchLibrary {
+            target_player: Some(TargetFilter::Controller),
+            ..
+        } => Some(ability.controller),
+        _ => None,
+    }
+}
+
+fn known_shuffle_player(ability: &ResolvedAbility, target: &TargetFilter) -> Option<PlayerId> {
+    match target {
+        TargetFilter::Controller => Some(ability.controller),
+        TargetFilter::OriginalController => {
+            Some(ability.original_controller.unwrap_or(ability.controller))
+        }
+        target if !target.is_context_ref() => {
+            ability.targets.iter().find_map(|target| match target {
+                TargetRef::Player(player) => Some(*player),
+                TargetRef::Object(_) => None,
+            })
+        }
+        _ => None,
+    }
 }
 
 fn search_ordering_outcomes(
@@ -469,7 +507,19 @@ fn executed_search_ordering_outcomes(
         {
             disposition.ordering = SearchOrderingHint::Unordered;
         }
-        Effect::Shuffle { .. } => disposition.ordering = SearchOrderingHint::Unordered,
+        Effect::Shuffle { target } => {
+            let preserves_order = matches!(target, TargetFilter::TrackedSet { .. })
+                || matches!(
+                    (
+                        disposition.searched_library_owner,
+                        known_shuffle_player(current, target),
+                    ),
+                    (Some(searched), Some(shuffled)) if searched != shuffled
+                );
+            if !preserves_order {
+                disposition.ordering = SearchOrderingHint::Unordered;
+            }
+        }
         _ => {}
     }
 
@@ -1017,6 +1067,35 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
 
         assert_eq!(search_ordering_hint(&search), SearchOrderingHint::Unordered);
+    }
+
+    #[test]
+    fn ordering_hint_preserves_top_order_when_later_shuffle_targets_other_player() {
+        let shuffle = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::Opponent,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let top = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(shuffle);
+        let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
+
+        assert_eq!(
+            search_ordering_hint(&search),
+            SearchOrderingHint::OrderedToLibraryTop
+        );
     }
 
     fn add_library_creature(
