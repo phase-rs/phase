@@ -57,8 +57,14 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      # `--locked` costs nothing here (this step already resolves the whole
+      # workspace) and asserts the committed root Cargo.lock is in sync with the
+      # manifests. Without it, dropping a crate leaves dead entries in the lock,
+      # every later cargo invocation silently rewrites the file, and Nightly
+      # Release dies on `cargo release`'s dirty-tree check -- which is exactly
+      # what #7556 did. `--locked` is already used for the Tauri manifest below.
       - name: Clippy
-        run: cargo clippy --workspace --exclude phase-tauri --all-targets --features engine/proptest -- -D warnings
+        run: cargo clippy --locked --workspace --exclude phase-tauri --all-targets --features engine/proptest -- -D warnings
 
       - name: Interaction bindings are current
         run: ./scripts/check-interaction-bindings.sh --check
