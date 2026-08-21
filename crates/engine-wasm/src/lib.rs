@@ -4068,6 +4068,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: Default::default(),
+            ordering_hint: Default::default(),
             split: None,
         };
         assert!(matches!(
