@@ -1,8 +1,3 @@
-// `DraftAdapter` must be constructed inside a function, never at module
-// evaluation time: its bundled chunk assigns exports inside a top-level-await
-// (`__tla`) microtask, so the binding is still `undefined` while this module
-// evaluates and a module-scope `const adapter = new DraftAdapter()` throws
-// there. It carries no instance state, so constructing per call is free.
 import {
   DraftAdapter,
   type DraftCardInstance,
