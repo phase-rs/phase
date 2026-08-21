@@ -1800,6 +1800,69 @@ fn mana_ability_ready_without_simulation_gated(
     true
 }
 
+/// CR 605.3a + CR 106.12 + CR 107.6 + CR 701.21a: True when the full-state
+/// legality clone in [`can_activate_mana_ability_now_gated`] would only
+/// re-derive an answer the non-simulating readiness gate has already settled.
+///
+/// Two disjoint shapes qualify:
+/// * [`mana_sources::cost_conclusively_payable_by_cheap_gate`] — no cost, or a
+///   cost built solely from the `{T}`/`{Q}` symbols. Unchanged.
+/// * A whole-tree choice-free cost that sacrifices exactly the ability's own
+///   source ([`mana_sources::has_unambiguous_self_sacrifice_component`]) —
+///   Treasure's `{T}, Sacrifice this token` (CR 111.10a) and Gold's tapless
+///   `Sacrifice this token` (CR 111.10c). `SacrificeRequirement::Aggregate`,
+///   `Count { count: n > 1 }` and every non-`SelfRef` target are excluded BY
+///   CONSTRUCTION by that predicate's `Count { count: 1 }` / `SelfRef` match —
+///   a non-self sacrifice may have no legal victim, so its simulation is
+///   load-bearing and must not be skipped.
+///
+/// The second shape is the first MULTI-component cost the engine answers
+/// without simulating, so the two divergences an earlier component can
+/// introduce are guarded explicitly. Both guards are conservative: a `true`
+/// declines the fast path and falls through to the unchanged simulation, so a
+/// spurious guard costs performance, never correctness. Note that Guard 2's
+/// granularity is the whole board rather than this source: `static_kind_present`
+/// is a board-global `StaticModeKind` presence read (CR 604.1), so a single
+/// `CantPayCost` permanent anywhere on the battlefield (Yasharn, Impeccable Sire)
+/// returns EVERY mana source to the clone path, not only the sources a
+/// prohibition could actually name.
+///
+/// Two divergences deliberately need NO guard:
+/// * CR 616.1 — a replacement on the sacrifice's battlefield -> graveyard move
+///   makes `sacrifice_permanent` return `NeedsReplacementChoice`, which the
+///   self-sacrifice payment arm maps to `Ok(ManaAbilityPaymentProgress::Paused)`,
+///   so the simulation returns `Ok` and reports the same `true` this path does.
+/// * CR 608.2h — the production tail runs after the source has left the
+///   battlefield, so a source-referential produced amount (Lotus Blossom's
+///   `CountersOn { scope: Source }`) reads last known information. That changes
+///   the amount of mana, never the legality answer: the tail's only two `?`
+///   operators are `mana_ability_definition` (rescued by the activation's
+///   `ability_snapshot`) and `resume_mana_ability_root` (infallible for the
+///   `Priority` resume the legality simulation uses).
+fn legality_simulation_is_redundant(
+    state: &GameState,
+    source_id: ObjectId,
+    cost: &Option<AbilityCost>,
+) -> bool {
+    if mana_sources::cost_conclusively_payable_by_cheap_gate(cost) {
+        return true;
+    }
+    mana_sources::has_unambiguous_self_sacrifice_component(cost)
+        // CR 601.2g: a permanent already committed to a pending spell's
+        // additional sacrifice cost is reserved; paying this ability's cost
+        // then errors at `continue_mana_ability_cost_payment_in_node`. Reuses
+        // the payment path's own authority rather than re-deriving it.
+        && !cost_sacrifices_reserved_source(state, source_id, cost)
+        // CR 118.3 + CR 601.2h: the readiness gate evaluated
+        // `player_cant_sacrifice_as_cost` on the PRE-payment state, but the
+        // payment re-evaluates it after this tree's `{T}` component has
+        // already tapped the source, and a prohibition's object filter can
+        // read that tapped bit (`FilterProp::Tapped`). O(1) presence read
+        // (CR 604.1): a `false` here is precise post-flush, so the two
+        // evaluations are provably identical; a `true` declines and simulates.
+        && !static_kind_present(state, StaticModeKind::CantPayCost)
+}
+
 pub fn can_activate_mana_ability_now(
     state: &GameState,
     player: PlayerId,
@@ -1850,8 +1913,12 @@ pub fn can_activate_mana_ability_now_gated(
     // simulation. Eliminates the mana-display board-sweep clone-storm (Cryptolith
     // Rite granting bare `{T}: Add` to ~700 tokens => ~700 clones/sweep). Mana/
     // resource/composite costs still simulate — the auto-tap affordability
-    // witness (CR 601.2g) must not flip UNAVAILABLE->AVAILABLE.
-    if mana_sources::cost_conclusively_payable_by_cheap_gate(&ability_def.cost) {
+    // witness (CR 601.2g) must not flip UNAVAILABLE->AVAILABLE. CR 111.10a +
+    // CR 701.21a: a whole-tree choice-free cost that sacrifices the ability's
+    // OWN source (Treasure, Gold, Lotus Petal) is conclusively decided the same
+    // way, behind two state-aware guards — see
+    // [`legality_simulation_is_redundant`].
+    if legality_simulation_is_redundant(state, source_id, &ability_def.cost) {
         return true;
     }
     can_activate_mana_ability_by_simulation(state, player, source_id, ability_index, ability_def)
@@ -3278,6 +3345,22 @@ pub(crate) fn resume_mana_ability_root(
         ManaAbilityResume::CompanionToHand { player, cost } => {
             super::companion::resume_companion_to_hand_payment(state, player, cost, events)
         }
+        // CR 116.2b + CR 605.3b: NOT compiler-forced either — the `resume =>`
+        // catch-all below would route a paused turn-face-up payment into
+        // `resume_waiting_for`, which `unreachable!()`s for this family.
+        ManaAbilityResume::TurnFaceUp {
+            player,
+            object_id,
+            cost,
+            announced_x,
+        } => super::morph::resume_turn_face_up_payment(
+            state,
+            player,
+            object_id,
+            cost,
+            announced_x,
+            events,
+        ),
         // CR 116.2c + CR 605.3b: NOT compiler-forced — the `resume =>` catch-all
         // below would silently route a paused pay-to-end payment into
         // `resume_waiting_for`, which `unreachable!()`s for this family.
@@ -3393,6 +3476,14 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
         ManaAbilityResume::CompanionToHand { player, .. } => Ok(
             super::companion::finish_paid_companion_to_hand(state, player, events),
         ),
+        ManaAbilityResume::TurnFaceUp {
+            player,
+            object_id,
+            announced_x,
+            ..
+        // CR 702.37e + CR 107.3d: payment has completed, so commit the
+        // turn-face-up action with its already-announced X value.
+        } => super::morph::finish_paid_turn_face_up(state, player, object_id, announced_x, events),
         ManaAbilityResume::EndContinuousEffect { player, group, .. } => Ok(
             super::end_continuous_effect::finish_paid_end_continuous_effect(
                 state, player, group, events,
@@ -4766,9 +4857,11 @@ pub(crate) fn resume_waiting_for(
         | ManaAbilityResume::PhyrexianCastPayment { .. }
         | ManaAbilityResume::FinalizePendingManaPayment { .. }
         | ManaAbilityResume::CompanionToHand { .. }
-        // CR 116.2c: like `CompanionToHand`, the pay-to-end special action is
-        // resumed by `resume_mana_ability_root`'s named arm, never here.
-        | ManaAbilityResume::EndContinuousEffect { .. } => {
+        // CR 116.2c + CR 116.2b: like `CompanionToHand`, the pay-to-end and
+        // turn-face-up special actions are resumed by
+        // `resume_mana_ability_root`'s named arms, never here.
+        | ManaAbilityResume::EndContinuousEffect { .. }
+        | ManaAbilityResume::TurnFaceUp { .. } => {
             unreachable!("effect-cost resume is handled by resume_mana_ability_root")
         }
     }
@@ -8414,29 +8507,638 @@ mod tests {
         );
     }
 
-    /// CR 601.2g: A `Composite{{Tap, Sacrifice}}` mana cost (Treasure) is NOT
-    /// conclusively decided by the cheap gate, so it must still simulate — the
-    /// must-simulate path is preserved (clone >= 1) even though it is activatable.
-    /// A(b). The self-sacrifice is always a legal target, so this does NOT build a
-    /// cost that passes `is_payable` yet fails simulation.
+    /// CR 604.1: Make the O(1) `StaticModePresence` index precise, then zero the
+    /// perf counters. **Every self-sacrifice cheap-gate assertion below must go
+    /// through this.** A fresh `GameState` seeds
+    /// `StaticModePresence::all_present()`, so `legality_simulation_is_redundant`'s
+    /// `CantPayCost` presence guard declines the fast path until the layers
+    /// pipeline has flushed — a test that skips the flush measures an inert fast
+    /// path and its `== 0` clone assertion fails. Production always flushes first
+    /// (`public_state::finalize_rules_state` -> `finalize_display_state`), so this
+    /// mirrors production rather than papering over it.
+    fn flush_and_reset(state: &mut GameState) {
+        crate::game::layers::flush_layers(state);
+        crate::game::perf_counters::reset();
+    }
+
+    /// CR 701.21a: the bare self-sacrifice cost component — "Sacrifice this".
+    fn self_sacrifice_cost() -> AbilityCost {
+        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1))
+    }
+
+    /// CR 111.10a: Treasure's `{T}, Sacrifice this token` cost tree.
+    fn tap_and_self_sacrifice_cost() -> AbilityCost {
+        AbilityCost::Composite {
+            costs: vec![AbilityCost::Tap, self_sacrifice_cost()],
+        }
+    }
+
+    fn any_one_color(count: QuantityExpr) -> ManaProduction {
+        ManaProduction::AnyOneColor {
+            count,
+            color_options: ManaColor::ALL.to_vec(),
+            contribution: ManaContribution::Base,
+        }
+    }
+
+    /// Attach one activated mana ability (`cost` -> `produced`) to a fresh
+    /// battlefield object at ability index 0. Single builder for the
+    /// self-sacrifice cheap-gate fixtures, so each test below states only the
+    /// axis it actually varies.
+    fn spawn_mana_source(
+        state: &mut GameState,
+        card: u64,
+        player: PlayerId,
+        name: &str,
+        cost: AbilityCost,
+        produced: ManaProduction,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card),
+            player,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(cost);
+        Arc::make_mut(&mut state.objects.get_mut(&id).unwrap().abilities).push(def);
+        id
+    }
+
+    /// CR 118.3: install a global "players can't sacrifice a creature to pay a
+    /// cost" static (Yasharn class) on its own battlefield permanent. Fixture
+    /// shape mirrors `sacrifice_mana_cost_rejects_prohibited_selected_permanent`.
+    fn install_cant_sacrifice_creature_static(state: &mut GameState, card: u64, player: PlayerId) {
+        let lock = create_object(
+            state,
+            CardId(card),
+            player,
+            "Cost Lock".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&lock)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantPayCost {
+                who: ProhibitionScope::AllPlayers,
+                cost: CostPaymentProhibition::Sacrifice {
+                    filter: TargetFilter::Typed(TypedFilter::creature()),
+                },
+            }));
+    }
+
+    /// CR 111.10a + CR 701.21a: A Treasure's `Composite{{Tap, Sacrifice this}}`
+    /// mana cost IS conclusively decided without simulating. The sacrifice target
+    /// is the ability's own source, so — behind the two state-aware guards in
+    /// `legality_simulation_is_redundant` — it is exactly as deterministic as the
+    /// bare `{T}` cost the cheap gate already skips.
+    ///
+    /// A(b), **rewritten**: this test previously pinned the pre-fix `clone >= 1`
+    /// behavior, which is the behavior being changed.
+    ///
+    /// REVERT-PROBE: drop the `has_unambiguous_self_sacrifice_component` disjunct
+    /// from `legality_simulation_is_redundant` and `state_clone_for_legality`
+    /// returns to 1 while `activatable` stays true.
     #[test]
-    fn composite_tap_sacrifice_still_simulates() {
+    fn composite_tap_self_sacrifice_skips_legality_clone() {
         let mut state = GameState::new_two_player(42);
         let treasure =
             make_any_color_treasure(&mut state, 9301, PlayerId(0), ManaColor::ALL.to_vec());
         let def = state.objects.get(&treasure).unwrap().abilities[0].clone();
 
-        crate::game::perf_counters::reset();
+        flush_and_reset(&mut state);
         let activatable = can_activate_mana_ability_now(&state, PlayerId(0), treasure, 0, &def);
         let snap = crate::game::perf_counters::snapshot();
 
         assert!(
             activatable,
-            "an untapped Treasure with a legal self-sacrifice is activatable"
+            "an untapped Treasure with a legal self-sacrifice is activatable \
+             (positive reach-guard: a 0-clone count is meaningless if the source \
+             was rejected upstream by the readiness gate)"
+        );
+        assert_eq!(
+            snap.state_clone_for_legality, 0,
+            "a whole-tree choice-free self-sacrifice cost is conclusively payable \
+             (CR 111.10a + CR 701.21a) — no legality clone"
+        );
+    }
+
+    /// CR 111.10c: Gold's tapless `Sacrifice this token: Add one mana of any
+    /// color` also skips the clone. The design deliberately composes
+    /// `has_unambiguous_self_sacrifice_component` (which requires a self-sacrifice
+    /// component to be present) rather than the `{T}`/`{Q}` anchor, so the tapless
+    /// half of the class is in — a *tapped* Gold token genuinely can still be
+    /// sacrificed for mana.
+    ///
+    /// REVERT-PROBE: re-anchor the fast path on `has_tap_component` and this goes
+    /// red while `composite_tap_self_sacrifice_skips_legality_clone` stays green.
+    #[test]
+    fn tapless_self_sacrifice_skips_legality_clone() {
+        let mut state = GameState::new_two_player(42);
+        let gold = spawn_mana_source(
+            &mut state,
+            9310,
+            PlayerId(0),
+            "Gold",
+            self_sacrifice_cost(),
+            any_one_color(QuantityExpr::Fixed { value: 1 }),
+        );
+        // CR 106.12: a tapped source with no {T} component is still payable —
+        // the readiness gate's tapped check is gated on `has_tap_component`.
+        state.objects.get_mut(&gold).unwrap().tapped = true;
+        let def = state.objects.get(&gold).unwrap().abilities[0].clone();
+
+        flush_and_reset(&mut state);
+        let activatable = can_activate_mana_ability_now(&state, PlayerId(0), gold, 0, &def);
+        let snap = crate::game::perf_counters::snapshot();
+
+        assert!(
+            activatable,
+            "a tapped Gold token can still pay its tapless self-sacrifice cost \
+             (CR 111.10c) — positive reach-guard for the clone count below"
+        );
+        assert_eq!(
+            snap.state_clone_for_legality, 0,
+            "a tapless self-sacrifice cost is conclusively payable — no legality clone"
+        );
+    }
+
+    /// **The direct discharge of "the fast path must not change the ANSWER."**
+    ///
+    /// For every shape the fast path now skips, the skipped simulation is run
+    /// explicitly and asserted to return the same `true` — so the design rests on
+    /// a measurement rather than on the assumption that the simulation would have
+    /// agreed. This is an equivalence test: it passes before and after the change
+    /// by construction, and it is the anti-vacuity backstop for U1/U2.
+    ///
+    /// Shapes (d) and (e) are the **Lotus Blossom class** (`lotus blossom`,
+    /// `glittering stockpile`, `shrine of boundless growth`): the produced amount
+    /// is `CountersOn { scope: Source }`, so the production tail reads the source
+    /// **after** `sacrifice_permanent` has already moved it to the graveyard —
+    /// last known information per CR 608.2h. (e) is the boundary where that read
+    /// yields zero. Either way the tail is infallible, so the legality answer
+    /// stays `true`; only the *amount* of mana can differ.
+    #[test]
+    fn self_sacrifice_fast_path_answer_matches_simulation() {
+        let assert_agrees =
+            |state: &GameState, id: ObjectId, def: &AbilityDefinition, label: &str| {
+                assert!(
+                    can_activate_mana_ability_by_simulation(state, PlayerId(0), id, 0, def),
+                    "{label}: the simulation the fast path skips must itself answer true"
+                );
+                assert!(
+                    can_activate_mana_ability_now(state, PlayerId(0), id, 0, def),
+                    "{label}: the fast path must report the simulation's answer"
+                );
+            };
+
+        // (a) Treasure — `{T}, Sacrifice this` -> one mana of any color.
+        let mut state = GameState::new_two_player(42);
+        let treasure =
+            make_any_color_treasure(&mut state, 9320, PlayerId(0), ManaColor::ALL.to_vec());
+        let def = state.objects.get(&treasure).unwrap().abilities[0].clone();
+        crate::game::layers::flush_layers(&mut state);
+        assert_agrees(&state, treasure, &def, "Treasure {T} + self-sacrifice");
+
+        // (b) Gold — tapless `Sacrifice this`.
+        let mut state = GameState::new_two_player(42);
+        let gold = spawn_mana_source(
+            &mut state,
+            9321,
+            PlayerId(0),
+            "Gold",
+            self_sacrifice_cost(),
+            any_one_color(QuantityExpr::Fixed { value: 1 }),
+        );
+        let def = state.objects.get(&gold).unwrap().abilities[0].clone();
+        crate::game::layers::flush_layers(&mut state);
+        assert_agrees(&state, gold, &def, "Gold tapless self-sacrifice");
+
+        // (c) Colorless production — no color prompt, so the simulation runs the
+        // whole post-sacrifice production tail instead of parking on a choice.
+        let mut state = GameState::new_two_player(42);
+        let scion = spawn_mana_source(
+            &mut state,
+            9322,
+            PlayerId(0),
+            "Eldrazi Scion",
+            self_sacrifice_cost(),
+            ManaProduction::Colorless {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        );
+        let def = state.objects.get(&scion).unwrap().abilities[0].clone();
+        crate::game::layers::flush_layers(&mut state);
+        assert_agrees(&state, scion, &def, "colorless self-sacrifice production");
+
+        // (d) CR 608.2h — source-referential produced amount, counters PRESENT.
+        for (counters, label) in [
+            (3u32, "Lotus Blossom class, 3 petal counters"),
+            (0u32, "Lotus Blossom class, ZERO petal counters"),
+        ] {
+            let mut state = GameState::new_two_player(42);
+            let blossom = spawn_mana_source(
+                &mut state,
+                9323,
+                PlayerId(0),
+                "Lotus Blossom",
+                tap_and_self_sacrifice_cost(),
+                any_one_color(QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(CounterType::Generic("petal".to_string())),
+                    },
+                }),
+            );
+            if counters > 0 {
+                state
+                    .objects
+                    .get_mut(&blossom)
+                    .unwrap()
+                    .counters
+                    .insert(CounterType::Generic("petal".to_string()), counters);
+            }
+            let def = state.objects.get(&blossom).unwrap().abilities[0].clone();
+            crate::game::layers::flush_layers(&mut state);
+            assert_agrees(&state, blossom, &def, label);
+        }
+    }
+
+    /// CR 701.21a: a **non-self** `Sacrifice` target stays OUT of the fast path —
+    /// a legal victim may not exist, so its simulation is load-bearing. Phyrexian
+    /// Altar shape, with a legal victim on the board so the readiness gate passes
+    /// and the decision seam is genuinely reached.
+    ///
+    /// The `activatable == true` assertion is the paired positive control: it
+    /// proves readiness passed, so `>= 1` measures the fast path declining rather
+    /// than an upstream rejection.
+    #[test]
+    fn non_self_sacrifice_mana_cost_still_simulates() {
+        let mut state = GameState::new_two_player(42);
+        let altar = spawn_mana_source(
+            &mut state,
+            9330,
+            PlayerId(0),
+            "Phyrexian Altar",
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Tap,
+                    AbilityCost::Sacrifice(SacrificeCost::count(
+                        TargetFilter::Typed(TypedFilter::creature()),
+                        1,
+                    )),
+                ],
+            },
+            any_one_color(QuantityExpr::Fixed { value: 1 }),
+        );
+        let victim = create_object(
+            &mut state,
+            CardId(9331),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&victim)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let def = state.objects.get(&altar).unwrap().abilities[0].clone();
+
+        flush_and_reset(&mut state);
+        let activatable = can_activate_mana_ability_now(&state, PlayerId(0), altar, 0, &def);
+        let snap = crate::game::perf_counters::snapshot();
+
+        assert!(
+            activatable,
+            "a legal victim is on the board, so readiness passes and the decision \
+             seam is really reached (positive control for the clone count)"
         );
         assert!(
             snap.state_clone_for_legality >= 1,
-            "a Composite with a Sacrifice component must still simulate (CR 601.2g)"
+            "a non-self Sacrifice target must still simulate — the victim's \
+             existence is not settled by the cost's AST shape"
+        );
+    }
+
+    /// **Guard 1 — CR 601.2g.** A permanent already committed to a pending
+    /// spell's additional sacrifice cost is reserved: paying this ability's cost
+    /// would error at `continue_mana_ability_cost_payment_in_node`, so the fast
+    /// path must decline and let the simulation report `false`.
+    ///
+    /// Multi-authority fixture: two definition-identical Treasures on one board,
+    /// exactly one reserved. A hoisted or board-global guard fails this test,
+    /// because the guard is keyed on `source_id`.
+    ///
+    /// **Non-vacuity:** the unreserved sibling reporting `true` is what proves the
+    /// reservation was really installed — `PendingCast::new` seeds
+    /// `deferred_sacrificed_permanents` **empty**, so a fixture that only installs
+    /// a `PendingCast` reserves nothing and both sources would report `true`.
+    ///
+    /// REVERT-PROBE: delete the `cost_sacrifices_reserved_source` term and the
+    /// reserved source flips to `true` with 0 clones.
+    #[test]
+    fn self_sacrifice_reserved_for_pending_cast_still_simulates() {
+        use crate::types::game_state::{DeferredSacrificeSelection, PendingCast};
+
+        let mut state = GameState::new_two_player(42);
+        let reserved =
+            make_any_color_treasure(&mut state, 9340, PlayerId(0), ManaColor::ALL.to_vec());
+        let sibling =
+            make_any_color_treasure(&mut state, 9341, PlayerId(0), ManaColor::ALL.to_vec());
+        let spell = create_object(
+            &mut state,
+            CardId(9342),
+            PlayerId(0),
+            "Some Spell".to_string(),
+            Zone::Stack,
+        );
+        let mut pending = PendingCast::new(
+            spell,
+            CardId(9342),
+            ResolvedAbility::new(
+                Effect::unimplemented("Some Spell", "test fixture"),
+                Vec::new(),
+                spell,
+                PlayerId(0),
+            ),
+            ManaCost::generic(1),
+        );
+        // CR 601.2g: `deferred_spell_sacrifice_reserved` matches on `object_id`
+        // alone, and `PendingCast::new` seeds this vector empty — the reservation
+        // must be pushed explicitly or the test passes vacuously.
+        pending
+            .deferred_sacrificed_permanents
+            .push(DeferredSacrificeSelection {
+                object_id: reserved,
+                filter: TargetFilter::Typed(TypedFilter::permanent()),
+            });
+        state.pending_cast = Some(Box::new(pending));
+
+        let def = state.objects.get(&reserved).unwrap().abilities[0].clone();
+
+        flush_and_reset(&mut state);
+        let reserved_activatable =
+            can_activate_mana_ability_now(&state, PlayerId(0), reserved, 0, &def);
+        let reserved_snap = crate::game::perf_counters::snapshot();
+
+        crate::game::perf_counters::reset();
+        let sibling_activatable =
+            can_activate_mana_ability_now(&state, PlayerId(0), sibling, 0, &def);
+        let sibling_snap = crate::game::perf_counters::snapshot();
+
+        assert!(
+            !reserved_activatable,
+            "a Treasure reserved for a pending spell's additional sacrifice cost \
+             can't also pay this mana ability's cost (CR 601.2g)"
+        );
+        assert!(
+            reserved_snap.state_clone_for_legality >= 1,
+            "the reserved source declines the fast path and simulates"
+        );
+        assert!(
+            sibling_activatable,
+            "the definition-identical UNRESERVED sibling on the same board is \
+             still activatable — this is the non-vacuity guard proving the \
+             reservation was really installed"
+        );
+        assert_eq!(
+            sibling_snap.state_clone_for_legality, 0,
+            "the guard is per-source_id, not board-global: the sibling still \
+             takes the fast path"
+        );
+    }
+
+    /// **Guard 2 — CR 118.3 + CR 601.2h, non-vacuously.** The readiness gate
+    /// evaluates `player_cant_sacrifice_as_cost` on the PRE-payment state, but the
+    /// payment re-evaluates it after this cost tree's `{T}` component has already
+    /// tapped the source, and a prohibition's object filter can read that tapped
+    /// bit (`FilterProp::Tapped`). So whenever any `CantPayCost` static is
+    /// functioning, the fast path declines and simulates.
+    ///
+    /// The static here filters **creatures**, which does not match the artifact
+    /// Treasure, so readiness still passes and the decision seam is genuinely
+    /// reached — the guard is measured, not inferred from an upstream rejection.
+    ///
+    /// REVERT-PROBE: delete the `static_kind_present` term and the main arm's
+    /// clone count drops to 0.
+    #[test]
+    fn cant_pay_cost_static_presence_declines_self_sacrifice_fast_path() {
+        // Main arm: the static IS present.
+        let mut state = GameState::new_two_player(42);
+        let treasure =
+            make_any_color_treasure(&mut state, 9350, PlayerId(0), ManaColor::ALL.to_vec());
+        install_cant_sacrifice_creature_static(&mut state, 9351, PlayerId(0));
+        let def = state.objects.get(&treasure).unwrap().abilities[0].clone();
+
+        flush_and_reset(&mut state);
+        // Non-vacuity FIRST: `static_kind_present` is an O(1) absence
+        // short-circuit, so an unflushed or mis-built board would let the
+        // assertions below pass for free.
+        assert!(
+            static_kind_present(&state, StaticModeKind::CantPayCost),
+            "the CantPayCost static must be functioning, or Guard 2 is untested"
+        );
+        let activatable = can_activate_mana_ability_now(&state, PlayerId(0), treasure, 0, &def);
+        let snap = crate::game::perf_counters::snapshot();
+
+        assert!(
+            activatable,
+            "the prohibition filters creatures, so an artifact Treasure is still \
+             activatable — readiness passed and the decision seam was reached"
+        );
+        assert!(
+            snap.state_clone_for_legality >= 1,
+            "Guard 2 declines the fast path while any CantPayCost static is present"
+        );
+
+        // Paired positive control: the identical board WITHOUT the static.
+        let mut control = GameState::new_two_player(42);
+        let treasure =
+            make_any_color_treasure(&mut control, 9350, PlayerId(0), ManaColor::ALL.to_vec());
+        let def = control.objects.get(&treasure).unwrap().abilities[0].clone();
+
+        flush_and_reset(&mut control);
+        assert!(
+            !static_kind_present(&control, StaticModeKind::CantPayCost),
+            "control board carries no CantPayCost static"
+        );
+        let activatable = can_activate_mana_ability_now(&control, PlayerId(0), treasure, 0, &def);
+        let snap = crate::game::perf_counters::snapshot();
+
+        assert!(activatable, "control Treasure is activatable");
+        assert_eq!(
+            snap.state_clone_for_legality, 0,
+            "without the static the same board takes the fast path — this is what \
+             makes the `>= 1` above a measurement rather than a broken board"
+        );
+    }
+
+    /// **The correctness guard: a genuinely prohibited self-sacrifice source must
+    /// report `false`.** The opposite fixture from Guard 2's test — here the
+    /// `CantPayCost { Sacrifice { creature } }` filter **matches** the source, so
+    /// the source really cannot pay.
+    ///
+    /// The answer must arrive from the **readiness gate** (`is_payable_for_mana_ability`
+    /// -> the `SelfRef` sacrifice arm's `!player_cant_sacrifice_as_cost` check),
+    /// BEFORE the cheap-gate decision is consulted. That is why
+    /// `state_clone_for_legality == 0` is load-bearing here: it pins that the
+    /// `false` came from readiness and not from a simulation. It goes red if
+    /// anyone reorders the decision seam ahead of the readiness gate.
+    ///
+    /// Both sub-cases carry a paired no-static control asserting `true`, so the
+    /// negative cannot pass because of summoning sickness, a tapped bit, or a
+    /// missing core type. **Deliberate asymmetry:** the control also reports 0
+    /// clones (it takes the fast path), so the discriminator between the arms is
+    /// `activatable`, never the counter.
+    #[test]
+    fn self_sacrifice_under_cant_pay_cost_static_reports_unactivatable() {
+        for (label, cost) in [
+            ("tapless self-sacrifice creature", self_sacrifice_cost()),
+            (
+                "tap-anchored self-sacrifice creature",
+                tap_and_self_sacrifice_cost(),
+            ),
+        ] {
+            let build = |with_static: bool| {
+                let mut state = GameState::new_two_player(42);
+                let source = spawn_mana_source(
+                    &mut state,
+                    9360,
+                    PlayerId(0),
+                    "Wild Cantor",
+                    cost.clone(),
+                    any_one_color(QuantityExpr::Fixed { value: 1 }),
+                );
+                {
+                    let obj = state.objects.get_mut(&source).unwrap();
+                    // CR 118.3: the prohibition's filter is applied to the
+                    // sacrificed object itself, so the source must be a creature
+                    // for the static to match it.
+                    obj.card_types.core_types.push(CoreType::Creature);
+                    // CR 302.6: keep the {T} sub-case out of the summoning-sickness
+                    // gate, so the only reason for a `false` is the prohibition.
+                    obj.summoning_sick = false;
+                }
+                if with_static {
+                    install_cant_sacrifice_creature_static(&mut state, 9361, PlayerId(0));
+                }
+                let def = state.objects.get(&source).unwrap().abilities[0].clone();
+                (state, source, def)
+            };
+
+            let (mut state, source, def) = build(true);
+            flush_and_reset(&mut state);
+            assert!(
+                static_kind_present(&state, StaticModeKind::CantPayCost),
+                "{label}: the CantPayCost static must be functioning, or this \
+                 negative assertion is vacuous"
+            );
+            let activatable = can_activate_mana_ability_now(&state, PlayerId(0), source, 0, &def);
+            let snap = crate::game::perf_counters::snapshot();
+
+            assert!(
+                !activatable,
+                "{label}: a creature under a `can't sacrifice a creature to pay a \
+                 cost` static can't pay its own self-sacrifice mana cost (CR 118.3)"
+            );
+            assert_eq!(
+                snap.state_clone_for_legality, 0,
+                "{label}: the `false` must come from the readiness gate, BEFORE \
+                 the cheap-gate decision — not from a legality simulation"
+            );
+
+            let (mut control, source, def) = build(false);
+            flush_and_reset(&mut control);
+            assert!(
+                !static_kind_present(&control, StaticModeKind::CantPayCost),
+                "{label}: control board carries no CantPayCost static"
+            );
+            let activatable = can_activate_mana_ability_now(&control, PlayerId(0), source, 0, &def);
+            assert!(
+                activatable,
+                "{label}: without the static the SAME source is activatable — this \
+                 is what proves the `false` above is caused by the prohibition and \
+                 not by sickness, a tapped bit, or a missing core type"
+            );
+        }
+    }
+
+    /// **CR 616.1 — the replacement disposition, tested rather than asserted.**
+    /// A "would be put into a graveyard" `Moved` replacement applies to the
+    /// sacrifice's inner battlefield -> graveyard move, so `sacrifice_permanent`
+    /// returns `NeedsReplacementChoice`. The self-sacrifice payment arm maps that
+    /// to `Ok(ManaAbilityPaymentProgress::Paused)`, which the payment loop returns
+    /// as `Ok` — so the simulation reports `true`, the same answer the fast path
+    /// reports. A replacement makes the payment **pause**, never **fail**.
+    ///
+    /// **Reach-guard first, and it is mandatory:** without it the test would pass
+    /// on a replacement definition that never matched, which is the exact failure
+    /// mode this row exists to rule out.
+    #[test]
+    fn self_sacrifice_with_graveyard_replacement_matches_simulation() {
+        use crate::types::ability::{ReplacementDefinition, ReplacementMode};
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let treasure =
+            make_any_color_treasure(&mut state, 9370, PlayerId(0), ManaColor::ALL.to_vec());
+        let leyline = create_object(
+            &mut state,
+            CardId(9371),
+            PlayerId(0),
+            "Leyline of the Void".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&leyline)
+            .unwrap()
+            .replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::Moved)
+            .destination_zone(Zone::Graveyard)
+            .mode(ReplacementMode::Optional { decline: None })]
+        .into();
+        let def = state.objects.get(&treasure).unwrap().abilities[0].clone();
+        crate::game::layers::flush_layers(&mut state);
+
+        // Reach-guard: prove on a throwaway clone that the definition genuinely
+        // intercepts this sacrifice's inner graveyard move.
+        let mut probe = state.clone();
+        let outcome =
+            sacrifice::sacrifice_permanent(&mut probe, treasure, PlayerId(0), &mut Vec::new())
+                .expect("sacrificing an on-battlefield permanent must not error");
+        assert!(
+            matches!(
+                outcome,
+                sacrifice::SacrificeOutcome::NeedsReplacementChoice(_)
+            ),
+            "the graveyard-move replacement must really apply (CR 616.1), or the \
+             equivalence below would be asserted on a replacement that never fired"
+        );
+
+        assert!(
+            can_activate_mana_ability_by_simulation(&state, PlayerId(0), treasure, 0, &def),
+            "a CR 616.1 replacement makes the simulated payment PAUSE, not fail — \
+             `activate_mana_ability` still returns Ok"
+        );
+        assert!(
+            can_activate_mana_ability_now(&state, PlayerId(0), treasure, 0, &def),
+            "the fast path reports the same answer, so no guard is needed for the \
+             replacement axis"
         );
     }
 
@@ -8562,7 +9264,7 @@ mod tests {
     /// and EffectCost an arbitrary effect, so these are asserted at the
     /// classifier/wrapper level rather than as full runtime cards; the runtime
     /// "falls through to simulate" path itself is exercised by
-    /// `composite_tap_sacrifice_still_simulates` (A(b)) and
+    /// `non_self_sacrifice_mana_cost_still_simulates` (A(b)) and
     /// `filter_land_composite_still_activatable_via_simulation` (C).
     #[test]
     fn cheap_gate_hostile_costs_must_simulate() {

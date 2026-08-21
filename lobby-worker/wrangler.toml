@@ -1,7 +1,7 @@
 # Cloudflare Worker + Durable Object for the official phase.rs lobby broker.
 #
 # The DO body (src/lobby-do.ts) is a thin imperative shell around the compiled
-# Rust `lobby-broker` core (lobby-worker/broker-wasm -> src/broker-wasm-pkg).
+# Rust `lobby-broker` core (lobby-worker/broker-wasm -> broker-wasm-pkg).
 # All protocol parsing, dispatch, reservations, capacity caps, build-commit
 # gating, and the staleness reaper live in Rust — the SAME code phase-server
 # runs natively — so the two deployments behave identically by construction.
@@ -12,10 +12,38 @@ compatibility_date = "2026-05-01"
 
 # Build the Rust broker to WASM (+ wasm-bindgen glue) before bundling. wrangler
 # runs this on `wrangler deploy` and `wrangler dev`; the generated glue under
-# src/broker-wasm-pkg/ is gitignored and regenerated. Requires the wasm32 target,
+# broker-wasm-pkg/ is gitignored and regenerated. Requires the wasm32 target,
 # wasm-bindgen-cli (0.2.121), and wasm-opt — the release workflow sets these up.
+#
+# Two rules keep `wrangler dev` from rebuilding itself in a loop. Both are
+# load-bearing:
+#
+#   1. The glue lands in broker-wasm-pkg/ NEXT TO src/, never inside it.
+#      wrangler re-runs this command whenever watch_dir changes, so output
+#      written into a watched directory retriggers the watcher that produced
+#      it. That is an unbounded loop, not merely a slow start. Keep any future
+#      codegen out of the watched tree for the same reason.
+#   2. watch_dir names the Rust build inputs, rather than the default ./src.
+#      This includes the standalone crate, both path dependencies, and the
+#      workspace/config inputs their manifests inherit. Worker TypeScript still
+#      hot-reloads: wrangler watches the bundle's module graph for that,
+#      independently. The only thing this suppresses is a pointless wasm
+#      rebuild on every .ts save.
 [build]
 command = "bash ../scripts/build-broker-wasm.sh release"
+watch_dir = [
+  "broker-wasm/src",
+  "broker-wasm/Cargo.toml",
+  "broker-wasm/Cargo.lock",
+  "broker-wasm/.cargo/config.toml",
+  "../crates/lobby-broker/src",
+  "../crates/lobby-broker/Cargo.toml",
+  "../crates/engine/src",
+  "../crates/engine/Cargo.toml",
+  "../Cargo.toml",
+  "../.cargo/config.toml",
+  "../scripts/build-broker-wasm.sh",
+]
 
 # Single global lobby = one DO instance addressed by a fixed name ("global").
 [[durable_objects.bindings]]

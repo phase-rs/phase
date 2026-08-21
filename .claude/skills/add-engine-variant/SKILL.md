@@ -20,7 +20,7 @@ If you find yourself about to type `pub enum Foo { ... NewVariant ... }` in `cra
 
 ### Stage 1: Existence verification (5-grep protocol)
 
-The variant might already exist under a different engine-native name. The mtgish AST and the engine vocabulary are not 1:1; the engine often has the concept under a different name.
+The variant might already exist under a different engine-native name. External data formats and the engine vocabulary are not 1:1; the engine often has the concept under a different name.
 
 > The canonical engine surface is `data/engine-inventory.json` (gitignored). Run `cargo engine-inventory` to (re)generate it locally before grepping for existing variants.
 
@@ -46,7 +46,7 @@ rg -n "<concept_keyword>" crates/engine/src/database/synthesis.rs
 **Stage 1 verdicts:**
 
 - **EXISTS_SAME_NAME**: variant exists. Stop. Wire to it.
-- **EXISTS_DIFFERENT_NAME**: concept exists under engine-native name (e.g., mtgish `CreateTriggerUntil` ↔ engine `Effect::CreateDelayedTrigger`). Stop. Map mtgish AST to the existing slot.
+- **EXISTS_DIFFERENT_NAME**: concept exists under an engine-native name (e.g., an external `CreateTriggerUntil` maps to engine `Effect::CreateDelayedTrigger`). Stop. Map the source data to the existing slot.
 - **EXISTS_AS_PARAMETER**: concept exists as a parameter value of a more general variant (e.g., "untapped" exists as `Tap { negated: true }`). Stop. Use the parameter form.
 - **DOES_NOT_EXIST**: proceed to Stage 2.
 
@@ -131,7 +131,7 @@ If you've made it through all three stages with EXTEND_OK / WITHIN_SECTION verdi
 ## Anti-patterns this skill prevents
 
 - "Audit said add variant X" → adding sibling without verification (the audit is wrong about a third of the time per session metrics)
-- "Engine doesn't have it" → without grepping for engine-native names (CreateTriggerUntil mtgish ↔ CreateDelayedTrigger engine)
+- "Engine doesn't have it" → without grepping for engine-native names (external CreateTriggerUntil ↔ CreateDelayedTrigger engine)
 - "Just one more sibling" → ignoring the sibling-cluster smell and compounding parameterization debt
 - "Unify under one type" → crossing CR rule sections and conflating runtime resolvers
 - "Type-only stub returning a placeholder true/false" → masks runtime correctness; pair with real evaluation logic before shipping. The historical example: `ReplacementCondition::CastViaKicker` initially shipped with a `=> true` stub that silently over-applied to non-kicked spells. Resolved by adding `Option<KickerVariant>` to the variant and tracking `SpellContext.kickers_paid` at cast resolution — the runtime now actually evaluates the gate. Always verify the resolver does what the variant doc-comment claims.
@@ -150,7 +150,6 @@ Refusing is the correct outcome when any stage fails. Coverage waits, architectu
 ## Related artifacts
 
 - Workspace `CLAUDE.md` — "Parameterize, don't proliferate" principle (the policy this skill enforces)
-- Crate `mtgish-import/CLAUDE.md` Rule §8 — audit-verdict filter discipline
 - Memory note `feedback_parameterize_dont_proliferate.md` — user directive recording this as a hard rule
 
 ## Inputs / outputs

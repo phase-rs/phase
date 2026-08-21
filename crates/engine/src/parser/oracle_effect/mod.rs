@@ -20459,13 +20459,16 @@ fn rebind_source_ref(qty: &mut QuantityRef, target: ObjectScope, rebind: SourceR
     if matches!(rebind, SourceRefRebind::PowerOrToughness)
         && !matches!(
             qty,
-            QuantityRef::Power { .. } | QuantityRef::Toughness { .. }
+            QuantityRef::Power { .. }
+                | QuantityRef::BasePower { .. }
+                | QuantityRef::Toughness { .. }
         )
     {
         return;
     }
     let scope = match qty {
         QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
         | QuantityRef::Toughness { scope }
         | QuantityRef::ObjectManaValue { scope }
         | QuantityRef::ObjectColorCount { scope }
@@ -22158,6 +22161,7 @@ pub(super) fn rebind_target_subject_object_scope(expr: &mut QuantityExpr) {
         QuantityExpr::Ref { qty } => {
             let scope = match qty {
                 QuantityRef::Power { scope }
+                | QuantityRef::BasePower { scope }
                 | QuantityRef::Toughness { scope }
                 | QuantityRef::ObjectManaValue { scope }
                 | QuantityRef::ObjectColorCount { scope }
@@ -22199,6 +22203,7 @@ pub(super) fn rebind_target_subject_object_scope(expr: &mut QuantityExpr) {
 fn rebind_anaphoric_ref(qty: &mut QuantityRef, target: ObjectScope) {
     let scope = match qty {
         QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
         | QuantityRef::Toughness { scope }
         | QuantityRef::ObjectManaValue { scope }
         | QuantityRef::ObjectColorCount { scope }
@@ -28499,16 +28504,20 @@ pub(crate) fn resolve_difference_anaphor_in_ability(
 }
 
 fn resolve_difference_anaphor_in_effect(effect: &mut Effect, bound: Option<&QuantityExpr>) {
-    // Recurse into the single-`Box<Effect>` wrapper (the draw-replacement
-    // substitute) so a placeholder nested inside it is reached. This is the only
-    // `Effect` variant that wraps a heterogeneous sub-`Effect`; every other
-    // nesting is via `AbilityDefinition` (`sub_ability`/`else_ability`), walked
-    // by the caller.
-    if let Effect::CreateDrawReplacement {
-        replacement_effect: inner,
-    } = effect
-    {
-        resolve_difference_anaphor_in_effect(inner, bound);
+    // Recurse into effect variants that carry a nested ability/effect so a
+    // placeholder inside the deferred body is reached. Ordinary ability-chain
+    // nesting (`sub_ability`/`else_ability`) is walked by the caller.
+    match effect {
+        Effect::CreateDrawReplacement {
+            replacement_effect: inner,
+        } => resolve_difference_anaphor_in_effect(inner, bound),
+        // CR 603.7a: a delayed trigger carries a complete ability definition;
+        // walk that definition so a comparison-derived binding reaches a
+        // deferred "the difference" in its eventual effect body.
+        Effect::CreateDelayedTrigger { effect: inner, .. } => {
+            resolve_difference_anaphor_in_ability(inner, bound)
+        }
+        _ => {}
     }
 
     // Only effects a count parser can emit the deferred placeholder onto ever
@@ -32415,24 +32424,25 @@ pub(crate) fn parse_effect_chain_ir(
         // target permanent, put another counter of that kind on it or remove one
         // from it" — Dramatist's Puppet, Quarry Hauler), whose target and choice
         // would likewise be dropped by the generic strip.
-        let (repeat_for, text, for_each_reference_target) = if try_parse_proliferate_target(&text)
-            .is_some()
-            || try_parse_for_each_counter_kind_adjust_target(&text).is_some()
-        {
-            (None, text, None)
-        } else if let Some(stripped) = strip_redundant_flip_win_quantifier(&text) {
-            // CR 705.2: "for each flip you won, <effect>" (Mirror March) — the flip
-            // loop (`finish_until_lose`) already runs the win effect once per win,
-            // so the quantifier is redundant. Drop it (no `repeat_for`) so the bare
-            // copy clause reaches `CopyTokenOf` instead of an `Unimplemented` "for"
-            // fallback (#5966).
-            (None, stripped, None)
-        } else {
-            let reference_target = for_each_clause_target_controller_filter(&text);
-            let (repeat_for, text) = super::clause_shell::peel_for_each_prefix(&text);
-            let reference_target = repeat_for.as_ref().and(reference_target);
-            (repeat_for, text, reference_target)
-        };
+        let (repeat_for, text, for_each_reference_target, repeat_for_difference) =
+            if try_parse_proliferate_target(&text).is_some()
+                || try_parse_for_each_counter_kind_adjust_target(&text).is_some()
+            {
+                (None, text, None, None)
+            } else if let Some(stripped) = strip_redundant_flip_win_quantifier(&text) {
+                // CR 705.2: "for each flip you won, <effect>" (Mirror March) — the flip
+                // loop (`finish_until_lose`) already runs the win effect once per win,
+                // so the quantifier is redundant. Drop it (no `repeat_for`) so the bare
+                // copy clause reaches `CopyTokenOf` instead of an `Unimplemented` "for"
+                // fallback (#5966).
+                (None, stripped, None, None)
+            } else {
+                let reference_target = for_each_clause_target_controller_filter(&text);
+                let (repeat_for, difference, text) =
+                    lower::strip_for_each_prefix_with_difference(&text);
+                let reference_target = repeat_for.as_ref().and(reference_target);
+                (repeat_for, text, reference_target, difference)
+            };
         let (text_without_where_x, local_where_x_expression) = {
             let text_where_x_lower = text.to_lowercase();
             let (without_where_x, where_x_expression) =
@@ -33350,7 +33360,10 @@ pub(crate) fn parse_effect_chain_ir(
             // before the trigger seam runs, breaking every difference-counter
             // trigger. A spell's difference operands always ride the same clause
             // (Hit the Mother Lode), so `Some(bound)` is the only case to handle.
-            if let Some(bound) = effective_condition.and_then(conditions::difference_expr) {
+            if let Some(bound) = effective_condition
+                .and_then(conditions::difference_expr)
+                .or(repeat_for_difference)
+            {
                 resolve_difference_anaphor_in_effect(&mut clause.effect, Some(&bound));
                 if let Some(sub) = clause.sub_ability.as_deref_mut() {
                     resolve_difference_anaphor_in_ability(sub, Some(&bound));

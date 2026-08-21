@@ -506,6 +506,7 @@ mod tests {
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         };
         let mut face = creature_face(2);
         face.static_abilities.push(static_haste);
@@ -600,6 +601,7 @@ mod tests {
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         };
         let face = CardFace {
             mana_cost: ManaCost::generic(3),

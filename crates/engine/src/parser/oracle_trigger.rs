@@ -2463,6 +2463,7 @@ fn remap_self_scope_to_event_source_in_quantity(expr: &mut QuantityExpr) {
 fn remap_self_scope_to_event_source_in_ref(qty: &mut QuantityRef) {
     let scope = match qty {
         QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
         | QuantityRef::Toughness { scope }
         | QuantityRef::ObjectManaValue { scope }
         | QuantityRef::ObjectColorCount { scope }

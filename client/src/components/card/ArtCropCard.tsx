@@ -8,10 +8,10 @@ import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
-import { faceDownMarkerRef } from "./faceDownMarker.ts";
+import { faceDownMarkerName, faceDownMarkerRef } from "./faceDownMarker.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { COUNTER_COLORS, computePTDisplay, hasOtherPrintedFace, shouldRenderCardBack, toRoman } from "../../viewmodel/cardProps.ts";
+import { COUNTER_COLORS, computePTDisplay, hasOtherPrintedFace, toRoman } from "../../viewmodel/cardProps.ts";
 import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 import { LoyaltyBadge } from "../ui/LoyaltyBadge.tsx";
 import { CardArtFallback } from "./CardArtFallback.tsx";
@@ -38,8 +38,13 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
   );
 
-  const renderCardBack = shouldRenderCardBack(obj);
-  const cardName = renderCardBack ? t("card.faceDownName") : (obj?.name ?? "");
+  // Same rule as `PermanentCard`: the tile always backs a face-down
+  // permanent (the live face is blanked per CR 708.2a); the controller's peek
+  // is the hover preview (#7547).
+  const renderCardBack = obj?.face_down === true;
+  const cardName = renderCardBack
+    ? (faceDownMarkerName(true, obj?.face_down_cause) ?? t("card.faceDownName"))
+    : (obj?.name ?? "");
   const imageLookup = obj
     ? cardImageLookup(obj)
     : { name: "", faceIndex: 0, oracleId: undefined, faceName: undefined };

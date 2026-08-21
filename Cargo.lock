@@ -1836,19 +1836,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mtgish-import"
-version = "0.59.0"
-dependencies = [
- "anyhow",
- "phase-engine",
- "serde",
- "serde_json",
- "serde_with",
- "syn 2.0.117",
- "tempfile",
-]
-
-[[package]]
 name = "muxado"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

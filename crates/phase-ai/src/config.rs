@@ -242,6 +242,10 @@ pub struct PolicyPenalties {
     pub gift_food_penalty: f64,
     /// Penalty for gifting opponent a tapped 1/1 Fish token.
     pub gift_fish_penalty: f64,
+    /// CR 702.174g: penalty for gifting an opponent an extra turn. Untuned — see
+    /// `UNTUNED_POLICY_PENALTY_FIELDS`.
+    #[serde(default = "default_gift_extra_turn_penalty")]
+    pub gift_extra_turn_penalty: f64,
     /// Minimum creature value (from evaluate_creature) to justify gift removal.
     pub worthy_target_threshold: f64,
 
@@ -560,6 +564,7 @@ impl Default for PolicyPenalties {
             gift_treasure_penalty: -1.5,
             gift_food_penalty: -1.0,
             gift_fish_penalty: -0.5,
+            gift_extra_turn_penalty: default_gift_extra_turn_penalty(),
             worthy_target_threshold: 3.0,
             overkill_base_penalty: -2.0,
             removal_quality_mismatch: -1.5,
@@ -641,6 +646,14 @@ fn default_graveyard_types_progress() -> f64 {
 
 fn default_wasted_cast_penalty() -> f64 {
     -8.0
+}
+/// The worst gift in the family — a whole untapping, draw and attack step for
+/// the opponent — but bounded by the policy's own score band. The pure-downside
+/// branch doubles this to -14.0; a seed past 7.5 would saturate its -15.0 clamp
+/// and erase that distinction. Shared by `Default` and `#[serde(default)]` so
+/// older `ai_tune` artifacts keep loading.
+fn default_gift_extra_turn_penalty() -> f64 {
+    -7.0
 }
 /// CR 104.3d. Shared by `Default` and `#[serde(default)]` so a tuning artifact
 /// written before this field existed still deserializes (`ai_tune` reads the
@@ -904,6 +917,13 @@ pub const ACTIVE_POLICY_PENALTY_FIELDS: &[&str] = &[
 /// Policy penalties intentionally not present in an active CMA-ES parameter
 /// vector yet.
 pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
+    (
+        "gift_extra_turn_penalty",
+        "CR 702.174g extra-turn gift downside — one shipped card (Perch Protection); \
+         seeded at the largest value the downside policy's band admits without its \
+         pure-downside doubling saturating, and awaiting a paired-seed ai-gate \
+         calibration.",
+    ),
     (
         "devotion_pip_progress",
         "CR 700.5 per-pip devotion progress weight — awaiting a paired-seed ai-gate calibration.",
@@ -1762,6 +1782,30 @@ mod tests {
         assert_eq!(
             PolicyPenalties::default().poison_clock_pressure,
             default_poison_clock_pressure(),
+            "Default and serde must share one source of truth"
+        );
+    }
+
+    #[test]
+    fn policy_penalties_load_pre_gift_extra_turn_artifact() {
+        let mut artifact = serde_json::to_value(PolicyPenalties::default()).unwrap();
+        let object = artifact.as_object_mut().expect("serializes as object");
+        object
+            .remove("gift_extra_turn_penalty")
+            .expect("field must be present before removal");
+        object.insert("wasted_cast_penalty".into(), serde_json::json!(-3.5));
+
+        let loaded: PolicyPenalties = serde_json::from_value(artifact)
+            .expect("a pre-gift-extra-turn artifact must still deserialize");
+        assert_eq!(loaded.wasted_cast_penalty, -3.5, "tuned value preserved");
+        assert_eq!(
+            loaded.gift_extra_turn_penalty,
+            default_gift_extra_turn_penalty(),
+            "absent field must fall back to the shared default"
+        );
+        assert_eq!(
+            PolicyPenalties::default().gift_extra_turn_penalty,
+            default_gift_extra_turn_penalty(),
             "Default and serde must share one source of truth"
         );
     }

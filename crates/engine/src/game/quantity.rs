@@ -558,6 +558,9 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
             | QuantityRef::Power {
                 scope: ObjectScope::Recipient,
             }
+            | QuantityRef::BasePower {
+                scope: ObjectScope::Recipient,
+            }
             | QuantityRef::Toughness {
                 scope: ObjectScope::Recipient,
             }
@@ -577,6 +580,9 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
                 ..
             } => true,
             QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            }
+            | QuantityRef::BasePower {
                 scope: ObjectScope::CostPaidObject,
             }
             | QuantityRef::Toughness {
@@ -651,6 +657,7 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
         QuantityExpr::Fixed { .. } => false,
         QuantityExpr::Ref { qty } => match qty {
             QuantityRef::Power { scope }
+            | QuantityRef::BasePower { scope }
             | QuantityRef::Toughness { scope }
             | QuantityRef::ObjectManaValue { scope }
             | QuantityRef::ObjectColorCount { scope }
@@ -691,6 +698,7 @@ pub(crate) fn quantity_expr_contains_scope(expr: &QuantityExpr, scope: ObjectSco
     fn ref_contains_scope(qty: &QuantityRef, scope: ObjectScope) -> bool {
         match qty {
             QuantityRef::Power { scope: s }
+            | QuantityRef::BasePower { scope: s }
             | QuantityRef::Toughness { scope: s }
             | QuantityRef::ObjectManaValue { scope: s }
             | QuantityRef::ObjectColorCount { scope: s }
@@ -836,6 +844,7 @@ pub(crate) fn quantity_expr_missing_resolution_only_referent(
         QuantityExpr::Fixed { .. } => false,
         QuantityExpr::Ref { qty } => match qty {
             QuantityRef::Power { scope }
+            | QuantityRef::BasePower { scope }
             | QuantityRef::Toughness { scope }
             | QuantityRef::ObjectManaValue { scope }
             | QuantityRef::ObjectColorCount { scope }
@@ -953,6 +962,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::TargetControllerCounter { .. }
         | QuantityRef::Variable { .. }
         | QuantityRef::Power { .. }
+        | QuantityRef::BasePower { .. }
         | QuantityRef::Intensity { .. }
         | QuantityRef::Toughness { .. }
         | QuantityRef::ObjectManaValue { .. }
@@ -1289,6 +1299,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::TargetControllerCounter { .. }
         | QuantityRef::Variable { .. }
         | QuantityRef::Power { .. }
+        | QuantityRef::BasePower { .. }
         | QuantityRef::Intensity { .. }
         | QuantityRef::Toughness { .. }
         | QuantityRef::ObjectManaValue { .. }
@@ -1548,10 +1559,16 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         }
 
         // ---- Single-object characteristic reads. ----
-        // CR 208.1 / CR 209.1.
-        QuantityRef::Power { .. } | QuantityRef::Toughness { .. } => {
+        // CR 208.1 / CR 209.1: power and toughness are single-object
+        // characteristic reads.
+        QuantityRef::Power { .. }
+        | QuantityRef::Toughness { .. } => {
             CharacteristicKinds::POWER_TOUGHNESS
         }
+        // CR 208.4b + CR 613.4b: BasePower reads the current base value after
+        // characteristic-defining and setting effects, before layer-7c
+        // modifications and counters.
+        QuantityRef::BasePower { .. } => CharacteristicKinds::POWER_TOUGHNESS,
         // CR 607.2b: power of a card in exile, read the same way.
         QuantityRef::ExiledCardPower { .. } => CharacteristicKinds::POWER_TOUGHNESS,
         // CR 202.3 / CR 107.4a.
@@ -1850,6 +1867,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::TargetControllerCounter { .. }
         | QuantityRef::Variable { .. }
         | QuantityRef::Power { .. }
+        | QuantityRef::BasePower { .. }
         | QuantityRef::Intensity { .. }
         | QuantityRef::Toughness { .. }
         | QuantityRef::ObjectManaValue { .. }
@@ -2113,8 +2131,8 @@ pub(crate) fn resolve_quantity_for_trigger_check(
 /// boundary rejects the condition rather than substituting the controller.
 ///
 /// Duration-timing-only scopes are rejected BEFORE delegating: because
-/// `IsMonarch { player }` is serde-constructible from `card-data.json` and from
-/// mtgish input, `PlayerScope::AnyTurn` / `SpecificPlayer` can reach this
+/// `IsMonarch { player }` is serde-constructible from `card-data.json`, so
+/// `PlayerScope::AnyTurn` / `SpecificPlayer` can reach this
 /// function from a malformed row, and `resolve_single_player_scope` answers
 /// those with `unreachable!()`. Returning `None` here makes a bad row fail
 /// closed instead of panicking the engine inside a trigger check. (Validating
@@ -3592,6 +3610,17 @@ fn resolve_ref(
             ability,
             |obj| obj.power,
             |lki| lki.power,
+        ),
+        // CR 208.4b + CR 613.4a-b: base power is the current layer-7a/7b
+        // value, before counters and other power-modifying effects in layer 7c.
+        QuantityRef::BasePower { scope } => resolve_object_pt(
+            state,
+            *scope,
+            ctx,
+            targets,
+            ability,
+            |obj| obj.layer_base_power.or(obj.base_power),
+            |lki| lki.base_power,
         ),
         // Digital-only Alchemy: read the object's current intensity. The reader
         // is the source itself (a spell on the stack or a permanent reading its

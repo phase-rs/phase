@@ -61,17 +61,9 @@ CARD_DATA = REPO_ROOT / "data" / "card-data.json"
 # hands it to the engine, so the population here is the whole workspace: every
 # `crates/*/src`. Scanning is a READ; nothing here modifies any crate.
 #
-# History, because the scope of this census has been wrong twice and each time the
-# count was right about the population it looked at and wrong about the question it
-# claimed to answer:
-#   - v1 scanned the engine only, and froze 6 producers while a 7th was live in
-#     mtgish-import.
-#   - v2 added mtgish-import by hand: 3 named crates of a 13-crate workspace. Full
-#     workspace was the intent, but `strip_noncode` had no branch for Rust RAW
-#     strings, so a workspace-wide scan died on `crates/draft-wasm/src/suggest.rs`.
-#     The 3-crate list was a workaround for a scanner ceiling, frozen as if it were
-#     a decision.
-#   - v3 (here): the raw-string ceiling is fixed, so the scope is the workspace.
+# The scanner covers the whole workspace, including raw-string-containing source
+# files, so the population is defined by the workspace glob rather than a
+# hand-maintained list.
 #
 # GLOBBED, not enumerated. A hand-written 13-tuple is a list that goes stale the
 # moment crate #14 is added -- which is precisely how v1 and v2 went wrong. The
@@ -107,12 +99,8 @@ SCOPES = tuple(sorted(str(p.relative_to(REPO_ROOT)) for p in (REPO_ROOT / "crate
 #   => Ok(ReplacementEvent::Draw)                          -> family `event-decode`
 #       database/forge/replacement.rs  (Result-returning, hence the Ok wrap)
 #
-#   ReplacementDefinition { .. event: ReplacementEvent::Draw .. }
-#                                                          -> family `struct-literal`
-#       mtgish-import/convert/replacement.rs::convert_replace_would_draw
-#
-# The struct-literal family is not hypothetical scaffolding for the one mtgish
-# site: `ReplacementDefinition { .. }` is a live idiom inside the engine too --
+# The `ReplacementDefinition { .. }` struct-literal family is a live idiom inside
+# the engine:
 # 50 literals across crates/engine/src (non-test files), 17 of them in
 # database/synthesis.rs, 13 of those in production code. None is a Draw today, so
 # the family has exactly one occupant -- but the next engine Draw written as a
@@ -131,9 +119,8 @@ SCOPES = tuple(sorted(str(p.relative_to(REPO_ROOT)) for p in (REPO_ROOT / "crate
 # which is why `STRUCT_LITERAL` below exists. Across `crates/` today: 429 `::new(`
 # sites and 91 `ReplacementDefinition {` sites, so neither shape is exotic.
 #
-# Naming this "the way a definition is built in Rust" is what the first cut of
-# this comment did, and it is the same category error that hid the mtgish
-# producer for a full review cycle: a comment that describes a family instead of
+# Naming this "the way a definition is built in Rust" is a category error: a
+# comment that describes a family instead of
 # a pattern invites the reader to believe the pattern covers the family.
 CONSTRUCTOR = re.compile(r"ReplacementDefinition::new\(\s*ReplacementEvent::Draw(Cards)?\b")
 
@@ -206,7 +193,6 @@ PRODUCERS_HEADER = """\
 #                        (from_str; the Forge importer). Mints a definition
 #                        without calling the constructor.
 # family=struct-literal  `ReplacementDefinition { .. event: ReplacementEvent::Draw .. }`
-#                        (mtgish-import). Same: no constructor call.
 #
 # SCOPE, stated exactly rather than implied: this scans the whole cargo workspace
 # -- every `crates/*/src` (13 crates today), globbed rather than enumerated so a
@@ -214,12 +200,9 @@ PRODUCERS_HEADER = """\
 # Cargo excludes from the workspace (`client/src-tauri`, `lobby-worker/broker-wasm`,
 # 4 `.rs` files); neither mentions `ReplacementEvent` at all.
 #
-# Earlier cuts scanned less and said so imprecisely. v1 scanned the engine only and
-# froze 6 producers while a 7th was live in mtgish-import. v2 hand-added
-# mtgish-import, reaching 3 of 13 crates -- not by choice but because the shared
-# scanner could not read raw strings and died on crates/draft-wasm. Both counts were
-# right about the population they looked at and wrong about the question they
-# claimed to answer.
+# The scanner covers the whole workspace, including raw-string-containing source
+# files, so the population is defined by the workspace glob rather than a
+# hand-maintained list.
 #
 # COVERAGE BOUNDARY, stated so this is not mistaken for "every possible source":
 # a `ReplacementDefinition` also comes back to life via its plain serde derive

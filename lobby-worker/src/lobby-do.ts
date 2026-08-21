@@ -17,8 +17,8 @@
 // Mirrors the engine -> engine-wasm -> React-adapter pattern: the WASM owns the
 // logic, the host language is a serialization boundary with zero game logic.
 
-import wasmModule from "./broker-wasm-pkg/broker_bg.wasm";
-import { initSync, protocol_version, WasmBroker } from "./broker-wasm-pkg/broker.js";
+import wasmModule from "../broker-wasm-pkg/broker_bg.wasm";
+import { initSync, protocol_version, WasmBroker } from "../broker-wasm-pkg/broker.js";
 import {
   classifyHelloGate,
   helloGateErrorMessage,

@@ -201,4 +201,86 @@ describe("useCardImage", () => {
     });
     expect(result.current.src).toBe("second.png");
   });
+  it("resolves a face-down marker from tokenImageRef alone — no name, no oracle id (#7549)", async () => {
+    // The #7535 marker request shape: cardName "" and only the ref naming the
+    // printing. The hook must NOT short-circuit on the empty name — that
+    // short-circuit is exactly what kept the merged marker feature from ever
+    // loading in the live client (the component tests stubbed this hook, so
+    // only a REAL-hook regression can hold the line).
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url === "/scryfall-token-images.json") {
+        return Promise.resolve(jsonResponse({
+          "oracle:8f92f8d7-ec89-426f-86dc-fbc259eb5559:morph": {
+            scryfall_id: "morph-token-dtk",
+            oracle_id: "8f92f8d7-ec89-426f-86dc-fbc259eb5559",
+            face_names: ["morph"],
+            faces: [{ normal: "https://img.example/morph.jpg", art_crop: "https://img.example/morph-art.jpg" }],
+            name: "Morph",
+            layout: "token",
+          },
+        }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    }));
+
+    const { useCardImage } = await import("../useCardImage");
+    const { result } = renderHook(() =>
+      useCardImage("", {
+        size: "normal",
+        isToken: true,
+        tokenImageRef: {
+          scryfall_id: "",
+          scryfall_oracle_id: "8f92f8d7-ec89-426f-86dc-fbc259eb5559",
+          face_name: "morph",
+          preset_id: "face-down-morph",
+        },
+      }),
+    );
+
+    await waitFor(() => expect(result.current.src).toBe("https://img.example/morph.jpg"));
+  });
+
+  it("fetches nothing for a token ref that names no printing — both ids empty (#7550 review)", async () => {
+    // A `TokenImageRef` is only a pointer when it carries at least one id.
+    // With BOTH `scryfall_id` and `scryfall_oracle_id` empty there is nothing
+    // to resolve — the request must short-circuit exactly like the empty-name
+    // case, not fall through to a `fetchTokenImageUrl("")` junk search.
+    const fetchTokenImageByRef = vi.fn().mockResolvedValue(null);
+    const fetchTokenImageUrl = vi.fn().mockResolvedValue(null);
+    vi.doMock("../../services/scryfall.ts", () => ({
+      fetchCardImageAsset: vi.fn(),
+      fetchCardImageAssetByOracleId: vi.fn(),
+      fetchCardImageByOracleId: vi.fn(),
+      fetchCardImageUrl: vi.fn(),
+      fetchTokenImageByRef,
+      fetchTokenImageUrl,
+      findPrintingById: vi.fn(),
+      getCardPrintings: vi.fn().mockResolvedValue([]),
+      isCardImageRotatedSync: vi.fn().mockReturnValue(false),
+      isLocaleArtReady: vi.fn().mockReturnValue(true),
+      loadLocaleArt: vi.fn().mockResolvedValue(new Map()),
+      resolveFaceIndexSync: vi.fn().mockReturnValue(null),
+      resolveOracleIdSync: vi.fn().mockReturnValue(null),
+      resolvePrintingImageUrl: vi.fn(),
+    }));
+
+    const { useCardImage } = await import("../useCardImage");
+    const { result } = renderHook(() =>
+      useCardImage("", {
+        size: "normal",
+        isToken: true,
+        tokenImageRef: {
+          scryfall_id: "",
+          scryfall_oracle_id: "",
+          preset_id: "face-down-morph",
+        },
+      }),
+    );
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.src).toBeNull();
+    expect(fetchTokenImageByRef).not.toHaveBeenCalled();
+    expect(fetchTokenImageUrl).not.toHaveBeenCalled();
+  });
+
 });

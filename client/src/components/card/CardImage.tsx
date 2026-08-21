@@ -5,7 +5,7 @@ import { useEngineCardData } from "../../hooks/useEngineCardData.ts";
 import type { TokenSearchFilters } from "../../services/scryfall.ts";
 import type { FaceDownCause, TokenImageRef } from "../../adapter/types.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
-import { faceDownMarkerRef } from "./faceDownMarker.ts";
+import { faceDownMarkerName, faceDownMarkerRef } from "./faceDownMarker.ts";
 import { getBevelBorderStyle } from "./cardFrame.ts";
 import { getCardImageSrcSetProps } from "./cardImageSrcSet.ts";
 import { CardArtFallback } from "./CardArtFallback.tsx";
@@ -135,7 +135,9 @@ export function CardImage({
   const renderedSrc = faceDown
     ? (imageError ? CARD_BACK_URL : (src ?? CARD_BACK_URL))
     : (src ?? "");
-  const renderedAlt = faceDown ? t("card.faceDownName") : cardName;
+  const renderedAlt = faceDown
+    ? (faceDownMarkerName(true, faceDownCause) ?? t("card.faceDownName"))
+    : cardName;
 
   return (
     <div className="relative inline-block w-fit select-none">

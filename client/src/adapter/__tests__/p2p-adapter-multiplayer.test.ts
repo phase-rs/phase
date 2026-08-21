@@ -1555,7 +1555,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
   });
 
   // Regression guard: the wire must carry legalActionsByObject, spellCosts,
-  // and engine-authored mana-payment shortcut actions
+  // engine-authored mana-payment shortcut actions, and derived copy views
   // across game_setup, state_update, and reconnect_ack. Dropping these fields
   // — even though the flat `legalActions` array still arrives — leaves guests
   // unable to click cards in their hand, because the frontend card-click
@@ -1578,6 +1578,8 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       "42": { generic: 1, colored: { R: 1 } },
     };
     const manaPaymentShortcutActions: GameAction[] = [{ type: "PassPriority" }];
+    const copiedPermanents = [42];
+    const legendCandidateIdentities = { "42": "TokenCopy" as const };
     // Cast via `unknown` because the hoisted mock's default return is inferred
     // as `{ actions: never[]; autoPassRecommended: boolean }`, which would
     // reject our richer payload. The adapter consumes the full
@@ -1590,7 +1592,14 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     (mocks.getViewerSnapshot as unknown as {
       mockImplementation: (fn: (pid: number) => Promise<unknown>) => void;
     }).mockImplementation(async (pid: number) => ({
-      state: { filteredFor: pid, players: [] },
+      state: {
+        filteredFor: pid,
+        players: [],
+        derived: {
+          copied_permanents: copiedPermanents,
+          legend_candidate_identities: legendCandidateIdentities,
+        },
+      },
       actions: [
         { type: "CastSpell", data: { object_id: 42, targets: [] } },
         { type: "PlayLand", data: { object_id: 43 } },
@@ -1619,6 +1628,12 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         legalActionsByObject?: Record<string, unknown>;
         spellCosts?: Record<string, unknown>;
         manaPaymentShortcutActions?: GameAction[];
+        state: {
+          derived?: {
+            copied_permanents?: number[];
+            legend_candidate_identities?: Record<string, string>;
+          };
+        };
       } =>
         typeof m === "object" && m !== null && (m as { type: string }).type === "game_setup",
     );
@@ -1626,6 +1641,8 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(setup!.legalActionsByObject).toEqual(legalActionsByObject);
     expect(setup!.spellCosts).toEqual(spellCosts);
     expect(setup!.manaPaymentShortcutActions).toEqual(manaPaymentShortcutActions);
+    expect(setup!.state.derived?.copied_permanents).toEqual(copiedPermanents);
+    expect(setup!.state.derived?.legend_candidate_identities).toEqual(legendCandidateIdentities);
     const playerToken = setup!.playerToken;
 
     // ── state_update ───────────────────────────────────────────────────────
@@ -1638,6 +1655,12 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         legalActionsByObject?: Record<string, unknown>;
         spellCosts?: Record<string, unknown>;
         manaPaymentShortcutActions?: GameAction[];
+        state: {
+          derived?: {
+            copied_permanents?: number[];
+            legend_candidate_identities?: Record<string, string>;
+          };
+        };
       } =>
         typeof m === "object" && m !== null && (m as { type: string }).type === "state_update",
     );
@@ -1645,6 +1668,8 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(stateUpdate!.legalActionsByObject).toEqual(legalActionsByObject);
     expect(stateUpdate!.spellCosts).toEqual(spellCosts);
     expect(stateUpdate!.manaPaymentShortcutActions).toEqual(manaPaymentShortcutActions);
+    expect(stateUpdate!.state.derived?.copied_permanents).toEqual(copiedPermanents);
+    expect(stateUpdate!.state.derived?.legend_candidate_identities).toEqual(legendCandidateIdentities);
 
     // ── reconnect_ack ──────────────────────────────────────────────────────
     g1.simulateClose();
@@ -1663,6 +1688,12 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         legalActionsByObject?: Record<string, unknown>;
         spellCosts?: Record<string, unknown>;
         manaPaymentShortcutActions?: GameAction[];
+        state: {
+          derived?: {
+            copied_permanents?: number[];
+            legend_candidate_identities?: Record<string, string>;
+          };
+        };
       } =>
         typeof m === "object" && m !== null && (m as { type: string }).type === "reconnect_ack",
     );
@@ -1670,6 +1701,8 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(ack!.legalActionsByObject).toEqual(legalActionsByObject);
     expect(ack!.spellCosts).toEqual(spellCosts);
     expect(ack!.manaPaymentShortcutActions).toEqual(manaPaymentShortcutActions);
+    expect(ack!.state.derived?.copied_permanents).toEqual(copiedPermanents);
+    expect(ack!.state.derived?.legend_candidate_identities).toEqual(legendCandidateIdentities);
   });
 
   it("keeps turn-controller auto-pass recommendations viewer-scoped on setup, update, and reconnect", async () => {

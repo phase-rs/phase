@@ -80,9 +80,10 @@ use super::{
     parse_spells_cast_this_way_graveyard_replacement_rider,
     publishes_aggregate_set_from_resolution, publishes_exiled_cause_at_resolution,
     publishes_tracked_set_from_resolution, rebind_tracked_aggregate_to_chain_set,
-    retarget_counter_additional_cost_to_target, rewrite_grant_parent_to_filter,
-    rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
-    stamp_delayed_returns, try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
+    resolve_difference_anaphor_in_ability, retarget_counter_additional_cost_to_target,
+    rewrite_grant_parent_to_filter, rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode,
+    rewrite_that_type_mana_instead, stamp_delayed_returns, try_fold_token_repeat_into_count,
+    wire_optional_cast_decline_fallback,
 };
 
 /// CR 601.2c: True when the assembled head chose one or more players at
@@ -1591,6 +1592,19 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             let d = &mut defs[bound_index];
                             {
                                 let mut else_def = else_def.clone();
+                                // CR 608.2c: both branches of a conditional inherit
+                                // comparison-derived "the difference" from the same
+                                // antecedent condition. The else chain is parsed
+                                // independently, so bind its deferred placeholder
+                                // before attaching it to the conditional definition.
+                                let resolution = d
+                                    .condition
+                                    .as_ref()
+                                    .and_then(super::conditions::difference_expr);
+                                resolve_difference_anaphor_in_ability(
+                                    &mut else_def,
+                                    resolution.as_ref(),
+                                );
                                 // CR 608.2c: when the gated clause acts on the
                                 // source (`SelfRef`), the else clause's "it" anaphor
                                 // is the same source — rebind its `ParentTarget`

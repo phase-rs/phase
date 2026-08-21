@@ -5777,6 +5777,7 @@ mod tests {
                 source_object: None,
                 bypass_beneficiary: None,
                 protection_does_not_remove: None,
+                room_door: None,
             };
             obj.static_definitions = vec![def].into();
         }
@@ -5900,6 +5901,7 @@ mod tests {
                 source_object: None,
                 bypass_beneficiary: None,
                 protection_does_not_remove: None,
+                room_door: None,
             };
             obj.static_definitions = vec![def].into();
         }

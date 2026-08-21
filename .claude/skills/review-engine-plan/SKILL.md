@@ -7,7 +7,46 @@ description: Review phase.rs engine, parser, AI, frontend, or rules implementati
 
 Review the plan as an architectural gate. Reject the plan if any required dimension is missing, superficial, or contradicted by code evidence.
 
+## Probe policy — you MAY and SHOULD run code
+
+**You are not a read-only reviewer.** Building and running throwaway probes is an expected part of this
+review, and it is the only instrument that can refute a plan whose prose is internally consistent but
+whose runtime behaviour differs. Static review structurally cannot catch a predicate that reads
+correctly and answers wrongly on a real board.
+
+Use an isolated `CARGO_TARGET_DIR` and the worktree's absolute path; never build in a checkout another
+process (e.g. Tilt) owns; serialize probe activity behind any active implementation executor. That
+isolation is why no brief needs to withhold builds from you — if one says "do not run cargo", use your
+own target dir and note it in your report.
+
 ## Required Checks
+
+0. **Probe the plan, don't just read it**
+   - The plan's central premise is yours to test, not merely to assess. Probe it against a real
+     committed fixture or dump where one exists — synthetic state proves a predicate reads a field, a
+     real board proves what it answers in production. A premise that only ever held on synthetic input
+     is the highest-value refutation available to you.
+   - The assertions worth probing are the ones whose falsity would change the design: a predicate's
+     runtime verdict, which route or branch is actually taken, an observed count or delta, "X never
+     happens", "this conjunct is what refuses". Where the plan asserts one of these from reading alone
+     and you doubt it, go measure it — the finding is the wrong assertion, never the missing paperwork.
+   - **Believe a probe only if it reached the code under test** — the plan's or your own. A zero with no
+     positive control showing the instrument fires is not a negative result, and a run that didn't exit
+     cleanly didn't measure anything. This is Check 9's paired positive reach-guard applied to the
+     plan's evidence rather than to its tests; the two recurring shapes are a census that reports zero
+     because the instrument never fired, and a discriminator whose verdict is really decided by an
+     upstream conjunct that dominates it.
+   - **Verify every board-census premise against a hostile fixture.** The shape that survives static
+     review is a census predicate that ignores an applicability/filter field and so matches objects
+     with nothing to do with the phenomenon. Run the census on a real fixture that *contains irrelevant
+     objects* and confirm the predicate actually consults the applicability field. A census matching
+     "almost everything" is a defect signature, not a result: **reject the premise** until that field
+     check is shown. A plausible positive result on friendly input does not discharge this.
+   - **A falsified snapshot claim is repaired by reformulation, not refresh.** When an edit falsifies a
+     recorded count, coordinate, or cardinality ("four sites", "two red flags", a per-section tally),
+     say so *and* require the durable form — a symbol name, "every X in §Y", or the command that
+     regenerates the figure. Asking only for a corrected number re-arms the same defect for the next
+     edit, which is how one stale claim becomes a multi-round loop.
 
 1. **Class vs card**
    - Identify how many cards or patterns the plan covers.

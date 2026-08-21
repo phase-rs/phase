@@ -232,8 +232,17 @@ export function formatTypeLine(cardTypes: CardType, keywords?: Keyword[]): strin
  * discriminant — it ships `layout_kind` on the serialized back face (the same
  * value `engine::game::transform::is_double_faced_permanent` keys on).
  */
-export function hasOtherPrintedFace(obj: Pick<GameObject, "back_face">): boolean {
-  return obj.back_face != null && obj.back_face.layout_kind !== "Flip";
+export function hasOtherPrintedFace(
+  obj: Pick<GameObject, "back_face" | "face_down">,
+): boolean {
+  // CR 712.16: a double-faced permanent can't be face down — a face-down
+  // permanent's `back_face` is its STORED REAL FACE (morph/manifest), not
+  // another printed face, so it must not raise the DFC affordance (#7547).
+  return (
+    obj.face_down !== true &&
+    obj.back_face != null &&
+    obj.back_face.layout_kind !== "Flip"
+  );
 }
 
 export function computePTDisplay(obj: GameObject): PTDisplay | null {

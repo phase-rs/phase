@@ -1479,20 +1479,16 @@ pub fn resolve_add(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (counter_type, counter_num) = match &ability.effect {
+    let (counter_type, count) = match &ability.effect {
         Effect::PutCounter {
             counter_type,
             count,
             ..
-        } => {
-            // CR 107.1b: Ability-context resolve so X-counter effects (e.g. "put X +1/+1 counters")
-            // pick up the caster-chosen X.
-            let resolved_count =
-                crate::game::quantity::resolve_quantity_with_targets(state, count, ability).max(0)
-                    as u32;
-            (counter_type.clone(), resolved_count)
-        }
-        _ => (CounterType::Plus1Plus1, 1),
+        } => (counter_type.clone(), count.clone()),
+        _ => (
+            CounterType::Plus1Plus1,
+            crate::types::ability::QuantityExpr::Fixed { value: 1 },
+        ),
     };
 
     // CR 601.2d: If distribution was assigned at cast time, apply per-target counter counts.
@@ -1514,9 +1510,27 @@ pub fn resolve_add(
             .collect()
     } else {
         let targets = resolve_defined_or_targets(state, ability);
+        // CR 608.2c: A quantity bound to the resolved recipient (such as
+        // Sovereign Okinec Ahau's "the difference") is evaluated separately
+        // for each object. Source-relative quantities remain one shared value.
+        let count_uses_recipient = crate::game::quantity::quantity_expr_uses_recipient(&count);
+        let counter_num_shared = (!count_uses_recipient).then(|| {
+            // CR 107.1b: Ability-context resolve preserves the announced X for
+            // source-relative counter quantities.
+            crate::game::quantity::resolve_quantity_with_targets(state, &count, ability).max(0)
+                as u32
+        });
         targets
             .into_iter()
             .map(|obj_id| {
+                let counter_num = if count_uses_recipient {
+                    crate::game::quantity::resolve_quantity_with_targets_and_recipient(
+                        state, &count, ability, obj_id,
+                    )
+                    .max(0) as u32
+                } else {
+                    counter_num_shared.expect("shared counter quantity must be resolved")
+                };
                 object_counter_addition(
                     ability.controller,
                     obj_id,

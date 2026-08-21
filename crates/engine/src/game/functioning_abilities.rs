@@ -186,6 +186,12 @@ pub fn is_self_referential_prohibition(def: &StaticDefinition) -> bool {
 /// remains the documented exception because it applies its own inline
 /// `active_zones` gate.
 pub(crate) fn static_functions_in_zone(obj: &GameObject, def: &StaticDefinition) -> bool {
+    // CR 709.5 + CR 709.5c: on the battlefield a locked Room half doesn't
+    // have its rules text — a door-stamped static functions only while its
+    // half is unlocked (single authority: `room::door_text_functions`).
+    if !crate::game::room::door_text_functions(obj, def.room_door) {
+        return false;
+    }
     match obj.zone {
         Zone::Command => obj.is_emblem || non_emblem_command_zone_static_functions(obj, def),
         zone => {
@@ -417,6 +423,15 @@ pub fn active_trigger_definitions<'a>(
             .iter_all()
             .enumerate()
             .filter(move |(_, entry)| {
+                // CR 709.5: on the battlefield a locked half's rules text does
+                // not function — a door-stamped trigger contributes only while
+                // its Room half is unlocked. (CR 709.5h needs no exception:
+                // the designation is granted BEFORE the unlock event is
+                // matched, so the just-unlocked half already passes.) Shared
+                // authority with the statics gathers: `room::door_text_functions`.
+                if !crate::game::room::door_text_functions(obj, entry.definition().room_door) {
+                    return false;
+                }
                 if zone == Zone::Command && !is_emblem {
                     return non_emblem_command_zone_trigger_functions(obj, entry.definition());
                 }
@@ -819,6 +834,47 @@ mod tests {
         let mut on_bf = make_obj(2, Zone::Battlefield);
         on_bf.static_definitions = vec![def].into();
         assert_eq!(active_static_definitions(&state, &on_bf).count(), 0);
+    }
+
+    /// CR 709.5 + CR 709.5c: a door-stamped static on a battlefield Room
+    /// functions only while its half is unlocked (uncast entry per CR 709.5d
+    /// leaves both halves locked); off the battlefield there are no lock
+    /// designations, so the stamp must not gate there. Exercised through
+    /// `active_static_definitions`; `game_functioning_statics` and
+    /// `battlefield_functioning_statics` share the same
+    /// `static_functions_in_zone` predicate.
+    #[test]
+    fn door_stamped_static_functions_only_while_its_half_is_unlocked() {
+        use crate::game::game_object::{RoomDoor, RoomUnlockState};
+
+        let state = new_state();
+        let mut obj = make_obj(1, Zone::Battlefield);
+        obj.static_definitions =
+            vec![StaticDefinition::new(StaticMode::Continuous).room_door(RoomDoor::Right)].into();
+        // Neither door unlocked (uncast entry, CR 709.5d): no rules text.
+        obj.room_unlocks = Some(RoomUnlockState::default());
+        assert_eq!(active_static_definitions(&state, &obj).count(), 0);
+        // The stamped half unlocked: its text functions.
+        obj.room_unlocks = Some(RoomUnlockState {
+            left_unlocked: false,
+            right_unlocked: true,
+        });
+        assert_eq!(active_static_definitions(&state, &obj).count(), 1);
+        // The OTHER half unlocked: the stamped half stays locked and silent.
+        obj.room_unlocks = Some(RoomUnlockState {
+            left_unlocked: true,
+            right_unlocked: false,
+        });
+        assert_eq!(active_static_definitions(&state, &obj).count(), 0);
+
+        // Off the battlefield the gate does not apply — both halves' text
+        // exists there (mirror of the trigger gate's zone scope).
+        let mut in_graveyard = make_obj(2, Zone::Graveyard);
+        in_graveyard.static_definitions = vec![StaticDefinition::new(StaticMode::Continuous)
+            .active_zones(vec![Zone::Graveyard])
+            .room_door(RoomDoor::Right)]
+        .into();
+        assert_eq!(active_static_definitions(&state, &in_graveyard).count(), 1);
     }
 
     #[test]

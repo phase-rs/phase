@@ -4618,10 +4618,18 @@ pub(super) fn match_unlock_door(
     if let GameEvent::RoomDoorUnlocked {
         player_id,
         object_id,
+        door,
         ..
     } = event
     {
-        *object_id == source_id && valid_player_matches(trigger, state, *player_id, source_context)
+        // CR 709.5h: an unlock ability triggers when ITS half gets the
+        // designation — a door-stamped trigger fires only for its own door's
+        // event (Moldering Gym's search must not re-fire when Weight Room
+        // unlocks). `None` (non-Room shapes, hand-built data) keeps the
+        // door-blind legacy match.
+        *object_id == source_id
+            && trigger.room_door.is_none_or(|stamped| stamped == *door)
+            && valid_player_matches(trigger, state, *player_id, source_context)
     } else {
         false
     }

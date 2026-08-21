@@ -5341,6 +5341,16 @@ pub enum BatchCompletion {
         /// must too. `None` for the kept-choice / dig paths, which emit their own
         /// `EffectResolved` before the pause (or rely on the continuation).
         emit_reveal_until_resolved: Option<ObjectId>,
+        /// CR 608.2c + CR 701.62a (#7467): a paused manifest-dread entry's
+        /// chosen object. The completion drain publishes it as the chain's
+        /// fresh tracked set — only once the entry has actually finished
+        /// (battlefield gate) and right before the parked consumer drains —
+        /// the deferred mirror of the synchronous `ManifestDreadChoice`
+        /// publish. Deliberately separate from `publish_tracked_set`, whose
+        /// presence doubles as the dig-vs-reveal ROUTING selector for the rest
+        /// pile. `None` for every non-manifest rest pile.
+        #[serde(default)]
+        manifested_for_continuation: Option<ObjectId>,
     },
     /// CR 608.2c + CR 616.1: The rest half of a deterministic mass Dig settled
     /// after a replacement choice. Resume its selected-card delivery only now,
@@ -6968,6 +6978,24 @@ pub enum ManaAbilityResume {
     CompanionToHand {
         player: PlayerId,
         cost: ManaCost,
+    },
+    /// CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b + CR 605.3b + CR 616.1:
+    /// A turn-face-up special action whose auto-tapped mana source paused on a
+    /// replacement-aware cost move. `cost` is the final cost locked at action
+    /// initiation — after the special-action reduction and after CR 107.3d's
+    /// `{X}` was concretized — so resumption cannot re-derive it against a board
+    /// that changed while the replacement choice was pending. `announced_x`
+    /// travels with it because CR 702.37f / CR 702.168e publish that value to the
+    /// permanent's own turn-face-up trigger, which fires after the payment
+    /// completes.
+    TurnFaceUp {
+        player: PlayerId,
+        object_id: ObjectId,
+        cost: ManaCost,
+        /// The announced value for a cost that contained X. `None` means the
+        /// cost had no X; `Some(0)` remains a real CR 107.3d announcement and
+        /// binds that zero to the resulting turn-face-up trigger.
+        announced_x: Option<u32>,
     },
     /// CR 116.2c + CR 605.3b + CR 616.1: A pay-to-end special action whose
     /// auto-tapped mana source paused on a replacement-aware cost move. `cost`
@@ -10406,6 +10434,47 @@ fn migrate_legacy_tap_effect(effect: &mut serde_json::Value) {
     );
     effect.insert("scope".to_string(), serde_json::json!({ "type": scope }));
     effect.insert("state".to_string(), serde_json::json!({ "type": state }));
+}
+
+/// Maps the pre-Option turn-face-up continuation wire shape onto the typed
+/// `Option<u32>` representation. A legacy `cost_had_x: false` plus zero was
+/// never an X announcement, while `true` plus zero was.
+fn migrate_legacy_turn_face_up_resume(value: &mut serde_json::Value) -> Result<(), String> {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                migrate_legacy_turn_face_up_resume(value)?;
+            }
+        }
+        serde_json::Value::Object(object) => {
+            if let Some(resume) = object.get_mut("TurnFaceUp") {
+                let fields = resume
+                    .as_object_mut()
+                    .ok_or_else(|| "legacy TurnFaceUp resume must be an object".to_string())?;
+                if let Some(cost_had_x) = fields.remove("cost_had_x") {
+                    let cost_had_x = cost_had_x.as_bool().ok_or_else(|| {
+                        "legacy TurnFaceUp resume cost_had_x must be a boolean".to_string()
+                    })?;
+                    let announced_x = fields
+                        .remove("announced_x")
+                        .unwrap_or_else(|| serde_json::Value::from(0));
+                    fields.insert(
+                        "announced_x".to_string(),
+                        if cost_had_x {
+                            announced_x
+                        } else {
+                            serde_json::Value::Null
+                        },
+                    );
+                }
+            }
+            for value in object.values_mut() {
+                migrate_legacy_turn_face_up_resume(value)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn delayed_trigger_install_command(
@@ -17648,6 +17717,7 @@ impl GameStateDecode {
                 ),
             )?;
         }
+        migrate_legacy_turn_face_up_resume(&mut value)?;
         let mut state = Self::materialize_prepared(value)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         validate_trigger_firing_coherence(&state)?;
@@ -17678,6 +17748,7 @@ impl GameStateDecode {
         )?;
         migrate_legacy_mana_target_roles(value)?;
         migrate_legacy_tap_effects(value);
+        migrate_legacy_turn_face_up_resume(value)?;
         Ok(())
     }
 
@@ -20306,8 +20377,11 @@ impl GameState {
                 keywords: object.keywords.clone(),
                 power: object.power,
                 toughness: object.toughness,
-                base_power: object.base_power,
-                base_toughness: object.base_toughness,
+                // CR 208.4b + CR 613.4a-b: preserve current base P/T after
+                // characteristic-defining and setting effects for this event
+                // snapshot; counters and later modifiers are excluded.
+                base_power: object.layer_base_power.or(object.base_power),
+                base_toughness: object.layer_base_toughness.or(object.base_toughness),
                 mana_value: object.effective_mana_value(),
                 counters: object.counters.clone(),
                 is_token: object.is_token,
@@ -25057,6 +25131,34 @@ mod tests {
             serde_json::json!({ "type": "Untap" }),
             "only serialized Effect payloads are migrated"
         );
+    }
+
+    #[test]
+    fn legacy_turn_face_up_resume_preserves_none_and_zero() {
+        let mut legacy = serde_json::json!({
+            "no_x": {
+                "TurnFaceUp": {
+                    "cost_had_x": false,
+                    "announced_x": 0
+                }
+            },
+            "zero_x": {
+                "TurnFaceUp": {
+                    "cost_had_x": true,
+                    "announced_x": 0
+                }
+            }
+        });
+
+        migrate_legacy_turn_face_up_resume(&mut legacy).expect("legacy shape migrates");
+
+        assert_eq!(
+            legacy["no_x"]["TurnFaceUp"]["announced_x"],
+            serde_json::Value::Null
+        );
+        assert_eq!(legacy["zero_x"]["TurnFaceUp"]["announced_x"], 0);
+        assert!(legacy["no_x"]["TurnFaceUp"].get("cost_had_x").is_none());
+        assert!(legacy["zero_x"]["TurnFaceUp"].get("cost_had_x").is_none());
     }
 
     #[test]

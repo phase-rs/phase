@@ -67,6 +67,38 @@ pub(in crate::game) fn priority_unlock_room_door_announcements(
         .collect()
 }
 
+/// CR 709.5j + CR 709.5d: The door (printed half) the object's LIVE face is.
+/// `modal_back_face` records that the right (second printed) half was cast —
+/// the same mapping CR 709.5d entry-unlocking uses. Single authority: the
+/// unlock-cost lookup and the door-text install both resolve through this.
+pub fn live_face_door(obj: &crate::game::game_object::GameObject) -> RoomDoor {
+    if obj.modal_back_face {
+        RoomDoor::Right
+    } else {
+        RoomDoor::Left
+    }
+}
+
+/// CR 709.5 + CR 709.5c: On the battlefield a locked half doesn't have its
+/// rules text, so a door-stamped definition (trigger or static) functions only
+/// while its half is unlocked — and stops again when that half is re-locked
+/// (CR 709.5g). `None` means the definition is not Room-half text: no gating.
+/// Off the battlefield there are no lock designations and both halves' text
+/// exists, so the gate applies only there. Single authority shared by the
+/// trigger iterator and every statics gather.
+pub(crate) fn door_text_functions(
+    obj: &crate::game::game_object::GameObject,
+    door: Option<RoomDoor>,
+) -> bool {
+    let Some(door) = door else {
+        return true;
+    };
+    if obj.zone != Zone::Battlefield {
+        return true;
+    }
+    obj.room_unlocks.unwrap_or_default().is_unlocked(door)
+}
+
 /// CR 709.5j: A "door" is a half of a Room permanent. A Room has a left door
 /// always and a right door only if it has a back face (the second half of the
 /// split card). Returns the doors that actually exist for `object_id`.

@@ -106,6 +106,35 @@ describe("StackEntry", () => {
     expect(screen.queryByAltText("2")).not.toBeInTheDocument();
   });
 
+  it("raises its entry after a long press", () => {
+    vi.useFakeTimers();
+    const onHoverChange = vi.fn();
+    const entry = buildStackEntry({ id: 77, source_id: 42 });
+
+    render(
+      <StackEntry
+        entry={entry}
+        index={0}
+        isTop
+        cardSize={{ width: 120, height: 168 }}
+        onHoverChange={onHoverChange}
+      />,
+    );
+
+    fireEvent.pointerDown(document.querySelector('[data-stack-entry="77"]')!, {
+      button: 0,
+      clientX: 12,
+      clientY: 12,
+      isPrimary: true,
+      pointerId: 1,
+      pointerType: "touch",
+    });
+    act(() => vi.advanceTimersByTime(500));
+
+    expect(onHoverChange).toHaveBeenCalledWith(true);
+    vi.useRealTimers();
+  });
+
   it("offers Revoke for an AllCopies yield after the source token has ceased", () => {
     // CR 400.7 + CR 704.5d: a ceased token is gone from `objects`, so the entry
     // has no live source object to read a card_id from — the menu must match the

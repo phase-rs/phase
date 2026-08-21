@@ -10421,6 +10421,7 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
     match qty {
         QuantityRef::CountersOn { scope, .. }
         | QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
         | QuantityRef::Intensity { scope }
         | QuantityRef::Toughness { scope }
         | QuantityRef::ObjectManaValue { scope }
@@ -13871,6 +13872,7 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
     match qty {
         // Object-axis refs: read the cost-paid object iff scoped to it.
         QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
         | QuantityRef::Toughness { scope }
         | QuantityRef::Intensity { scope }
         | QuantityRef::ObjectManaValue { scope }

@@ -3381,6 +3381,7 @@ fn quantity_ref_counts_population_matching(
         | QuantityRef::TargetControllerCounter { .. }
         | QuantityRef::Variable { .. }
         | QuantityRef::Power { .. }
+        | QuantityRef::BasePower { .. }
         | QuantityRef::Intensity { .. }
         | QuantityRef::Toughness { .. }
         | QuantityRef::ObjectManaValue { .. }
@@ -4249,6 +4250,7 @@ fn quantity_ref_references_demonstrative(qty: &QuantityRef) -> bool {
     use crate::types::ability::ObjectScope;
     let scope = match qty {
         QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::BasePower { scope }
         | QuantityRef::Power { scope }
         | QuantityRef::Toughness { scope }
         | QuantityRef::CountersOn { scope, .. }
@@ -6650,6 +6652,25 @@ pub(crate) fn publish_fresh_tracked_set(
     state.tracked_object_sets.insert(set_id, affected_ids);
     state.chain_tracked_set_id = Some(set_id);
     set_id
+}
+
+/// CR 608.2c + CR 701.62a (#7467): publish `object_id` as the chain's fresh
+/// tracked set iff the parked continuation actually reads one and the object
+/// really sits on the battlefield — mirroring the resolver harvest's
+/// destination filter, so an entry replacement that redirected the card
+/// elsewhere publishes nothing. Shared by the two seams a manifest-dread
+/// creature can finish entering from: the synchronous `ManifestDreadChoice`
+/// arm and the paused-entry `RevealRestPile` completion.
+pub(crate) fn publish_battlefield_object_for_pending_continuation(
+    state: &mut GameState,
+    object_id: ObjectId,
+) {
+    let continuation_consumes_tracked_set = state
+        .active_ability_continuation()
+        .is_some_and(|continuation| chain_references_tracked_set(&continuation.chain));
+    if continuation_consumes_tracked_set && state.battlefield.contains(&object_id) {
+        publish_fresh_tracked_set(state, vec![object_id]);
+    }
 }
 
 /// CR 603.7 + CR 109.5: Returns `true` when the effect resolves an acting

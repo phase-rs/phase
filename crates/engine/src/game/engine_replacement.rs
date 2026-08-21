@@ -354,6 +354,9 @@ pub(super) fn handle_replacement_choice(
                 }
                 event @ ProposedEvent::TokenEntry { entry_ref, .. } => {
                     if state.has_post_replacement_drain() {
+                        state.waiting_for = WaitingFor::Priority {
+                            player: state.active_player,
+                        };
                         if let Some(waiting_for) = apply_pending_post_replacement_effect(
                             state,
                             Some(entry_ref),

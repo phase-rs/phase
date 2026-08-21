@@ -319,18 +319,19 @@ pub(crate) fn parse_superlative_property_head(
     Ok((input, (function, property)))
 }
 
-/// CR 208.1: Possessive pronoun introducing a creature's *own* stat in a
-/// self-referential P/T comparison — "its" (singular subject) or "their" (plural
-/// subject). Both refer to the candidate object itself, not the ability source.
+/// CR 208.1: Possessive phrase introducing a creature's *own* stat in a
+/// self-referential P/T comparison — "its", "their", or "that creature's".
+/// All refer to the candidate object itself, not the ability source.
 fn parse_pt_possessive(input: &str) -> OracleResult<'_, &str> {
-    alt((tag("its"), tag("their"))).parse(input)
+    alt((tag("its "), tag("their "), tag("that creature's "))).parse(input)
 }
 
 /// CR 208.1: "toughness greater than <poss> power" → [`FilterProp::ToughnessGTPower`]
 /// and "power greater than <poss> base power" → [`FilterProp::PowerExceedsBase`].
 /// These are the self-referential P/T comparisons (a creature's own stat vs its
 /// own other stat), distinct from the numeric/quantity-threshold comparisons the
-/// rest of `parse_pt_comparison` handles. Accepts singular and plural possessives.
+/// rest of `parse_pt_comparison` handles. Accepts pronoun and demonstrative
+/// possessives.
 fn parse_self_referential_pt(input: &str) -> OracleResult<'_, FilterProp> {
     alt((
         value(
@@ -338,7 +339,7 @@ fn parse_self_referential_pt(input: &str) -> OracleResult<'_, FilterProp> {
             (
                 tag("toughness greater than "),
                 parse_pt_possessive,
-                tag(" power"),
+                tag("power"),
             ),
         ),
         value(
@@ -346,7 +347,7 @@ fn parse_self_referential_pt(input: &str) -> OracleResult<'_, FilterProp> {
             (
                 tag("power greater than "),
                 parse_pt_possessive,
-                tag(" base power"),
+                tag("base power"),
             ),
         ),
     ))
@@ -793,6 +794,16 @@ mod tests {
             }
         );
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_with_self_referential_base_power_demonstrative() {
+        // CR 208.4b: the demonstrative possessive names the candidate creature's
+        // base power, not the ability source's power.
+        let (rest, prop) =
+            parse_with_property("with power greater than that creature's base power").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(prop, FilterProp::PowerExceedsBase);
     }
 
     #[test]
