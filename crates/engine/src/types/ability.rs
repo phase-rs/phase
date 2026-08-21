@@ -11302,9 +11302,9 @@ pub enum LibraryPosition {
     },
 }
 
-/// CR 701.23a + CR 608.2c: Presentation metadata for a library-search choice.
-/// The engine supplies this because the continuation determines whether the
-/// selected cards have semantic order when the search resolves.
+/// CR 401.4 + CR 701.23a + CR 608.2c: Presentation metadata for a library-search
+/// choice. The engine supplies this because the continuation determines whether
+/// the owner may arrange the selected cards in one library position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SearchOrderingHint {
     #[default]

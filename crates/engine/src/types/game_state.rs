@@ -11422,8 +11422,8 @@ pub enum WaitingFor {
         /// AI candidate enumerator to prune illegal combinations.
         #[serde(default)]
         constraint: SearchSelectionConstraint,
-        /// CR 701.23a + CR 608.2c: Whether the selected cards have semantic
-        /// order in the search's continuation.
+        /// CR 401.4 + CR 701.23a + CR 608.2c: Whether the selected cards are
+        /// arranged in one library position by their owner in the continuation.
         #[serde(default)]
         ordering_hint: SearchOrderingHint,
         /// CR 701.23a + CR 608.2c: Split-destination metadata propagated from

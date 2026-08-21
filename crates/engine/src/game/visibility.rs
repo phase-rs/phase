@@ -3485,6 +3485,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn redacted_search_choice_preserves_ordering_hint() {
+        let mut state = GameState::new_two_player(42);
+        let card_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hidden Ordered Target".to_string(),
+            Zone::Library,
+        );
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            library_owner: Some(PlayerId(0)),
+            cards: vec![card_id],
+            count: 1,
+            reveal: false,
+            up_to: false,
+            allows_partial_find: false,
+            constraint: crate::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: crate::types::ability::SearchOrderingHint::OrderedToLibraryTop,
+            split: None,
+        };
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(1));
+
+        match filtered.waiting_for {
+            WaitingFor::SearchChoice {
+                cards,
+                ordering_hint,
+                ..
+            } => {
+                assert_eq!(cards, vec![ObjectId(0)]);
+                assert_eq!(
+                    ordering_hint,
+                    crate::types::ability::SearchOrderingHint::OrderedToLibraryTop
+                );
+            }
+            other => panic!("expected SearchChoice, got {other:?}"),
+        }
+    }
+
     /// CR 101.4a + CR 701.23i: In a three-player simultaneous library search,
     /// each selector sees only their own already-found cards and only the
     /// current searcher sees that search's candidates. The deferred delivery

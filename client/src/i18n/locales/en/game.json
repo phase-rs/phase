@@ -1511,7 +1511,12 @@
       "labelReturn": "Return ({{selected}}/{{count}})",
       "labelExile": "Exile ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
-      "orderTop": "Top"
+      "orderTop": "Top",
+      "orderSecond": "2nd",
+      "orderThird": "3rd",
+      "orderFourth": "4th",
+      "orderFifth": "5th",
+      "orderPosition": "Position {{position}}"
     },
     "drawnThisTurn": {
       "title": "Drawn This Turn",

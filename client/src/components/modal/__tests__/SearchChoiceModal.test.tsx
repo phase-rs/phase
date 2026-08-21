@@ -97,13 +97,12 @@ describe("SearchChoice modal", () => {
 
     render(<CardChoiceModal />);
 
-    const cardButtons = screen
-      .getAllByRole("button")
-      .filter((button) => !button.textContent?.includes("Confirm"));
-    for (const button of cardButtons) {
-      fireEvent.click(button);
+    const clickOrder = [46, 42, 45, 43, 44];
+    for (const id of clickOrder) {
+      fireEvent.click(screen.getByLabelText(new RegExp(`Card ${id}$`)).closest("button")!);
     }
 
+    expect(screen.getByLabelText(/Card 46$/).closest("button")).toHaveTextContent("Top");
     expect(screen.getByText("Top")).toBeInTheDocument();
     expect(screen.getByText("2nd")).toBeInTheDocument();
     expect(screen.getByText("3rd")).toBeInTheDocument();
@@ -113,7 +112,7 @@ describe("SearchChoice modal", () => {
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
     expect(dispatchMock).toHaveBeenCalledWith({
       type: "SelectCards",
-      data: { cards: cardIds },
+      data: { cards: clickOrder },
     });
   });
 

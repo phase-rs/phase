@@ -1467,7 +1467,12 @@
       "labelReturn": "Zurückgeben ({{selected}}/{{count}})",
       "labelExile": "Ins Exil ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
-      "orderTop": "Oben"
+      "orderTop": "Oben",
+      "orderSecond": "2.",
+      "orderThird": "3.",
+      "orderFourth": "4.",
+      "orderFifth": "5.",
+      "orderPosition": "Position {{position}}"
     },
     "drawnThisTurn": {
       "title": "Diesen Zug gezogen",

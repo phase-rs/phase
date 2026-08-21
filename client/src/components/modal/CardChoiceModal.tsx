@@ -1205,10 +1205,20 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
 }
 
 function formatTopdeckOrderLabel(index: number, t: TFunction<"game">): string {
-  if (index === 0) return t("cardChoice.effectZone.orderTop");
-  const position = index + 1;
-  const suffix = position === 2 ? "nd" : position === 3 ? "rd" : "th";
-  return `${position}${suffix}`;
+  switch (index) {
+    case 0:
+      return t("cardChoice.effectZone.orderTop");
+    case 1:
+      return t("cardChoice.effectZone.orderSecond");
+    case 2:
+      return t("cardChoice.effectZone.orderThird");
+    case 3:
+      return t("cardChoice.effectZone.orderFourth");
+    case 4:
+      return t("cardChoice.effectZone.orderFifth");
+    default:
+      return t("cardChoice.effectZone.orderPosition", { position: index + 1 });
+  }
 }
 
 function DrawnThisTurnTopdeckModal({

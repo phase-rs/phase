@@ -1467,7 +1467,12 @@
       "labelReturn": "Renvoyer ({{selected}}/{{count}})",
       "labelExile": "Exiler ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
-      "orderTop": "Dessus"
+      "orderTop": "Dessus",
+      "orderSecond": "2e",
+      "orderThird": "3e",
+      "orderFourth": "4e",
+      "orderFifth": "5e",
+      "orderPosition": "Position {{position}}"
     },
     "drawnThisTurn": {
       "title": "Piochées ce tour-ci",

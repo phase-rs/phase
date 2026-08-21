@@ -1467,7 +1467,12 @@
       "labelReturn": "Restituisci ({{selected}}/{{count}})",
       "labelExile": "Esilia ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
-      "orderTop": "Cima"
+      "orderTop": "Cima",
+      "orderSecond": "2º",
+      "orderThird": "3º",
+      "orderFourth": "4º",
+      "orderFifth": "5º",
+      "orderPosition": "Posizione {{position}}"
     },
     "drawnThisTurn": {
       "title": "Pescate questo turno",

@@ -2883,8 +2883,14 @@ pub(crate) fn should_propagate_parent_targets(
     ability: &ResolvedAbility,
     sub: &ResolvedAbility,
 ) -> bool {
+    !ability.targets.is_empty() && can_inherit_parent_targets(sub)
+}
+
+/// Whether an empty-targeted child can inherit the parent's bound targets.
+/// Kept separate from the parent's current target population so structural
+/// continuation analysis can use the same authority as runtime propagation.
+pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
     sub.targets.is_empty()
-        && !ability.targets.is_empty()
         && (sub.target_choice_timing != TargetChoiceTiming::Resolution
             // CR 608.2c + CR 303.4f: TargetOnly → ChangeZone[+Attach ParentTarget]
             // (Necrotic Plague) stamps Resolution on the return clause, but the
@@ -3053,58 +3059,7 @@ pub(super) fn resolve_optional_effect_decision(
             }
         }
         AutoMayChoice::Decline => {
-            let decline_branch = ability.else_ability.as_deref().or_else(|| {
-                let sub = ability.sub_ability.as_deref()?;
-                // CR 608.2c: a conditioned decline branch (IfYouDo /
-                // Otherwise / composite) resolves on decline — authoritative
-                // check.
-                let selected = should_resolve_subability_on_optional_decline(sub)
-                    // CR 608.2c: a separate-sentence sibling is the next
-                    // printed instruction and resolves regardless of the
-                    // optional decision — BUT only when it is not a
-                    // reflexive trigger. CR 603.12: a reflexive ("When you
-                    // do, …") sub's "do" did not occur when the action was
-                    // declined, so it must NOT fire even though it is a
-                    // separate sentence (issue #3179: Swashbuckler
-                    // Extraordinaire's declined Treasure sacrifice must not
-                    // resolve the double-strike reflexive). CastFromZone's
-                    // graveyard-redirect rider is not a printed follow-up to
-                    // execute on decline; it is permission metadata consumed
-                    // only if the graveyard spell is actually cast.
-                    || (sub.sub_link == SubAbilityLink::SequentialSibling
-                        && !sub_ability_is_reflexive(sub)
-                        && !(matches!(&ability.effect, Effect::CastFromZone { .. })
-                            && (cast_from_zone::graveyard_destination_rider(sub).is_some()
-                                // CR 614.1c + CR 122.1: the enters-with-counter
-                                // rider is permission metadata (Osteomancer
-                                // Adept, The Tomb of Aclazotz), not a printed
-                                // follow-up to execute on decline.
-                                || cast_from_zone::is_enters_with_counter_rider_subability(sub))));
-                if !selected {
-                    return None;
-                }
-                // CR 608.2c: An `IfYouDo` head with no `else_ability` gates its
-                // ENTIRE accept body ("if you do, A and B") on the optional
-                // decision. On decline, run ONLY the trailing
-                // `Not(OptionalEffectPerformed)` clause ("if you don't, C") —
-                // never the accept-only instructions chained under the head
-                // (Omnath, Locus of All: declining the reveal must put the card
-                // in hand without adding mana). For every other selected shape
-                // (direct `Not` head, `else_ability` head whose condition-false
-                // path runs the else, composite `And`/`Or` head re-evaluated
-                // post-decline, or a `SequentialSibling`) the head itself is the
-                // branch to resolve.
-                if sub
-                    .condition
-                    .as_ref()
-                    .is_some_and(|c| c.is_optional_effect_performed())
-                    && sub.else_ability.is_none()
-                {
-                    Some(nested_optional_decline_clause(sub).unwrap_or(sub))
-                } else {
-                    Some(sub)
-                }
-            });
+            let decline_branch = optional_decline_branch(&ability);
             if let Some(branch) = decline_branch {
                 let mut resolved = branch.clone();
                 // CR 608.2c: inherit the parent's resolved object targets ONLY
@@ -3147,6 +3102,34 @@ pub(super) fn resolve_optional_effect_decision(
         }
     }
     Ok(())
+}
+
+/// CR 608.2c + CR 608.2d: Select the exact continuation that survives an
+/// optional effect being declined. Shared with structural continuation
+/// analysis so UI metadata follows the same printed-tail and reflexive rules.
+pub(crate) fn optional_decline_branch(ability: &ResolvedAbility) -> Option<&ResolvedAbility> {
+    ability.else_ability.as_deref().or_else(|| {
+        let sub = ability.sub_ability.as_deref()?;
+        let selected = should_resolve_subability_on_optional_decline(sub)
+            || (sub.sub_link == SubAbilityLink::SequentialSibling
+                && !sub_ability_is_reflexive(sub)
+                && !(matches!(&ability.effect, Effect::CastFromZone { .. })
+                    && (cast_from_zone::graveyard_destination_rider(sub).is_some()
+                        || cast_from_zone::is_enters_with_counter_rider_subability(sub))));
+        if !selected {
+            return None;
+        }
+        if sub
+            .condition
+            .as_ref()
+            .is_some_and(|condition| condition.is_optional_effect_performed())
+            && sub.else_ability.is_none()
+        {
+            Some(nested_optional_decline_clause(sub).unwrap_or(sub))
+        } else {
+            Some(sub)
+        }
+    })
 }
 
 /// Whether a sub-ability condition references a per-iteration outcome gate —
@@ -6688,7 +6671,7 @@ pub(crate) fn publish_fresh_tracked_set(
 /// participates without code changes here. `Effect::target_filter()` already
 /// surfaces `SearchLibrary::target_player`, so iterated-search variants are
 /// covered through the same single path.
-fn effect_refs_parent_target(effect: &Effect) -> bool {
+pub(crate) fn effect_refs_parent_target(effect: &Effect) -> bool {
     effect_parent_ref_slots(effect)
         .iter()
         .any(|filter| filter_refs_parent_target(filter))
