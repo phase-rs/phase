@@ -376,12 +376,21 @@ pub(crate) fn search_ordering_hint(ability: &ResolvedAbility) -> SearchOrderingH
     ) {
         return SearchOrderingHint::OrderedToLibraryTop;
     }
-    ability
-        .sub_ability
-        .as_deref()
-        .map(search_ordering_hint)
-        .or_else(|| ability.else_ability.as_deref().map(search_ordering_hint))
-        .unwrap_or_default()
+    if ability.sub_ability.as_deref().is_some_and(|sub| {
+        matches!(
+            search_ordering_hint(sub),
+            SearchOrderingHint::OrderedToLibraryTop
+        )
+    }) || ability.else_ability.as_deref().is_some_and(|else_ability| {
+        matches!(
+            search_ordering_hint(else_ability),
+            SearchOrderingHint::OrderedToLibraryTop
+        )
+    }) {
+        SearchOrderingHint::OrderedToLibraryTop
+    } else {
+        SearchOrderingHint::Unordered
+    }
 }
 
 /// CR 701.23a + CR 701.23i: compute one effective search from immutable game
