@@ -5,7 +5,6 @@ import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import wasm from "vite-plugin-wasm";
-import topLevelAwait from "vite-plugin-top-level-await";
 import { VitePWA } from "vite-plugin-pwa";
 import { compression } from "vite-plugin-compression2";
 import type { Plugin } from "vite";
@@ -217,7 +216,16 @@ export default defineConfig(({ mode }) => ({
     react(),
     tailwindcss(),
     wasm(),
-    topLevelAwait(),
+    // NOTE: no `topLevelAwait()`. `build.target` is `esnext`, which emits and
+    // runs top-level await natively, and no source module has one — so the
+    // plugin transformed nothing useful. It DID wrap every chunk containing a
+    // dynamic `import()`, deferring that chunk's exports into a `__tla`
+    // microtask while leaving its *untransformed* importers un-awaited (it
+    // seeds propagation only from chunks with a *real* top-level await, so an
+    // importer with no TLA and no dynamic import of its own is never wrapped
+    // and never awaits). Such an importer reading a deferred export at
+    // module-evaluation time saw `undefined` and threw, killing the whole lazy
+    // route — see #7583.
     VitePWA({
       registerType: "autoUpdate",
       manifest: false, // Use public/manifest.json

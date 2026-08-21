@@ -1251,8 +1251,10 @@ pub fn fallback_action(
                 }
             )
         }),
-        // Ready has no acting player; the authorized frontend consumer starts
-        // the bounded prefix drain.
+        // Ready has no acting player, so no AI decision exists here. The
+        // authorized consumer starts the bounded prefix drain: the granting
+        // client on a local table, and `server-core`'s own `run_ai` hand-off
+        // when the final Grant came from a server-driven AI seat.
         WaitingFor::ResolveAllReady { .. } => None,
 
         // Priority is the only state where PassPriority is valid.

@@ -6361,6 +6361,30 @@ fn affected_objects_from_events(
     }
 }
 
+/// CR 603.12 (#7511): A reflexive "when you do" triggers "based on whether the
+/// trigger event or events occurred earlier during the resolution" of its
+/// parent. The `WhenYouDo` arm of `evaluate_condition` covers the OPTIONAL
+/// parent (declined / infeasible — #7414) and the failed-payment class; it
+/// cannot see the resolution's event slice, so the MANDATORY-parent question
+/// ("the instruction ran and did nothing") is answered here, at the sub-walk
+/// call site that has the parent's own events in hand. Mirrors the CR 608.2c
+/// mandatory-rider seed's exclusions: an outcome-owning parent (coin flip,
+/// clash, dig, behold — `effect_manages_own_outcome_flag`) keeps its own
+/// record, an effect kind without an event witness stays "mandatory means
+/// yes" (`mandatory_parent_effect_performed`'s default arm), and any recorded
+/// performance (`optional_effect_performed`) always wins.
+fn when_you_do_mandatory_parent_did_nothing(
+    condition: &AbilityCondition,
+    parent: &ResolvedAbility,
+    parent_events: &[GameEvent],
+) -> bool {
+    matches!(condition, AbilityCondition::WhenYouDo)
+        && !parent.optional
+        && !parent.context.optional_effect_performed
+        && !effect_manages_own_outcome_flag(&parent.effect)
+        && !mandatory_parent_effect_performed(&parent.effect, parent_events)
+}
+
 fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> bool {
     match effect {
         Effect::Destroy { .. } | Effect::DestroyAll { .. } => events.iter().any(|event| {
@@ -12582,7 +12606,16 @@ fn resolve_chain_body(
                     ability
                 };
 
-            let condition_met = evaluate_condition(condition, state, condition_ability);
+            // CR 603.12 (#7511): a MANDATORY parent whose witnessed action did
+            // nothing — "when you do" never happened. Suppression routes
+            // through the ordinary false path below, so an else branch and the
+            // surviving sequential siblings keep their printed semantics.
+            let condition_met = evaluate_condition(condition, state, condition_ability)
+                && !when_you_do_mandatory_parent_did_nothing(
+                    condition,
+                    ability,
+                    &events[events_before..],
+                );
             if !condition_met {
                 // CR 608.2c: Execute else branch if present ("Otherwise, [effect]")
                 if let Some(ref else_branch) = sub.else_ability {
@@ -20531,6 +20564,126 @@ mod tests {
             evaluate_condition(&AbilityCondition::WhenYouDo, &state, &parent(false, false)),
             "a MANDATORY parent carries no performed-record; gating on the bare \
              flag would silence every mandatory reflexive"
+        );
+    }
+
+    /// CR 603.12 (#7511): the MANDATORY-parent stage of the "when you do"
+    /// gate — answered at the sub-walk call site from the parent's own event
+    /// slice, because the arm above has no events and (as its third row pins)
+    /// must keep saying "mandatory means yes". Rows vary one axis at a time
+    /// around the same `RemoveCounter` parent (Vhal, Scholar of Mortality's
+    /// shape: "remove all study counters from it. When you do, …" with zero
+    /// counters).
+    #[test]
+    fn a_mandatory_parent_that_did_nothing_suppresses_its_reflexive() {
+        let remove_counter = || Effect::RemoveCounter {
+            counter_type: Some(CounterType::Generic("study".to_string())),
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        };
+        let parent = |optional: bool, performed: bool| {
+            let mut ability =
+                ResolvedAbility::new(remove_counter(), vec![], ObjectId(100), PlayerId(0));
+            ability.optional = optional;
+            ability.context.optional_effect_performed = performed;
+            ability
+        };
+        let when_you_do = AbilityCondition::WhenYouDo;
+        let no_events: Vec<GameEvent> = vec![];
+        let witnessed = vec![GameEvent::CounterRemoved {
+            object_id: ObjectId(100),
+            counter_type: CounterType::Generic("study".to_string()),
+            count: 2,
+        }];
+
+        // The suppression case: mandatory, no record, no witness event.
+        assert!(
+            when_you_do_mandatory_parent_did_nothing(
+                &when_you_do,
+                &parent(false, false),
+                &no_events
+            ),
+            "a mandatory RemoveCounter that removed nothing did not happen (CR 603.12)"
+        );
+        // The witness event clears it — the working card keeps its reflexive.
+        assert!(
+            !when_you_do_mandatory_parent_did_nothing(
+                &when_you_do,
+                &parent(false, false),
+                &witnessed
+            ),
+            "a CounterRemoved event is the parent's occurrence — no suppression"
+        );
+        // An optional parent is the arm's business, never this stage's.
+        assert!(
+            !when_you_do_mandatory_parent_did_nothing(
+                &when_you_do,
+                &parent(true, false),
+                &no_events
+            ),
+            "the optional axis is owned by the WhenYouDo arm (#7414), not this stage"
+        );
+        // A recorded performance always wins.
+        assert!(
+            !when_you_do_mandatory_parent_did_nothing(
+                &when_you_do,
+                &parent(false, true),
+                &no_events
+            ),
+            "a recorded performance must never be second-guessed"
+        );
+        // An outcome-owning parent (RollDie) keeps its own record.
+        let mut roll = ResolvedAbility::new(
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides: 6,
+                results: vec![],
+                modifier: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        roll.optional = false;
+        assert!(
+            !when_you_do_mandatory_parent_did_nothing(&when_you_do, &roll, &no_events),
+            "an outcome-owning parent (effect_manages_own_outcome_flag) is exempt"
+        );
+        // A kind without an event witness stays "mandatory means yes"
+        // (`mandatory_parent_effect_performed`'s default arm) — BecomeCopy is
+        // the arm test's own example of a mandatory reflexive that must stay
+        // unconditional.
+        let become_copy = ResolvedAbility::new(
+            Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
+                target: TargetFilter::SelfRef,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        assert!(
+            !when_you_do_mandatory_parent_did_nothing(&when_you_do, &become_copy, &no_events),
+            "an effect kind without an event witness must stay unconditional"
+        );
+        // The condition guard: the call site hands EVERY sub-effect condition
+        // to this stage, so a non-WhenYouDo condition must pass through even
+        // when all the parent-side conjuncts would otherwise suppress it.
+        let quantity_check = AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Fixed { value: 0 },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        };
+        assert!(
+            !when_you_do_mandatory_parent_did_nothing(
+                &quantity_check,
+                &parent(false, false),
+                &no_events
+            ),
+            "only AbilityCondition::WhenYouDo is this stage's business"
         );
     }
 

@@ -3188,9 +3188,13 @@ pub(crate) fn collect_completed_mana_frame_events(
         .filter(|index| !(historical_copy_start..historical_copy_end).contains(index))
         .filter(|index| {
             let occurrence = super::triggers::trigger_event_occurrence(events, *index);
-            !consumed
-                .iter()
-                .any(|claimed| claimed.event == events[*index] && claimed.occurrence == occurrence)
+            !consumed.iter().any(|claimed| {
+                claimed.event == events[*index]
+                    && claimed.occurrence == occurrence
+                    && claimed
+                        .scope
+                        .consumes(super::triggers::TriggerCollectionRequester::Ordinary)
+            })
         })
         .collect();
     let mut batch = deferred;
@@ -3206,6 +3210,7 @@ pub(crate) fn collect_completed_mana_frame_events(
             |index| crate::game::triggers::ConsumedTriggerEventOccurrence {
                 event: events[index].clone(),
                 occurrence: super::triggers::trigger_event_occurrence(events, index),
+                scope: crate::game::triggers::ConsumedTriggerEventScope::AllCollectors,
             },
         )
         .collect();

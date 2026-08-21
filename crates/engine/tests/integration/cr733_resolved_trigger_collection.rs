@@ -3,7 +3,8 @@
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::triggers::{
     apply_resolved_trigger_collection, resolve_and_apply_trigger_collection,
-    ConsumedTriggerEventOccurrence, PendingTrigger, PendingTriggerContext,
+    ConsumedTriggerEventOccurrence, ConsumedTriggerEventScope, PendingTrigger,
+    PendingTriggerContext,
 };
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
@@ -60,6 +61,7 @@ fn occurrence(player: PlayerId) -> ConsumedTriggerEventOccurrence {
             scry_top_count: None,
         },
         occurrence: 0,
+        scope: ConsumedTriggerEventScope::AllCollectors,
     }
 }
 
@@ -89,6 +91,7 @@ fn current_action_occurrences(events: &[GameEvent]) -> Vec<ConsumedTriggerEventO
                 .iter()
                 .filter(|prior| *prior == event)
                 .count(),
+            scope: ConsumedTriggerEventScope::AllCollectors,
         })
         .collect()
 }

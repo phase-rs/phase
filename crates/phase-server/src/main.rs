@@ -57,6 +57,7 @@ use server_core::game_action_payload_guard::guard_game_action_payload;
 use server_core::game_reconnect_guard::guard_game_reconnect;
 use server_core::game_state_snapshot_wire_guard::{
     guard_game_state_for_broadcast, guard_state_snapshot_broadcast, StateSnapshotParts,
+    MAX_RESOLVE_ALL_LOG_ENTRIES,
 };
 use server_core::interaction_payload_guard::guard_interaction_submission_payload;
 use server_core::legacy_deck_guard::guard_legacy_deck;
@@ -495,16 +496,11 @@ fn build_state_update_message(
     })
 }
 
-/// Resolve All can collect thousands of engine events. They are needed for
-/// authoritative transition bookkeeping, but replaying them in one wire frame
-/// defeats the batch path and breaches the snapshot payload guard. Preserve a
-/// bounded tail of engine-authored logs alongside the final, fully-derived
-/// state; the requester acknowledgement carries progress metadata separately.
-const MAX_RESOLVE_ALL_LOG_ENTRIES: usize = 128;
-
 /// Resolving the batch and then resuming normal AI play are one authoritative
 /// transition. Retain their engine-authored logs in that order while keeping
-/// the compact final snapshot bounded.
+/// the compact final snapshot bounded by
+/// [`MAX_RESOLVE_ALL_LOG_ENTRIES`], which `server-core` also applies to a batch
+/// its own AI hand-off collapses.
 fn resolve_all_log_tail(
     batch_log_entries: &[GameLogEntry],
     ai_results: &[RevisionedActionResult],

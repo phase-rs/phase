@@ -336,6 +336,44 @@ fn enter_phase(
 ) -> PhaseEntryOutcome {
     use std::collections::VecDeque;
 
+    // CR 500.4 + CR 510.2: a combat-damage batch parked on a CR 616.1 life-gain
+    // ordering choice belongs to the combat-damage step's turn-based action. The
+    // game is entering another step, so that action can no longer be performed and
+    // the record is abandoned — its still-owed gains are forfeit.
+    //
+    // Unconditional, and it can only ever see a STRANDED record: the drain owns the
+    // record by value while it runs and writes it back only on the pause path
+    // (`combat_damage::drain_combat_lifelink`), so the field is `None` for the whole
+    // time a drain is executing. A `Some` observed HERE is therefore necessarily a
+    // record whose answer can never arrive, never a live batch — which is why this
+    // clear cannot destroy work in progress. The three doors that can strand one
+    // all pass through here: CR 800.4 `skip_eliminated_active_turn` (the active player
+    // conceded or lost while their own CR 616.1 prompt was open), CR 724.1d
+    // `end_turn_to_cleanup`, and CR 724.2d `end_combat_phase_to_postcombat`. Without
+    // this, the stale record is drained by `resolve_combat_damage`'s guard on a LATER
+    // turn's combat-damage step, re-emitting that batch's events and then writing
+    // `regular_damage_done` on the new combat — silently skipping that turn's combat
+    // damage (CR 510.2 / CR 510.4).
+    //
+    // What authorises DISCARDING the batch's still-waiting CR 603.3b triggers
+    // differs per door, and neither CR 500.4 nor CR 510.2 addresses them:
+    //   * CR 724.1d `end_turn_to_cleanup` and CR 724.2d
+    //     `end_combat_phase_to_postcombat`: CR 724.1a and CR 724.2a each state
+    //     that abilities which triggered before the process began but have not
+    //     yet been put onto the stack CEASE TO EXIST. `effects/end_the_turn.rs`
+    //     and `effects/end_combat_phase.rs` already call
+    //     `end_phase::clear_preexisting_unstacked_triggers` for exactly that, so
+    //     abandoning the record on these two doors is CONSISTENT with the
+    //     engine's existing CR 724.1a implementation rather than in tension with
+    //     it.
+    //   * CR 800.4 `skip_eliminated_active_turn`: this door no longer reaches
+    //     here with a live record. CR 800.4j keeps the turn running to its
+    //     completion, so the batch still owes its triggers to the OTHER seats;
+    //     `auto_advance_once`'s CR 800.4 branch now discharges the record through
+    //     `resume_pending_combat_lifelink` BEFORE the skip. A `Some` observed at
+    //     the line below can therefore no longer have come from that door.
+    state.pending_combat_lifelink = None;
+
     state.phase = next;
     if next == Phase::BeginCombat {
         state.combat_phases_started_this_turn =
@@ -2929,6 +2967,56 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
     // CR 800.4: If the active player has been eliminated, skip their
     // remaining phases and proceed to the next player's turn.
     if !super::players::is_alive(state, state.active_player) {
+        // CR 800.4j + CR 704.3 + CR 800.4d: the turn continues to its completion,
+        // so a combat-damage batch parked on a CR 616.1 answer that died with the
+        // active player still OWES its CR 603.3b triggers to every OTHER player.
+        // No rule ends them: CR 800.4d drops only the departed seat's abilities,
+        // and unlike CR 724.1a / CR 724.2a (which DO make pre-process triggers
+        // cease to exist, and which `end_phase::clear_preexisting_unstacked_triggers`
+        // already implements for the two end-the-turn/end-the-combat-phase doors)
+        // nothing on this path erases them.
+        //
+        // Discharge through the batch's own authority. `resume_pending_combat_lifelink`
+        // reaches `process_combat_damage_triggers`, whose `pending.retain(is_alive)`
+        // is the ONLY implementation of CR 800.4d on this path — releasing into
+        // `deferred_triggers` instead would put the departed seat's own triggers on
+        // the stack, because nothing in `triggers.rs` filters on aliveness at all.
+        // `elimination` has already pruned that seat's owed gains per-entry, so the
+        // gains drained here belong to living controllers.
+        //
+        // Placed HERE and not in `skip_eliminated_active_turn` (which returns `()`
+        // and would orphan a prompt the drain raises) and not in `enter_phase`
+        // (the shared funnel for all three abandonment doors, which cannot tell
+        // this one from the CR 724.1a/724.2a doors that must NOT discharge).
+        if state.pending_combat_lifelink.is_some() {
+            let event_start = events.len();
+            if let Some(waiting_for) =
+                super::combat_damage::resume_pending_combat_lifelink(state, event_start, events)
+            {
+                // `Priority` is the resume's "nothing further is owed" sentinel and
+                // is always addressed to `state.active_player` — the seat that just
+                // left. Fall through to the skip rather than surfacing it.
+                //
+                // CR 800.4a: everything else is a real prompt, but this is the one
+                // call site of `resume_pending_combat_lifelink` reached while the
+                // active player is NOT in the game (the other two run with a living
+                // active player by construction), so a wait it produces can name a
+                // seat that cannot answer. `elimination` already enforces exactly
+                // this invariant once, at elimination time, with the same accessor
+                // and the same aliveness test; re-apply it here because this is the
+                // only place a NEW wait can be installed after that reconcile has
+                // run. `acting_player()` is `None` for `GameOver`, which is terminal
+                // and must still be surfaced — hence `is_some_and`, not a check that
+                // an acting player exists and is alive.
+                let unanswerable = waiting_for
+                    .acting_player()
+                    .is_some_and(|player| !super::players::is_alive(state, player));
+                if !matches!(waiting_for, WaitingFor::Priority { .. }) && !unanswerable {
+                    state.waiting_for = waiting_for.clone();
+                    return AutoAdvanceStep::waiting(waiting_for);
+                }
+            }
+        }
         skip_eliminated_active_turn(state, events);
         return AutoAdvanceStep::Continue;
     }

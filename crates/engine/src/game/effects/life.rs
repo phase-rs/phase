@@ -97,7 +97,10 @@ pub fn resolve_gain(
             }
         }
         ReplacementResult::NeedsChoice(player) => {
-            // TODO(CR 614.7): When multiple replacement effects apply to life gain, controller should choose which applies first. Currently falls through unconditionally.
+            // CR 616.1: two or more applicable life-gain replacements — the affected
+            // player chooses which applies first. Unlike every other arm here, this
+            // one returns WITHOUT pushing `EffectResolved`: the prompt owns the rest
+            // of the resolution.
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(player, state);
             return Ok(());
@@ -116,7 +119,7 @@ pub fn resolve_gain(
 /// Apply life gain, running through the replacement pipeline.
 /// Returns the actual amount of life gained (may differ due to replacements like Leyline of Hope).
 /// Returns `Err(ReplacementDeferred)` when multiple replacement effects compete and
-/// the player must choose which applies first (CR 614.7).
+/// the player must choose which applies first (CR 616.1).
 pub fn apply_life_gain(
     state: &mut GameState,
     player_id: PlayerId,
