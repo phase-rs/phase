@@ -1,3 +1,8 @@
+// `DraftAdapter` must be constructed inside a function, never at module
+// evaluation time: its bundled chunk assigns exports inside a top-level-await
+// (`__tla`) microtask, so the binding is still `undefined` while this module
+// evaluates and a module-scope `const adapter = new DraftAdapter()` throws
+// there. It carries no instance state, so constructing per call is free.
 import {
   DraftAdapter,
   type DraftCardInstance,
@@ -50,8 +55,6 @@ export function axisKinds(groups: DraftPoolGroup[]): DraftPoolGroupKind[] {
   return groups.map((group) => group.kind);
 }
 
-const adapter = new DraftAdapter();
-
 /**
  * Ask the engine which instances of `listing` the filter keeps, in listing
  * order. The display renders exactly this result. Classification happens
@@ -61,7 +64,7 @@ export function filterPoolListing(
   listing: DraftCardInstance[],
   filter: PoolFilter,
 ): Promise<string[]> {
-  return adapter.filterPoolListing(listing, filter);
+  return new DraftAdapter().filterPoolListing(listing, filter);
 }
 
 /**
@@ -72,5 +75,5 @@ export function filterPoolListing(
 export function fetchPoolFilterOptions(
   pool: DraftCardInstance[],
 ): Promise<PoolFilterOptions> {
-  return adapter.poolFilterOptions(pool);
+  return new DraftAdapter().poolFilterOptions(pool);
 }
