@@ -13400,6 +13400,73 @@ pub enum RetargetScope {
     ForcedTo(TargetRef),
 }
 
+/// CR 103.5 / CR 104.1: who — if anyone — may act in a `WaitingFor` state.
+///
+/// THE single authority behind [`WaitingFor::acting_player`] and
+/// [`WaitingFor::acting_players`]; both are adapters over
+/// [`WaitingFor::acting_authority`], and the exhaustive per-variant match lives
+/// there and nowhere else.
+///
+/// The type exists so that "nobody acts" cannot be written as a bare `None`.
+/// A state with no acting player is advanced by something OUTSIDE the action
+/// pipeline, and if that something is never called the game hangs with no
+/// player able to move it and no client rendering a prompt. Naming the
+/// advancer in the type is what makes the obligation reviewable; the census in
+/// `tests/integration/waiting_for_actor_authority_census.rs` is what makes it
+/// unskippable.
+///
+/// INVARIANT THE CENSUS ENFORCES: every arm of `acting_authority` is a bare,
+/// UNGUARDED pattern whose body is exactly one constructor call on this enum —
+/// possibly wrapped by `rustfmt` in a block whose single tail expression is
+/// that call — and the census PINS the constructor set it accepts, so a new
+/// one cannot route its arms past the adjudications while the census still
+/// reports healthy (see that file's `A4c` and `A4d`). A match guard would let
+/// an arm decide the answer somewhere the census cannot read, so guards are
+/// rejected outright — see that file's `A8`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActingAuthority {
+    /// Exactly one player is authorized to submit the next action.
+    One(PlayerId),
+    /// CR 103.5: several players decide at once — the mulligan family. Every
+    /// listed player may submit, in any arrival order.
+    Simultaneous(Vec<PlayerId>),
+    /// No player may act. The payload names what advances the state instead.
+    None(NoActor),
+}
+
+/// What advances a `WaitingFor` state that has NO acting player.
+///
+/// Every variant answers one question — "what moves this along?" — so the enum
+/// has a single axis and no mixed abstraction layers.
+///
+/// Adding an actorless `WaitingFor` variant that cannot honestly reuse one of
+/// these answers must add one here. That addition IS the declaration this type
+/// exists to force, and the census pins this enum's variant set so the addition
+/// cannot be silent.
+///
+/// Unrelated to `phase_ai::auto_play::AiActionsBreakReason::NoActor`, a *driver
+/// break reason*, not a state classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoActor {
+    /// CR 104.1: the game has already ended, so no player takes further game
+    /// actions. Advanced by the match layer (`game::match_flow`), which reads
+    /// the winner out of the state and tears the game down — outside the game,
+    /// by design.
+    MatchTeardown,
+    /// CR 117.4: a Resolve All latch. Consumed out of band by
+    /// [`crate::game::engine_resolve_batch::resolve_all_ready_prefix`], which
+    /// every transport that can MINT the latch must also call.
+    ///
+    /// The name deliberately mirrors that function, and the census asserts the
+    /// function still exists under that name (`A9`) so the correspondence
+    /// cannot rot into a lie during a rename.
+    ///
+    /// The hang this name exists to prevent: a server-driven AI seat minted the
+    /// latch and no transport consumed it, so a 3-player Commander game parked
+    /// forever with no acting player and no client rendering it.
+    ResolveAllReadyPrefix,
+}
+
 impl WaitingFor {
     /// Canonical stable variant name (engine-owned labeler).
     ///
@@ -13545,29 +13612,32 @@ impl WaitingFor {
         }
     }
 
-    /// Extract the player who must act, if any.
+    /// THE single authority on who — if anyone — may act in this state.
     ///
-    /// CR 103.5: For simultaneous-decision states (`MulliganDecision`,
-    /// `OpeningHandBottomCards`) this returns `Some(p)` only when exactly one
-    /// player is pending, and `None` when multiple are pending — callers
-    /// that need set semantics must use [`Self::acting_players`] instead.
-    pub fn acting_player(&self) -> Option<PlayerId> {
+    /// [`Self::acting_player`] and [`Self::acting_players`] are adapters over
+    /// this function; the per-variant match lives here and nowhere else.
+    ///
+    /// Every arm MUST be a bare, UNGUARDED pattern whose body is exactly one
+    /// [`ActingAuthority`] constructor call, from the set that type's census
+    /// pins. No `let`, no early return, no preprocessing before the `match`,
+    /// and no match guard: a guard would let an arm decide the answer
+    /// somewhere that census cannot read it. [`ActingAuthority`]'s doc names
+    /// the census by path; `source_census.rs`'s `EXEMPT` table records that
+    /// path too. If a per-arm condition seems necessary, it belongs either in
+    /// a new `WaitingFor` variant (when it changes WHO acts) or in an adapter
+    /// (when it merely narrows an authority this arm already declares,
+    /// exactly as the CR 103.5 `pending.len() == 1` test does).
+    pub fn acting_authority(&self) -> ActingAuthority {
         match self {
             WaitingFor::MulliganDecision { pending, .. } => {
-                if pending.len() == 1 {
-                    Some(pending[0].player)
-                } else {
-                    None
-                }
+                ActingAuthority::Simultaneous(pending.iter().map(|e| e.player).collect())
             }
             WaitingFor::OpeningHandBottomCards { pending, .. } => {
-                if pending.len() == 1 {
-                    Some(pending[0].player)
-                } else {
-                    None
-                }
+                ActingAuthority::Simultaneous(pending.iter().map(|e| e.player).collect())
             }
-            WaitingFor::ResolveAllReady { .. } => None,
+            WaitingFor::ResolveAllReady { .. } => {
+                ActingAuthority::None(NoActor::ResolveAllReadyPrefix)
+            }
             WaitingFor::Priority { player }
             | WaitingFor::ResolveAllConsent {
                 representative: player,
@@ -13694,21 +13764,49 @@ impl WaitingFor {
             | WaitingFor::CommanderZoneChoice { player, .. }
             | WaitingFor::SeparatePilesChooseOpponent { player, .. }
             | WaitingFor::SeparatePilesPartition { player, .. }
-            | WaitingFor::SeparatePilesChoice { player, .. } => Some(*player),
+            | WaitingFor::SeparatePilesChoice { player, .. } => ActingAuthority::One(*player),
             // CR 608.2c: For `ControllerLabels` votes (Battlebond friend-or-foe
             // cards), the ACTOR is the spell controller, not `player` (the
             // subject being labeled). `VoteActor::resolve` returns the
             // authorized submitter without the call site needing to know
             // which voting shape this is.
-            WaitingFor::VoteChoice { player, actor, .. } => Some(actor.resolve(*player)),
+            WaitingFor::VoteChoice { player, actor, .. } => {
+                ActingAuthority::One(actor.resolve(*player))
+            }
             // CR 702.132a: the assisting (chosen) player acts on the payment step,
             // not the caster — route authorization to them.
-            WaitingFor::AssistPayment { chosen, .. } => Some(*chosen),
+            WaitingFor::AssistPayment { chosen, .. } => ActingAuthority::One(*chosen),
             // CR 732.2a: the loop-shortcut proposer is the player with priority, carried
             // in `proposer` (not a `player` field) — dedicated arm like `AssistPayment`.
-            WaitingFor::LoopShortcut { proposer, .. } => Some(*proposer),
-            WaitingFor::PrecastCopyShortcutOffer { proposer, .. } => Some(*proposer),
-            WaitingFor::GameOver { .. } => None,
+            WaitingFor::LoopShortcut { proposer, .. } => ActingAuthority::One(*proposer),
+            WaitingFor::PrecastCopyShortcutOffer { proposer, .. } => {
+                ActingAuthority::One(*proposer)
+            }
+            WaitingFor::GameOver { .. } => ActingAuthority::None(NoActor::MatchTeardown),
+        }
+    }
+
+    /// Extract the player who must act, if any.
+    ///
+    /// CR 103.5: For simultaneous-decision states (`MulliganDecision`,
+    /// `OpeningHandBottomCards`) this returns `Some(p)` only when exactly one
+    /// player is pending, and `None` when multiple are pending — callers
+    /// that need set semantics must use [`Self::acting_players`] instead.
+    ///
+    /// A thin adapter over [`Self::acting_authority`]; it narrows an authority
+    /// the arm already declared and never decides one.
+    #[inline]
+    pub fn acting_player(&self) -> Option<PlayerId> {
+        match self.acting_authority() {
+            ActingAuthority::One(player) => Some(player),
+            // CR 103.5: a simultaneous decision has a single actor only while
+            // exactly one player is still pending — the historical
+            // `pending.len() == 1` test, moved here from the match arms.
+            ActingAuthority::Simultaneous(players) => match players.as_slice() {
+                [only] => Some(*only),
+                _ => None,
+            },
+            ActingAuthority::None(_) => None,
         }
     }
 
@@ -13720,15 +13818,14 @@ impl WaitingFor {
     /// Engine authorization checks should use this in preference to
     /// `acting_player()` so the simultaneous variants accept actions from any
     /// of the pending players in any arrival order.
+    ///
+    /// A thin adapter over [`Self::acting_authority`].
+    #[inline]
     pub fn acting_players(&self) -> Vec<PlayerId> {
-        match self {
-            WaitingFor::MulliganDecision { pending, .. } => {
-                pending.iter().map(|e| e.player).collect()
-            }
-            WaitingFor::OpeningHandBottomCards { pending, .. } => {
-                pending.iter().map(|e| e.player).collect()
-            }
-            _ => self.acting_player().into_iter().collect(),
+        match self.acting_authority() {
+            ActingAuthority::One(player) => vec![player],
+            ActingAuthority::Simultaneous(players) => players,
+            ActingAuthority::None(_) => Vec::new(),
         }
     }
 
