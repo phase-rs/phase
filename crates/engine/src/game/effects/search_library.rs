@@ -4,8 +4,8 @@ use crate::game::filter::{
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::static_abilities::prohibition_scope_matches_player;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, SearchSelectionConstraint, SharedQuality,
-    TargetFilter, TargetRef,
+    Effect, EffectError, EffectKind, LibraryPosition, ResolvedAbility, SearchOrderingHint,
+    SearchSelectionConstraint, SharedQuality, TargetFilter, TargetRef,
 };
 use crate::types::card_type::is_land_subtype;
 use crate::types::events::{GameEvent, PlayerActionKind};
@@ -359,10 +359,29 @@ pub(crate) struct PreparedEffectiveSearch {
     pub up_to: bool,
     pub allows_partial_find: bool,
     pub constraint: SearchSelectionConstraint,
+    pub ordering_hint: SearchOrderingHint,
     pub split: Option<crate::types::ability::SearchDestinationSplit>,
     pub active_search: Option<ActiveLibrarySearch>,
     pub hidden_event: Option<GameEvent>,
     pub decision: ActiveSearchDecisionControl,
+}
+
+pub(crate) fn search_ordering_hint(ability: &ResolvedAbility) -> SearchOrderingHint {
+    if matches!(
+        ability.effect,
+        Effect::PutAtLibraryPosition {
+            position: LibraryPosition::Top,
+            ..
+        }
+    ) {
+        return SearchOrderingHint::OrderedToLibraryTop;
+    }
+    ability
+        .sub_ability
+        .as_deref()
+        .map(search_ordering_hint)
+        .or_else(|| ability.else_ability.as_deref().map(search_ordering_hint))
+        .unwrap_or_default()
 }
 
 /// CR 701.23a + CR 701.23i: compute one effective search from immutable game
@@ -507,6 +526,7 @@ pub(crate) fn prepare_effective_search(
         split,
         active_search,
         hidden_event,
+        ordering_hint: search_ordering_hint(ability),
         decision: ActiveSearchDecisionControl {
             searcher,
             searched_zone_owner,
@@ -578,6 +598,7 @@ pub fn resolve(
         up_to: prepared.up_to,
         allows_partial_find: prepared.allows_partial_find,
         constraint: prepared.constraint,
+        ordering_hint: prepared.ordering_hint,
         split: prepared.split,
     };
     state

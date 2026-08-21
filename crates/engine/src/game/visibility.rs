@@ -1181,6 +1181,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         allows_partial_find,
         ref constraint,
         ref split,
+        ordering_hint,
     } = state.waiting_for
     {
         if !can_view_private_for_player(player) {
@@ -1193,6 +1194,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 up_to,
                 allows_partial_find,
                 constraint: constraint.clone(),
+                ordering_hint,
                 split: split.clone(),
             };
         }
@@ -3467,6 +3469,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -3542,6 +3545,7 @@ mod tests {
             up_to: true,
             allows_partial_find: true,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -3656,6 +3660,7 @@ mod tests {
                         up_to: false,
                         allows_partial_find: false,
                         constraint: crate::types::ability::SearchSelectionConstraint::None,
+                        ordering_hint: Default::default(),
                     },
                     PreparedScopedLibrarySearchChoice {
                         player: later_searcher,
@@ -3669,6 +3674,7 @@ mod tests {
                         up_to: false,
                         allows_partial_find: false,
                         constraint: crate::types::ability::SearchSelectionConstraint::None,
+                        ordering_hint: Default::default(),
                     },
                 ],
                 next_selection_index: 2,
@@ -3692,6 +3698,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -4166,6 +4173,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
 

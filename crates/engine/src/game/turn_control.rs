@@ -483,6 +483,7 @@ mod tests {
             up_to: true,
             allows_partial_find: true,
             constraint: SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
         state

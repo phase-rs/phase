@@ -482,7 +482,8 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
       ]?.looked_at,
   );
   const hoverProps = useInspectHoverProps();
-  const [selectedSet, setSelectedSet] = useState<Set<ObjectId>>(new Set());
+  const [selectedOrder, setSelectedOrder] = useState<ObjectId[]>([]);
+  const isOrdered = data.ordering_hint === "OrderedToLibraryTop";
   // The engine records every card the searching player looked at. `cards`
   // remains the legal-selection subset; rendering the full engine-provided
   // look set lets a library-search modal show the remaining library while
@@ -498,24 +499,24 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
     : data.cards;
   const selectableCards = new Set(data.cards);
   const countValid = searchChoiceAllowsPartialFind(data)
-    ? selectedSet.size <= data.count
-    : selectedSet.size === data.count;
+    ? selectedOrder.length <= data.count
+    : selectedOrder.length === data.count;
   const subtitle = searchChoiceSubtitle(data, t);
 
   useEffect(() => {
-    setSelectedSet(new Set());
+    setSelectedOrder([]);
   }, [data]);
 
   const toggleSelect = useCallback(
     (id: ObjectId) => {
-      setSelectedSet((prev) => {
-        const next = new Set(prev);
-        if (next.has(id)) {
-          next.delete(id);
-        } else if (next.size < data.count) {
-          next.add(id);
+      setSelectedOrder((prev) => {
+        const selectedIndex = prev.indexOf(id);
+        if (selectedIndex >= 0) {
+          return prev.filter((selectedId) => selectedId !== id);
+        } else if (prev.length < data.count) {
+          return [...prev, id];
         }
-        return next;
+        return prev;
       });
     },
     [data.count],
@@ -525,10 +526,10 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
     if (countValid) {
       dispatch({
         type: "SelectCards",
-        data: { cards: Array.from(selectedSet) },
+        data: { cards: selectedOrder },
       });
     }
-  }, [countValid, dispatch, selectedSet]);
+  }, [countValid, dispatch, selectedOrder]);
 
   if (!objects) return null;
 
@@ -542,7 +543,8 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
         {displayedCards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
-          const isSelected = selectedSet.has(id);
+          const selectedIndex = selectedOrder.indexOf(id);
+          const isSelected = selectedIndex >= 0;
           const isSelectable = selectableCards.has(id);
           return (
             <motion.button
@@ -570,7 +572,9 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
               {isSelected && (
                 <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
                   <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-bold text-white">
-                    {t("cardChoice.badges.choose")}
+                    {isOrdered
+                      ? formatTopdeckOrderLabel(selectedIndex, t)
+                      : t("cardChoice.badges.choose")}
                   </span>
                 </div>
               )}

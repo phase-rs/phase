@@ -8083,6 +8083,7 @@ mod state_transport_derived_tests {
             up_to: true,
             allows_partial_find: true,
             constraint: SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
         raw.active_search_decision_controls

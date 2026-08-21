@@ -11302,6 +11302,16 @@ pub enum LibraryPosition {
     },
 }
 
+/// CR 701.23a + CR 608.2c: Presentation metadata for a library-search choice.
+/// The engine supplies this because the continuation determines whether the
+/// selected cards have semantic order when the search resolves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SearchOrderingHint {
+    #[default]
+    Unordered,
+    OrderedToLibraryTop,
+}
+
 /// CR 701.20a + CR 608.2c: How the *set* of matching cards found by an
 /// [`Effect::RevealUntil`] is dispensed once the until-loop terminates.
 ///

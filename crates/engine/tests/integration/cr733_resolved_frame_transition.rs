@@ -175,6 +175,7 @@ fn optional_effect_frame_cannot_survive_into_search_choice_parent_insertion() {
         up_to: false,
         allows_partial_find: false,
         constraint: Default::default(),
+        ordering_hint: Default::default(),
         split: None,
     };
     let before = state.resolution_stack.clone();
