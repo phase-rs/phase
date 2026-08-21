@@ -36,6 +36,17 @@
 //! permissive lookup would degrade into `A4a`'s `extra=[..]` side plus the declared-count
 //! pin instead of failing where the cause is.
 //!
+//! `A11` is the only assertion here that reads the BODY of a function other than
+//! `acting_authority` (`A9` reads a consumer's existence, never its body):
+//! `acting_player` and `acting_players` must each be a single tail match on
+//! `self.acting_authority()`. Every other body-reading assertion here reads
+//! `acting_authority` while production reads the adapters, so an adapter re-forked
+//! into its own match over `WaitingFor` variants is adjudicated by nothing —
+//! measured on a fixture, not assumed. `A11`'s reach is the TOP-LEVEL body shape of the
+//! two adapters it names: a per-variant match nested inside an arm of the delegating
+//! match is not read, and a third adapter over `acting_authority` would be read by
+//! nothing here.
+//!
 //! HOW THIS FILE FAILS. Findings are COLLECTED into a `Vec<String>` and asserted ONCE at
 //! the end; only the preconditions (parse, enum lookups, `A10`, `A0`) and the `ACTORLESS`
 //! cardinality reach-guard panic immediately. That is deliberate and load-bearing, not a
@@ -183,8 +194,10 @@ fn enum_variants(items: &[&Item], enum_name: &str) -> Option<Vec<String>> {
 }
 
 /// Inherent (`trait_.is_none()`) methods named `fn_name` on `self_ty`. Returns every
-/// match so the caller can reject BOTH zero (renamed or moved) and two (a trait impl
-/// exposing the same name) — never a silent `find_map`.
+/// match so the caller can reject BOTH zero (renamed or moved) and two (a second inherent
+/// impl block whose self-type's LAST path segment is also `self_ty` — a `cfg`-gated
+/// duplicate, or a same-named type in an inline `mod`, which `flatten` descends into).
+/// A trait impl cannot produce a two: `trait_.is_some()` is skipped below.
 fn inherent_fns<'a>(items: &[&'a Item], self_ty: &str, fn_name: &str) -> Vec<&'a syn::ImplItemFn> {
     let mut found = Vec::new();
     for item in items {
@@ -400,6 +413,35 @@ fn classify_body(expr: &Expr) -> Result<(String, Option<String>), String> {
     ))
 }
 
+/// Why an adapter's body is not a delegation to `acting_authority` — `A11`'s whole
+/// predicate — or `Ok(())`.
+///
+/// Narrow for `A0`'s reason: a body this census cannot read is a body that could be
+/// deciding an authority instead of narrowing one. A legitimate restructuring REDs and
+/// gets adjudicated here; that red is the point, not a cost.
+fn adapter_delegation(f: &syn::ImplItemFn) -> Result<(), String> {
+    let [Stmt::Expr(Expr::Match(m), None)] = f.block.stmts.as_slice() else {
+        return Err("its body is not a single tail `match` expression".to_string());
+    };
+    let scrutinee = m.expr.as_ref();
+    let Expr::MethodCall(call) = scrutinee else {
+        let saw = if matches!(scrutinee, Expr::Path(p) if p.path.is_ident("self")) {
+            "`self`"
+        } else {
+            shape(scrutinee)
+        };
+        return Err(format!("it matches on {saw}"));
+    };
+    let on_self = matches!(call.receiver.as_ref(), Expr::Path(p) if p.path.is_ident("self"));
+    if !on_self || call.method != "acting_authority" || !call.args.is_empty() {
+        return Err(format!(
+            "it matches on a `.{}()` call that is not the no-argument `self.acting_authority()`",
+            call.method
+        ));
+    }
+    Ok(())
+}
+
 fn render_set(items: &BTreeSet<String>) -> String {
     let joined: Vec<&str> = items.iter().map(String::as_str).collect();
     format!("{{{}}}", joined.join(", "))
@@ -449,8 +491,10 @@ fn every_waiting_for_arm_declares_its_acting_authority() {
         1,
         "A10: expected exactly one inherent `WaitingFor::acting_authority`, found {}. \
          Zero means it was renamed or moved and this census now asserts nothing at all; \
-         two means a trait impl exposes the same name and the census may be reading the \
-         wrong one.",
+         two means a second inherent impl block whose self-type's last path segment is \
+         also `WaitingFor` — a `cfg`-gated duplicate, or a same-named type in an inline \
+         `mod` — and the census may be reading the wrong one. A trait impl is skipped and \
+         cannot be the cause.",
         found.len()
     );
     let acting_authority = found[0];
@@ -664,6 +708,36 @@ fn every_waiting_for_arm_declares_its_acting_authority() {
                 "A9 `{consumer}` is not a free `fn` in `{file}`, but `NoActor::{answer}` \
                  (adjudicated for `WaitingFor::{variant}`) still names it. Renaming the consumer \
                  without renaming the answer turns the correspondence into a lie."
+            ));
+        }
+    }
+
+    // A11 — the adapters are adapters. Every other body-reading assertion here reads
+    // `acting_authority`'s arms, so this is the only one that can see an adapter
+    // answering from a match of its own.
+    for adapter in ["acting_player", "acting_players"] {
+        let found = inherent_fns(&game_state_items, "WaitingFor", adapter);
+        let [f] = found.as_slice() else {
+            failures.push(format!(
+                "A11 expected exactly one inherent `WaitingFor::{adapter}`, found {}. Zero means \
+                 it was renamed, moved or deleted and production no longer reaches \
+                 `acting_authority` under that name; two means a second inherent impl block \
+                 whose self-type's last path segment is also `WaitingFor` — a `cfg`-gated \
+                 duplicate, or a same-named type in an inline `mod` — and this census may be \
+                 reading the wrong body. A trait impl is skipped and cannot be the cause.",
+                found.len()
+            ));
+            continue;
+        };
+        if let Err(why) = adapter_delegation(f) {
+            failures.push(format!(
+                "A11 `WaitingFor::{adapter}` does not delegate to `acting_authority`: {why}. Its \
+                 body must be one tail `match self.acting_authority()`. An adapter that answers \
+                 from its own match over `WaitingFor` is read by NO assertion in this file, and \
+                 every adjudication here then describes a function production has stopped \
+                 asking. A condition that narrows one authority class belongs inside an arm of \
+                 the delegating match; one that changes WHO acts belongs in a new `WaitingFor` \
+                 variant, exactly as `A8` says of a guard."
             ));
         }
     }
