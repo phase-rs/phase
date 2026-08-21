@@ -187,31 +187,6 @@ fn run_post_action_pipeline_from_with_policy(
                 retained_logical_zone_events.extend(&paused_current.delivery_events);
             }
         }
-        // CR 510.3a + CR 603.3b: a combat-damage batch parked on a CR 616.1
-        // life-gain ordering choice still OWNS every event it has emitted. The
-        // record's `batch_events` is replayed through
-        // `process_combat_damage_triggers` (combat_damage.rs) when the batch
-        // completes, and that replay is the SINGLE authority for the batch's
-        // CR 603.3b trigger collection — CR 702.15b makes the lifelink gain a
-        // result of the damage event, so the gain observer and the damage
-        // observers must be ordered as one batch by their controller, and
-        // CR 510.3a puts them all on the stack together before the active
-        // player gets priority.
-        //
-        // The generic post-action scan must therefore not rediscover them.
-        // Collecting here as well as at completion fires every observer in the
-        // batch TWICE: `collect_triggers_into_deferred` writes nothing to
-        // `consumed_before_priority_trigger_events`, and
-        // `process_combat_damage_triggers` consults no ledger at all, so nothing
-        // downstream would dedup them.
-        //
-        // Same shape and same reason as `retained_logical_zone_events` above: a
-        // paused owner's retained events are invisible to the generic scan.
-        let parked_combat_damage_events: Vec<&GameEvent> = state
-            .pending_combat_lifelink
-            .as_deref()
-            .map(|record| record.batch_events.iter().collect())
-            .unwrap_or_default();
         // A completed logical owner has already collected its segment and
         // settlement contexts into the deferred queue, and a paused owner that
         // drained may instead have claimed them in the consumed ledger.
@@ -230,7 +205,6 @@ fn run_post_action_pipeline_from_with_policy(
                 !matches!(event, GameEvent::PhaseChanged { .. })
                     && !state.deferred_entry_events.contains(event)
                     && !retained_logical_zone_events.contains(event)
-                    && !parked_combat_damage_events.contains(event)
             })
             .cloned()
             .collect();

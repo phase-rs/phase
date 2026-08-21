@@ -4215,17 +4215,16 @@ fn ordered_delayed_tail_drains_after_trigger_target_selection_without_recipient(
     let delayed_source = continuation_source(&mut state, "Delayed observer");
     let target = make_creature(&mut state, PlayerId(1), "Target", 1, 1);
     let alternative_target = make_creature(&mut state, PlayerId(1), "Alternative target", 1, 1);
-    let ordinary = continuation_pending(
+    let ordinary = definition_backed_continuation_pending(
+        &state,
         ordinary_source,
-        ResolvedAbility::new(
+        AbilityDefinition::new(
+            AbilityKind::Database,
             Effect::SetTapState {
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 scope: EffectScope::Single,
                 state: TapStateChange::Tap,
             },
-            Vec::new(),
-            ordinary_source,
-            PlayerId(0),
         ),
         "Ordinary target trigger",
     );
@@ -4272,19 +4271,21 @@ fn ordered_delayed_tail_drains_after_triggered_mode_choice_without_recipient() {
     state.priority_player = PlayerId(0);
     let ordinary_source = continuation_source(&mut state, "Modal ordinary");
     let delayed_source = continuation_source(&mut state, "Delayed observer");
-    let mut ordinary = continuation_pending(
-        ordinary_source,
-        ResolvedAbility::new(Effect::NoOp, Vec::new(), ordinary_source, PlayerId(0)),
-        "Ordinary modal trigger",
-    );
-    ordinary.modal = Some(ModalChoice {
+    let mut execute = AbilityDefinition::new(AbilityKind::Database, Effect::NoOp);
+    execute.modal = Some(ModalChoice {
         min_choices: 1,
         max_choices: 1,
         mode_count: 1,
         mode_descriptions: vec!["Do nothing".to_string()],
         ..Default::default()
     });
-    ordinary.mode_abilities = vec![AbilityDefinition::new(AbilityKind::Database, Effect::NoOp)];
+    execute.mode_abilities = vec![AbilityDefinition::new(AbilityKind::Database, Effect::NoOp)];
+    let ordinary = definition_backed_continuation_pending(
+        &state,
+        ordinary_source,
+        execute,
+        "Ordinary modal trigger",
+    );
 
     begin_paused_continuation_batch(
         &mut state,
@@ -4408,7 +4409,7 @@ fn empty_deferred_tail_is_inert_after_trigger_target_selection_without_recipient
     state.priority_player = PlayerId(0);
     let source = continuation_source(&mut state, "Targeting ordinary");
     let target = make_creature(&mut state, PlayerId(1), "Target", 1, 1);
-    let _alternative_target = make_creature(&mut state, PlayerId(1), "Alternative target", 1, 1);
+    let alternative_target = make_creature(&mut state, PlayerId(1), "Alternative target", 1, 1);
     let ordinary = definition_backed_continuation_pending(
         &state,
         source,
@@ -4428,6 +4429,18 @@ fn empty_deferred_tail_is_inert_after_trigger_target_selection_without_recipient
         state.waiting_for,
         WaitingFor::TriggerTargetSelection { .. }
     ));
+    let WaitingFor::TriggerTargetSelection { target_slots, .. } = &state.waiting_for else {
+        unreachable!("the preceding reach guard fixed this waiting state");
+    };
+    assert!(
+        target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(target))
+            && target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(alternative_target)),
+        "the empty-tail control must keep target selection interactive"
+    );
     crate::game::engine::apply_as_current(
         &mut state,
         GameAction::SelectTargets {

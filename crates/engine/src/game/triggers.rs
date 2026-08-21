@@ -9964,6 +9964,12 @@ pub(crate) fn trigger_event_occurrence(events: &[GameEvent], event_index: usize)
 /// complete action event buffer. An occurrence is an identity within the full
 /// buffer, not within a later continuation slice: rebasing it at `event_start`
 /// can consume an equal-looking event from the wrong resolution segment.
+///
+/// `requester` is the collector performing this scan. An
+/// [`ConsumedTriggerEventScope::OrdinaryCollectorsOnly`] claim suppresses an
+/// ordinary requester but deliberately preserves the occurrence for a delayed
+/// requester; [`filter_consumed_trigger_events`] applies the same rule to the
+/// whole buffer.
 pub(crate) fn filter_consumed_trigger_events_from(
     events: &[GameEvent],
     event_start: usize,

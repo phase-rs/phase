@@ -2766,6 +2766,7 @@ fn settle_sacrifice_for_cost_events(
         .collect();
     if !deferred_cost_events.is_empty() {
         crate::game::triggers::collect_triggers_into_deferred(state, &deferred_cost_events);
+        crate::game::triggers::collect_delayed_triggers_into_deferred(state, &deferred_cost_events);
     }
     // The journal claims the whole current fragment, not just what survived the
     // filter: an occurrence the filter dropped is one an earlier collector

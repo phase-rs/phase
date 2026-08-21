@@ -174,7 +174,7 @@ pub fn resolve_combat_damage(
                     events,
                     batch_event_start,
                 );
-                return Some(waiting_for);
+                return Some(*waiting_for);
             }
             CombatDamageBatch::Complete(damage_events) => {
                 if let Some(wf) = finish_combat_damage_sub_step(
@@ -207,7 +207,7 @@ pub fn resolve_combat_damage(
                 events,
                 batch_event_start,
             );
-            Some(waiting_for)
+            Some(*waiting_for)
         }
         CombatDamageBatch::Complete(damage_events) => finish_combat_damage_sub_step(
             state,
@@ -349,7 +349,12 @@ pub(crate) fn resume_pending_combat_lifelink(
             // still-untouched tail was re-parked with the batch so far, so the
             // eventual completion still fires ONE CR 603.3b batch.
             events.extend_from_slice(&batch[owed_from..]);
-            Some(waiting_for)
+            claim_combat_lifelink_batch_events_for_ordinary_collection(
+                state,
+                events,
+                action_event_start,
+            );
+            Some(*waiting_for)
         }
         CombatDamageBatch::Complete(damage_events) => {
             events.extend_from_slice(&damage_events[owed_from..]);
@@ -1511,7 +1516,7 @@ pub(crate) enum CombatDamageBatch {
     /// paused source's own `LifeGain` and is the resume's authority.
     Paused {
         events: Vec<GameEvent>,
-        waiting_for: WaitingFor,
+        waiting_for: Box<WaitingFor>,
     },
 }
 
@@ -1777,7 +1782,7 @@ fn drain_combat_lifelink(
                 state.pending_combat_lifelink = Some(Box::new(record));
                 return CombatDamageBatch::Paused {
                     events,
-                    waiting_for,
+                    waiting_for: Box::new(waiting_for),
                 };
             }
             // CR 614.6 + CR 614.1: a cross-event substitute (Lich class) already

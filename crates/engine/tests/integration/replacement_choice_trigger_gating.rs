@@ -1,4 +1,4 @@
-//! CR 704.3 + CR 117.5 — a triggered ability must not reach the stack while a
+//! CR 603.3 + CR 117.5 — a triggered ability must not reach the stack while a
 //! replacement pause is open, on the GENERIC (non-combat) path.
 //!
 //! This file exists to isolate ONE production conjunct: the
@@ -176,12 +176,12 @@ fn parked_replacement_defers_a_noncombat_observer_off_the_stack() {
         "reach guard: the observer's effect has not landed while the prompt is open"
     );
 
-    // THE ASSERTION. CR 704.3 + CR 117.5: triggered abilities are put on the stack
+    // THE ASSERTION. CR 603.3 + CR 117.5: triggered abilities are put on the stack
     // only when a player WOULD receive priority, and no player receives priority
     // for a CR 616.1 choice.
     assert!(
         runner.state().stack.is_empty(),
-        "CR 704.3 + CR 117.5: no triggered ability may be put on the stack while a \
+        "CR 603.3 + CR 117.5: no triggered ability may be put on the stack while a \
          replacement pause is open — the event that triggered it has not finished \
          happening and no player has received priority"
     );

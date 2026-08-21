@@ -1917,11 +1917,9 @@ fn combat_batch_observers_reach_the_stack_once_as_one_group() {
 /// once. No competing replacements, so no CR 616.1 choice is raised and the batch
 /// never parks.
 ///
-/// This is the correct-behaviour half of a known asymmetry. The same board WITH a
-/// CR 616.1 pause measures 2, a live CR 119.9 violation tracked as a follow-up
-/// (see docs/plans/R1-duplicate-life-gain-trigger.md). Keeping this row green
-/// pins the boundary: the double fire is specific to the pause/resume path and is
-/// NOT intrinsic to the combat-damage batch.
+/// The same board WITH a CR 616.1 pause also fires exactly once: the paused-path
+/// regression exercises that receipt through
+/// `resumed_lifelink_gain_triggers_single_pridemate_once`.
 #[test]
 fn single_observer_gain_receipt_fires_once_without_a_pause() {
     let mut scenario = GameScenario::new();
