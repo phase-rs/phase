@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 195,
+      "date": "2026-08-21",
+      "title": "Morph and disguise creatures finally flip face up",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Face-down creatures can finally be turned face up in play — morph, megamorph, disguise, manifest, and cloak all now offer the special action when you can pay for it. The engine accepted the action but never advertised it, so the whole class was stuck face down\n• Sovereign Okinec Ahau joins the card pool, counting each creature whose power exceeds its base power and handing out the difference in +1/+1 counters\n• Perch Protection now gifts an extra turn instead of a card — the \"gift an extra turn\" wording was silently falling back to the wrong gift\n• Prop Room and Ivorytusk Fortress untap your creatures during each other player's untap step as printed\n\n🛠️ Cards That Now Work Right\n• Sword of the Meek returns from your graveyard AND attaches to the 1/1 that entered, instead of quietly doing nothing (also fixes Auriok Survivors)\n• Rooms are handled properly on both halves: the unlocked door fires its own trigger instead of re-running the cast half's, a locked half's rules text is genuinely off, and both halves' abilities exist for unlocking — Access Maze, Dazzling Theater, Fractured Realm, Greenhouse, Lecture Hall, Porcelain Gallery, Secret Arcade, Solitary Study, Steaming Sauna, and Walk-in Closet\n• \"When you do\" reflexive abilities no longer fire when the required instruction ahead of them did nothing — Cemetery Desecrator stops offering its mode with an empty graveyard, and Vhal, Scholar of Mortality stops reanimating off zero counters (81 cards in this class)\n• Valgavoth's Onslaught puts its +1/+1 counters on the creatures it just manifested when you had to choose which card to manifest\n• Role tokens made by a source outside the catalog now resolve their art instead of pulsing forever\n• Your own face-down permanents show the marker for how they got there — Morph, Manifest, or A Mysterious Creature — and their art loads correctly; you can peek at your own face-down permanent in the hover preview, while opponents still see only the back\n\n⚔️ Combat & Gameplay\n• Combat lifelink is no longer thrown away when you control two life-gain replacements that need an ordering choice (Rhox Faithmender plus Leyline of Hope) — the gain now resumes after you pick, and \"whenever you gain life\" triggers fire alongside the damage triggers\n• Games no longer strand after an AI opponent casts the last Resolve All consent, or when a token copy has to make an entry replacement choice\n• Ordered searches label every pick's destination — Doomsday now reads Top / 2nd / 3rd / 4th / 5th instead of calling them all \"Top\"\n• Damage prevention totals are now applied in a fixed order, so a saved game replays identically to how it was played\n\n🖥️ Interface\n• The limited build screen can now be filtered by card type, color, and rarity, with a name search — all straight from the engine's own pool classification, so a 45-card pool no longer means scanning by eye\n• Hovering or long-pressing a card on the stack raises it above its neighbors\n• Colorless decks are identified correctly on the home dashboard, and the legend-copy choice names each copy\n• Big Commander boards are responsive again — a 4-player table with ~190 Treasures was spending over two seconds recalculating available mana after every resolution\n• Quick draft and draft pods load again after a bundling bug took both routes down\n\n🌐 Multiplayer\n• Pod-draft guests are seated correctly instead of always being treated as seat 0 — previously a guest's own hand came back hidden and both players deadlocked on \"Opponent is deciding their opening hand…\"",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1540492019481182268"
+    },
+    {
       "id": 194,
       "date": "2026-08-19",
       "title": "Face-down cards get their markers",
