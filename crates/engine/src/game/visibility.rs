@@ -260,6 +260,14 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // itself. Viewer projections are display-only clones; the authoritative
     // state the drain resumes from is never filtered.
     filtered.pending_discard_batch = None;
+    // CR 510.2 + CR 616.1: the parked combat-damage batch is server authority.
+    // Its `batch_events` can carry rider-created `ZoneChanged` records and other
+    // effect events that `filter_events_for_viewer` would redact in the live
+    // stream, and its `prevention_tally` names replacement sources. The projected
+    // `WaitingFor::ReplacementChoice` is the complete viewer-facing interaction
+    // surface, so no viewer — including the choosing player — needs the carrier
+    // itself.
+    filtered.pending_combat_lifelink = None;
     // CR 608.2h: a paused player-scope clause retains its frozen aggregate in
     // authoritative state so save/restore resumes the same application. The
     // value can encode hidden-zone information (for example, hand sizes), so it
@@ -1181,6 +1189,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         allows_partial_find,
         ref constraint,
         ref split,
+        ordering_hint,
     } = state.waiting_for
     {
         if !can_view_private_for_player(player) {
@@ -1193,6 +1202,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 up_to,
                 allows_partial_find,
                 constraint: constraint.clone(),
+                ordering_hint,
                 split: split.clone(),
             };
         }
@@ -3467,6 +3477,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -3480,6 +3491,47 @@ mod tests {
             filtered.objects.get(&card_id).map(|obj| obj.name.as_str()),
             Some("Hidden Tutor Target")
         );
+    }
+
+    #[test]
+    fn redacted_search_choice_preserves_ordering_hint() {
+        let mut state = GameState::new_two_player(42);
+        let card_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hidden Ordered Target".to_string(),
+            Zone::Library,
+        );
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            library_owner: Some(PlayerId(0)),
+            cards: vec![card_id],
+            count: 1,
+            reveal: false,
+            up_to: false,
+            allows_partial_find: false,
+            constraint: crate::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: crate::types::ability::SearchOrderingHint::OrderedToLibraryTop,
+            split: None,
+        };
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(1));
+
+        match filtered.waiting_for {
+            WaitingFor::SearchChoice {
+                cards,
+                ordering_hint,
+                ..
+            } => {
+                assert_eq!(cards, vec![ObjectId(0)]);
+                assert_eq!(
+                    ordering_hint,
+                    crate::types::ability::SearchOrderingHint::OrderedToLibraryTop
+                );
+            }
+            other => panic!("expected SearchChoice, got {other:?}"),
+        }
     }
 
     /// CR 101.4a + CR 701.23i: In a three-player simultaneous library search,
@@ -3542,6 +3594,7 @@ mod tests {
             up_to: true,
             allows_partial_find: true,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -3656,6 +3709,7 @@ mod tests {
                         up_to: false,
                         allows_partial_find: false,
                         constraint: crate::types::ability::SearchSelectionConstraint::None,
+                        ordering_hint: Default::default(),
                     },
                     PreparedScopedLibrarySearchChoice {
                         player: later_searcher,
@@ -3669,6 +3723,7 @@ mod tests {
                         up_to: false,
                         allows_partial_find: false,
                         constraint: crate::types::ability::SearchSelectionConstraint::None,
+                        ordering_hint: Default::default(),
                     },
                 ],
                 next_selection_index: 2,
@@ -3692,6 +3747,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -4166,6 +4222,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -6255,6 +6312,77 @@ mod tests {
 
         assert!(
             state.pending_discard_batch.is_some(),
+            "filtering must not alter the authoritative server carrier"
+        );
+    }
+
+    /// CR 510.2 + CR 616.1: `pending_combat_lifelink` is the parked
+    /// combat-damage batch. Its `batch_events` can carry effect events that
+    /// `filter_events_for_viewer` redacts in the live stream — a hidden-zone
+    /// `ZoneChanged` among them — and its `prevention_tally` names replacement
+    /// sources, so it must be absent from every viewer projection including the
+    /// choosing player's own.
+    ///
+    /// REVERT PROBE: delete `filtered.pending_combat_lifelink = None;` from
+    /// `filter_state_for_viewer` — the first per-viewer assertion below fails.
+    #[test]
+    fn parked_combat_lifelink_is_absent_from_every_viewer_projection() {
+        let mut state = GameState::new_two_player(42);
+        let hidden = create_object(
+            &mut state,
+            CardId(70_017),
+            PlayerId(0),
+            "Library Secret".to_string(),
+            Zone::Library,
+        );
+        let record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            hidden,
+            Some(Zone::Library),
+            Zone::Battlefield,
+        );
+        state.pending_combat_lifelink =
+            Some(Box::new(crate::types::game_state::PendingCombatLifelink {
+                remaining: std::collections::VecDeque::from(vec![
+                    crate::types::game_state::PendingLifelinkGain {
+                        controller: PlayerId(0),
+                        amount: 3,
+                    },
+                ]),
+                batch_events: vec![GameEvent::ZoneChanged {
+                    object_id: hidden,
+                    from: Some(Zone::Library),
+                    to: Zone::Battlefield,
+                    record: Box::new(record),
+                }],
+                damage_to_players: Vec::new(),
+                prevention_tally: Vec::new(),
+                lives_before: vec![20, 20],
+                sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
+            }));
+
+        let authoritative = serde_json::to_string(&state.pending_combat_lifelink)
+            .expect("the authoritative record serializes");
+        assert!(
+            authoritative.contains(&hidden.0.to_string()),
+            "reach guard: the authoritative carrier really does hold the library card's ID"
+        );
+
+        for viewer in [PlayerId(0), PlayerId(1)] {
+            let view = filter_state_for_viewer(&state, viewer);
+            assert!(
+                view.pending_combat_lifelink.is_none(),
+                "viewer {viewer:?} must not receive the parked combat-damage batch"
+            );
+            let wire = serde_json::to_string(&view).expect("the filtered snapshot serializes");
+            assert!(
+                !wire.contains("\"pendingCombatLifelink\":{")
+                    && !wire.contains("\"pending_combat_lifelink\":{"),
+                "viewer {viewer:?}'s snapshot must not serialize the carrier at all"
+            );
+        }
+
+        assert!(
+            state.pending_combat_lifelink.is_some(),
             "filtering must not alter the authoritative server carrier"
         );
     }

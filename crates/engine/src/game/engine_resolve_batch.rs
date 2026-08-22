@@ -64,6 +64,41 @@ pub fn resolve_all_ready_prefix(
     state: &mut GameState,
     requester: PlayerId,
 ) -> ResolveAllFastForwardResult {
+    resolve_all_ready_prefix_with(state, requester, ResolveAllContinuation::AutoPassRemainder)
+}
+
+/// What to do with the remainder of the stack when the prefix proof stops
+/// short.
+///
+/// The two answers belong to different situations, not to a preference. A live
+/// session honors the requester's durable intent; a session being restored has
+/// nobody connected to observe an unattended run-out, so it hands an
+/// actionable state back and stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolveAllContinuation {
+    /// Install the ordinary `UntilStackEmpty` auto-pass and pass priority, so
+    /// the requester's standing intent to avoid manual passes survives a proof
+    /// that could not collapse the whole batch. The live-session answer.
+    AutoPassRemainder,
+    /// Stop at ordinary priority and install nothing.
+    ///
+    /// Used at restore. The auto-pass path resolves the remaining stack through
+    /// the ordinary pipeline, which can end the game — and a restore has no
+    /// socket attached and no caller positioned to emit a ranked result or a
+    /// terminal artifact, so a game that ended there would be registered as a
+    /// live session parked in `GameOver`. Handing priority back instead loses
+    /// nothing: the consent is discarded either way, and a reconnecting player
+    /// can simply ask for Resolve All again.
+    StopAtPriority,
+}
+
+/// [`resolve_all_ready_prefix`], with an explicit answer for the stack that the
+/// proof could not collapse.
+pub fn resolve_all_ready_prefix_with(
+    state: &mut GameState,
+    requester: PlayerId,
+    continuation: ResolveAllContinuation,
+) -> ResolveAllFastForwardResult {
     let total = state.stack.len() as u32;
     let mut events = Vec::new();
     let mut log_entries = Vec::new();
@@ -136,7 +171,7 @@ pub fn resolve_all_ready_prefix(
     // requester's durable intent to avoid manual priority passes. Continue
     // through the ordinary `UntilStackEmpty` engine path in that case.
     turn_control::invalidate_resolve_all_consent(state);
-    if proof_stopped {
+    if proof_stopped && continuation == ResolveAllContinuation::AutoPassRemainder {
         let mut fallback_events = Vec::new();
         match super::engine::install_until_stack_empty_auto_pass_and_pass_priority(
             state,
@@ -172,19 +207,149 @@ pub fn resolve_all_ready_prefix(
     }
 }
 
-/// Returns whether the frozen Ready consent run authorizes this requester.
-/// Transport callers must reject an unauthorized request before mutating the
-/// authoritative session; the resolver's fail-closed invalidation remains its
-/// defense-in-depth boundary.
-pub fn resolve_all_ready_requester_is_authorized(state: &GameState, requester: PlayerId) -> bool {
-    ready_consent_run(state, requester).is_some()
+/// Whether `requester` may hand the current `WaitingFor::ResolveAllReady`
+/// latch to [`resolve_all_ready_prefix`].
+///
+/// Deliberately one axis — entitlement — and not two. Whether the frozen run
+/// is still *coherent* with the live game is a second question, and it is
+/// answered inside [`resolve_all_ready_prefix`], which re-derives it and
+/// either collapses the consented prefix or repairs the latch back to
+/// priority. Returning that answer here as well would compute a decision at
+/// the transport, hand it to a caller with no use for it, and then recompute
+/// it in the callee — one decision spread across a layer boundary.
+///
+/// Callers that want to know which of the two happened should read
+/// [`ResolveAllFastForwardResult::items_resolved`], which the resolver already
+/// reports, rather than a pre-flight guess that may be stale by the time the
+/// resolver runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolveAllReadyAccess {
+    /// The resolver may run. Either the requester is one of the run's frozen
+    /// submitters, or no run bears this epoch at all — in which case there is
+    /// no submitter list left to check anyone against, and the resolver's
+    /// repair is the latch's only exit.
+    ///
+    /// Admitting the incoherent case is deliberate. The repair resolves
+    /// nothing, so it confers no advantage, and refusing every seat would make
+    /// an unadvanceable state permanent. It is still a mutation — it clears the
+    /// recorded priority passes — so a seat that did not start the run can
+    /// restart a pass cycle. That is the price of having any exit at all, and
+    /// the caller is token-authenticated at the transport regardless.
+    Admitted,
+    /// Not a Ready latch, or a run bearing this epoch exists and this requester
+    /// is not among its frozen submitters. Transports must reject without
+    /// mutating the session.
+    Refused,
 }
 
-/// Validates the frozen Phase-1 consent against the live topology before the
-/// Ready state is materialized. A changed controller, eliminated player, or
-/// stale requester fails closed without invoking a speculative callback.
-pub fn resolve_all_ready_is_authorized(state: &GameState, requester: PlayerId) -> bool {
-    ready_consent_run(state, requester).is_some()
+/// Single authority on whether `requester` may touch the current Ready latch.
+///
+/// A changed controller, eliminated player, or drifted priority cursor does
+/// NOT refuse: those are the engine's own bookkeeping going out of date rather
+/// than an unentitled caller, and the resolver's repair is the only exit from
+/// the latch.
+pub fn resolve_all_ready_access(state: &GameState, requester: PlayerId) -> ResolveAllReadyAccess {
+    let WaitingFor::ResolveAllReady { epoch } = &state.waiting_for else {
+        return ResolveAllReadyAccess::Refused;
+    };
+    // Without a run bearing this epoch there is no frozen submitter list, so no
+    // seat can prove ownership. Refusing every seat would brick the game.
+    let Some(run) = state
+        .resolve_all_consent_run
+        .as_ref()
+        .filter(|run| run.epoch == *epoch)
+    else {
+        return ResolveAllReadyAccess::Admitted;
+    };
+    if run
+        .participants
+        .iter()
+        .any(|participant| participant.authorized_submitter == requester)
+    {
+        ResolveAllReadyAccess::Admitted
+    } else {
+        ResolveAllReadyAccess::Refused
+    }
+}
+
+/// The frozen submitter who started a pending, consumable Ready latch.
+///
+/// `begin_resolve_all_consent` rotates the participant list so its first entry
+/// is the initiating representative, making `participants[0]` the run's own
+/// record of who asked for the batch. Callers that must drive the latch — the
+/// AI-seat hand-off on both the local and the server transport — read the
+/// requester from here instead of synthesizing one, so authorization stays
+/// frozen at proposal time exactly as `ResolveAllConsentRun` intends.
+///
+/// INITIATOR, NOT OWNER — the distinction has already cost one wrong test
+/// assertion. This names whoever called `BeginResolveAll`, which is frequently
+/// NOT the seat whose Grant completed the run. Ownership of a latch follows the
+/// FINAL Grant, because that submitter's client is the thing that will send
+/// `ResolveAll` for it, so this value must never be used to decide whose latch
+/// it is. `GameSession::run_ai` derives that from its own applied batch instead.
+///
+/// Why passing the initiator to [`resolve_all_ready_prefix_with`] is
+/// nonetheless right: there `requester` is a CREDENTIAL and nothing else,
+/// consumed once by `ready_consent_run` as a membership test over the frozen
+/// submitters, which the initiator always satisfies. Every seat-bearing
+/// decision downstream reads the run instead — the Priority restore and the
+/// proof-stopped auto-pass both use `run.priority_snapshot.waiting_player`, and
+/// the proof loop seeds passes for all participants. So which participant is
+/// handed in cannot change the outcome.
+///
+/// That is NOT true everywhere. In [`resolve_all_fast_forward`] the requester
+/// is behaviour-bearing: `actor == requester` auto-passes silently while other
+/// seats are routed through the caller's callback. Neither latch consumer goes
+/// through that path today; one that did would have to decide owner-vs-initiator
+/// on purpose rather than inherit this function's answer.
+pub fn pending_resolve_all_ready_requester(state: &GameState) -> Option<PlayerId> {
+    if !matches!(state.waiting_for, WaitingFor::ResolveAllReady { .. }) {
+        return None;
+    }
+    let requester = state
+        .resolve_all_consent_run
+        .as_ref()?
+        .participants
+        .first()?
+        .authorized_submitter;
+    ready_consent_run(state, requester)
+        .is_some()
+        .then_some(requester)
+}
+
+/// Discharge a `ResolveAllReady` latch carried by a state that is being
+/// restored, returning the batch when a prefix was collapsed.
+///
+/// Every restore seam owes this call, and the reason is structural rather than
+/// defensive. `ResolveAllReady` reports no acting player
+/// (`WaitingFor::acting_player` is `None` for it), so it is advanced only out
+/// of band, by whichever driver holds the submitting call's return value. That
+/// driver is in-memory and does not survive the process that created it.
+///
+/// The latch is not literally action-less: while its run is intact,
+/// `candidate_actions` offers each grantor a `RevokeResolveAllConsent`. But no
+/// client renders anything at `ResolveAllReady` — `ResolveAllConsentModal` is
+/// gated on `ResolveAllConsent` — so that escape is never presented to a human,
+/// and it disappears entirely once the run is gone. A restored latch is
+/// therefore unadvanceable in practice even where it is not in theory.
+///
+/// [`resolve_all_ready_prefix`] is the single authority for both outcomes, so
+/// this deliberately does not branch on which one applies. An intact unanimous
+/// run collapses to the prefix the players already consented to; an incoherent
+/// one repairs `waiting_for` back to priority together with the display and
+/// interaction-authority state that repair implies. Passing a seat that is not
+/// a participant reaches the repair branch by construction, which is why the
+/// fallback requester below needs no separate justification.
+pub fn recover_orphaned_resolve_all(state: &mut GameState) -> Option<ResolveAllFastForwardResult> {
+    if !matches!(state.waiting_for, WaitingFor::ResolveAllReady { .. }) {
+        return None;
+    }
+    let requester = pending_resolve_all_ready_requester(state).unwrap_or(state.priority_player);
+    Some(resolve_all_ready_prefix_with(
+        state,
+        requester,
+        ResolveAllContinuation::StopAtPriority,
+    ))
 }
 
 fn ready_consent_run(state: &GameState, requester: PlayerId) -> Option<&ResolveAllConsentRun> {

@@ -1,0 +1,9 @@
+phase-server {{ .Chart.AppVersion }} ({{ if .Values.server.lobbyOnly }}lobby-only{{ else }}full{{ end }} mode)
+
+{{- if .Values.ingress.enabled }}
+WebSocket URL for the client's Server picker:  wss://{{ .Values.ingress.host }}/ws
+Health:                                        https://{{ .Values.ingress.host }}/health
+{{- end }}
+
+First boot downloads ~100 MiB of card data into the PVC before /health answers.
+Follow with:  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "phase-server.fullname" . }} -f

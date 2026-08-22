@@ -6154,7 +6154,7 @@ impl PlayerScope {
     ///
     /// Any resolver reachable from DESERIALIZED data must reject them here
     /// rather than reaching that `unreachable!()`: `IsMonarch { player }` is
-    /// serde-constructible from `card-data.json` and from mtgish input, so a
+    /// serde-constructible from `card-data.json`, so a
     /// malformed or hand-authored row must fail closed, not panic the engine
     /// inside a trigger-condition check.
     pub(crate) fn duration_timing_only(&self) -> bool {
@@ -6779,6 +6779,11 @@ pub enum QuantityRef {
     /// `EventContextSourcePower` (CR 608.2k: cost OR trigger-condition
     /// referent).
     Power { scope: ObjectScope },
+    /// CR 208.4b + CR 613.4b: Base power of an object, scoped via
+    /// `ObjectScope`. This reads the value after characteristic-defining and
+    /// set effects (layers 7a–7b), before counters and other modifiers (layer
+    /// 7c), rather than the current post-layer power read by `Power`.
+    BasePower { scope: ObjectScope },
     /// Digital-only Alchemy (no CR entry): the current `intensity` of an object,
     /// scoped via `ObjectScope`. Reads "X is [card]'s intensity" /
     /// "this spell's intensity" / "equal to its intensity".
@@ -7547,6 +7552,7 @@ impl QuantityRef {
             | QuantityRef::TargetControllerCounter { .. }
             | QuantityRef::Variable { .. }
             | QuantityRef::Power { .. }
+            | QuantityRef::BasePower { .. }
             | QuantityRef::Intensity { .. }
             | QuantityRef::Toughness { .. }
             | QuantityRef::ObjectManaValue { .. }
@@ -11300,6 +11306,16 @@ pub enum LibraryPosition {
     RandomWithinTop {
         n: QuantityExpr,
     },
+}
+
+/// CR 401.4 + CR 701.23a + CR 608.2c: Presentation metadata for a library-search
+/// choice. The engine supplies this because the continuation determines whether
+/// the owner may arrange the selected cards in one library position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SearchOrderingHint {
+    #[default]
+    Unordered,
+    OrderedToLibraryTop,
 }
 
 /// CR 701.20a + CR 608.2c: How the *set* of matching cards found by an
@@ -15629,8 +15645,8 @@ fn default_distinct_names() -> Vec<SharedQuality> {
 /// producers were `parse_number_of_distinct_colors_among_permanents_tail`
 /// (craft materials → `And { [ExiledBySource, Typed] }`, or a `parse_type_phrase`
 /// object filter) and `parse_for_each_distinct_colors_among_permanents`
-/// (`parse_type_phrase` only), plus the mtgish-import converter (`Typed`) —
-/// none of which can yield a BARE `ExiledBySource` / `TrackedSet` filter.
+/// (`parse_type_phrase` only) — neither can yield a BARE `ExiledBySource` /
+/// `TrackedSet` filter.
 fn deserialize_distinct_colors_population<'de, D>(
     deserializer: D,
 ) -> Result<CardTypeSetSource, D::Error>
@@ -21779,7 +21795,23 @@ pub enum AbilityCondition {
     /// Evaluated by checking `state.last_zone_changed_ids` against the filter.
     /// Handles both optional-targeting parents (empty targets → empty IDs → false)
     /// and mandatory parents (type filter check on moved objects).
-    ZoneChangedThisWay { filter: TargetFilter },
+    ///
+    /// `destination`: destination-bound wordings ("is put into a graveyard this
+    /// way"; "dies this way", CR 700.4) additionally require the moved object to
+    /// have ARRIVED in this zone — a replacement that redirects the arrival
+    /// (CR 122.1h finality counters: exile instead of the graveyard) defeats the
+    /// clause, because the replaced event never happened (CR 614.6).
+    /// Cause-bound wordings ("destroyed/sacrificed/exiled … this way") keep
+    /// `None`: the cause survives a redirect, the destination does not. The
+    /// check reads the object's CURRENT zone — the condition is evaluated in
+    /// the same resolution step as the parent instruction (CR 608.2c), before
+    /// any state-based action or trigger could move the object again, so the
+    /// current zone IS the arrival zone.
+    ZoneChangedThisWay {
+        filter: TargetFilter,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination: Option<crate::types::zones::Zone>,
+    },
     /// CR 117.1 + CR 400.7j + CR 608.2k: "if you sacrificed/exiled/discarded a
     /// [filter] this way" checks the object paid as a cost for this resolving
     /// ability using its cost-payment-time public characteristics.
@@ -22998,6 +23030,22 @@ impl TriggerCondition {
     }
 }
 
+/// CR 702.37e / CR 702.168d / CR 701.40b: which stored-face source supplies
+/// a turn-face-up cost — the classification `turn_face_up_prepare` reports
+/// next to the cost, carried through the payment (and its pause/resume) like
+/// the cost itself. CR 702.37b's counter rider keys on `Megamorph` EXACTLY.
+/// `Default` (`Morph`) exists only for serde back-compat of pre-existing
+/// paused-payment snapshots, which never carried a source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum TurnUpCostSource {
+    #[default]
+    Morph,
+    Megamorph,
+    Disguise,
+    /// CR 701.40b: a manifested creature card's own mana cost.
+    ManifestManaCost,
+}
+
 /// Condition that gates whether a replacement effect applies.
 /// Checked when determining if the replacement is a candidate for an event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -23078,6 +23126,13 @@ pub enum ReplacementCondition {
     /// `AbilityCondition::CastVariantPaid`. Evaluated against
     /// `GameObject.cast_variant_paid`. Used by Scarlet Spider (web-slinging).
     CastVariantPaid { variant: CastVariantPaid },
+    /// CR 702.37b: the in-flight PAID turn-face-up special action selected
+    /// this cost source ("… if its megamorph cost was paid to turn it face
+    /// up"). Reads the payment fact `state.turn_up_paid_cost_source`, which
+    /// the paid action publishes for exactly the flip it commits — an
+    /// effect-driven (free) turn-up never publishes one. Payment-fact sibling
+    /// of `CastVariantPaid` / `CastViaEscape` / `CastViaKicker`.
+    TurnUpCostSourcePaid { source: TurnUpCostSource },
     /// CR 603.4: "if you cast it from [zone]" — replacement applies only when
     /// the source object was cast from the specified zone (e.g., Myojin's
     /// "enters with an indestructible counter on it if you cast it from your
@@ -23641,6 +23696,13 @@ pub struct TriggerDefinition {
     /// controller (see `ClashResult::for_player` / `match_clash`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clash_result: Option<ClashResult>,
+    /// CR 709.5 + CR 709.5h: The Room half (door) this trigger's printed text
+    /// lives on. Stamped when a split Room's two halves are wired onto a game
+    /// object; a door's trigger functions only while that half is unlocked,
+    /// and an unlock trigger fires only for its own door's event. `None` for
+    /// every non-Room trigger: no door gating.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_door: Option<crate::game::game_object::RoomDoor>,
 }
 
 /// CR 605.1b: Which aggregate mana output a mana-ability trigger requires.
@@ -24177,11 +24239,18 @@ impl TriggerDefinition {
             taps_for_mana_produced: None,
             mana_ability_produced: None,
             clash_result: None,
+            room_door: None,
         }
     }
 
     pub fn execute(mut self, ability: AbilityDefinition) -> Self {
         self.execute = Some(Box::new(ability));
+        self
+    }
+
+    /// CR 709.5: tag this trigger as living on the given Room half.
+    pub fn room_door(mut self, door: crate::game::game_object::RoomDoor) -> Self {
+        self.room_door = Some(door);
         self
     }
 
@@ -24415,6 +24484,13 @@ pub struct StaticDefinition {
     /// pre-existing card-data round-trips unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protection_does_not_remove: Option<ProtectionDoesNotRemove>,
+    /// CR 709.5 + CR 709.5c: The Room half (door) this static's printed text
+    /// lives on. Stamped when a split Room's two halves are wired onto a game
+    /// object; a locked half doesn't have its rules text, so a door's static
+    /// functions only while that half is unlocked. `None` for every non-Room
+    /// static: no door gating.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_door: Option<crate::game::game_object::RoomDoor>,
 }
 
 /// CR 702.16n / CR 702.16p: Which attachments a protection-granting continuous
@@ -24556,11 +24632,19 @@ impl StaticDefinition {
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         }
     }
 
     pub fn continuous() -> Self {
         Self::new(StaticMode::Continuous)
+    }
+
+    /// CR 709.5 + CR 709.5c: Stamp the Room half this static's text lives on
+    /// (see the `room_door` field doc). Mirrors `TriggerDefinition::room_door`.
+    pub fn room_door(mut self, door: crate::game::game_object::RoomDoor) -> Self {
+        self.room_door = Some(door);
+        self
     }
 
     pub fn affected(mut self, filter: TargetFilter) -> Self {
@@ -24691,9 +24775,8 @@ pub enum DamageModification {
     /// any amount; the replacement is not consumed — continuous, not
     /// shield-style, distinct from `ShieldKind::Prevention { All }`).
     ///
-    /// Provenance is a sibling variant rather than a field on `Minus` because
-    /// the dormant, contributor-frozen `crates/mtgish-import` constructs
-    /// `Minus { value }` literals that a new mandatory field would break.
+    /// Provenance is a sibling variant rather than a field on `Minus` to
+    /// preserve the established `Minus { value }` construction shape.
     PreventionMinus { value: u32 },
     /// CR 614.1a: Conditional — if amount < source's power, set amount = source's power.
     /// References the replacement source's (not the damage source's) current post-layer power.
@@ -25470,6 +25553,28 @@ impl ReplacementDefinition {
 
 /// What modification a continuous effect applies to an object.
 /// Each variant knows its own layer implicitly.
+/// CR 709.5b + CR 707.2: one printed Room half's copiable identity — the name
+/// and mana cost the half contributes while unlocked (CR 709.5) and the cost
+/// its door demands to unlock (CR 709.5e).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomHalfIdentity {
+    pub name: String,
+    pub mana_cost: ManaCost,
+}
+
+/// CR 709.5 + CR 709.5b + CR 707.2: a Room's half data as a copiable value —
+/// both printed halves in PRINTED order (the right half is absent on a Room
+/// printed without a second half). CR 709.5 makes the unlocked-half behavior
+/// and which half a characteristic is in part of the copiable values; this
+/// carries the per-half identities so a copy can derive its door-gated name
+/// and door costs from the COPIED form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomCopiableHalves {
+    pub left: RoomHalfIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right: Option<RoomHalfIdentity>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopiableValues {
     pub name: String,
@@ -25488,6 +25593,28 @@ pub struct CopiableValues {
     pub trigger_definitions: Arc<Vec<TriggerDefinition>>,
     pub replacement_definitions: Arc<Vec<ReplacementDefinition>>,
     pub static_definitions: Arc<Vec<StaticDefinition>>,
+    /// CR 709.5 + CR 709.5b: present iff the copied object is a Room — the
+    /// per-half identities a copy needs to derive its door-gated name and
+    /// door costs. `None` for every non-Room source (and in pre-existing
+    /// serialized snapshots, via the serde default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_halves: Option<RoomCopiableHalves>,
+    /// CR 707.9b: where `name` came from — a folded copy-effect name
+    /// EXCEPTION ("except its name is X") stays the copy's final name: a
+    /// later copy of this copy keeps X (CR 707.3), and the Room door gate
+    /// must not replace it.
+    #[serde(default)]
+    pub name_origin: CopiedNameOrigin,
+}
+
+/// CR 707.9b: where a copy's NAME characteristic came from — the copied
+/// source's copiable name, or an "except its name is X" exception rider.
+/// The exception is the copy's FINAL name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CopiedNameOrigin {
+    #[default]
+    Source,
+    Exception,
 }
 
 /// CR 707.2b + CR 707.2c + CR 111.1: A copiable-values snapshot latched when an
@@ -29510,6 +29637,7 @@ mod tests {
             taps_for_mana_produced: None,
             mana_ability_produced: None,
             clash_result: None,
+            room_door: Some(crate::game::game_object::RoomDoor::Left),
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: TriggerDefinition = serde_json::from_str(&json).unwrap();
@@ -29569,6 +29697,7 @@ mod tests {
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         };
         let json = serde_json::to_string(&static_def).unwrap();
         let deserialized: StaticDefinition = serde_json::from_str(&json).unwrap();
@@ -29887,6 +30016,7 @@ mod tests {
                 source_object: None,
                 bypass_beneficiary: None,
                 protection_does_not_remove: None,
+                room_door: None,
             }],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,

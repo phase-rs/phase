@@ -564,6 +564,7 @@ struct ObjectFingerprint {
     power: Option<i32>,
     toughness: Option<i32>,
     base_power: Option<i32>,
+    base_toughness: Option<i32>,
     name: String,
     foretold: bool,
     is_saddled: bool,
@@ -637,6 +638,7 @@ impl Hash for ObjectFingerprint {
         self.power.hash(h);
         self.toughness.hash(h);
         self.base_power.hash(h);
+        self.base_toughness.hash(h);
         self.mana_cost.mana_value().hash(h);
         self.cost_x_paid.hash(h);
         self.damage_marked.hash(h);
@@ -693,7 +695,8 @@ fn object_fingerprint(state: &GameState, id: ObjectId) -> Option<ObjectFingerpri
         counters: obj.counters.clone(),
         power: obj.power,
         toughness: obj.toughness,
-        base_power: obj.base_power,
+        base_power: obj.layer_base_power.or(obj.base_power),
+        base_toughness: obj.layer_base_toughness.or(obj.base_toughness),
         name: obj.name.clone(),
         foretold: obj.foretold,
         is_saddled: obj.is_saddled,
@@ -1938,6 +1941,7 @@ mod tests {
             up_to: true,
             allows_partial_find: true,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
         state

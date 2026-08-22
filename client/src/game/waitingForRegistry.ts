@@ -34,8 +34,18 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     // Active priority — passes via PassButton / mana payment / cast.
     "Priority",
     // Resolve All's explicit standing-pass authorization. The consent modal
-    // gathers each representative's response; its final Grant consumes Ready
-    // through the engine adapter before ordinary priority resumes.
+    // gathers each representative's response.
+    //
+    // `ResolveAllReady` is listed as handled even though it renders nothing,
+    // because whoever submits the FINAL Grant consumes it: this client via the
+    // modal, a browser-driven AI seat via `aiController`, and a server-driven
+    // AI seat via `server-core`'s own hand-off inside `run_ai`. The state has
+    // no acting player, and while the engine does still offer each grantor a
+    // `RevokeResolveAllConsent`, nothing here renders it — so a transport that
+    // reaches this state without one of those owners parks the game
+    // permanently, which is exactly what happened before the server grew its
+    // half. Any new transport that can mint a consent run owes a consumer here
+    // before this entry stays honest.
     "ResolveAllConsent",
     "ResolveAllReady",
     // CR 701.42 / CR 508.4: meld pair and attacking-entry destination dialogs.

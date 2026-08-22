@@ -667,7 +667,10 @@ fn condition_uses_chosen_card_predicate(condition: &AbilityCondition) -> bool {
         | AbilityCondition::SourceMatchesFilter { filter }
         | AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. }
         | AbilityCondition::ControllerControlsMatching { filter }
-        | AbilityCondition::ZoneChangedThisWay { filter }
+        | AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: _,
+        }
         | AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
             target_filter_uses_chosen_card_predicate(filter)
         }

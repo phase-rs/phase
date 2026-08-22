@@ -166,11 +166,14 @@ export function StackDisplay({
         right: `calc(env(safe-area-inset-right) + ${rightOffsetPx}px + var(--game-right-rail-offset, 0px))`,
       };
 
-  const entryStyles = displayStack.map((_, index) => ({
+  const entryStyles = displayStack.map((entry, index) => ({
     position: "absolute" as const,
     top: index * staggerY,
     left: index * staggerX,
-    zIndex: index + 1,
+    // Cards overlap to form the stack pile. Raise the inspected card above
+    // every sibling so its engine-provided targets, modes, and paid-cost chips
+    // remain readable even when it is below the top stack entry.
+    zIndex: entry.id === hoveredStackEntryId ? displayStack.length + 1 : index + 1,
   }));
 
   return (

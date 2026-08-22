@@ -2463,6 +2463,7 @@ fn remap_self_scope_to_event_source_in_quantity(expr: &mut QuantityExpr) {
 fn remap_self_scope_to_event_source_in_ref(qty: &mut QuantityRef) {
     let scope = match qty {
         QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
         | QuantityRef::Toughness { scope }
         | QuantityRef::ObjectManaValue { scope }
         | QuantityRef::ObjectColorCount { scope }
@@ -5903,6 +5904,24 @@ fn extract_if_condition_with_card_name(
         return result;
     }
 
+    // CR 603.4 + CR 603.10a + CR 700.4: A leading past-tense pronoun predicate
+    // after a proven dies head binds to the battlefield-to-graveyard event
+    // object's last-known characteristics. Keep this ahead of the legacy
+    // source-only `WasType` arm so gendered pronouns and composite descriptors
+    // use the event snapshot. Negation wraps only the coherent snapshot
+    // predicate, so a non-dies event can never fail open through `Not`.
+    if let Some((before, condition, rest)) = scan_preceded(&lower, |input| {
+        parse_gendered_dies_event_object_condition(input, trigger_zone_change)
+    })
+    .filter(|(before, _, _)| before.trim().is_empty())
+    {
+        let clause_len = lower.len() - before.len() - rest.len();
+        return (
+            strip_condition_clause(text, before.len(), clause_len),
+            Some(condition),
+        );
+    }
+
     // CR 400.7 + CR 603.10: "if it was a [type]" / "if it was an [type]"
     // Nom combinator: prefix dispatch + typed core type extraction.
     {
@@ -6132,6 +6151,99 @@ fn extract_if_condition_with_card_name(
     }
 
     (text.to_string(), None)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiesEventObjectPronoun {
+    It,
+    He,
+    She,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PastCopulaPolarity {
+    Positive,
+    Negative,
+}
+
+fn parse_gendered_dies_event_object_condition<'a>(
+    input: &'a str,
+    trigger_zone_change: Option<(Zone, Zone)>,
+) -> OracleResult<'a, TriggerCondition> {
+    if trigger_zone_change != Some((Zone::Battlefield, Zone::Graveyard)) {
+        return Err(oracle_err(input));
+    }
+
+    let (rest, _) = tag("if ").parse(input)?;
+    let (rest, pronoun) = alt((
+        value(DiesEventObjectPronoun::It, tag("it ")),
+        value(DiesEventObjectPronoun::He, tag("he ")),
+        value(DiesEventObjectPronoun::She, tag("she ")),
+    ))
+    .parse(rest)?;
+    let (rest, polarity) = alt((
+        value(PastCopulaPolarity::Negative, tag("wasn't ")),
+        value(PastCopulaPolarity::Negative, tag("wasn’t ")),
+        value(PastCopulaPolarity::Negative, tag("was not ")),
+        value(PastCopulaPolarity::Positive, tag("was ")),
+    ))
+    .parse(rest)?;
+    let (descriptor, _) = alt((tag("an "), tag("a "))).parse(rest)?;
+
+    // All three pronouns name the same grammatical role here: the object whose
+    // death produced the zone-change event. Keeping the axis typed and matched
+    // exhaustively prevents a future pronoun from silently inheriting it.
+    match pronoun {
+        DiesEventObjectPronoun::It | DiesEventObjectPronoun::He | DiesEventObjectPronoun::She => {}
+    }
+
+    let (filter, rest) = parse_type_phrase(descriptor);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(oracle_err(input));
+    }
+    // Preserve the legacy positive bare-core `if it was a <CoreType>` shape.
+    // Existing exported cards encode that narrow grammar as `WasType`; the new
+    // event-snapshot condition owns gendered pronouns, negative copulas,
+    // subtypes, and composite descriptors without rewriting that stable wire
+    // representation.
+    if pronoun == DiesEventObjectPronoun::It
+        && polarity == PastCopulaPolarity::Positive
+        && matches!(&filter,
+            TargetFilter::Typed(typed)
+                if typed.controller.is_none()
+                    && typed.properties.is_empty()
+                    && matches!(typed.type_filters.as_slice(),
+                        [TypeFilter::Creature]
+                            | [TypeFilter::Land]
+                            | [TypeFilter::Instant]
+                            | [TypeFilter::Sorcery]
+                            | [TypeFilter::Artifact]
+                            | [TypeFilter::Enchantment]
+                            | [TypeFilter::Planeswalker]
+                            | [TypeFilter::Battle]))
+    {
+        return Err(oracle_err(input));
+    }
+    alt((
+        value((), eof),
+        value((), peek(one_of::<_, _, OracleError<'_>>(",."))),
+    ))
+    .parse(rest)?;
+
+    let condition = TriggerCondition::ZoneChangeObjectMatchesFilter {
+        origin: Some(Zone::Battlefield),
+        destination: Zone::Graveyard,
+        filter,
+    };
+    Ok((
+        rest,
+        match polarity {
+            PastCopulaPolarity::Positive => condition,
+            PastCopulaPolarity::Negative => TriggerCondition::Not {
+                condition: Box::new(condition),
+            },
+        },
+    ))
 }
 
 /// CR 603.4 + CR 700.4 + CR 120.1: dies-trigger intervening-if
@@ -6675,7 +6787,7 @@ fn parse_zone_change_object_filter_predicate(
 
     let (rest, negated) = alt((
         value(false, tag("was ")),
-        value(true, tag("wasn't ")),
+        value(true, alt((tag("wasn't "), tag("wasn’t ")))),
         value(true, tag("was not ")),
     ))
     .parse(input)?;
@@ -6805,7 +6917,10 @@ fn zone_change_object_token_condition(negated: bool) -> TriggerCondition {
 
 fn parse_zone_change_object_token_predicate(input: &str) -> OracleResult<'_, TriggerCondition> {
     let (rest, contracted_negation) = alt((
-        value(true, alt((tag("isn't"), tag("wasn't")))),
+        value(
+            true,
+            alt((tag("isn't"), tag("isn’t"), tag("wasn't"), tag("wasn’t"))),
+        ),
         value(false, alt((tag("is"), tag("was")))),
     ))
     .parse(input)?;

@@ -98,19 +98,8 @@ jobs:
         with:
           tool: wasm-bindgen-cli@0.2.121
 
-      - name: Cache binaryen
-        id: binaryen-cache
-        uses: actions/cache@v4
-        with:
-          path: binaryen-version_123
-          key: binaryen-123-x86_64-linux
-
-      - name: Install binaryen
-        if: steps.binaryen-cache.outputs.cache-hit != 'true'
-        run: curl -L https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-linux.tar.gz | tar xz
-
-      - name: Add binaryen to PATH
-        run: echo "$PWD/binaryen-version_123/bin" >> $GITHUB_PATH
+      - name: Set up Binaryen
+        uses: ./.github/actions/binaryen
 
       - uses: pnpm/action-setup@v4
         with:
@@ -553,20 +542,36 @@ jobs:
           retention-days: 90
 
   # ── Server binary compile (linux musl, shared) ──────────────────────────────
-  # Compiles the static musl binary ONCE per release run. Consumed by both
-  # build-server-image (prebuilt Docker image) and build-server's linux leg
-  # (slim server asset), so neither pays a redundant ~10min compile. Needs nothing
-  # the data pipeline produces, so it starts immediately.
+  # Compiles the static musl binaries ONCE per release run, one matrix leg per
+  # image architecture. Consumed by build-server-image (multi-arch prebuilt
+  # image) and build-server's linux leg (slim x86_64 asset), so neither pays a
+  # redundant ~10min compile. Needs nothing the data pipeline produces, so it
+  # starts immediately.
   build-server-binary:
-    name: Build Server Binary (linux)
+    name: Build Server Binary (linux ${{ matrix.arch }})
     needs: [resolve-release-ref]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The zig cross-compile leg does the same ~10min of work as the native one
+    # but has no history on these runners; headroom over the old 30.
+    timeout-minutes: 45
     permissions:
       contents: read
     env:
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
       PHASE_CHANNEL: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # amd64 keeps the native musl-tools build the slim release asset has
+          # always shipped from; arm64 cross-compiles with zig as the C
+          # toolchain (same mechanism as the Dockerfile's compile stage).
+          - arch: amd64
+            triple: x86_64-unknown-linux-musl
+            cargo_cmd: build
+          - arch: arm64
+            triple: aarch64-unknown-linux-musl
+            cargo_cmd: zigbuild
     steps:
       - uses: actions/checkout@v4
         with:
@@ -574,17 +579,31 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          cache-shared-key: rust-server-linux
+          cache-shared-key: rust-server-linux-${{ matrix.arch }}
           # CI owns the warning-as-error gate. Release profiles compile out
           # debug-only assertions, which can legitimately leave their inputs
           # unused in an otherwise CI-clean tagged source tree.
           rustflags: ""
 
-      - name: Install musl tools and target
+      - name: Install musl tools
+        if: matrix.cargo_cmd == 'build'
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
-          rustup target add x86_64-unknown-linux-musl
+
+      - name: Install zig cross toolchain
+        if: matrix.cargo_cmd == 'zigbuild'
+        # --break-system-packages: ubuntu-latest is 24.04, whose default
+        # Python is PEP 668 externally-managed since GitHub reverted its
+        # pip workaround (actions/runner-images#10897, 2025-05-09). Same
+        # flag the Dockerfile already passes for this identical install.
+        run: pip install --break-system-packages cargo-zigbuild==0.23.0 ziglang==0.16.0
+
+      - name: Add musl target
+        # Must be `rustup target add`, not setup-rust-toolchain's `targets:`
+        # input: rust-toolchain.toml pins its own targets list (wasm32 only),
+        # which overrides the action input.
+        run: rustup target add ${{ matrix.triple }}
 
       - name: Build phase-server (static musl)
         # No chmod here: upload-artifact strips the executable bit anyway; both
@@ -593,13 +612,13 @@ jobs:
           # -p scopes feature unification to phase-server's own graph — an
           # unscoped workspace build unifies feed-scraper's native-tls reqwest
           # features in, dragging openssl-sys into the musl cross-compile.
-          cargo build -p phase-server --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
-          cp target/x86_64-unknown-linux-musl/server-release/phase-server ./phase-server
+          cargo ${{ matrix.cargo_cmd }} -p phase-server --profile server-release --bin phase-server --target ${{ matrix.triple }}
+          cp target/${{ matrix.triple }}/server-release/phase-server ./phase-server
 
       - name: Upload server binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: server-binary-linux
+          name: server-binary-linux-${{ matrix.arch }}
           path: phase-server
           if-no-files-found: error
           retention-days: 1
@@ -621,16 +640,20 @@ jobs:
         with:
           ref: ${{ env.RELEASE_SHA }}
 
-      - name: Download server binary
+      - name: Download server binaries
         uses: actions/download-artifact@v4
         with:
-          name: server-binary-linux
-          path: .
+          pattern: server-binary-linux-*
+          path: prebuilt
 
       - name: Verify build context
+        # The Dockerfile's prebuilt stage copies ./phase-server-<arch> per platform.
         run: |
-          test -s phase-server
-          chmod +x phase-server
+          for arch in amd64 arm64; do
+            test -s "prebuilt/server-binary-linux-$arch/phase-server"
+            cp "prebuilt/server-binary-linux-$arch/phase-server" "phase-server-$arch"
+            chmod +x "phase-server-$arch"
+          done
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -639,14 +662,23 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # QEMU only runs the runtime stage's apt-get for the arm64 leg; the
+      # binaries are prebuilt, so nothing heavy is emulated.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v3
+
       - name: Build and push release image
-        # BINARY_STAGE=prebuilt: copy the musl binary from build-server-binary
+        # BINARY_STAGE=prebuilt: copy the musl binaries from build-server-binary
         # instead of compiling in-container — the build is just apt + COPY.
+        # One manifest list covers both platforms under the same tag/digest.
         uses: docker/build-push-action@v6
         env:
           DOCKER_BUILD_RECORD_UPLOAD: false
         with:
           context: .
+          platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
             BINARY_STAGE=prebuilt
@@ -736,21 +768,9 @@ jobs:
           # lobby-worker/broker-wasm/Cargo.toml (schema versions must be exact).
           tool: wasm-bindgen-cli@0.2.121
 
-      - name: Cache binaryen
-        id: binaryen-cache
+      - name: Set up Binaryen
         if: steps.lobby-worker.outputs.exists == 'true'
-        uses: actions/cache@v4
-        with:
-          path: binaryen-version_123
-          key: binaryen-123-x86_64-linux
-
-      - name: Install binaryen
-        if: steps.lobby-worker.outputs.exists == 'true' && steps.binaryen-cache.outputs.cache-hit != 'true'
-        run: curl -L https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-linux.tar.gz | tar xz
-
-      - name: Add binaryen to PATH
-        if: steps.lobby-worker.outputs.exists == 'true'
-        run: echo "$PWD/binaryen-version_123/bin" >> "$GITHUB_PATH"
+        uses: ./.github/actions/binaryen
 
       - name: Deploy lobby Worker to Cloudflare
         if: steps.lobby-worker.outputs.exists == 'true'
@@ -820,7 +840,7 @@ jobs:
         if: matrix.triple == 'x86_64-unknown-linux-musl'
         uses: actions/download-artifact@v4
         with:
-          name: server-binary-linux
+          name: server-binary-linux-amd64
           path: target/x86_64-unknown-linux-musl/server-release
 
       - name: Prepare slim server binary (Unix)

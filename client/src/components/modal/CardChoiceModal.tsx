@@ -482,7 +482,8 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
       ]?.looked_at,
   );
   const hoverProps = useInspectHoverProps();
-  const [selectedSet, setSelectedSet] = useState<Set<ObjectId>>(new Set());
+  const [selectedOrder, setSelectedOrder] = useState<ObjectId[]>([]);
+  const isOrdered = data.ordering_hint === "OrderedToLibraryTop";
   // The engine records every card the searching player looked at. `cards`
   // remains the legal-selection subset; rendering the full engine-provided
   // look set lets a library-search modal show the remaining library while
@@ -498,24 +499,24 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
     : data.cards;
   const selectableCards = new Set(data.cards);
   const countValid = searchChoiceAllowsPartialFind(data)
-    ? selectedSet.size <= data.count
-    : selectedSet.size === data.count;
+    ? selectedOrder.length <= data.count
+    : selectedOrder.length === data.count;
   const subtitle = searchChoiceSubtitle(data, t);
 
   useEffect(() => {
-    setSelectedSet(new Set());
+    setSelectedOrder([]);
   }, [data]);
 
   const toggleSelect = useCallback(
     (id: ObjectId) => {
-      setSelectedSet((prev) => {
-        const next = new Set(prev);
-        if (next.has(id)) {
-          next.delete(id);
-        } else if (next.size < data.count) {
-          next.add(id);
+      setSelectedOrder((prev) => {
+        const selectedIndex = prev.indexOf(id);
+        if (selectedIndex >= 0) {
+          return prev.filter((selectedId) => selectedId !== id);
+        } else if (prev.length < data.count) {
+          return [...prev, id];
         }
-        return next;
+        return prev;
       });
     },
     [data.count],
@@ -525,10 +526,10 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
     if (countValid) {
       dispatch({
         type: "SelectCards",
-        data: { cards: Array.from(selectedSet) },
+        data: { cards: selectedOrder },
       });
     }
-  }, [countValid, dispatch, selectedSet]);
+  }, [countValid, dispatch, selectedOrder]);
 
   if (!objects) return null;
 
@@ -542,7 +543,8 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
         {displayedCards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
-          const isSelected = selectedSet.has(id);
+          const selectedIndex = selectedOrder.indexOf(id);
+          const isSelected = selectedIndex >= 0;
           const isSelectable = selectableCards.has(id);
           return (
             <motion.button
@@ -570,7 +572,9 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
               {isSelected && (
                 <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
                   <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-bold text-white">
-                    {t("cardChoice.badges.choose")}
+                    {isOrdered
+                      ? formatTopdeckOrderLabel(selectedIndex, t)
+                      : t("cardChoice.badges.choose")}
                   </span>
                 </div>
               )}
@@ -1201,10 +1205,20 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
 }
 
 function formatTopdeckOrderLabel(index: number, t: TFunction<"game">): string {
-  if (index === 0) return t("cardChoice.effectZone.orderTop");
-  const position = index + 1;
-  const suffix = position === 2 ? "nd" : position === 3 ? "rd" : "th";
-  return `${position}${suffix}`;
+  switch (index) {
+    case 0:
+      return t("cardChoice.effectZone.orderTop");
+    case 1:
+      return t("cardChoice.effectZone.orderSecond");
+    case 2:
+      return t("cardChoice.effectZone.orderThird");
+    case 3:
+      return t("cardChoice.effectZone.orderFourth");
+    case 4:
+      return t("cardChoice.effectZone.orderFifth");
+    default:
+      return t("cardChoice.effectZone.orderPosition", { position: index + 1 });
+  }
 }
 
 function DrawnThisTurnTopdeckModal({
@@ -2527,6 +2541,7 @@ function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
   const gameState = useGameStore((s) => s.gameState);
   const objects = gameState?.objects;
   const turnNumber = gameState?.turn_number;
+  const legendCandidateIdentities = gameState?.derived?.legend_candidate_identities;
   const hoverProps = useInspectHoverProps();
 
   if (!objects) return null;
@@ -2540,18 +2555,32 @@ function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
         {data.candidates.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
+          const identity = legendCandidateIdentities?.[String(id)];
+          if (!identity) return null;
           const isCurrentTurnEntry =
             turnNumber != null && obj.entered_battlefield_turn === turnNumber;
           const entryLabel = isCurrentTurnEntry
             ? t("cardChoice.legend.statusJustEntered")
             : t("cardChoice.legend.statusAlready");
+          const identityLabel =
+            identity === "Unknown"
+              ? undefined
+              : t(`cardChoice.legend.identity${identity}`);
+          const ariaLabel = identityLabel
+            ? t("cardChoice.legend.keepAria", {
+                name: obj.name,
+                status: entryLabel,
+                identity: identityLabel,
+              })
+            : t("cardChoice.legend.keepAriaUnknown", {
+                name: obj.name,
+                status: entryLabel,
+              });
+          const isCopy = identity === "Copy" || identity === "TokenCopy";
           return (
             <motion.button
               key={id}
-              aria-label={t("cardChoice.legend.keepAria", {
-                name: obj.name,
-                status: entryLabel,
-              })}
+              aria-label={ariaLabel}
               className="relative rounded-lg transition hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
               initial={{ opacity: 0, y: 60, scale: 0.85 }}
               animate={{ opacity: 0.85, y: 0, scale: 1 }}
@@ -2567,7 +2596,7 @@ function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
                 size="normal"
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
-              <div className="absolute top-2 left-1/2 -translate-x-1/2">
+              <div className="absolute top-2 left-1/2 flex -translate-x-1/2 flex-col items-center gap-1">
                 <span
                   className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-bold text-white shadow ${
                     isCurrentTurnEntry ? "bg-amber-500/95" : "bg-sky-700/95"
@@ -2575,6 +2604,15 @@ function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
                 >
                   {entryLabel}
                 </span>
+                {identityLabel && (
+                  <span
+                    className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-bold text-white shadow ${
+                      isCopy ? "bg-indigo-600/95" : "bg-emerald-600/95"
+                    }`}
+                  >
+                    {identityLabel}
+                  </span>
+                )}
               </div>
             </motion.button>
           );

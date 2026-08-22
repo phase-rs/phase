@@ -1467,7 +1467,12 @@
       "labelReturn": "Zwróć ({{selected}}/{{count}})",
       "labelExile": "Wygnaj ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
-      "orderTop": "Wierzch"
+      "orderTop": "Wierzch",
+      "orderSecond": "2.",
+      "orderThird": "3.",
+      "orderFourth": "4.",
+      "orderFifth": "5.",
+      "orderPosition": "Pozycja {{position}}"
     },
     "drawnThisTurn": {
       "title": "Dobrane w tej turze",
@@ -1633,7 +1638,11 @@
     "legend": {
       "title": "Zasada legend",
       "subtitle": "Wybierz, którego „{{name}}” zatrzymać",
-      "keepAria": "Zatrzymaj {{name}} ({{status}})",
+      "keepAria": "Zatrzymaj {{name}} ({{identity}}, {{status}})",
+      "keepAriaUnknown": "Zatrzymaj {{name}} ({{status}})",
+      "identityOriginal": "Oryginał",
+      "identityCopy": "Kopia",
+      "identityTokenCopy": "Kopia żetonu",
       "statusJustEntered": "Właśnie wszedł",
       "statusAlready": "Już na polu bitwy"
     },
@@ -1853,7 +1862,8 @@
         "card": "kartę",
         "treasure": "Skarb",
         "food": "Pożywienie",
-        "tappedFish": "zakręconą Rybę"
+        "tappedFish": "zakręconą Rybę",
+        "extraTurn": "dodatkową turę"
       }
     }
   },

@@ -513,7 +513,11 @@ fn spelunking_etb_put_cave_gains_life_conditionally() {
     }
     let gain = find_gain_life(etb).expect("the ETB chain must contain a GainLife node");
 
-    let Some(AbilityCondition::ZoneChangedThisWay { filter }) = &gain.condition else {
+    let Some(AbilityCondition::ZoneChangedThisWay {
+        filter,
+        destination: Some(Zone::Battlefield),
+    }) = &gain.condition
+    else {
         panic!(
             "GainLife must be gated by ZoneChangedThisWay, got {:?}",
             gain.condition

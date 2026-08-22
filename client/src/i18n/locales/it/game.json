@@ -1467,7 +1467,12 @@
       "labelReturn": "Restituisci ({{selected}}/{{count}})",
       "labelExile": "Esilia ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
-      "orderTop": "Cima"
+      "orderTop": "Cima",
+      "orderSecond": "2º",
+      "orderThird": "3º",
+      "orderFourth": "4º",
+      "orderFifth": "5º",
+      "orderPosition": "Posizione {{position}}"
     },
     "drawnThisTurn": {
       "title": "Pescate questo turno",
@@ -1633,7 +1638,11 @@
     "legend": {
       "title": "Regola delle leggende",
       "subtitle": "Scegli quale \"{{name}}\" tenere",
-      "keepAria": "Tieni {{name}} ({{status}})",
+      "keepAria": "Tieni {{name}} ({{identity}}, {{status}})",
+      "keepAriaUnknown": "Tieni {{name}} ({{status}})",
+      "identityOriginal": "Originale",
+      "identityCopy": "Copia",
+      "identityTokenCopy": "Copia pedina",
       "statusJustEntered": "Appena entrata",
       "statusAlready": "Già sul campo di battaglia"
     },
@@ -1853,7 +1862,8 @@
         "card": "una carta",
         "treasure": "un Tesoro",
         "food": "un Cibo",
-        "tappedFish": "un Pesce TAPpato"
+        "tappedFish": "un Pesce TAPpato",
+        "extraTurn": "un turno extra"
       }
     }
   },

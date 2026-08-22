@@ -149,6 +149,18 @@ echo "Step 2: Installing frontend dependencies..."
 (cd client && pnpm install) &
 PID_PNPM=$!
 
+# The lobby worker is a separate npm project (its own package-lock.json), and
+# Tilt's 'lobby-worker' resource runs `npm run dev` from it. Without this the
+# resource comes up red on a fresh clone and deck URL import stays broken.
+# Guarded on presence for the same reason release.yml guards its deploy job:
+# commits older than the Worker have no lobby-worker/, and setup must not hard
+# fail there.
+PID_WORKER=""
+if [ -d lobby-worker ]; then
+  (cd lobby-worker && npm install) &
+  PID_WORKER=$!
+fi
+
 # --- Card-data + WASM ---
 if [ "$USE_TILT" = 1 ]; then
   echo ""
@@ -166,6 +178,9 @@ else
 fi
 
 wait $PID_PNPM || FAIL=1
+if [ -n "$PID_WORKER" ]; then
+  wait $PID_WORKER || FAIL=1
+fi
 if [ $FAIL -ne 0 ]; then
   echo "ERROR: setup step failed (see logs above)." >&2
   exit 1

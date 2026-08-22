@@ -203,6 +203,13 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 33 — LegendCandidateIdentity adds Unknown so face-down legend candidates do
+ *      not publish an affirmative original/copy identity.
+ * 32 — DerivedViews.legend_candidate_identities publishes the engine-authored
+ *      original/copy/token-copy identity for each active legend-rule choice. The
+ *      field is serde-optional, but the client deliberately no longer derives this
+ *      rules-sensitive identity from raw objects; an older server would silently
+ *      omit every choice identity.
  * 31 — WaitingFor::LoopShortcut publishes the engine-issued declaration, and
  *      InteractionResponseSpec::Shortcut publishes preview, the per-axis
  *      consequence of the offered count. Both are optional and neither type
@@ -255,7 +262,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 31;
+export const PROTOCOL_VERSION = 33;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -265,11 +272,42 @@ export const PROTOCOL_VERSION = 31;
 export const MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION;
 
 /**
- * Lowest server protocol version this client accepts for lobby-only brokers.
- * LobbyOnly carries matchmaking metadata only, so it keeps a one-version
- * rollout window while Full servers stay current-only.
+ * Lowest server `protocol_version` this client accepts for lobby-only brokers
+ * that predate `lobby_protocol_version` — the LEGACY path only.
+ *
+ * Derived from PROTOCOL_VERSION, so it slides every time the full-game surface
+ * bumps. That is the defect LOBBY_PROTOCOL_VERSION below exists to fix; this
+ * constant survives only to keep already-deployed brokers reachable.
  */
 export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
+
+/**
+ * Wire version of the LOBBY message set, independent of PROTOCOL_VERSION.
+ * Must match `LOBBY_PROTOCOL_VERSION` in `crates/lobby-broker/src/protocol.rs`.
+ *
+ * Bump ONLY when a lobby message variant changes shape. A full-game bump must
+ * NOT move this number: no lobby variant carries GameState or GameAction, so
+ * full-game churn cannot break lobby traffic. Sharing one integer between the
+ * two surfaces is what took preview multiplayer down — PROTOCOL_VERSION moved
+ * twice for GameState-only changes and the derived lobby window went disjoint
+ * from the deployed broker's.
+ *
+ * 1 — Initial lobby-owned version, covering the lobby variant set unchanged
+ *     since #1880.
+ */
+export const LOBBY_PROTOCOL_VERSION = 1;
+
+/**
+ * Lowest broker LOBBY_PROTOCOL_VERSION this client accepts.
+ *
+ * There is deliberately NO ceiling. A broker newer than this client can only
+ * hurt it by sending a lobby variant the client does not know, and
+ * `handleMessage` already ignores unknown tags rather than tearing the session
+ * down. Refusing to connect at all would evict this client from a broker whose
+ * new variant it may never need — which is precisely how a protocol-bumping
+ * release used to strand every older desktop build.
+ */
+export const MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL = 1;
 
 /** Identity advertised by the server in its `ServerHello`. */
 export interface ServerInfo {
@@ -277,9 +315,49 @@ export interface ServerInfo {
   buildCommit: string;
   protocolVersion: number;
   mode: "Full" | "LobbyOnly";
+  /** The server's LOBBY_PROTOCOL_VERSION, when it advertises one. `undefined`
+   * from brokers built before the lobby owned its own version — those are
+   * gated on `protocolVersion` instead. */
+  lobbyProtocolVersion?: number;
   /** Public base URL the server advertises for `<code>@<host>` join strings
    * (a tunnel/proxy URL), or undefined when the server has none to share. */
   publicUrl?: string;
+}
+
+/**
+ * Why this client cannot talk to `info`, or `null` when it can.
+ *
+ * SINGLE AUTHORITY for the protocol window. The handshake in
+ * `openPhaseSocket.ts` and the compatibility badge in `multiplayerStore.ts`
+ * both route through here, so a server can never be rejected by one and shown
+ * as usable by the other.
+ *
+ * Three policies, by surface:
+ *  - Full servers: exact match. GameState/GameAction payloads are neither
+ *    forward- nor backward-compatible across a bump.
+ *  - Lobby brokers advertising a lobby version: floor only, NO CEILING. See
+ *    {@link MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL}.
+ *  - Lobby brokers that predate the field: the legacy one-version window on
+ *    `protocolVersion`, unchanged, so already-deployed brokers stay reachable.
+ */
+export function serverProtocolRejection(info: ServerInfo): string | null {
+  if (info.mode === "LobbyOnly" && info.lobbyProtocolVersion !== undefined) {
+    return info.lobbyProtocolVersion < MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL
+      ? `Lobby protocol version ${info.lobbyProtocolVersion} is older than supported (client speaks ${LOBBY_PROTOCOL_VERSION}, min ${MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL}).`
+      : null;
+  }
+
+  const minAccepted =
+    info.mode === "LobbyOnly"
+      ? LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL
+      : MIN_SUPPORTED_SERVER_PROTOCOL;
+  if (info.protocolVersion < minAccepted) {
+    return `Server protocol version ${info.protocolVersion} is older than supported (client speaks ${PROTOCOL_VERSION}, min ${minAccepted}). Please wait for the lobby to finish rolling out.`;
+  }
+  if (info.protocolVersion > PROTOCOL_VERSION) {
+    return `Server protocol version ${info.protocolVersion} is newer than this client (${PROTOCOL_VERSION}). Please refresh to update.`;
+  }
+  return null;
 }
 
 /** Events emitted by the WebSocketAdapter for UI state updates. */

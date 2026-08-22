@@ -1511,7 +1511,12 @@
       "labelReturn": "Return ({{selected}}/{{count}})",
       "labelExile": "Exile ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
-      "orderTop": "Top"
+      "orderTop": "Top",
+      "orderSecond": "2nd",
+      "orderThird": "3rd",
+      "orderFourth": "4th",
+      "orderFifth": "5th",
+      "orderPosition": "Position {{position}}"
     },
     "drawnThisTurn": {
       "title": "Drawn This Turn",
@@ -1677,7 +1682,11 @@
     "legend": {
       "title": "Legend Rule",
       "subtitle": "Choose which \"{{name}}\" to keep",
-      "keepAria": "Keep {{name}} ({{status}})",
+      "keepAria": "Keep {{name}} ({{identity}}, {{status}})",
+      "keepAriaUnknown": "Keep {{name}} ({{status}})",
+      "identityOriginal": "Original",
+      "identityCopy": "Copy",
+      "identityTokenCopy": "Token copy",
       "statusJustEntered": "Just entered",
       "statusAlready": "Already on battlefield"
     },
@@ -1897,7 +1906,8 @@
         "card": "a card",
         "treasure": "a Treasure",
         "food": "a Food",
-        "tappedFish": "a tapped Fish"
+        "tappedFish": "a tapped Fish",
+        "extraTurn": "an extra turn"
       }
     }
   },

@@ -442,6 +442,16 @@ export function useCardImage(
   // blinding the dependency check on the large effect below.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const stableTokenImageRef = useMemo(() => tokenImageRef, [tokenImageRefKey]);
+  // A token ref is only a pointer when it names a printing: with BOTH ids
+  // empty there is nothing to resolve, so such a ref must not hold the
+  // empty-name guards open — the request would fall through to a
+  // `fetchTokenImageUrl("")` junk search. Our face-down markers carry only an
+  // oracle id (empty `scryfall_id`), so either id keeps the guard open.
+  const resolvableTokenImageRef =
+    stableTokenImageRef &&
+    (stableTokenImageRef.scryfall_id || stableTokenImageRef.scryfall_oracle_id)
+      ? stableTokenImageRef
+      : null;
   const oracleId = options?.oracleId ?? "";
   const faceName = options?.faceName ?? "";
   const scryfallId = options?.scryfallId ?? "";
@@ -572,7 +582,11 @@ export function useCardImage(
       return;
     }
 
-    if (!cardName && !oracleId) {
+    // A face-down marker request carries NO name and NO oracle id — only the
+    // `tokenImageRef` names the printing. Bailing on the empty name here was
+    // what kept the #7535 markers from ever loading at runtime (#7549): the
+    // ref-driven fetch below never ran.
+    if (!cardName && !oracleId && !resolvableTokenImageRef) {
       setStateRequestKey(requestKey);
       setSrc(null);
       setIsRotated(false);
@@ -642,6 +656,7 @@ export function useCardImage(
     filterPower,
     filterSubtypes,
     filterToughness,
+    resolvableTokenImageRef,
     stableTokenImageRef,
     tokenImageRefKey,
     isToken,
@@ -666,7 +681,7 @@ export function useCardImage(
         isFlip: isCardImageFlipLayoutSync(resolvedOracleId, cardName),
       };
     }
-    if (!cardName && !oracleId) {
+    if (!cardName && !oracleId && !resolvableTokenImageRef) {
       return { src: null, isLoading: false, isRotated: false, isFlip: false };
     }
     const cachedEntry = imageRequestCache.get(requestKey);

@@ -91,6 +91,10 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       and the state snapshot carries WaitingFor::LoopShortcut.declaration.
  *       Both are optional and parse on a v20 peer; the loss is silent, so the
  *       handshake is the only place the pairing can be refused.
+ *  24 — DerivedViews.legend_candidate_identities carries the engine-authored
+ *       copy identity required to label legend-rule choices. The field is
+ *       additive but the client no longer infers this identity from raw state,
+ *       so accepting a v23 peer would silently remove every choice option.
  *  20 — Serialized player-action completion provenance and modal continuations.
  *  19 — Added an action_noop acknowledgement for accepted transport no-ops.
  *  18 — DebugCardEntries added a serialized, private resolution frame for
@@ -123,7 +127,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 23 as const;
+export const WIRE_PROTOCOL_VERSION = 24 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }

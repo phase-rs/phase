@@ -10510,6 +10510,75 @@ fn draw_cards_equal_to_hand_difference_from_limit() {
     }
 }
 
+/// CR 608.2c: an `Otherwise` branch must inherit a comparison-derived
+/// "the difference" from the same conditional definition as its then branch.
+/// The counter parser emits a deferred `Variable("difference")` for the
+/// independently parsed else chain, so assembly must replace it with the
+/// antecedent's typed operands.
+#[test]
+fn otherwise_branch_binds_difference_from_antecedent_condition() {
+    let def = parse_effect_chain(
+        "If you have fewer than seven cards in hand, draw a card. Otherwise, put a number of +1/+1 counters on ~ equal to the difference.",
+        AbilityKind::Spell,
+    );
+
+    assert_eq!(
+        def.condition,
+        Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::Controller,
+                },
+            },
+            comparator: Comparator::LT,
+            rhs: QuantityExpr::Fixed { value: 7 },
+        }),
+        "then branch must retain the comparison that establishes the difference"
+    );
+    assert!(matches!(*def.effect, Effect::Draw { .. }));
+
+    let else_branch = def
+        .else_ability
+        .as_deref()
+        .expect("Otherwise must attach to the comparison-gated effect");
+    match else_branch.effect.as_ref() {
+        Effect::PutCounter {
+            counter_type,
+            count: QuantityExpr::Difference { left, right },
+            target: TargetFilter::SelfRef,
+        } => {
+            assert_eq!(
+                *counter_type,
+                crate::types::counter::CounterType::Plus1Plus1
+            );
+            assert_eq!(
+                **left,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
+                }
+            );
+            assert_eq!(**right, QuantityExpr::Fixed { value: 7 });
+        }
+        other => panic!(
+            "Otherwise counter effect must contain the typed comparison-derived Difference, got {other:?}"
+        ),
+    }
+    assert!(
+        !matches!(
+            else_branch.effect.as_ref(),
+            Effect::PutCounter {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable { name }
+                },
+                ..
+            } if name == "difference"
+        ),
+        "Otherwise must not retain an unresolved difference placeholder"
+    );
+}
+
 /// CR 121.1 + CR 402: "if that player has more cards in hand than you, draw cards
 /// equal to the difference" — cross-player difference. Anchor: Slithermuse.
 #[test]
@@ -47020,7 +47089,10 @@ fn attach_just_moved_armored_skyhunter_dig_with_zone_changed_this_way() {
         other => panic!("expected Attach sub_ability, got {other:?}"),
     }
     match &attach.condition {
-        Some(AbilityCondition::ZoneChangedThisWay { filter }) => match filter {
+        Some(AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: Some(Zone::Battlefield),
+        }) => match filter {
             TargetFilter::Typed(t) => assert!(
                 t.type_filters.iter().any(
                     |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))
@@ -47080,7 +47152,10 @@ fn attach_just_moved_iron_man_put_from_hand_attach_equipment_to_source() {
     // Condition gates on the MOVED card's type (ZoneChangedThisWay), not the
     // ability's first target slot (the pre-fix TargetMatchesFilter bug).
     match &attach.condition {
-        Some(AbilityCondition::ZoneChangedThisWay { filter }) => match filter {
+        Some(AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: None,
+        }) => match filter {
             TargetFilter::Typed(t) => assert!(
                 t.type_filters.iter().any(
                     |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))
@@ -47136,7 +47211,10 @@ fn invincible_iron_man_trigger_parses_equipment_attach_via_parse_oracle_text() {
         other => panic!("expected Attach sub_ability, got {other:?}"),
     }
     match &attach.condition {
-        Some(AbilityCondition::ZoneChangedThisWay { filter }) => match filter {
+        Some(AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: None,
+        }) => match filter {
             TargetFilter::Typed(t) => assert!(t.type_filters.iter().any(
                 |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))
             )),
@@ -47216,7 +47294,10 @@ fn attach_just_moved_gilgamesh_any_number_equipment_reflexive_attach() {
         other => panic!("expected Attach sub_ability, got {other:?}"),
     }
     match &attach.condition {
-        Some(AbilityCondition::ZoneChangedThisWay { filter }) => match filter {
+        Some(AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: Some(Zone::Battlefield),
+        }) => match filter {
             TargetFilter::Typed(t) => assert!(
                 t.type_filters.iter().any(
                     |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))
@@ -47373,6 +47454,380 @@ fn attach_just_moved_negative_no_attach_sub_no_rewire() {
     assert!(
         !any_forward_result(&def),
         "ChangeZone-only (no Attach sub) must not be marked forward_result"
+    );
+}
+
+/// Oracle text is verbatim from `client/public/card-data.json`.
+const SWORD_OF_THE_MEEK_ORACLE: &str = "Equipped creature gets +1/+2.\n\
+Equip {2}\n\
+Whenever a 1/1 creature you control enters, you may return this card from your \
+graveyard to the battlefield, then attach it to that creature.";
+
+const AURIOK_SURVIVORS_ORACLE: &str = "When this creature enters, you may return \
+target Equipment card from your graveyard to the battlefield. If you do, you may \
+attach it to this creature.";
+
+const STONEHEWER_GIANT_ORACLE: &str = "Vigilance\n\
+{1}{W}, {T}: Search your library for an Equipment card, put it onto the \
+battlefield, attach it to a creature you control, then shuffle.";
+
+const PRE_WAR_FORMALWEAR_ORACLE: &str = "When this Equipment enters, return target \
+creature card with mana value 3 or less from your graveyard to the battlefield and \
+attach this Equipment to it.\n\
+Equipped creature gets +2/+2 and has vigilance.\n\
+Equip {3}";
+
+const OGRE_GEARGRABBER_ORACLE: &str = "Whenever this creature attacks, gain control \
+of target Equipment an opponent controls until end of turn. Attach it to this \
+creature. When you lose control of that Equipment, unattach it.";
+
+const AURA_GRAFT_ORACLE: &str =
+    "Gain control of target Aura that's attached to a permanent. Attach it to \
+another permanent it can enchant.";
+
+fn find_attach_under(
+    def: &AbilityDefinition,
+    mut parent_matches: impl FnMut(&Effect) -> bool,
+) -> Option<(&AbilityDefinition, &AbilityDefinition)> {
+    fn walk<'a>(
+        def: &'a AbilityDefinition,
+        parent_matches: &mut dyn FnMut(&Effect) -> bool,
+    ) -> Option<(&'a AbilityDefinition, &'a AbilityDefinition)> {
+        if let Some(sub) = def.sub_ability.as_deref() {
+            if matches!(*sub.effect, Effect::Attach { .. }) && parent_matches(&def.effect) {
+                return Some((def, sub));
+            }
+            if let Some(found) = walk(sub, parent_matches) {
+                return Some(found);
+            }
+        }
+        if let Some(else_branch) = def.else_ability.as_deref() {
+            if let Some(found) = walk(else_branch, parent_matches) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    walk(def, &mut parent_matches)
+}
+
+/// Scoped to `abilities` + `triggers` — the two chains these tests walk.
+/// `statics` and `replacements` carry different definition types.
+fn chain_unimplemented_count(def: &AbilityDefinition) -> usize {
+    usize::from(matches!(*def.effect, Effect::Unimplemented { .. }))
+        + def
+            .sub_ability
+            .as_deref()
+            .map_or(0, chain_unimplemented_count)
+        + def
+            .else_ability
+            .as_deref()
+            .map_or(0, chain_unimplemented_count)
+}
+
+fn ability_or_trigger_has_unimplemented(parsed: &crate::parser::oracle::ParsedAbilities) -> bool {
+    parsed.abilities.iter().any(chain_has_unimplemented)
+        || parsed
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_deref())
+            .any(chain_has_unimplemented)
+}
+
+fn is_battlefield_move(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::ChangeZone {
+            destination: Zone::Battlefield,
+            ..
+        } | Effect::Dig {
+            destination: Some(Zone::Battlefield),
+            ..
+        } | Effect::Conjure {
+            destination: Zone::Battlefield,
+            ..
+        }
+    )
+}
+
+/// CR 400.7j + CR 301.5c: "return this card from your graveyard to the
+/// battlefield, then attach it to that creature" collapsed BOTH operands of the
+/// nested `Attach` onto the trigger-event anaphor, making the attach a
+/// guaranteed self-attach no-op — Sword of the Meek returned but never equipped
+/// the entering 1/1. The attachment operand must name the just-moved card
+/// (`SelfRef`, rebound to the forwarded object at resolution), leaving
+/// `ParentTarget` to mean only the host — the same shape Dragon Breath and
+/// Smoke Shroud already produce.
+#[test]
+fn attach_just_moved_collapsed_recipient_anaphor_rebinds_to_forwarded_source() {
+    let parsed = parse_oracle_text(
+        SWORD_OF_THE_MEEK_ORACLE,
+        "Sword of the Meek",
+        &[],
+        &["Artifact".to_string()],
+        &["Equipment".to_string()],
+    );
+    assert!(
+        !ability_or_trigger_has_unimplemented(&parsed),
+        "Sword of the Meek must parse with zero Unimplemented in its abilities/triggers"
+    );
+    let execute = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("graveyard return trigger");
+    // Positive reach-guard: the return itself must still be the parent effect.
+    assert!(
+        matches!(
+            &*execute.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "expected the graveyard→battlefield self return, got {:?}",
+        execute.effect
+    );
+    assert!(
+        execute.forward_result,
+        "the return must forward the moved card to the Attach sub"
+    );
+    let attach = execute.sub_ability.as_deref().expect("Attach sub-ability");
+    assert_eq!(
+        &*attach.effect,
+        &Effect::Attach {
+            attachment: TargetFilter::SelfRef,
+            target: TargetFilter::ParentTarget,
+        },
+        "the returned Sword is the attachment; 'that creature' is the host"
+    );
+}
+
+/// Shape-only sibling of the test above — **no behavioral claim**. Auriok
+/// Survivors' recipient operand ("attach it to *this creature*") is a separate,
+/// unfixed misparse: it lowers to `ParentTarget` where `SelfRef` is correct, so
+/// the card self-attaches (a CR 301.5c no-op) both before and after this
+/// rebind. Only the attachment operand is asserted here.
+#[test]
+fn attach_just_moved_collapsed_recipient_anaphor_auriok_survivors_shape_only() {
+    let parsed = parse_oracle_text(
+        AURIOK_SURVIVORS_ORACLE,
+        "Auriok Survivors",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Soldier".to_string()],
+    );
+    assert!(
+        !ability_or_trigger_has_unimplemented(&parsed),
+        "Auriok Survivors must parse with zero Unimplemented in its abilities/triggers"
+    );
+    let execute = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("ETB trigger");
+    let (parent, attach) =
+        find_attach_under(execute, is_battlefield_move).expect("Attach under the return");
+    assert!(
+        parent.forward_result,
+        "the return must forward the moved Equipment to the Attach sub"
+    );
+    let Effect::Attach { attachment, .. } = &*attach.effect else {
+        unreachable!("find_attach_under only returns Attach nodes");
+    };
+    assert_eq!(
+        *attachment,
+        TargetFilter::SelfRef,
+        "'it' names the returned Equipment (CR 400.7j), not the host slot"
+    );
+}
+
+/// Negative sibling: distinct operands must NOT be rebound. Stonehewer Giant's
+/// "it" names the *searched* Equipment and is resolved at runtime out of the
+/// trigger context; rebinding it to `SelfRef` would try to equip the Giant.
+///
+/// The reach-guard deliberately does not assert `forward_result` — Stonehewer
+/// Giant carries `forward_result: false` at every node of its chain, because
+/// `sub_targets_moved_card` reads the `Attach`'s `target` field, which here is
+/// `Typed(Creature)`.
+#[test]
+fn attach_just_moved_negative_distinct_anaphors_are_not_rebound() {
+    let parsed = parse_oracle_text(
+        STONEHEWER_GIANT_ORACLE,
+        "Stonehewer Giant",
+        &["Vigilance".to_string()],
+        &["Creature".to_string()],
+        &["Giant".to_string(), "Warrior".to_string()],
+    );
+    assert!(
+        !ability_or_trigger_has_unimplemented(&parsed),
+        "Stonehewer Giant must parse with zero Unimplemented in its abilities/triggers"
+    );
+    let (_, attach) = parsed
+        .abilities
+        .iter()
+        .find_map(|def| find_attach_under(def, is_battlefield_move))
+        .expect("Attach under the library→battlefield put");
+    let Effect::Attach { attachment, target } = &*attach.effect else {
+        unreachable!("find_attach_under only returns Attach nodes");
+    };
+    assert_eq!(
+        *attachment,
+        TargetFilter::ParentTarget,
+        "distinct operands must keep the runtime-rescued ParentTarget attachment"
+    );
+    assert!(
+        matches!(target, TargetFilter::Typed(_)),
+        "expected a typed creature host, got {target:?}"
+    );
+}
+
+/// Negative sibling for the mirrored family: an explicit "attach **this
+/// Equipment** to it" already lowers the attachment to `SelfRef`, so the parse
+/// must survive the rebind untouched. This documents the shape the hoisted
+/// allow-list protects; it does not discriminate the hoist itself, because
+/// every `SelfRef`/`SelfRef` parent in today's corpus already carries
+/// `forward_result` — `rebind_rejects_self_ref_attachment_operand` below is the
+/// test that pins the hoist.
+#[test]
+fn attach_just_moved_negative_self_ref_attachment_is_not_rebound() {
+    let parsed = parse_oracle_text(
+        PRE_WAR_FORMALWEAR_ORACLE,
+        "Pre-War Formalwear",
+        &[],
+        &["Artifact".to_string()],
+        &["Equipment".to_string()],
+    );
+    assert!(
+        !ability_or_trigger_has_unimplemented(&parsed),
+        "Pre-War Formalwear must parse with zero Unimplemented in its abilities/triggers"
+    );
+    let execute = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("ETB trigger");
+    let (parent, attach) =
+        find_attach_under(execute, is_battlefield_move).expect("Attach under the return");
+    assert!(parent.forward_result);
+    assert_eq!(
+        &*attach.effect,
+        &Effect::Attach {
+            attachment: TargetFilter::SelfRef,
+            target: TargetFilter::ParentTarget,
+        },
+        "an explicit self attachment must survive the rebind unchanged"
+    );
+}
+
+/// Direct guard on the hoisted allow-list: a `SelfRef`/`SelfRef` `Attach` must
+/// not be rewritten by the operand-identity arm. Corpus cards with this shape
+/// (Nim Deathmantle, Boonweaver Giant, Hakim, Light-Paws, Magnetic Snuffler,
+/// Runed Crown) already carry `forward_result`, so only a direct call can
+/// observe the hoist.
+#[test]
+fn rebind_rejects_self_ref_attachment_operand() {
+    let mut effect = Effect::Attach {
+        attachment: TargetFilter::SelfRef,
+        target: TargetFilter::SelfRef,
+    };
+    assert!(
+        !super::lower::rebind_attach_attachment_to_forwarded_source_if_anaphor_names_moved_card(
+            &mut effect
+        )
+    );
+    assert_eq!(
+        effect,
+        Effect::Attach {
+            attachment: TargetFilter::SelfRef,
+            target: TargetFilter::SelfRef,
+        }
+    );
+}
+
+/// The caller gate, not the predicate, is what protects the equal-operand pairs
+/// whose parent moves nothing to a public zone. Ogre Geargrabber has the SAME
+/// `Attach { ParentTarget, ParentTarget }` shape as Sword of the Meek, but under
+/// a `GainControl` parent — CR 400.7j never applies, so there is no moved card
+/// for "it" to name and the rebind must not fire.
+///
+/// The reach-guard is path-scoped: the card carries one `Effect::Unimplemented`
+/// on the sibling "when you lose control" clause, so a card-wide zero assertion
+/// would be unsatisfiable.
+#[test]
+fn attach_just_moved_negative_equal_operands_under_gain_control_are_not_rebound() {
+    let parsed = parse_oracle_text(
+        OGRE_GEARGRABBER_ORACLE,
+        "Ogre Geargrabber",
+        &[],
+        &["Creature".to_string()],
+        &["Ogre".to_string(), "Warrior".to_string()],
+    );
+    let execute = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("attack trigger");
+    let (parent, attach) = find_attach_under(execute, |effect| {
+        matches!(effect, Effect::GainControl { .. })
+    })
+    .expect("Attach under the GainControl");
+    // Reach-guard: the card carries exactly one `Unimplemented` — the sibling
+    // "when you lose control of that Equipment" clause hanging off the Attach —
+    // so a parse failure that swallowed the GainControl→Attach path would move
+    // this count and fail here before the negative below could pass vacuously.
+    assert_eq!(
+        chain_unimplemented_count(execute),
+        1,
+        "expected only the trailing lose-control clause to be unimplemented"
+    );
+    assert_eq!(
+        &*attach.effect,
+        &Effect::Attach {
+            attachment: TargetFilter::ParentTarget,
+            target: TargetFilter::ParentTarget,
+        },
+        "no public-zone move ⇒ no CR 400.7j referent ⇒ no rebind"
+    );
+    assert!(
+        !parent.forward_result,
+        "a GainControl parent must not be stamped forward_result"
+    );
+}
+
+/// Aura Graft is the other `GainControl` attach whose "it" must stay
+/// `ParentTarget`. Its operands are NOT equal (the host is a typed "another
+/// permanent"), so it is protected twice over — by the caller gate and by the
+/// operand-identity test.
+#[test]
+fn attach_just_moved_negative_aura_graft_attachment_stays_parent_target() {
+    let parsed = parse_oracle_text(
+        AURA_GRAFT_ORACLE,
+        "Aura Graft",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    assert!(
+        !ability_or_trigger_has_unimplemented(&parsed),
+        "Aura Graft must parse with zero Unimplemented in its abilities/triggers"
+    );
+    let (_, attach) = parsed
+        .abilities
+        .iter()
+        .find_map(|def| {
+            find_attach_under(def, |effect| matches!(effect, Effect::GainControl { .. }))
+        })
+        .expect("Attach under the GainControl");
+    let Effect::Attach { attachment, target } = &*attach.effect else {
+        unreachable!("find_attach_under only returns Attach nodes");
+    };
+    assert_eq!(*attachment, TargetFilter::ParentTarget);
+    assert!(
+        matches!(target, TargetFilter::Typed(_)),
+        "expected the typed 'another permanent' host, got {target:?}"
     );
 }
 
@@ -48013,7 +48468,8 @@ fn reflexive_sacrifice_this_way_taps_and_draws_that_many() {
     assert!(matches!(
         def.condition,
         Some(AbilityCondition::ZoneChangedThisWay {
-            filter: TargetFilter::Typed(TypedFilter { ref type_filters, .. })
+            filter: TargetFilter::Typed(TypedFilter { ref type_filters, .. }),
+            destination: None,
         }) if type_filters.iter().any(|f| matches!(f, TypeFilter::Artifact))
     ));
 

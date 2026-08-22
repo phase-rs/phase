@@ -1056,6 +1056,36 @@ fn do_eliminate(
         super::replacement::abandon_post_replacement_continuation(state);
     }
 
+    // A leaving player gains no life: they are no longer a player in the game, so
+    // there is no one for the owed CR 702.15b gain to be applied to. NO CR 800.4
+    // SUBPART STATES THIS DIRECTLY — a sweep of 800.4 and 800.4a-800.4p returns no
+    // mention of life at all, so this sentence carries no citation on purpose. The
+    // nearest analogues are CR 800.4d (a triggered ability that would be controlled
+    // by a player who has left the game isn't put on the stack), CR 800.4e (combat
+    // damage that would be assigned to a player who has left the game isn't
+    // assigned), and CR 614.9 (damage redirected to or from a player who has left
+    // the game does nothing). 800.4d is the closest in SHAPE — an owed effect for a
+    // departed seat simply does not happen — but it is about triggered abilities,
+    // and the other two are about damage; NONE may be cited as authority for life
+    // gain. A re-sweep of 800.4 and 800.4a-800.4p confirms the enumerated subparts
+    // cover objects, control, creation, combat damage, costs, choices, information,
+    // and turns, and none of them life.
+    //
+    // Drop only THAT seat's owed lifelink gains — the rest of the batch belongs to
+    // other controllers and must still land, and the batch itself must still
+    // complete so its CR 603.3b triggers fire. Per-entry, mirroring
+    // `abandon_pending_spell_casts`, never a blanket null.
+    //
+    // CR 800.4j: when the seat that left is the ACTIVE player, the turn still
+    // continues to its completion, so the batch DOES complete — `auto_advance_once`
+    // discharges it through `resume_pending_combat_lifelink` before the CR 800.4
+    // turn skip. (An earlier revision of this comment claimed the batch "can no
+    // longer complete at all" and that `turns::enter_phase` owned that case; both
+    // halves are false now that the discharge exists.)
+    if let Some(record) = state.pending_combat_lifelink.as_mut() {
+        record.remaining.retain(|gain| gain.controller != player);
+    }
+
     // CR 800.4a: A coupled ETB spell-resolution context can outlive its
     // `pending_replacement` (nested `ContinueZoneDeliveryTail` early-return,
     // engine_replacement.rs), so it is torn down under its OWN controller-keyed

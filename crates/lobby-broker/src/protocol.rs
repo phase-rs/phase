@@ -43,6 +43,13 @@ pub enum ServerErrorCode {
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
 ///
+/// 33 — `LegendCandidateIdentity::Unknown` prevents face-down legend candidates
+///      from publishing an affirmative original/copy identity.
+/// 32 — `DerivedViews::legend_candidate_identities` publishes the engine-authored
+///      original/copy/token-copy identity for each active legend-rule choice. The
+///      field is `#[serde(default)]`, but the client deliberately no longer derives
+///      this rules-sensitive identity from raw objects; an older server would
+///      silently omit every choice identity.
 /// 31 — `WaitingFor::LoopShortcut` publishes the engine-issued `declaration`, and
 ///      `InteractionResponseSpec::Shortcut` publishes `preview`, the per-axis
 ///      consequence of the offered count. Both are `Option` and neither type sets
@@ -94,12 +101,46 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 31;
+pub const PROTOCOL_VERSION: u32 = 33;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
-/// handshake. Lobby traffic has a one-version rollout window; full game servers
-/// may choose a stricter floor when state/action payloads change.
+/// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
+/// legacy path only. Lobby traffic has a one-version rollout window; full game
+/// servers may choose a stricter floor when state/action payloads change.
+///
+/// Being derived from [`PROTOCOL_VERSION`] is exactly the defect
+/// [`LOBBY_PROTOCOL_VERSION`] fixes: a `GameState`-only bump slides this floor
+/// even though no lobby message changed. It survives only so already-deployed
+/// clients stay reachable; new gating must use [`MIN_SUPPORTED_LOBBY_PROTOCOL`].
 pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
+
+/// Wire-protocol version of the **lobby** message set ([`LobbyClientMessage`] /
+/// [`LobbyServerMessage`]), independent of [`PROTOCOL_VERSION`].
+///
+/// Bump ONLY when a lobby variant is added, removed, renamed, or has a field
+/// type changed. A full-game bump must NOT move this number: no lobby variant
+/// carries `GameState` or `GameAction`, so full-game churn cannot break lobby
+/// traffic.
+///
+/// Sharing one integer between the two surfaces is what took preview
+/// multiplayer down: `PROTOCOL_VERSION` moved twice for `GameState`-only
+/// changes, [`MIN_SUPPORTED_PROTOCOL`] is derived from it, and the deployed
+/// broker's window went disjoint from the shipped client's. This constant is
+/// the fix — it moves only for reasons the lobby can actually observe.
+///
+/// 1 — Initial lobby-owned version, covering the `LobbyClientMessage` /
+///     `LobbyServerMessage` variant sets, unchanged since #1880.
+pub const LOBBY_PROTOCOL_VERSION: u32 = 1;
+
+/// Lowest [`LOBBY_PROTOCOL_VERSION`] a broker accepts from a client.
+///
+/// There is deliberately **no upper bound**. A client newer than the broker can
+/// only fail by sending a lobby variant this broker does not know, and
+/// [`parse_lobby_client_message`] already answers that with an explicit
+/// [`ParsedFrame::UnknownTag`] rejection scoped to the offending frame. That is
+/// a loud, per-feature failure; refusing the whole connection instead evicts a
+/// client over a variant it may never send.
+pub const MIN_SUPPORTED_LOBBY_PROTOCOL: u32 = 1;
 
 /// Public-lobby view of a single registered game. Populated by the server,
 /// never by clients. Field shape mirrors the pre-extraction
@@ -186,6 +227,13 @@ pub enum LobbyClientMessage {
         client_version: String,
         build_commit: String,
         protocol_version: u32,
+        /// The client's [`LOBBY_PROTOCOL_VERSION`]. `None` from clients built
+        /// before the lobby owned its own version; those fall back to the
+        /// `protocol_version` window. Additive and optional, so an older broker
+        /// ignores it and an older client omits it — no `PROTOCOL_VERSION` bump
+        /// is required for either direction to keep parsing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lobby_protocol_version: Option<u32>,
     },
     SubscribeLobby,
     UnsubscribeLobby,
@@ -266,6 +314,11 @@ pub enum LobbyServerMessage {
         build_commit: String,
         protocol_version: u32,
         mode: ServerMode,
+        /// This broker's [`LOBBY_PROTOCOL_VERSION`]. Advertised alongside — not
+        /// instead of — `protocol_version`, which older clients still gate on
+        /// and which therefore must keep tracking the full-game constant.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lobby_protocol_version: Option<u32>,
     },
     GameCreated {
         game_code: String,
@@ -429,14 +482,39 @@ fn json_string(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The two surfaces must not share a number. `scripts/check-protocol-version.mjs`
+    /// carries the structural half of this guard — it matches
+    /// `LOBBY_PROTOCOL_VERSION` only against a bare integer literal, so
+    /// re-deriving it from `PROTOCOL_VERSION` fails the cross-language gate
+    /// rather than silently re-coupling the lobby to full-game churn.
+    #[test]
+    fn lobby_protocol_version_is_independent_of_the_full_game_one() {
+        assert_eq!(LOBBY_PROTOCOL_VERSION, 1);
+        assert_eq!(MIN_SUPPORTED_LOBBY_PROTOCOL, 1);
+        assert_ne!(
+            LOBBY_PROTOCOL_VERSION, PROTOCOL_VERSION,
+            "the lobby must version its own message set, not alias the full-game one"
+        );
+        // A `const` block, not a runtime assert: both operands are constants, so
+        // this is decidable at compile time. A floor above the current version
+        // would refuse every client, and that should fail the BUILD rather than
+        // wait for someone to run the test suite.
+        const {
+            assert!(
+                MIN_SUPPORTED_LOBBY_PROTOCOL <= LOBBY_PROTOCOL_VERSION,
+                "a floor above the current version would refuse every client"
+            )
+        };
+    }
+
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 31);
+        assert_eq!(PROTOCOL_VERSION, 33);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which is what refuses an older full-game peer whose GameState cannot
         // understand a success acknowledgment the submitting client awaits.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 30);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 32);
     }
 
     #[test]

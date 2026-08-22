@@ -10,10 +10,13 @@ import { ManaSymbol } from "../../mana/ManaSymbol";
 import { useCardImage } from "../../../hooks/useCardImage";
 import { useResumables } from "../../../hooks/useResumables";
 import { useCardDataStore } from "../../../stores/cardDataStore";
+import { evaluateDeckCompatibility } from "../../../services/deckCompatibility";
 import {
   getDeckCardCount,
   getDeckColorIdentity,
+  getDeckColorIdentityPips,
   getRepresentativeCard,
+  loadDeck,
 } from "../deckHelpers";
 
 interface ActionDef {
@@ -167,6 +170,7 @@ function ActiveDeckCard() {
   const { t } = useTranslation("menu");
   const navigate = useNavigate();
   const [name, setName] = useState<string | null>(null);
+  const [colors, setColors] = useState<string[] | null>(null);
   useEffect(() => setName(localStorage.getItem(ACTIVE_DECK_KEY)), []);
 
   // Resolve the deck's representative card so the card can show real art, the
@@ -177,6 +181,34 @@ function ActiveDeckCard() {
   const repCard = name && !randomDeckSelected ? getRepresentativeCard(name) : null;
   const { src: artSrc } = useCardImage(repCard ?? "", { size: "art_crop" });
 
+  useEffect(() => {
+    if (!name || randomDeckSelected) {
+      setColors(null);
+      return;
+    }
+
+    const catalogColors = getDeckColorIdentity(name);
+    if (catalogColors !== null) {
+      setColors(catalogColors);
+      return;
+    }
+
+    const deck = loadDeck(name);
+    if (!deck) {
+      setColors(null);
+      return;
+    }
+
+    let cancelled = false;
+    setColors(null);
+    void evaluateDeckCompatibility(deck, { summaryOnly: true }).then((result) => {
+      if (!cancelled) setColors(result.color_identity);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [name, randomDeckSelected]);
+
   if (!name) {
     return (
       <button type="button" onClick={() => navigate("/my-decks")} className={`${INFO_CARD} flex cursor-pointer flex-col items-start text-left transition-colors hover:border-hairline-hover`}>
@@ -186,7 +218,7 @@ function ActiveDeckCard() {
     );
   }
   const count = randomDeckSelected ? 0 : getDeckCardCount(name);
-  const colors = randomDeckSelected ? [] : getDeckColorIdentity(name);
+  const colorPips = randomDeckSelected ? null : getDeckColorIdentityPips(colors);
   return (
     <div
       role="button"
@@ -213,9 +245,9 @@ function ActiveDeckCard() {
         <div className={`${SECTION_LABEL} absolute left-3 top-2.5 z-10 drop-shadow-[0_1px_2px_rgba(0,0,0,0.7)]`}>
           {t("home.dashboard.activeDeck")}
         </div>
-        {colors.length > 0 && (
+        {colorPips && (
           <div className="absolute right-2.5 top-2.5 z-10 flex items-center gap-0.5 rounded-full bg-black/75 px-2 py-1 shadow-[0_2px_8px_rgba(0,0,0,0.6)] ring-1 ring-white/20 backdrop-blur-sm">
-            {colors.map((c) => <ManaSymbol key={c} shard={c} size="xs" />)}
+            {colorPips.map((color) => <ManaSymbol key={color} shard={color} size="xs" />)}
           </div>
         )}
       </div>

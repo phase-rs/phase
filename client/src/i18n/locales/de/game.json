@@ -1467,7 +1467,12 @@
       "labelReturn": "Zurückgeben ({{selected}}/{{count}})",
       "labelExile": "Ins Exil ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
-      "orderTop": "Oben"
+      "orderTop": "Oben",
+      "orderSecond": "2.",
+      "orderThird": "3.",
+      "orderFourth": "4.",
+      "orderFifth": "5.",
+      "orderPosition": "Position {{position}}"
     },
     "drawnThisTurn": {
       "title": "Diesen Zug gezogen",
@@ -1633,7 +1638,11 @@
     "legend": {
       "title": "Legendenregel",
       "subtitle": "Wähle, welches „{{name}}“ du behältst",
-      "keepAria": "{{name}} behalten ({{status}})",
+      "keepAria": "{{name}} behalten ({{identity}}, {{status}})",
+      "keepAriaUnknown": "{{name}} behalten ({{status}})",
+      "identityOriginal": "Original",
+      "identityCopy": "Kopie",
+      "identityTokenCopy": "Spielsteinkopie",
       "statusJustEntered": "Gerade betreten",
       "statusAlready": "Bereits auf dem Schlachtfeld"
     },
@@ -1853,7 +1862,8 @@
         "card": "eine Karte",
         "treasure": "einen Schatz",
         "food": "eine Nahrung",
-        "tappedFish": "einen getappten Fisch"
+        "tappedFish": "einen getappten Fisch",
+        "extraTurn": "einen zusätzlichen Zug"
       }
     }
   },

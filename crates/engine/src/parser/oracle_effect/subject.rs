@@ -409,16 +409,26 @@ fn try_parse_contracted_subject_additive_type_clause(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<ClauseAst> {
-    type VE<'a> = OracleError<'a>;
-
     let lower = text.to_lowercase();
-    let (_, (subject_text, prefix_len)) = alt((
-        value(("it", "it's ".len()), tag::<_, _, VE>("it's ")),
-        value(("it", "it’s ".len()), tag::<_, _, VE>("it’s ")),
-    ))
-    .parse(lower.as_str())
-    .ok()?;
-    let rest_original = &text[prefix_len..];
+    let ((pronoun, article), descriptor) = nom_on_lower(text, &lower, |input| {
+        let (input, pronoun) = alt((
+            value(ContractedSubjectPronoun::It, tag("it")),
+            value(ContractedSubjectPronoun::He, tag("he")),
+            value(ContractedSubjectPronoun::She, tag("she")),
+        ))
+        .parse(input)?;
+        let (input, _) = alt((tag("'"), tag("’"))).parse(input)?;
+        let (input, _) = tag("s ").parse(input)?;
+        let (input, article) =
+            alt((value("an ", tag("an ")), value("a ", tag("a ")))).parse(input)?;
+        Ok((input, (pronoun, article)))
+    })?;
+    let subject_text = match pronoun {
+        ContractedSubjectPronoun::It => "it",
+        ContractedSubjectPronoun::He => "he",
+        ContractedSubjectPronoun::She => "she",
+    };
+    let rest_original = format!("{article}{descriptor}");
     let predicate = format!("is {rest_original}");
     let application = additive_type_subject_application(subject_text, ctx)?;
 
@@ -473,21 +483,23 @@ fn try_parse_contracted_subject_additive_type_clause(
 
     // CR 205.1b: additive form first — "it's a [type] in addition to its other
     // types" retains prior types (AddType/AddSubtype only).
-    if let Some(clause) = build_additive_type_continuous_clause(&application, &predicate) {
-        return Some(ClauseAst::SubjectPredicate {
-            subject: Box::new(SubjectPhraseAst {
-                affected: Some(application.affected),
-                target: application.target,
-                multi_target: application.multi_target,
-                inherits_parent: application.inherits_parent,
-                is_optional: application.is_optional,
-            }),
-            predicate: Box::new(PredicateAst::Continuous {
-                effect: clause.effect,
-                duration: clause.duration,
-                sub_ability: clause.sub_ability,
-            }),
-        });
+    if has_in_addition_to_other_types(&predicate) {
+        if let Some(clause) = build_additive_type_continuous_clause(&application, &predicate) {
+            return Some(ClauseAst::SubjectPredicate {
+                subject: Box::new(SubjectPhraseAst {
+                    affected: Some(application.affected),
+                    target: application.target,
+                    multi_target: application.multi_target,
+                    inherits_parent: application.inherits_parent,
+                    is_optional: application.is_optional,
+                }),
+                predicate: Box::new(PredicateAst::Continuous {
+                    effect: clause.effect,
+                    duration: clause.duration,
+                    sub_ability: clause.sub_ability,
+                }),
+            });
+        }
     }
 
     // CR 205.1a + CR 613.1d: non-additive animation — "it's a 3/3 Robot artifact
@@ -509,14 +521,53 @@ fn try_parse_contracted_subject_additive_type_clause(
     // animating the wrong object. The additive "… in addition to its other
     // types" form above is unaffected (it is a type *addition* and stays on the
     // referenced subject regardless).
-    if !matches!(
-        static_affected_for_application(&application),
-        TargetFilter::ParentTarget
-    ) {
+    let affected = static_affected_for_application(&application);
+    let binds_honestly = match pronoun {
+        ContractedSubjectPronoun::It => matches!(affected, TargetFilter::ParentTarget),
+        ContractedSubjectPronoun::He | ContractedSubjectPronoun::She => {
+            matches!(affected, TargetFilter::SelfRef)
+        }
+    };
+    if !binds_honestly {
         return None;
     }
     let become_predicate = format!("becomes {rest_original}");
-    let clause = build_become_clause(application.clone(), &become_predicate, ctx)?;
+    let mut clause = build_become_clause(application.clone(), &become_predicate, ctx)?;
+    // CR 205.1a: an explicit gendered contracted copula is a type-setting
+    // instruction, not an additive animation shorthand. Preserve supertypes
+    // such as Legendary, but replace the core card-type set ("She's a land" ->
+    // Land, not Creature Land). The context-sensitive `it's` branch keeps the
+    // established antecedent-bound animation semantics (Sauron, Dino Devotee).
+    // Explicit "in addition" returned above for every pronoun.
+    if matches!(
+        pronoun,
+        ContractedSubjectPronoun::He | ContractedSubjectPronoun::She
+    ) {
+        if let Effect::GenericEffect {
+            static_abilities, ..
+        } = &mut clause.effect
+        {
+            for definition in static_abilities {
+                let mut core_types = Vec::new();
+                let mut first_core_type_index = None;
+                for (index, modification) in definition.modifications.iter().enumerate() {
+                    if let ContinuousModification::AddType { core_type } = modification {
+                        first_core_type_index.get_or_insert(index);
+                        core_types.push(*core_type);
+                    }
+                }
+                if let Some(index) = first_core_type_index {
+                    definition.modifications.retain(|modification| {
+                        !matches!(modification, ContinuousModification::AddType { .. })
+                    });
+                    definition.modifications.insert(
+                        index.min(definition.modifications.len()),
+                        ContinuousModification::SetCardTypes { core_types },
+                    );
+                }
+            }
+        }
+    }
     Some(ClauseAst::SubjectPredicate {
         subject: Box::new(SubjectPhraseAst {
             affected: Some(application.affected),
@@ -531,6 +582,13 @@ fn try_parse_contracted_subject_additive_type_clause(
             sub_ability: clause.sub_ability,
         }),
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContractedSubjectPronoun {
+    It,
+    He,
+    She,
 }
 
 fn try_parse_subject_continuous_clause(
@@ -4887,7 +4945,10 @@ fn build_become_clause(
     }
     let modifications = if let Some(name) = name_override {
         let mut with_name = Vec::with_capacity(modifications.len() + 1);
-        with_name.push(ContinuousModification::SetName { name });
+        // CR 612.8 + CR 613.1c: a resolving non-copy effect that assigns a
+        // name is a text-changing effect in Layer 3. Copy exceptions continue
+        // to use `SetName` in the copy-effect payload.
+        with_name.push(ContinuousModification::SetTextName { name });
         with_name.extend(modifications);
         with_name
     } else {
@@ -4923,11 +4984,17 @@ fn build_become_clause(
 /// abilities" yields the name `"Fenric"` (not `"Fenric and loses all
 /// abilities"`); the residual `"and loses all abilities"` is recovered
 /// independently by `parse_continuous_modifications` on the full predicate.
-/// CR 201.4: an effect-assigned name is a single token-or-phrase, not the rest
-/// of the clause.
 fn strip_become_name_override(text: &str) -> (String, Option<String>) {
     let lower = text.to_lowercase();
-    let tp = TextPair::new(text, &lower);
+    let masked_lower = nom_primitives::mask_double_quoted_spans_preserving_len(&lower);
+    // The masked view is deliberately not byte-for-byte lowercase text, but it
+    // preserves byte length. Construct the lockstep slices directly so quoted
+    // `named` tokens stay invisible while all original-text slicing remains
+    // aligned.
+    let tp = TextPair {
+        original: text,
+        lower: masked_lower.as_ref(),
+    };
     let Some((before, after)) = tp.split_around(" named ") else {
         return (text.to_string(), None);
     };
@@ -6910,7 +6977,7 @@ mod tests {
     use crate::types::ability::{
         AbilityKind, BasicLandType, ContinuousModification, ControllerRef, Effect, TypeFilter,
     };
-    use crate::types::card_type::Supertype;
+    use crate::types::card_type::{CoreType, Supertype};
     use crate::types::statics::BlockExceptionKind;
 
     /// CR 105.3 + CR 106.1a: "becomes that color" (Foraging Wickermaw) maps to the
@@ -7766,7 +7833,7 @@ mod tests {
         );
     }
 
-    // CR 201.4: a "named X" effect-assigned name terminates at the first
+    // A "named X" outer assigned name terminates at the first
     // conjunction — "becomes … named Fenric and loses all abilities" yields
     // name "Fenric", not "Fenric and loses all abilities". The residual "loses
     // all abilities" is recovered independently as RemoveAllAbilities. Building
@@ -7789,6 +7856,104 @@ mod tests {
     fn become_named_plain_captures_full_name() {
         let (_, name) = strip_become_name_override("becomes a creature named Serra Angel");
         assert_eq!(name.as_deref(), Some("Serra Angel"));
+    }
+
+    fn clause_modifications(text: &str, ctx: &mut ParseContext) -> Vec<ContinuousModification> {
+        let ability = crate::parser::oracle_effect::parse_effect_chain_with_context(
+            text,
+            AbilityKind::Spell,
+            ctx,
+        );
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = ability.effect.as_ref()
+        else {
+            panic!(
+                "expected GenericEffect for {text:?}, got {:?}",
+                ability.effect
+            );
+        };
+        static_abilities[0].modifications.clone()
+    }
+
+    #[test]
+    fn gendered_contracted_copulas_bind_self_and_preserve_original_name_case() {
+        for text in ["She's a land named Moon", "She’s a land named Moon"] {
+            let modifications = clause_modifications(text, &mut ParseContext::default());
+            assert!(
+                modifications.iter().any(|modification| matches!(
+                    modification,
+                    ContinuousModification::SetCardTypes { core_types }
+                        if core_types == &vec![CoreType::Land]
+                )),
+                "missing land replacement in {modifications:?}"
+            );
+            assert!(modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::SetTextName { name } if name == "Moon"
+            )));
+            assert!(!modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::SetName { .. }
+            )));
+        }
+
+        let fang = clause_modifications(
+            "He's a Spirit in addition to his other types",
+            &mut ParseContext::default(),
+        );
+        assert!(fang.iter().any(|modification| matches!(
+            modification,
+            ContinuousModification::AddSubtype { subtype } if subtype == "Spirit"
+        )));
+        assert!(!fang.iter().any(|modification| matches!(
+            modification,
+            ContinuousModification::SetCardTypes { .. }
+        )));
+    }
+
+    #[test]
+    fn outer_assigned_names_are_text_changes_but_quoted_named_is_opaque() {
+        for (text, expected_name) in [
+            (
+                "It becomes a legendary 0/0 Elemental creature with haste named Vitu-Ghazi",
+                "Vitu-Ghazi",
+            ),
+            (
+                "it becomes a legendary creature named Mileva, the Stalwart, it has base power and toughness 5/5",
+                "Mileva, the Stalwart",
+            ),
+            (
+                "Target nontoken creature becomes a 6/6 legendary Horror creature named Fenric and loses all abilities",
+                "Fenric",
+            ),
+            (
+                "have The Irencrag become a legendary Equipment artifact named Everflame, Heroes' Legacy",
+                "Everflame, Heroes' Legacy",
+            ),
+        ] {
+            let mut ctx = ParseContext {
+                card_name: Some("The Irencrag".to_string()),
+                ..Default::default()
+            };
+            let modifications = clause_modifications(text, &mut ctx);
+            assert!(modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::SetTextName { name } if name == expected_name
+            )), "missing SetTextName({expected_name:?}) in {modifications:?}");
+            assert!(!modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::SetName { .. }
+            )), "non-copy outer name must not use SetName: {modifications:?}");
+        }
+
+        let (_, name) = strip_become_name_override(
+            "become 0/0 Elemental creatures with reach, haste, and \"When this creature leaves the battlefield, conjure a card named Forest onto the battlefield tapped.\" They're still lands",
+        );
+        assert_eq!(
+            name, None,
+            "quoted named token is not an outer assigned name"
+        );
     }
 
     /// CR 608.2c: the additive-"also" strip is a building block — it removes the
@@ -8143,10 +8308,14 @@ mod tests {
         assert!(
             modifications.iter().any(|modification| matches!(
                 modification,
-                ContinuousModification::SetName { name } if name == "Everflame, Heroes' Legacy"
+                // allow-noncombinator: semantic test assertion on the exact parsed assigned name, not parser dispatch
+                ContinuousModification::SetTextName { name } if name == "Everflame, Heroes' Legacy"
             )),
-            "expected SetName in {modifications:?}",
+            "expected SetTextName in {modifications:?}",
         );
+        assert!(!modifications
+            .iter()
+            .any(|modification| matches!(modification, ContinuousModification::SetName { .. })));
         assert!(
             modifications.iter().any(|modification| matches!(
                 modification,

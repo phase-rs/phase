@@ -1467,7 +1467,12 @@
       "labelReturn": "Devolver ({{selected}}/{{count}})",
       "labelExile": "Exiliar ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
-      "orderTop": "Superior"
+      "orderTop": "Superior",
+      "orderSecond": "2.º",
+      "orderThird": "3.º",
+      "orderFourth": "4.º",
+      "orderFifth": "5.º",
+      "orderPosition": "Posición {{position}}"
     },
     "drawnThisTurn": {
       "title": "Robadas este turno",
@@ -1633,7 +1638,11 @@
     "legend": {
       "title": "Regla de leyendas",
       "subtitle": "Elige qué \"{{name}}\" conservar",
-      "keepAria": "Conservar {{name}} ({{status}})",
+      "keepAria": "Conservar {{name}} ({{identity}}, {{status}})",
+      "keepAriaUnknown": "Conservar {{name}} ({{status}})",
+      "identityOriginal": "Original",
+      "identityCopy": "Copia",
+      "identityTokenCopy": "Copia de ficha",
       "statusJustEntered": "Acaba de entrar",
       "statusAlready": "Ya en el campo de batalla"
     },
@@ -1853,7 +1862,8 @@
         "card": "una carta",
         "treasure": "un Tesoro",
         "food": "un Alimento",
-        "tappedFish": "un Pez girado"
+        "tappedFish": "un Pez girado",
+        "extraTurn": "un turno adicional"
       }
     }
   },

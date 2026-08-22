@@ -1296,6 +1296,8 @@ pub(crate) fn materialize_token_spec_body(
         object.base_name = ch.display_name.clone();
         object.base_power = ch.power;
         object.base_toughness = ch.toughness;
+        object.layer_base_power = ch.power;
+        object.layer_base_toughness = ch.toughness;
         object.card_types = CardType {
             supertypes: ch.supertypes.clone(),
             core_types: ch.core_types.clone(),

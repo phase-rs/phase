@@ -924,7 +924,10 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
             let body_lower = strip_reflexive_conditional_body_separator(after_clause);
             let offset = text.len() - body_lower.len();
             return (
-                Some(AbilityCondition::ZoneChangedThisWay { filter }),
+                Some(AbilityCondition::ZoneChangedThisWay {
+                    filter,
+                    destination: Some(Zone::Battlefield),
+                }),
                 text[offset..].to_string(),
             );
         }
@@ -942,17 +945,23 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
             let body_lower = strip_reflexive_conditional_body_separator(after_clause);
             let offset = text.len() - body_lower.len();
             return (
-                Some(AbilityCondition::ZoneChangedThisWay { filter }),
+                Some(AbilityCondition::ZoneChangedThisWay {
+                    filter,
+                    destination: None,
+                }),
                 text[offset..].to_string(),
             );
         }
-        if let Ok((after_clause, (filter, _negated))) =
+        if let Ok((after_clause, (filter, _negated, destination))) =
             nom_cond::parse_zone_changed_this_way_clause(rest)
         {
             let body_lower = strip_reflexive_conditional_body_separator(after_clause);
             let offset = text.len() - body_lower.len();
             return (
-                Some(AbilityCondition::ZoneChangedThisWay { filter }),
+                Some(AbilityCondition::ZoneChangedThisWay {
+                    filter,
+                    destination,
+                }),
                 text[offset..].to_string(),
             );
         }
@@ -968,7 +977,10 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
                 let body_lower = strip_reflexive_conditional_body_separator(after_clause);
                 let offset = text.len() - body_lower.len();
                 return (
-                    Some(AbilityCondition::ZoneChangedThisWay { filter }),
+                    Some(AbilityCondition::ZoneChangedThisWay {
+                        filter,
+                        destination: None,
+                    }),
                     text[offset..].to_string(),
                 );
             }
@@ -983,7 +995,10 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
                 let body_lower = strip_reflexive_conditional_body_separator(after_clause);
                 let offset = text.len() - body_lower.len();
                 return (
-                    Some(AbilityCondition::ZoneChangedThisWay { filter }),
+                    Some(AbilityCondition::ZoneChangedThisWay {
+                        filter,
+                        destination: None,
+                    }),
                     text[offset..].to_string(),
                 );
             }
@@ -1539,7 +1554,10 @@ pub(super) fn try_parse_moved_card_subtype_attach_followup(
     if !after_dot.trim().is_empty() {
         return None;
     }
-    let condition = AbilityCondition::ZoneChangedThisWay { filter };
+    let condition = AbilityCondition::ZoneChangedThisWay {
+        filter,
+        destination: None,
+    };
     let attach = Effect::Attach {
         attachment: TargetFilter::SelfRef,
         target: TargetFilter::ParentTarget,
@@ -5608,7 +5626,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
     // `strip_if_you_do_conditional` uses — so prefix ("if a creature card is
     // exiled this way, …") and suffix ("… if at least one creature card was
     // exiled this way") forms produce the identical
-    // `AbilityCondition::ZoneChangedThisWay { filter }` representation.
+    // `AbilityCondition::ZoneChangedThisWay { filter, destination: None }` representation.
     if let Some(condition) = parse_outcome_this_way_condition(lower.as_str()) {
         return Some(condition);
     }
@@ -5802,6 +5820,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
         return Some(AbilityCondition::Not {
             condition: Box::new(AbilityCondition::ZoneChangedThisWay {
                 filter: TargetFilter::Any,
+                destination: None,
             }),
         });
     }
@@ -6875,6 +6894,7 @@ fn parse_effect_discard_instant_or_sorcery_condition(lower: &str) -> Option<Abil
             TypeFilter::Instant,
             TypeFilter::Sorcery,
         ]))),
+        destination: None,
     })
 }
 
@@ -7204,14 +7224,20 @@ pub(super) fn parse_zone_change_object_has_keyword_condition(
 ///     unlocks the whole "if you put a [type] onto the battlefield this way,
 ///     [bonus]" fetch/ramp payoff class).
 fn parse_outcome_this_way_condition(lower: &str) -> Option<AbilityCondition> {
-    let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(lower)
-        .or_else(|_| parse_you_put_onto_battlefield_this_way_clause(lower))
+    let (rest, (filter, negated, destination)) = parse_zone_changed_this_way_clause(lower)
+        .or_else(|_| {
+            parse_you_put_onto_battlefield_this_way_clause(lower)
+                .map(|(rest, (filter, negated))| (rest, (filter, negated, Some(Zone::Battlefield))))
+        })
         .ok()?;
     if !rest.trim().is_empty() {
         return None;
     }
     Some(maybe_negate(
-        AbilityCondition::ZoneChangedThisWay { filter },
+        AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination,
+        },
         negated,
     ))
 }
@@ -7670,6 +7696,7 @@ mod tests {
         assert_eq!(body, "you gain 4 life");
         let Some(AbilityCondition::ZoneChangedThisWay {
             filter: TargetFilter::Typed(TypedFilter { type_filters, .. }),
+            destination: Some(Zone::Battlefield),
         }) = cond
         else {
             panic!("expected ZoneChangedThisWay Artifact, got {cond:?}");
@@ -7688,6 +7715,7 @@ mod tests {
         assert_eq!(body, "you gain 2 life");
         let Some(AbilityCondition::ZoneChangedThisWay {
             filter: TargetFilter::Typed(TypedFilter { type_filters, .. }),
+            destination: Some(Zone::Hand),
         }) = cond
         else {
             panic!("expected ZoneChangedThisWay Town, got {cond:?}");
@@ -7747,6 +7775,7 @@ mod tests {
         assert_eq!(body, "surveil 1");
         let Some(AbilityCondition::ZoneChangedThisWay {
             filter: TargetFilter::Typed(TypedFilter { properties, .. }),
+            destination: None,
         }) = cond
         else {
             panic!("expected ZoneChangedThisWay, got {cond:?}");
@@ -7766,6 +7795,7 @@ mod tests {
         );
         let Some(AbilityCondition::ZoneChangedThisWay {
             filter: TargetFilter::Or { filters },
+            destination: None,
         }) = cond
         else {
             panic!("expected ZoneChangedThisWay Or, got {cond:?}");
@@ -8692,7 +8722,11 @@ mod tests {
             "if at least one angel card is milled this way, you gain 4 life",
         );
         assert_eq!(body, "you gain 4 life");
-        let Some(AbilityCondition::ZoneChangedThisWay { filter }) = condition else {
+        let Some(AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: None,
+        }) = condition
+        else {
             panic!("expected ZoneChangedThisWay condition, got {condition:?}");
         };
         match filter {
@@ -8714,7 +8748,11 @@ mod tests {
             "if a hero enters this way, it enters with an additional +1/+1 counter on it",
         );
         assert_eq!(body, "it enters with an additional +1/+1 counter on it");
-        let Some(AbilityCondition::ZoneChangedThisWay { filter }) = condition else {
+        let Some(AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: Some(Zone::Battlefield),
+        }) = condition
+        else {
             panic!("expected ZoneChangedThisWay condition, got {condition:?}");
         };
         match filter {
@@ -8733,7 +8771,11 @@ mod tests {
             "when you put one or more equipment onto the battlefield this way, you may attach one of them to a samurai you control",
         );
         assert_eq!(body, "you may attach one of them to a samurai you control");
-        let Some(AbilityCondition::ZoneChangedThisWay { filter }) = condition else {
+        let Some(AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: Some(Zone::Battlefield),
+        }) = condition
+        else {
             panic!("expected ZoneChangedThisWay condition, got {condition:?}");
         };
         match filter {
@@ -8762,7 +8804,11 @@ mod tests {
             &mut ParseContext::default(),
         );
         assert_eq!(body, "you gain 4 life.");
-        let Some(AbilityCondition::ZoneChangedThisWay { filter }) = condition else {
+        let Some(AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: Some(Zone::Battlefield),
+        }) = condition
+        else {
             panic!("expected ZoneChangedThisWay condition, got {condition:?}");
         };
         match filter {
@@ -8787,7 +8833,11 @@ mod tests {
         let condition =
             parse_outcome_this_way_condition("you put a creature onto the battlefield this way")
                 .expect("active-voice put gate must lower to ZoneChangedThisWay");
-        let AbilityCondition::ZoneChangedThisWay { filter } = condition else {
+        let AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: Some(Zone::Battlefield),
+        } = condition
+        else {
             panic!("expected ZoneChangedThisWay condition, got {condition:?}");
         };
         match filter {
@@ -8815,7 +8865,11 @@ mod tests {
             "when you discard a card this way, target player mills cards equal to its mana value",
         );
         assert_eq!(body, "target player mills cards equal to its mana value");
-        let Some(AbilityCondition::ZoneChangedThisWay { filter }) = condition else {
+        let Some(AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: None,
+        }) = condition
+        else {
             panic!("expected ZoneChangedThisWay condition, got {condition:?}");
         };
         match filter {
@@ -8842,7 +8896,11 @@ mod tests {
             &mut ParseContext::default(),
         );
         assert_eq!(body, "You gain 2 life");
-        let Some(AbilityCondition::ZoneChangedThisWay { filter }) = condition else {
+        let Some(AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: None,
+        }) = condition
+        else {
             panic!("expected ZoneChangedThisWay condition, got {condition:?}");
         };
         let TargetFilter::Typed(TypedFilter { type_filters, .. }) = filter else {
@@ -8883,6 +8941,7 @@ mod tests {
                 Some(AbilityCondition::Not {
                     condition: Box::new(AbilityCondition::ZoneChangedThisWay {
                         filter: TargetFilter::Any,
+                        destination: None,
                     }),
                 }),
                 "expected Not {{ ZoneChangedThisWay {{ Any }} }} for {text:?}",
@@ -10037,7 +10096,10 @@ mod tests {
                 .expect("Iron Man Equipment attach follow-up must be recognized");
         assert!(!is_optional, "the attach itself is mandatory once gated");
         match cond {
-            AbilityCondition::ZoneChangedThisWay { filter } => match filter {
+            AbilityCondition::ZoneChangedThisWay {
+                filter,
+                destination: None,
+            } => match filter {
                 TargetFilter::Typed(t) => assert!(
                     t.type_filters.iter().any(|f| matches!(
                         f,

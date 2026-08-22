@@ -22,6 +22,49 @@ env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/phase-server
 
 jobs:
+  # ── Deploy provenance gate ─────────────────────────────────────────────────
+  # Single authority for "is this trigger allowed to deploy?". Every deploy job
+  # `needs` this one, so the answer lives in exactly one expression and cannot
+  # drift between paths — which is how `deploy-lobby-preview` ended up with the
+  # Cloudflare token and no guard at all.
+  #
+  # The hole this closes: `workflow_run` fires in THIS repo for CI runs of fork
+  # pull requests too, and the `branches: [main]` filter above matches the
+  # TRIGGERING run's head branch — which a fork controls and can simply name
+  # `main`. A conclusion check alone therefore admits fork-authored code as
+  # DEPLOY_SHA, and the deploy jobs check that SHA out while holding
+  # CLOUDFLARE_API_TOKEN, the minisign key, and `packages: write` on GHCR.
+  # `head_repository.full_name` is the field that a fork cannot forge.
+  #
+  # Field names per the workflow run object schema:
+  # https://docs.github.com/en/rest/actions/workflow-runs
+  deploy-gate:
+    name: Verify deploy provenance
+    if: >-
+      ${{ github.repository == 'phase-rs/phase' && (
+        github.event_name == 'workflow_dispatch' || (
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.head_repository.full_name == github.repository &&
+          github.event.workflow_run.head_branch == 'main'
+        )
+      ) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Record the commit being deployed
+        # Through `env`, never `${{ }}` inside the script: head_branch and
+        # head_repository are attacker-chosen strings on the very event this
+        # job exists to screen, and direct interpolation would run them.
+        env:
+          EVENT: ${{ github.event_name }}
+          SOURCE_REPO: ${{ github.event.workflow_run.head_repository.full_name || github.repository }}
+          SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch || github.ref_name }}
+        run: |
+          echo "event=${EVENT}"
+          echo "source=${SOURCE_REPO}"
+          echo "branch=${SOURCE_BRANCH}"
+          echo "deploy_sha=${DEPLOY_SHA}"
+
   # ── Preview inputs ─────────────────────────────────────────────────────────
   # Generates the immutable card-data/draft-pool pair and derives the engine
   # fingerprint shared by the preview server and frontend. The publication work
@@ -29,7 +72,7 @@ jobs:
   # these inputs are ready rather than waiting on ancillary data generation.
   preview-inputs:
     name: Prepare preview inputs
-    if: ${{ github.repository == 'phase-rs/phase' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success') }}
+    needs: [deploy-gate]
     runs-on: ubuntu-latest
     # Sized for the MTGJSON-publish day, not the steady state. When MTGJSON
     # ships a new version the key rolls, and the first run to see it pays the
@@ -294,8 +337,7 @@ jobs:
   # pointing at data that has not reached R2.
   card-data:
     name: Publish card data & R2
-    needs: [preview-inputs]
-    if: ${{ github.repository == 'phase-rs/phase' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success') }}
+    needs: [deploy-gate, preview-inputs]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -519,7 +561,7 @@ jobs:
   # parallel. The output feeds the frontend build via artifact.
   build-wasm:
     name: Build WASM
-    if: ${{ github.repository == 'phase-rs/phase' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success') }}
+    needs: [deploy-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -542,19 +584,8 @@ jobs:
         with:
           tool: wasm-bindgen-cli@0.2.121
 
-      - name: Cache binaryen
-        id: binaryen-cache
-        uses: actions/cache@v4
-        with:
-          path: binaryen-version_123
-          key: binaryen-123-x86_64-linux
-
-      - name: Install binaryen
-        if: steps.binaryen-cache.outputs.cache-hit != 'true'
-        run: curl -L https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-linux.tar.gz | tar xz
-
-      - name: Add binaryen to PATH
-        run: echo "$PWD/binaryen-version_123/bin" >> $GITHUB_PATH
+      - name: Set up Binaryen
+        uses: ./.github/actions/binaryen
 
       # build-wasm.sh's assert_wasm_stack guard parses the shipped wasm's memory
       # section with node; declare the dependency explicitly (release.yml already
@@ -580,8 +611,7 @@ jobs:
   # fingerprint whose signed server artifact is missing from the manifest.
   preview-server:
     name: Publish Preview Server
-    needs: [preview-inputs]
-    if: ${{ github.repository == 'phase-rs/phase' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success') }}
+    needs: [deploy-gate, preview-inputs]
     uses: ./.github/workflows/preview-server.yml
     with:
       fingerprint: ${{ needs.preview-inputs.outputs.engine_fingerprint }}
@@ -595,10 +625,94 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY: ${{ secrets.SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY }}
 
+  # ── Preview lobby Worker ───────────────────────────────────────────────────
+  # The preview channel's matchmaking broker (wrangler.toml [env.preview] ->
+  # Worker `phase-lobby-preview`, wss://lobby-preview.phase-rs.dev/ws). Deployed
+  # on EVERY staging deploy, which is the whole point: production's lobby only
+  # redeploys at release, so `main` drifts ahead of it and the two accept-windows
+  # ([PROTOCOL_VERSION-1, PROTOCOL_VERSION] on each side) go disjoint after two
+  # bumps. Redeploying preview in lockstep with the preview client keeps that
+  # pair aligned by construction. Production's `phase-lobby` is untouched here.
+  deploy-lobby-preview:
+    name: Deploy Preview Lobby Worker (Cloudflare)
+    needs: [deploy-gate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          targets: wasm32-unknown-unknown
+          cache-shared-key: rust-wasm
+          # broker-wasm needs its .cargo/config.toml
+          # [target.wasm32-unknown-unknown] shadow-stack rustflags; an env
+          # RUSTFLAGS would override them.
+          rustflags: ""
+
+      - uses: taiki-e/install-action@v2
+        with:
+          # Must match the pinned wasm-bindgen crate version in
+          # lobby-worker/broker-wasm/Cargo.toml (schema versions must be exact).
+          tool: wasm-bindgen-cli@0.2.121
+
+      - name: Set up Binaryen
+        uses: ./.github/actions/binaryen
+
+      - name: Deploy preview lobby Worker
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.113.0"
+          workingDirectory: lobby-worker
+          command: deploy --env preview
+
+      - name: Assert the preview lobby advertises this commit's protocol versions
+        # Guards the exact regression this job exists to prevent: a preview
+        # client that cannot handshake with the preview lobby. Compares the
+        # deployed Worker's advertised versions against the constants in the
+        # tree being deployed.
+        #
+        # BOTH numbers are checked, and they mean different things:
+        #   protocol_version       — the full-game surface. Only clients that
+        #                            predate lobby_protocol_version gate on it.
+        #   lobby_protocol_version — the lobby message set, and what every
+        #                            current client actually handshakes on.
+        # A stale deploy of either is a real incompatibility, so neither is
+        # allowed to drift from the tree.
+        run: |
+          set -euo pipefail
+          expected=$(grep -oE 'pub const PROTOCOL_VERSION: u32 = [0-9]+' \
+            crates/lobby-broker/src/protocol.rs | grep -oE '[0-9]+$')
+          expected_lobby=$(grep -oE 'pub const LOBBY_PROTOCOL_VERSION: u32 = [0-9]+' \
+            crates/lobby-broker/src/protocol.rs | grep -oE '[0-9]+$')
+          if [ -z "$expected" ] || [ -z "$expected_lobby" ]; then
+            echo "::error::Could not read protocol constants from the tree."
+            exit 1
+          fi
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            health=$(curl -sS -m 15 https://lobby-preview.phase-rs.dev/health || true)
+            actual=$(printf '%s' "$health" | jq -r '.protocol_version // empty' || true)
+            actual_lobby=$(printf '%s' "$health" | jq -r '.lobby_protocol_version // empty' || true)
+            if [ "$actual" = "$expected" ] && [ "$actual_lobby" = "$expected_lobby" ]; then
+              echo "Preview lobby advertises protocol_version=$actual, lobby_protocol_version=$actual_lobby (both match tree)."
+              exit 0
+            fi
+            echo "Attempt $attempt: got protocol='${actual:-<none>}' lobby='${actual_lobby:-<none>}';" \
+              "want protocol='$expected' lobby='$expected_lobby'; retrying..."
+            sleep 10
+          done
+          echo "::error::Preview lobby advertises protocol='${actual:-<none>}' lobby='${actual_lobby:-<none>}'," \
+            "but this commit speaks protocol='$expected' lobby='$expected_lobby'."
+          exit 1
+
   # ── Frontend + Pages deploy (needs published data + server artifact + WASM) ─
   build-pages:
     name: Build & Deploy Pages
-    needs: [preview-inputs, card-data, build-wasm, preview-server]
+    needs: [preview-inputs, card-data, build-wasm, preview-server, deploy-lobby-preview]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -681,7 +795,23 @@ jobs:
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           # First-party telemetry ingest (lobby Worker → Analytics Engine, see
           # docs/telemetry-proposal.md). Unset would compile telemetry to a no-op.
-          TELEMETRY_URL: "https://lobby.phase-rs.dev/telemetry"
+          TELEMETRY_URL: "https://lobby-preview.phase-rs.dev/telemetry"
+          # Preview talks to its OWN lobby Worker (wrangler.toml [env.preview]).
+          # A single lobby cannot serve both channels: ServerHello is sent
+          # unprompted before ClientHello, so the broker advertises one protocol
+          # number blind, and each client only accepts
+          # [PROTOCOL_VERSION-1, PROTOCOL_VERSION] of its OWN build. Two bumps on
+          # main after a release makes those windows disjoint and one cohort is
+          # always locked out. Splitting the deployment is what keeps preview
+          # usable while release stays pinned to the last tag.
+          #
+          # This sets OFFICIAL, not DEFAULT. DEFAULT is the self-hoster seam, and
+          # serverDetection.ts reads DEFAULT !== OFFICIAL as "self-hosted build",
+          # which would label the preview lobby "Self-hosted" AND offer an
+          # "Official" row pointing at the production lobby this build cannot
+          # handshake with. Setting OFFICIAL keeps DEFAULT === OFFICIAL, so the
+          # picker shows exactly one correct official entry.
+          OFFICIAL_MULTIPLAYER_SERVER_URL: "wss://lobby-preview.phase-rs.dev/ws"
         run: |
           cd client
           pnpm install --frozen-lockfile
@@ -747,12 +877,23 @@ jobs:
   # crate recompiles each time. The win here is parallelism, not incrementality;
   # warming the workspace compile would need sccache or similar.
   build-server-binary:
-    name: Build server binary
-    if: ${{ github.repository == 'phase-rs/phase' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success') }}
+    name: Build server binary (linux ${{ matrix.arch }})
+    needs: [deploy-gate]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Mirrors release.yml: amd64 native via musl-tools, arm64 cross via zig.
+          - arch: amd64
+            triple: x86_64-unknown-linux-musl
+            cargo_cmd: build
+          - arch: arm64
+            triple: aarch64-unknown-linux-musl
+            cargo_cmd: zigbuild
     steps:
       - uses: actions/checkout@v4
         with:
@@ -760,16 +901,26 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          cache-shared-key: rust-server
+          cache-shared-key: rust-server-${{ matrix.arch }}
 
-      - name: Install musl tools and target
+      - name: Install musl tools
+        if: matrix.cargo_cmd == 'build'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Install zig cross toolchain
+        if: matrix.cargo_cmd == 'zigbuild'
+        # --break-system-packages: ubuntu-latest is 24.04, whose default
+        # Python is PEP 668 externally-managed since GitHub reverted its
+        # pip workaround (actions/runner-images#10897, 2025-05-09). Same
+        # flag the Dockerfile already passes for this identical install.
+        run: pip install --break-system-packages cargo-zigbuild==0.23.0 ziglang==0.16.0
+
+      - name: Add musl target
         # The musl target must be added explicitly with `rustup target add`, not
         # via setup-rust-toolchain's `targets:` input: rust-toolchain.toml pins
         # the toolchain and its own `targets` list (wasm32 only), which overrides
         # the action input. Mirrors release.yml's Linux server build.
-        run: |
-          sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
-          rustup target add x86_64-unknown-linux-musl
+        run: rustup target add ${{ matrix.triple }}
 
       - name: Build phase-server (static musl)
         # Static musl binary: no glibc dependency, so it runs on the slim debian
@@ -782,13 +933,13 @@ jobs:
           # unscoped workspace build unifies feed-scraper's native-tls reqwest
           # features into phase-server, dragging openssl-sys into the musl
           # cross-compile (which has no OpenSSL and fails).
-          cargo build -p phase-server --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
-          cp target/x86_64-unknown-linux-musl/server-release/phase-server ./phase-server
+          cargo ${{ matrix.cargo_cmd }} -p phase-server --profile server-release --bin phase-server --target ${{ matrix.triple }}
+          cp target/${{ matrix.triple }}/server-release/phase-server ./phase-server
 
       - name: Upload server binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: server-binary
+          name: server-binary-${{ matrix.arch }}
           path: phase-server
           if-no-files-found: error
           retention-days: 1
@@ -818,16 +969,20 @@ jobs:
         with:
           ref: ${{ env.DEPLOY_SHA }}
 
-      - name: Download server binary artifact
+      - name: Download server binary artifacts
         uses: actions/download-artifact@v4
         with:
-          name: server-binary
-          path: .
+          pattern: server-binary-*
+          path: prebuilt
 
       - name: Verify build context
+        # The Dockerfile's prebuilt stage copies ./phase-server-<arch> per platform.
         run: |
-          test -s phase-server
-          chmod +x phase-server
+          for arch in amd64 arm64; do
+            test -s "prebuilt/server-binary-$arch/phase-server"
+            cp "prebuilt/server-binary-$arch/phase-server" "phase-server-$arch"
+            chmod +x "phase-server-$arch"
+          done
 
       - name: Compute image tags
         id: image
@@ -840,12 +995,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # QEMU only runs the runtime stage's apt-get for the arm64 leg; the
+      # binaries are prebuilt, so nothing heavy is emulated.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v3
+
       - name: Build and push preview image
-        # BINARY_STAGE=prebuilt makes Docker copy the prebuilt musl binary
+        # BINARY_STAGE=prebuilt makes Docker copy the prebuilt musl binaries
         # instead of compiling in-container — the build is just apt + COPY.
+        # One manifest list covers both platforms under the same tag/digest.
         uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
             BINARY_STAGE=prebuilt

@@ -5302,7 +5302,13 @@ fn pt_value_from_pair(stat: PtStat, power: Option<i32>, toughness: Option<i32>) 
 fn object_pt_value(obj: &GameObject, stat: PtStat, scope: PtValueScope) -> i32 {
     match scope {
         PtValueScope::Current => pt_value_from_pair(stat, obj.power, obj.toughness),
-        PtValueScope::Base => pt_value_from_pair(stat, obj.base_power, obj.base_toughness),
+        // CR 208.4b + CR 613.4a-b: base P/T includes characteristic-defining
+        // and setting effects, but excludes layer-7c modifications and counters.
+        PtValueScope::Base => pt_value_from_pair(
+            stat,
+            obj.layer_base_power.or(obj.base_power),
+            obj.layer_base_toughness.or(obj.base_toughness),
+        ),
     }
 }
 
@@ -6054,7 +6060,9 @@ fn matches_filter_prop(
         // CR 208.1 + CR 613.4b: Match creatures whose current (post-layer) power
         // exceeds their base power (layer-7b baseline incl. CDA, before
         // counters/pumps in 7c–7e).
-        FilterProp::PowerExceedsBase => obj.power.unwrap_or(0) > obj.base_power.unwrap_or(0),
+        FilterProp::PowerExceedsBase => {
+            obj.power.unwrap_or(0) > obj.layer_base_power.or(obj.base_power).unwrap_or(0)
+        }
         // Match objects whose name differs from all controlled battlefield objects matching the filter.
         FilterProp::DifferentNameFrom { filter } => {
             let controller = source.controller.unwrap_or(PlayerId(0));
@@ -12942,6 +12950,33 @@ mod tests {
             &record,
             &source_ctx,
         ));
+    }
+
+    /// CR 208.4b + CR 613.4a-c: a live base-toughness read observes the
+    /// layer-7a/7b carrier, not printed toughness and not a later modifier.
+    #[test]
+    fn live_base_scope_uses_layer_base_toughness() {
+        let mut object = crate::game::game_object::GameObject::new(
+            ObjectId(7),
+            CardId(7),
+            PlayerId(0),
+            "Layered Creature".to_string(),
+            Zone::Battlefield,
+        );
+        object.base_toughness = Some(1);
+        object.layer_base_toughness = Some(4);
+        object.toughness = Some(7);
+
+        assert_eq!(
+            object_pt_value(&object, PtStat::Toughness, PtValueScope::Base),
+            4,
+            "base toughness must be the layer-7b value"
+        );
+        assert_eq!(
+            object_pt_value(&object, PtStat::Toughness, PtValueScope::Current),
+            7,
+            "current toughness must retain the later layer-7c value"
+        );
     }
 
     /// CR 208.4b + CR 613.4b + CR 603.10a: End-to-end look-back path. Drives a

@@ -57,6 +57,7 @@ import { useSetSymbol } from "../../hooks/useSetSymbols";
 import {
   getDeckCardCount,
   getDeckColorIdentity,
+  getDeckColorIdentityPips,
   getRepresentativeCard,
   isBundledDeck,
 } from "./deckHelpers";
@@ -238,13 +239,12 @@ const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onC
     const timer = setTimeout(() => setConfirmingDelete(false), 3000);
     return () => clearTimeout(timer);
   }, [confirmingDelete]);
-  const colors = compatibility?.color_identity?.length
-    ? compatibility.color_identity
-    : feedDeckOverride?.colors?.length
-      ? feedDeckOverride.colors
-      : preconDeckOverride
-        ? getPreconColorIdentity(preconDeckOverride)
-        : getDeckColorIdentity(deckName);
+  const colors = compatibility?.color_identity
+    ?? feedDeckOverride?.colors
+    ?? (preconDeckOverride
+      ? getPreconColorIdentity(preconDeckOverride)
+      : getDeckColorIdentity(deckName));
+  const colorPips = getDeckColorIdentityPips(colors);
   const count = feedDeckOverride
     ? feedDeckOverride.main.reduce((sum, e) => sum + e.count, 0)
     : preconDeckOverride
@@ -285,11 +285,13 @@ const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onC
         {/* Color identity as actual Scryfall mana symbols, clustered top-right.
             A dark backing chip keeps the bright pips legible over any card art —
             without it the gold/white symbols wash out against light artwork. */}
-        <div className="absolute right-2 top-2 z-10 flex items-center gap-0.5 rounded-full bg-black/75 px-2 py-1 shadow-[0_2px_8px_rgba(0,0,0,0.6)] ring-1 ring-white/20 backdrop-blur-sm">
-          {(colors.length ? colors : ["C"]).map((color) => (
-            <ManaSymbol key={color} shard={color} size="xs" />
-          ))}
-        </div>
+        {colorPips && (
+          <div className="absolute right-2 top-2 z-10 flex items-center gap-0.5 rounded-full bg-black/75 px-2 py-1 shadow-[0_2px_8px_rgba(0,0,0,0.6)] ring-1 ring-white/20 backdrop-blur-sm">
+            {colorPips.map((color) => (
+              <ManaSymbol key={color} shard={color} size="xs" />
+            ))}
+          </div>
+        )}
 
         {/* Top-left: selected check only — the source label lives in the body so
             it never competes with the color-identity mana pips. Hover actions

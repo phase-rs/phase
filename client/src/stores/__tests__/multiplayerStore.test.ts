@@ -31,10 +31,16 @@ import {
   FORMAT_DEFAULTS,
   isServerCompatible,
   migrateOfficialServerAddress,
+  migratePersistedMultiplayerState,
   type HostingSettings,
   useMultiplayerStore,
 } from "../multiplayerStore";
-import { PROTOCOL_VERSION, type ServerInfo } from "../../adapter/ws-adapter";
+import {
+  LOBBY_PROTOCOL_VERSION,
+  PROTOCOL_VERSION,
+  type ServerInfo,
+} from "../../adapter/ws-adapter";
+import { DEFAULT_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import {
   clearWsSession,
   loadWsSession,
@@ -182,18 +188,51 @@ describe("multiplayerStore", () => {
     expect(id2).toBe(id1);
   });
 
-  it("keeps LobbyOnly compatibility to the derived one-version rollout window", () => {
-    const server = (mode: ServerInfo["mode"], protocolVersion: number): ServerInfo => ({
-      version: "test",
-      buildCommit: "test",
-      mode,
-      protocolVersion,
-    });
+  const server = (
+    mode: ServerInfo["mode"],
+    protocolVersion: number,
+    lobbyProtocolVersion?: number,
+  ): ServerInfo => ({
+    version: "test",
+    buildCommit: "test",
+    mode,
+    protocolVersion,
+    lobbyProtocolVersion,
+  });
 
+  // LEGACY PATH: brokers that advertise no lobby version keep the derived
+  // one-version window, so already-deployed brokers stay reachable.
+  it("keeps LobbyOnly compatibility to the derived one-version rollout window", () => {
     expect(isServerCompatible(server("LobbyOnly", PROTOCOL_VERSION))).toBe(true);
     expect(isServerCompatible(server("LobbyOnly", PROTOCOL_VERSION - 1))).toBe(true);
     expect(isServerCompatible(server("LobbyOnly", PROTOCOL_VERSION - 2))).toBe(false);
     expect(isServerCompatible(server("Full", PROTOCOL_VERSION - 1))).toBe(false);
+  });
+
+  it("judges a lobby broker by its lobby version, not its full-game version", () => {
+    // The badge must agree with the handshake: a broker whose full-game number
+    // is many bumps stale is still fully usable when the lobby surface matches.
+    expect(
+      isServerCompatible(
+        server("LobbyOnly", PROTOCOL_VERSION - 9, LOBBY_PROTOCOL_VERSION),
+      ),
+    ).toBe(true);
+    // No ceiling — a newer broker must not strand this client.
+    expect(
+      isServerCompatible(
+        server("LobbyOnly", PROTOCOL_VERSION, LOBBY_PROTOCOL_VERSION + 5),
+      ),
+    ).toBe(true);
+    // The floor still bites.
+    expect(
+      isServerCompatible(
+        server("LobbyOnly", PROTOCOL_VERSION, LOBBY_PROTOCOL_VERSION - 1),
+      ),
+    ).toBe(false);
+    // Full servers ignore the lobby field entirely.
+    expect(
+      isServerCompatible(server("Full", PROTOCOL_VERSION - 1, LOBBY_PROTOCOL_VERSION)),
+    ).toBe(false);
   });
 
   it("persists displayName across store resets", () => {
@@ -248,6 +287,52 @@ describe("multiplayerStore", () => {
         "wss://selfhost.example/ws",
       ),
     ).toBe("wss://play.example.com/ws");
+  });
+
+  // Every channel's broker is an official host. A returning preview browser
+  // holds a persisted PRODUCTION address, and detectServerUrl honours any
+  // stored address whose /health answers — production's does — so without this
+  // it stays pinned to a lobby its build cannot handshake with.
+  it("migrates the other channel's official lobby to this build's default", () => {
+    expect(
+      migrateOfficialServerAddress(
+        "wss://lobby.phase-rs.dev/ws",
+        "wss://lobby-preview.phase-rs.dev/ws",
+      ),
+    ).toBe("wss://lobby-preview.phase-rs.dev/ws");
+    expect(
+      migrateOfficialServerAddress(
+        "wss://lobby-preview.phase-rs.dev/ws",
+        "wss://lobby.phase-rs.dev/ws",
+      ),
+    ).toBe("wss://lobby.phase-rs.dev/ws");
+  });
+
+  it("re-runs the official-address migration for v2 stores (v2 -> v3)", () => {
+    expect(
+      migratePersistedMultiplayerState(
+        { serverAddress: "wss://lobby.phase-rs.dev/ws" },
+        2,
+      ),
+    ).toEqual({ serverAddress: DEFAULT_MULTIPLAYER_SERVER_URL });
+  });
+
+  it("leaves a user-typed address alone across the v3 migration", () => {
+    expect(
+      migratePersistedMultiplayerState(
+        { serverAddress: "wss://play.example.com/ws" },
+        2,
+      ),
+    ).toEqual({ serverAddress: "wss://play.example.com/ws" });
+  });
+
+  it("does not re-migrate a store already at v3", () => {
+    expect(
+      migratePersistedMultiplayerState(
+        { serverAddress: "wss://lobby.phase-rs.dev/ws" },
+        3,
+      ),
+    ).toEqual({ serverAddress: "wss://lobby.phase-rs.dev/ws" });
   });
 
   it("strips AI seats from team-based server host settings", async () => {

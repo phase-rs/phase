@@ -18731,6 +18731,7 @@ fn quantity_ref_is_board_state_relative(qty: &QuantityRef) -> bool {
         | QuantityRef::Aggregate { filter, .. } => !filter_references_target_player(filter),
         QuantityRef::CountersOn { scope, .. }
         | QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
         | QuantityRef::Toughness { scope }
         | QuantityRef::ObjectManaValue { scope }
         | QuantityRef::ObjectColorCount { scope }

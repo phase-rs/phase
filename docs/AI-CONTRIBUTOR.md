@@ -98,14 +98,6 @@ Throughout this document, skills are written with a leading `$` (Codex conventio
 
 ---
 
-## 0.5. Out-of-scope paths — `mtgish` is dormant
-
-`mtgish/`, `crates/mtgish-import/`, and `data/mtgish-*` are **dormant** — they are NOT live consumers of the engine, parser, or card data. The runtime pipeline is MTGJSON → `crates/engine/src/parser/` → `client/public/card-data.json`.
-
-Do not modify any mtgish path. Do not mirror new engine variants, struct-variant fields, or parser changes into `mtgish-import` "for consistency." PRs that only touch mtgish files will be rejected on sight. If a tool, audit, or skill steers you toward mtgish, treat the reference as historical and stay in `crates/engine/`.
-
----
-
 ## 1. Pick your track
 
 | Track | You (the human) have... | The LLM will... |

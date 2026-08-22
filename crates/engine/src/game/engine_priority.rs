@@ -221,7 +221,41 @@ fn run_post_action_pipeline_from_with_policy(
         // back to Priority. Mirrors `batch_or_drain_observer_triggers`' B2 branch.
         // CR 603.3b: Terminal-resolution observers join the deferred batch so
         // they are ordered only after the resolving ability has completed.
+        // CR 704.3 + CR 117.5 + CR 510.3a: triggered abilities waiting to be put
+        // on the stack are put there only when a player WOULD receive priority,
+        // and combat-damage triggers specifically go on the stack BEFORE the
+        // active player gets priority (CR 510.3a). A parked replacement
+        // (a CR 616.1 ordering choice, a CR 616.1b entry-controller choice, or
+        // any prompt raised while answering one) is a mid-event pause: the event
+        // that triggered these abilities has not finished happening and no player
+        // receives priority for the choice. Park the batch instead, so it reaches
+        // the stack as ONE CR 603.3b batch once the answer settles resolution
+        // back to Priority — splitting it would deny the controller the ordering
+        // choice over the whole batch.
+        //
+        // Keyed on `state.pending_replacement`, NOT on a
+        // `WaitingFor::ReplacementChoice` match and NOT by admitting that variant
+        // to `engine_resolution_choices::handles`:
+        //   * The field is set BEFORE the wait is installed. `replacement.rs`'s
+        //     pipeline_loop parks the record and returns `NeedsChoice` with no
+        //     write to `waiting_for`; the caller installs the wait afterwards. A
+        //     `matches!` on the variant is blind inside that window; the field is
+        //     not. It also covers `EntryControllerChoice`, which `handles` does
+        //     not admit either.
+        //   * `handles` is consulted by four other seams (the reducer's dispatch
+        //     arm in engine.rs, `replacement.rs::park_waiting_for`,
+        //     `triggers.rs::resolution_completion_can_settle`, and
+        //     `park_cast_during_resolution_cast_observers`). Admitting
+        //     `ReplacementChoice` there would silently re-home the replacement
+        //     pause's whole action-dispatch surface and would make a CHAINED
+        //     replacement choice fail to install its own candidate list.
+        //
+        // Not over-broad: on the ANSWERING path the field is already cleared —
+        // `continue_replacement_impl` `.take()`s it as its first statement — so
+        // the disjunct is inert at the reducer's own pipeline call and bites only
+        // at the unguarded `pass_priority_once_with_pipeline` seam.
         if super::engine_resolution_choices::handles(&state.waiting_for)
+            || state.pending_replacement.is_some()
             || state.pending_resolution_completion.is_some()
         {
             triggers::collect_triggers_into_deferred(state, &filtered_events);
@@ -306,6 +340,7 @@ fn run_post_action_pipeline_from_with_policy(
             std::mem::take(&mut state.consumed_before_priority_trigger_events);
         let unconsumed_exile_return_events = triggers::filter_consumed_trigger_events(
             &exile_return_events,
+            triggers::TriggerCollectionRequester::Ordinary,
             &consumed_exile_return_events,
         );
         // CR 603.3b: Exile-return triggers also join a terminal batch so they
@@ -381,7 +416,11 @@ fn run_post_action_pipeline_from_with_policy(
     consumed_trigger_events.extend(std::mem::take(
         &mut state.consumed_before_priority_trigger_events,
     ));
-    let delayed_input = triggers::filter_consumed_trigger_events(events, &consumed_trigger_events);
+    let delayed_input = triggers::filter_consumed_trigger_events(
+        events,
+        triggers::TriggerCollectionRequester::Delayed,
+        &consumed_trigger_events,
+    );
     let delayed_events = triggers::check_delayed_triggers(state, &delayed_input);
     events.extend(delayed_events);
     state.consumed_before_priority_trigger_events.clear();
@@ -482,6 +521,7 @@ fn stage_pending_activation_trigger_events(
             triggers::ConsumedTriggerEventOccurrence {
                 event: event.clone(),
                 occurrence: triggers::trigger_event_occurrence(events, event_start + offset),
+                scope: triggers::ConsumedTriggerEventScope::AllCollectors,
             }
         }));
 }

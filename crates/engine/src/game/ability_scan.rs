@@ -1994,7 +1994,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         // always safe — it only forces an extra re-scan, never a stale read).
         QuantityRef::TargetControllerCounter { kind: _ } => Axes::CONSERVATIVE,
         QuantityRef::Variable { name: _ } => Axes::NONE,
-        QuantityRef::Power { scope, .. } => {
+        QuantityRef::Power { scope, .. } | QuantityRef::BasePower { scope, .. } => {
             let mut acc = Axes {
                 event: false,
                 sibling: true,
@@ -2888,7 +2888,12 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
             sibling: false,
             projected: true,
         },
-        AbilityCondition::ZoneChangedThisWay { filter } => {
+        // `destination` refines the same event-ledger read (the moved object's
+        // current zone) — no new axis beyond the `event: true` already set.
+        AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: _,
+        } => {
             let mut acc = Axes {
                 event: true,
                 sibling: false,
@@ -4153,6 +4158,14 @@ fn scan_replacement_condition(x: &ReplacementCondition, mode: ScanMode) -> Axes 
             }
             acc
         }
+        // CR 702.37b: reads the resolution-local turn-up payment fact ("if
+        // its megamorph cost was paid to turn it face up") — an event-scoped
+        // signal, no board census and no projected resource.
+        ReplacementCondition::TurnUpCostSourcePaid { source: _ } => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
         ReplacementCondition::UnlessControlsSubtype { subtypes: _ } => Axes::NONE,
         ReplacementCondition::UnlessControlsOtherLeq { .. } => Axes::CONSERVATIVE,
         ReplacementCondition::UnlessControlsMatching { filter } => {
@@ -7694,6 +7707,9 @@ mod tests {
             QuantityRef::Power {
                 scope: ObjectScope::Source,
             },
+            QuantityRef::BasePower {
+                scope: ObjectScope::Source,
+            },
             QuantityRef::CountersOn {
                 scope: ObjectScope::Source,
                 counter_type: None,
@@ -7741,6 +7757,11 @@ mod tests {
         // (1) ObjectScope::EventSource via QuantityRef::Power.
         assert!(ability_uses_event_context(&ability_with_amount(
             QuantityRef::Power {
+                scope: ObjectScope::EventSource,
+            }
+        )));
+        assert!(ability_uses_event_context(&ability_with_amount(
+            QuantityRef::BasePower {
                 scope: ObjectScope::EventSource,
             }
         )));
@@ -8039,6 +8060,11 @@ mod tests {
         // Source power (Orcish Siegemaster class) is a sibling-mutable read.
         assert!(ability_reads_sibling_mutable(&ability_with_amount(
             QuantityRef::Power {
+                scope: ObjectScope::Source
+            }
+        )));
+        assert!(ability_reads_sibling_mutable(&ability_with_amount(
+            QuantityRef::BasePower {
                 scope: ObjectScope::Source
             }
         )));

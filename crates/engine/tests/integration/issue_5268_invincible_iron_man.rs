@@ -76,7 +76,10 @@ fn invincible_iron_man_trigger_parses_attach_to_source_not_self() {
         other => panic!("expected Attach sub, got {other:?}"),
     }
     match attach.condition.as_ref() {
-        Some(AbilityCondition::ZoneChangedThisWay { filter }) => match filter {
+        Some(AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: None,
+        }) => match filter {
             TargetFilter::Typed(t) => assert!(t.type_filters.iter().any(
                 |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))
             )),

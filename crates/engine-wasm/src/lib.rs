@@ -14,7 +14,8 @@ use engine::ai_support::{
 use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
 use engine::database::{CardDatabase, CardSearchQuery};
 use engine::game::engine::{
-    apply, apply_for_simulation, resolve_all_ready_is_authorized, resolve_all_ready_prefix,
+    apply, apply_for_simulation, recover_orphaned_resolve_all, resolve_all_ready_access,
+    resolve_all_ready_prefix, ResolveAllReadyAccess,
 };
 use engine::game::interaction::{bind_interaction_authority, submit_interaction};
 use engine::game::preview::{compute_preview_diff, preview_auto_payment_sources};
@@ -2197,6 +2198,10 @@ fn restore_game_state_inner(json_str: &str) -> Result<(), String> {
     backfill_legacy_debug_permissions(&mut state, restored.debug_permitted_was_serialized, false);
     finalize_public_state(&mut state);
     bind_interaction_session(&mut state);
+    // A snapshot written while a Resolve All latch was outstanding restores
+    // with no acting seat; the consumer that would have advanced it lived in
+    // the worker that produced the snapshot.
+    recover_orphaned_resolve_all(&mut state);
     GAME_STATE.with(|cell| cell.set(Some(state)));
     // Restoring (undo, or resuming a save from a fresh worker that never saw
     // `initialize_game`) invalidates any in-progress recording — the restored
@@ -2268,6 +2273,10 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
 
     finalize_public_state(&mut state);
     bind_interaction_session(&mut state);
+    // Mirrors `server-core::GameSession::from_persisted`: a host that reloaded
+    // while a Resolve All latch was outstanding would otherwise resume into a
+    // state no seat can advance, with returning guests bound to a dead prompt.
+    recover_orphaned_resolve_all(&mut state);
 
     GAME_STATE.with(|cell| cell.set(Some(state)));
     MULTIPLAYER_MODE.with(|cell| cell.set(true));
@@ -3044,8 +3053,18 @@ pub fn resolve_all(
         // priority window. Keep the legacy payload parse as a wire-compatible
         // boundary while the consent action owns the authoritative cap.
         let _ = max_resolutions;
-        if !resolve_all_ready_is_authorized(state, requester) {
-            return Err(JsValue::from_str("Resolve All consent is not ready"));
+        // Reject only an unentitled caller. A latch whose frozen run has gone
+        // stale is still routed into the resolver, whose fail-closed
+        // invalidation restores ordinary priority — rejecting it here instead
+        // would leave the game parked with no acting player and, in practice,
+        // nothing any client offers the player to press.
+        // Exhaustive rather than an equality test: a future variant must be
+        // classified here instead of silently defaulting to allowed.
+        match resolve_all_ready_access(state, requester) {
+            ResolveAllReadyAccess::Refused => {
+                return Err(JsValue::from_str("Resolve All consent is not ready"));
+            }
+            ResolveAllReadyAccess::Admitted => {}
         }
         let mut result = resolve_all_ready_prefix(state, requester);
         // A Resolve All burst applies real actions directly via
@@ -4068,6 +4087,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: Default::default(),
+            ordering_hint: Default::default(),
             split: None,
         };
         assert!(matches!(

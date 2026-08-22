@@ -3738,6 +3738,7 @@ mod tests {
             up_to: true,
             allows_partial_find: false,
             constraint: SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -3778,6 +3779,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -3811,6 +3813,7 @@ mod tests {
             constraint: SearchSelectionConstraint::MatchEachFilter {
                 filters: vec![TargetFilter::Any, TargetFilter::Any],
             },
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -5774,6 +5777,7 @@ mod tests {
                 source_object: None,
                 bypass_beneficiary: None,
                 protection_does_not_remove: None,
+                room_door: None,
             };
             obj.static_definitions = vec![def].into();
         }
@@ -5897,6 +5901,7 @@ mod tests {
                 source_object: None,
                 bypass_beneficiary: None,
                 protection_does_not_remove: None,
+                room_door: None,
             };
             obj.static_definitions = vec![def].into();
         }

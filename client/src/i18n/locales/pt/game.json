@@ -1467,7 +1467,12 @@
       "labelReturn": "Devolver ({{selected}}/{{count}})",
       "labelExile": "Exilar ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
-      "orderTop": "Topo"
+      "orderTop": "Topo",
+      "orderSecond": "2.º",
+      "orderThird": "3.º",
+      "orderFourth": "4.º",
+      "orderFifth": "5.º",
+      "orderPosition": "Posição {{position}}"
     },
     "drawnThisTurn": {
       "title": "Compradas Neste Turno",
@@ -1633,7 +1638,11 @@
     "legend": {
       "title": "Regra das Lendas",
       "subtitle": "Escolha qual \"{{name}}\" manter",
-      "keepAria": "Manter {{name}} ({{status}})",
+      "keepAria": "Manter {{name}} ({{identity}}, {{status}})",
+      "keepAriaUnknown": "Manter {{name}} ({{status}})",
+      "identityOriginal": "Original",
+      "identityCopy": "Cópia",
+      "identityTokenCopy": "Cópia de ficha",
       "statusJustEntered": "Acabou de entrar",
       "statusAlready": "Já está no campo de batalha"
     },
@@ -1853,7 +1862,8 @@
         "card": "um card",
         "treasure": "um Tesouro",
         "food": "um Alimento",
-        "tappedFish": "um Peixe virado"
+        "tappedFish": "um Peixe virado",
+        "extraTurn": "um turno extra"
       }
     }
   },

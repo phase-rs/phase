@@ -1,7 +1,7 @@
 import {
-  LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL,
-  MIN_SUPPORTED_SERVER_PROTOCOL,
+  LOBBY_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
+  serverProtocolRejection,
   type ServerInfo,
 } from "../adapter/ws-adapter";
 
@@ -211,6 +211,7 @@ export function openPhaseSocket(
         build_commit: string;
         protocol_version: number;
         mode: "Full" | "LobbyOnly";
+        lobby_protocol_version?: number;
         public_url?: string;
       };
       const info: ServerInfo = {
@@ -218,29 +219,15 @@ export function openPhaseSocket(
         buildCommit: data.build_commit,
         protocolVersion: data.protocol_version,
         mode: data.mode,
+        lobbyProtocolVersion: data.lobby_protocol_version,
         publicUrl: data.public_url,
       };
 
-      const minAcceptedProtocol =
-        info.mode === "LobbyOnly"
-          ? LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL
-          : MIN_SUPPORTED_SERVER_PROTOCOL;
-
-      // Accept any server in [minAcceptedProtocol, PROTOCOL_VERSION]. Full
-      // servers are current-only for breaking game protocol releases; LobbyOnly
-      // brokers keep a one-version rollout window because they do not carry
-      // game-state/action payloads.
-      if (
-        info.protocolVersion < minAcceptedProtocol ||
-        info.protocolVersion > PROTOCOL_VERSION
-      ) {
-        const reason =
-          info.protocolVersion < minAcceptedProtocol
-            ? `Server protocol version ${info.protocolVersion} is older than supported (client speaks ${PROTOCOL_VERSION}, min ${minAcceptedProtocol}). Please wait for the lobby to finish rolling out.`
-            : `Server protocol version ${info.protocolVersion} is newer than this client (${PROTOCOL_VERSION}). Please refresh to update.`;
+      const rejection = serverProtocolRejection(info);
+      if (rejection) {
         settle(() => {
           ws.close();
-          reject(new HandshakeError("protocol_mismatch", reason, info));
+          reject(new HandshakeError("protocol_mismatch", rejection, info));
         });
         return;
       }
@@ -248,9 +235,14 @@ export function openPhaseSocket(
       const clientProtocolVersion =
         info.mode === "LobbyOnly" ? info.protocolVersion : PROTOCOL_VERSION;
 
-      // Send our ClientHello back. For LobbyOnly brokers in the rollout
-      // window, echo the accepted broker protocol so an older deployed worker
-      // does not reject a newer local-dev client as a future protocol.
+      // Send our ClientHello back.
+      //
+      // `protocol_version` echoes the broker's own number for LobbyOnly so a
+      // deployed worker on the LEGACY gate does not reject a newer client as a
+      // future protocol. `lobby_protocol_version` is always our own: a broker
+      // that understands it gates on that instead, which is what decouples the
+      // lobby handshake from full-game churn. Brokers that predate the field
+      // ignore it (nothing sets `deny_unknown_fields`).
       ws.send(
         JSON.stringify({
           type: "ClientHello",
@@ -258,6 +250,7 @@ export function openPhaseSocket(
             client_version: __APP_VERSION__,
             build_commit: __BUILD_HASH__,
             protocol_version: clientProtocolVersion,
+            lobby_protocol_version: LOBBY_PROTOCOL_VERSION,
           },
         }),
       );

@@ -2096,8 +2096,20 @@ fn derive_suspected_abilities(obj: &mut crate::game::game_object::GameObject) {
 /// separable at all).
 fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameObject) {
     obj.name = obj.base_name.clone();
+    // CR 707.2 + CR 613.1a: the copied Room half data is layer-derived — it
+    // survives only as long as a Layer-1a copy effect keeps re-applying it.
+    // (The door-gated Room NAME is derived at layer-1 exit, in
+    // `derive_room_battlefield_names`, from the post-copy effective form.)
+    obj.copied_room_halves = None;
+    // CR 707.9b: restore the persistent base origin (materialized exception
+    // names); a Layer-1 copy application overwrites it within the pass.
+    obj.layer1_name_origin = obj.base_name_origin;
     obj.power = obj.base_power;
     obj.toughness = obj.base_toughness;
+    // CR 208.4b + CR 613.4b: layer 7b starts from the printed/copiable base;
+    // later 7b setters update this carrier while 7c leaves it unchanged.
+    obj.layer_base_power = obj.base_power;
+    obj.layer_base_toughness = obj.base_toughness;
     obj.loyalty = obj.base_loyalty;
     obj.card_types = obj.base_card_types.clone();
     obj.mana_cost = obj.base_mana_cost.clone();
@@ -2354,8 +2366,6 @@ pub fn evaluate_layers(state: &mut GameState) {
         &mut zone_cache,
         &mut started_effect_sets,
     );
-    let stickers_applied =
-        crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, &bf_ids);
 
     // CR 613.2b + CR 708.2a + CR 708.10: Layer 1b. After Layer-1a copiable effects
     // (copy per CR 707, merge per CR 730) are applied, re-set each face-down
@@ -2368,6 +2378,8 @@ pub fn evaluate_layers(state: &mut GameState) {
             seed_live_characteristics_from_base(obj);
         }
     }
+
+    let stickers_applied = apply_room_names_then_stickers(state, &bf_ids);
 
     // Both producers say the same thing: layer 1 can turn a non-generator into a
     // continuous static source mid-pass, and the top-of-pass index was built from
@@ -2890,6 +2902,7 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::TargetControllerCounter { .. }
         | QuantityRef::Variable { .. }
         | QuantityRef::Power { .. }
+        | QuantityRef::BasePower { .. }
         | QuantityRef::Intensity { .. }
         | QuantityRef::Toughness { .. }
         | QuantityRef::ObjectManaValue { .. }
@@ -3218,6 +3231,7 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::TargetControllerCounter { .. }
         | QuantityRef::Variable { .. }
         | QuantityRef::Power { .. }
+        | QuantityRef::BasePower { .. }
         | QuantityRef::Intensity { .. }
         | QuantityRef::Toughness { .. }
         | QuantityRef::ObjectManaValue { .. }
@@ -5043,14 +5057,13 @@ fn apply_copy_sublayer_to_fixed_point(
 ///   `add_transient_continuous_effect`, so the effect is `Transient`-keyed.
 /// - `expand_granted_static_effects` sets `def_index: None`, so a granted
 ///   copy-layer static is `GrantedStatic`-keyed.
-/// - Card data is the only other producer of `StaticDefinition`s, and in the
-///   generated pool every copy-layer modification that sits inside one at all sits
-///   inside a `GenericEffect` payload — Awakening of Vitu-Ghazi, Tenth District
-///   Hero, The Curse of Fenric, The Irencrag, all `SetName` — which
-///   `effects::effect` resolves through `register_transient_effect`. No card
-///   carries a copy-layer modification in its printed `static_abilities`, so no
-///   route into an object's `static_definitions` can carry one either: the copy
-///   payload ([`apply_copiable_values`]), the `GrantStaticAbility` graft, and the
+/// - Card data is the only other producer of `StaticDefinition`s. The resolving
+///   name changes on Awakening of Vitu-Ghazi, Tenth District Hero, The Curse of
+///   Fenric, and The Irencrag are `SetTextName` modifications in Layer 3 inside
+///   `GenericEffect` payloads, not copy-layer producers. No card carries a
+///   copy-layer modification in its printed `static_abilities`, so no route into
+///   an object's `static_definitions` can carry one either: the copy payload
+///   ([`apply_copiable_values`]), the `GrantStaticAbility` graft, and the
 ///   `RetainPrintedAbilityFromSource` graft all replay card-data statics.
 ///
 /// The first card to print a copy-layer static ability directly — rather than
@@ -5104,6 +5117,40 @@ fn copy_sublayer_effect_id(
 /// does not promise: the guarantee is "no DETECTED perturbation", not "no
 /// population read is live". The residual blind spots are enumerated on
 /// `population_probe_blinded_by_entrant_characteristic_change`.
+/// CR 709.5 + CR 707.2 + CR 613.1a: derive each battlefield Room's door-gated
+/// NAME from its effective (post-Layer-1) form. A locked half doesn't have its
+/// name; the halves come from the copied snapshot when a copy applied, else
+/// from the object's own printed form (`room::door_gated_battlefield_name`).
+/// Face-down objects keep their CR 708.2a profile — no name to derive.
+fn derive_room_battlefield_names(state: &mut GameState, ids: &[ObjectId]) {
+    for id in ids {
+        let Some(obj) = state.objects.get_mut(id) else {
+            continue;
+        };
+        if obj.face_down {
+            continue;
+        }
+        // CR 707.9b: a Layer-1 name EXCEPTION is the copy's final name —
+        // CR 709.5 removes locked HALVES' names, never a separate exception.
+        if obj.layer1_name_origin == Some(crate::types::ability::CopiedNameOrigin::Exception) {
+            continue;
+        }
+        if let Some(room_name) = crate::game::room::door_gated_battlefield_name(obj) {
+            obj.name = room_name;
+        }
+    }
+}
+
+/// CR 709.5 + CR 123.6c + CR 613.1c: first derive a Room permanent's name from
+/// its unlocked halves, then apply name-sticker text changes to that resulting
+/// name. The full and incremental paths must share this exact ordering or a
+/// stickered Room can have different characteristics depending on the flush
+/// path. Ability stickers ride the same existing sticker pass.
+fn apply_room_names_then_stickers(state: &mut GameState, ids: &[ObjectId]) -> bool {
+    derive_room_battlefield_names(state, ids);
+    crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, ids)
+}
+
 fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncrementalFlush) {
     let PreparedIncrementalFlush {
         recipient_ids,
@@ -5143,8 +5190,7 @@ fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncremental
     }
 
     let recipient_vec: Vec<ObjectId> = recipient_ids.iter().copied().collect();
-    let stickers_changed =
-        crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, &recipient_vec);
+    let stickers_changed = apply_room_names_then_stickers(state, &recipient_vec);
     // CR 613.2a + CR 613.2c: deliberately no copy disjunct on this rebuild, unlike
     // the full pass. A copy applied here could only add a generator by landing on
     // a recipient, and it cannot: `recipient_ids` is `entered_ids` alone, because
@@ -5638,9 +5684,20 @@ fn active_continuous_effects_from_static_definitions(
     // cycle: "as long as this card is in your graveyard, ..."). If the source
     // is currently outside every declared zone, the static contributes no
     // effects.
-    let source_zone = state.objects.get(&source_id).map(|o| o.zone);
+    let source_obj = state.objects.get(&source_id);
+    let source_zone = source_obj.map(|o| o.zone);
     for (def_idx, def) in static_definitions.iter().enumerate() {
         if def.mode != StaticMode::Continuous {
+            continue;
+        }
+
+        // CR 709.5 + CR 709.5c: on the battlefield a locked Room half doesn't
+        // have its rules text — a door-stamped static contributes no
+        // continuous effects while its half is locked. This gather bypasses
+        // `functioning_abilities::static_functions_in_zone` (see the module
+        // doc there), so the shared door authority is applied here too.
+        if source_obj.is_some_and(|obj| !crate::game::room::door_text_functions(obj, def.room_door))
+        {
             continue;
         }
 
@@ -7739,6 +7796,9 @@ fn apply_continuous_effect_filtered(
             // follows `CopyValues` in `add_transient_continuous_effect`).
             ContinuousModification::SetName { name } => {
                 obj.name = name.clone();
+                // CR 707.9b: the exception is the copy's FINAL copiable name —
+                // `derive_room_battlefield_names` must leave it alone.
+                obj.layer1_name_origin = Some(crate::types::ability::CopiedNameOrigin::Exception);
             }
             // CR 612.8 + CR 613.1c: Literal name changes from continuous
             // effects apply in Layer 3 and are not copiable values.
@@ -7766,9 +7826,14 @@ fn apply_continuous_effect_filtered(
             }
             ContinuousModification::SetPower { value } => {
                 obj.power = Some(*value);
+                // CR 613.4b: a fixed set effect changes current base power,
+                // not only the post-layer live power field.
+                obj.layer_base_power = Some(*value);
             }
             ContinuousModification::SetToughness { value } => {
                 obj.toughness = Some(*value);
+                // CR 613.4b: a fixed set effect changes current base toughness.
+                obj.layer_base_toughness = Some(*value);
             }
             // CR 702.16g: "Protection from [A] and from [B]" behaves as two
             // separate protection abilities. Parameterized keywords like
@@ -8122,23 +8187,35 @@ fn apply_continuous_effect_filtered(
             ContinuousModification::SetDynamicPower { .. } => {
                 if let Some(val) = dynamic_pt {
                     obj.power = Some(val);
+                    // CR 613.4a: a characteristic-defining power sets the
+                    // current base power before layer-7b set effects run.
+                    obj.layer_base_power = Some(val);
                 }
             }
             ContinuousModification::SetDynamicToughness { .. } => {
                 if let Some(val) = dynamic_pt {
                     obj.toughness = Some(val);
+                    // CR 613.4a: a dynamic characteristic-defining toughness sets
+                    // the current base toughness before layer-7b effects.
+                    obj.layer_base_toughness = Some(val);
                 }
             }
             // CR 613.4b: Layer 7b — set base power to dynamic value (e.g., Biomass Mutation).
             ContinuousModification::SetPowerDynamic { .. } => {
                 if let Some(val) = dynamic_pt {
                     obj.power = Some(val);
+                    // CR 613.4b: dynamic layer-7b setters share the same
+                    // authoritative current-base carrier as fixed setters.
+                    obj.layer_base_power = Some(val);
                 }
             }
             // CR 613.4b: Layer 7b — set base toughness to dynamic value.
             ContinuousModification::SetToughnessDynamic { .. } => {
                 if let Some(val) = dynamic_pt {
                     obj.toughness = Some(val);
+                    // CR 613.4b: dynamic layer-7b setters update the authoritative
+                    // current-base carrier just like fixed setters.
+                    obj.layer_base_toughness = Some(val);
                 }
             }
             // CR 613.4c: Additive dynamic P/T modification (layer 7c).
@@ -8597,6 +8674,9 @@ pub(crate) fn compute_current_copiable_values(
             // source's name.
             ContinuousModification::SetName { name } => {
                 values.name = name.clone();
+                // CR 707.9b + CR 707.3: mark the fold so a later copy (and its
+                // Room name derivation) treats X as the final name.
+                values.name_origin = crate::types::ability::CopiedNameOrigin::Exception;
             }
             // CR 707.9b + CR 306.5b: Starting loyalty is a copy-effect
             // characteristic exception. A later copy of this copy must see
@@ -17779,6 +17859,132 @@ mod tests {
         );
     }
 
+    /// CR 709.5 + CR 123.6c + CR 613.1c: Room door-gated naming must precede
+    /// name-sticker text modification on both the full and incremental paths.
+    /// This differential fixture forces the incremental fast path for the same
+    /// stickered Room that a full pass evaluates and compares the final name.
+    #[test]
+    fn stickered_room_name_matches_between_full_and_incremental_layer_paths() {
+        use crate::game::game_object::{RoomDoor, RoomUnlockState};
+        use crate::types::stickers::{AppliedSticker, StickerLocator};
+
+        let mut base = setup();
+        let room = create_object(
+            &mut base,
+            CardId(0),
+            PlayerId(0),
+            "Weight Room".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = base.objects.get_mut(&room).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Room".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.room_unlocks = Some(RoomUnlockState {
+                left_unlocked: true,
+                right_unlocked: false,
+            });
+            obj.stickers.push(AppliedSticker::Name {
+                locator: StickerLocator {
+                    sheet: "Layer Path Probe".to_string(),
+                    index: 0,
+                },
+                text: "Cool".to_string(),
+                position: 0,
+                timestamp: 1,
+            });
+            assert!(obj.room_unlocks.unwrap().is_unlocked(RoomDoor::Left));
+        }
+
+        let mut full = base.clone();
+        evaluate_layers(&mut full);
+
+        let mut incremental = base;
+        crate::game::perf_counters::reset();
+        incremental.layers_dirty = LayersDirty::EnteredObjects([room].into());
+        flush_layers(&mut incremental);
+        let counters = crate::game::perf_counters::snapshot();
+        assert_eq!(
+            counters.layers_incremental, 1,
+            "fixture must take the fast path"
+        );
+        assert_eq!(
+            counters.layers_full_eval, 0,
+            "fixture must not silently escalate"
+        );
+
+        assert_eq!(full.objects[&room].name, "Cool Weight Room");
+        assert_eq!(
+            incremental.objects[&room].name, full.objects[&room].name,
+            "full and incremental Layer-1 exits must produce the same stickered Room name"
+        );
+    }
+
+    /// CR 709.5 + CR 709.5c: the layers gather applies the Room door
+    /// authority itself (it bypasses `static_functions_in_zone`, see the
+    /// `functioning_abilities` module doc) — a locked half's Continuous
+    /// anthem contributes nothing, unlocking the half turns it on, and
+    /// re-locking (CR 709.5g) turns it back off on the next recompute.
+    #[test]
+    fn a_door_stamped_anthem_applies_only_while_its_half_is_unlocked() {
+        use crate::game::game_object::{RoomDoor, RoomUnlockState};
+
+        let mut state = setup();
+        let room = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Weight Room".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&room).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Room".to_string());
+            let anthem = StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                ))
+                .modifications(vec![
+                    ContinuousModification::AddPower { value: 1 },
+                    ContinuousModification::AddToughness { value: 1 },
+                ])
+                .room_door(RoomDoor::Right);
+            obj.static_definitions.push(anthem.clone());
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(anthem);
+            // Uncast entry (CR 709.5d): neither door unlocked.
+            obj.room_unlocks = Some(RoomUnlockState::default());
+        }
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&bear].power,
+            Some(2),
+            "CR 709.5: the locked half's anthem must not apply"
+        );
+
+        state.objects.get_mut(&room).unwrap().room_unlocks = Some(RoomUnlockState {
+            left_unlocked: false,
+            right_unlocked: true,
+        });
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&bear].power,
+            Some(3),
+            "CR 709.5c: the unlocked half's anthem applies"
+        );
+
+        state.objects.get_mut(&room).unwrap().room_unlocks = Some(RoomUnlockState::default());
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&bear].power,
+            Some(2),
+            "CR 709.5g: the re-locked half's anthem stops applying"
+        );
+    }
+
     /// Builds a Doctor Doom permanent on player 0's battlefield whose static
     /// grants itself Indestructible while its controller controls an artifact
     /// creature or a Plan — the exact typed condition the parser now lowers
@@ -19994,6 +20200,8 @@ mod tests {
             trigger_definitions: Default::default(),
             replacement_definitions: Default::default(),
             static_definitions: Default::default(),
+            room_halves: None,
+            name_origin: Default::default(),
         };
         let _ = state.add_transient_continuous_effect(
             source,
@@ -22491,6 +22699,8 @@ mod tests {
                     trigger_definitions: Arc::new(Vec::new()),
                     replacement_definitions: Arc::new(Vec::new()),
                     static_definitions: Arc::new(Vec::new()),
+                    room_halves: None,
+                    name_origin: Default::default(),
                 }),
                 display_source: Default::default(),
                 printed_ref: None,

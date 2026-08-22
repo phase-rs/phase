@@ -2883,8 +2883,14 @@ pub(crate) fn should_propagate_parent_targets(
     ability: &ResolvedAbility,
     sub: &ResolvedAbility,
 ) -> bool {
+    !ability.targets.is_empty() && can_inherit_parent_targets(sub)
+}
+
+/// Whether an empty-targeted child can inherit the parent's bound targets.
+/// Kept separate from the parent's current target population so structural
+/// continuation analysis can use the same authority as runtime propagation.
+pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
     sub.targets.is_empty()
-        && !ability.targets.is_empty()
         && (sub.target_choice_timing != TargetChoiceTiming::Resolution
             // CR 608.2c + CR 303.4f: TargetOnly → ChangeZone[+Attach ParentTarget]
             // (Necrotic Plague) stamps Resolution on the return clause, but the
@@ -3053,58 +3059,7 @@ pub(super) fn resolve_optional_effect_decision(
             }
         }
         AutoMayChoice::Decline => {
-            let decline_branch = ability.else_ability.as_deref().or_else(|| {
-                let sub = ability.sub_ability.as_deref()?;
-                // CR 608.2c: a conditioned decline branch (IfYouDo /
-                // Otherwise / composite) resolves on decline — authoritative
-                // check.
-                let selected = should_resolve_subability_on_optional_decline(sub)
-                    // CR 608.2c: a separate-sentence sibling is the next
-                    // printed instruction and resolves regardless of the
-                    // optional decision — BUT only when it is not a
-                    // reflexive trigger. CR 603.12: a reflexive ("When you
-                    // do, …") sub's "do" did not occur when the action was
-                    // declined, so it must NOT fire even though it is a
-                    // separate sentence (issue #3179: Swashbuckler
-                    // Extraordinaire's declined Treasure sacrifice must not
-                    // resolve the double-strike reflexive). CastFromZone's
-                    // graveyard-redirect rider is not a printed follow-up to
-                    // execute on decline; it is permission metadata consumed
-                    // only if the graveyard spell is actually cast.
-                    || (sub.sub_link == SubAbilityLink::SequentialSibling
-                        && !sub_ability_is_reflexive(sub)
-                        && !(matches!(&ability.effect, Effect::CastFromZone { .. })
-                            && (cast_from_zone::graveyard_destination_rider(sub).is_some()
-                                // CR 614.1c + CR 122.1: the enters-with-counter
-                                // rider is permission metadata (Osteomancer
-                                // Adept, The Tomb of Aclazotz), not a printed
-                                // follow-up to execute on decline.
-                                || cast_from_zone::is_enters_with_counter_rider_subability(sub))));
-                if !selected {
-                    return None;
-                }
-                // CR 608.2c: An `IfYouDo` head with no `else_ability` gates its
-                // ENTIRE accept body ("if you do, A and B") on the optional
-                // decision. On decline, run ONLY the trailing
-                // `Not(OptionalEffectPerformed)` clause ("if you don't, C") —
-                // never the accept-only instructions chained under the head
-                // (Omnath, Locus of All: declining the reveal must put the card
-                // in hand without adding mana). For every other selected shape
-                // (direct `Not` head, `else_ability` head whose condition-false
-                // path runs the else, composite `And`/`Or` head re-evaluated
-                // post-decline, or a `SequentialSibling`) the head itself is the
-                // branch to resolve.
-                if sub
-                    .condition
-                    .as_ref()
-                    .is_some_and(|c| c.is_optional_effect_performed())
-                    && sub.else_ability.is_none()
-                {
-                    Some(nested_optional_decline_clause(sub).unwrap_or(sub))
-                } else {
-                    Some(sub)
-                }
-            });
+            let decline_branch = optional_decline_branch(&ability);
             if let Some(branch) = decline_branch {
                 let mut resolved = branch.clone();
                 // CR 608.2c: inherit the parent's resolved object targets ONLY
@@ -3147,6 +3102,34 @@ pub(super) fn resolve_optional_effect_decision(
         }
     }
     Ok(())
+}
+
+/// CR 608.2c + CR 608.2d: Select the exact continuation that survives an
+/// optional effect being declined. Shared with structural continuation
+/// analysis so UI metadata follows the same printed-tail and reflexive rules.
+pub(crate) fn optional_decline_branch(ability: &ResolvedAbility) -> Option<&ResolvedAbility> {
+    ability.else_ability.as_deref().or_else(|| {
+        let sub = ability.sub_ability.as_deref()?;
+        let selected = should_resolve_subability_on_optional_decline(sub)
+            || (sub.sub_link == SubAbilityLink::SequentialSibling
+                && !sub_ability_is_reflexive(sub)
+                && !(matches!(&ability.effect, Effect::CastFromZone { .. })
+                    && (cast_from_zone::graveyard_destination_rider(sub).is_some()
+                        || cast_from_zone::is_enters_with_counter_rider_subability(sub))));
+        if !selected {
+            return None;
+        }
+        if sub
+            .condition
+            .as_ref()
+            .is_some_and(|condition| condition.is_optional_effect_performed())
+            && sub.else_ability.is_none()
+        {
+            Some(nested_optional_decline_clause(sub).unwrap_or(sub))
+        } else {
+            Some(sub)
+        }
+    })
 }
 
 /// Whether a sub-ability condition references a per-iteration outcome gate —
@@ -3398,6 +3381,7 @@ fn quantity_ref_counts_population_matching(
         | QuantityRef::TargetControllerCounter { .. }
         | QuantityRef::Variable { .. }
         | QuantityRef::Power { .. }
+        | QuantityRef::BasePower { .. }
         | QuantityRef::Intensity { .. }
         | QuantityRef::Toughness { .. }
         | QuantityRef::ObjectManaValue { .. }
@@ -3548,7 +3532,10 @@ fn condition_reads_filter_population(
         | AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. }
         | AbilityCondition::ControllerControlsMatching { filter }
         | AbilityCondition::ControllerControlledMatchingAsCast { filter }
-        | AbilityCondition::ZoneChangedThisWay { filter }
+        | AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: _,
+        }
         | AbilityCondition::CostPaidObjectMatchesFilter { filter } => has_filter(filter),
         AbilityCondition::RevealedHasCardType {
             additional_filter,
@@ -4266,6 +4253,7 @@ fn quantity_ref_references_demonstrative(qty: &QuantityRef) -> bool {
     use crate::types::ability::ObjectScope;
     let scope = match qty {
         QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::BasePower { scope }
         | QuantityRef::Power { scope }
         | QuantityRef::Toughness { scope }
         | QuantityRef::CountersOn { scope, .. }
@@ -6376,6 +6364,30 @@ fn affected_objects_from_events(
     }
 }
 
+/// CR 603.12 (#7511): A reflexive "when you do" triggers "based on whether the
+/// trigger event or events occurred earlier during the resolution" of its
+/// parent. The `WhenYouDo` arm of `evaluate_condition` covers the OPTIONAL
+/// parent (declined / infeasible — #7414) and the failed-payment class; it
+/// cannot see the resolution's event slice, so the MANDATORY-parent question
+/// ("the instruction ran and did nothing") is answered here, at the sub-walk
+/// call site that has the parent's own events in hand. Mirrors the CR 608.2c
+/// mandatory-rider seed's exclusions: an outcome-owning parent (coin flip,
+/// clash, dig, behold — `effect_manages_own_outcome_flag`) keeps its own
+/// record, an effect kind without an event witness stays "mandatory means
+/// yes" (`mandatory_parent_effect_performed`'s default arm), and any recorded
+/// performance (`optional_effect_performed`) always wins.
+fn when_you_do_mandatory_parent_did_nothing(
+    condition: &AbilityCondition,
+    parent: &ResolvedAbility,
+    parent_events: &[GameEvent],
+) -> bool {
+    matches!(condition, AbilityCondition::WhenYouDo)
+        && !parent.optional
+        && !parent.context.optional_effect_performed
+        && !effect_manages_own_outcome_flag(&parent.effect)
+        && !mandatory_parent_effect_performed(&parent.effect, parent_events)
+}
+
 fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> bool {
     match effect {
         Effect::Destroy { .. } | Effect::DestroyAll { .. } => events.iter().any(|event| {
@@ -6669,6 +6681,25 @@ pub(crate) fn publish_fresh_tracked_set(
     set_id
 }
 
+/// CR 608.2c + CR 701.62a (#7467): publish `object_id` as the chain's fresh
+/// tracked set iff the parked continuation actually reads one and the object
+/// really sits on the battlefield — mirroring the resolver harvest's
+/// destination filter, so an entry replacement that redirected the card
+/// elsewhere publishes nothing. Shared by the two seams a manifest-dread
+/// creature can finish entering from: the synchronous `ManifestDreadChoice`
+/// arm and the paused-entry `RevealRestPile` completion.
+pub(crate) fn publish_battlefield_object_for_pending_continuation(
+    state: &mut GameState,
+    object_id: ObjectId,
+) {
+    let continuation_consumes_tracked_set = state
+        .active_ability_continuation()
+        .is_some_and(|continuation| chain_references_tracked_set(&continuation.chain));
+    if continuation_consumes_tracked_set && state.battlefield.contains(&object_id) {
+        publish_fresh_tracked_set(state, vec![object_id]);
+    }
+}
+
 /// CR 603.7 + CR 109.5: Returns `true` when the effect resolves an acting
 /// subject relative to the parent target — i.e., any effect-target slot
 /// reachable via [`effect_target_filter`] contains
@@ -6688,7 +6719,7 @@ pub(crate) fn publish_fresh_tracked_set(
 /// participates without code changes here. `Effect::target_filter()` already
 /// surfaces `SearchLibrary::target_player`, so iterated-search variants are
 /// covered through the same single path.
-fn effect_refs_parent_target(effect: &Effect) -> bool {
+pub(crate) fn effect_refs_parent_target(effect: &Effect) -> bool {
     effect_parent_ref_slots(effect)
         .iter()
         .any(|filter| filter_refs_parent_target(filter))
@@ -12578,7 +12609,16 @@ fn resolve_chain_body(
                     ability
                 };
 
-            let condition_met = evaluate_condition(condition, state, condition_ability);
+            // CR 603.12 (#7511): a MANDATORY parent whose witnessed action did
+            // nothing — "when you do" never happened. Suppression routes
+            // through the ordinary false path below, so an else branch and the
+            // surviving sequential siblings keep their printed semantics.
+            let condition_met = evaluate_condition(condition, state, condition_ability)
+                && !when_you_do_mandatory_parent_did_nothing(
+                    condition,
+                    ability,
+                    &events[events_before..],
+                );
             if !condition_met {
                 // CR 608.2c: Execute else branch if present ("Otherwise, [effect]")
                 if let Some(ref else_branch) = sub.else_ability {
@@ -14166,13 +14206,24 @@ pub(crate) fn evaluate_condition(
         // CR 608.2c: "If a [noun] was [verb]ed this way" — check if any zone-changed
         // object matches the type filter. For optional-targeting parents with no targets
         // chosen, last_zone_changed_ids is empty → returns false.
-        AbilityCondition::ZoneChangedThisWay { filter } => {
+        AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination,
+        } => {
             // CR 107.3a + CR 601.2b: ability-context filter evaluation.
             let ctx = crate::game::filter::FilterContext::from_ability(ability);
-            state
-                .last_zone_changed_ids
-                .iter()
-                .any(|&id| crate::game::filter::matches_target_filter(state, id, filter, &ctx))
+            state.last_zone_changed_ids.iter().any(|&id| {
+                crate::game::filter::matches_target_filter(state, id, filter, &ctx)
+                    // CR 608.2c + CR 122.1h + CR 614.6: a destination-bound
+                    // wording ("put into a graveyard / dies this way") needs the
+                    // ARRIVAL, not just the move — a replacement that redirected
+                    // the object elsewhere defeats it. Current zone IS the
+                    // arrival zone here: nothing else runs between the parent
+                    // instruction and this evaluation.
+                    && destination.is_none_or(|zone| {
+                        state.objects.get(&id).is_some_and(|obj| obj.zone == zone)
+                    })
+            })
         }
         // CR 608.2k + CR 608.2h: the cost-paid object is a persistent untargeted
         // reference, so it reads CURRENT information while it is still in a
@@ -14837,6 +14888,39 @@ mod tests {
             PlayerId(0),
         )
         .condition(AbilityCondition::WhenYouDo)
+    }
+
+    /// CR 608.2c + CR 614.6: a destination-bound "this way" rider must not
+    /// see an object whose move was redirected away from its named arrival.
+    #[test]
+    fn zone_changed_this_way_requires_named_destination() {
+        let mut state = GameState::new_two_player(42);
+        let object = reflexive_test_creature(&mut state, PlayerId(0), "Test Creature");
+        state.last_zone_changed_ids = vec![object];
+        let ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: None,
+            },
+            Vec::new(),
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let condition = AbilityCondition::ZoneChangedThisWay {
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+            destination: Some(Zone::Graveyard),
+        };
+
+        assert!(
+            !evaluate_condition(&condition, &state, &ability),
+            "a battlefield object does not satisfy a graveyard-bound rider"
+        );
+
+        state.objects.get_mut(&object).unwrap().zone = Zone::Graveyard;
+        assert!(
+            evaluate_condition(&condition, &state, &ability),
+            "the same tracked object satisfies the rider after arriving in the graveyard"
+        );
     }
 
     #[test]
@@ -20530,6 +20614,126 @@ mod tests {
         );
     }
 
+    /// CR 603.12 (#7511): the MANDATORY-parent stage of the "when you do"
+    /// gate — answered at the sub-walk call site from the parent's own event
+    /// slice, because the arm above has no events and (as its third row pins)
+    /// must keep saying "mandatory means yes". Rows vary one axis at a time
+    /// around the same `RemoveCounter` parent (Vhal, Scholar of Mortality's
+    /// shape: "remove all study counters from it. When you do, …" with zero
+    /// counters).
+    #[test]
+    fn a_mandatory_parent_that_did_nothing_suppresses_its_reflexive() {
+        let remove_counter = || Effect::RemoveCounter {
+            counter_type: Some(CounterType::Generic("study".to_string())),
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        };
+        let parent = |optional: bool, performed: bool| {
+            let mut ability =
+                ResolvedAbility::new(remove_counter(), vec![], ObjectId(100), PlayerId(0));
+            ability.optional = optional;
+            ability.context.optional_effect_performed = performed;
+            ability
+        };
+        let when_you_do = AbilityCondition::WhenYouDo;
+        let no_events: Vec<GameEvent> = vec![];
+        let witnessed = vec![GameEvent::CounterRemoved {
+            object_id: ObjectId(100),
+            counter_type: CounterType::Generic("study".to_string()),
+            count: 2,
+        }];
+
+        // The suppression case: mandatory, no record, no witness event.
+        assert!(
+            when_you_do_mandatory_parent_did_nothing(
+                &when_you_do,
+                &parent(false, false),
+                &no_events
+            ),
+            "a mandatory RemoveCounter that removed nothing did not happen (CR 603.12)"
+        );
+        // The witness event clears it — the working card keeps its reflexive.
+        assert!(
+            !when_you_do_mandatory_parent_did_nothing(
+                &when_you_do,
+                &parent(false, false),
+                &witnessed
+            ),
+            "a CounterRemoved event is the parent's occurrence — no suppression"
+        );
+        // An optional parent is the arm's business, never this stage's.
+        assert!(
+            !when_you_do_mandatory_parent_did_nothing(
+                &when_you_do,
+                &parent(true, false),
+                &no_events
+            ),
+            "the optional axis is owned by the WhenYouDo arm (#7414), not this stage"
+        );
+        // A recorded performance always wins.
+        assert!(
+            !when_you_do_mandatory_parent_did_nothing(
+                &when_you_do,
+                &parent(false, true),
+                &no_events
+            ),
+            "a recorded performance must never be second-guessed"
+        );
+        // An outcome-owning parent (RollDie) keeps its own record.
+        let mut roll = ResolvedAbility::new(
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides: 6,
+                results: vec![],
+                modifier: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        roll.optional = false;
+        assert!(
+            !when_you_do_mandatory_parent_did_nothing(&when_you_do, &roll, &no_events),
+            "an outcome-owning parent (effect_manages_own_outcome_flag) is exempt"
+        );
+        // A kind without an event witness stays "mandatory means yes"
+        // (`mandatory_parent_effect_performed`'s default arm) — BecomeCopy is
+        // the arm test's own example of a mandatory reflexive that must stay
+        // unconditional.
+        let become_copy = ResolvedAbility::new(
+            Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
+                target: TargetFilter::SelfRef,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        assert!(
+            !when_you_do_mandatory_parent_did_nothing(&when_you_do, &become_copy, &no_events),
+            "an effect kind without an event witness must stay unconditional"
+        );
+        // The condition guard: the call site hands EVERY sub-effect condition
+        // to this stage, so a non-WhenYouDo condition must pass through even
+        // when all the parent-side conjuncts would otherwise suppress it.
+        let quantity_check = AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Fixed { value: 0 },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        };
+        assert!(
+            !when_you_do_mandatory_parent_did_nothing(
+                &quantity_check,
+                &parent(false, false),
+                &no_events
+            ),
+            "only AbilityCondition::WhenYouDo is this stage's business"
+        );
+    }
+
     #[test]
     fn chain_depth_exceeds_limit_returns_error() {
         let mut state = GameState::new_two_player(42);
@@ -23517,6 +23721,7 @@ mod tests {
             up_to: true,
             allows_partial_find: false,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -32892,7 +33097,10 @@ mod tests {
             AbilityCondition::CostPaidObjectMatchesFilter { filter: anaphor() },
             AbilityCondition::TriggeringSpellTargetsFilter { filter: anaphor() },
             AbilityCondition::ControllerControlledMatchingAsCast { filter: anaphor() },
-            AbilityCondition::ZoneChangedThisWay { filter: anaphor() },
+            AbilityCondition::ZoneChangedThisWay {
+                filter: anaphor(),
+                destination: None,
+            },
             AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter: anaphor() },
             AbilityCondition::TargetSharesNameWithOtherExiledThisWay { target: anaphor() },
             AbilityCondition::ObjectsShareQuality {
@@ -32934,6 +33142,7 @@ mod tests {
         assert!(!condition_depends_on_last_created(
             &AbilityCondition::ZoneChangedThisWay {
                 filter: TargetFilter::LastZoneChanged,
+                destination: None,
             }
         ));
     }

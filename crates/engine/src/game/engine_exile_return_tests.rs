@@ -697,6 +697,7 @@ fn exile_return_occurs_before_a_pending_resolution_choice() {
         up_to: true,
         allows_partial_find: true,
         constraint: Default::default(),
+        ordering_hint: Default::default(),
         split: None,
     };
     let mut search_events = Vec::new();

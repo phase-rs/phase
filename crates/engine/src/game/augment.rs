@@ -395,6 +395,10 @@ fn merged_copiable_values(
         trigger_definitions: Arc::new(triggers),
         replacement_definitions: Arc::new(replacements),
         static_definitions: Arc::new(statics),
+        // An augment merge is a Host+Augment creature, never a Room — augment
+        // is an Un-set mechanic with no Comprehensive Rules entry to cite.
+        room_halves: None,
+        name_origin: Default::default(),
     };
 
     Some((

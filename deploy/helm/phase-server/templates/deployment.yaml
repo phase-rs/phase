@@ -1,0 +1,124 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "phase-server.fullname" . }}
+  labels:
+    {{- include "phase-server.labels" . | nindent 4 }}
+spec:
+  # Not configurable: sessions, the lobby and the SQLite games.db are
+  # per-process state, and two pods on one node could share the RWO PVC.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "phase-server.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "phase-server.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: default
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.dnsConfig }}
+      dnsConfig:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: phase-server
+          image: {{ include "phase-server.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Bypass the image's root entrypoint (mkdir/chown + gosu); the pod
+          # securityContext already runs us as the `phase` uid with fsGroup.
+          command: ["phase-server"]
+          args:
+            {{- if .Values.server.allowedOrigin }}
+            - --allowed-origin
+            - {{ .Values.server.allowedOrigin | quote }}
+            {{- end }}
+            {{- if .Values.server.noDataDownload }}
+            - --no-data-download
+            {{- end }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: PORT
+              value: {{ .Values.service.port | quote }}
+            - name: PHASE_DATA_DIR
+              value: /var/lib/phase-server
+            - name: PHASE_LOBBY_ONLY
+              value: {{ .Values.server.lobbyOnly | quote }}
+            - name: PHASE_CORS_ORIGIN
+              value: {{ .Values.server.corsOrigin | quote }}
+            - name: PHASE_LOG_JSON
+              value: {{ .Values.server.logJson | quote }}
+            - name: RUST_LOG
+              value: {{ .Values.server.rustLog | quote }}
+            - name: PUBLIC_URL
+              value: {{ include "phase-server.publicUrl" . | quote }}
+            {{- with .Values.server.dataManifestUrl }}
+            - name: PHASE_DATA_MANIFEST_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.server.adminTokenSecret }}
+            - name: PHASE_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: {{ $.Values.server.adminTokenSecretKey }}
+            {{- end }}
+            {{- with .Values.server.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/phase-server
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-data" (include "phase-server.fullname" .)) .Values.persistence.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

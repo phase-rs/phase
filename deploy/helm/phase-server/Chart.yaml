@@ -1,0 +1,9 @@
+apiVersion: v2
+name: phase-server
+description: phase.rs multiplayer server (Axum WebSocket) behind Traefik + cert-manager
+type: application
+version: 0.1.0
+appVersion: "0.59.0"
+home: https://github.com/phase-rs/phase
+sources:
+  - https://github.com/phase-rs/phase

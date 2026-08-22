@@ -57,6 +57,7 @@ use server_core::game_action_payload_guard::guard_game_action_payload;
 use server_core::game_reconnect_guard::guard_game_reconnect;
 use server_core::game_state_snapshot_wire_guard::{
     guard_game_state_for_broadcast, guard_state_snapshot_broadcast, StateSnapshotParts,
+    MAX_RESOLVE_ALL_LOG_ENTRIES,
 };
 use server_core::interaction_payload_guard::guard_interaction_submission_payload;
 use server_core::legacy_deck_guard::guard_legacy_deck;
@@ -65,7 +66,8 @@ use server_core::lobby::RegisterGameRequest;
 use server_core::lobby_subscriber_wire_guard::guard_lobby_subscriber_capacity;
 use server_core::protocol::{
     build_commit, ClientMessage, RankedPlayerResult, ServerMessage, ServerMode,
-    LOBBY_MIN_SUPPORTED_PROTOCOL, MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
+    LOBBY_MIN_SUPPORTED_PROTOCOL, LOBBY_PROTOCOL_VERSION, MIN_SUPPORTED_LOBBY_PROTOCOL,
+    MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
 };
 use server_core::resolve_deck;
 use server_core::seat_mutation_wire_guard::guard_seat_mutation;
@@ -495,16 +497,11 @@ fn build_state_update_message(
     })
 }
 
-/// Resolve All can collect thousands of engine events. They are needed for
-/// authoritative transition bookkeeping, but replaying them in one wire frame
-/// defeats the batch path and breaches the snapshot payload guard. Preserve a
-/// bounded tail of engine-authored logs alongside the final, fully-derived
-/// state; the requester acknowledgement carries progress metadata separately.
-const MAX_RESOLVE_ALL_LOG_ENTRIES: usize = 128;
-
 /// Resolving the batch and then resuming normal AI play are one authoritative
 /// transition. Retain their engine-authored logs in that order while keeping
-/// the compact final snapshot bounded.
+/// the compact final snapshot bounded by
+/// [`MAX_RESOLVE_ALL_LOG_ENTRIES`], which `server-core` also applies to a batch
+/// its own AI hand-off collapses.
 fn resolve_all_log_tail(
     batch_log_entries: &[GameLogEntry],
     ai_results: &[RevisionedActionResult],
@@ -917,10 +914,60 @@ enum HelloGateOutcome {
     PassThrough,
 }
 
+/// Which protocol surface a server gates its handshake on.
+///
+/// A bare `RangeInclusive<u32>` could only express "between X and Y on
+/// `protocol_version`". The lobby needs a different shape entirely — a floor,
+/// no ceiling, read off a *different* wire field — so the policy is a type
+/// rather than a range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HelloAcceptance {
+    /// Full-game surface: `protocol_version` must land in this inclusive range.
+    /// Both ends matter — `GameState` and `GameAction` payloads are not
+    /// forward- or backward-compatible across a bump.
+    FullGame(std::ops::RangeInclusive<u32>),
+    /// Lobby surface. Gates on the client's `lobby_protocol_version` against
+    /// `lobby_floor` with **no ceiling**: a client newer than this broker can
+    /// only fail by sending a lobby variant the broker does not know, which
+    /// `parse_lobby_client_message` already rejects per-frame as an unknown
+    /// tag. Clients that predate the field fall back to `legacy_range` on
+    /// `protocol_version`, preserving the pre-existing behavior exactly.
+    Lobby {
+        lobby_floor: u32,
+        legacy_range: std::ops::RangeInclusive<u32>,
+    },
+}
+
+impl HelloAcceptance {
+    /// `None` when the hello is acceptable; `Some((client, server))` naming the
+    /// two versions to report when it is not.
+    fn reject(
+        &self,
+        protocol_version: u32,
+        lobby_protocol_version: Option<u32>,
+    ) -> Option<(u32, u32)> {
+        match self {
+            Self::FullGame(range) => {
+                (!range.contains(&protocol_version)).then(|| (protocol_version, *range.end()))
+            }
+            Self::Lobby {
+                lobby_floor,
+                legacy_range,
+            } => match lobby_protocol_version {
+                Some(client_lobby) => {
+                    (client_lobby < *lobby_floor).then_some((client_lobby, LOBBY_PROTOCOL_VERSION))
+                }
+                None => (!legacy_range.contains(&protocol_version))
+                    .then(|| (protocol_version, *legacy_range.end())),
+            },
+        }
+    }
+}
+
 fn classify_hello_gate(
     hello_received: bool,
     msg: &ClientMessage,
-    server_protocol_range: std::ops::RangeInclusive<u32>,
+    acceptance: HelloAcceptance,
 ) -> HelloGateOutcome {
     match (hello_received, msg) {
         (
@@ -929,16 +976,16 @@ fn classify_hello_gate(
                 client_version,
                 build_commit,
                 protocol_version,
+                lobby_protocol_version,
             },
         ) => {
-            // Accept any client in the supported range. The `server` field on
-            // RejectProtocol surfaces the *current* protocol version so the
-            // error message tells the client what to upgrade (or downgrade) to.
-            if !server_protocol_range.contains(protocol_version) {
-                HelloGateOutcome::RejectProtocol {
-                    client: *protocol_version,
-                    server: *server_protocol_range.end(),
-                }
+            // The `server` field on RejectProtocol surfaces the version this
+            // server speaks on whichever surface it gated, so the error message
+            // tells the client what to upgrade (or downgrade) to.
+            if let Some((client, server)) =
+                acceptance.reject(*protocol_version, *lobby_protocol_version)
+            {
+                HelloGateOutcome::RejectProtocol { client, server }
             } else if let Err(reason) = guard_client_hello(client_version, build_commit) {
                 HelloGateOutcome::RejectInvalidHello(reason)
             } else {
@@ -954,10 +1001,13 @@ fn classify_hello_gate(
     }
 }
 
-fn supported_protocol_range(mode: ServerMode) -> std::ops::RangeInclusive<u32> {
+fn hello_acceptance(mode: ServerMode) -> HelloAcceptance {
     match mode {
-        ServerMode::Full => MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
-        ServerMode::LobbyOnly => LOBBY_MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+        ServerMode::Full => HelloAcceptance::FullGame(MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION),
+        ServerMode::LobbyOnly => HelloAcceptance::Lobby {
+            lobby_floor: MIN_SUPPORTED_LOBBY_PROTOCOL,
+            legacy_range: LOBBY_MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+        },
     }
 }
 
@@ -1070,7 +1120,7 @@ fn guard_full_create_game_settings_inbound(
 fn client_forbidden_draft_action_reason(action: &draft_core::types::DraftAction) -> Option<String> {
     use draft_core::types::DraftAction;
     match action {
-        DraftAction::GeneratePairings { .. } => {
+        DraftAction::GeneratePairings => {
             Some("GeneratePairings is server-internal; not allowed from client".to_string())
         }
         DraftAction::SetSeatConnected { .. } => {
@@ -2160,6 +2210,7 @@ async fn handle_socket(
         build_commit: build_commit().to_string(),
         protocol_version: PROTOCOL_VERSION,
         mode,
+        lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
         public_url,
     };
     if let Ok(json) = serde_json::to_string(&hello) {
@@ -2381,6 +2432,7 @@ fn to_server_message(m: lobby_broker::LobbyServerMessage) -> ServerMessage {
             build_commit,
             protocol_version,
             mode,
+            lobby_protocol_version,
         } => ServerMessage::ServerHello {
             server_version,
             build_commit,
@@ -2389,6 +2441,7 @@ fn to_server_message(m: lobby_broker::LobbyServerMessage) -> ServerMessage {
                 lobby_broker::ServerMode::Full => ServerMode::Full,
                 lobby_broker::ServerMode::LobbyOnly => ServerMode::LobbyOnly,
             },
+            lobby_protocol_version,
             // LobbyOnly brokers run no server-side game, so there is no
             // game-server URL to advertise for a `<code>@<host>` share string.
             public_url: None,
@@ -2460,10 +2513,12 @@ fn to_lobby_client_message(msg: &ClientMessage) -> Option<lobby_broker::LobbyCli
             client_version,
             build_commit,
             protocol_version,
+            lobby_protocol_version,
         } => L::ClientHello {
             client_version: client_version.clone(),
             build_commit: build_commit.clone(),
             protocol_version: *protocol_version,
+            lobby_protocol_version: *lobby_protocol_version,
         },
         ClientMessage::SubscribeLobby => L::SubscribeLobby,
         ClientMessage::UnsubscribeLobby => L::UnsubscribeLobby,
@@ -4480,7 +4535,7 @@ async fn handle_client_message(
     match classify_hello_gate(
         identity.client_hello.is_some(),
         &client_msg,
-        supported_protocol_range(mode),
+        hello_acceptance(mode),
     ) {
         HelloGateOutcome::Accept(info) => {
             info!(
@@ -8083,6 +8138,7 @@ mod state_transport_derived_tests {
             up_to: true,
             allows_partial_find: true,
             constraint: SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
         raw.active_search_decision_controls
@@ -8677,6 +8733,7 @@ mod issue_4548_full_create_tests {
                 client_version: env!("CARGO_PKG_VERSION").to_string(),
                 build_commit: build_commit().to_string(),
                 protocol_version: PROTOCOL_VERSION,
+                lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
             };
             socket
                 .send(WsMessage::Text(
@@ -8752,6 +8809,7 @@ mod issue_4548_full_create_tests {
                 client_version: env!("CARGO_PKG_VERSION").to_string(),
                 build_commit: build_commit().to_string(),
                 protocol_version: PROTOCOL_VERSION,
+                lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
             };
             socket
                 .send(WsMessage::Text(
@@ -8817,6 +8875,7 @@ mod issue_4548_full_create_tests {
                 client_version: env!("CARGO_PKG_VERSION").to_string(),
                 build_commit: build_commit().to_string(),
                 protocol_version: PROTOCOL_VERSION,
+                lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
             };
             socket
                 .send(WsMessage::Text(
@@ -8948,6 +9007,7 @@ mod game_submission_tests {
             client_version: env!("CARGO_PKG_VERSION").to_string(),
             build_commit: build_commit().to_string(),
             protocol_version: PROTOCOL_VERSION,
+            lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
         };
         socket
             .send(WsMessage::Text(
@@ -9264,6 +9324,7 @@ mod game_submission_tests {
                 client_version: env!("CARGO_PKG_VERSION").to_string(),
                 build_commit: build_commit().to_string(),
                 protocol_version: PROTOCOL_VERSION,
+                lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
             };
             socket
                 .send(WsMessage::Text(
@@ -9385,6 +9446,7 @@ mod mode_gate_tests {
                 client_version: "0.1.11".into(),
                 build_commit: "abc".into(),
                 protocol_version: PROTOCOL_VERSION,
+                lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
             },
             ClientMessage::SubscribeLobby,
             ClientMessage::UnsubscribeLobby,
@@ -9544,8 +9606,11 @@ mod handshake_tests {
                 client_version: "0.1.11".into(),
                 build_commit: "abc1234".into(),
                 protocol_version: PROTOCOL_VERSION,
+                // Legacy client: predates the lobby-owned version, so the
+                // gate must fall back to the `protocol_version` window.
+                lobby_protocol_version: None,
             },
-            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+            hello_acceptance(ServerMode::Full),
         );
         assert_eq!(
             outcome,
@@ -9565,8 +9630,11 @@ mod handshake_tests {
                 client_version: "0.1.10".into(),
                 build_commit: "old1234".into(),
                 protocol_version: previous,
+                // Legacy client: predates the lobby-owned version, so the
+                // gate must fall back to the `protocol_version` window.
+                lobby_protocol_version: None,
             },
-            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+            hello_acceptance(ServerMode::Full),
         );
         assert_eq!(
             outcome,
@@ -9586,10 +9654,105 @@ mod handshake_tests {
                 client_version: "0.1.10".into(),
                 build_commit: "old1234".into(),
                 protocol_version: previous,
+                // Legacy client: predates the lobby-owned version, so the
+                // gate must fall back to the `protocol_version` window.
+                lobby_protocol_version: None,
             },
-            LOBBY_MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+            hello_acceptance(ServerMode::LobbyOnly),
         );
         assert!(matches!(outcome, HelloGateOutcome::Accept(_)));
+    }
+
+    /// The regression this whole change exists for. A client whose full-game
+    /// `protocol_version` is many bumps behind the broker is still accepted,
+    /// because the lobby gates on the surface it actually speaks. Before the
+    /// split this was a `RejectProtocol` and it took preview multiplayer down.
+    #[test]
+    fn lobby_accepts_stale_full_game_protocol_when_lobby_version_current() {
+        let outcome = classify_hello_gate(
+            false,
+            &ClientMessage::ClientHello {
+                client_version: "0.1.0".into(),
+                build_commit: "old1234".into(),
+                // Far outside LOBBY_MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION.
+                protocol_version: PROTOCOL_VERSION.saturating_sub(9),
+                lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+            },
+            hello_acceptance(ServerMode::LobbyOnly),
+        );
+        assert!(matches!(outcome, HelloGateOutcome::Accept(_)));
+    }
+
+    /// No ceiling on the lobby surface: a client newer than this broker can
+    /// only fail by sending a lobby variant the broker does not know, and
+    /// `parse_lobby_client_message` rejects that per-frame as an unknown tag.
+    /// Evicting the whole connection would refuse a client over a variant it
+    /// may never send.
+    #[test]
+    fn lobby_accepts_future_lobby_protocol_version() {
+        let outcome = classify_hello_gate(
+            false,
+            &ClientMessage::ClientHello {
+                client_version: "9.9.9".into(),
+                build_commit: "future12".into(),
+                protocol_version: PROTOCOL_VERSION,
+                lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION + 5),
+            },
+            hello_acceptance(ServerMode::LobbyOnly),
+        );
+        assert!(matches!(outcome, HelloGateOutcome::Accept(_)));
+    }
+
+    /// The floor is still enforced — that is what a genuinely breaking lobby
+    /// change would raise.
+    #[test]
+    fn lobby_rejects_below_lobby_floor() {
+        let Some(below) = MIN_SUPPORTED_LOBBY_PROTOCOL.checked_sub(1) else {
+            // Floor is 0; nothing can sit below it. Nothing to assert.
+            return;
+        };
+        let outcome = classify_hello_gate(
+            false,
+            &ClientMessage::ClientHello {
+                client_version: "0.1.0".into(),
+                build_commit: "ancient1".into(),
+                protocol_version: PROTOCOL_VERSION,
+                lobby_protocol_version: Some(below),
+            },
+            hello_acceptance(ServerMode::LobbyOnly),
+        );
+        assert_eq!(
+            outcome,
+            HelloGateOutcome::RejectProtocol {
+                client: below,
+                server: LOBBY_PROTOCOL_VERSION,
+            }
+        );
+    }
+
+    /// A Full server must ignore the lobby field entirely — full-game payloads
+    /// are not compatible across a `PROTOCOL_VERSION` bump regardless of what
+    /// the client claims about the lobby surface.
+    #[test]
+    fn full_game_gate_ignores_lobby_protocol_version() {
+        let previous = PROTOCOL_VERSION.saturating_sub(1);
+        let outcome = classify_hello_gate(
+            false,
+            &ClientMessage::ClientHello {
+                client_version: "0.1.10".into(),
+                build_commit: "old1234".into(),
+                protocol_version: previous,
+                lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+            },
+            hello_acceptance(ServerMode::Full),
+        );
+        assert_eq!(
+            outcome,
+            HelloGateOutcome::RejectProtocol {
+                client: previous,
+                server: PROTOCOL_VERSION,
+            }
+        );
     }
 
     #[test]
@@ -9601,8 +9764,11 @@ mod handshake_tests {
                 client_version: "0.1.0".into(),
                 build_commit: "ancient1".into(),
                 protocol_version: too_old,
+                // Legacy client: predates the lobby-owned version, so the
+                // gate must fall back to the `protocol_version` window.
+                lobby_protocol_version: None,
             },
-            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+            hello_acceptance(ServerMode::Full),
         );
         assert_eq!(
             outcome,
@@ -9621,8 +9787,11 @@ mod handshake_tests {
                 client_version: "0.1.11".into(),
                 build_commit: "abc1234".into(),
                 protocol_version: 0,
+                // Legacy client: predates the lobby-owned version, so the
+                // gate must fall back to the `protocol_version` window.
+                lobby_protocol_version: None,
             },
-            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+            hello_acceptance(ServerMode::Full),
         );
         assert_eq!(
             outcome,
@@ -9641,8 +9810,11 @@ mod handshake_tests {
                 client_version: "0.2.0".into(),
                 build_commit: "def5678".into(),
                 protocol_version: PROTOCOL_VERSION + 1,
+                // Legacy client: predates the lobby-owned version, so the
+                // gate must fall back to the `protocol_version` window.
+                lobby_protocol_version: None,
             },
-            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+            hello_acceptance(ServerMode::Full),
         );
         assert!(matches!(outcome, HelloGateOutcome::RejectProtocol { .. }));
     }
@@ -9655,8 +9827,11 @@ mod handshake_tests {
                 client_version: "v".repeat(MAX_TOKEN_LEN + 1),
                 build_commit: "abc1234".into(),
                 protocol_version: PROTOCOL_VERSION,
+                // Legacy client: predates the lobby-owned version, so the
+                // gate must fall back to the `protocol_version` window.
+                lobby_protocol_version: None,
             },
-            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+            hello_acceptance(ServerMode::Full),
         );
         assert!(matches!(outcome, HelloGateOutcome::RejectInvalidHello(_)));
     }
@@ -9668,28 +9843,28 @@ mod handshake_tests {
             &ClientMessage::Action {
                 action: GameAction::PassPriority,
             },
-            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+            hello_acceptance(ServerMode::Full),
         );
         assert_eq!(outcome, HelloGateOutcome::RejectHandshakeRequired);
 
         let outcome = classify_hello_gate(
             false,
             &ClientMessage::CreateGame { deck: empty_deck() },
-            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+            hello_acceptance(ServerMode::Full),
         );
         assert_eq!(outcome, HelloGateOutcome::RejectHandshakeRequired);
 
         let outcome = classify_hello_gate(
             false,
             &ClientMessage::SubscribeLobby,
-            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+            hello_acceptance(ServerMode::Full),
         );
         assert_eq!(outcome, HelloGateOutcome::RejectHandshakeRequired);
 
         let outcome = classify_hello_gate(
             false,
             &ClientMessage::Ping { timestamp: 1 },
-            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+            hello_acceptance(ServerMode::Full),
         );
         assert_eq!(outcome, HelloGateOutcome::RejectHandshakeRequired);
     }
@@ -9702,8 +9877,11 @@ mod handshake_tests {
                 client_version: "0.1.11".into(),
                 build_commit: "abc1234".into(),
                 protocol_version: PROTOCOL_VERSION,
+                // Legacy client: predates the lobby-owned version, so the
+                // gate must fall back to the `protocol_version` window.
+                lobby_protocol_version: None,
             },
-            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+            hello_acceptance(ServerMode::Full),
         );
         assert_eq!(outcome, HelloGateOutcome::IgnoreRedundantHello);
     }
@@ -9715,7 +9893,7 @@ mod handshake_tests {
             &ClientMessage::Action {
                 action: GameAction::PassPriority,
             },
-            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+            hello_acceptance(ServerMode::Full),
         );
         assert_eq!(outcome, HelloGateOutcome::PassThrough);
     }
@@ -9802,7 +9980,7 @@ mod handshake_tests {
         // Regression coverage: this rejection predates GH #1254 and must
         // continue to fire. GeneratePairings is server-internal because
         // match spawning now drives it after deck submission.
-        let action = draft_core::types::DraftAction::GeneratePairings { round: 1 };
+        let action = draft_core::types::DraftAction::GeneratePairings;
         let reason = client_forbidden_draft_action_reason(&action);
         assert!(reason.is_some());
         assert!(reason.unwrap().contains("server-internal"));

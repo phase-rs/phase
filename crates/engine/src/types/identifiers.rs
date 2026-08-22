@@ -22,8 +22,7 @@ pub struct ObjectId(pub u64);
 /// id (the allocator starts well below `u64::MAX`), so this is safe to use as
 /// a sentinel without a dedicated `TargetFilter`/`ReplacementDefinition`
 /// variant, which would ripple through every exhaustive match on those types
-/// across the workspace (including the dormant `mtgish-import` crate, which
-/// must remain untouched).
+/// across the workspace.
 pub(crate) const TRIGGERING_SPELL_PLACEHOLDER: ObjectId = ObjectId(u64::MAX);
 
 /// Monotonic identity for one logical simultaneous zone-change action.

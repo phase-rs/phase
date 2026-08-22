@@ -25,8 +25,18 @@ pub const PROTOCOL_VERSION: u32 = lobby_broker::PROTOCOL_VERSION;
 /// game-state/action payload shape, so stale clients must not join full games.
 pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION;
 
-/// Minimum protocol version accepted by lobby-only brokers.
+/// Minimum protocol version accepted by lobby-only brokers from clients that
+/// predate the lobby-owned version. Derived from `PROTOCOL_VERSION`, so it
+/// slides on full-game churn — which is exactly why
+/// [`MIN_SUPPORTED_LOBBY_PROTOCOL`] exists. Legacy path only.
 pub const LOBBY_MIN_SUPPORTED_PROTOCOL: u32 = lobby_broker::MIN_SUPPORTED_PROTOCOL;
+
+/// Wire version of the lobby message set, independent of [`PROTOCOL_VERSION`].
+pub const LOBBY_PROTOCOL_VERSION: u32 = lobby_broker::LOBBY_PROTOCOL_VERSION;
+
+/// Lowest [`LOBBY_PROTOCOL_VERSION`] a lobby broker accepts. No upper bound —
+/// see `lobby_broker::protocol::MIN_SUPPORTED_LOBBY_PROTOCOL`.
+pub const MIN_SUPPORTED_LOBBY_PROTOCOL: u32 = lobby_broker::MIN_SUPPORTED_LOBBY_PROTOCOL;
 
 /// Git short-hash of the build. Emitted by `build.rs`; falls back to `"dev"`
 /// when git isn't available (containers, source tarballs).
@@ -142,6 +152,12 @@ pub enum ClientMessage {
         client_version: String,
         build_commit: String,
         protocol_version: u32,
+        /// The client's `lobby_broker::LOBBY_PROTOCOL_VERSION`. Only meaningful
+        /// against a `LobbyOnly` server; `None` from clients that predate the
+        /// lobby-owned version. See `lobby_broker::protocol` for why the lobby
+        /// versions its own message set separately from `PROTOCOL_VERSION`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lobby_protocol_version: Option<u32>,
     },
     CreateGame {
         deck: DeckData,
@@ -369,6 +385,12 @@ pub enum ServerMessage {
         build_commit: String,
         protocol_version: u32,
         mode: ServerMode,
+        /// This server's `lobby_broker::LOBBY_PROTOCOL_VERSION`, advertised
+        /// alongside — never instead of — `protocol_version`, which clients
+        /// predating the lobby-owned version still gate on. Additive and
+        /// optional in both directions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lobby_protocol_version: Option<u32>,
         /// Public base URL clients should advertise when sharing a join code
         /// (e.g. `https://x.ngrok-free.app` from an embedded tunnel, or a
         /// `PUBLIC_URL` reverse proxy). Lets a host connected over `localhost`
@@ -1677,6 +1699,7 @@ mod tests {
             client_version: "0.1.11".to_string(),
             build_commit: "abc1234".to_string(),
             protocol_version: PROTOCOL_VERSION,
+            lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -1685,10 +1708,12 @@ mod tests {
                 client_version,
                 build_commit,
                 protocol_version,
+                lobby_protocol_version,
             } => {
                 assert_eq!(client_version, "0.1.11");
                 assert_eq!(build_commit, "abc1234");
                 assert_eq!(protocol_version, PROTOCOL_VERSION);
+                assert_eq!(lobby_protocol_version, Some(LOBBY_PROTOCOL_VERSION));
             }
             _ => panic!("wrong variant"),
         }
@@ -1701,6 +1726,7 @@ mod tests {
             build_commit: "abc1234".to_string(),
             protocol_version: PROTOCOL_VERSION,
             mode: ServerMode::Full,
+            lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
             public_url: Some("https://x.ngrok-free.app".to_string()),
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -1711,12 +1737,14 @@ mod tests {
                 build_commit,
                 protocol_version,
                 mode,
+                lobby_protocol_version,
                 public_url,
             } => {
                 assert_eq!(server_version, "0.1.11");
                 assert_eq!(build_commit, "abc1234");
                 assert_eq!(protocol_version, PROTOCOL_VERSION);
                 assert_eq!(mode, ServerMode::Full);
+                assert_eq!(lobby_protocol_version, Some(LOBBY_PROTOCOL_VERSION));
                 assert_eq!(public_url.as_deref(), Some("https://x.ngrok-free.app"));
             }
             _ => panic!("wrong variant"),
@@ -1733,10 +1761,17 @@ mod tests {
             build_commit: "abc1234".to_string(),
             protocol_version: PROTOCOL_VERSION,
             mode: ServerMode::LobbyOnly,
+            lobby_protocol_version: None,
             public_url: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("public_url"), "None must be omitted: {json}");
+        // Same `skip_serializing_if` contract: a build that advertises no
+        // lobby version must be byte-identical to one that never had the field.
+        assert!(
+            !json.contains("lobby_protocol_version"),
+            "None must be omitted: {json}"
+        );
     }
 
     #[test]
@@ -2324,8 +2359,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_31() {
-        assert_eq!(PROTOCOL_VERSION, 31);
+    fn protocol_version_is_33() {
+        assert_eq!(PROTOCOL_VERSION, 33);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -2335,7 +2370,7 @@ mod tests {
     /// understand.
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
-    /// this guards — and this test reds while `protocol_version_is_31` stays
+    /// this guards — and this test reds while `protocol_version_is_33` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

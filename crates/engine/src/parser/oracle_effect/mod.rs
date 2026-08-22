@@ -661,6 +661,7 @@ fn if_you_do_object_anchor(
     clauses
         .iter()
         .rev()
+        // allow-noncombinator: typed ClauseIr adjacency lookup, not Oracle-text dispatch.
         .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
         .and_then(|clause| match &clause.parsed.effect {
             Effect::GenericEffect {
@@ -722,7 +723,8 @@ fn rewrite_cant_rider_for_non_zone_change_parent(
             if matches!(
                 condition.as_ref(),
                 AbilityCondition::ZoneChangedThisWay {
-                    filter: TargetFilter::Any
+                    filter: TargetFilter::Any,
+                    destination: None,
                 }
             )
     );
@@ -791,6 +793,7 @@ fn rewrite_cost_paid_exiled_reflexive_for_effect_exile_parent(
     if prev_is_effect_exile {
         return Some(AbilityCondition::ZoneChangedThisWay {
             filter: filter.clone(),
+            destination: None,
         });
     }
     condition
@@ -9733,7 +9736,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     }
 
     // "it's still a/an [type]" / "that's still a/an [type]" — type-retention clause
-    // CR 205.1a: Retains the original type in addition to new types from animation effects
+    // CR 205.1b: Retains the original type in addition to new types from animation effects
     if let Some(clause) = try_parse_still_a_type(tp) {
         return clause;
     }
@@ -11441,8 +11444,9 @@ fn rebind_controller_to_triggering_source(mut clause: ParsedEffectClause) -> Par
 /// Parse "it's still a/an [type]" and "that's still a/an [type]" type-retention clauses.
 ///
 /// These appear as separate sentences after animation effects (e.g., "This land becomes
-/// a 3/3 creature with vigilance. It's still a land."). The clause ensures the original
-/// type is retained as a permanent continuous effect.
+/// a 3/3 creature with vigilance. It's still a land."). The retained type shares the
+/// governing animation's stated duration; a standalone clause has no governing duration
+/// and therefore lasts indefinitely (CR 611.2a).
 ///
 /// CR 205.1a: An object retains types explicitly stated by the effect.
 /// CR 509.1c: "All creatures able to block [target/~] [this turn] do so."
@@ -11523,28 +11527,36 @@ fn try_parse_mass_forced_block(tp: TextPair, ctx: &mut ParseContext) -> Option<P
     })
 }
 
-fn try_parse_still_a_type(tp: TextPair) -> Option<ParsedEffectClause> {
+fn parse_retained_type_clause(tp: TextPair) -> Option<ParsedRetainedTypeClause> {
     // Match singular "it's still a/an [type]" / "that's still a/an [type]"
-    // or plural "they're still [type]s" — CR 205.1a type retention after
+    // or plural "they're still [type]s" — CR 205.1b type retention after
     // animation. The descriptor is purely additive: a permanent animated into
     // a creature retains its prior types/subtypes (CR 613.1d ordering), so the
     // "still a …" clause is confirmatory and emits the same `AddType`/
     // `AddSubtype` Layer-4 modifications the animation already implies.
-    let (is_plural, descriptor_orig) = nom_on_lower(tp.original, tp.lower, |input| {
-        alt((
-            value(false, tag("it's still ")),
-            value(false, tag("that's still ")),
-            value(true, tag("they're still ")),
-        ))
-        .parse(input)
-    })?;
+    let (is_plural, descriptor_owned) = if let Some((article, descriptor)) =
+        nom_on_lower(tp.original, tp.lower, |input| {
+            let (input, _) = alt((tag("it"), tag("he"), tag("she"), tag("that"))).parse(input)?;
+            let (input, _) = alt((tag("'"), tag("’"))).parse(input)?;
+            let (input, _) = tag("s still ").parse(input)?;
+            let (input, article) =
+                alt((value("an ", tag("an ")), value("a ", tag("a ")))).parse(input)?;
+            Ok((input, article))
+        }) {
+        (false, format!("{article}{descriptor}"))
+    } else {
+        let ((), descriptor) = nom_on_lower(tp.original, tp.lower, |input| {
+            value((), alt((tag("they're still "), tag("they’re still ")))).parse(input)
+        })?;
+        (true, descriptor.to_string())
+    };
 
-    // CR 205.1b + CR 305.7: parse the type descriptor ("a Cave land", "lands",
+    // CR 205.1b: parse the type descriptor ("a Cave land", "lands",
     // "a planeswalker") through the shared animation building block so a subtype
     // *and* core type are both retained ("It's still a Cave land" → AddType{Land}
     // + AddSubtype{Cave}, Cavernous Maw), not just a bare core type. Strip a
     // trailing period so the descriptor parses cleanly.
-    let descriptor = descriptor_orig.trim().trim_end_matches('.');
+    let descriptor = descriptor_owned.trim().trim_end_matches('.');
     let descriptor = if is_plural {
         // allow-noncombinator: structural singularization after nom parsed the plural prefix.
         descriptor.strip_suffix('s').unwrap_or(descriptor)
@@ -11557,24 +11569,104 @@ fn try_parse_still_a_type(tp: TextPair) -> Option<ParsedEffectClause> {
         return None;
     }
 
-    Some(ParsedEffectClause {
-        effect: Effect::GenericEffect {
-            static_abilities: vec![StaticDefinition::continuous()
-                .affected(TargetFilter::SelfRef)
-                .modifications(modifications)
-                .description(tp.original.to_string())],
-            duration: Some(Duration::Permanent),
-            target: None,
-            end_cost: None,
-        },
-        duration: Some(Duration::Permanent),
-        sub_ability: None,
-        distribute: None,
-        multi_target: None,
-        condition: None,
-        optional: false,
-        unless_pay: None,
+    Some(ParsedRetainedTypeClause {
+        modifications,
+        description: tp.original.to_string(),
     })
+}
+
+fn try_parse_still_a_type(tp: TextPair) -> Option<ParsedEffectClause> {
+    parse_retained_type_clause(tp)
+        .map(|clause| clause.lower(RetainedTypeDurationBinding::Standalone))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RetainedTypeDurationBinding {
+    Standalone,
+    GoverningAnimation(Duration),
+}
+
+impl RetainedTypeDurationBinding {
+    fn duration(self) -> Duration {
+        match self {
+            Self::Standalone => Duration::Permanent,
+            Self::GoverningAnimation(duration) => duration,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ParsedRetainedTypeClause {
+    modifications: Vec<ContinuousModification>,
+    description: String,
+}
+
+impl ParsedRetainedTypeClause {
+    fn lower(self, duration_binding: RetainedTypeDurationBinding) -> ParsedEffectClause {
+        let duration = duration_binding.duration();
+        ParsedEffectClause {
+            effect: Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(self.modifications)
+                    .description(self.description)],
+                duration: Some(duration.clone()),
+                target: None,
+                end_cost: None,
+            },
+            duration: Some(duration),
+            sub_ability: None,
+            distribute: None,
+            multi_target: None,
+            condition: None,
+            optional: false,
+            unless_pay: None,
+        }
+    }
+}
+
+/// CR 205.1b + CR 608.2c + CR 611.2a: a separate retained-type sentence
+/// modifies the immediately preceding animation. Bind it to that animation's
+/// duration in the typed clause stream, before lowering constructs sibling
+/// continuous effects. If there is no adjacent type-changing animation, the
+/// retained-type clause is standalone and keeps its indefinite duration.
+fn retained_type_duration_binding(clauses: &[ClauseIr]) -> RetainedTypeDurationBinding {
+    clauses
+        .iter()
+        .rev()
+        .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
+        .and_then(type_changing_clause_duration)
+        .map_or(
+            RetainedTypeDurationBinding::Standalone,
+            RetainedTypeDurationBinding::GoverningAnimation,
+        )
+}
+
+fn type_changing_clause_duration(clause: &ClauseIr) -> Option<Duration> {
+    match &clause.parsed.effect {
+        Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } if static_abilities.iter().any(|definition| {
+            definition.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::SetCardTypes { .. }
+                        | ContinuousModification::AddType { .. }
+                        | ContinuousModification::AddSubtype { .. }
+                )
+            })
+        }) =>
+        {
+            duration
+                .clone()
+                .or_else(|| clause.parsed.duration.clone())
+                .or(Some(Duration::Permanent))
+        }
+        Effect::Animate { .. } => clause.parsed.duration.clone().or(Some(Duration::Permanent)),
+        _ => None,
+    }
 }
 
 /// CR 614.10a: Parse "[subject] skip[s] [their|your] next [step] step[s]" —
@@ -20459,13 +20551,16 @@ fn rebind_source_ref(qty: &mut QuantityRef, target: ObjectScope, rebind: SourceR
     if matches!(rebind, SourceRefRebind::PowerOrToughness)
         && !matches!(
             qty,
-            QuantityRef::Power { .. } | QuantityRef::Toughness { .. }
+            QuantityRef::Power { .. }
+                | QuantityRef::BasePower { .. }
+                | QuantityRef::Toughness { .. }
         )
     {
         return;
     }
     let scope = match qty {
         QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
         | QuantityRef::Toughness { scope }
         | QuantityRef::ObjectManaValue { scope }
         | QuantityRef::ObjectColorCount { scope }
@@ -22158,6 +22253,7 @@ pub(super) fn rebind_target_subject_object_scope(expr: &mut QuantityExpr) {
         QuantityExpr::Ref { qty } => {
             let scope = match qty {
                 QuantityRef::Power { scope }
+                | QuantityRef::BasePower { scope }
                 | QuantityRef::Toughness { scope }
                 | QuantityRef::ObjectManaValue { scope }
                 | QuantityRef::ObjectColorCount { scope }
@@ -22199,6 +22295,7 @@ pub(super) fn rebind_target_subject_object_scope(expr: &mut QuantityExpr) {
 fn rebind_anaphoric_ref(qty: &mut QuantityRef, target: ObjectScope) {
     let scope = match qty {
         QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
         | QuantityRef::Toughness { scope }
         | QuantityRef::ObjectManaValue { scope }
         | QuantityRef::ObjectColorCount { scope }
@@ -28104,7 +28201,10 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
             | AbilityCondition::SourceMatchesFilter { filter }
             | AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. }
             | AbilityCondition::ControllerControlsMatching { filter }
-            | AbilityCondition::ZoneChangedThisWay { filter }
+            | AbilityCondition::ZoneChangedThisWay {
+                filter,
+                destination: _,
+            }
             | AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
                 rewrite_filter_controller_to_scoped(filter);
             }
@@ -28499,16 +28599,20 @@ pub(crate) fn resolve_difference_anaphor_in_ability(
 }
 
 fn resolve_difference_anaphor_in_effect(effect: &mut Effect, bound: Option<&QuantityExpr>) {
-    // Recurse into the single-`Box<Effect>` wrapper (the draw-replacement
-    // substitute) so a placeholder nested inside it is reached. This is the only
-    // `Effect` variant that wraps a heterogeneous sub-`Effect`; every other
-    // nesting is via `AbilityDefinition` (`sub_ability`/`else_ability`), walked
-    // by the caller.
-    if let Effect::CreateDrawReplacement {
-        replacement_effect: inner,
-    } = effect
-    {
-        resolve_difference_anaphor_in_effect(inner, bound);
+    // Recurse into effect variants that carry a nested ability/effect so a
+    // placeholder inside the deferred body is reached. Ordinary ability-chain
+    // nesting (`sub_ability`/`else_ability`) is walked by the caller.
+    match effect {
+        Effect::CreateDrawReplacement {
+            replacement_effect: inner,
+        } => resolve_difference_anaphor_in_effect(inner, bound),
+        // CR 603.7a: a delayed trigger carries a complete ability definition;
+        // walk that definition so a comparison-derived binding reaches a
+        // deferred "the difference" in its eventual effect body.
+        Effect::CreateDelayedTrigger { effect: inner, .. } => {
+            resolve_difference_anaphor_in_ability(inner, bound)
+        }
+        _ => {}
     }
 
     // Only effects a count parser can emit the deferred placeholder onto ever
@@ -32415,24 +32519,25 @@ pub(crate) fn parse_effect_chain_ir(
         // target permanent, put another counter of that kind on it or remove one
         // from it" — Dramatist's Puppet, Quarry Hauler), whose target and choice
         // would likewise be dropped by the generic strip.
-        let (repeat_for, text, for_each_reference_target) = if try_parse_proliferate_target(&text)
-            .is_some()
-            || try_parse_for_each_counter_kind_adjust_target(&text).is_some()
-        {
-            (None, text, None)
-        } else if let Some(stripped) = strip_redundant_flip_win_quantifier(&text) {
-            // CR 705.2: "for each flip you won, <effect>" (Mirror March) — the flip
-            // loop (`finish_until_lose`) already runs the win effect once per win,
-            // so the quantifier is redundant. Drop it (no `repeat_for`) so the bare
-            // copy clause reaches `CopyTokenOf` instead of an `Unimplemented` "for"
-            // fallback (#5966).
-            (None, stripped, None)
-        } else {
-            let reference_target = for_each_clause_target_controller_filter(&text);
-            let (repeat_for, text) = super::clause_shell::peel_for_each_prefix(&text);
-            let reference_target = repeat_for.as_ref().and(reference_target);
-            (repeat_for, text, reference_target)
-        };
+        let (repeat_for, text, for_each_reference_target, repeat_for_difference) =
+            if try_parse_proliferate_target(&text).is_some()
+                || try_parse_for_each_counter_kind_adjust_target(&text).is_some()
+            {
+                (None, text, None, None)
+            } else if let Some(stripped) = strip_redundant_flip_win_quantifier(&text) {
+                // CR 705.2: "for each flip you won, <effect>" (Mirror March) — the flip
+                // loop (`finish_until_lose`) already runs the win effect once per win,
+                // so the quantifier is redundant. Drop it (no `repeat_for`) so the bare
+                // copy clause reaches `CopyTokenOf` instead of an `Unimplemented` "for"
+                // fallback (#5966).
+                (None, stripped, None, None)
+            } else {
+                let reference_target = for_each_clause_target_controller_filter(&text);
+                let (repeat_for, difference, text) =
+                    lower::strip_for_each_prefix_with_difference(&text);
+                let reference_target = repeat_for.as_ref().and(reference_target);
+                (repeat_for, text, reference_target, difference)
+            };
         let (text_without_where_x, local_where_x_expression) = {
             let text_where_x_lower = text.to_lowercase();
             let (without_where_x, where_x_expression) =
@@ -32684,7 +32789,10 @@ pub(crate) fn parse_effect_chain_ir(
                 let condition = AbilityCondition::And {
                     conditions: vec![
                         AbilityCondition::Not {
-                            condition: Box::new(AbilityCondition::ZoneChangedThisWay { filter }),
+                            condition: Box::new(AbilityCondition::ZoneChangedThisWay {
+                                filter,
+                                destination: None,
+                            }),
                         },
                         AbilityCondition::ScopedPlayerMatches { filter: scope },
                     ],
@@ -33156,6 +33264,10 @@ pub(crate) fn parse_effect_chain_ir(
 
         let (text_no_temporal, delayed_condition) = strip_temporal_suffix(&text);
         let (text_no_qty, mut multi_target) = strip_any_number_quantifier(text_no_temporal);
+        let retained_type_clause = {
+            let lower = text_no_qty.to_lowercase();
+            parse_retained_type_clause(TextPair::new(&text_no_qty, &lower))
+        };
         // CR 121.1 + CR 608.2c: "draw cards equal to the difference" — anaphoric draw
         // count. When a leading QuantityCheck condition establishes two operands (e.g.
         // "if you have fewer than seven cards in hand"), "the difference" draws the
@@ -33200,7 +33312,10 @@ pub(crate) fn parse_effect_chain_ir(
                 None
             }
         });
-        let (clause, repeat_for) = if let Some(draw) = difference_draw {
+        let (clause, repeat_for) = if let Some(retained_type_clause) = retained_type_clause {
+            let duration_binding = retained_type_duration_binding(builder.clauses());
+            (retained_type_clause.lower(duration_binding), repeat_for)
+        } else if let Some(draw) = difference_draw {
             (draw, repeat_for)
         } else if let Some(lose) = difference_lose {
             (lose, repeat_for)
@@ -33350,7 +33465,10 @@ pub(crate) fn parse_effect_chain_ir(
             // before the trigger seam runs, breaking every difference-counter
             // trigger. A spell's difference operands always ride the same clause
             // (Hit the Mother Lode), so `Some(bound)` is the only case to handle.
-            if let Some(bound) = effective_condition.and_then(conditions::difference_expr) {
+            if let Some(bound) = effective_condition
+                .and_then(conditions::difference_expr)
+                .or(repeat_for_difference)
+            {
                 resolve_difference_anaphor_in_effect(&mut clause.effect, Some(&bound));
                 if let Some(sub) = clause.sub_ability.as_deref_mut() {
                     resolve_difference_anaphor_in_ability(sub, Some(&bound));
@@ -36363,6 +36481,92 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod gendered_still_type_tests {
+    use super::*;
+
+    #[test]
+    fn gideon_gendered_still_type_retains_planeswalker() {
+        for text in ["He's still a planeswalker.", "He’s still a planeswalker."] {
+            let clause = try_parse_still_a_type(TextPair::new(text, &text.to_lowercase()))
+                .expect("gendered still-a clause parses");
+            let Effect::GenericEffect {
+                static_abilities, ..
+            } = clause.effect
+            else {
+                panic!("expected GenericEffect");
+            };
+            assert_eq!(static_abilities[0].affected, Some(TargetFilter::SelfRef));
+            assert!(static_abilities[0]
+                .modifications
+                .iter()
+                .any(|modification| {
+                    matches!(
+                        modification,
+                        ContinuousModification::AddType {
+                            core_type: CoreType::Planeswalker
+                        }
+                    )
+                }));
+            assert!(!static_abilities[0]
+                .modifications
+                .iter()
+                .any(|modification| {
+                    matches!(modification, ContinuousModification::SetCardTypes { .. })
+                }));
+        }
+
+        assert!(try_parse_still_a_type(TextPair::new(
+            "He's still maybe a planeswalker.",
+            "he's still maybe a planeswalker."
+        ))
+        .is_none());
+    }
+
+    #[test]
+    fn gideon_separate_retention_clause_inherits_animation_duration() {
+        let definition = parse_effect_chain(
+            "Until end of turn, Gideon becomes a Human Soldier creature with indestructible. He's still a planeswalker.",
+            AbilityKind::Activated,
+        );
+        assert_eq!(definition.duration, Some(Duration::UntilEndOfTurn));
+        let retained = definition
+            .sub_ability
+            .as_deref()
+            .expect("separate retained-type clause");
+        assert_eq!(retained.duration, Some(Duration::UntilEndOfTurn));
+        assert!(matches!(
+            retained.effect.as_ref(),
+            Effect::GenericEffect {
+                duration: Some(Duration::UntilEndOfTurn),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn standalone_retention_pronoun_siblings_remain_permanent() {
+        for text in [
+            "It's still a land.",
+            "That's still an artifact.",
+            "They're still lands.",
+            "They’re still lands.",
+            "She's still a creature.",
+        ] {
+            let clause = try_parse_still_a_type(TextPair::new(text, &text.to_lowercase()))
+                .expect("standalone retained-type clause parses");
+            assert_eq!(clause.duration, Some(Duration::Permanent), "{text}");
+            assert!(matches!(
+                clause.effect,
+                Effect::GenericEffect {
+                    duration: Some(Duration::Permanent),
+                    ..
+                }
+            ));
+        }
+    }
+}
 
 /// Snapshot tests locking current `parse_effect_chain` behavior before the
 /// IR/lowering split in Phase 48 Plan 02. Per D-05/D-06, these test 4 groups:

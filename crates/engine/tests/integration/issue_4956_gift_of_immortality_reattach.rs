@@ -196,8 +196,8 @@ fn gift_delayed_attach_host(parsed: &engine::parser::oracle::ParsedAbilities) ->
     }
 }
 
-fn drain_priority(runner: &mut GameRunner) {
-    drain_priority_preferring(runner, &[]);
+fn drain_priority(runner: &mut GameRunner) -> bool {
+    drain_priority_preferring(runner, &[])
 }
 
 /// Drain priority/resolution prompts, preferring `preferred` object ids when
@@ -205,10 +205,13 @@ fn drain_priority(runner: &mut GameRunner) {
 fn drain_priority_preferring(
     runner: &mut GameRunner,
     preferred: &[engine::types::identifiers::ObjectId],
-) {
+) -> bool {
+    let mut consumed_effect_zone_choice = false;
     for _ in 0..256 {
         match &runner.state().waiting_for {
-            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => {
+                return consumed_effect_zone_choice;
+            }
             WaitingFor::ReturnAsAuraTarget {
                 legal_targets,
                 returned_id,
@@ -247,6 +250,7 @@ fn drain_priority_preferring(
                     .expect("accept optional");
             }
             WaitingFor::EffectZoneChoice { cards, .. } => {
+                consumed_effect_zone_choice = true;
                 let pick = preferred
                     .iter()
                     .copied()
@@ -318,7 +322,7 @@ fn drain_priority_preferring(
             }
             _ => {
                 if runner.act(GameAction::PassPriority).is_err() {
-                    return;
+                    return consumed_effect_zone_choice;
                 }
             }
         }
@@ -1352,5 +1356,210 @@ fn necrotic_plague_attaches_to_chosen_creature_not_dying_host() {
             WaitingFor::ReturnAsAuraTarget { .. }
         ),
         "must not open CR 303.4f Aura host choice when ParentTarget is the chosen creature"
+    );
+}
+
+/// Oracle text verbatim from `client/public/card-data.json`.
+const SWORD_OF_THE_MEEK_ORACLE: &str = "Equipped creature gets +1/+2.\n\
+Equip {2}\n\
+Whenever a 1/1 creature you control enters, you may return this card from your \
+graveyard to the battlefield, then attach it to that creature.";
+
+const AURIOK_SURVIVORS_ORACLE: &str = "When this creature enters, you may return \
+target Equipment card from your graveyard to the battlefield. If you do, you may \
+attach it to this creature.";
+
+/// CR 400.7j + CR 301.5: "return this card from your graveyard to the
+/// battlefield, then attach it to that creature" must equip the entering 1/1.
+/// The bare-"it" attachment names the card the same effect just returned
+/// (CR 400.7j), not the trigger-event referent; before the parser rebind both
+/// operands collapsed onto the entering creature and CR 301.5c's self-attach
+/// guard silently swallowed the whole attach.
+///
+/// Hostile fixture: the Sword has a *prior host* and there is a *second 1/1*
+/// already on the battlefield, so an `AttachedTo` LKI fallback or a battlefield
+/// scan binds the wrong permanent and fails.
+#[test]
+fn sword_of_the_meek_attaches_to_entering_one_one_not_the_prior_host() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let prior_host = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let distractor = scenario.add_creature(P0, "Memnite", 1, 1).id();
+    let one_one = scenario.add_creature_to_hand(P0, "Ornithopter", 1, 1).id();
+    let sword = scenario
+        .add_creature(P0, "Sword of the Meek", 0, 0)
+        .as_artifact()
+        .with_subtypes(vec!["Equipment"])
+        .from_oracle_text(SWORD_OF_THE_MEEK_ORACLE)
+        .id();
+
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), sword, prior_host);
+
+    let mut gy_events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), sword, Zone::Graveyard, &mut gy_events);
+    process_triggers(runner.state_mut(), &gy_events);
+    drain_priority(&mut runner);
+    assert_eq!(runner.state().objects[&sword].zone, Zone::Graveyard);
+
+    let mut etb_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        one_one,
+        Zone::Battlefield,
+        &mut etb_events,
+    );
+    process_triggers(runner.state_mut(), &etb_events);
+    let consumed_effect_zone_choice = drain_priority(&mut runner);
+
+    // Positive reach-guard: the return ran, so execution reached the Attach.
+    assert_eq!(
+        runner.state().objects[&sword].zone,
+        Zone::Battlefield,
+        "Sword of the Meek returns from the graveyard on the 1/1's ETB"
+    );
+    assert_eq!(
+        runner.state().objects[&sword].attached_to,
+        Some(AttachTarget::Object(one_one)),
+        "must equip the entering 1/1 ({one_one:?}), not the prior host \
+         ({prior_host:?}) or the distractor 1/1 ({distractor:?}); attached_to={:?}",
+        runner.state().objects[&sword].attached_to
+    );
+    assert!(
+        runner.state().objects[&one_one]
+            .attachments
+            .contains(&sword),
+        "the entering 1/1 must list the Sword as attached"
+    );
+    assert!(
+        !consumed_effect_zone_choice,
+        "a SelfRef attachment must not consume a resolution-time attachment choice"
+    );
+}
+
+/// CR 301.5e + CR 608.2c: "return …, **then** attach it" performs the return
+/// unconditionally — only the attach can fail. This is the observable that
+/// distinguishes it from the Aura "return … **attached to** that creature"
+/// family, whose CR 303.4i/CR 704.5m denial keeps the card in the graveyard
+/// (`gift_of_immortality_stays_in_graveyard_when_host_gone`, above). The rebind
+/// routes the Sword through the same `enter_attached_to` delivery slot those
+/// Auras use, so this guard pins that the slot stays a delivery mechanism for an
+/// Equipment rather than becoming an entry gate.
+///
+/// Not revert-failing (reverted, the Sword also enters unattached) — Claim 1a
+/// above carries that burden. The prior host is retained so the `AttachedTo`
+/// fallback would bind it if the primary referent ever stopped resolving.
+#[test]
+fn sword_of_the_meek_returns_unattached_when_the_entering_creature_leaves() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let prior_host = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let one_one = scenario.add_creature_to_hand(P0, "Ornithopter", 1, 1).id();
+    let sword = scenario
+        .add_creature(P0, "Sword of the Meek", 0, 0)
+        .as_artifact()
+        .with_subtypes(vec!["Equipment"])
+        .from_oracle_text(SWORD_OF_THE_MEEK_ORACLE)
+        .id();
+
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), sword, prior_host);
+
+    let mut gy_events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), sword, Zone::Graveyard, &mut gy_events);
+    process_triggers(runner.state_mut(), &gy_events);
+    drain_priority(&mut runner);
+
+    let mut etb_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        one_one,
+        Zone::Battlefield,
+        &mut etb_events,
+    );
+    process_triggers(runner.state_mut(), &etb_events);
+    // Reach-guard: the trigger is actually pending before the host is removed,
+    // otherwise "the Sword entered" below could pass without the trigger firing.
+    assert!(
+        !runner.state().stack.is_empty()
+            || matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. } | WaitingFor::OrderTriggers { .. }
+            ),
+        "the return trigger must be pending; stack={} waiting={:?}",
+        runner.state().stack.len(),
+        runner.state().waiting_for
+    );
+
+    let mut death_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        one_one,
+        Zone::Graveyard,
+        &mut death_events,
+    );
+    process_triggers(runner.state_mut(), &death_events);
+    assert_eq!(runner.state().objects[&one_one].zone, Zone::Graveyard);
+    drain_priority(&mut runner);
+
+    assert_eq!(
+        runner.state().objects[&sword].zone,
+        Zone::Battlefield,
+        "CR 608.2c: the return is not gated on the attach — unlike an Aura's \
+         CR 303.4i return, the Equipment enters even with no legal host"
+    );
+    assert_eq!(
+        runner.state().objects[&sword].attached_to,
+        None,
+        "CR 301.5e: with an undefined host the Equipment enters unattached — \
+         not re-bound to the stale prior host ({prior_host:?})"
+    );
+}
+
+/// Auriok Survivors shares Sword of the Meek's collapsed-anaphor shape, so the
+/// rebind changes its AST too. Its *recipient* operand ("attach it to this
+/// creature") is a separate, unfixed misparse, so the card still asks to attach
+/// the returned Equipment to itself — a CR 301.5c no-op. This guard pins that
+/// the newly-stamped self-host is neutralized rather than producing a corrupt
+/// self-attached state.
+#[test]
+fn auriok_survivors_returned_equipment_enters_unattached() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let equipment = scenario
+        .add_creature_to_graveyard(P0, "Bonesplitter", 0, 0)
+        .as_artifact()
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let survivors = scenario
+        .add_creature_to_hand(P0, "Auriok Survivors", 3, 5)
+        .from_oracle_text(AURIOK_SURVIVORS_ORACLE)
+        .id();
+
+    let mut runner = scenario.build();
+    let mut etb_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        survivors,
+        Zone::Battlefield,
+        &mut etb_events,
+    );
+    process_triggers(runner.state_mut(), &etb_events);
+    drain_priority_preferring(&mut runner, &[equipment]);
+
+    assert_eq!(
+        runner.state().objects[&equipment].zone,
+        Zone::Battlefield,
+        "the targeted Equipment returns from the graveyard"
+    );
+    assert_eq!(
+        runner.state().objects[&equipment].attached_to,
+        None,
+        "CR 301.5c + CR 301.5e: an Equipment can't equip itself, so the \
+         unfixed recipient anaphor leaves it entering unattached rather than \
+         producing a self-attached state"
     );
 }

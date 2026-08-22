@@ -402,6 +402,8 @@ export type LibraryPosition =
   | { type: "Bottom" }
   | { type: "NthFromTop"; n: number };
 
+export type SearchOrderingHint = "Unordered" | "OrderedToLibraryTop";
+
 // Narrow source-zone type for a `PayCost` exile-from-hand/graveyard cost —
 // only `Hand` (pitch spells) and `Graveyard` (escape) are valid (mirrors the
 // engine's `ExileCostSourceZone`).
@@ -1760,7 +1762,7 @@ export type WaitingFor =
   | { type: "DigChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_count: number; up_to?: boolean; selectable_cards?: ObjectId[]; kept_destination?: Zone | null; rest_destination?: Zone | null } }
   | { type: "SurveilChoice"; data: { player: PlayerId; cards: ObjectId[] } }
   | { type: "RevealChoice"; data: { player: PlayerId; cards: ObjectId[]; filter: unknown; optional?: boolean } }
-  | { type: "SearchChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; reveal?: boolean; up_to?: boolean; allows_partial_find?: boolean; constraint?: SearchSelectionConstraint; split?: SearchDestinationSplit | null } }
+  | { type: "SearchChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; reveal?: boolean; up_to?: boolean; allows_partial_find?: boolean; constraint?: SearchSelectionConstraint; ordering_hint?: SearchOrderingHint; split?: SearchDestinationSplit | null } }
   | { type: "SearchPartitionChoice"; data: { player: PlayerId; cards: ObjectId[]; primary_destination: Zone; primary_count: number; primary_enter_tapped: boolean; rest_destination: Zone; source_id: ObjectId } }
   | { type: "OutsideGameChoice"; data: { player: PlayerId; source_id: ObjectId; choices: OutsideGameChoiceEntry[]; count: number; reveal?: boolean; up_to?: boolean; destination: Zone } }
   | { type: "ChooseOneOfBranch"; data: { player: PlayerId; controller: PlayerId; source_id: ObjectId; branches: unknown[]; branch_descriptions?: string[]; parent_targets?: TargetRef[]; context?: unknown; remaining_players?: PlayerId[] } }
@@ -2989,6 +2991,9 @@ export interface DebugLibraryCardView {
   name: string;
 }
 
+/** Engine-classified identity for a candidate in a legend-rule choice. */
+export type LegendCandidateIdentity = "Original" | "Copy" | "TokenCopy" | "Unknown";
+
 /**
  * Engine-authored projections computed at each state snapshot. Rides
  * alongside GameState through every adapter path. Frontend components
@@ -3035,6 +3040,12 @@ export interface DerivedViews {
    * Face-down permanents are excluded per CR 708.2. Absent when empty.
    */
   copied_permanents?: ObjectId[];
+  /**
+   * CR 704.5j + CR 707.2 / CR 708.2: identity for every current legend-rule
+   * candidate. The choice modal renders this engine-authored map directly.
+   * Keyed by ObjectId-as-string and omitted when no legend choice is pending.
+   */
+  legend_candidate_identities?: Record<string, LegendCandidateIdentity>;
   /** Keyed by attacking commander's current controller (PlayerId as string). */
   commander_damage_by_attacker?: Record<string, CommanderDamageView[]>;
   /**

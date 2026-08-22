@@ -147,6 +147,7 @@ impl Broker {
                 client_version,
                 build_commit,
                 protocol_version: _,
+                lobby_protocol_version: _,
             } => {
                 // The handshake gate (protocol-version check, first-frame
                 // enforcement) stays in the shell; by the time a ClientHello
@@ -741,6 +742,9 @@ pub fn server_hello(
         build_commit,
         protocol_version,
         mode,
+        // Always advertised by this build. `protocol_version` above stays on
+        // the full-game constant for clients that predate the lobby-owned one.
+        lobby_protocol_version: Some(crate::protocol::LOBBY_PROTOCOL_VERSION),
     }
 }
 
@@ -802,6 +806,7 @@ mod tests {
                 client_version: "0.1.0".into(),
                 build_commit: "abc".into(),
                 protocol_version: PROTOCOL_VERSION,
+                lobby_protocol_version: Some(crate::protocol::LOBBY_PROTOCOL_VERSION),
             },
             env,
         );

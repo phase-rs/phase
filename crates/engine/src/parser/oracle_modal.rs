@@ -1711,6 +1711,7 @@ fn lower_as_enters_anchor_word_modal(
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         };
         result.statics.push(placeholder);
     }

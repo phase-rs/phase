@@ -1467,7 +1467,12 @@
       "labelReturn": "Renvoyer ({{selected}}/{{count}})",
       "labelExile": "Exiler ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
-      "orderTop": "Dessus"
+      "orderTop": "Dessus",
+      "orderSecond": "2e",
+      "orderThird": "3e",
+      "orderFourth": "4e",
+      "orderFifth": "5e",
+      "orderPosition": "Position {{position}}"
     },
     "drawnThisTurn": {
       "title": "Piochées ce tour-ci",
@@ -1633,7 +1638,11 @@
     "legend": {
       "title": "Règle de la légende",
       "subtitle": "Choisissez quel(le) « {{name}} » garder",
-      "keepAria": "Garder {{name}} ({{status}})",
+      "keepAria": "Garder {{name}} ({{identity}}, {{status}})",
+      "keepAriaUnknown": "Garder {{name}} ({{status}})",
+      "identityOriginal": "Original",
+      "identityCopy": "Copie",
+      "identityTokenCopy": "Copie de jeton",
       "statusJustEntered": "Vient d'arriver",
       "statusAlready": "Déjà sur le champ de bataille"
     },
@@ -1853,7 +1862,8 @@
         "card": "une carte",
         "treasure": "un Trésor",
         "food": "un Aliment",
-        "tappedFish": "un Poisson engagé"
+        "tappedFish": "un Poisson engagé",
+        "extraTurn": "un tour supplémentaire"
       }
     }
   },

@@ -1251,8 +1251,10 @@ pub fn fallback_action(
                 }
             )
         }),
-        // Ready has no acting player; the authorized frontend consumer starts
-        // the bounded prefix drain.
+        // Ready has no acting player, so no AI decision exists here. The
+        // authorized consumer starts the bounded prefix drain: the granting
+        // client on a local table, and `server-core`'s own `run_ai` hand-off
+        // when the final Grant came from a server-driven AI seat.
         WaitingFor::ResolveAllReady { .. } => None,
 
         // Priority is the only state where PassPriority is valid.
@@ -8909,6 +8911,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: engine::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -9382,6 +9385,7 @@ mod tests {
             constraint: SearchSelectionConstraint::DistinctQualities {
                 qualities: vec![SharedQuality::Name],
             },
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -12165,6 +12169,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: engine::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         });
         // The row above cannot discriminate the tutor defect: a 3-card pool is
@@ -12196,6 +12201,7 @@ mod tests {
                 up_to: false,
                 allows_partial_find: false,
                 constraint: engine::types::ability::SearchSelectionConstraint::None,
+                ordering_hint: Default::default(),
                 split: None,
             }
         });

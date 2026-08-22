@@ -1,0 +1,53 @@
+{{- if .Values.ingress.enabled }}
+{{- $fullname := include "phase-server.fullname" . }}
+{{- $common := include "phase-server.commonMiddlewares" . }}
+{{- $backupMw := $common }}
+{{- if .Values.traefik.middlewares.enabled }}
+{{- $backupMw = printf "%s,%s,%s" (include "phase-server.crdRef" (dict "ctx" . "suffix" "backup-ratelimit")) (include "phase-server.crdRef" (dict "ctx" . "suffix" "backup-buffering")) $common }}
+{{- end }}
+{{- /* One Ingress per middleware set: /ws (+/health) and the backup API. Only the
+     first carries the cert-manager annotation so ingress-shim manages one
+     Certificate for the shared secret. */}}
+{{- range $i, $route := list
+      (dict "suffix" "" "paths" (list "/ws" "/health") "mw" $common)
+      (dict "suffix" "-backup" "paths" (list "/p2p-draft-backup") "mw" $backupMw) }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullname }}{{ $route.suffix }}
+  labels:
+    {{- include "phase-server.labels" $ | nindent 4 }}
+  annotations:
+    {{- include "phase-server.ingressAnnotations" $ | nindent 4 }}
+    {{- if eq $i 0 }}
+    {{- if $.Values.ingress.tls.clusterIssuer }}
+    cert-manager.io/cluster-issuer: {{ $.Values.ingress.tls.clusterIssuer | quote }}
+    {{- else if $.Values.ingress.tls.issuer }}
+    cert-manager.io/issuer: {{ $.Values.ingress.tls.issuer | quote }}
+    {{- end }}
+    {{- end }}
+    {{- if $route.mw }}
+    traefik.ingress.kubernetes.io/router.middlewares: {{ $route.mw | quote }}
+    {{- end }}
+spec:
+  ingressClassName: {{ $.Values.ingress.className }}
+  tls:
+    - hosts:
+        - {{ $.Values.ingress.host }}
+      secretName: {{ include "phase-server.tlsSecretName" $ }}
+  rules:
+    - host: {{ $.Values.ingress.host }}
+      http:
+        paths:
+          {{- range $p := $route.paths }}
+          - path: {{ $p }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullname }}
+                port:
+                  name: http
+          {{- end }}
+{{- end }}
+{{- end }}

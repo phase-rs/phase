@@ -5,12 +5,12 @@ import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import wasm from "vite-plugin-wasm";
-import topLevelAwait from "vite-plugin-top-level-await";
 import { VitePWA } from "vite-plugin-pwa";
 import { compression } from "vite-plugin-compression2";
+import { resolveMultiplayerServerUrls } from "./src/config/multiplayerServerUrls";
 import type { Plugin } from "vite";
 
-const OFFICIAL_MULTIPLAYER_SERVER_URL = "wss://lobby.phase-rs.dev/ws";
+
 
 // wasm-bindgen emits `import * as importN from "env"` for WASM host-environment
 // imports (LLVM intrinsics). These are provided at instantiation time by the JS
@@ -130,6 +130,7 @@ function dataFileDefines(mode: string): Record<string, string> {
   const envVar = (name: string): string =>
     process.env[name] ?? fileEnv[name] ?? "";
   const base = process.env.DATA_BASE_URL || "";
+  const multiplayerServers = resolveMultiplayerServerUrls(envVar);
   const defines: Record<string, string> = {
     __APP_VERSION__: JSON.stringify(workspaceVersion()),
     __BUILD_HASH__: JSON.stringify(gitHash()),
@@ -149,9 +150,16 @@ function dataFileDefines(mode: string): Record<string, string> {
     __GIT_REPO_URL__: JSON.stringify("https://github.com/phase-rs/phase"),
     __PREVIEW_SITE_URL__: JSON.stringify("https://preview.phase-rs.dev"),
     __RELEASE_SITE_URL__: JSON.stringify("https://phase-rs.dev"),
-    __DEFAULT_MULTIPLAYER_SERVER_URL__: JSON.stringify(
-      envVar("DEFAULT_MULTIPLAYER_SERVER_URL") || OFFICIAL_MULTIPLAYER_SERVER_URL,
-    ),
+    // Channel-scoped official lobby (deploy.yml points preview at its own
+    // broker). DEFAULT falls back to the RESOLVED official value, not the
+    // hardcoded constant — chaining to the constant would leave DEFAULT on
+    // production while OFFICIAL moved to preview, and serverDetection.ts keys
+    // "is this a self-hosted build?" off DEFAULT !== OFFICIAL. That mismatch
+    // would prepend a bogus self-hosted preset holding the production URL and
+    // make it SERVER_PRESETS[0] — i.e. the default pick would become the one
+    // lobby a preview client cannot handshake with.
+    __OFFICIAL_MULTIPLAYER_SERVER_URL__: JSON.stringify(multiplayerServers.official),
+    __DEFAULT_MULTIPLAYER_SERVER_URL__: JSON.stringify(multiplayerServers.buildDefault),
     // True only for tagged production releases (release.yml sets RELEASE_BUILD).
     // The staging deploy (deploy.yml) is also a production Vite build, so we
     // cannot key off import.meta.env.PROD — that would surface the "try the
@@ -217,7 +225,16 @@ export default defineConfig(({ mode }) => ({
     react(),
     tailwindcss(),
     wasm(),
-    topLevelAwait(),
+    // NOTE: no `topLevelAwait()`. `build.target` is `esnext`, which emits and
+    // runs top-level await natively, and no source module has one — so the
+    // plugin transformed nothing useful. It DID wrap every chunk containing a
+    // dynamic `import()`, deferring that chunk's exports into a `__tla`
+    // microtask while leaving its *untransformed* importers un-awaited (it
+    // seeds propagation only from chunks with a *real* top-level await, so an
+    // importer with no TLA and no dynamic import of its own is never wrapped
+    // and never awaits). Such an importer reading a deferred export at
+    // module-evaluation time saw `undefined` and threw, killing the whole lazy
+    // route — see #7583.
     VitePWA({
       registerType: "autoUpdate",
       manifest: false, // Use public/manifest.json

@@ -4416,10 +4416,15 @@ fn quantity_ref_target_slot_spec(qty: &QuantityRef) -> Option<TargetFilter> {
         QuantityRef::Power {
             scope: ObjectScope::Target,
         }
+        | QuantityRef::BasePower {
+            scope: ObjectScope::Target,
+        }
         | QuantityRef::Toughness {
             scope: ObjectScope::Target,
         } => Some(TargetFilter::Typed(TypedFilter::creature())),
-        QuantityRef::Power { .. } | QuantityRef::Toughness { .. } => None,
+        QuantityRef::Power { .. }
+        | QuantityRef::BasePower { .. }
+        | QuantityRef::Toughness { .. } => None,
         // CR 202.3 + CR 115.1: the ref carries its own slot filter.
         QuantityRef::TargetObjectManaValue { filter } => Some((**filter).clone()),
         // CR 701.9 + CR 115.1: cards a single targeted opponent discarded this

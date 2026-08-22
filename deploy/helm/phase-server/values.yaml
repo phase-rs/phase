@@ -1,0 +1,174 @@
+# Default values for phase-server. See README.md for the deployment model.
+
+image:
+  # Published for linux/amd64 and linux/arm64 from release.yml.
+  repository: ghcr.io/phase-rs/phase-server
+  tag: ""            # defaults to .Chart.appVersion prefixed with "v"
+  digest: ""         # optional sha256:... — pins the image regardless of tag
+  pullPolicy: IfNotPresent
+
+server:
+  # Matchmaking-broker-only mode (no server-hosted games/drafts). Upstream's
+  # public server runs lobby-only; a self-hosted server is usually wanted for
+  # server-hosted games, so the default is full mode.
+  lobbyOnly: false
+  # CORS for the HTTP routes (/health is fetched cross-origin by the client's
+  # "Test server" button). "*" or a single exact origin.
+  corsOrigin: "*"
+  # If set, /ws rejects browser upgrades whose Origin header differs (exact
+  # match, one origin). Origin-less clients (desktop app, curl) still connect.
+  allowedOrigin: ""
+  # Advertised in ServerHello so hosts can share "CODE@host" join strings.
+  # Must be an absolute URL with a host, e.g. https://play.example.com — the
+  # server validates it at startup (validate_public_url) and advertises nothing
+  # if it does not parse, so a bare host or scheme-only value silently costs
+  # clients their join URL. Defaults to https://<ingress.host> when the ingress
+  # is enabled; required otherwise.
+  publicUrl: ""
+  # Sets PHASE_DATA_MANIFEST_URL. Only needed if the image was built without
+  # PHASE_CHANNEL (e.g. upstream :preview images); release builds derive it.
+  dataManifestUrl: ""
+  # Refuse to download card data at startup (data dir must be pre-provisioned).
+  noDataDownload: false
+  logJson: true
+  rustLog: info
+  # Existing Secret holding PHASE_ADMIN_TOKEN. Leave empty to keep /admin/*
+  # unmounted (404). /admin is never routed through the Ingress; reach it with
+  # `kubectl port-forward svc/<release> 9374`.
+  adminTokenSecret: ""
+  adminTokenSecretKey: token
+  extraEnv: []
+
+# PHASE_DATA_DIR: card-data.json (~100 MiB, downloaded on first boot),
+# draft-pools.json and the SQLite games.db (+WAL). Needs RWO block storage.
+persistence:
+  enabled: true
+  size: 2Gi
+  storageClass: ""     # "" = cluster default
+  existingClaim: ""
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 768Mi   # measured idle RSS ~530 MiB (card DB)
+  limits:
+    memory: 2Gi
+
+# Time for the graceful-shutdown session flush. Open WebSockets are not
+# closed by the server, so the pod is SIGKILLed at the end of this window.
+terminationGracePeriodSeconds: 30
+
+# First boot may download ~100 MiB of card data before /health answers.
+startupProbe:
+  periodSeconds: 10
+  failureThreshold: 60
+
+# Image's `phase` user is uid/gid 999. The stock entrypoint chowns the data
+# dir as root then drops privileges; here the binary runs directly as 999 and
+# fsGroup makes the volume writable instead.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 999
+  runAsGroup: 999
+  fsGroup: 999
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+
+service:
+  type: ClusterIP
+  port: 9374
+
+ingress:
+  enabled: true
+  className: traefik
+  host: phase.example.com
+  # Only /ws, /health and /p2p-draft-backup are routed; /admin never is.
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+  tls:
+    secretName: ""                 # defaults to <release>-tls
+    clusterIssuer: ""              # cert-manager ClusterIssuer name
+    issuer: ""                     # or a namespaced Issuer
+
+# Traefik Middleware CRDs (traefik.io/v1alpha1).
+traefik:
+  middlewares:
+    enabled: true
+    # What "per source" means for the limits below. The default is the socket
+    # peer IP — which is a SNAT'd node IP when the ingress Service runs with
+    # externalTrafficPolicy: Cluster, collapsing every limit into one GLOBAL
+    # bucket (e.g. 25 WebSockets total). Either set the Service to
+    # externalTrafficPolicy: Local, or key on a trusted header: behind
+    # Cloudflare, cloudflare.enabled overrides this with CF-Connecting-IP.
+    sourceCriterion:
+      ipStrategy: {}
+    # Applied to every routed path.
+    rateLimit:
+      average: 20      # requests/second per source
+      burst: 50
+    inFlightReq:
+      amount: 25       # concurrent requests (WebSockets count) per source
+    # /p2p-draft-backup: unauthenticated 1 MiB JSON writes into SQLite that
+    # only a restart purges (>24h old). Drafts post a snapshot per pick, so a
+    # few per minute is plenty; this bounds PVC fill to ~12 MiB/min per source.
+    backup:
+      maxRequestBodyBytes: 1200000
+      rateLimit:
+        average: 1
+        period: 5s
+        burst: 10
+    headers:
+      stsSeconds: 31536000
+    # Middleware names (namespace-name@kubernetescrd) appended to all routes.
+    extra: []
+
+cloudflare:
+  # Site is proxied through Cloudflare (orange cloud): rate limits key on the
+  # CF-Connecting-IP header instead of the (SNAT'd) socket peer. Rendering
+  # fails unless the origin is provably Cloudflare-only (authenticatedOriginPulls
+  # below) or trustHeaderWithoutOriginPulls acknowledges another control.
+  enabled: false
+  # Only set true if a firewall (Cloudflare IP ranges) or Cloudflare Tunnel
+  # already guarantees nothing else reaches the origin; otherwise a forged
+  # header per request sidesteps every per-client limit.
+  trustHeaderWithoutOriginPulls: false
+  # Require Cloudflare's Authenticated Origin Pull client certificate on the
+  # TLS handshake for this host, so the origin cannot be reached directly with
+  # a forged CF-Connecting-IP. Enable "Authenticated Origin Pulls" in the zone.
+  authenticatedOriginPulls:
+    enabled: false
+    # https://developers.cloudflare.com/ssl/static/authenticated_origin_pull_ca.pem
+    caPem: ""
+
+networkPolicy:
+  enabled: true
+  # Namespace of the ingress controller — the only allowed ingress source.
+  # Stock k3s runs its bundled Traefik in kube-system; a Helm-installed Traefik
+  # is usually in `traefik` or `traefik-system`. A wrong value fails silently:
+  # the pod is Ready (kubelet probes are not policed) but every request 504s.
+  ingressNamespaceLabels:
+    kubernetes.io/metadata.name: kube-system
+  # Allow HTTPS egress to the public internet for the card-data bootstrap
+  # (and nothing else besides DNS). Set false once data is on the PVC.
+  allowBootstrapEgress: true
+
+# The binary is static musl; musl's resolver fails on search-list expansion
+# under the kubelet default ndots:5 (measured on k3s: "could not resolve
+# data.phase-rs.dev" while the absolute name works). The server only talks to
+# public hosts, so no search domains are needed.
+dnsConfig:
+  options:
+    - name: ndots
+      value: "1"
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}

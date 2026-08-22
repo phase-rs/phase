@@ -16,9 +16,10 @@ use super::ability::{
     CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, DigRestOrder, Duration,
     EffectKind, FaceDownProfile, GameRestriction, KeywordAction, KickerVariant, LibraryPosition,
     ModalChoice, PermanentEntryMode, PileSource, QuantityExpr, ResolvedAbility,
-    SearchDestinationSplit, SearchSelectionConstraint, StackAbilityKind, StaticCondition,
-    TapCreaturesAggregate, TargetFilter, TargetRef, ThisWayCause, TriggerBaseSetInstanceRef,
-    TriggerCondition, TriggerDefinition, TriggerDefinitionRef, TriggerEntry,
+    SearchDestinationSplit, SearchOrderingHint, SearchSelectionConstraint, StackAbilityKind,
+    StaticCondition, TapCreaturesAggregate, TargetFilter, TargetRef, ThisWayCause,
+    TriggerBaseSetInstanceRef, TriggerCondition, TriggerDefinition, TriggerDefinitionRef,
+    TriggerEntry,
 };
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
@@ -4522,6 +4523,9 @@ pub struct PreparedScopedLibrarySearchChoice {
     pub up_to: bool,
     pub allows_partial_find: bool,
     pub constraint: SearchSelectionConstraint,
+    /// Whether the client must preserve and display the selected-card order.
+    #[serde(default)]
+    pub ordering_hint: SearchOrderingHint,
 }
 
 fn default_prepared_search_filter() -> TargetFilter {
@@ -5338,6 +5342,16 @@ pub enum BatchCompletion {
         /// must too. `None` for the kept-choice / dig paths, which emit their own
         /// `EffectResolved` before the pause (or rely on the continuation).
         emit_reveal_until_resolved: Option<ObjectId>,
+        /// CR 608.2c + CR 701.62a (#7467): a paused manifest-dread entry's
+        /// chosen object. The completion drain publishes it as the chain's
+        /// fresh tracked set — only once the entry has actually finished
+        /// (battlefield gate) and right before the parked consumer drains —
+        /// the deferred mirror of the synchronous `ManifestDreadChoice`
+        /// publish. Deliberately separate from `publish_tracked_set`, whose
+        /// presence doubles as the dig-vs-reveal ROUTING selector for the rest
+        /// pile. `None` for every non-manifest rest pile.
+        #[serde(default)]
+        manifested_for_continuation: Option<ObjectId>,
     },
     /// CR 608.2c + CR 616.1: The rest half of a deterministic mass Dig settled
     /// after a replacement choice. Resume its selected-card delivery only now,
@@ -6965,6 +6979,30 @@ pub enum ManaAbilityResume {
     CompanionToHand {
         player: PlayerId,
         cost: ManaCost,
+    },
+    /// CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b + CR 605.3b + CR 616.1:
+    /// A turn-face-up special action whose auto-tapped mana source paused on a
+    /// replacement-aware cost move. `cost` is the final cost locked at action
+    /// initiation — after the special-action reduction and after CR 107.3d's
+    /// `{X}` was concretized — so resumption cannot re-derive it against a board
+    /// that changed while the replacement choice was pending. `announced_x`
+    /// travels with it because CR 702.37f / CR 702.168e publish that value to the
+    /// permanent's own turn-face-up trigger, which fires after the payment
+    /// completes.
+    TurnFaceUp {
+        player: PlayerId,
+        object_id: ObjectId,
+        cost: ManaCost,
+        /// The announced value for a cost that contained X. `None` means the
+        /// cost had no X; `Some(0)` remains a real CR 107.3d announcement and
+        /// binds that zero to the resulting turn-face-up trigger.
+        announced_x: Option<u32>,
+        /// CR 702.37b: which stored-face source the prepared cost came from —
+        /// locked at initiation exactly like `cost`, so the rider decision
+        /// cannot drift against a board that changed while paused. The serde
+        /// default (`Morph`) covers pre-existing paused snapshots: no counter.
+        #[serde(default)]
+        cost_source: crate::types::ability::TurnUpCostSource,
     },
     /// CR 116.2c + CR 605.3b + CR 616.1: A pay-to-end special action whose
     /// auto-tapped mana source paused on a replacement-aware cost move. `cost`
@@ -9177,6 +9215,11 @@ fn visit_persisted_live_zone_changed_records(
         // records, whose `turn_zone_change_index` must be rebound on load —
         // exactly the reason its sacrifice sibling is listed above.
         "pending_discard_batch",
+        // `PendingCombatLifelink::batch_events` holds the parked combat-damage
+        // batch's events, which can include `ZoneChanged` records created by a
+        // prevention shield's rider (CR 615.5) — their `turn_zone_change_index`
+        // must be rebound on load for the same reason as the siblings above.
+        "pending_combat_lifelink",
         "stack",
         "waiting_for",
         "resolution_stack",
@@ -10405,6 +10448,47 @@ fn migrate_legacy_tap_effect(effect: &mut serde_json::Value) {
     effect.insert("state".to_string(), serde_json::json!({ "type": state }));
 }
 
+/// Maps the pre-Option turn-face-up continuation wire shape onto the typed
+/// `Option<u32>` representation. A legacy `cost_had_x: false` plus zero was
+/// never an X announcement, while `true` plus zero was.
+fn migrate_legacy_turn_face_up_resume(value: &mut serde_json::Value) -> Result<(), String> {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                migrate_legacy_turn_face_up_resume(value)?;
+            }
+        }
+        serde_json::Value::Object(object) => {
+            if let Some(resume) = object.get_mut("TurnFaceUp") {
+                let fields = resume
+                    .as_object_mut()
+                    .ok_or_else(|| "legacy TurnFaceUp resume must be an object".to_string())?;
+                if let Some(cost_had_x) = fields.remove("cost_had_x") {
+                    let cost_had_x = cost_had_x.as_bool().ok_or_else(|| {
+                        "legacy TurnFaceUp resume cost_had_x must be a boolean".to_string()
+                    })?;
+                    let announced_x = fields
+                        .remove("announced_x")
+                        .unwrap_or_else(|| serde_json::Value::from(0));
+                    fields.insert(
+                        "announced_x".to_string(),
+                        if cost_had_x {
+                            announced_x
+                        } else {
+                            serde_json::Value::Null
+                        },
+                    );
+                }
+            }
+            for value in object.values_mut() {
+                migrate_legacy_turn_face_up_resume(value)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn delayed_trigger_install_command(
     entry: &serde_json::Value,
 ) -> Option<&serde_json::Map<String, serde_json::Value>> {
@@ -11419,6 +11503,10 @@ pub enum WaitingFor {
         /// AI candidate enumerator to prune illegal combinations.
         #[serde(default)]
         constraint: SearchSelectionConstraint,
+        /// CR 401.4 + CR 701.23a + CR 608.2c: Whether the selected cards are
+        /// arranged in one library position by their owner in the continuation.
+        #[serde(default)]
+        ordering_hint: SearchOrderingHint,
         /// CR 701.23a + CR 608.2c: Split-destination metadata propagated from
         /// `Effect::SearchLibrary.split` (cultivate-class "put one onto the
         /// battlefield tapped and the other into your hand"). When set, the
@@ -13048,6 +13136,97 @@ pub enum CombatDamageAssignmentMode {
     AsThoughUnblocked,
 }
 
+/// CR 510.4: which of the two combat-damage sub-steps a simultaneous batch
+/// belongs to. First strike / double strike creates a first sub-step; the
+/// remaining attackers and blockers assign in a mandatory second sub-step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CombatDamageSubStep {
+    FirstStrike,
+    Regular,
+}
+
+/// CR 702.15b: one lifelink source's owed life gain, bound at the moment the
+/// damage was dealt. Snapshotted, not live (CR 702.15c LKI): a control change
+/// while the CR 616.1 prompt is open must not redirect or void the gain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingLifelinkGain {
+    pub controller: PlayerId,
+    pub amount: u32,
+}
+
+/// CR 510.2 + CR 616.1 + CR 702.15b: the unfinished tail of ONE simultaneous
+/// combat-damage batch, parked because a lifelink life-gain event met two or
+/// more co-applicable replacement effects and the gaining player must choose
+/// which applies first.
+///
+/// CR 510.2 forbids *casting spells and activating abilities* between combat
+/// damage being assigned and dealt — a priority window. It does NOT forbid a
+/// CR 616.1 choice made while the event is being applied, which opens no
+/// priority window and puts nothing on the stack. The belief that it did is
+/// what dropped the gain: the choice cannot be answered inside the turn-based
+/// action, so 100% of that source's gain — and every later lifelink source in
+/// the same batch — was discarded.
+///
+/// What CR 510.2 *does* forbid is replaying the batch: it is one event. So the
+/// damage is never re-dealt; only the unstarted tail is parked.
+///
+/// The tail is parked whole, in emission order, so the completing batch's event
+/// stream is byte-identical to the un-paused one: per-source gains, then the
+/// per-player `CombatDamageDealtToPlayer` aggregate, then Phase D's prevention
+/// riders. Deferring Phase D rather than hoisting it is what makes it
+/// impossible for a rider's own continuation (CR 615.5) to run while the
+/// CR 616.1 prompt is open.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCombatLifelink {
+    /// CR 702.15e: per-source gains still owed, in batch order — separate life
+    /// gain events, never merged.
+    ///
+    /// The source whose gain PAUSED is deliberately absent: its
+    /// `ProposedEvent::LifeGain` is owned by `state.pending_replacement` and is
+    /// completed by `engine_replacement::handle_replacement_choice`. Re-queueing
+    /// it here would gain the life twice.
+    pub remaining: VecDeque<PendingLifelinkGain>,
+    /// CR 510.2 + CR 603.3b: every event this batch has produced. Each resume
+    /// appends the events its own replacement round trip produced, so the
+    /// lifelink `LifeChanged` and the combat-damage events reach
+    /// `process_combat_damage_triggers` as ONE batch — CR 702.15b makes the gain
+    /// simultaneous with the damage, and no player received priority for the
+    /// CR 616.1 choice.
+    pub batch_events: Vec<GameEvent>,
+    /// CR 510.2: the per-player `CombatDamageDealtToPlayer` aggregate, built in
+    /// Phase C and emitted AFTER the lifelink gains — the position it occupies
+    /// today. Carried so a pause cannot reorder it ahead of a resumed gain.
+    pub damage_to_players: Vec<GameEvent>,
+    /// CR 615.5 + CR 615.13: each shield's aggregate prevented amount, so the
+    /// completion tail can fire every rider exactly once against the amount THIS
+    /// batch prevented. A `Vec` rather than the producer's `HashMap`: an enum key
+    /// is not a JSON map key, and the record is serialized.
+    pub prevention_tally: Vec<(AppliedReplacementKey, i32)>,
+    /// CR 732.2a: the pre-batch life totals the loop-detection ring keys on.
+    ///
+    /// Carried here rather than re-snapshotted at resume time. What that buys is
+    /// the PAUSE-path guard call: the pause is reached under `PassPriority`, which
+    /// `apply()` exempts from its blanket ring clear, so a pre-batch snapshot is
+    /// what lets that call observe the CR 120.3a damage this batch has already
+    /// dealt. Re-snapshotting at drain entry would make the comparison vacuous
+    /// there — `parked_batch_invalidates_the_loop_ring_against_the_pre_batch_snapshot`
+    /// is the fixture that fails when it is.
+    ///
+    /// It buys NOTHING on the resume, and this is MEASURED, not assumed:
+    /// `apply()` clears `loop_detect_ring` for every action that is neither in its
+    /// exemption list nor an answer to a `WaitingFor::is_forced_cascade_window`,
+    /// and `GameAction::ChooseReplacement` / `WaitingFor::ReplacementChoice` are in
+    /// neither set. The ring is therefore already empty before the drain is
+    /// re-entered, so the completion-path call cannot be observed to clear
+    /// anything on that path. Do not write, or rely on, a claim that this window
+    /// "observes the paused source's own gain" — arithmetically it spans it, but
+    /// no observer survives to see it.
+    pub lives_before: Vec<i32>,
+    /// CR 510.4: which sub-step owns this batch. Snapshotted because
+    /// `combat.first_strike_done` mutates during the resume.
+    pub sub_step: CombatDamageSubStep,
+}
+
 /// CR 510.1c: A blocker with its lethal damage threshold for UI display.
 /// `lethal_minimum` is only enforced as a hard constraint before trample excess (CR 702.19b).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -13227,6 +13406,73 @@ pub enum RetargetScope {
     ForcedTo(TargetRef),
 }
 
+/// CR 103.5 / CR 104.1: who — if anyone — may act in a `WaitingFor` state.
+///
+/// THE single authority behind [`WaitingFor::acting_player`] and
+/// [`WaitingFor::acting_players`]; both are adapters over
+/// [`WaitingFor::acting_authority`], and the exhaustive per-variant match lives
+/// there and nowhere else.
+///
+/// The type exists so that "nobody acts" cannot be written as a bare `None`.
+/// A state with no acting player is advanced by something OUTSIDE the action
+/// pipeline, and if that something is never called the game hangs with no
+/// player able to move it and no client rendering a prompt. Naming the
+/// advancer in the type is what makes the obligation reviewable; the census in
+/// `tests/integration/waiting_for_actor_authority_census.rs` is what makes it
+/// unskippable.
+///
+/// INVARIANT THE CENSUS ENFORCES: every arm of `acting_authority` is a bare,
+/// UNGUARDED pattern whose body is exactly one constructor call on this enum —
+/// possibly wrapped by `rustfmt` in a block whose single tail expression is
+/// that call — and the census PINS the constructor set it accepts, so a new
+/// one cannot route its arms past the adjudications while the census still
+/// reports healthy (see that file's `A4c` and `A4d`). A match guard would let
+/// an arm decide the answer somewhere the census cannot read, so guards are
+/// rejected outright — see that file's `A8`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActingAuthority {
+    /// Exactly one player is authorized to submit the next action.
+    One(PlayerId),
+    /// CR 103.5: several players decide at once — the mulligan family. Every
+    /// listed player may submit, in any arrival order.
+    Simultaneous(Vec<PlayerId>),
+    /// No player may act. The payload names what advances the state instead.
+    None(NoActor),
+}
+
+/// What advances a `WaitingFor` state that has NO acting player.
+///
+/// Every variant answers one question — "what moves this along?" — so the enum
+/// has a single axis and no mixed abstraction layers.
+///
+/// Adding an actorless `WaitingFor` variant that cannot honestly reuse one of
+/// these answers must add one here. That addition IS the declaration this type
+/// exists to force, and the census pins this enum's variant set so the addition
+/// cannot be silent.
+///
+/// Unrelated to `phase_ai::auto_play::AiActionsBreakReason::NoActor`, a *driver
+/// break reason*, not a state classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoActor {
+    /// CR 104.1: the game has already ended, so no player takes further game
+    /// actions. Advanced by the match layer (`game::match_flow`), which reads
+    /// the winner out of the state and tears the game down — outside the game,
+    /// by design.
+    MatchTeardown,
+    /// CR 117.4: a Resolve All latch. Consumed out of band by
+    /// [`crate::game::engine_resolve_batch::resolve_all_ready_prefix`], which
+    /// every transport that can MINT the latch must also call.
+    ///
+    /// The name deliberately mirrors that function, and the census asserts the
+    /// function still exists under that name (`A9`) so the correspondence
+    /// cannot rot into a lie during a rename.
+    ///
+    /// The hang this name exists to prevent: a server-driven AI seat minted the
+    /// latch and no transport consumed it, so a 3-player Commander game parked
+    /// forever with no acting player and no client rendering it.
+    ResolveAllReadyPrefix,
+}
+
 impl WaitingFor {
     /// Canonical stable variant name (engine-owned labeler).
     ///
@@ -13372,29 +13618,32 @@ impl WaitingFor {
         }
     }
 
-    /// Extract the player who must act, if any.
+    /// THE single authority on who — if anyone — may act in this state.
     ///
-    /// CR 103.5: For simultaneous-decision states (`MulliganDecision`,
-    /// `OpeningHandBottomCards`) this returns `Some(p)` only when exactly one
-    /// player is pending, and `None` when multiple are pending — callers
-    /// that need set semantics must use [`Self::acting_players`] instead.
-    pub fn acting_player(&self) -> Option<PlayerId> {
+    /// [`Self::acting_player`] and [`Self::acting_players`] are adapters over
+    /// this function; the per-variant match lives here and nowhere else.
+    ///
+    /// Every arm MUST be a bare, UNGUARDED pattern whose body is exactly one
+    /// [`ActingAuthority`] constructor call, from the set that type's census
+    /// pins. No `let`, no early return, no preprocessing before the `match`,
+    /// and no match guard: a guard would let an arm decide the answer
+    /// somewhere that census cannot read it. [`ActingAuthority`]'s doc names
+    /// the census by path; `source_census.rs`'s `EXEMPT` table records that
+    /// path too. If a per-arm condition seems necessary, it belongs either in
+    /// a new `WaitingFor` variant (when it changes WHO acts) or in an adapter
+    /// (when it merely narrows an authority this arm already declares,
+    /// exactly as the CR 103.5 `pending.len() == 1` test does).
+    pub fn acting_authority(&self) -> ActingAuthority {
         match self {
             WaitingFor::MulliganDecision { pending, .. } => {
-                if pending.len() == 1 {
-                    Some(pending[0].player)
-                } else {
-                    None
-                }
+                ActingAuthority::Simultaneous(pending.iter().map(|e| e.player).collect())
             }
             WaitingFor::OpeningHandBottomCards { pending, .. } => {
-                if pending.len() == 1 {
-                    Some(pending[0].player)
-                } else {
-                    None
-                }
+                ActingAuthority::Simultaneous(pending.iter().map(|e| e.player).collect())
             }
-            WaitingFor::ResolveAllReady { .. } => None,
+            WaitingFor::ResolveAllReady { .. } => {
+                ActingAuthority::None(NoActor::ResolveAllReadyPrefix)
+            }
             WaitingFor::Priority { player }
             | WaitingFor::ResolveAllConsent {
                 representative: player,
@@ -13521,21 +13770,49 @@ impl WaitingFor {
             | WaitingFor::CommanderZoneChoice { player, .. }
             | WaitingFor::SeparatePilesChooseOpponent { player, .. }
             | WaitingFor::SeparatePilesPartition { player, .. }
-            | WaitingFor::SeparatePilesChoice { player, .. } => Some(*player),
+            | WaitingFor::SeparatePilesChoice { player, .. } => ActingAuthority::One(*player),
             // CR 608.2c: For `ControllerLabels` votes (Battlebond friend-or-foe
             // cards), the ACTOR is the spell controller, not `player` (the
             // subject being labeled). `VoteActor::resolve` returns the
             // authorized submitter without the call site needing to know
             // which voting shape this is.
-            WaitingFor::VoteChoice { player, actor, .. } => Some(actor.resolve(*player)),
+            WaitingFor::VoteChoice { player, actor, .. } => {
+                ActingAuthority::One(actor.resolve(*player))
+            }
             // CR 702.132a: the assisting (chosen) player acts on the payment step,
             // not the caster — route authorization to them.
-            WaitingFor::AssistPayment { chosen, .. } => Some(*chosen),
+            WaitingFor::AssistPayment { chosen, .. } => ActingAuthority::One(*chosen),
             // CR 732.2a: the loop-shortcut proposer is the player with priority, carried
             // in `proposer` (not a `player` field) — dedicated arm like `AssistPayment`.
-            WaitingFor::LoopShortcut { proposer, .. } => Some(*proposer),
-            WaitingFor::PrecastCopyShortcutOffer { proposer, .. } => Some(*proposer),
-            WaitingFor::GameOver { .. } => None,
+            WaitingFor::LoopShortcut { proposer, .. } => ActingAuthority::One(*proposer),
+            WaitingFor::PrecastCopyShortcutOffer { proposer, .. } => {
+                ActingAuthority::One(*proposer)
+            }
+            WaitingFor::GameOver { .. } => ActingAuthority::None(NoActor::MatchTeardown),
+        }
+    }
+
+    /// Extract the player who must act, if any.
+    ///
+    /// CR 103.5: For simultaneous-decision states (`MulliganDecision`,
+    /// `OpeningHandBottomCards`) this returns `Some(p)` only when exactly one
+    /// player is pending, and `None` when multiple are pending — callers
+    /// that need set semantics must use [`Self::acting_players`] instead.
+    ///
+    /// A thin adapter over [`Self::acting_authority`]; it narrows an authority
+    /// the arm already declared and never decides one.
+    #[inline]
+    pub fn acting_player(&self) -> Option<PlayerId> {
+        match self.acting_authority() {
+            ActingAuthority::One(player) => Some(player),
+            // CR 103.5: a simultaneous decision has a single actor only while
+            // exactly one player is still pending — the historical
+            // `pending.len() == 1` test, moved here from the match arms.
+            ActingAuthority::Simultaneous(players) => match players.as_slice() {
+                [only] => Some(*only),
+                _ => None,
+            },
+            ActingAuthority::None(_) => None,
         }
     }
 
@@ -13547,15 +13824,14 @@ impl WaitingFor {
     /// Engine authorization checks should use this in preference to
     /// `acting_player()` so the simultaneous variants accept actions from any
     /// of the pending players in any arrival order.
+    ///
+    /// A thin adapter over [`Self::acting_authority`].
+    #[inline]
     pub fn acting_players(&self) -> Vec<PlayerId> {
-        match self {
-            WaitingFor::MulliganDecision { pending, .. } => {
-                pending.iter().map(|e| e.player).collect()
-            }
-            WaitingFor::OpeningHandBottomCards { pending, .. } => {
-                pending.iter().map(|e| e.player).collect()
-            }
-            _ => self.acting_player().into_iter().collect(),
+        match self.acting_authority() {
+            ActingAuthority::One(player) => vec![player],
+            ActingAuthority::Simultaneous(players) => players,
+            ActingAuthority::None(_) => Vec::new(),
         }
     }
 
@@ -15457,6 +15733,13 @@ declare_game_state! {
 
     // Replacement effects
     pub pending_replacement: Option<PendingReplacement>,
+    /// CR 510.2 + CR 616.1: see [`PendingCombatLifelink`]. Boxed like its
+    /// `pending_discard_batch` sibling — `GameState` is moved by value through
+    /// the server action and AI paths and has a hard stack budget
+    /// (`game_state_size.rs`), so a multi-`Vec` parked record rides behind a
+    /// pointer, not inline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_combat_lifelink: Option<Box<PendingCombatLifelink>>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
     pub liminal_entries: HashMap<ObjectId, LiminalEntry>,
@@ -15834,11 +16117,10 @@ declare_game_state! {
     /// only when the marking owner passed the whole, un-reordered action buffer;
     /// one `zone_pipeline.rs` owner passes a sub-slice (rebased ordinals) and the
     /// other marks after its buffer has been re-assembled by the batch drain.
-    /// NOTE: this ledger is ALSO the delayed-trigger input filter
-    /// (`engine_priority.rs`) — claiming an occurrence hides it from
-    /// `check_delayed_triggers` too, which is why only three of the seven logical
-    /// zone-change owners mark (CR 603.7b). Transient engine coordination,
-    /// cleared at action/pipeline boundaries.
+    /// NOTE: an all-collector row also hides its occurrence from the delayed-trigger
+    /// input filter (`engine_priority.rs`), while an ordinary-only row leaves it for
+    /// `check_delayed_triggers` (CR 603.7b). Transient engine coordination, cleared
+    /// at action/pipeline boundaries.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub consumed_before_priority_trigger_events:
         Vec<crate::game::triggers::ConsumedTriggerEventOccurrence>,
@@ -17324,6 +17606,15 @@ declare_game_state! {
         skip_serializing_if = "Option::is_none"
     )]
     pub announced_source_x: Option<(ObjectId, u32)>,
+    /// CR 702.37b: the payment fact of the in-flight PAID turn-face-up
+    /// special action — which cost source was selected for WHICH object.
+    /// Published by `finish_paid_turn_face_up` immediately before the flip it
+    /// commits and cleared right after the flip's replacement pipeline
+    /// settles, so only the CR 702.37b rider of exactly that flip can read
+    /// it. Effect-driven (free) turn-ups never publish one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_up_paid_cost_source:
+        Option<(ObjectId, crate::types::ability::TurnUpCostSource)>,
     /// CR 400.7j (+ CR 400.7g/h cast hop): a resolution-scoped record of a source
     /// object that the currently-resolving ability moved as part of its own
     /// resolution (Siege "exile it, then you may cast it"). It lets
@@ -17653,6 +17944,7 @@ impl GameStateDecode {
                 ),
             )?;
         }
+        migrate_legacy_turn_face_up_resume(&mut value)?;
         let mut state = Self::materialize_prepared(value)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         validate_trigger_firing_coherence(&state)?;
@@ -17683,6 +17975,7 @@ impl GameStateDecode {
         )?;
         migrate_legacy_mana_target_roles(value)?;
         migrate_legacy_tap_effects(value);
+        migrate_legacy_turn_face_up_resume(value)?;
         Ok(())
     }
 
@@ -20370,8 +20663,11 @@ impl GameState {
                 keywords: object.keywords.clone(),
                 power: object.power,
                 toughness: object.toughness,
-                base_power: object.base_power,
-                base_toughness: object.base_toughness,
+                // CR 208.4b + CR 613.4a-b: preserve current base P/T after
+                // characteristic-defining and setting effects for this event
+                // snapshot; counters and later modifiers are excluded.
+                base_power: object.layer_base_power.or(object.base_power),
+                base_toughness: object.layer_base_toughness.or(object.base_toughness),
                 mana_value: object.effective_mana_value(),
                 counters: object.counters.clone(),
                 is_token: object.is_token,
@@ -21538,6 +21834,7 @@ impl GameState {
             max_lands_per_turn: 1,
             priority_pass_count: 0,
             pending_replacement: None,
+            pending_combat_lifelink: None,
             liminal_entries: HashMap::new(),
             pending_liminal_entry_resume: None,
             entering_aura_authority: None,
@@ -21739,6 +22036,7 @@ impl GameState {
             pending_untap_declines: Vec::new(),
             current_trigger_event: None,
             announced_source_x: None,
+            turn_up_paid_cost_source: None,
             current_trigger_match_count: None,
             resolving_stack_entry: None,
             resolving_trigger_firing: None,
@@ -23387,6 +23685,13 @@ fn _gamestate_partition_is_total(s: &GameState) {
         max_lands_per_turn: _,
         priority_pass_count: _,
         pending_replacement: _,
+        //   - `pending_combat_lifelink`: COMPARED (hand-written `impl PartialEq` conjunct) — the
+        //     parked tail of one CR 510.2 combat-damage batch. `remaining` only SHRINKS and
+        //     `batch_events` only GROWS within a batch, so two states differing in this field are
+        //     genuinely different points in the same turn-based action and COMPARING it can never
+        //     suppress a legitimate loop's detection. Classified identically to its
+        //     `pending_discard_batch` sibling below.
+        pending_combat_lifelink: _,
         replacement_may_cost_paused: _,
         post_replacement_token_choice_applied: _,
         deferred_entry_events: _,
@@ -23603,6 +23908,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         // context, not durable board state — like `current_trigger_event`, it is not a
         // per-cycle accumulator and PartialEq does not compare it.
         announced_source_x: _,
+        turn_up_paid_cost_source: _,
         resolving_stack_entry: _,
         resolving_trigger_firing: _,
         pending_resolution_completion: _,
@@ -23887,6 +24193,7 @@ impl PartialEq for GameState {
             && self.pending_player_scope_sacrifice_choice
                 == other.pending_player_scope_sacrifice_choice
             && self.pending_discard_batch == other.pending_discard_batch
+            && self.pending_combat_lifelink == other.pending_combat_lifelink
             && self.pending_mass_library_order_choice
                 == other.pending_mass_library_order_choice
             && self.pending_scoped_library_search == other.pending_scoped_library_search
@@ -25124,6 +25431,34 @@ mod tests {
     }
 
     #[test]
+    fn legacy_turn_face_up_resume_preserves_none_and_zero() {
+        let mut legacy = serde_json::json!({
+            "no_x": {
+                "TurnFaceUp": {
+                    "cost_had_x": false,
+                    "announced_x": 0
+                }
+            },
+            "zero_x": {
+                "TurnFaceUp": {
+                    "cost_had_x": true,
+                    "announced_x": 0
+                }
+            }
+        });
+
+        migrate_legacy_turn_face_up_resume(&mut legacy).expect("legacy shape migrates");
+
+        assert_eq!(
+            legacy["no_x"]["TurnFaceUp"]["announced_x"],
+            serde_json::Value::Null
+        );
+        assert_eq!(legacy["zero_x"]["TurnFaceUp"]["announced_x"], 0);
+        assert!(legacy["no_x"]["TurnFaceUp"].get("cost_had_x").is_none());
+        assert!(legacy["zero_x"]["TurnFaceUp"].get("cost_had_x").is_none());
+    }
+
+    #[test]
     fn persisted_legacy_untap_effect_restores_as_set_tap_state() {
         let mut state = GameState::new_two_player(42);
         let source = create_object(
@@ -26102,6 +26437,162 @@ mod tests {
              prompt rebuilt with different contents — so the inconsistency stays \
              observable to a caller instead of being silently rewritten into a \
              plausible-looking state"
+        );
+    }
+
+    /// A mid-pause combat-damage batch carrying one current-turn `ZoneChanged`
+    /// in `batch_events` — the shape a prevention shield's CR 615.5 rider
+    /// produces (Inkshield's tokens) inside a batch that then parks.
+    fn parked_combat_lifelink(record: ZoneChangeRecord) -> Box<PendingCombatLifelink> {
+        Box::new(PendingCombatLifelink {
+            remaining: VecDeque::from(vec![PendingLifelinkGain {
+                controller: PlayerId(1),
+                amount: 3,
+            }]),
+            batch_events: vec![persisted_zone_change_event(record)],
+            damage_to_players: vec![GameEvent::CombatDamageDealtToPlayer {
+                player_id: PlayerId(1),
+                source_amounts: vec![(ObjectId(9_401), 3)],
+                total_damage: 3,
+            }],
+            prevention_tally: vec![(
+                AppliedReplacementKey::Object {
+                    source: ObjectId(9_402),
+                    index: 0,
+                },
+                2,
+            )],
+            lives_before: vec![20, 20],
+            sub_step: CombatDamageSubStep::Regular,
+        })
+    }
+
+    /// Registration surfaces 4 and 5 for `pending_combat_lifelink`: the
+    /// hand-written `PartialEq` conjunct, and membership in
+    /// `LIVE_EVENT_CARRIER_FIELDS`.
+    ///
+    /// REVERT PROBES:
+    ///   * delete `"pending_combat_lifelink"` from `LIVE_EVENT_CARRIER_FIELDS` →
+    ///     the visitor reaches no record and `erased > 0` fails inside
+    ///     `erase_persisted_event_occurrence_fields`.
+    ///   * delete the `self.pending_combat_lifelink == other.pending_combat_lifelink`
+    ///     conjunct → the `assert_ne!` below sees two states as equal.
+    #[test]
+    fn parked_combat_lifelink_is_a_live_event_carrier_and_a_compared_field() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 19;
+        let record = persisted_zone_change_record(ObjectId(9_401), 19, 0);
+        state.zone_changes_this_turn.push_back(record.clone());
+        state.pending_combat_lifelink = Some(parked_combat_lifelink(record));
+
+        let bare = {
+            let mut bare = state.clone();
+            bare.pending_combat_lifelink = None;
+            bare
+        };
+        assert_ne!(
+            state, bare,
+            "a parked combat-damage batch is interaction state and must be COMPARED"
+        );
+
+        let mut persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("fixture serializes");
+        // Asserts internally that the traversal reached at least one record —
+        // which it can only do if the field is a declared live-event carrier.
+        erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
+        let restored = serde_json::from_value::<PersistedGameState>(persisted)
+            .expect("the parked batch's records reconcile")
+            .into_game_state();
+        let parked = restored
+            .pending_combat_lifelink
+            .as_ref()
+            .expect("the parked batch survives the round trip");
+        let GameEvent::ZoneChanged { record, .. } = &parked.batch_events[0] else {
+            panic!("the fixture stores one ZoneChanged");
+        };
+        assert_eq!(
+            (record.recorded_turn_number, record.turn_zone_change_index),
+            (19, 0),
+            "the carried record is rebound to this turn's ledger on load"
+        );
+        assert_eq!(
+            parked.remaining,
+            VecDeque::from(vec![PendingLifelinkGain {
+                controller: PlayerId(1),
+                amount: 3,
+            }]),
+            "the owed per-source gains round-trip unchanged"
+        );
+        assert_eq!(
+            parked.prevention_tally,
+            vec![(
+                AppliedReplacementKey::Object {
+                    source: ObjectId(9_402),
+                    index: 0,
+                },
+                2,
+            )],
+            "the prevention tally round-trips as a Vec — an enum key is not a JSON map key"
+        );
+    }
+
+    /// Registration surface 1's save-compat property for the parked
+    /// combat-damage batch: a save written before this field existed must load
+    /// as `None` rather than failing deserialization, and the prompt it was
+    /// paused on must survive VERBATIM. Modelled on
+    /// `absent_pending_discard_batch_deserializes_as_none`, including its
+    /// mid-pause input requirement — a fixture whose `waiting_for` is already
+    /// `Priority` would restate an input property instead of measuring one.
+    ///
+    /// REVERT PROBES:
+    ///   * remove the `ReplacementChoice` install below → the prompt assertion
+    ///     stops discriminating.
+    ///   * add a load-time "repair" that resets `waiting_for` to `Priority` when
+    ///     `pending_combat_lifelink` is absent, in
+    ///     `PersistedGameState::into_game_state()` → the same assertion fails.
+    #[test]
+    fn absent_pending_combat_lifelink_deserializes_as_none() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 19;
+        let record = persisted_zone_change_record(ObjectId(9_401), 19, 0);
+        state.zone_changes_this_turn.push_back(record.clone());
+        state.pending_combat_lifelink = Some(parked_combat_lifelink(record));
+        // CR 616.1: the ordering prompt a parked batch is waiting on. Without it
+        // the save is not mid-pause and this test measures nothing.
+        state.waiting_for = WaitingFor::ReplacementChoice {
+            player: PlayerId(0),
+            candidate_count: 2,
+            candidates: Vec::new(),
+        };
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "reach guard: the INPUT must not already satisfy the property under test"
+        );
+
+        let mut wire = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
+            .expect("fixture serializes");
+        assert!(
+            wire.as_object_mut()
+                .expect("a raw persisted state is an object")
+                .remove("pending_combat_lifelink")
+                .is_some(),
+            "reach guard: the field must actually have been serialized to remove"
+        );
+
+        let restored = serde_json::from_value::<PersistedGameState>(wire)
+            .expect("an absent parked batch defaults to None")
+            .into_game_state();
+        assert!(restored.pending_combat_lifelink.is_none());
+        assert!(
+            matches!(
+                restored.waiting_for,
+                WaitingFor::ReplacementChoice {
+                    player,
+                    candidate_count,
+                    ..
+                } if player == PlayerId(0) && candidate_count == 2
+            ),
+            "a batch-less mid-pause save must round-trip its prompt VERBATIM"
         );
     }
 
@@ -27142,6 +27633,7 @@ mod tests {
                         up_to: false,
                         allows_partial_find: false,
                         constraint: SearchSelectionConstraint::None,
+                        ordering_hint: SearchOrderingHint::default(),
                     },
                     PreparedScopedLibrarySearchChoice {
                         player: PlayerId(1),
@@ -27155,6 +27647,7 @@ mod tests {
                         up_to: false,
                         allows_partial_find: false,
                         constraint: SearchSelectionConstraint::None,
+                        ordering_hint: SearchOrderingHint::default(),
                     },
                 ],
                 next_selection_index: 2,
@@ -27224,6 +27717,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: SearchSelectionConstraint::None,
+            ordering_hint: SearchOrderingHint::default(),
         });
         *next_selection_index = 3;
         *current_player = Some(PlayerId(2));
@@ -28156,6 +28650,8 @@ mod tests {
             trigger_definitions: std::sync::Arc::default(),
             replacement_definitions: std::sync::Arc::default(),
             static_definitions: std::sync::Arc::default(),
+            room_halves: None,
+            name_origin: Default::default(),
         })
     }
 

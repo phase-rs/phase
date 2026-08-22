@@ -1142,6 +1142,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // published it. Clear it here so it never leaks into an unrelated resolution; it is
     // republished below for an `ActivatedAbility` entry (and only for that kind).
     state.announced_source_x = None;
+    state.turn_up_paid_cost_source = None;
 
     // CR 405.5: When all players pass in succession, the top object on the stack resolves.
     let Some(PoppedStackEntry {
@@ -2039,17 +2040,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         // CR 709.5d: a Room permanent enters with the unlocked
                         // designation for whichever half was cast as a spell — the
                         // right door when its right half was cast, otherwise the
-                        // left. `modal_back_face` (still set on the battlefield, see
-                        // zones.rs) records that the right half was the cast face.
-                        let cast_door = if state
+                        // left. `room::live_face_door` reads `modal_back_face`
+                        // (still set on the battlefield, see zones.rs), the shared
+                        // orientation authority with the unlock-cost lookup.
+                        let cast_door = state
                             .objects
                             .get(&entry.id)
-                            .is_some_and(|obj| obj.modal_back_face)
-                        {
-                            crate::game::game_object::RoomDoor::Right
-                        } else {
-                            crate::game::game_object::RoomDoor::Left
-                        };
+                            .map(super::room::live_face_door)
+                            .unwrap_or(crate::game::game_object::RoomDoor::Left);
                         super::room::unlock_door_designation(
                             state,
                             entry.id,
@@ -3020,6 +3018,7 @@ fn consumed_trigger_event_occurrences(
             crate::game::triggers::ConsumedTriggerEventOccurrence {
                 event: event.clone(),
                 occurrence,
+                scope: crate::game::triggers::ConsumedTriggerEventScope::AllCollectors,
             }
         })
         .collect()
@@ -3031,6 +3030,7 @@ fn consumed_trigger_event_occurrences(
 /// stack depth alone.
 pub(crate) fn priority_checkpoint_is_settled(state: &GameState) -> bool {
     state.pending_replacement.is_none()
+        && state.pending_combat_lifelink.is_none()
         && state.pending_trigger.is_none()
         && state.pending_trigger_event_batch.is_empty()
         && state.pending_trigger_entry.is_none()
@@ -8270,6 +8270,48 @@ mod tests {
             assert!(
                 !priority_checkpoint_is_settled(&state),
                 "an active resolution frame makes a skipped priority checkpoint observable"
+            );
+        }
+
+        /// CR 510.2 + CR 616.1: a parked combat-damage batch is latent
+        /// continuation work — the drain still owes life gains, the per-player
+        /// aggregate and Phase D's riders — so a batch consumer proving a
+        /// sequence on a clone must not treat that state as a settled priority
+        /// checkpoint.
+        ///
+        /// REVERT PROBE: delete the `pending_combat_lifelink.is_none()` conjunct
+        /// from `priority_checkpoint_is_settled` — the first assertion fails.
+        #[test]
+        fn parked_combat_lifelink_is_not_a_settled_priority_checkpoint() {
+            let mut state = setup();
+            assert!(
+                priority_checkpoint_is_settled(&state),
+                "reach guard: the fixture is settled BEFORE the record is parked"
+            );
+
+            state.pending_combat_lifelink =
+                Some(Box::new(crate::types::game_state::PendingCombatLifelink {
+                    remaining: std::collections::VecDeque::from(vec![
+                        crate::types::game_state::PendingLifelinkGain {
+                            controller: PlayerId(0),
+                            amount: 3,
+                        },
+                    ]),
+                    batch_events: Vec::new(),
+                    damage_to_players: Vec::new(),
+                    prevention_tally: Vec::new(),
+                    lives_before: vec![20, 20],
+                    sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
+                }));
+            assert!(
+                !priority_checkpoint_is_settled(&state),
+                "an unfinished combat-damage batch is latent continuation work"
+            );
+
+            state.pending_combat_lifelink = None;
+            assert!(
+                priority_checkpoint_is_settled(&state),
+                "once the batch is drained the checkpoint settles again"
             );
         }
 

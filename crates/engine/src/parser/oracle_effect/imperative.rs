@@ -6102,10 +6102,17 @@ fn parse_neuter_attach_self_recipient(input: &str) -> OracleResult<'_, ()> {
 ///
 /// Every other chain keeps its pre-existing `parse_target` binding, unchanged:
 ///
-/// * **A chain with an earlier typed object referent** — "it" names that
-///   referent and `ParentTarget` is correct (Aura Graft "gain control of target
-///   Aura … attach **it** to another permanent"; Ogre Geargrabber; Auriok
-///   Survivors).
+/// * **A chain with an earlier typed object referent and NO public-zone move** —
+///   "it" names that referent and `ParentTarget` is correct (Aura Graft "gain
+///   control of target Aura … attach **it** to another permanent"; Ogre
+///   Geargrabber). Their parent is a `GainControl`, so CR 400.7j never applies
+///   and there is no moved card for "it" to name.
+/// * **A chain whose parent MOVES the card to the battlefield** (Sword of the
+///   Meek, Auriok Survivors) — "it" names the moved card under CR 400.7j, so
+///   `ParentTarget` is NOT correct there. It is rewritten to `SelfRef` after
+///   lowering by `lower::rebind_attach_attachment_to_forwarded_source_if_anaphor_names_moved_card`,
+///   because only that pass can see the parent effect. Nothing changes in this
+///   function.
 /// * **The Equipment-ETB class** (Embercleave — "When this Equipment enters,
 ///   attach **it** to target creature you control") — intentionally left at
 ///   `ParentTarget`. It is resolved at RUNTIME by

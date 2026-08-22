@@ -403,10 +403,23 @@ pub fn resolve_all_granted_submitter(
 /// frozen representative set is no longer meaningful after elimination, so
 /// restart ordinary priority from a living representative instead of trying to
 /// repair the proposal in place.
+///
+/// The public consent state, not the private run, decides whether a repair is
+/// owed. An earlier form returned as soon as `take()` found no run, which made
+/// this a no-op in exactly the case it exists to fix — a consent `WaitingFor`
+/// left standing over a run that is already gone. Neither half of that pairing
+/// can advance: a run-less `ResolveAllReady` has no acting player AND — with
+/// no run to enumerate grantors from — not even the Revoke that an intact
+/// latch still offers, and a run-less `ResolveAllConsent` still offers its
+/// representative a Grant that `respond_resolve_all_consent` can only reject.
+/// Taking the run stays unconditional so the two fields cannot disagree
+/// afterwards.
+///
+/// CR 117.4: clearing the recorded passes restarts the pass cycle that the
+/// discarded consent state had suspended, so priority resumes from the
+/// repaired holder rather than from a partial round nobody can complete.
 pub fn invalidate_resolve_all_consent(state: &mut GameState) {
-    if state.resolve_all_consent_run.take().is_none() {
-        return;
-    }
+    state.resolve_all_consent_run = None;
     if !matches!(
         state.waiting_for,
         WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
@@ -483,6 +496,7 @@ mod tests {
             up_to: true,
             allows_partial_find: true,
             constraint: SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
         state

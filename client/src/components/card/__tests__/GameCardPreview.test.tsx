@@ -260,12 +260,33 @@ describe("GameCardPreview", () => {
     expect(screen.getAllByAltText("Insectile Aberration").length).toBeGreaterThan(0);
   });
 
-  it("never previews a face-down permanent (hidden information)", () => {
+  it("previews a markerless face-down permanent as the generic back — identity stays hidden (#7551 review)", () => {
+    // No recorded cause (older saves): there is no marker printing, but the
+    // hover must still answer — with the generic card back, which reveals
+    // nothing (CR 708.2a: the public face is a blank 2/2).
     inspect(battlefieldObject({ face_down: true }));
 
-    const { container } = render(<GameCardPreview />);
+    render(<GameCardPreview />);
 
-    expect(container.firstChild).toBeNull();
+    expect(screen.getAllByAltText("Face-down card").length).toBeGreaterThan(0);
+    expect(screen.queryByAltText("Pithing Needle")).toBeNull();
+  });
+
+  it("previews the Ixidron class (TurnedFaceDown) as the generic back (#7551 review)", () => {
+    // `TurnedFaceDown` (an effect turned it face down, CR 708.2a) has no
+    // printed marker token — same generic-back path as the unknown cause.
+    inspect(
+      battlefieldObject({
+        face_down: true,
+        face_down_cause: "TurnedFaceDown" as never,
+        name: "",
+      }),
+    );
+
+    render(<GameCardPreview />);
+
+    expect(screen.getAllByAltText("Face-down card").length).toBeGreaterThan(0);
+    expect(screen.queryByAltText("Pithing Needle")).toBeNull();
   });
 
   it("previews a face-down permanent when the engine projects its identity", () => {
@@ -274,5 +295,39 @@ describe("GameCardPreview", () => {
     render(<GameCardPreview />);
 
     expect(screen.getAllByAltText("Pithing Needle").length).toBeGreaterThan(0);
+  });
+
+  it("peeks the STORED face of the viewer's own face-down permanent (#7547)", () => {
+    // The live face is blanked per CR 708.2a; the preview is the CR 708.5
+    // peek, so it resolves the stored real face — on any hovered face index.
+    inspect(
+      battlefieldObject({
+        face_down: true,
+        display_visible_to_viewer: true,
+        name: "",
+        back_face: { name: "Hooded Hydra", layout_kind: null } as never,
+      }),
+    );
+
+    render(<GameCardPreview />);
+
+    expect(screen.getAllByAltText("Hooded Hydra").length).toBeGreaterThan(0);
+  });
+
+  it("previews an OPPONENT's face-down permanent as its cause marker (#7547)", () => {
+    // The identity stays hidden; the marker carries the mechanic's reminder
+    // text, which is exactly what an opponent may know.
+    inspect(
+      battlefieldObject({
+        face_down: true,
+        face_down_cause: "Morph" as never,
+        name: "",
+      }),
+    );
+
+    render(<GameCardPreview />);
+
+    expect(screen.getAllByAltText("Morph").length).toBeGreaterThan(0);
+    expect(screen.queryByAltText("Pithing Needle")).toBeNull();
   });
 });

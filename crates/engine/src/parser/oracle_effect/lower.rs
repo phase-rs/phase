@@ -1537,6 +1537,7 @@ fn quantity_ref_reads_other_revealed_card(qty: &QuantityRef) -> bool {
     let scope = match qty {
         QuantityRef::ObjectManaValue { scope }
         | QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
         | QuantityRef::Toughness { scope }
         | QuantityRef::ObjectColorCount { scope }
         | QuantityRef::ObjectNameWordCount { scope }
@@ -1999,11 +2000,26 @@ pub(super) fn fold_enters_this_way_counter_rider(def: &mut AbilityDefinition) {
         return;
     };
 
-    let Some(AbilityCondition::ZoneChangedThisWay { filter }) = sub.condition.clone() else {
+    // CR 122.6: counters given as an object enters the battlefield use the
+    // same entry-counter representation as counters put on a battlefield object.
+    // The parent is itself a battlefield-entry effect, so both legacy
+    // destination-agnostic conditions and explicit battlefield-arrival
+    // conditions describe this typed entry-counter slot. Other named
+    // destinations must remain standalone riders.
+    let Some(AbilityCondition::ZoneChangedThisWay {
+        filter,
+        destination,
+    }) = sub.condition.clone()
+    else {
         def.sub_ability = Some(sub);
         fold_enters_this_way_counter_rider(def.sub_ability.as_mut().unwrap());
         return;
     };
+    if !matches!(destination, None | Some(Zone::Battlefield)) {
+        def.sub_ability = Some(sub);
+        fold_enters_this_way_counter_rider(def.sub_ability.as_mut().unwrap());
+        return;
+    }
 
     if let Effect::PutCounter {
         counter_type,
@@ -2209,11 +2225,13 @@ pub(super) fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
                 ..
             }
         );
-        let attach_uses_moved_card_as_attachment_to_last_created = parent_moves_to_battlefield
-            && rebind_attach_attachment_to_forwarded_source_if_last_created_target(&mut sub.effect);
+        let attach_anaphor_names_moved_card = parent_moves_to_battlefield
+            && rebind_attach_attachment_to_forwarded_source_if_anaphor_names_moved_card(
+                &mut sub.effect,
+            );
         if parent_moves_to_battlefield
             && (sub_is_attach_with_zone_changed_cond
-                || attach_uses_moved_card_as_attachment_to_last_created
+                || attach_anaphor_names_moved_card
                 || sub_targets_moved_card(sub))
         {
             def.forward_result = true;
@@ -2227,18 +2245,59 @@ pub(super) fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
     }
 }
 
-fn rebind_attach_attachment_to_forwarded_source_if_last_created_target(
+/// CR 400.7j + CR 608.2c + CR 701.3a: in "<move a card to the battlefield>, then
+/// attach it to <referent>", the bare-"it" attachment operand names the card the
+/// parent instruction just moved — CR 400.7j lets the rest of that effect find the
+/// object it put into a public zone. Encode it as `SelfRef`: the runtime
+/// `forward_result` branch rebinds the sub-ability's `source_id` to the moved
+/// object, and `change_zone::resolve_forward_result_search_attach_host` gates the
+/// pre-entry host stamp on exactly that `SelfRef` encoding.
+///
+/// Two recipient encodings prove the attachment anaphor is the moved card:
+///
+/// * `LastCreated` — the recipient is a token this chain created (Ratonhnhaké꞉ton,
+///   Forum Filibuster), so the attachment cannot be it.
+/// * the SAME filter node as the attachment — the sentence's two referents
+///   collapsed onto one anaphor (Sword of the Meek). Attaching an object to
+///   itself is a guaranteed no-op whatever the operand resolves to — CR 301.5c
+///   ("An Equipment can't equip itself"), CR 301.6 (the same for Fortifications),
+///   CR 303.4d ("An Aura can't enchant itself"), and CR 701.3b for anything else
+///   — so rebinding can only turn a dead node live; it can never take working
+///   behavior away.
+///
+/// Note the delivery this rebind selects: `SelfRef` also satisfies
+/// `change_zone::resolve_forward_result_search_attach_host`'s attachment gate, so
+/// the host is stamped as `enter_attached_to` and the card enters already
+/// attached. The trailing `Attach` sub still resolves and still emits its
+/// `EffectKind::Attach`, so `TriggerMode::Attached` observers are unaffected.
+/// It is a CR 301.5c self-attach — the sub's `ParentTarget` host falls back to
+/// the source — which `attach::attachment_illegality_projected` rejects before
+/// any edit: no state change, no timestamp bump.
+///
+/// Caller-gated on the parent moving a card to the battlefield. That gate is why
+/// this cannot live in `parse_attachment_anaphor` (`imperative.rs`): the parent
+/// effect is unknown at parse time, and rebinding there would regress Stonehewer
+/// Giant / Quest for the Holy Relic / Armored Skyhunter / Adaptive Armorer, whose
+/// "it" names a searched Equipment rather than the source. The same gate keeps the
+/// equal-operand pairs under `GainControl` (Ogre Geargrabber, Thieving Skydiver)
+/// and under `CopyTokenOf` untouched: no public-zone move, so no CR 400.7j
+/// referent to rebind to.
+pub(super) fn rebind_attach_attachment_to_forwarded_source_if_anaphor_names_moved_card(
     effect: &mut Effect,
 ) -> bool {
     let Effect::Attach { attachment, target } = effect else {
         return false;
     };
-    if matches!(target, TargetFilter::LastCreated)
-        && matches!(
-            attachment,
-            TargetFilter::ParentTarget | TargetFilter::TriggeringSource
-        )
-    {
+    // Hoisted so the operand-identity test below can never fire for a
+    // `SelfRef`/`SelfRef` pair (Nim Deathmantle, Boonweaver Giant, Hakim,
+    // Light-Paws, Magnetic Snuffler, Runed Crown).
+    if !matches!(
+        attachment,
+        TargetFilter::ParentTarget | TargetFilter::TriggeringSource
+    ) {
+        return false;
+    }
+    if matches!(target, TargetFilter::LastCreated) || *target == *attachment {
         *attachment = TargetFilter::SelfRef;
         return true;
     }
@@ -3913,13 +3972,31 @@ fn is_chain_veil_for_each_grant(lower: &str) -> bool {
 }
 
 pub(crate) fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String) {
+    let (repeat_for, _, rest) = strip_for_each_prefix_with_difference(text);
+    (repeat_for, rest)
+}
+
+/// CR 608.2c + CR 208.4b: Peel a leading `for each` prefix while preserving
+/// comparison provenance from the parser product. The optional binding is
+/// produced only by the dedicated controller-scoped `PowerExceedsBase` parser
+/// arm; it is not inferred by searching an arbitrary filter tree later.
+pub(crate) fn strip_for_each_prefix_with_difference(
+    text: &str,
+) -> (Option<QuantityExpr>, Option<QuantityExpr>, String) {
     let lower = text.to_lowercase();
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("for each ")).parse(i)) {
         let rest_lower = &lower[text.len() - rest.len()..];
         if let Ok((remainder, clause)) =
             terminated(take_until(", "), tag::<_, _, OracleError<'_>>(", ")).parse(rest_lower)
         {
-            if let Some(qty) = parse_for_each_clause(clause) {
+            let parsed_comparison = nom_quantity::parse_for_each_clause_ref_with_difference(clause)
+                .ok()
+                .and_then(|(rest, parsed)| rest.is_empty().then_some(parsed));
+            let parsed_clause = parsed_comparison
+                .clone()
+                .map(|(qty, difference)| (qty, Some(difference)))
+                .or_else(|| parse_for_each_clause(clause).map(|qty| (qty, None)));
+            if let Some((qty, difference)) = parsed_clause {
                 // CR 105.1: "for each color among [X], add one mana of that color"
                 // must NOT be split into (repeat_for, "add one mana of that color").
                 // The "that color" anaphors the per-iteration color, not the
@@ -3933,11 +4010,11 @@ pub(crate) fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String
                         .trim()
                         .eq_ignore_ascii_case("add one mana of that color")
                 {
-                    return (None, text.to_string());
+                    return (None, None, text.to_string());
                 }
                 let mut copy_ctx = ParseContext::default();
                 if parse_for_each_object_copy_parts(text, &lower, &mut copy_ctx).is_some() {
-                    return (None, text.to_string());
+                    return (None, None, text.to_string());
                 }
                 // CR 606.3: The Chain Veil's "For each planeswalker you control,
                 // you may activate one of its loyalty abilities once this turn..."
@@ -3947,14 +4024,44 @@ pub(crate) fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String
                 // a repeat count. Bailing out keeps the residual text intact so
                 // the imperative dispatch can recognize the full pattern.
                 if is_chain_veil_for_each_grant(&lower) {
-                    return (None, text.to_string());
+                    return (None, None, text.to_string());
                 }
                 let offset = text.len() - remainder.len();
-                return (Some(QuantityExpr::Ref { qty }), text[offset..].to_string());
+                return (
+                    Some(QuantityExpr::Ref { qty }),
+                    difference,
+                    text[offset..].to_string(),
+                );
             }
         }
     }
-    (None, text.to_string())
+    (None, None, text.to_string())
+}
+
+#[cfg(test)]
+mod difference_binding_tests {
+    use super::strip_for_each_prefix_with_difference;
+
+    #[test]
+    fn comparison_parser_product_carries_difference_provenance() {
+        let (repeat_for, difference, rest) = strip_for_each_prefix_with_difference(
+            "for each creature you control with power greater than that creature's base power, put a counter",
+        );
+        assert!(repeat_for.is_some());
+        assert!(difference.is_some());
+        assert_eq!(rest, "put a counter");
+    }
+
+    #[test]
+    fn nested_not_and_or_properties_do_not_bind_difference() {
+        for text in [
+            "for each creature you control with not power greater than that creature's base power, put a counter",
+            "for each creature you control with power greater than that creature's base power or flying, put a counter",
+        ] {
+            let (_, difference, _) = strip_for_each_prefix_with_difference(text);
+            assert!(difference.is_none(), "nested property must not bind: {text}");
+        }
+    }
 }
 
 /// CR 705.2: Strip the redundant `"for each flip you won, "` (Mirror March)

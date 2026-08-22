@@ -248,6 +248,11 @@ pub(crate) fn flipped_normal_copiable_values(obj: &GameObject) -> Option<Copiabl
                 .collect(),
         ),
         static_definitions: Arc::new(normal_face.static_definitions.iter_all().cloned().collect()),
+        // CR 710.1 + CR 710.2: a flip card is a single card whose normal and
+        // alternative characteristics share one face — never one of CR 709.5's
+        // shared-type-line Room permanents, so there is no half data to carry.
+        room_halves: None,
+        name_origin: Default::default(),
     })
 }
 
@@ -325,8 +330,10 @@ pub(crate) fn apply_flipped_face_to_object(obj: &mut GameObject, face: BackFaceD
     // CR 710.1b: alternative power and toughness.
     obj.power = face.power;
     obj.base_power = face.power;
+    obj.layer_base_power = face.power;
     obj.toughness = face.toughness;
     obj.base_toughness = face.toughness;
+    obj.layer_base_toughness = face.toughness;
 
     // CR 306.5b + CR 310.4b: loyalty/defense track the alternative type line.
     obj.loyalty = face.loyalty;

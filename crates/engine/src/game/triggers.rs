@@ -168,6 +168,35 @@ fn pending_trigger_dispatch_origin_is_normal(origin: &PendingTriggerDispatchOrig
 pub struct ConsumedTriggerEventOccurrence {
     pub event: GameEvent,
     pub occurrence: usize,
+    #[serde(default)]
+    pub scope: ConsumedTriggerEventScope,
+}
+
+/// Which trigger collectors have already handled an event occurrence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum ConsumedTriggerEventScope {
+    /// The historical complete-transaction claim: neither collector may revisit it.
+    #[default]
+    AllCollectors,
+    /// A batch owner collected ordinary triggers; delayed triggers still observe it.
+    OrdinaryCollectorsOnly,
+}
+
+/// The trigger collector requesting events from the consumed-occurrence journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TriggerCollectionRequester {
+    Ordinary,
+    Delayed,
+}
+
+impl ConsumedTriggerEventScope {
+    pub(crate) fn consumes(self, requester: TriggerCollectionRequester) -> bool {
+        match (self, requester) {
+            (Self::AllCollectors, _)
+            | (Self::OrdinaryCollectorsOnly, TriggerCollectionRequester::Ordinary) => true,
+            (Self::OrdinaryCollectorsOnly, TriggerCollectionRequester::Delayed) => false,
+        }
+    }
 }
 
 pub struct TriggerBatchOutcome {
@@ -3564,6 +3593,7 @@ pub(crate) fn mark_logical_zone_events_consumed_before_priority(
                     ConsumedTriggerEventOccurrence {
                         event: event.clone(),
                         occurrence: trigger_event_occurrence(events, index),
+                        scope: ConsumedTriggerEventScope::AllCollectors,
                     }
                 })
         })
@@ -7155,6 +7185,7 @@ pub(crate) fn park_observer_triggers_if_paused(
     let trigger_events: Vec<GameEvent> = filter_consumed_trigger_events_from(
         events,
         slice_start,
+        TriggerCollectionRequester::Ordinary,
         &state.consumed_before_priority_trigger_events,
     )
     .into_iter()
@@ -7192,6 +7223,7 @@ pub(crate) fn collect_and_drain_observer_triggers_if_settled(
     let trigger_events: Vec<GameEvent> = filter_consumed_trigger_events_from(
         events,
         slice_start,
+        TriggerCollectionRequester::Ordinary,
         &state.consumed_before_priority_trigger_events,
     )
     .into_iter()
@@ -8845,6 +8877,7 @@ fn claim_resumed_triggered_mana_events(
         .map(|index| ConsumedTriggerEventOccurrence {
             event: events[index].clone(),
             occurrence: trigger_event_occurrence(events, index),
+            scope: ConsumedTriggerEventScope::AllCollectors,
         })
         .collect();
     resolve_and_apply_trigger_collection(
@@ -9931,9 +9964,16 @@ pub(crate) fn trigger_event_occurrence(events: &[GameEvent], event_index: usize)
 /// complete action event buffer. An occurrence is an identity within the full
 /// buffer, not within a later continuation slice: rebasing it at `event_start`
 /// can consume an equal-looking event from the wrong resolution segment.
+///
+/// `requester` is the collector performing this scan. An
+/// [`ConsumedTriggerEventScope::OrdinaryCollectorsOnly`] claim suppresses an
+/// ordinary requester but deliberately preserves the occurrence for a delayed
+/// requester; [`filter_consumed_trigger_events`] applies the same rule to the
+/// whole buffer.
 pub(crate) fn filter_consumed_trigger_events_from(
     events: &[GameEvent],
     event_start: usize,
+    requester: TriggerCollectionRequester,
     consumed: &[ConsumedTriggerEventOccurrence],
 ) -> Vec<GameEvent> {
     events[event_start..]
@@ -9941,10 +9981,11 @@ pub(crate) fn filter_consumed_trigger_events_from(
         .enumerate()
         .filter_map(|(offset, event)| {
             let occurrence = trigger_event_occurrence(events, event_start + offset);
-            if !consumed
-                .iter()
-                .any(|consumed| consumed.event == *event && consumed.occurrence == occurrence)
-            {
+            if !consumed.iter().any(|consumed| {
+                consumed.event == *event
+                    && consumed.occurrence == occurrence
+                    && consumed.scope.consumes(requester)
+            }) {
                 Some(event.clone())
             } else {
                 None
@@ -9955,9 +9996,10 @@ pub(crate) fn filter_consumed_trigger_events_from(
 
 pub(crate) fn filter_consumed_trigger_events(
     events: &[GameEvent],
+    requester: TriggerCollectionRequester,
     consumed: &[ConsumedTriggerEventOccurrence],
 ) -> Vec<GameEvent> {
-    filter_consumed_trigger_events_from(events, 0, consumed)
+    filter_consumed_trigger_events_from(events, 0, requester, consumed)
 }
 
 /// CR 603.2c: Remove from `events[event_start..]` the occurrences a trigger
@@ -10130,24 +10172,29 @@ pub(crate) fn filter_already_collected_trigger_events_from(
         .flat_map(|context| context.trigger_events.iter())
         .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
         .collect();
-    filter_consumed_trigger_events_from(events, event_start, consumed)
-        .into_iter()
-        .filter(|event| {
-            if !matches!(event, GameEvent::ZoneChanged { .. }) {
-                return true;
+    filter_consumed_trigger_events_from(
+        events,
+        event_start,
+        TriggerCollectionRequester::Ordinary,
+        consumed,
+    )
+    .into_iter()
+    .filter(|event| {
+        if !matches!(event, GameEvent::ZoneChanged { .. }) {
+            return true;
+        }
+        match queued_zone_change_witnesses
+            .iter()
+            .position(|queued| *queued == event)
+        {
+            Some(index) => {
+                queued_zone_change_witnesses.remove(index);
+                false
             }
-            match queued_zone_change_witnesses
-                .iter()
-                .position(|queued| *queued == event)
-            {
-                Some(index) => {
-                    queued_zone_change_witnesses.remove(index);
-                    false
-                }
-                None => true,
-            }
-        })
-        .collect()
+            None => true,
+        }
+    })
+    .collect()
 }
 
 /// CR 603.2c + CR 510.2: Expand a multi-fire `WheneverEvent` `DamageDone`
@@ -10421,6 +10468,7 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
     match qty {
         QuantityRef::CountersOn { scope, .. }
         | QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
         | QuantityRef::Intensity { scope }
         | QuantityRef::Toughness { scope }
         | QuantityRef::ObjectManaValue { scope }
@@ -11055,6 +11103,7 @@ fn collect_matching_delayed_triggers(
             consumed_events.push(ConsumedTriggerEventOccurrence {
                 occurrence: trigger_event_occurrence(events, event_index),
                 event: events[event_index].clone(),
+                scope: ConsumedTriggerEventScope::AllCollectors,
             });
             let origin = trigger.provenance.origin();
             let binding = super::lifecycle::ImmutableBinding {
@@ -13871,6 +13920,7 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
     match qty {
         // Object-axis refs: read the cost-paid object iff scoped to it.
         QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
         | QuantityRef::Toughness { scope }
         | QuantityRef::Intensity { scope }
         | QuantityRef::ObjectManaValue { scope }
@@ -22232,6 +22282,7 @@ pub mod tests {
             vec![ConsumedTriggerEventOccurrence {
                 event: events[0].clone(),
                 occurrence: 0,
+                scope: ConsumedTriggerEventScope::AllCollectors,
             }],
             "the delayed phase trigger must consume the exact PhaseChanged occurrence it matched"
         );
@@ -22276,9 +22327,11 @@ pub mod tests {
         ];
         let filtered = filter_consumed_trigger_events(
             &events,
+            TriggerCollectionRequester::Ordinary,
             &[ConsumedTriggerEventOccurrence {
                 event: events[0].clone(),
                 occurrence: 1,
+                scope: ConsumedTriggerEventScope::AllCollectors,
             }],
         );
 
@@ -22299,9 +22352,11 @@ pub mod tests {
         let filtered = filter_consumed_trigger_events_from(
             &events,
             1,
+            TriggerCollectionRequester::Ordinary,
             &[ConsumedTriggerEventOccurrence {
                 event: events[1].clone(),
                 occurrence: 1,
+                scope: ConsumedTriggerEventScope::AllCollectors,
             }],
         );
 
@@ -22310,6 +22365,72 @@ pub mod tests {
             vec![events[2].clone()],
             "the suffix-local first upkeep is globally the second occurrence"
         );
+    }
+
+    #[test]
+    fn consumed_trigger_event_scope_partitions_collectors() {
+        assert!(
+            ConsumedTriggerEventScope::AllCollectors.consumes(TriggerCollectionRequester::Ordinary)
+        );
+        assert!(
+            ConsumedTriggerEventScope::AllCollectors.consumes(TriggerCollectionRequester::Delayed)
+        );
+        assert!(ConsumedTriggerEventScope::OrdinaryCollectorsOnly
+            .consumes(TriggerCollectionRequester::Ordinary));
+        assert!(!ConsumedTriggerEventScope::OrdinaryCollectorsOnly
+            .consumes(TriggerCollectionRequester::Delayed));
+    }
+
+    #[test]
+    fn ordinary_only_claim_keeps_delayed_event_and_full_buffer_prefix() {
+        let repeated = GameEvent::PhaseChanged {
+            phase: Phase::Upkeep,
+        };
+        let events = vec![
+            repeated.clone(),
+            repeated.clone(),
+            GameEvent::PhaseChanged { phase: Phase::Draw },
+        ];
+        let consumed = [ConsumedTriggerEventOccurrence {
+            event: repeated,
+            occurrence: trigger_event_occurrence(&events, 1),
+            scope: ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
+        }];
+
+        assert_eq!(
+            filter_consumed_trigger_events(
+                &events,
+                TriggerCollectionRequester::Ordinary,
+                &consumed,
+            ),
+            vec![events[0].clone(), events[2].clone()],
+            "the full-buffer prefix is a distinct occurrence from the claimed suffix"
+        );
+        assert_eq!(
+            filter_consumed_trigger_events(&events, TriggerCollectionRequester::Delayed, &consumed,),
+            events,
+            "ordinary-only collection must leave the raw event for delayed triggers"
+        );
+    }
+
+    #[test]
+    fn consumed_trigger_event_occurrence_defaults_scope_for_historical_json() {
+        let occurrence = ConsumedTriggerEventOccurrence {
+            event: GameEvent::PhaseChanged {
+                phase: Phase::Upkeep,
+            },
+            occurrence: 0,
+            scope: ConsumedTriggerEventScope::AllCollectors,
+        };
+        let mut historical = serde_json::to_value(occurrence).expect("occurrence serializes");
+        historical
+            .as_object_mut()
+            .expect("occurrence serializes as an object")
+            .remove("scope");
+
+        let restored: ConsumedTriggerEventOccurrence =
+            serde_json::from_value(historical).expect("historical occurrence deserializes");
+        assert_eq!(restored.scope, ConsumedTriggerEventScope::AllCollectors);
     }
 
     /// CR 603.2c + CR 510.2 (PR #6884 blocker 1): a MULTI-FIRE combat-damage
@@ -22429,7 +22550,8 @@ pub mod tests {
         // must REMOVE the aggregate, so a subsequent priority scan sees no combat
         // event to re-expand. With a synthetic-keyed consumed entry the aggregate
         // would survive here and the trigger could re-fire.
-        let remaining = filter_consumed_trigger_events(&events, &consumed);
+        let remaining =
+            filter_consumed_trigger_events(&events, TriggerCollectionRequester::Delayed, &consumed);
         assert!(
             !remaining
                 .iter()
@@ -35053,6 +35175,7 @@ pub mod tests {
             state.consumed_before_priority_trigger_events = vec![ConsumedTriggerEventOccurrence {
                 event: repeated.clone(),
                 occurrence: trigger_event_occurrence(&events, 0),
+                scope: ConsumedTriggerEventScope::AllCollectors,
             }];
 
             if settled {

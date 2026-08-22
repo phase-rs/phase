@@ -4226,6 +4226,45 @@ pub(crate) fn priority_actions_with_probe(
         }
     }
 
+    // CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b: turning a face-down
+    // permanent face up is a special action available ANY time its controller
+    // has priority — no timing gate, no stack, either player's turn.
+    //
+    // Offered from the same admission authority the Priority preflight uses
+    // (`morph::turn_face_up_offer`), so the engine's progress gate and the list
+    // the client renders cannot disagree. They did until now: the reducer
+    // accepted `GameAction::TurnFaceUp` and the preflight counted it as
+    // progress, but this list never emitted it, so no client could ever send it
+    // and the whole morph / megamorph / disguise / manifest / cloak class was
+    // unturnable in play (#6732, #4381).
+    //
+    // Split second does NOT stop it: CR 702.61b prohibits casting spells and
+    // activating abilities, and a special action is neither (CR 116.1).
+    for &object_id in &state.battlefield {
+        let Some(object) = state.objects.get(&object_id) else {
+            continue;
+        };
+        if !object.face_down || object.controller != player {
+            continue;
+        }
+        match crate::game::morph::turn_face_up_offer(state, player, object_id) {
+            Some(crate::game::morph::TurnFaceUpOffer::Ready) => {
+                actions.push(candidate(
+                    GameAction::TurnFaceUp { object_id, x: 0 },
+                    TacticalClass::Ability,
+                    Some(player),
+                ));
+            }
+            // CR 107.3d: the player chooses X immediately before paying, so a
+            // flat action list has no value to offer. Announcing one here would
+            // be the engine choosing for them. Stated rather than silently
+            // dropped: Warbreak Trumpeter, Bane of the Living and Aurelia's
+            // Vindicator stay unofferable until the client can announce an X for
+            // a special action.
+            Some(crate::game::morph::TurnFaceUpOffer::RequiresChosenX) | None => {}
+        }
+    }
+
     // CR 702.143a-b: Foretell is a priority-time special action from hand
     // during the player's own turn. It does not use the stack; the runtime
     // handler pays {2}, exiles the card, marks it foretold, and grants the
@@ -7549,6 +7588,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
         let baseline = candidate_actions_broad(&state);
@@ -7574,6 +7614,7 @@ mod tests {
             constraint: SearchSelectionConstraint::DistinctQualities {
                 qualities: vec![SharedQuality::Name],
             },
+            ordering_hint: Default::default(),
             split: None,
         };
         let filtered = candidate_actions_broad(&state);
@@ -7636,6 +7677,7 @@ mod tests {
             constraint: SearchSelectionConstraint::DistinctQualities {
                 qualities: vec![SharedQuality::Name],
             },
+            ordering_hint: Default::default(),
             split: None,
         };
         let actions = candidate_actions_broad(&state);
@@ -7688,6 +7730,7 @@ mod tests {
                 up_to,
                 allows_partial_find: false,
                 constraint: SearchSelectionConstraint::None,
+                ordering_hint: Default::default(),
                 split: None,
             };
             candidate_actions_broad(&state).len()
@@ -7735,6 +7778,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
         (state, ids)
@@ -7827,6 +7871,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
         assert!(

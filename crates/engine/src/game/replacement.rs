@@ -5827,6 +5827,11 @@ fn evaluate_replacement_condition(
                 event,
             )
         }),
+        // CR 702.37b: true iff the in-flight PAID turn-face-up published this
+        // exact (object, source) payment fact. The affected object is the
+        // flipping permanent itself (the rider is `valid_card: SelfRef`).
+        ReplacementCondition::TurnUpCostSourcePaid { source } => affected_object_id
+            .is_some_and(|id| state.turn_up_paid_cost_source == Some((id, *source))),
         ReplacementCondition::UnlessControlsSubtype { subtypes } => {
             // "unless you control a [subtype]" → suppressed if controller has a matching permanent
             let controls_any = state.objects.values().any(|o| {

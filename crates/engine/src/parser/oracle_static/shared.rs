@@ -3273,6 +3273,11 @@ pub(crate) fn rebind_source_object_quantity_ref_to_recipient(qty: QuantityRef) -
         } => QuantityRef::Power {
             scope: ObjectScope::Recipient,
         },
+        QuantityRef::BasePower {
+            scope: ObjectScope::Source,
+        } => QuantityRef::BasePower {
+            scope: ObjectScope::Recipient,
+        },
         QuantityRef::Toughness {
             scope: ObjectScope::Source,
         } => QuantityRef::Toughness {

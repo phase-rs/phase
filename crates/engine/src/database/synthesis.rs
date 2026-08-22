@@ -3783,6 +3783,53 @@ fn static_grants_riot(static_def: &StaticDefinition) -> bool {
         })
 }
 
+/// CR 702.37b: Megamorph — "As this permanent is turned face up, put a +1/+1
+/// counter on it if its megamorph cost was paid to turn it face up." A
+/// TurnFaceUp replacement gated on the payment fact
+/// (`ReplacementCondition::TurnUpCostSourcePaid`), which only the PAID
+/// special action publishes — an effect-driven (free) turn-up places nothing.
+/// Riding the replacement pipeline gives the rider ordinary CR 616.1
+/// ordering with any other as-turned-face-up replacement.
+pub fn synthesize_megamorph(face: &mut CardFace) {
+    let has_megamorph = face
+        .keywords
+        .iter()
+        .any(|kw| matches!(kw, Keyword::Megamorph(_)));
+    if !has_megamorph {
+        return;
+    }
+    let already = face.replacements.iter().any(|replacement| {
+        replacement.event == ReplacementEvent::TurnFaceUp
+            && matches!(
+                replacement.condition,
+                Some(ReplacementCondition::TurnUpCostSourcePaid {
+                    source: crate::types::ability::TurnUpCostSource::Megamorph
+                })
+            )
+    });
+    if already {
+        return;
+    }
+    face.replacements.push(
+        ReplacementDefinition::new(ReplacementEvent::TurnFaceUp)
+            .valid_card(TargetFilter::SelfRef)
+            .condition(ReplacementCondition::TurnUpCostSourcePaid {
+                source: crate::types::ability::TurnUpCostSource::Megamorph,
+            })
+            .execute(
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::PutCounter {
+                        counter_type: CounterType::Plus1Plus1,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::SelfRef,
+                    },
+                )
+                .description("Put a +1/+1 counter on it (its megamorph cost was paid)".to_string()),
+            ),
+    );
+}
+
 fn add_riot_replacements(face: &mut CardFace, valid_card: TargetFilter, needed: usize) {
     let existing = face
         .replacements
@@ -9267,6 +9314,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // haste. Static grants of Riot synthesize matching ETB replacements from
     // their affected filters.
     synthesize_riot(face);
+    // CR 702.37b: Megamorph — the paid-turn-up counter rider as a TurnFaceUp
+    // replacement, gated on the special action's published payment fact.
+    synthesize_megamorph(face);
     // CR 702.64a: Absorb N — continuous self-recipient damage replacement that
     // prevents N from each source each time.
     synthesize_absorb(face);

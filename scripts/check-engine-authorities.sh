@@ -163,12 +163,9 @@ fi
 # lifted the scanner ceiling a workspace-wide scan used to hit (`CensusError:
 # crates/draft-wasm/src/suggest.rs:437: brace tracking desynced`).
 #
-# Widening surfaced ZERO new producers: `ReplacementEvent::Draw` occurs in exactly
-# two crates (engine, mtgish-import). The other ten are not producer-free merely by
-# assumption — phase-ai builds `ReplacementDefinition`s with the same constructor
-# and struct-literal idioms this census matches, just never with `Draw`. So the
-# frozen population is unchanged at 7 rows, and now covers the surface it always
-# claimed to.
+# The census scans the complete workspace. phase-ai builds
+# `ReplacementDefinition`s with the same constructor and struct-literal idioms
+# this census matches, just never with `Draw`.
 #
 # Outside the workspace, and NOT scanned: `client/src-tauri` and
 # `lobby-worker/broker-wasm` (Cargo `exclude`; 4 `.rs` files, zero mentions of
