@@ -38,6 +38,7 @@ type LoopShortcutWaitingFor = Extract<WaitingFor, { type: "LoopShortcut" }>;
 type RespondToShortcutWaitingFor = Extract<WaitingFor, { type: "RespondToShortcut" }>;
 type CopyRetargetWaitingFor = Extract<WaitingFor, { type: "CopyRetarget" }>;
 type RetargetChoiceWaitingFor = Extract<WaitingFor, { type: "RetargetChoice" }>;
+type ReturnAsAuraTargetWaitingFor = Extract<WaitingFor, { type: "ReturnAsAuraTarget" }>;
 type WaitingForWithData = Extract<WaitingFor, { data: object }>;
 
 /**
@@ -317,6 +318,27 @@ export const buildRetargetChoiceWaitingFor = (
   overrides: Partial<RetargetChoiceWaitingFor> = {},
 ): RetargetChoiceWaitingFor => {
   return retargetChoiceWaitingForFactory.withData(overrides.data ?? {}).build();
+};
+
+export class ReturnAsAuraTargetWaitingForFactory
+  extends PlayerWaitingForFactory<ReturnAsAuraTargetWaitingFor> {}
+
+export const returnAsAuraTargetWaitingForFactory =
+  ReturnAsAuraTargetWaitingForFactory.define((): ReturnAsAuraTargetWaitingFor => ({
+    type: "ReturnAsAuraTarget",
+    data: {
+      player: 0,
+      source_id: 1,
+      returned_id: 2,
+      legal_targets: [],
+      pending_effect: null,
+    },
+  }));
+
+export const buildReturnAsAuraTargetWaitingFor = (
+  overrides: Partial<ReturnAsAuraTargetWaitingFor> = {},
+): ReturnAsAuraTargetWaitingFor => {
+  return returnAsAuraTargetWaitingForFactory.withData(overrides.data ?? {}).build();
 };
 
 export class ChooseXValueWaitingForFactory extends PlayerWaitingForFactory<ChooseXValueWaitingFor> {}

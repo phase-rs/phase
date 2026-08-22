@@ -1,13 +1,14 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
-import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
+import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getOpponentDisplayName, useMultiplayerStore } from "../../stores/multiplayerStore.ts";
+import { getWaitingForPlayerChoiceIds } from "../../viewmodel/gameStateView.ts";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import {
   CityBlessingBadge,
@@ -34,7 +35,6 @@ interface OpponentSeatHeaderProps {
 
 export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: OpponentSeatHeaderProps) {
   const { t } = useTranslation("game");
-  const myId = usePerspectivePlayerId();
   const [kickOpen, setKickOpen] = useState(false);
   const gameState = useGameStore((s) => s.gameState);
   const waitingFor = useGameStore((s) => s.waitingFor);
@@ -47,33 +47,11 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
   const player = gameState?.players[playerId];
   const label = getOpponentDisplayName(playerId);
 
-  const currentLegalTargets = useMemo(() => {
-    if (
-      (waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection")
-      && waitingFor.data.player === myId
-    ) {
-      return waitingFor.data.selection?.current_legal_targets ?? [];
-    }
-    if (waitingFor?.type === "CopyRetarget" && waitingFor.data.player === myId) {
-      const slot = waitingFor.data.target_slots[waitingFor.data.current_slot ?? 0];
-      return slot?.legal_alternatives ?? [];
-    }
-    if (
-      waitingFor?.type === "RetargetChoice"
-      && waitingFor.data.player === myId
-      && waitingFor.data.scope.type === "Single"
-    ) {
-      return waitingFor.data.legal_new_targets;
-    }
-    if (waitingFor?.type === "ReturnAsAuraTarget" && waitingFor.data.player === myId) {
-      return waitingFor.data.legal_targets;
-    }
-    return [];
-  }, [myId, waitingFor]);
-
-  const isValidPlayerTarget = currentLegalTargets.some(
-    (target) => "Player" in target && target.Player === playerId,
-  );
+  const canActForWaitingState = useCanActForWaitingState();
+  // Same authority + actor gate as PlayerHud / OpponentHud — this header is the
+  // split-board seat surface, so it must offer exactly the same seats.
+  const isValidPlayerTarget =
+    canActForWaitingState && getWaitingForPlayerChoiceIds(waitingFor).includes(playerId);
   const isTheirTurn = gameState?.active_player === playerId;
   const isUnderAttack = gameState?.combat?.attackers.some(
     (attacker) => attacker.attack_target.type === "Player" && attacker.attack_target.data === playerId,

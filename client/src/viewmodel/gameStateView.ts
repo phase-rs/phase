@@ -5,6 +5,7 @@ import type {
   ObjectCounterDisplay,
   ObjectId,
   PlayerId,
+  TargetRef,
   WaitingFor,
 } from "../adapter/types";
 import type { MultiplayerBoardLayout } from "../stores/preferencesStore";
@@ -155,6 +156,100 @@ export function isObjectReportableToViewer(
   return gameState != null && (obj.display_visible_to_viewer ?? false);
 }
 
+/**
+ * The engine-authored legal set for a prompt the player answers with ONE
+ * `GameAction::ChooseTarget` carrying a single `TargetRef` — CR 115.1: "the
+ * targets are object(s) and/or player(s) the spell or ability will affect."
+ *
+ * Returns `null` when `waitingFor` is not such a prompt, so a caller can tell
+ * "no click-targeting is in progress" from "click-targeting is in progress and
+ * nothing is legal yet". Same applicable-or-not convention as
+ * `getBoardChoiceView`, which `DialogHost` consumes as `!= null`.
+ *
+ * Membership needs BOTH halves; do not widen on either alone:
+ *   1. the engine has a `GameAction::ChooseTarget` apply arm for the variant, and
+ *   2. its legal-set field is typed `TargetRef[]`, so it can name a player.
+ *
+ * The other `ChooseTarget` variants carry `ObjectId[]` and therefore cannot name
+ * a player — `CopyTargetChoice.valid_targets`, `ExploreChoice.choosable`,
+ * `PopulateChoice.valid_tokens` (the engine's populate arm matches
+ * `TargetRef::Object` outright). They stay in `getWaitingForObjectChoiceIds`.
+ *
+ * Prompts answered by a DIFFERENT action are dialog-only by design and stay out.
+ * Each already renders its player rows in its own modal, so nothing is
+ * unreachable — only the click path differs:
+ *   - `DistributeAmong`   -> `DistributeAmong { distribution }`; a click carries
+ *                            no amount (DistributeAmongModal).
+ *   - `ProliferateChoice` -> `SelectTargets`; CR 701.34a chooses any-size subset
+ *     `TimeTravelChoice`     of permanents and/or players (ProliferateModal).
+ *     `ChooseObjectsSelection`
+ *   - `EachPlayerCopyChosenSelection` -> `SelectTargets`, ORDERED (first pick is
+ *                            copied, second scales); a click carries no order.
+ *   - `ChooseOneOfBranch` -> `ChooseBranch { index }`; `parent_targets` is
+ *                            continuation context the modal never reads.
+ * All of the above are host-wrapped (absent from
+ * `DialogHost.CLICK_THROUGH_WAITING_FOR_TYPES`), so a HUD glow beneath their
+ * `fixed inset-0` host could not be clicked even if it were offered.
+ *
+ * NOTE: `getWaitingForObjectChoiceIds` below keeps its own switch over a
+ * superset of these arms. The two must agree on every shared arm, and neither
+ * may silently gain an arm the other lacks. `PARTITION_FIXTURES` in
+ * `gameStateView.test.ts` is a `Record<WaitingFor["type"], …>`, so adding a
+ * variant to `WaitingFor` fails `pnpm run type-check` until that map records
+ * what the player axis does with it. Apply the two-criteria test above before
+ * answering that compile error.
+ */
+export function getWaitingForClickTargetRefs(
+  waitingFor: WaitingFor | null | undefined,
+): TargetRef[] | null {
+  switch (waitingFor?.type) {
+    case "TargetSelection":
+    case "TriggerTargetSelection":
+      return waitingFor.data.selection?.current_legal_targets ?? [];
+    case "CopyRetarget": {
+      // CR 707.10c: the copy's controller may choose new targets, one slot at a
+      // time — read the slot the engine is currently asking about.
+      const slot = waitingFor.data.target_slots[waitingFor.data.current_slot ?? 0];
+      return slot?.legal_alternatives ?? [];
+    }
+    case "RetargetChoice":
+      // CR 115.7: a single-target retarget (Bolt Bend, Redirect) is answered by a
+      // board/HUD click. An `All`-scope retarget keeps RetargetChoiceModal, whose
+      // confirm button needs pointer events, and the engine has no `ChooseTarget`
+      // arm for it — so it is not a click prompt at all.
+      return waitingFor.data.scope.type === "Single"
+        ? waitingFor.data.legal_new_targets
+        : null;
+    case "ReturnAsAuraTarget":
+      // CR 303.4: an Aura enters attached to an object OR a player, so this list
+      // mixes both. The engine owns which hosts are legal; the client only routes
+      // each ref to the surface that can render it.
+      return waitingFor.data.legal_targets;
+    default:
+      return null;
+  }
+}
+
+/**
+ * The players the engine is currently offering as click targets — the
+ * player-axis sibling of `getWaitingForObjectChoiceIds`, and the single
+ * authority for every surface that renders a seat (PlayerHud, OpponentHud's 1v1
+ * pill and multiplayer tabs, OpponentSeatHeader).
+ *
+ * Pair it with `useCanActForWaitingState()` at the call site: this function says
+ * WHICH players are legal, the hook says WHETHER this client may answer. The two
+ * resolve different seats on purpose — the hook against the real seat, the
+ * membership test against the rendered seat — and under a CR 723 turn-control
+ * effect those differ. See `usePerspectivePlayerId`.
+ */
+export function getWaitingForPlayerChoiceIds(
+  waitingFor: WaitingFor | null | undefined,
+): PlayerId[] {
+  return (getWaitingForClickTargetRefs(waitingFor) ?? []).flatMap((target) =>
+    "Player" in target ? [target.Player] : [],
+  );
+}
+
 export function getWaitingForObjectChoiceIds(
   waitingFor: WaitingFor | null | undefined,
 ): ObjectId[] {
@@ -184,7 +279,9 @@ export function getWaitingForObjectChoiceIds(
     case "ReturnAsAuraTarget":
       // CR 303.4 / CR 115.1: `legal_targets` is a TargetRef[] of object hosts
       // *and* players (Curse / enchant-player Auras). Only object hosts glow on
-      // the board; player hosts are handled by PlayerHud/OpponentHud glow.
+      // the board; player hosts are projected by
+      // `getWaitingForPlayerChoiceIds` above, which every seat-rendering
+      // surface reads.
       return waitingFor.data.legal_targets.flatMap((target) =>
         "Object" in target ? [target.Object] : [],
       );
