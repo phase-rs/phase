@@ -1889,8 +1889,10 @@ fn zone_change_token_predicate_parses_present_and_past_negation_forms() {
         ("is a token", FilterProp::Token),
         ("was a token", FilterProp::Token),
         ("isn't a token", FilterProp::NonToken),
+        ("isn’t a token", FilterProp::NonToken),
         ("is not a token", FilterProp::NonToken),
         ("wasn't a token", FilterProp::NonToken),
+        ("wasn’t a token", FilterProp::NonToken),
         ("was not a token", FilterProp::NonToken),
     ] {
         let (rest, condition) =
@@ -22636,20 +22638,23 @@ fn plain_etb_has_no_cast_variant_condition() {
 
 #[test]
 fn extract_if_it_wasnt_blocking_as_zone_change_lookback() {
-    let (cleaned, cond) = extract_if_condition("if it wasn't blocking, draw a card");
-    assert_eq!(cleaned, "draw a card");
-    assert_eq!(
-        cond.unwrap(),
-        TriggerCondition::Not {
-            condition: Box::new(TriggerCondition::ZoneChangeObjectMatchesFilter {
-                origin: Some(Zone::Battlefield),
-                destination: Zone::Graveyard,
-                filter: TargetFilter::Typed(
-                    TypedFilter::creature().properties(vec![FilterProp::Blocking])
-                ),
-            }),
-        }
-    );
+    for apostrophe in ["wasn't", "wasn’t"] {
+        let (cleaned, cond) =
+            extract_if_condition(&format!("if it {apostrophe} blocking, draw a card"));
+        assert_eq!(cleaned, "draw a card");
+        assert_eq!(
+            cond.unwrap(),
+            TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::ZoneChangeObjectMatchesFilter {
+                    origin: Some(Zone::Battlefield),
+                    destination: Zone::Graveyard,
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![FilterProp::Blocking])
+                    ),
+                }),
+            }
+        );
+    }
 }
 
 /// CR 506.5: the disjunctive "attacking or blocking alone" intervening-if

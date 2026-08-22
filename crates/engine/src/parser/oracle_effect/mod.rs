@@ -9736,7 +9736,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     }
 
     // "it's still a/an [type]" / "that's still a/an [type]" — type-retention clause
-    // CR 205.1a: Retains the original type in addition to new types from animation effects
+    // CR 205.1b: Retains the original type in addition to new types from animation effects
     if let Some(clause) = try_parse_still_a_type(tp) {
         return clause;
     }
@@ -11534,27 +11534,15 @@ fn parse_retained_type_clause(tp: TextPair) -> Option<ParsedRetainedTypeClause> 
     // a creature retains its prior types/subtypes (CR 613.1d ordering), so the
     // "still a …" clause is confirmatory and emits the same `AddType`/
     // `AddSubtype` Layer-4 modifications the animation already implies.
-    let (is_plural, descriptor_owned) = if let Some(((pronoun, article), descriptor)) =
+    let (is_plural, descriptor_owned) = if let Some((article, descriptor)) =
         nom_on_lower(tp.original, tp.lower, |input| {
-            let (input, pronoun) = alt((
-                value(StillTypePronoun::It, tag("it")),
-                value(StillTypePronoun::He, tag("he")),
-                value(StillTypePronoun::She, tag("she")),
-                value(StillTypePronoun::That, tag("that")),
-            ))
-            .parse(input)?;
+            let (input, _) = alt((tag("it"), tag("he"), tag("she"), tag("that"))).parse(input)?;
             let (input, _) = alt((tag("'"), tag("’"))).parse(input)?;
             let (input, _) = tag("s still ").parse(input)?;
             let (input, article) =
                 alt((value("an ", tag("an ")), value("a ", tag("a ")))).parse(input)?;
-            Ok((input, (pronoun, article)))
+            Ok((input, article))
         }) {
-        match pronoun {
-            StillTypePronoun::It
-            | StillTypePronoun::He
-            | StillTypePronoun::She
-            | StillTypePronoun::That => {}
-        }
         (false, format!("{article}{descriptor}"))
     } else {
         let ((), descriptor) = nom_on_lower(tp.original, tp.lower, |input| {
@@ -11679,14 +11667,6 @@ fn type_changing_clause_duration(clause: &ClauseIr) -> Option<Duration> {
         Effect::Animate { .. } => clause.parsed.duration.clone().or(Some(Duration::Permanent)),
         _ => None,
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StillTypePronoun {
-    It,
-    He,
-    She,
-    That,
 }
 
 /// CR 614.10a: Parse "[subject] skip[s] [their|your] next [step] step[s]" —
