@@ -23,8 +23,18 @@ vi.mock("../../../game/dispatch.ts", () => ({
 
 // Keep the test hermetic: the card-image hook otherwise fires a dev-server
 // asset fetch (localhost:3000) that has nothing to do with the affordance.
+// `vi.hoisted` because the `vi.mock` factory is hoisted above module-scope
+// `const`s and would otherwise read them in their TDZ.
+const cardImage = vi.hoisted(() => ({
+  calls: [] as Array<{ name: string; options?: Record<string, unknown> }>,
+  result: { src: null as string | null, isLoading: false },
+}));
+
 vi.mock("../../../hooks/useCardImage.ts", () => ({
-  useCardImage: () => ({ src: null }),
+  useCardImage: (name: string, options?: Record<string, unknown>) => {
+    cardImage.calls.push({ name, options });
+    return cardImage.result;
+  },
 }));
 
 const COMMANDER_ID = 101;
@@ -267,5 +277,85 @@ describe("CommanderCardZone activation gate", () => {
     expect(live).toHaveAttribute("title", "Cast Mock Commander — double-click or drag to play");
     fireEvent.click(live);
     expect(dispatchAction).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * The command dock is the one board surface that used to resolve art from the
+ * bare card name and render a single name tile for BOTH "still resolving" and
+ * "no art exists". Reported as commander art never rendering: `scryfall-data.json`
+ * is tens of MB, and for its whole download the dock showed a name with no
+ * picture — indistinguishable from permanently broken art.
+ */
+describe("CommanderCardZone art resolution", () => {
+  const ORACLE_ID = "6d3ca5cb-781d-4608-b7f1-38c020536376";
+  const ART_URL = "https://cards.scryfall.io/normal/front/8/f/kefka.jpg";
+
+  function seedWithPrintedRef() {
+    const commander = buildCommanderGameObject({
+      id: COMMANDER_ID,
+      name: "Kefka, Court Mage",
+      printed_ref: { oracle_id: ORACLE_ID, face_name: "Kefka, Court Mage" },
+    });
+    const gameState = makeState(commander);
+    useGameStore.setState({
+      gameMode: "local",
+      gameState,
+      waitingFor: gameState.waiting_for,
+      legalActions: [],
+      legalActionsByObject: {},
+      spellCosts: {},
+    });
+  }
+
+  beforeEach(() => {
+    cardImage.calls.length = 0;
+    cardImage.result = { src: null, isLoading: false };
+    seedWithPrintedRef();
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("resolves art through the engine's printed_ref rather than the card name", () => {
+    render(<CommanderCardZone playerId={0} />);
+
+    // The name path is the documented legacy fallback for objects with no
+    // printed_ref; a command-zone leader always has one, and only the oracle-id
+    // path picks the right face for a leader whose active face is not the front.
+    expect(cardImage.calls[0].options).toMatchObject({
+      oracleId: ORACLE_ID,
+      faceName: "Kefka, Court Mage",
+    });
+  });
+
+  it("does not show the no-art name tile while resolution is still in flight", () => {
+    cardImage.result = { src: null, isLoading: true };
+    render(<CommanderCardZone playerId={0} />);
+
+    // The regression: the name tile rendered during the whole scryfall-data
+    // fetch, reading as "this commander has no art" rather than "art is
+    // loading". Assert on the rendered NAME TEXT — the pre-fix tile was a plain
+    // <div>, so a role-based query would have been null under both versions.
+    expect(screen.queryByText("Kefka, Court Mage")).toBeNull();
+  });
+
+  it("shows the shared name tile once resolution finishes with no art", () => {
+    cardImage.result = { src: null, isLoading: false };
+    render(<CommanderCardZone playerId={0} />);
+
+    // Named art tile, not bare text: CardArtFallback carries role/aria-label so
+    // assistive tech announces an artless commander the way every other board
+    // surface does.
+    expect(screen.getByRole("img", { name: "Kefka, Court Mage" })).toBeInTheDocument();
+    expect(screen.getByText("Kefka, Court Mage")).toBeInTheDocument();
+  });
+
+  it("renders the resolved art", () => {
+    cardImage.result = { src: ART_URL, isLoading: false };
+    render(<CommanderCardZone playerId={0} />);
+
+    expect(screen.getByAltText("Kefka, Court Mage")).toHaveAttribute("src", ART_URL);
   });
 });
