@@ -46,6 +46,7 @@ use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::resolve_ability_chain;
 use engine::game::game_object::{AttachTarget, GameObject};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::turns::execute_cleanup;
 use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::TargetFilter;
@@ -54,6 +55,7 @@ use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
@@ -336,9 +338,11 @@ fn ojer_taq_token_triplication_full_card_parses() {
 use engine::game::ability_utils::build_resolved_from_def_with_targets;
 use engine::game::layers::evaluate_layers;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, ContinuousModification, Duration, Effect,
+    AbilityCost, AbilityDefinition, ContinuousModification, Duration, Effect, ManaProduction,
+    PlayerScope, QuantityExpr, StaticCondition,
 };
-use engine::types::card_type::CoreType;
+use engine::types::card_type::{CoreType, Supertype};
+use engine::types::keywords::Keyword;
 use engine::types::zones::Zone;
 
 const VRASKA_ORACLE: &str = "Deathtouch\nWhenever a nontoken creature an opponent controls dies, you may pay {1}. If you do, return that card to the battlefield tapped under your control. It's a Treasure artifact with \"{T}, Sacrifice this artifact: Add one mana of any color,\" and it loses all other card types.";
@@ -1494,5 +1498,655 @@ fn moonlit_parses_to_copy_of_host_replacement() {
             Effect::ChooseOneOf { .. }
         ),
         "Jinnie remains a ChooseOneOf substitution, not stolen by Moonlit's arm"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Princess Yue / Fang / Gideon / quote-scoped assigned names
+// ---------------------------------------------------------------------------
+
+const PRINCESS_YUE_ORACLE: &str = "When Princess Yue dies, if she was a nonland creature, return this card to the battlefield tapped under your control. She's a land named Moon. She gains \"{T}: Add {C}.\" (She's still legendary.)\n{T}: Scry 2.";
+const FANG_ORACLE: &str = "Flying\nWhenever Fang attacks, another target legendary creature you control gets +X/+0 until end of turn, where X is Fang's power.\nWhen Fang dies, if he wasn't a Spirit, return this card to the battlefield under your control. He's a Spirit in addition to his other types.";
+const GIDEON_CHAMPION_ORACLE: &str = "[+1]: Put a loyalty counter on Gideon for each creature target opponent controls.\n[0]: Until end of turn, Gideon becomes a Human Soldier creature with power and toughness each equal to the number of loyalty counters on him and gains indestructible. He's still a planeswalker. Prevent all damage that would be dealt to him this turn.\n[−15]: Exile all other permanents.";
+const ARGOTHIAN_ORACLE: &str = "Put two +1/+1 counters on each of X target lands you control. They each become 0/0 Elemental creatures with reach, haste, and \"When this creature leaves the battlefield, conjure a card named Forest onto the battlefield tapped.\" They're still lands.";
+const AWAKENING_ORACLE: &str = "Put nine +1/+1 counters on target land you control. It becomes a legendary 0/0 Elemental creature with haste named Vitu-Ghazi. It's still a land.";
+const TENTH_DISTRICT_HERO_ORACLE: &str = "{1}{W}, Collect evidence 2: This creature becomes a Human Detective with base power and toughness 4/4 and gains vigilance.\n{2}{W}, Collect evidence 4: If this creature is a Detective, it becomes a legendary creature named Mileva, the Stalwart, it has base power and toughness 5/5, and it gains \"Other creatures you control have indestructible.\"";
+const CURSE_OF_FENRIC_ORACLE: &str = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — For each player, destroy up to one target creature that player controls. For each creature destroyed this way, its controller creates a 3/3 green Mutant creature token with deathtouch.\nII — Target nontoken creature becomes a 6/6 legendary Horror creature named Fenric and loses all abilities.\nIII — Target Mutant fights another target creature named Fenric.";
+const IRENCRAG_ORACLE: &str = "{T}: Add {C}.\nWhenever a legendary creature you control enters, you may have The Irencrag become a legendary Equipment artifact named Everflame, Heroes' Legacy. If you do, it gains equip {3} and \"Equipped creature gets +3/+3\" and loses all other abilities.";
+const DISTURBED_SLUMBER_ORACLE: &str = "Until end of turn, target land you control becomes a 4/4 Dinosaur creature with reach and haste. It's still a land. It must be blocked this turn if able.";
+const NISSA_VITAL_FORCE_ORACLE: &str = "[+1]: Untap target land you control. Until your next turn, it becomes a 5/5 Elemental creature with haste. It's still a land.\n[−3]: Return target permanent card from your graveyard to your hand.\n[−6]: You get an emblem with \"Whenever a land you control enters, you may draw a card.\"";
+const SYLVAN_AWAKENING_ORACLE: &str = "Until your next turn, all lands you control become 2/2 Elemental creatures with reach, indestructible, and haste. They're still lands.";
+const WRENN_REALMBREAKER_ORACLE: &str = "Lands you control have \"{T}: Add one mana of any color.\"\n[+1]: Up to one target land you control becomes a 3/3 Elemental creature with vigilance, hexproof, and haste until your next turn. It's still a land.\n[−2]: Mill three cards. You may put a permanent card from among the milled cards into your hand.\n[−7]: You get an emblem with \"You may play lands and cast permanent spells from your graveyard.\"";
+const AWAKENER_DRUID_ORACLE: &str = "When this creature enters, target Forest becomes a 4/5 green Treefolk creature for as long as this creature remains on the battlefield. It's still a land.";
+const HEDGE_WHISPERER_ORACLE: &str = "You may choose not to untap this creature during your untap step.\n{3}{G}, {T}, Collect evidence 4: Target land you control becomes a 5/5 green Plant Boar creature with haste for as long as this creature remains tapped. It's still a land. Activate only as a sorcery. (To collect evidence 4, exile cards with total mana value 4 or greater from your graveyard.)";
+const CACOPHONY_UNLEASHED_ORACLE: &str = "When this enchantment enters, if you cast it, destroy all nonenchantment creatures.\nWhenever this enchantment or another enchantment you control enters, until end of turn, this enchantment becomes a legendary 6/6 Nightmare God creature with menace and deathtouch. It's still an enchantment.";
+const CAVERNOUS_MAW_ORACLE: &str = "{T}: Add {C}.\n{2}: This land becomes a 3/3 Elemental creature until end of turn. It's still a Cave land. Activate only if the number of other Caves you control plus the number of Cave cards in your graveyard is three or greater.";
+
+fn all_modifications(def: &AbilityDefinition) -> Vec<&ContinuousModification> {
+    let mut result = Vec::new();
+    let mut pending = vec![def];
+    while let Some(node) = pending.pop() {
+        if let Effect::GenericEffect {
+            static_abilities, ..
+        } = node.effect.as_ref()
+        {
+            result.extend(
+                static_abilities
+                    .iter()
+                    .flat_map(|static_def| static_def.modifications.iter()),
+            );
+        }
+        pending.extend(node.sub_ability.as_deref());
+        pending.extend(node.else_ability.as_deref());
+    }
+    result
+}
+
+fn retained_type_definition<'a>(
+    definition: &'a AbilityDefinition,
+    core_type: &CoreType,
+    subtype: Option<&str>,
+) -> Option<&'a AbilityDefinition> {
+    let carries_retained_type = match definition.effect.as_ref() {
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => static_abilities.iter().any(|static_definition| {
+            let has_core_type = static_definition.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::AddType {
+                        core_type: actual
+                    } if actual == core_type
+                )
+            });
+            let has_subtype = subtype.is_none_or(|expected| {
+                static_definition.modifications.iter().any(|modification| {
+                    matches!(
+                        modification,
+                        ContinuousModification::AddSubtype { subtype }
+                            if subtype == expected
+                    )
+                })
+            });
+            has_core_type && has_subtype
+        }),
+        _ => false,
+    };
+    if carries_retained_type {
+        return Some(definition);
+    }
+    definition
+        .sub_ability
+        .as_deref()
+        .and_then(|sub| retained_type_definition(sub, core_type, subtype))
+        .or_else(|| {
+            definition
+                .else_ability
+                .as_deref()
+                .and_then(|otherwise| retained_type_definition(otherwise, core_type, subtype))
+        })
+}
+
+fn parsed_retained_type_definition<'a>(
+    parsed: &'a engine::parser::oracle::ParsedAbilities,
+    core_type: CoreType,
+    subtype: Option<&str>,
+) -> &'a AbilityDefinition {
+    parsed
+        .abilities
+        .iter()
+        .find_map(|definition| retained_type_definition(definition, &core_type, subtype))
+        .or_else(|| {
+            parsed.triggers.iter().find_map(|trigger| {
+                trigger.execute.as_deref().and_then(|definition| {
+                    retained_type_definition(definition, &core_type, subtype)
+                })
+            })
+        })
+        .expect("retained-type production definition")
+}
+
+fn assert_retained_type_duration(
+    parsed: &engine::parser::oracle::ParsedAbilities,
+    name: &str,
+    core_type: CoreType,
+    subtype: Option<&str>,
+    expected_duration: Duration,
+) {
+    assert_zero_unimplemented(parsed, name);
+    let retained = parsed_retained_type_definition(parsed, core_type, subtype);
+    assert_eq!(retained.duration, Some(expected_duration.clone()), "{name}");
+    assert!(
+        matches!(
+            retained.effect.as_ref(),
+            Effect::GenericEffect {
+                duration: Some(actual),
+                ..
+            } if actual == &expected_duration
+        ),
+        "{name}: retained-type effect duration must match the governing animation: {retained:#?}"
+    );
+}
+
+fn assert_exact_text_name(
+    definitions: impl IntoIterator<Item = AbilityDefinition>,
+    expected_name: &str,
+) {
+    let definitions: Vec<_> = definitions.into_iter().collect();
+    let modifications: Vec<_> = definitions.iter().flat_map(all_modifications).collect();
+    assert!(
+        modifications.iter().any(|modification| matches!(
+            modification,
+            ContinuousModification::SetTextName { name } if name == expected_name
+        )),
+        "missing SetTextName({expected_name:?}) in {modifications:#?}"
+    );
+    assert!(
+        !modifications
+            .iter()
+            .any(|modification| matches!(modification, ContinuousModification::SetName { .. })),
+        "non-copy assigned name must not use SetName: {modifications:#?}"
+    );
+}
+
+#[test]
+fn resolving_outer_assigned_names_are_layer_three_in_all_full_cards() {
+    let awakening = parse(
+        AWAKENING_ORACLE,
+        "Awakening of Vitu-Ghazi",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert_zero_unimplemented(&awakening, "Awakening of Vitu-Ghazi");
+    assert_exact_text_name(awakening.abilities, "Vitu-Ghazi");
+
+    let tenth = parse(
+        TENTH_DISTRICT_HERO_ORACLE,
+        "Tenth District Hero",
+        &[],
+        &["Creature"],
+        &["Human"],
+    );
+    assert_zero_unimplemented(&tenth, "Tenth District Hero");
+    assert_exact_text_name(tenth.abilities, "Mileva, the Stalwart");
+
+    let fenric = parse(
+        CURSE_OF_FENRIC_ORACLE,
+        "The Curse of Fenric",
+        &[],
+        &["Enchantment"],
+        &["Saga"],
+    );
+    assert_zero_unimplemented(&fenric, "The Curse of Fenric");
+    let fenric_chapters = fenric
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref().cloned());
+    assert_exact_text_name(fenric_chapters, "Fenric");
+
+    let irencrag = parse(IRENCRAG_ORACLE, "The Irencrag", &[], &["Artifact"], &[]);
+    assert_zero_unimplemented(&irencrag, "The Irencrag");
+    let execute = irencrag
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref().cloned());
+    assert_exact_text_name(execute, "Everflame, Heroes' Legacy");
+}
+
+#[test]
+fn princess_fang_gideon_and_argothian_full_cards_parse_semantically() {
+    let princess = parse(
+        PRINCESS_YUE_ORACLE,
+        "Princess Yue",
+        &[],
+        &["Legendary", "Creature"],
+        &["Human", "Noble"],
+    );
+    assert_zero_unimplemented(&princess, "Princess Yue");
+    let princess_trigger = princess.triggers.first().expect("Princess dies trigger");
+    assert!(matches!(
+        princess_trigger.condition,
+        Some(engine::types::ability::TriggerCondition::ZoneChangeObjectMatchesFilter { .. })
+    ));
+    let princess_mods = all_modifications(
+        princess_trigger
+            .execute
+            .as_deref()
+            .expect("Princess trigger execute"),
+    );
+    assert!(princess_mods.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::SetTextName { name } if name == "Moon"
+    )));
+    assert!(princess_mods.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::SetCardTypes { core_types }
+            if core_types == &vec![CoreType::Land]
+    )));
+    assert!(princess_mods.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::GrantAbility { definition }
+            if matches!(definition.cost, Some(AbilityCost::Tap))
+                && matches!(definition.effect.as_ref(), Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 }
+                    },
+                    ..
+                })
+    )));
+    assert!(
+        princess.abilities.iter().any(|definition| {
+            matches!(definition.cost, Some(AbilityCost::Tap))
+                && matches!(
+                    definition.effect.as_ref(),
+                    Effect::Scry {
+                        count: QuantityExpr::Fixed { value: 2 },
+                        ..
+                    }
+                )
+        }),
+        "Princess's printed tap/Scry ability must remain distinct from the granted mana ability"
+    );
+
+    let fang = parse(
+        FANG_ORACLE,
+        "Fang, Roku's Companion",
+        &["Flying"],
+        &["Legendary", "Creature"],
+        &["Wolf", "Dog"],
+    );
+    assert_zero_unimplemented(&fang, "Fang, Roku's Companion");
+    let fang_trigger = fang
+        .triggers
+        .iter()
+        .find(|trigger| {
+            matches!(
+                trigger.condition,
+                Some(engine::types::ability::TriggerCondition::Not { .. })
+            )
+        })
+        .expect("Fang dies trigger");
+    assert!(all_modifications(fang_trigger.execute.as_deref().unwrap())
+        .iter()
+        .any(|modification| matches!(
+            modification,
+            ContinuousModification::AddSubtype { subtype } if subtype == "Spirit"
+        )));
+
+    let gideon = parse(
+        GIDEON_CHAMPION_ORACLE,
+        "Gideon, Champion of Justice",
+        &[],
+        &["Legendary", "Planeswalker"],
+        &["Gideon"],
+    );
+    assert_zero_unimplemented(&gideon, "Gideon, Champion of Justice");
+    assert!(gideon
+        .abilities
+        .iter()
+        .flat_map(all_modifications)
+        .any(|modification| matches!(
+            modification,
+            ContinuousModification::AddType {
+                core_type: CoreType::Planeswalker
+            }
+        )));
+
+    let argothian = parse(
+        ARGOTHIAN_ORACLE,
+        "Argothian Uprooting",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert_zero_unimplemented(&argothian, "Argothian Uprooting");
+    let argothian_mods: Vec<_> = argothian
+        .abilities
+        .iter()
+        .flat_map(all_modifications)
+        .collect();
+    assert!(!argothian_mods.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::SetName { .. } | ContinuousModification::SetTextName { .. }
+    )));
+    assert!(argothian_mods
+        .iter()
+        .any(|modification| matches!(modification, ContinuousModification::SetPower { value: 0 })));
+    assert!(argothian_mods.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::SetToughness { value: 0 }
+    )));
+    assert!(argothian_mods.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::AddSubtype { subtype } if subtype == "Elemental"
+    )));
+    assert!(argothian_mods.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::AddType {
+            core_type: CoreType::Creature
+        }
+    )));
+    assert!(argothian_mods.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::AddKeyword {
+            keyword: Keyword::Reach
+        }
+    )));
+    assert!(argothian_mods.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::AddKeyword {
+            keyword: Keyword::Haste
+        }
+    )));
+    assert!(argothian_mods.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::GrantTrigger { trigger }
+            if matches!(trigger.execute.as_deref().map(|ability| ability.effect.as_ref()),
+                Some(Effect::Conjure {
+                    cards,
+                    destination: Zone::Battlefield,
+                    tapped: true,
+                    ..
+                }) if cards.len() == 1 && cards[0].named_name() == Some("Forest"))
+    )));
+}
+
+fn run_dies_return_case(
+    oracle: &str,
+    name: &str,
+    subtypes: Vec<&str>,
+    starts_as_land: bool,
+) -> (ObjectId, ObjectId, engine::game::scenario::CastOutcome) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut subject = scenario.add_creature_from_oracle(P0, name, 2, 2, oracle);
+    subject
+        .as_legendary()
+        .with_subtypes(subtypes)
+        .controlled_by(P1);
+    if starts_as_land {
+        subject.as_land().as_creature();
+    }
+    let subject = subject.id();
+    let sentinel = scenario.add_creature(P1, "Sentinel", 3, 3).id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, "Destroy target creature.")
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner.cast(murder).target_object(subject).resolve();
+    (subject, sentinel, outcome)
+}
+
+#[test]
+fn princess_yue_dies_filter_and_returned_object_transformation_execute() {
+    let (yue, sentinel, outcome) =
+        run_dies_return_case(PRINCESS_YUE_ORACLE, "Princess Yue", vec!["Human"], false);
+    outcome.assert_zone(&[yue], Zone::Battlefield);
+    outcome.assert_zone(&[sentinel], Zone::Battlefield);
+    let object = &outcome.state().objects[&yue];
+    assert!(object.tapped);
+    assert_eq!(object.controller, P1);
+    assert_eq!(object.name, "Moon");
+    assert!(object.card_types.supertypes.contains(&Supertype::Legendary));
+    assert!(object.card_types.core_types.contains(&CoreType::Land));
+    assert!(!object.card_types.core_types.contains(&CoreType::Creature));
+    assert!(object.abilities.iter().any(|definition| {
+        matches!(definition.cost, Some(AbilityCost::Tap))
+            && matches!(
+                definition.effect.as_ref(),
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 }
+                    },
+                    ..
+                }
+            )
+    }));
+    assert!(outcome
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .any(|effect| {
+            matches!(effect.affected, TargetFilter::SpecificObject { id } if id == yue)
+        }));
+    assert!(!outcome
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .any(|effect| {
+            matches!(effect.affected, TargetFilter::SpecificObject { id } if id == sentinel)
+        }));
+    assert!(!outcome.state().objects[&sentinel]
+        .abilities
+        .iter()
+        .any(|definition| matches!(
+            definition.effect.as_ref(),
+            Effect::Mana {
+                produced: ManaProduction::Colorless { .. },
+                ..
+            }
+        )));
+
+    let (land_yue, _, negative) =
+        run_dies_return_case(PRINCESS_YUE_ORACLE, "Princess Yue", vec!["Human"], true);
+    negative.assert_zone(&[land_yue], Zone::Graveyard);
+    assert!(!negative
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .any(|effect| {
+            matches!(effect.affected, TargetFilter::SpecificObject { id } if id == land_yue)
+        }));
+    assert!(matches!(
+        negative.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn fang_dies_filter_adds_spirit_only_when_it_was_absent() {
+    let (fang, _, outcome) = run_dies_return_case(
+        FANG_ORACLE,
+        "Fang, Roku's Companion",
+        vec!["Wolf", "Dog"],
+        false,
+    );
+    outcome.assert_zone(&[fang], Zone::Battlefield);
+    let object = &outcome.state().objects[&fang];
+    assert!(object.card_types.core_types.contains(&CoreType::Creature));
+    assert!(object
+        .card_types
+        .subtypes
+        .iter()
+        .any(|subtype| subtype == "Wolf"));
+    assert!(object
+        .card_types
+        .subtypes
+        .iter()
+        .any(|subtype| subtype == "Spirit"));
+    assert!(outcome
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .any(|effect| {
+            matches!(effect.affected, TargetFilter::SpecificObject { id } if id == fang)
+        }));
+
+    let (spirit_fang, _, negative) = run_dies_return_case(
+        FANG_ORACLE,
+        "Fang, Roku's Companion",
+        vec!["Wolf", "Spirit"],
+        false,
+    );
+    negative.assert_zone(&[spirit_fang], Zone::Graveyard);
+    assert!(!negative
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .any(|effect| {
+            matches!(effect.affected, TargetFilter::SpecificObject { id } if id == spirit_fang)
+        }));
+    assert!(matches!(
+        negative.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// Candidate-bound production coverage for every retained-type duration class in
+/// the 79-card projected comparator slice. The 72-card add-Land EOT class keeps
+/// its runtime discriminator below (Disturbed Slumber); these shipped cards pin
+/// all three non-EOT authorities plus the two distinct one-card EOT payloads.
+/// Reverting the preceding-animation binding changes every retained definition
+/// asserted here back to `Permanent`.
+#[test]
+fn shipped_retained_type_duration_classes_follow_the_governing_animation() {
+    let until_next_turn = Duration::UntilNextTurnOf {
+        player: PlayerScope::Controller,
+    };
+    for (name, oracle, types, subtypes) in [
+        (
+            "Nissa, Vital Force",
+            NISSA_VITAL_FORCE_ORACLE,
+            &["Legendary", "Planeswalker"][..],
+            &["Nissa"][..],
+        ),
+        (
+            "Sylvan Awakening",
+            SYLVAN_AWAKENING_ORACLE,
+            &["Sorcery"][..],
+            &[][..],
+        ),
+        (
+            "Wrenn and Realmbreaker",
+            WRENN_REALMBREAKER_ORACLE,
+            &["Legendary", "Planeswalker"][..],
+            &["Wrenn"][..],
+        ),
+    ] {
+        let parsed = parse(oracle, name, &[], types, subtypes);
+        assert_retained_type_duration(&parsed, name, CoreType::Land, None, until_next_turn.clone());
+    }
+
+    let awakener = parse(
+        AWAKENER_DRUID_ORACLE,
+        "Awakener Druid",
+        &[],
+        &["Creature"],
+        &["Human", "Druid"],
+    );
+    assert_retained_type_duration(
+        &awakener,
+        "Awakener Druid",
+        CoreType::Land,
+        None,
+        Duration::UntilHostLeavesPlay,
+    );
+
+    let hedge = parse(
+        HEDGE_WHISPERER_ORACLE,
+        "Hedge Whisperer",
+        &[],
+        &["Creature"],
+        &["Elf", "Druid"],
+    );
+    assert_retained_type_duration(
+        &hedge,
+        "Hedge Whisperer",
+        CoreType::Land,
+        None,
+        Duration::ForAsLongAs {
+            condition: StaticCondition::SourceIsTapped,
+        },
+    );
+
+    let cacophony = parse(
+        CACOPHONY_UNLEASHED_ORACLE,
+        "Cacophony Unleashed",
+        &[],
+        &["Legendary", "Enchantment"],
+        &[],
+    );
+    assert_retained_type_duration(
+        &cacophony,
+        "Cacophony Unleashed",
+        CoreType::Enchantment,
+        None,
+        Duration::UntilEndOfTurn,
+    );
+
+    let cavernous_maw = parse(
+        CAVERNOUS_MAW_ORACLE,
+        "Cavernous Maw",
+        &[],
+        &["Land"],
+        &["Cave"],
+    );
+    assert_retained_type_duration(
+        &cavernous_maw,
+        "Cavernous Maw",
+        CoreType::Land,
+        Some("Cave"),
+        Duration::UntilEndOfTurn,
+    );
+}
+
+/// CR 205.1b + CR 514.2 + CR 611.2a: the separate "It's still a land"
+/// sentence modifies the preceding animation; it does not create an independent
+/// permanent continuous effect. This exact shipped-card cast drives the parsed
+/// chain through resolution and cleanup. Reverting the duration binding leaves
+/// the retained-Land transient at `Permanent`, so the final assertion fails.
+#[test]
+fn retained_type_clause_expires_with_its_governing_animation() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let land = scenario.add_basic_land(P0, ManaColor::Green);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Disturbed Slumber", true, DISTURBED_SLUMBER_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(spell).target_object(land).resolve();
+    assert!(
+        outcome
+            .state()
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| {
+                effect.duration == Duration::UntilEndOfTurn
+                    && matches!(effect.affected, TargetFilter::SpecificObject { id } if id == land)
+                    && effect.modifications.iter().any(|modification| {
+                        matches!(
+                            modification,
+                            ContinuousModification::AddType {
+                                core_type: CoreType::Land
+                            }
+                        )
+                    })
+            }),
+        "reach guard: the retained-Land clause must install an UntilEndOfTurn transient"
+    );
+
+    let mut events = Vec::new();
+    execute_cleanup(runner.state_mut(), &mut events);
+    evaluate_layers(runner.state_mut());
+
+    assert!(
+        !runner
+            .state()
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| {
+                matches!(effect.affected, TargetFilter::SpecificObject { id } if id == land)
+                    && effect.modifications.iter().any(|modification| {
+                        matches!(
+                            modification,
+                            ContinuousModification::AddType {
+                                core_type: CoreType::Land
+                            }
+                        )
+                    })
+            }),
+        "CR 514.2: the retained-type transient must expire with the governing animation"
     );
 }

@@ -10,11 +10,7 @@ import type {
   PlayerId,
 } from "../adapter/types";
 import { FORMAT_REGISTRY } from "../data/formatRegistry";
-import {
-  LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL,
-  PROTOCOL_VERSION,
-  type ServerInfo,
-} from "../adapter/ws-adapter";
+import { serverProtocolRejection, type ServerInfo } from "../adapter/ws-adapter";
 import {
   clearWsSession,
   loadWsSession,
@@ -495,12 +491,14 @@ export function isLobbyEntryCompatible(
   return hostBuildCommit === __BUILD_HASH__;
 }
 
-/** True when the client's wire-protocol can speak to the server's advertised mode. */
+/**
+ * True when the client's wire-protocol can speak to the server's advertised
+ * mode. Delegates to `serverProtocolRejection` — the same decision the
+ * handshake makes — so the compatibility badge can never disagree with whether
+ * the connection actually succeeds.
+ */
 export function isServerCompatible(info: ServerInfo | null): boolean {
-  if (!info) return false;
-  const minProtocol =
-    info.mode === "LobbyOnly" ? LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL : PROTOCOL_VERSION;
-  return info.protocolVersion >= minProtocol && info.protocolVersion <= PROTOCOL_VERSION;
+  return info !== null && serverProtocolRejection(info) === null;
 }
 
 // Build the FORMAT_DEFAULTS map from the engine-authored FORMAT_REGISTRY.
@@ -1480,10 +1478,10 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       // v2 → v3: same rule, re-applied because the official set now spans a
       // broker PER RELEASE CHANNEL. Without this bump a returning preview
       // browser keeps its persisted production address, and detectServerUrl
-      // honours any stored address whose /health answers — production's does —
-      // so it would silently stay pinned to a lobby its build cannot handshake
-      // with. Re-running the same migration repoints it at this channel's
-      // broker; a user-typed non-official address is still preserved.
+      // honours any valid stored address, so it would silently stay pinned to a
+      // lobby its build cannot handshake with. Re-running the same migration
+      // repoints it at this channel's broker; a user-typed non-official address
+      // is still preserved.
       migrate: migratePersistedMultiplayerState,
       partialize: (state) => ({
         playerId: state.playerId,

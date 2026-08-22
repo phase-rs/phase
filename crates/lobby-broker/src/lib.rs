@@ -31,8 +31,8 @@ pub use lobby::{
 };
 pub use protocol::{
     parse_lobby_client_message, DraftLobbyMetadata, LobbyClientMessage, LobbyGame,
-    LobbyServerMessage, ParsedFrame, ServerErrorCode, ServerMode, MIN_SUPPORTED_PROTOCOL,
-    PROTOCOL_VERSION,
+    LobbyServerMessage, ParsedFrame, ServerErrorCode, ServerMode, LOBBY_PROTOCOL_VERSION,
+    MIN_SUPPORTED_LOBBY_PROTOCOL, MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
 };
 pub use reservation_auth::{
     conn_holds_reservation, consume_owned_reservation, release_owned_reservation,

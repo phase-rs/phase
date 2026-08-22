@@ -2366,8 +2366,6 @@ pub fn evaluate_layers(state: &mut GameState) {
         &mut zone_cache,
         &mut started_effect_sets,
     );
-    let stickers_applied =
-        crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, &bf_ids);
 
     // CR 613.2b + CR 708.2a + CR 708.10: Layer 1b. After Layer-1a copiable effects
     // (copy per CR 707, merge per CR 730) are applied, re-set each face-down
@@ -2381,11 +2379,7 @@ pub fn evaluate_layers(state: &mut GameState) {
         }
     }
 
-    // CR 709.5 + CR 707.2 + CR 613.1a: derive each battlefield Room's
-    // door-gated NAME from its EFFECTIVE, post-layer-1 form — after copies, so
-    // a copy shows the COPIED halves through its own designations. Placed
-    // after the 1b reseed so the face-down profile (CR 708.2a, no name) wins.
-    derive_room_battlefield_names(state, &bf_ids);
+    let stickers_applied = apply_room_names_then_stickers(state, &bf_ids);
 
     // Both producers say the same thing: layer 1 can turn a non-generator into a
     // continuous static source mid-pass, and the top-of-pass index was built from
@@ -5063,14 +5057,13 @@ fn apply_copy_sublayer_to_fixed_point(
 ///   `add_transient_continuous_effect`, so the effect is `Transient`-keyed.
 /// - `expand_granted_static_effects` sets `def_index: None`, so a granted
 ///   copy-layer static is `GrantedStatic`-keyed.
-/// - Card data is the only other producer of `StaticDefinition`s, and in the
-///   generated pool every copy-layer modification that sits inside one at all sits
-///   inside a `GenericEffect` payload — Awakening of Vitu-Ghazi, Tenth District
-///   Hero, The Curse of Fenric, The Irencrag, all `SetName` — which
-///   `effects::effect` resolves through `register_transient_effect`. No card
-///   carries a copy-layer modification in its printed `static_abilities`, so no
-///   route into an object's `static_definitions` can carry one either: the copy
-///   payload ([`apply_copiable_values`]), the `GrantStaticAbility` graft, and the
+/// - Card data is the only other producer of `StaticDefinition`s. The resolving
+///   name changes on Awakening of Vitu-Ghazi, Tenth District Hero, The Curse of
+///   Fenric, and The Irencrag are `SetTextName` modifications in Layer 3 inside
+///   `GenericEffect` payloads, not copy-layer producers. No card carries a
+///   copy-layer modification in its printed `static_abilities`, so no route into
+///   an object's `static_definitions` can carry one either: the copy payload
+///   ([`apply_copiable_values`]), the `GrantStaticAbility` graft, and the
 ///   `RetainPrintedAbilityFromSource` graft all replay card-data statics.
 ///
 /// The first card to print a copy-layer static ability directly — rather than
@@ -5148,6 +5141,16 @@ fn derive_room_battlefield_names(state: &mut GameState, ids: &[ObjectId]) {
     }
 }
 
+/// CR 709.5 + CR 123.6c + CR 613.1c: first derive a Room permanent's name from
+/// its unlocked halves, then apply name-sticker text changes to that resulting
+/// name. The full and incremental paths must share this exact ordering or a
+/// stickered Room can have different characteristics depending on the flush
+/// path. Ability stickers ride the same existing sticker pass.
+fn apply_room_names_then_stickers(state: &mut GameState, ids: &[ObjectId]) -> bool {
+    derive_room_battlefield_names(state, ids);
+    crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, ids)
+}
+
 fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncrementalFlush) {
     let PreparedIncrementalFlush {
         recipient_ids,
@@ -5187,11 +5190,7 @@ fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncremental
     }
 
     let recipient_vec: Vec<ObjectId> = recipient_ids.iter().copied().collect();
-    // CR 709.5 + CR 613.1a: same layer-1 exit derivation as the full pass —
-    // an entrant that is (or copies) a Room gets its door-gated name here.
-    derive_room_battlefield_names(state, &recipient_vec);
-    let stickers_changed =
-        crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, &recipient_vec);
+    let stickers_changed = apply_room_names_then_stickers(state, &recipient_vec);
     // CR 613.2a + CR 613.2c: deliberately no copy disjunct on this rebuild, unlike
     // the full pass. A copy applied here could only add a generator by landing on
     // a recipient, and it cannot: `recipient_ids` is `entered_ids` alone, because
@@ -17857,6 +17856,68 @@ mod tests {
         assert!(
             !bear_obj.has_keyword(&Keyword::Haste),
             "Without a Mountain, the compound condition fails and Haste is not granted"
+        );
+    }
+
+    /// CR 709.5 + CR 123.6c + CR 613.1c: Room door-gated naming must precede
+    /// name-sticker text modification on both the full and incremental paths.
+    /// This differential fixture forces the incremental fast path for the same
+    /// stickered Room that a full pass evaluates and compares the final name.
+    #[test]
+    fn stickered_room_name_matches_between_full_and_incremental_layer_paths() {
+        use crate::game::game_object::{RoomDoor, RoomUnlockState};
+        use crate::types::stickers::{AppliedSticker, StickerLocator};
+
+        let mut base = setup();
+        let room = create_object(
+            &mut base,
+            CardId(0),
+            PlayerId(0),
+            "Weight Room".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = base.objects.get_mut(&room).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Room".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.room_unlocks = Some(RoomUnlockState {
+                left_unlocked: true,
+                right_unlocked: false,
+            });
+            obj.stickers.push(AppliedSticker::Name {
+                locator: StickerLocator {
+                    sheet: "Layer Path Probe".to_string(),
+                    index: 0,
+                },
+                text: "Cool".to_string(),
+                position: 0,
+                timestamp: 1,
+            });
+            assert!(obj.room_unlocks.unwrap().is_unlocked(RoomDoor::Left));
+        }
+
+        let mut full = base.clone();
+        evaluate_layers(&mut full);
+
+        let mut incremental = base;
+        crate::game::perf_counters::reset();
+        incremental.layers_dirty = LayersDirty::EnteredObjects([room].into());
+        flush_layers(&mut incremental);
+        let counters = crate::game::perf_counters::snapshot();
+        assert_eq!(
+            counters.layers_incremental, 1,
+            "fixture must take the fast path"
+        );
+        assert_eq!(
+            counters.layers_full_eval, 0,
+            "fixture must not silently escalate"
+        );
+
+        assert_eq!(full.objects[&room].name, "Cool Weight Room");
+        assert_eq!(
+            incremental.objects[&room].name, full.objects[&room].name,
+            "full and incremental Layer-1 exits must produce the same stickered Room name"
         );
     }
 

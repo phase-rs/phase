@@ -7296,6 +7296,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
         } => Effect::Manifest {
             target,
             count,
+            object_source: None,
             profile,
             enters_under,
         },
@@ -10693,10 +10694,37 @@ pub(super) fn parse_imperative_family_ast(
                 Some(ImperativeFamilyAst::Manifest {
                     target,
                     count,
+                    from_zone: None,
                     enters_under,
                 })
             } else {
-                None
+                // CR 701.40a: "manifest a card from your hand" (Scroll of
+                // Fate) — the manifest twin of the cloak from-hand form below:
+                // the controller chooses a hand card, lowered to a
+                // `ChooseFromZone` parent + `Manifest` sub-chain in
+                // `lower_imperative_family_ast`.
+                let from_hand = all_consuming((
+                    tag::<_, _, OracleError<'_>>("manifest "),
+                    alt((tag("a card"), tag("one card"))),
+                    tag(" from your hand"),
+                    opt(tag(".")),
+                ))
+                .parse(lower.trim())
+                .is_ok();
+
+                if from_hand {
+                    Some(ImperativeFamilyAst::Manifest {
+                        target: TargetFilter::Controller,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        from_zone: Some(Zone::Hand),
+                        // CR 110.2a: the imperative "you" subject manifests, so
+                        // the card enters under the instruction controller's
+                        // control.
+                        enters_under: Some(ControllerRef::You),
+                    })
+                } else {
+                    None
+                }
             }
         }
         // CR 701.58a: "cloak the top card of your library" / "cloak the top N
@@ -12780,6 +12808,44 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 },
             ))
         }
+        // CR 701.40a: "manifest a card from your hand" (Scroll of Fate). The
+        // manifest twin of the cloak from-hand arm below: the controller
+        // chooses a card from their hand — delegated to the `ChooseFromZone`
+        // building block — then manifests it. The `Manifest` sub-ability reads
+        // the chosen card from `object_source` (`ParentTarget`, resolved
+        // against the `ability.targets` the choose forwards — CR 608.2c: later
+        // instructions read the earlier selection). Intercepted here because a
+        // bare Effect cannot express the parent + sub chain — only
+        // `ParsedEffectClause` can.
+        ImperativeFamilyAst::Manifest {
+            target,
+            count,
+            from_zone: Some(zone),
+            enters_under,
+        } => {
+            let mut clause = parsed_clause(Effect::ChooseFromZone {
+                count: 1,
+                zone,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::Controller,
+                filter: None,
+                chooser: Chooser::Controller,
+                up_to: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                constraint: None,
+            });
+            clause.sub_ability = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Manifest {
+                    target,
+                    count,
+                    object_source: Some(TargetFilter::ParentTarget),
+                    profile: None,
+                    enters_under,
+                },
+            )));
+            clause
+        }
         // CR 701.58a: "cloak a card from your hand" (Vannifar). The controller
         // chooses a card from their hand — delegated to the `ChooseFromZone`
         // building block — then cloaks it (CR 701.58a). The `Cloak` sub-ability
@@ -13059,13 +13125,19 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         // carries no effect-specified face-down profile; `enters_under` records
         // the instruction-controller default. The put-form manifest may also
         // seed an effect-specified profile (see `lower_put_ast`).
+        // CR 701.40a: Manifest the top card(s) of a library. The from-hand
+        // form (`from_zone: Some`) is intercepted upstream in
+        // `lower_imperative_family_ast` (Cloak pattern); only the library-top
+        // source reaches here.
         ImperativeFamilyAst::Manifest {
             target,
             count,
             enters_under,
+            ..
         } => Effect::Manifest {
             target,
             count,
+            object_source: None,
             profile: None,
             enters_under,
         },

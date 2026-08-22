@@ -5111,6 +5111,7 @@ fn rw_effect(
         Effect::Manifest {
             target: _,
             count,
+            object_source,
             enters_under: _,
             profile: _,
         } => {
@@ -5119,6 +5120,15 @@ fn rw_effect(
             p.writes_membership_external_census.merge(Census::Any);
             p.writes_membership_external_zones.merge(ZoneSpan::Any);
             p.merge(rw_quantity_expr(count));
+            // CR 701.40a: `object_source` (Some) names already-chosen objects
+            // being manifested — a membership WRITE target. The membership
+            // write is already maximal-conservative (Census/Zone Any) above;
+            // flag its D5 / member-bound referents (mirrors the `Cloak` arm
+            // below).
+            if let Some(src) = object_source {
+                flag_legacy_write_target(&mut p, src);
+                flag_member_bound_write_target(&mut p, src);
+            }
             (p, None)
         }
         Effect::ManifestDread => {

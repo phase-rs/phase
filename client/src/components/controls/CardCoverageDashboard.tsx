@@ -7,6 +7,7 @@ import { useSetList, type SetMeta } from "../../hooks/useSetList";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { scryfallLegalityKey } from "../../services/scryfall";
 import { SelectField } from "../ui/SelectField";
+import { copyText } from "../../services/copyText";
 
 // Supported handlers are now derived from the coverage export, not a hardcoded list.
 // See `extractHandlerUsage` below — a handler is listed iff the parser produces it
@@ -1644,7 +1645,8 @@ function CopyButton({ text, label, className = "" }: { text: string; label: stri
   const [copied, setCopied] = useState(false);
 
   const handleCopy = useCallback(() => {
-    navigator.clipboard.writeText(text).then(() => {
+    void copyText(text).then((ok) => {
+      if (!ok) return;
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     });

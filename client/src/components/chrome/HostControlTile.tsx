@@ -14,6 +14,7 @@ import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import { formatJoinShare } from "../../services/serverDetection";
 import { expandParsedDeck } from "../../services/deckParser";
 import { SelectField } from "../ui/SelectField";
+import { copyText } from "../../services/copyText";
 
 const AI_DIFFICULTIES = ["Easy", "Medium", "Hard", "VeryHard"] as const;
 const RANDOM_DECK: DeckChoice = { type: "Random" };
@@ -443,11 +444,12 @@ export function HostControlTile() {
             onClick={() => {
               if (joinShare) {
                 // Server-run host: copy the reachable `<code>@<host>` join link.
-                void navigator.clipboard?.writeText(joinShare);
-                showToast(t("hostControl.joinLinkCopied"));
+                void copyText(joinShare).then((copied) => {
+                  if (copied) showToast(t("hostControl.joinLinkCopied"));
+                });
               } else if (location.pathname.startsWith("/game/") && hostGameCode) {
                 // P2P host in-game: the bare code (friends join via direct code).
-                void navigator.clipboard?.writeText(hostGameCode);
+                void copyText(hostGameCode);
               } else {
                 navigate("/multiplayer");
               }

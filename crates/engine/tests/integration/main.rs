@@ -977,6 +977,7 @@ mod scarab_god_regression;
 mod scholarship_sponsor;
 mod screaming_nemesis_combat_damage_multi_trigger;
 mod screaming_nemesis_life_lock;
+mod scroll_of_fate_manifest_from_hand;
 mod scythecat_cub_second_resolution;
 mod search_delivery_observer_dedup;
 mod season_points_budget_modal;

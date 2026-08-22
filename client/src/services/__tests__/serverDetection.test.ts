@@ -1,13 +1,15 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   DEFAULT_MULTIPLAYER_SERVER_URL,
   OFFICIAL_MULTIPLAYER_SERVER_URL,
   isOfficialMultiplayerServerUrl,
 } from "../../config/multiplayerServer";
+import { useMultiplayerStore } from "../../stores/multiplayerStore";
 import {
   DEFAULT_SERVER,
   SERVER_PRESETS,
+  detectServerUrl,
   formatJoinShare,
   mixedContentBlockReason,
   parseJoinCode,
@@ -52,6 +54,34 @@ describe("official server hosts", () => {
     expect(SERVER_PRESETS).toHaveLength(1);
     expect(SERVER_PRESETS[0].labelKey).toBe("serverPicker.official");
     expect(DEFAULT_SERVER).toBe(OFFICIAL_MULTIPLAYER_SERVER_URL);
+  });
+});
+
+describe("detectServerUrl", () => {
+  const CHOSEN = "wss://play.example.com/ws";
+
+  afterEach(() => {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+    vi.unstubAllGlobals();
+  });
+
+  // The desktop shell talks to its own native engine over a Tauri IPC bridge on
+  // an ephemeral port, so a reachable localhost phase-server is always someone
+  // else's and must never displace the server the player picked.
+  it("keeps the chosen server in the desktop shell even when localhost answers", async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    const fetchSpy = vi.fn(() => Promise.resolve(new Response("ok", { status: 200 })));
+    vi.stubGlobal("fetch", fetchSpy);
+    useMultiplayerStore.setState({ serverAddress: CHOSEN });
+
+    await expect(detectServerUrl()).resolves.toBe(CHOSEN);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("falls back to this build's default when no valid address is stored", async () => {
+    useMultiplayerStore.setState({ serverAddress: "" });
+
+    await expect(detectServerUrl()).resolves.toBe(DEFAULT_SERVER);
   });
 });
 

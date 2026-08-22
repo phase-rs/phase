@@ -19,15 +19,17 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (target, count, profile, enters_under) = match &ability.effect {
+    let (target, count, object_source, profile, enters_under) = match &ability.effect {
         Effect::Manifest {
             target,
             count,
+            object_source,
             profile,
             enters_under,
         } => (
             target.clone(),
             resolve_quantity_with_targets(state, count, ability).max(0) as usize,
+            object_source.clone(),
             profile.clone(),
             enters_under.clone(),
         ),
@@ -58,26 +60,52 @@ pub fn resolve(
     // manifest default (CR 701.40a).
     let profile = profile.unwrap_or_else(crate::types::ability::FaceDownProfile::vanilla_2_2);
 
-    // CR 701.40e: Manifest cards one at a time
-    for _ in 0..count {
-        // CR 701.40a: Resolve the top card of the library owner's library, then
-        // manifest it through the shared morph infrastructure, routing the
-        // effect-specified profile and the optional controller override.
-        let object_id = match crate::game::morph::top_library_object(state, player) {
-            Ok(id) => id,
-            // The library owner has no cards left — stop manifesting.
-            Err(_) => break,
-        };
-        crate::game::morph::manifest_card(
-            state,
-            player,
-            object_id,
-            ability.source_id,
-            profile.clone(),
-            controller,
-            events,
-        )
-        .map_err(|e| EffectError::MissingParam(format!("{e}")))?;
+    match object_source {
+        // CR 701.40a: Manifest explicit objects forwarded onto
+        // `ability.targets` by a parent `ChooseFromZone` (Scroll of Fate's
+        // "manifest a card from your hand"). Those cards live in a
+        // non-battlefield zone, so `manifest_card` is a real move (CR 608.2c —
+        // later instructions read the earlier selection). Mirrors the
+        // `Cloak.object_source` branch, minus the ward profile.
+        Some(filter) => {
+            let object_ids = super::effect_object_targets(&filter, &ability.targets);
+            for object_id in object_ids {
+                crate::game::morph::manifest_card(
+                    state,
+                    player,
+                    object_id,
+                    ability.source_id,
+                    profile.clone(),
+                    controller,
+                    events,
+                )
+                .map_err(|e| EffectError::MissingParam(format!("{e}")))?;
+            }
+        }
+        // CR 701.40e: Manifest cards one at a time
+        None => {
+            for _ in 0..count {
+                // CR 701.40a: Resolve the top card of the library owner's
+                // library, then manifest it through the shared morph
+                // infrastructure, routing the effect-specified profile and the
+                // optional controller override.
+                let object_id = match crate::game::morph::top_library_object(state, player) {
+                    Ok(id) => id,
+                    // The library owner has no cards left — stop manifesting.
+                    Err(_) => break,
+                };
+                crate::game::morph::manifest_card(
+                    state,
+                    player,
+                    object_id,
+                    ability.source_id,
+                    profile.clone(),
+                    controller,
+                    events,
+                )
+                .map_err(|e| EffectError::MissingParam(format!("{e}")))?;
+            }
+        }
     }
 
     events.push(GameEvent::EffectResolved {
@@ -104,6 +132,7 @@ mod tests {
             Effect::Manifest {
                 target: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: count },
+                object_source: None,
                 profile: None,
                 enters_under: None,
             },
@@ -122,6 +151,7 @@ mod tests {
             Effect::Manifest {
                 target: target_filter,
                 count: QuantityExpr::Fixed { value: count },
+                object_source: None,
                 profile: None,
                 enters_under: None,
             },
@@ -421,6 +451,7 @@ mod tests {
             Effect::Manifest {
                 target: TargetFilter::TriggeringPlayer,
                 count: QuantityExpr::Fixed { value: 2 },
+                object_source: None,
                 profile: Some(profile),
                 enters_under: Some(crate::types::ability::ControllerRef::You),
             },

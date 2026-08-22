@@ -1132,7 +1132,9 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       break;
     case "roundAdvanced":
       disposeMatchAdapter(set);
-      set({ phase: "pairing", currentRound: event.newRound });
+      // `currentRound` is engine-owned: `viewUpdated` and `pairingsGenerated`
+      // both write it from engine state moments later.
+      set({ phase: "pairing" });
       saveDraftPodProgress("pairing");
       break;
     case "roundComplete":

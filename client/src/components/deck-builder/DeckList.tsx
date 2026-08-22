@@ -16,6 +16,7 @@ import { mouseHoverPreview } from "./hoverPreview";
 import type { CardHoverHandler } from "./hoverPreview";
 import { groupAccent, groupKey, groupOrder, groupTitleKey, type GroupMode } from "./deckGrouping";
 import { isMaybeboardPolicy, useSideboardPolicy } from "./useSideboardPolicy";
+import { copyText } from "../../services/copyText";
 
 interface DeckListProps {
   deck: ParsedDeck;
@@ -193,7 +194,7 @@ export function DeckList({
   };
 
   const handleCopyToClipboard = async () => {
-    await navigator.clipboard.writeText(exportText);
+    if (!(await copyText(exportText))) return;
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };

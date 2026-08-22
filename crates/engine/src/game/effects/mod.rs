@@ -18134,6 +18134,7 @@ mod tests {
             Effect::Manifest {
                 target: TargetFilter::ParentTargetController,
                 count: QuantityExpr::Fixed { value: 1 },
+                object_source: None,
                 profile: None,
                 enters_under: None,
             },

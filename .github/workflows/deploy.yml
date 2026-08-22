@@ -670,26 +670,43 @@ jobs:
           workingDirectory: lobby-worker
           command: deploy --env preview
 
-      - name: Assert the preview lobby advertises this commit's protocol version
+      - name: Assert the preview lobby advertises this commit's protocol versions
         # Guards the exact regression this job exists to prevent: a preview
         # client that cannot handshake with the preview lobby. Compares the
-        # deployed Worker's advertised protocol_version against the constant in
-        # the tree being deployed.
+        # deployed Worker's advertised versions against the constants in the
+        # tree being deployed.
+        #
+        # BOTH numbers are checked, and they mean different things:
+        #   protocol_version       — the full-game surface. Only clients that
+        #                            predate lobby_protocol_version gate on it.
+        #   lobby_protocol_version — the lobby message set, and what every
+        #                            current client actually handshakes on.
+        # A stale deploy of either is a real incompatibility, so neither is
+        # allowed to drift from the tree.
         run: |
           set -euo pipefail
           expected=$(grep -oE 'pub const PROTOCOL_VERSION: u32 = [0-9]+' \
             crates/lobby-broker/src/protocol.rs | grep -oE '[0-9]+$')
+          expected_lobby=$(grep -oE 'pub const LOBBY_PROTOCOL_VERSION: u32 = [0-9]+' \
+            crates/lobby-broker/src/protocol.rs | grep -oE '[0-9]+$')
+          if [ -z "$expected" ] || [ -z "$expected_lobby" ]; then
+            echo "::error::Could not read protocol constants from the tree."
+            exit 1
+          fi
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            actual=$(curl -sS -m 15 https://lobby-preview.phase-rs.dev/health \
-              | jq -r '.protocol_version // empty' || true)
-            if [ "$actual" = "$expected" ]; then
-              echo "Preview lobby advertises protocol_version=$actual (matches tree)."
+            health=$(curl -sS -m 15 https://lobby-preview.phase-rs.dev/health || true)
+            actual=$(printf '%s' "$health" | jq -r '.protocol_version // empty' || true)
+            actual_lobby=$(printf '%s' "$health" | jq -r '.lobby_protocol_version // empty' || true)
+            if [ "$actual" = "$expected" ] && [ "$actual_lobby" = "$expected_lobby" ]; then
+              echo "Preview lobby advertises protocol_version=$actual, lobby_protocol_version=$actual_lobby (both match tree)."
               exit 0
             fi
-            echo "Attempt $attempt: got '${actual:-<none>}', want '$expected'; retrying..."
+            echo "Attempt $attempt: got protocol='${actual:-<none>}' lobby='${actual_lobby:-<none>}';" \
+              "want protocol='$expected' lobby='$expected_lobby'; retrying..."
             sleep 10
           done
-          echo "::error::Preview lobby advertises '${actual:-<none>}' but this commit speaks '$expected'."
+          echo "::error::Preview lobby advertises protocol='${actual:-<none>}' lobby='${actual_lobby:-<none>}'," \
+            "but this commit speaks protocol='$expected' lobby='$expected_lobby'."
           exit 1
 
   # ── Frontend + Pages deploy (needs published data + server artifact + WASM) ─

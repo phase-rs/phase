@@ -1644,12 +1644,16 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         Effect::Manifest {
             target,
             count,
+            object_source,
             enters_under,
             profile: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc = acc.or(scan_quantity_expr(count, mode));
+            if let Some(f) = object_source {
+                acc = acc.or(scan_target_filter(f, target_ctx, mode));
+            }
             if let Some(x) = enters_under {
                 acc = acc.or(scan_controller_ref(x));
             }

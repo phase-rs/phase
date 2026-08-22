@@ -11926,6 +11926,45 @@ fn effect_cloak_a_card_from_your_hand_lowers_to_choose_from_zone_then_cloak() {
 }
 
 #[test]
+fn effect_manifest_a_card_from_your_hand_lowers_to_choose_from_zone_then_manifest() {
+    // CR 701.40a: Scroll of Fate's "Manifest a card from your hand" is NOT a
+    // library-top manifest — it is the manifest twin of Vannifar's cloak form
+    // above: a ChooseFromZone{Hand} parent whose Manifest sub-ability
+    // manifests the chosen object. Reverting the from-hand parser alt() drops
+    // it to Effect::Unimplemented → this fails.
+    let def = parse_effect_chain("Manifest a card from your hand", AbilityKind::Spell);
+    assert!(
+        matches!(
+            def.effect.as_ref(),
+            Effect::ChooseFromZone {
+                count: 1,
+                zone: Zone::Hand,
+                ..
+            }
+        ),
+        "expected ChooseFromZone{{Hand,count:1}} parent, got: {:?}",
+        def.effect
+    );
+    let sub = def
+        .sub_ability
+        .as_ref()
+        .expect("from-hand manifest must chain a Manifest sub-ability");
+    assert!(
+        matches!(
+            sub.effect.as_ref(),
+            Effect::Manifest {
+                object_source: Some(TargetFilter::ParentTarget),
+                enters_under: Some(ControllerRef::You),
+                ..
+            }
+        ),
+        "sub-ability must be Manifest with an explicit object_source and the \
+         CR 110.2a manifester-controls entry (enters_under: You), got: {:?}",
+        sub.effect
+    );
+}
+
+#[test]
 fn turn_face_up_then_conditional_put_keeps_follow_up_clause() {
     // CR 406.3 + CR 701.20a: Clone Shell / Summoner's Egg dies-trigger effect. The
     // "turn the exiled card face up" clause must NOT swallow the trailing
@@ -12071,6 +12110,7 @@ fn effect_put_top_onto_battlefield_face_down_lowers_to_manifest() {
     let Effect::Manifest {
         target,
         count,
+        object_source: None,
         profile,
         enters_under,
     } = &*def.effect
@@ -12094,6 +12134,7 @@ fn effect_put_top_onto_battlefield_face_down_lowers_to_manifest() {
             Effect::Manifest {
                 target: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                object_source: None,
                 profile: Some(_),
                 enters_under: None,
             }
@@ -12136,6 +12177,7 @@ fn effect_direct_manifest_top_library_parses_controller_override_only_for_impera
             Effect::Manifest {
                 target: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                object_source: None,
                 enters_under: Some(ControllerRef::You),
                 profile: None,
             }
@@ -12150,6 +12192,7 @@ fn effect_direct_manifest_top_library_parses_controller_override_only_for_impera
             Effect::Manifest {
                 target: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 2 },
+                object_source: None,
                 enters_under: Some(ControllerRef::You),
                 profile: None,
             }
@@ -12172,6 +12215,7 @@ fn effect_direct_manifest_top_library_parses_controller_override_only_for_impera
             Effect::Manifest {
                 target: TargetFilter::TriggeringPlayer,
                 count: QuantityExpr::Fixed { value: 1 },
+                object_source: None,
                 enters_under: Some(ControllerRef::You),
                 profile: None,
             }
@@ -12188,6 +12232,7 @@ fn effect_direct_manifest_top_library_parses_controller_override_only_for_impera
             Effect::Manifest {
                 target: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                object_source: None,
                 enters_under: Some(ControllerRef::You),
                 profile: None,
             }

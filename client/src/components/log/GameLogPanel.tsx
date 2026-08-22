@@ -20,6 +20,7 @@ import {
   uniqueTurns,
 } from "../../viewmodel/logSearch.ts";
 import { LogEntry } from "./LogEntry.tsx";
+import { copyText } from "../../services/copyText";
 
 const EMPTY_LOG: GameLogEntry[] = [];
 const LOG_PANEL_WIDTH_PX = 320;
@@ -246,12 +247,7 @@ export function GameLogPanel() {
         return `${context}: ${segmentsToPlainText(entry.segments)}`;
       })
       .join("\n");
-    try {
-      await navigator.clipboard.writeText(text);
-      reportCopyStatus("success");
-    } catch {
-      reportCopyStatus("failure");
-    }
+    reportCopyStatus((await copyText(text)) ? "success" : "failure");
   };
 
   const filterSummary = t("log.filterSummary", { count: filteredEntries.length });

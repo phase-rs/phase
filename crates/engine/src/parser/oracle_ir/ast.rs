@@ -747,6 +747,13 @@ pub(crate) enum ImperativeFamilyAst {
     Manifest {
         target: TargetFilter,
         count: QuantityExpr,
+        /// CR 701.40a: Source discriminant, mirroring `Cloak.from_zone`:
+        /// `None` manifests the top `count` cards of `target`'s library;
+        /// `Some(zone)` manifests a card the controller chooses from that zone
+        /// (Scroll of Fate's "manifest a card from your hand"), which lowers
+        /// to a `ChooseFromZone` parent + `Manifest { object_source }`
+        /// sub-chain.
+        from_zone: Option<Zone>,
         /// CR 110.2a: Direct imperative manifest defaults to the instruction's
         /// controller; subject-predicate forms leave this unset so the subject's
         /// library owner controls the manifested card.

@@ -14992,6 +14992,18 @@ pub enum Effect {
     Manifest {
         target: TargetFilter,
         count: QuantityExpr,
+        /// CR 701.40a: The objects to manifest. `None` (serde default) is the
+        /// library-top source — the resolver manifests the top `count` cards
+        /// of `target`'s library one at a time (CR 701.40e). `Some(filter)`
+        /// names explicit objects already chosen upstream (Scroll of Fate's
+        /// "manifest a card from your hand"): the objects are resolved from
+        /// the resolving ability's `targets` via `effect_object_targets`,
+        /// which a preceding `Effect::ChooseFromZone` populated. Kept off
+        /// `target_filter()` so manifest stays a non-targeted keyword action
+        /// (the object selection is the parent `ChooseFromZone`'s
+        /// responsibility). Mirrors `Cloak.object_source`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        object_source: Option<TargetFilter>,
         /// CR 708.2a: Effect-specified face-down characteristics override
         /// ("They're 2/2 Cyberman artifact creatures."). `None` = the vanilla
         /// 2/2 manifest default (CR 701.40a). The put-clause seeds
@@ -17473,25 +17485,20 @@ impl Effect {
             // is always the origin.
             | Effect::Seek { .. } => true,
 
-            // `Effect::Manifest` is TRUE because the ENGINE's manifest is always
-            // top-of-library (all 24 `"type":"Manifest"` nodes in
-            // `data/card-data.json`, each "manifest the top card of your
-            // library"; Ghastly Conscription's
-            // manifest-from-a-graveyard-pile routes to `ChangeZoneAll` instead),
-            // NOT because CR 701.40a says so — CR 701.40a names no source zone
-            // ("Put that card onto the battlefield face down"), and CR 701.40e
-            // ("If an effect instructs a player to manifest multiple cards from
-            // their library ...") and CR 701.40f ("it remains in its previous
-            // zone") together imply non-library sources are legal. A CR-derived
-            // verdict would have to be conditional; there is no source field to
-            // condition on.
-            //
-            // THIS ARM BECOMES WRONG the moment a card manifests from hand,
-            // graveyard, or exile AND parses to this variant. That change arrives
-            // as a new nested/source STRUCT FIELD — field access, not a match arm
-            // — and therefore compiles silently. If you are adding a source field
-            // to `Effect::Manifest`, make this arm conditional in the same commit.
-            Effect::Manifest { .. } => true,
+            // CR 701.40a names no source zone ("Put that card onto the
+            // battlefield face down"), so the verdict is conditional on the
+            // variant's own source axis, mirroring the `Cloak` arm below:
+            // `object_source: None` is the library-top default (every
+            // library-form card text), a real library move. `Some(filter)`
+            // names explicit objects chosen upstream (Scroll of Fate's
+            // "manifest a card from your hand") — the verdict follows the
+            // filter's zones, so a from-hand manifest is NOT a library move
+            // and must not reject an otherwise valid mana ability under the
+            // CR 605.1a classifier.
+            Effect::Manifest { object_source, .. } => match object_source {
+                None => true,
+                Some(filter) => filter.extract_zones().contains(&Zone::Library),
+            },
 
             // No CR entry exists: "heist" does not appear anywhere in
             // `docs/MagicCompRules.txt` (verified case-insensitively). Do not
