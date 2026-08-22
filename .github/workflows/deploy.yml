@@ -595,10 +595,87 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY: ${{ secrets.SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY }}
 
+  # ── Preview lobby Worker ───────────────────────────────────────────────────
+  # The preview channel's matchmaking broker (wrangler.toml [env.preview] ->
+  # Worker `phase-lobby-preview`, wss://lobby-preview.phase-rs.dev/ws). Deployed
+  # on EVERY staging deploy, which is the whole point: production's lobby only
+  # redeploys at release, so `main` drifts ahead of it and the two accept-windows
+  # ([PROTOCOL_VERSION-1, PROTOCOL_VERSION] on each side) go disjoint after two
+  # bumps. Redeploying preview in lockstep with the preview client keeps that
+  # pair aligned by construction. Production's `phase-lobby` is untouched here.
+  deploy-lobby-preview:
+    name: Deploy Preview Lobby Worker (Cloudflare)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          targets: wasm32-unknown-unknown
+          cache-shared-key: rust-wasm
+          # broker-wasm needs its .cargo/config.toml
+          # [target.wasm32-unknown-unknown] shadow-stack rustflags; an env
+          # RUSTFLAGS would override them.
+          rustflags: ""
+
+      - uses: taiki-e/install-action@v2
+        with:
+          # Must match the pinned wasm-bindgen crate version in
+          # lobby-worker/broker-wasm/Cargo.toml (schema versions must be exact).
+          tool: wasm-bindgen-cli@0.2.121
+
+      - name: Cache binaryen
+        id: binaryen-cache
+        uses: actions/cache@v4
+        with:
+          path: binaryen-version_123
+          key: binaryen-123-x86_64-linux
+
+      - name: Install binaryen
+        if: steps.binaryen-cache.outputs.cache-hit != 'true'
+        run: curl -L https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-linux.tar.gz | tar xz
+
+      - name: Add binaryen to PATH
+        run: echo "$PWD/binaryen-version_123/bin" >> "$GITHUB_PATH"
+
+      - name: Deploy preview lobby Worker
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.113.0"
+          workingDirectory: lobby-worker
+          command: deploy --env preview
+
+      - name: Assert the preview lobby advertises this commit's protocol version
+        # Guards the exact regression this job exists to prevent: a preview
+        # client that cannot handshake with the preview lobby. Compares the
+        # deployed Worker's advertised protocol_version against the constant in
+        # the tree being deployed.
+        run: |
+          set -euo pipefail
+          expected=$(grep -oE 'pub const PROTOCOL_VERSION: u32 = [0-9]+' \
+            crates/lobby-broker/src/protocol.rs | grep -oE '[0-9]+$')
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            actual=$(curl -sS -m 15 https://lobby-preview.phase-rs.dev/health \
+              | jq -r '.protocol_version // empty' || true)
+            if [ "$actual" = "$expected" ]; then
+              echo "Preview lobby advertises protocol_version=$actual (matches tree)."
+              exit 0
+            fi
+            echo "Attempt $attempt: got '${actual:-<none>}', want '$expected'; retrying..."
+            sleep 10
+          done
+          echo "::error::Preview lobby advertises '${actual:-<none>}' but this commit speaks '$expected'."
+          exit 1
+
   # ── Frontend + Pages deploy (needs published data + server artifact + WASM) ─
   build-pages:
     name: Build & Deploy Pages
-    needs: [preview-inputs, card-data, build-wasm, preview-server]
+    needs: [preview-inputs, card-data, build-wasm, preview-server, deploy-lobby-preview]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -681,7 +758,23 @@ jobs:
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           # First-party telemetry ingest (lobby Worker → Analytics Engine, see
           # docs/telemetry-proposal.md). Unset would compile telemetry to a no-op.
-          TELEMETRY_URL: "https://lobby.phase-rs.dev/telemetry"
+          TELEMETRY_URL: "https://lobby-preview.phase-rs.dev/telemetry"
+          # Preview talks to its OWN lobby Worker (wrangler.toml [env.preview]).
+          # A single lobby cannot serve both channels: ServerHello is sent
+          # unprompted before ClientHello, so the broker advertises one protocol
+          # number blind, and each client only accepts
+          # [PROTOCOL_VERSION-1, PROTOCOL_VERSION] of its OWN build. Two bumps on
+          # main after a release makes those windows disjoint and one cohort is
+          # always locked out. Splitting the deployment is what keeps preview
+          # usable while release stays pinned to the last tag.
+          #
+          # This sets OFFICIAL, not DEFAULT. DEFAULT is the self-hoster seam, and
+          # serverDetection.ts reads DEFAULT !== OFFICIAL as "self-hosted build",
+          # which would label the preview lobby "Self-hosted" AND offer an
+          # "Official" row pointing at the production lobby this build cannot
+          # handshake with. Setting OFFICIAL keeps DEFAULT === OFFICIAL, so the
+          # picker shows exactly one correct official entry.
+          OFFICIAL_MULTIPLAYER_SERVER_URL: "wss://lobby-preview.phase-rs.dev/ws"
         run: |
           cd client
           pnpm install --frozen-lockfile

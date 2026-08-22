@@ -1,6 +1,9 @@
 import path from "node:path";
 import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
+import { resolveMultiplayerServerUrls } from "./src/config/multiplayerServerUrls";
+
+const multiplayerServers = resolveMultiplayerServerUrls((name) => process.env[name]);
 
 /**
  * Resolves the @wasm/* aliases to the real WASM build artifacts when present,
@@ -51,9 +54,9 @@ export default defineConfig({
     __APP_VERSION__: JSON.stringify("0.0.0-test"),
     __BUILD_HASH__: JSON.stringify("testhash"),
     __ENGINE_WASM_URL__: "undefined",
-    __DEFAULT_MULTIPLAYER_SERVER_URL__: JSON.stringify(
-      process.env.DEFAULT_MULTIPLAYER_SERVER_URL || "wss://lobby.phase-rs.dev/ws",
-    ),
+    // Same resolver vite.config.ts uses — the order is single-authority.
+    __OFFICIAL_MULTIPLAYER_SERVER_URL__: JSON.stringify(multiplayerServers.official),
+    __DEFAULT_MULTIPLAYER_SERVER_URL__: JSON.stringify(multiplayerServers.buildDefault),
     __GIT_REPO_URL__: JSON.stringify("https://github.com/phase-rs/phase"),
     __PREVIEW_SITE_URL__: JSON.stringify("https://preview.phase-rs.dev"),
     __RELEASE_SITE_URL__: JSON.stringify("https://phase-rs.dev"),

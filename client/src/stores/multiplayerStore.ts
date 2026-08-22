@@ -525,7 +525,7 @@ export function migratePersistedMultiplayerState(
 ): unknown {
   if (!persisted || typeof persisted !== "object") return persisted;
   const migrated = persisted as Record<string, unknown>;
-  if (version < 2) {
+  if (version < 3) {
     migrated.serverAddress = migrateOfficialServerAddress(
       migrated.serverAddress,
       DEFAULT_MULTIPLAYER_SERVER_URL,
@@ -1471,11 +1471,19 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
     }),
     {
       name: "phase-multiplayer",
-      version: 2,
+      version: 3,
       // v0/v1 → v2: official hosted lobby addresses are deployment defaults,
       // not user intent. A self-hosted build must move returning browsers from
       // the official lobby to its configured default while preserving explicit
       // custom/self-hosted addresses.
+      //
+      // v2 → v3: same rule, re-applied because the official set now spans a
+      // broker PER RELEASE CHANNEL. Without this bump a returning preview
+      // browser keeps its persisted production address, and detectServerUrl
+      // honours any stored address whose /health answers — production's does —
+      // so it would silently stay pinned to a lobby its build cannot handshake
+      // with. Re-running the same migration repoints it at this channel's
+      // broker; a user-typed non-official address is still preserved.
       migrate: migratePersistedMultiplayerState,
       partialize: (state) => ({
         playerId: state.playerId,
