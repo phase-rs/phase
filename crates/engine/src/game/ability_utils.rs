@@ -6079,6 +6079,52 @@ fn build_target_selection_progress_for_ability(
         );
     }
 
+    // CR 115.10a: "Just because an object or player is being affected by a spell or
+    // ability doesn't make that object or player a target … Unless that object or
+    // player is identified by the word 'target'…". The `SpecificPlayer` half of a
+    // per-opponent target fanout (`collect_per_opponent_target_fanout_specs`) is a
+    // BINDER: it is pinned to one player by construction so the following object
+    // slot's `ControllerRef::TargetPlayer` scope resolves ("that player's
+    // graveyard"). The opponent is affected but never identified by "target" —
+    // Diluvian Primordial's "target" attaches to the card. CR 115.1d: only the card
+    // slot is an announced target. Announce the pinned player on the controller's
+    // behalf and advance, so the first prompt they see is the real choice.
+    //
+    // Same conjunction `legal_targets_for_selected_slot` already uses to identify a
+    // binder (fanout predicate + `SpecificPlayer` filter) — not a looser
+    // filter-shape test, so an ordinary pinned-player slot on a non-fanout ability
+    // still prompts.
+    //
+    // CR 115.6: `!slot.optional` — declining an optional slot is a real choice the
+    // controller owns ("may allow zero targets to be chosen"), so an optional slot
+    // is never a non-choice even with a singleton legal set.
+    // CR 601.2c + CR 115.1: `chooser.is_none()` — a slot announced by another player
+    // is not the controller's to auto-resolve.
+    if is_per_opponent_target_fanout(ability) && !slot.optional && slot.chooser.is_none() {
+        if let Some(TargetSlotSpec {
+            filter: TargetFilter::SpecificPlayer { id },
+            ..
+        }) = specs.get(current_slot)
+        {
+            // `TargetRef` is NOT `Copy`, so `== [pinned]` would MOVE `pinned` into
+            // the array literal and make the `push` below E0382. `from_ref`
+            // borrows instead, and allocates nothing.
+            let pinned = TargetRef::Player(*id);
+            if current_legal_targets == std::slice::from_ref(&pinned) {
+                let mut bound_slots = selected_slots;
+                bound_slots.push(Some(pinned));
+                return build_target_selection_progress_for_ability(
+                    state,
+                    ability,
+                    target_slots,
+                    constraints,
+                    current_slot + 1,
+                    bound_slots,
+                );
+            }
+        }
+    }
+
     Ok(TargetSelectionProgress {
         current_slot,
         selected_slots,
@@ -12108,23 +12154,15 @@ mod tests {
             .legal_targets
             .contains(&TargetRef::Object(caster_creature)));
 
+        // CR 115.10a: the pinned binder is announced by the engine, so the walk
+        // opens on the first object slot with the binder already bound.
         let progress =
             begin_target_selection_for_ability(&state, &ability, &slots, &[]).expect("selection");
+        assert_eq!(progress.current_slot, 1);
         assert_eq!(
-            progress.current_legal_targets,
-            vec![TargetRef::Player(PlayerId(1))]
+            progress.selected_slots,
+            vec![Some(TargetRef::Player(PlayerId(1)))]
         );
-        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
-            &state,
-            &ability,
-            &slots,
-            &[],
-            &progress,
-            Some(TargetRef::Player(PlayerId(1))),
-        )
-        .expect("forced first player target should be accepted") else {
-            panic!("expected first object slot");
-        };
         assert_eq!(
             progress.current_legal_targets,
             vec![TargetRef::Object(opponent_one_creature)]
@@ -12173,17 +12211,11 @@ mod tests {
 
         let progress =
             begin_target_selection_for_ability(&state, &ability, &slots, &[]).expect("selection");
-        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
-            &state,
-            &ability,
-            &slots,
-            &[],
-            &progress,
-            Some(TargetRef::Player(PlayerId(1))),
-        )
-        .expect("hidden player constraint should bypass player targeting protection") else {
-            panic!("expected first object slot");
-        };
+        assert_eq!(
+            progress.selected_slots,
+            vec![Some(TargetRef::Player(PlayerId(1)))],
+            "the auto-announced binder still bypasses player targeting protection"
+        );
         assert_eq!(
             progress.current_legal_targets,
             vec![TargetRef::Object(opponent_creature)]
@@ -12229,17 +12261,6 @@ mod tests {
 
         let progress =
             begin_target_selection_for_ability(&state, &ability, &slots, &[]).expect("selection");
-        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
-            &state,
-            &ability,
-            &slots,
-            &[],
-            &progress,
-            Some(TargetRef::Player(PlayerId(1))),
-        )
-        .expect("hidden player slot should be accepted") else {
-            panic!("expected object slot");
-        };
         assert_eq!(
             progress.current_legal_targets,
             vec![TargetRef::Object(unprotected_enchantment)]
@@ -12384,31 +12405,9 @@ mod tests {
             &slots,
             &[],
             &progress,
-            Some(TargetRef::Player(PlayerId(1))),
-        )
-        .expect("first hidden player slot should be accepted") else {
-            panic!("expected first object slot");
-        };
-        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
-            &state,
-            &ability,
-            &slots,
-            &[],
-            &progress,
             Some(TargetRef::Object(opponent_one_creature)),
         )
         .expect("first object slot should be accepted") else {
-            panic!("expected second hidden player slot");
-        };
-        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
-            &state,
-            &ability,
-            &slots,
-            &[],
-            &progress,
-            Some(TargetRef::Player(PlayerId(2))),
-        )
-        .expect("second hidden player slot should be accepted") else {
             panic!("expected second object slot");
         };
         let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
@@ -12429,6 +12428,202 @@ mod tests {
                 .current_legal_targets
                 .contains(&TargetRef::Player(PlayerId(1))),
             "trailing non-fanout target slot should fall through to normal target recompute"
+        );
+    }
+
+    /// Shared board for the two `chooser` rows: a MANDATORY per-opponent fanout
+    /// with exactly one opponent, who controls exactly one legal permanent. The
+    /// two rows are separate `#[test]` functions with their own verdicts and
+    /// differ only in the binder slot's `chooser`.
+    fn per_opponent_binder_chooser_fixture() -> (
+        GameState,
+        ResolvedAbility,
+        Vec<TargetSelectionSlot>,
+        ObjectId,
+    ) {
+        let mut state = GameState::new_two_player(42);
+        let opponent_creature = create_creature(&mut state, PlayerId(1), CardId(1), "Opp One");
+        let ability = per_opponent_gain_control_ability();
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        (state, ability, slots, opponent_creature)
+    }
+
+    /// CR 601.2c + CR 115.1: a slot another player announces is never the
+    /// controller's to auto-resolve, even when it is a structurally pinned
+    /// per-opponent binder. Paired negative for
+    /// `binder_slot_without_a_chooser_is_autofilled`.
+    #[test]
+    fn binder_slot_with_a_foreign_chooser_is_not_autofilled() {
+        let (state, ability, mut slots, _) = per_opponent_binder_chooser_fixture();
+        assert!(is_per_opponent_target_fanout(&ability));
+        assert_eq!(slots.len(), 2);
+        assert_eq!(slots[0].legal_targets, vec![TargetRef::Player(PlayerId(1))]);
+        assert!(
+            !slots[0].optional,
+            "the fixture must satisfy every conjunct except `chooser`"
+        );
+
+        slots[0].chooser = Some(PlayerId(1));
+        let progress =
+            begin_target_selection_for_ability(&state, &ability, &slots, &[]).expect("selection");
+        assert_eq!(
+            progress.current_slot, 0,
+            "a chooser-stamped binder remains an announced step for that player"
+        );
+        assert_eq!(
+            progress.current_legal_targets,
+            vec![TargetRef::Player(PlayerId(1))]
+        );
+    }
+
+    /// CR 115.10a: the same fixture with no foreign chooser — the pinned
+    /// opponent is announced by the engine and the walk opens on the object
+    /// slot. Sibling positive for
+    /// `binder_slot_with_a_foreign_chooser_is_not_autofilled`.
+    #[test]
+    fn binder_slot_without_a_chooser_is_autofilled() {
+        let (state, ability, slots, opponent_creature) = per_opponent_binder_chooser_fixture();
+        assert_eq!(slots.len(), 2);
+        assert!(slots[0].chooser.is_none());
+        assert_eq!(slots[0].legal_targets, vec![TargetRef::Player(PlayerId(1))]);
+
+        let progress =
+            begin_target_selection_for_ability(&state, &ability, &slots, &[]).expect("selection");
+        assert_eq!(
+            progress.current_slot, 1,
+            "the pinned binder is announced on the controller's behalf"
+        );
+        assert_eq!(
+            progress.selected_slots,
+            vec![Some(TargetRef::Player(PlayerId(1)))]
+        );
+        assert_eq!(
+            progress.current_legal_targets,
+            vec![TargetRef::Object(opponent_creature)]
+        );
+    }
+
+    /// CR 603.3d: a REQUIRED binder with no legal player still removes the
+    /// ability from the stack. The auto-fill block is deliberately ordered
+    /// after the empty-legal-set block, so this path is byte-identical to its
+    /// pre-auto-fill behavior.
+    #[test]
+    fn binder_with_no_legal_player_still_reports_no_legal_combinations() {
+        let mut state = GameState::new_two_player(42);
+        create_creature(&mut state, PlayerId(1), CardId(1), "Opp One");
+        let ability = per_opponent_gain_control_ability();
+
+        let mut slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(slots.len(), 2);
+        assert_eq!(slots[0].legal_targets, vec![TargetRef::Player(PlayerId(1))]);
+        assert!(!slots[0].optional);
+
+        // CR 800.4: the sole opponent leaves the game after the slots were
+        // built. The fanout then yields no spec at all, and the stale required
+        // binder slot has no legal player left.
+        state
+            .players
+            .iter_mut()
+            .find(|player| player.id == PlayerId(1))
+            .expect("opponent seat")
+            .is_eliminated = true;
+        slots[0].legal_targets.clear();
+
+        let error = begin_target_selection_for_ability(&state, &ability, &slots, &[])
+            .expect_err("a required binder with no legal player must not be auto-filled");
+        assert!(
+            matches!(&error, EngineError::ActionNotAllowed(message)
+                if message == "No legal target combinations available"),
+            "expected the CR 603.3d no-legal-combination error, got {error:?}"
+        );
+    }
+
+    /// CR 115.10a does NOT apply to an ordinary singleton target: "destroy
+    /// target creature" identifies the creature by the word "target", so the
+    /// controller still announces it even when exactly one is legal. Negative
+    /// control for the class boundary — the general "any mandatory singleton
+    /// auto-fills" rule is explicitly not implemented.
+    #[test]
+    fn a_lone_legal_creature_for_destroy_target_creature_still_prompts() {
+        let mut state = GameState::new_two_player(42);
+        let lone_creature = create_creature(&mut state, PlayerId(1), CardId(1), "Lone Creature");
+        let ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        assert!(!is_per_opponent_target_fanout(&ability));
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(slots.len(), 1);
+        assert!(!slots[0].optional);
+        assert!(slots[0].chooser.is_none());
+        let progress =
+            begin_target_selection_for_ability(&state, &ability, &slots, &[]).expect("selection");
+        assert_eq!(
+            progress.current_slot, 0,
+            "the word `target` attaches to the creature, so the controller announces it"
+        );
+        assert_eq!(
+            progress.current_legal_targets,
+            vec![TargetRef::Object(lone_creature)]
+        );
+
+        // Reach guard: the same shape with a genuine choice also prompts at
+        // slot 0, so the singleton assertion above is not the only branch.
+        let second_creature =
+            create_creature(&mut state, PlayerId(1), CardId(2), "Second Creature");
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        let progress =
+            begin_target_selection_for_ability(&state, &ability, &slots, &[]).expect("selection");
+        assert_eq!(progress.current_slot, 0);
+        assert!(progress
+            .current_legal_targets
+            .contains(&TargetRef::Object(second_creature)));
+    }
+
+    /// CR 115.10a is scoped to the per-opponent fanout BINDER, not to every
+    /// pinned-player slot. A mandatory `SpecificPlayer` slot on a NON-fanout
+    /// ability is a real announced target and still prompts — this is the row
+    /// that separates the adopted `is_per_opponent_target_fanout` gate from a
+    /// filter-shape-only predicate.
+    #[test]
+    fn mandatory_specific_player_slot_on_a_non_fanout_ability_still_prompts() {
+        let state = GameState::new(FormatConfig::standard(), 3, 42);
+        let pinned = PlayerId(1);
+        let ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::SpecificPlayer { id: pinned },
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        assert!(!ability.optional_targeting);
+        assert!(ability.multi_target.is_none());
+        assert!(!is_per_opponent_target_fanout(&ability));
+
+        // Reach guard: the fixture satisfies every conjunct of the auto-fill
+        // guard EXCEPT the fanout gate — mandatory, unchoosered, singleton.
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(slots.len(), 1);
+        assert!(!slots[0].optional);
+        assert!(slots[0].chooser.is_none());
+        assert_eq!(slots[0].legal_targets, vec![TargetRef::Player(pinned)]);
+
+        let progress =
+            begin_target_selection_for_ability(&state, &ability, &slots, &[]).expect("selection");
+        assert_eq!(
+            progress.current_slot, 0,
+            "a pinned-player slot outside the fanout class is still announced by the controller"
+        );
+        assert_eq!(
+            progress.current_legal_targets,
+            vec![TargetRef::Player(pinned)]
         );
     }
 
