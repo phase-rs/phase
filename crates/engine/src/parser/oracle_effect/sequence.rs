@@ -29,7 +29,7 @@ use crate::types::ability::{
     FaceDownProfile, FilterProp, ForEachCategoryAction, LibraryPosition, ManaSpendRestriction,
     MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter, PtValue, QuantityExpr,
     QuantityRef, RevealUntilDisposition, SpellStackToGraveyardReplacement, StaticDefinition,
-    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    TargetChoiceTiming, TargetFilter, ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -4300,6 +4300,7 @@ pub(super) fn apply_clause_continuation(
             enter_tapped,
             enters_attacking,
             reveal_verb,
+            caused_by,
         } => {
             // CR 608.2c: the "from among those cards" continuation patches the
             // earlier "look at the top N" instruction. When a transparent
@@ -4550,7 +4551,7 @@ pub(super) fn apply_clause_continuation(
                                     // selection anaphor over a single-producer
                                     // set — zone-agnostic (every member is in the
                                     // mill destination already).
-                                    caused_by: None,
+                                    caused_by,
                                 },
                                 enters_under,
                                 enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(
@@ -4585,7 +4586,7 @@ pub(super) fn apply_clause_continuation(
                                     filter: Box::new(card_filter),
                                     // Selection anaphor over the single milled
                                     // set — zone-agnostic (see the `All` arm).
-                                    caused_by: None,
+                                    caused_by,
                                 },
                                 owner_library: false,
                                 enter_transformed: false,
@@ -5774,6 +5775,7 @@ pub(super) fn parse_dig_from_among(
             enter_tapped,
             enters_attacking,
             reveal_verb,
+            caused_by: Some(ThisWayCause::Milled),
         });
     }
 
@@ -5880,6 +5882,7 @@ pub(super) fn parse_dig_from_among(
             enter_tapped,
             enters_attacking,
             reveal_verb,
+            caused_by: None,
         });
     }
 
@@ -5944,6 +5947,7 @@ pub(super) fn parse_dig_from_among(
                 enter_tapped,
                 enters_attacking,
                 reveal_verb: false,
+                caused_by: None,
             });
         }
     }
@@ -7026,6 +7030,7 @@ pub(super) fn parse_followup_continuation_ast(
                 enters_attacking: false,
                 // "put one of those cards onto the battlefield" — a put, not a reveal.
                 reveal_verb: false,
+                caused_by: None,
             })
         }
         // "You may put one of those cards back on top of your library" after
@@ -7049,6 +7054,7 @@ pub(super) fn parse_followup_continuation_ast(
                 enters_attacking: false,
                 // "put one ... back on top" — a put, not a reveal.
                 reveal_verb: false,
+                caused_by: None,
             })
         }
         // "put them back in any order" after Dig means all looked-at cards
@@ -10246,6 +10252,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             })
         );
     }
@@ -10272,6 +10279,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             })
         );
     }
@@ -10303,6 +10311,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             })
         );
     }
@@ -10328,6 +10337,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             })
         );
     }
@@ -10353,6 +10363,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             })
         );
     }
@@ -10380,6 +10391,7 @@ mod tests {
                     enter_tapped: false,
                     enters_attacking: false,
                     reveal_verb: false,
+                    caused_by: None,
                 }),
                 "{text}"
             );
@@ -10655,6 +10667,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             },
             AbilityKind::Spell,
             &env,
@@ -10929,6 +10942,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             },
             AbilityKind::Spell,
             &env,
@@ -10979,6 +10993,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             },
             AbilityKind::Spell,
             &env,
@@ -11047,6 +11062,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             },
             AbilityKind::Spell,
             &env,
@@ -12076,6 +12092,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             })
         );
     }
