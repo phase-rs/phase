@@ -12,6 +12,17 @@ use crate::types::*;
 use crate::validation::validate_limited_deck;
 
 impl DraftSession {
+    /// The round that pairings may next be generated for.
+    ///
+    /// Single authority. `AdvanceRound` deliberately leaves `current_round`
+    /// untouched — it only opens the `Pairing` window — so `current_round` is
+    /// always the last round whose pairings exist, and generating pairings is
+    /// what commits the next one. Private on purpose: callers outside this
+    /// module must not re-derive it.
+    fn next_pairing_round(&self) -> u8 {
+        self.current_round + 1
+    }
+
     /// Create a new draft session in Lobby status.
     ///
     /// Timestamps are set to 0 -- callers set them externally since the pure
@@ -145,7 +156,7 @@ pub fn apply(
             card_instance_ids,
         ),
         DraftAction::SubmitDeck { seat, main_deck } => apply_submit_deck(session, seat, main_deck),
-        DraftAction::GeneratePairings { round } => apply_generate_pairings(session, round),
+        DraftAction::GeneratePairings => apply_generate_pairings(session),
         DraftAction::ReportMatchResult {
             match_id,
             winner_seat,
@@ -186,10 +197,7 @@ fn ensure_match_record(
 /// Swiss round count for an 8-player pod.
 const SWISS_ROUNDS: u8 = 3;
 
-fn apply_generate_pairings(
-    session: &mut DraftSession,
-    round: u8,
-) -> Result<Vec<DraftDelta>, DraftError> {
+fn apply_generate_pairings(session: &mut DraftSession) -> Result<Vec<DraftDelta>, DraftError> {
     // Guard: valid status for pairing generation
     let valid = matches!(
         session.status,
@@ -213,12 +221,9 @@ fn apply_generate_pairings(
             actual: session.seats.len() as u8,
         });
     }
-    if round != session.current_round + 1 {
-        return Err(DraftError::InvalidTransition {
-            from: session.status,
-            action: "GeneratePairings".to_string(),
-        });
-    }
+    // Single authority. The round is derived, never supplied, so the old
+    // `round != current_round + 1` guard is unreachable and is gone.
+    let round = session.next_pairing_round();
 
     let mut rng =
         ChaCha20Rng::seed_from_u64(session.config.rng_seed ^ (round as u64 * 0xDEAD_BEEF));
@@ -1256,12 +1261,7 @@ mod tests {
         let (mut session, _) = test_session(8);
         session.status = DraftStatus::Deckbuilding;
 
-        let deltas = apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        let deltas = apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         assert!(deltas.contains(&DraftDelta::PairingsGenerated { round: 1 }));
         assert!(deltas.contains(&DraftDelta::TransitionedTo {
@@ -1294,12 +1294,7 @@ mod tests {
             };
         }
 
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let round_pairings: Vec<_> = session.pairings.iter().filter(|p| p.round == 1).collect();
         assert_eq!(round_pairings.len(), 4);
@@ -1319,12 +1314,7 @@ mod tests {
         session.seats[7] = DraftSeat::Bot {
             name: "Bot 7".to_string(),
         };
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
         let pairing = session
             .pairings
             .iter()
@@ -1352,11 +1342,7 @@ mod tests {
         session.status = DraftStatus::Deckbuilding;
         session.config.tournament_format = TournamentFormat::SingleElimination;
 
-        let result = apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        );
+        let result = apply(&mut session, DraftAction::GeneratePairings, None);
 
         assert!(matches!(
             result,
@@ -1376,12 +1362,7 @@ mod tests {
         session.status = DraftStatus::Deckbuilding;
 
         // Generate round 1
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         // Record all round 1 pairings as opponent pairs
         let round1_pairs: Vec<[PlayerId; 2]> = session
@@ -1409,12 +1390,7 @@ mod tests {
         session.status = DraftStatus::RoundComplete;
 
         // Generate round 2
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 2 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let round2_pairs: Vec<[PlayerId; 2]> = session
             .pairings
@@ -1465,12 +1441,7 @@ mod tests {
         let mut session = DraftSession::new(config, seats, "SE-TEST".to_string());
         session.status = DraftStatus::Deckbuilding;
 
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let pairings: Vec<_> = session.pairings.iter().filter(|p| p.round == 1).collect();
         assert_eq!(pairings.len(), 4);
@@ -1509,12 +1480,7 @@ mod tests {
         let mut session = DraftSession::new(config, seats, "SE-TEST".to_string());
         session.status = DraftStatus::Deckbuilding;
 
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         for (match_id, winner_seat) in [("r1-t0", 7), ("r1-t1", 6), ("r1-t2", 2), ("r1-t3", 4)] {
             apply(
@@ -1531,12 +1497,7 @@ mod tests {
         assert_eq!(session.status, DraftStatus::RoundComplete);
 
         apply(&mut session, DraftAction::AdvanceRound, None).unwrap();
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 2 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let pairings: Vec<_> = session.pairings.iter().filter(|p| p.round == 2).collect();
         assert_eq!(pairings.len(), 2);
@@ -1550,12 +1511,7 @@ mod tests {
         session.status = DraftStatus::Deckbuilding;
         session.config.tournament_format = TournamentFormat::SingleElimination;
 
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let result = apply(
             &mut session,
@@ -1577,12 +1533,7 @@ mod tests {
         let (mut session, _) = test_session(8);
         session.status = DraftStatus::Deckbuilding;
 
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let pairing = session
             .pairings
@@ -1627,12 +1578,7 @@ mod tests {
         let (mut session, _) = test_session(8);
         session.status = DraftStatus::Deckbuilding;
 
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let pairing = session
             .pairings
@@ -1687,12 +1633,7 @@ mod tests {
         let (mut session, _) = test_session(8);
         session.status = DraftStatus::Deckbuilding;
 
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let pairing = session
             .pairings
@@ -1742,12 +1683,7 @@ mod tests {
         let (mut session, _) = test_session(8);
         session.status = DraftStatus::Deckbuilding;
 
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let results: Vec<(String, u8)> = session
             .pairings
@@ -1801,12 +1737,7 @@ mod tests {
         let (mut session, _) = test_session(8);
         session.status = DraftStatus::Deckbuilding;
 
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let results: Vec<(String, u8)> = session
             .pairings
@@ -1828,12 +1759,7 @@ mod tests {
         }
 
         apply(&mut session, DraftAction::AdvanceRound, None).unwrap();
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 2 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let result = apply(
             &mut session,
@@ -1855,12 +1781,7 @@ mod tests {
         let (mut session, _) = test_session(8);
         session.status = DraftStatus::Deckbuilding;
 
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let results: Vec<(String, u8)> = session
             .pairings
@@ -1957,11 +1878,7 @@ mod tests {
     fn test_generate_pairings_wrong_status() {
         let (mut session, _) = test_session(8);
         // session is in Lobby status
-        let result = apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        );
+        let result = apply(&mut session, DraftAction::GeneratePairings, None);
         assert!(matches!(
             result,
             Err(DraftError::InvalidTransition {
@@ -2076,7 +1993,7 @@ mod tests {
         // Odd pod -> exactly one player takes a bye each round.
         let (mut session, _) = test_session(3);
         session.status = DraftStatus::Deckbuilding; // satisfy the pairing-generation guard
-        apply_generate_pairings(&mut session, 1).unwrap();
+        apply_generate_pairings(&mut session).unwrap();
 
         // Three players: one two-player pairing plus one bye.
         assert_eq!(
@@ -2113,11 +2030,9 @@ mod tests {
             );
         }
 
+        // With the round guard gone, a RoundComplete session generates the NEXT round.
         session.status = DraftStatus::RoundComplete;
-        assert!(matches!(
-            apply_generate_pairings(&mut session, 1),
-            Err(DraftError::InvalidTransition { .. })
-        ));
+        apply_generate_pairings(&mut session).expect("round two generates from RoundComplete");
         assert_eq!(
             session
                 .pairings
@@ -2125,7 +2040,16 @@ mod tests {
                 .filter(|pairing| pairing.round == 1)
                 .count(),
             1,
-            "replaying a completed round must not append pairings",
+            "generating round two must not append to round one",
+        );
+        assert_eq!(
+            session
+                .pairings
+                .iter()
+                .filter(|pairing| pairing.round == 2)
+                .count(),
+            1,
+            "a three-player pod pairs exactly one table in round two",
         );
         assert_eq!(
             session
@@ -2133,7 +2057,7 @@ mod tests {
                 .get(&bye)
                 .map(|record| record.match_wins),
             Some(1),
-            "replaying a completed round must not award the bye twice",
+            "the round-one bye is not re-credited by round-two generation",
         );
     }
 }

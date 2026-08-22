@@ -55,7 +55,7 @@ export type DraftPodHostEvent =
   | { type: "pairingsGenerated"; round: number; pairings: PairingView[] }
   | { type: "matchStart"; launch: DraftMatchLaunch }
   | { type: "matchResultReceived"; matchId: string; winnerSeat: number | null }
-  | { type: "roundAdvanced"; newRound: number }
+  | { type: "roundAdvanced" }
   | { type: "timerExpired" }
   | {
       type: "bo3SideboardPrompt";
@@ -341,7 +341,7 @@ export class DraftPodHostAdapter {
         break;
       case "roundAdvanced":
         this.setStatus("pairing");
-        this.emit({ type: "roundAdvanced", newRound: event.newRound });
+        this.emit({ type: "roundAdvanced" });
         break;
       case "timerExpired":
         this.emit({ type: "timerExpired" });
@@ -420,9 +420,9 @@ export class DraftPodHostAdapter {
 
   // ── Match coordination ──────────────────────────────────────────────
 
-  async generatePairings(round: number): Promise<void> {
+  async generatePairings(): Promise<void> {
     if (!this.host) throw new Error("Host not initialized");
-    await this.host.generatePairings(round);
+    await this.host.generatePairings();
   }
 
   async advanceRound(): Promise<void> {

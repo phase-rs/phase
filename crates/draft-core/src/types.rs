@@ -356,9 +356,9 @@ pub enum DraftAction {
         seat: u8,
         main_deck: Vec<String>,
     },
-    GeneratePairings {
-        round: u8,
-    },
+    /// Generate the next round's pairings. Carries no round: the reducer is the
+    /// single authority for which round that is (`DraftSession::next_pairing_round`).
+    GeneratePairings,
     ReportMatchResult {
         match_id: String,
         /// None = draw.
