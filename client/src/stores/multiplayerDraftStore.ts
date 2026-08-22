@@ -1132,8 +1132,11 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
     case "pairingsGenerated":
       // Host-only supersession: `advanceRound()` emits its own failure as
       // `error`, so a successful retry of that exact operation clears the
-      // banner. Guests have no `pairingsGenerated` handler, so for them
-      // `clearError` (the banner's dismiss control) is the only clearing path.
+      // banner. This clears *any* live error, not just that one — accepted,
+      // because `pairingsGenerated` fires once per round boundary, so anything
+      // it erases has already had a full round on screen. Guests have no
+      // `pairingsGenerated` handler, so for them `clearError` (the banner's
+      // dismiss control) is the only clearing path.
       set({
         phase: "matchInProgress",
         currentRound: event.round,

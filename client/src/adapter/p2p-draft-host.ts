@@ -1967,10 +1967,12 @@ export class P2PDraftHost {
       if (view.status === "MatchInProgress") {
         await this.dispatchMatchLaunchesForSeat(view, 0);
       } else if (view.status === "Pairing") {
-        // `apply_advance_round` is the engine's only writer of `Pairing`, and
-        // generating pairings immediately leaves it for `MatchInProgress`. So
-        // `Pairing` already means "the pairings this window exists to produce do
-        // not exist yet".
+        // Two engine sites write `Pairing`: `apply_submit_deck` opens the
+        // round-0 window once all decks are in, and `apply_advance_round` opens
+        // each later one. Neither has generated the pairings the window exists
+        // to produce — `apply_generate_pairings` is what generates them, and it
+        // immediately leaves for `MatchInProgress`. So `Pairing` always means
+        // "not generated yet".
         // `view.pairings` still holds the *previous* round's pairings here
         // (`compute_pairing_views` filters on `current_round`, which
         // `AdvanceRound` deliberately does not bump), so testing it for

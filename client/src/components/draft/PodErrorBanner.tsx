@@ -8,7 +8,16 @@ import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
  * Self-sources from the store, matching `StandingsTable`'s convention on this
  * surface, and renders `store.error` verbatim — the string is composed by the
  * host adapter and is not i18n'd. Reuses the red banner treatment already in
- * `DraftPodLobby` and the `role="status"` shape of the pause banner.
+ * `DraftPodLobby`, and `LimitedDeckBuilder`'s `role="alert"` treatment of this
+ * same store field — the pause banner's `role="status"` is the wrong precedent,
+ * because a paused draft is a status and a failed action is not.
+ *
+ * `store.error` is write-once: nothing clears it on a phase transition, so an
+ * error raised in `betweenGames` (which has no banner of its own) surfaces on
+ * the *next* pod screen and rides along until the host's next
+ * `pairingsGenerated` supersedes it or the user dismisses it. Deliberate — the
+ * alternative is the BASE behaviour, where those errors were invisible
+ * everywhere. A scoped phase-transition clearing rule is the real fix.
  */
 export function PodErrorBanner() {
   const { t } = useTranslation("common");
@@ -19,7 +28,7 @@ export function PodErrorBanner() {
 
   return (
     <div
-      role="status"
+      role="alert"
       data-testid="pod-error-banner"
       className="flex items-start gap-3 rounded-lg border border-red-400/20 bg-red-400/5 px-4 py-3 text-sm text-red-300"
     >

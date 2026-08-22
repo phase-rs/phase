@@ -138,11 +138,15 @@ describe("P2PDraftHost.restoreFromPersisted — pairing-window recovery", () => 
       viewFor("Pairing", 1, [pairing(1, 0)]),
     );
 
-    await host.restoreFromPersisted(persistedSession());
+    const restored = await host.restoreFromPersisted(persistedSession());
 
     // REVERT-FAILING ASSERTION: pre-fix the predicate also required
     // `view.pairings.length === 0`, so this branch was dead for every round >= 1.
     expect(adapter.generatePairings).toHaveBeenCalled();
+    // The caller (`draftPodHostAdapter`) emits this view and derives host status
+    // from it; a stale `Pairing` view here strands the user on the pairing screen.
+    expect(adapter.getViewForSeat).toHaveBeenCalled();
+    expect(restored?.status).toBe("MatchInProgress");
   });
 
   it("regenerates pairings when resuming at round 0 with no pairings yet", async () => {
