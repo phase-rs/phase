@@ -7456,18 +7456,45 @@ fn finish_damage_source_subject(subject: &str) -> Option<TargetFilter> {
 }
 
 /// Isolate the source-subject clause following a "dealt by " (or "dealt to
-/// and dealt by ") anchor, at the same clause-boundary terminator
-/// `parse_damage_recipient_after_prefix` uses for the symmetric recipient-side
-/// scan (`oracle_replacement.rs:10932-10951`): end of text, a sentence
-/// period, or a trailing "this turn"/"until end of turn" duration qualifier.
+/// and dealt by ") anchor, at the same clause-boundary terminator set
+/// `parse_damage_recipient_after_prefix` validates for the symmetric
+/// recipient-side scan (`oracle_replacement.rs:10932-10951`): end of text, a
+/// sentence period, or a trailing "this turn"/"until end of turn" duration
+/// qualifier.
+///
+/// Deliberately NOT a plain `alt()` over three `take_until` branches: each
+/// `take_until(pat)` only guarantees `pat` occurs *somewhere* later in the
+/// input, not that it is the *nearest* terminator, so trying branches in a
+/// fixed priority order picks whichever is listed first rather than
+/// whichever terminator actually occurs earliest — silently swallowing a
+/// closer terminator into the subject (e.g. `"enchanted creature until end
+/// of turn."` would wrongly capture `"enchanted creature until end of
+/// turn"` if `take_until(".")` were tried first, since the only period is
+/// at the very end). Instead: try all three, then keep whichever candidate
+/// consumed the *least* input — the terminator with the smallest offset.
 fn take_damage_source_subject_clause(input: &str) -> OracleResult<'_, &str> {
-    alt((
-        terminated(take_until("."), tag(".")),
-        terminated(take_until(" this turn"), tag(" this turn")),
-        terminated(take_until(" until end of turn"), tag(" until end of turn")),
-        rest,
-    ))
-    .parse(input)
+    let candidates: [OracleResult<'_, &str>; 3] = [
+        terminated(
+            take_until::<_, _, OracleError<'_>>("."),
+            tag::<_, _, OracleError<'_>>("."),
+        )
+        .parse(input),
+        terminated(
+            take_until::<_, _, OracleError<'_>>(" this turn"),
+            tag::<_, _, OracleError<'_>>(" this turn"),
+        )
+        .parse(input),
+        terminated(
+            take_until::<_, _, OracleError<'_>>(" until end of turn"),
+            tag::<_, _, OracleError<'_>>(" until end of turn"),
+        )
+        .parse(input),
+    ];
+    candidates
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+        .min_by_key(|(_, subject): &(&str, &str)| subject.len())
+        .map_or_else(|| rest(input), Ok)
 }
 
 /// Parse the damage source filter from the subject clause before "would deal"
@@ -12054,6 +12081,38 @@ mod tests {
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
+
+    /// `take_damage_source_subject_clause` must stop at whichever terminator
+    /// occurs EARLIEST in the text, not whichever is tried first. Regression
+    /// guard for a review finding: a plain `alt()` over three `take_until`
+    /// branches (period, "this turn", "until end of turn") in a fixed
+    /// priority order picks whichever branch is listed first — since
+    /// `take_until(".")` only requires a period to exist *somewhere* later,
+    /// it would wrongly swallow "until end of turn" into the subject when the
+    /// only period is at the very end of the sentence, even though "until end
+    /// of turn" is the nearer boundary.
+    #[test]
+    fn take_damage_source_subject_clause_stops_at_earliest_terminator() {
+        let (_, subject) =
+            take_damage_source_subject_clause("enchanted creature until end of turn.")
+                .expect("terminator scan should succeed");
+        assert_eq!(
+            subject, "enchanted creature",
+            "must stop at the nearer 'until end of turn' terminator, not swallow it \
+             by chasing the sentence-final period"
+        );
+
+        // Sibling ordering: "this turn" nearer than a later period.
+        let (_, subject) =
+            take_damage_source_subject_clause("that creature this turn, prevent that damage.")
+                .expect("terminator scan should succeed");
+        assert_eq!(subject, "that creature");
+
+        // Plain period still works when it is the only/nearest terminator.
+        let (_, subject) = take_damage_source_subject_clause("creatures you control.")
+            .expect("terminator scan should succeed");
+        assert_eq!(subject, "creatures you control");
+    }
 
     /// Sheriff of Safe Passage: "enters with a +1/+1 counter on it plus an
     /// additional +1/+1 counter on it for each other creature you control." The

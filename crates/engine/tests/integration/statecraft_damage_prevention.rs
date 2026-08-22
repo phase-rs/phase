@@ -426,15 +426,17 @@ fn statecraft_follows_new_controller_after_control_change() {
 /// Uses a direct `replace_event` probe (the same production replacement
 /// pipeline `object_replacement_candidate_applies` real combat damage runs
 /// through — not a parser-shape assertion) rather than driving full combat:
-/// attaching a plain (non-bestow) Aura by directly setting `attached_to`
-/// bypasses the provenance the real cast pipeline would have recorded, and
-/// CR 704.5m's illegal-attachment state-based action sweeps such an Aura to
-/// the graveyard on the next priority pass — confirmed directly (the
-/// battlefield-driven version of this test put Candletrap in the graveyard
-/// before combat damage, a test-harness artifact of the manual attach, not a
-/// defect in the fix under test). `replace_event` is called before any
-/// priority pass gives that sweep a chance to run, so it observes the
-/// intended attached state.
+/// this fixture (like the other `attach_aura`-based ones in this file) never
+/// sets the `Aura` subtype on the manually-constructed object, so CR 704.5p
+/// sentence 2's auto-unattach state-based action sweeps it to the graveyard
+/// on the next priority pass — confirmed directly (the battlefield-driven
+/// version of this test put Candletrap in the graveyard before combat
+/// damage, a test-harness artifact of the missing subtype, not a defect in
+/// the fix under test; see `gaseous_form_real_cast_and_combat_both_directions`
+/// below for a sibling card driven through the real cast/attach pipeline
+/// with the subtype correctly set, closing that gap for at least one card).
+/// `replace_event` is called before any priority pass gives that sweep a
+/// chance to run, so it observes the intended attached state.
 #[test]
 fn candletrap_prevents_enchanted_creatures_combat_damage() {
     let mut scenario = GameScenario::new();
@@ -600,6 +602,88 @@ fn fog_bank_both_directions_correct_after_unifying_self_ref() {
     }
 }
 
+/// CR 614.1a + CR 302.6c: Gaseous Form, cast and attached through the REAL
+/// production pipeline (`GameRunner::cast(..).target_object(..).resolve()`,
+/// not a manually-set `attached_to`), then driven through real
+/// `DeclareAttackers`/`DeclareBlockers`/combat-damage resolution.
+///
+/// The other tests in this file that exercise `AttachedTo`-scoped cards use
+/// `attach_aura` (manual field-setting) + a direct `replace_event` probe,
+/// documented as routing around a state-based-action sweep. That diagnosis
+/// was incomplete (a review finding): the sweep fires because the fixture
+/// never sets the `Aura` subtype (CR 301.5b), which CR 704.5p sentence 2
+/// requires for a permanent to be treated as capable of legally staying
+/// attached — not specifically because of *how* it got attached. Setting
+/// `with_subtypes(vec!["Aura"])` before casting fixes the underlying gap and
+/// lets this one card get full real-pipeline coverage, closing that finding.
+#[test]
+fn gaseous_form_real_cast_and_combat_both_directions() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let gaseous_form = scenario
+        .add_spell_to_hand(P1, "Gaseous Form", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(free_cost())
+        // The MTGJSON-style "enchant" keyword hint is required for "Enchant
+        // creature" to be extracted as `Keyword::Enchant` — bare-FromStr
+        // inference can't parse the space-form line (see
+        // `metamorphic_alteration.rs`'s `stage_metamorphic`). Without it the
+        // cast has no attach target wired up, so the Aura resolves onto the
+        // battlefield unattached and CR 704.5m immediately sweeps it to the
+        // graveyard.
+        .from_oracle_text_with_keywords(&["enchant"], GASEOUS_FORM_TEXT)
+        .id();
+    let host = scenario.add_creature(P1, "Wisp", 3, 3).id();
+    let attacker = scenario.add_creature(P0, "Raider", 3, 3).id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    let _outcome = runner.cast(gaseous_form).target_object(host).resolve();
+
+    assert_eq!(
+        runner.state().objects[&gaseous_form].zone,
+        engine::types::zones::Zone::Battlefield,
+        "reach-guard: Gaseous Form must actually resolve onto the battlefield"
+    );
+    assert_eq!(
+        runner.state().objects[&gaseous_form].attached_to,
+        Some(engine::game::game_object::AttachTarget::Object(host)),
+        "reach-guard: the real cast pipeline must attach it to the chosen target \
+         (CR 303.4) — with the Aura subtype now set, no SBA sweep should undo this"
+    );
+    assert_eq!(
+        runner.state().objects[&gaseous_form]
+            .replacement_definitions
+            .len(),
+        2,
+        "reach-guard: the bidirectional recognizer must emit both halves"
+    );
+
+    // Recipient half via real combat: P0 attacks, `host` blocks, must take 0
+    // marked damage from the 3-power attacker.
+    runner.state_mut().active_player = P0;
+    runner.advance_to_combat();
+    run_combat(&mut runner, P0, attacker, P1, Some(host));
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&host].damage_marked,
+        0,
+        "the enchanted creature must take zero damage when blocking (recipient half, \
+         real cast + real combat)"
+    );
+    assert_eq!(
+        runner.state().objects[&attacker].damage_marked,
+        0,
+        "the enchanted creature's own combat damage while blocking must also be \
+         prevented (source half, real cast + real combat) — the attacker must take \
+         zero damage in return"
+    );
+}
+
 /// CR 614.1a + CR 615.1a: Gaseous Form — both directions correct (recipient +
 /// source), AND (plan review round 3's finding) `combat_scope` is correctly
 /// derived by the standalone bidirectional recognizer, so a NON-combat damage
@@ -609,7 +693,10 @@ fn fog_bank_both_directions_correct_after_unifying_self_ref() {
 /// Revert guard for the combat_scope row: if `scan_combat_scope` is dropped
 /// from `parse_bidirectional_damage_prevention`, `combat_scope` stays `None`
 /// and this negative assertion would wrongly also see the non-combat event
-/// prevented.
+/// prevented. (This test keeps the direct `replace_event` probe style — it
+/// needs precise control over `is_combat`/source/target that a full combat
+/// driver can't isolate as cleanly; `gaseous_form_real_cast_and_combat_both_directions`
+/// above provides the real-pipeline coverage for the ordinary combat case.)
 #[test]
 fn gaseous_form_prevents_both_combat_directions_but_not_noncombat_damage() {
     let mut scenario = GameScenario::new();
