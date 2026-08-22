@@ -17,7 +17,10 @@ import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
  * the *next* pod screen and rides along until the host's next
  * `pairingsGenerated` supersedes it or the user dismisses it. Deliberate — the
  * alternative is the BASE behaviour, where those errors were invisible
- * everywhere. A scoped phase-transition clearing rule is the real fix.
+ * everywhere. A scoped phase-transition clearing rule is the real fix; until
+ * then, note that `role="alert"` re-announces a latched error at every pod
+ * phase change, because each phase view mounts its own instance of this
+ * component.
  */
 export function PodErrorBanner() {
   const { t } = useTranslation("common");
