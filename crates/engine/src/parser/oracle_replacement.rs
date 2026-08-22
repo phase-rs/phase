@@ -7513,6 +7513,25 @@ fn parse_damage_source_filter_active(norm_lower: &str) -> Option<TargetFilter> {
 /// `finish_damage_source_subject` — the same postprocessing authority the
 /// active-voice extraction uses.
 fn parse_damage_source_filter_passive(norm_lower: &str) -> Option<TargetFilter> {
+    // Bail out entirely when the text carries a "doesn't affect .../does not
+    // affect ..." exception clause (Undergrowth: "Prevent all combat damage
+    // that would be dealt this turn. If this spell's additional cost was
+    // paid, this effect doesn't affect combat damage that would be dealt by
+    // red creatures.") — an unconstrained scan for "dealt by " would latch
+    // onto the EXCLUSION's subject ("red creatures") and wrongly report it as
+    // the shield's OWN source scope, inverting the card's actual meaning
+    // (the shield protects against everyone EXCEPT that subject, not ONLY
+    // that subject). This class of conditional exception is not implemented
+    // by this recognizer at all — bailing to `None` here preserves the
+    // pre-existing, honest "unscoped" representation for such cards rather
+    // than fabricating a backwards-wrong one. Confirmed via card-data.json
+    // parse-diff on PR #7615: Undergrowth was the only corpus card this
+    // passive scan wrongly touched.
+    if nom_primitives::scan_contains(norm_lower, "doesn't affect")
+        || nom_primitives::scan_contains(norm_lower, "does not affect")
+    {
+        return None;
+    }
     let subject = nom_primitives::scan_at_word_boundaries(norm_lower, |input| {
         preceded(
             tag::<_, _, OracleError<'_>>("dealt by "),
@@ -10608,8 +10627,19 @@ pub(crate) fn parse_bidirectional_damage_prevention(
     // any sampled card sharing this construction, so it is left to fall
     // through to the general single-definition path rather than
     // speculatively supported here (no card needs it, per the plan's
-    // pattern-coverage sample).
-    if !nom_primitives::scan_contains(norm_lower, "prevent all") {
+    // pattern-coverage sample). "prevent all" is a substring of "prevent all
+    // but N", so the guard must reject that phrasing explicitly — a bare
+    // `scan_contains(norm_lower, "prevent all")` check would wrongly accept
+    // it as `PreventionAmount::All` (over-preventing) instead of deferring to
+    // the general path's `AllBut(N)` handling (CR 615.1a), which already
+    // anchors this exact ambiguity at `strip_after(working_lower, "prevent
+    // ")` + `tag("all but ")` before falling back to bare "all" below in
+    // `parse_damage_prevention_replacement`. Review-impl (CodeRabbit) finding
+    // on PR #7615 — latent, since no card in the current corpus combines
+    // "all but N" with this ellipsis, but still worth closing.
+    if !nom_primitives::scan_contains(norm_lower, "prevent all")
+        || nom_primitives::scan_contains(norm_lower, "prevent all but")
+    {
         return None;
     }
 
@@ -12112,6 +12142,52 @@ mod tests {
         let (_, subject) = take_damage_source_subject_clause("creatures you control.")
             .expect("terminator scan should succeed");
         assert_eq!(subject, "creatures you control");
+    }
+
+    /// Corpus regression, found via PR #7615's card-data.json parse-diff:
+    /// `parse_damage_source_filter_passive`'s unconstrained "dealt by "
+    /// scan must NOT latch onto a "doesn't affect ... dealt by <subject>"
+    /// exception clause and report that subject as the shield's OWN source
+    /// scope — that inverts the card's actual meaning (protects against
+    /// everyone EXCEPT the named subject, not ONLY the named subject).
+    /// Verbatim text (a card whose oracle text has this exact shape).
+    #[test]
+    fn passive_source_filter_ignores_doesnt_affect_exception_clause() {
+        let text = "prevent all combat damage that would be dealt this turn. if this \
+                     spell's additional cost was paid, this effect doesn't affect combat \
+                     damage that would be dealt by red creatures.";
+        assert_eq!(
+            parse_damage_source_filter_passive(text),
+            None,
+            "an unconstrained 'dealt by' scan must not treat the exclusion clause's \
+             subject as the shield's own source filter — this recognizer does not \
+             implement conditional exceptions at all, so it must stay None (honest \
+             gap) rather than fabricate a backwards-wrong scope"
+        );
+
+        // "does not affect" (unabbreviated) must be rejected the same way.
+        let text_unabbreviated = "prevent all damage that would be dealt this turn. this \
+                                   effect does not affect damage that would be dealt by \
+                                   artifact creatures.";
+        assert_eq!(
+            parse_damage_source_filter_passive(text_unabbreviated),
+            None,
+            "the unabbreviated 'does not affect' phrasing must be rejected identically \
+             to the contracted 'doesn't affect' form"
+        );
+
+        // Positive reach-guard: a genuine passive "dealt by X" match (no
+        // exception clause in the text at all) must still succeed — proves
+        // the guard rejects only text containing the negation phrase, not
+        // passive-voice matching in general.
+        assert!(
+            parse_damage_source_filter_passive(
+                "prevent all damage that would be dealt by enchanted creature."
+            )
+            .is_some(),
+            "the negation guard must not suppress ordinary passive-voice matches \
+             that carry no 'doesn't/does not affect' clause"
+        );
     }
 
     /// Sheriff of Safe Passage: "enters with a +1/+1 counter on it plus an

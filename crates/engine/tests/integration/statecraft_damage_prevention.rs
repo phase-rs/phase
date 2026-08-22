@@ -124,19 +124,40 @@ fn add_enchantment_spell_to_hand(
 /// whatever `WaitingFor` state the engine is currently in (not a fixed
 /// two-player pass count), so it also works when a third, uninvolved player
 /// is on the battlefield (the recipient-filter negative test below).
+///
+/// Returns whether combat actually reached the intended shape: the intended
+/// attacker was declared, the intended blocker (if any) was declared, AND
+/// the loop reached `EndCombat`/`PostCombatMain` normally (not an early
+/// `break` from an unhandled `WaitingFor` or an iteration-limit fallout).
+/// Every prevention assertion in this file is of the form "life unchanged"
+/// or "damage_marked == 0" — which is also the observation when combat never
+/// happens at all — so callers MUST assert this return value as a positive
+/// reach-guard before trusting a negative damage assertion (review-impl
+/// finding on PR #7615: without this, a `declare_attackers`/`declare_blockers`
+/// regression or an unhandled `WaitingFor` would silently pass every test in
+/// this file for the wrong reason). `declare_attackers`/`declare_blockers`
+/// failing for the INTENDED actor's own declaration now panics immediately
+/// via `.expect()` rather than silently breaking, since that specific failure
+/// would otherwise be indistinguishable from "combat correctly ran and
+/// prevented everything".
+#[must_use = "combat must be asserted to have actually run — see doc comment"]
 fn run_combat(
     runner: &mut GameRunner,
     attacker_player: PlayerId,
     attacker: ObjectId,
     defend_player: PlayerId,
     blocker: Option<ObjectId>,
-) {
+) -> bool {
     let mut attacked = false;
     let mut blocked = false;
+    let mut reached_end_of_combat = false;
 
     for _ in 0..400 {
         match runner.state().phase {
-            Phase::EndCombat | Phase::PostCombatMain => break,
+            Phase::EndCombat | Phase::PostCombatMain => {
+                reached_end_of_combat = true;
+                break;
+            }
             _ => {}
         }
         match runner.state().waiting_for.clone() {
@@ -160,9 +181,9 @@ fn run_combat(
                 } else {
                     vec![]
                 };
-                if runner.declare_attackers(&attacks).is_err() {
-                    break;
-                }
+                runner
+                    .declare_attackers(&attacks)
+                    .expect("declaring the intended attacker must succeed");
             }
             WaitingFor::DeclareAttackers { .. } => {
                 if runner.declare_attackers(&[]).is_err() {
@@ -176,9 +197,9 @@ fn run_combat(
                 } else {
                     vec![]
                 };
-                if runner.declare_blockers(&blocks).is_err() {
-                    break;
-                }
+                runner
+                    .declare_blockers(&blocks)
+                    .expect("declaring the intended blocker must succeed");
             }
             WaitingFor::DeclareBlockers { .. } => {
                 if runner.declare_blockers(&[]).is_err() {
@@ -188,6 +209,8 @@ fn run_combat(
             _ => break,
         }
     }
+
+    attacked && (blocker.is_none() || blocked) && reached_end_of_combat
 }
 
 /// Build a self-targeted damage-dealing `ResolvedAbility` — used for the
@@ -299,7 +322,11 @@ fn statecraft_prevents_controllers_own_creatures_combat_damage_to_defending_play
 
     let p1_life_before = runner.life(P1);
     runner.advance_to_combat();
-    run_combat(&mut runner, P0, attacker, P1, None);
+    assert!(
+        run_combat(&mut runner, P0, attacker, P1, None),
+        "reach-guard: combat must actually run (attacker declared and the combat \
+         damage step reached) before trusting the prevention assertion below"
+    );
     runner.advance_until_stack_empty();
 
     assert_eq!(
@@ -344,7 +371,11 @@ fn statecraft_prevents_damage_dealt_to_controllers_own_blocking_creature() {
 
     runner.state_mut().active_player = P1;
     runner.advance_to_combat();
-    run_combat(&mut runner, P1, attacker, P0, Some(blocker));
+    assert!(
+        run_combat(&mut runner, P1, attacker, P0, Some(blocker)),
+        "reach-guard: combat must actually run (attacker and blocker declared, combat \
+         damage step reached) before trusting the prevention assertion below"
+    );
     runner.advance_until_stack_empty();
 
     assert_eq!(
@@ -399,7 +430,11 @@ fn statecraft_follows_new_controller_after_control_change() {
     let p0_life_before = runner.life(P0);
     runner.state_mut().active_player = P1;
     runner.advance_to_combat();
-    run_combat(&mut runner, P1, attacker, P0, None);
+    assert!(
+        run_combat(&mut runner, P1, attacker, P0, None),
+        "reach-guard: combat must actually run (attacker declared and the combat \
+         damage step reached) before trusting the prevention assertion below"
+    );
     runner.advance_until_stack_empty();
 
     assert_eq!(
@@ -529,7 +564,11 @@ fn candletrap_real_cast_prevents_enchanted_creatures_combat_damage() {
 
     runner.state_mut().active_player = P0;
     runner.advance_to_combat();
-    run_combat(&mut runner, P0, attacker, P1, Some(host));
+    assert!(
+        run_combat(&mut runner, P0, attacker, P1, Some(host)),
+        "reach-guard: combat must actually run (attacker and blocker declared, combat \
+         damage step reached) before trusting the prevention assertion below"
+    );
     runner.advance_until_stack_empty();
 
     assert_eq!(
@@ -569,8 +608,13 @@ fn defang_and_charm_school_parser_shape() {
         "Defang: exactly one source-scoped ReplacementDefinition"
     );
     assert!(
-        parsed_defang.replacements[0].damage_source_filter.is_some(),
-        "Defang's damage_source_filter must now be populated (Gap A fix)"
+        matches!(
+            parsed_defang.replacements[0].damage_source_filter,
+            Some(TargetFilter::AttachedTo)
+        ),
+        "Defang's damage_source_filter must be scoped to the enchanted creature \
+         (AttachedTo), not merely populated — Some(TargetFilter::Any) would also \
+         pass is_some() while wrongly shielding every source on the battlefield"
     );
 
     let parsed_charm_school = engine::parser::oracle::parse_oracle_text(
@@ -634,7 +678,11 @@ fn fog_bank_both_directions_correct_after_unifying_self_ref() {
     // survival ambiguous on its own — assert marked damage directly.
     runner.state_mut().active_player = P1;
     runner.advance_to_combat();
-    run_combat(&mut runner, P1, attacker, P0, Some(fog_bank_id));
+    assert!(
+        run_combat(&mut runner, P1, attacker, P0, Some(fog_bank_id)),
+        "reach-guard: combat must actually run (attacker and blocker declared, combat \
+         damage step reached) before trusting the prevention assertion below"
+    );
     runner.advance_until_stack_empty();
     assert_eq!(
         runner.state().objects[&fog_bank_id].damage_marked,
@@ -751,7 +799,11 @@ fn gaseous_form_real_cast_and_combat_both_directions() {
     // marked damage from the 3-power attacker.
     runner.state_mut().active_player = P0;
     runner.advance_to_combat();
-    run_combat(&mut runner, P0, attacker, P1, Some(host));
+    assert!(
+        run_combat(&mut runner, P0, attacker, P1, Some(host)),
+        "reach-guard: combat must actually run (attacker and blocker declared, combat \
+         damage step reached) before trusting the prevention assertion below"
+    );
     runner.advance_until_stack_empty();
     assert_eq!(
         runner.state().objects[&host].damage_marked,
@@ -899,18 +951,35 @@ fn ghostly_possession_and_sandskin_parser_shape() {
             2,
             "{name}: the bidirectional recognizer must emit both halves"
         );
-        let has_recipient = parsed
+        // Counting `recipient_only`/`source_only` (each requiring the OTHER
+        // field be `None`), not just `any(...)` presence, is load-bearing:
+        // `any()` alone is satisfied even when one definition wrongly carries
+        // BOTH `valid_card: AttachedTo` and `damage_source_filter: AttachedTo`
+        // and the second definition carries neither — the exact AND-collision
+        // shape the two-definition design exists to prevent (plan review
+        // round 1's Fog Bank regression), which `any()` cannot distinguish
+        // from the correct shape (review-impl finding on PR #7615).
+        let recipient_only = parsed
             .replacements
             .iter()
-            .any(|r| matches!(r.valid_card, Some(TargetFilter::AttachedTo)));
-        let has_source = parsed
+            .filter(|r| {
+                matches!(r.valid_card, Some(TargetFilter::AttachedTo))
+                    && r.damage_source_filter.is_none()
+            })
+            .count();
+        let source_only = parsed
             .replacements
             .iter()
-            .any(|r| matches!(r.damage_source_filter, Some(TargetFilter::AttachedTo)));
+            .filter(|r| {
+                matches!(r.damage_source_filter, Some(TargetFilter::AttachedTo))
+                    && r.valid_card.is_none()
+            })
+            .count();
         assert!(
-            has_recipient && has_source,
+            recipient_only == 1 && source_only == 1,
             "{name}: exactly one definition scoped via valid_card=AttachedTo (recipient) \
-             and one via damage_source_filter=AttachedTo (source)"
+             and one via damage_source_filter=AttachedTo (source) — the two scopes must \
+             never land on the same definition (AND semantics would break the shield)"
         );
         assert!(
             parsed
@@ -964,6 +1033,15 @@ fn heart_of_light_parser_shape_and_self_damage_cr616_choice() {
     let mut runner = scenario.build();
     attach_aura(&mut runner, heart_of_light, host);
 
+    assert_eq!(
+        runner.state().objects[&heart_of_light]
+            .replacement_definitions
+            .len(),
+        2,
+        "reach-guard: both halves must be registered on the runtime object, or the \
+         CR 616.1 two-candidate claim below is unreachable"
+    );
+
     let ability = self_damage_ability(host, 3, P0);
     let mut events = Vec::new();
     engine::game::effects::resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
@@ -980,15 +1058,22 @@ fn heart_of_light_parser_shape_and_self_damage_cr616_choice() {
                 .act(GameAction::ChooseReplacement { index: 0 })
                 .expect("CR 616.1 order choice for two co-matching prevention shields");
         }
+        // The permissive fallback this replaced (silently accepting any
+        // other WaitingFor and asserting prevention directly) would mask the
+        // exact regression this test exists to catch: if the source half
+        // stops being emitted at runtime, only one candidate matches, no
+        // prompt fires, the surviving half still prevents the damage, and
+        // damage_marked == 0 below would still pass — reporting green for a
+        // broken bidirectional recognizer (review-impl finding on PR #7615).
+        // The reach-guard above already proves both definitions are
+        // registered, so reaching this arm means the engine's existing,
+        // unmodified CR 616.1 multiple-replacement-order machinery failed to
+        // recognize two co-matching candidates on the same event — a real
+        // failure, not an accepted alternate shape.
         other => {
-            // Some engine versions of the pipeline may resolve a single
-            // dominant candidate without prompting when both are pure,
-            // riderless Prevention::All shields — accept either shape, but
-            // the damage must be prevented either way.
-            eprintln!(
-                "note: self-damage on doubly-enchanted host did not reach \
-                 WaitingFor::ReplacementChoice (got {other:?}); asserting \
-                 prevention directly instead"
+            panic!(
+                "two co-matching riderless prevention shields must reach \
+                 WaitingFor::ReplacementChoice (CR 616.1) — got {other:?}"
             );
         }
     }
@@ -1049,7 +1134,11 @@ fn heart_of_light_real_cast_prevents_combat_and_noncombat_damage() {
     // as Gaseous Form (this card is also bidirectional).
     runner.state_mut().active_player = P0;
     runner.advance_to_combat();
-    run_combat(&mut runner, P0, attacker, P1, Some(host));
+    assert!(
+        run_combat(&mut runner, P0, attacker, P1, Some(host)),
+        "reach-guard: combat must actually run (attacker and blocker declared, combat \
+         damage step reached) before trusting the prevention assertion below"
+    );
     runner.advance_until_stack_empty();
     assert_eq!(
         runner.state().objects[&host].damage_marked,

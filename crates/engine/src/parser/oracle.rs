@@ -6056,6 +6056,34 @@ pub(crate) fn parse_oracle_ir(
                 i += 1;
                 continue;
             }
+            // CR 614.1a + CR 616.1: "Prevent all [combat] damage that would
+            // be dealt to and dealt by <subject>" is an English ellipsis that
+            // needs TWO independent `ReplacementDefinition`s (recipient half +
+            // source half) from one physical sentence — the same "one line ->
+            // Vec<ReplacementIr>" multi-emit shape `lower_as_enters_or_face_up_counters`
+            // uses above, so it runs at the same tier, right after it. Must
+            // also run BEFORE `parse_replacement_sentence_sequence_ir` below,
+            // not just before the generic single-definition
+            // `parse_replacement_line_ir`: if a future card ever puts this
+            // ellipsis sentence on the same physical line as a second
+            // period-terminated replacement sentence, the sequence parser
+            // would otherwise treat the ellipsis sentence as one more ordinary
+            // sentence and hand it to `parse_replacement_line_ir` per-sentence
+            // (via its own internal loop), which can only ever populate one of
+            // the two scoping fields — silently reintroducing this PR's bug
+            // for that shape. No card in the current corpus combines the two,
+            // so this was a latent gap (review-impl finding on PR #7615), not
+            // an active misparse.
+            if let Some(definitions) = parse_bidirectional_damage_prevention(&lower, &line) {
+                for definition in definitions {
+                    emitter.replacement_ir_at(
+                        item_line,
+                        ReplacementIr::from_definition(&line, definition),
+                    );
+                }
+                i += 1;
+                continue;
+            }
             // CR 614.1c: Effects that read "[This permanent] enters with ...",
             // "As [this permanent] enters ...", or "[This permanent] enters as ..."
             // are replacement effects.
@@ -6067,24 +6095,6 @@ pub(crate) fn parse_oracle_ir(
             {
                 for replacement_ir in replacement_irs {
                     emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
-                }
-                i += 1;
-                continue;
-            }
-            // CR 614.1a + CR 616.1: "Prevent all [combat] damage that would
-            // be dealt to and dealt by <subject>" is an English ellipsis that
-            // needs TWO independent `ReplacementDefinition`s (recipient half +
-            // source half) from one physical sentence — the same "one line ->
-            // Vec<ReplacementIr>" multi-emit shape `lower_as_enters_or_face_up_counters`
-            // uses above. Tried before the generic single-definition
-            // `parse_replacement_line_ir` path below, which can only ever
-            // populate one of the two scoping fields per definition.
-            if let Some(definitions) = parse_bidirectional_damage_prevention(&lower, &line) {
-                for definition in definitions {
-                    emitter.replacement_ir_at(
-                        item_line,
-                        ReplacementIr::from_definition(&line, definition),
-                    );
                 }
                 i += 1;
                 continue;
