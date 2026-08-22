@@ -1061,7 +1061,7 @@ describe("getWaitingForPlayerChoiceIds", () => {
     expect(getWaitingForObjectChoiceIds(wf)).toEqual([7]);
   });
 
-  // CR 115.7: Bolt Bend / Redirect retarget a single-target spell by a click.
+  // CR 115.7: Bolt Bend / Misdirection retarget a single-target spell by a click.
   it("projects RetargetChoice(Single) player refs", () => {
     const wf = retargetChoiceWaitingForFactory
       .withData({ scope: { type: "Single" }, legal_new_targets: MIXED_LEGAL })

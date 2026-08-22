@@ -135,7 +135,7 @@ describe("PlayerHud", () => {
       });
     });
 
-    // CR 115.7: a single-target retarget (Bolt Bend, Redirect) is answered by a
+    // CR 115.7: a single-target retarget (Bolt Bend, Misdirection) is answered by a
     // HUD click.
     it("offers the seat for RetargetChoice(Single)", () => {
       const { dispatch } = mount(

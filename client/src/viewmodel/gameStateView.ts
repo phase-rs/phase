@@ -213,7 +213,7 @@ export function getWaitingForClickTargetRefs(
       return slot?.legal_alternatives ?? [];
     }
     case "RetargetChoice":
-      // CR 115.7: a single-target retarget (Bolt Bend, Redirect) is answered by a
+      // CR 115.7: a single-target retarget (Bolt Bend, Misdirection) is answered by a
       // board/HUD click. An `All`-scope retarget keeps RetargetChoiceModal, whose
       // confirm button needs pointer events, and the engine has no `ChooseTarget`
       // arm for it — so it is not a click prompt at all.
@@ -266,7 +266,7 @@ export function getWaitingForObjectChoiceIds(
       return (slot?.legal_alternatives ?? []).flatMap((t) => "Object" in t ? [t.Object] : []);
     }
     case "RetargetChoice":
-      // CR 115.7: Single-target retargets (Bolt Bend, Redirect) are resolved by
+      // CR 115.7: Single-target retargets (Bolt Bend, Misdirection) are resolved by
       // a board click; multi-target (`All`-scope) retargets keep the dialog.
       if (waitingFor.data.scope.type !== "Single") return [];
       return waitingFor.data.legal_new_targets.flatMap((target) =>
