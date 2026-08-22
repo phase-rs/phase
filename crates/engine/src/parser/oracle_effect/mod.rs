@@ -11529,7 +11529,7 @@ fn try_parse_mass_forced_block(tp: TextPair, ctx: &mut ParseContext) -> Option<P
 
 fn parse_retained_type_clause(tp: TextPair) -> Option<ParsedRetainedTypeClause> {
     // Match singular "it's still a/an [type]" / "that's still a/an [type]"
-    // or plural "they're still [type]s" — CR 205.1a type retention after
+    // or plural "they're still [type]s" — CR 205.1b type retention after
     // animation. The descriptor is purely additive: a permanent animated into
     // a creature retains its prior types/subtypes (CR 613.1d ordering), so the
     // "still a …" clause is confirmatory and emits the same `AddType`/
@@ -11557,7 +11557,7 @@ fn parse_retained_type_clause(tp: TextPair) -> Option<ParsedRetainedTypeClause> 
         }
         (false, format!("{article}{descriptor}"))
     } else {
-        let (descriptor, ()) = nom_on_lower(tp.original, tp.lower, |input| {
+        let ((), descriptor) = nom_on_lower(tp.original, tp.lower, |input| {
             value((), alt((tag("they're still "), tag("they’re still ")))).parse(input)
         })?;
         (true, descriptor.to_string())
