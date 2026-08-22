@@ -425,18 +425,17 @@ fn statecraft_follows_new_controller_after_control_change() {
 ///
 /// Uses a direct `replace_event` probe (the same production replacement
 /// pipeline `object_replacement_candidate_applies` real combat damage runs
-/// through — not a parser-shape assertion) rather than driving full combat:
-/// this fixture (like the other `attach_aura`-based ones in this file) never
-/// sets the `Aura` subtype on the manually-constructed object, so CR 704.5p
-/// sentence 2's auto-unattach state-based action sweeps it to the graveyard
-/// on the next priority pass — confirmed directly (the battlefield-driven
-/// version of this test put Candletrap in the graveyard before combat
-/// damage, a test-harness artifact of the missing subtype, not a defect in
-/// the fix under test; see `gaseous_form_real_cast_and_combat_both_directions`
-/// below for a sibling card driven through the real cast/attach pipeline
-/// with the subtype correctly set, closing that gap for at least one card).
-/// `replace_event` is called before any priority pass gives that sweep a
-/// chance to run, so it observes the intended attached state.
+/// through — not a parser-shape assertion) rather than driving full combat.
+/// `attach_aura` sets `attached_to` directly to a host the Aura's own
+/// `Keyword::Enchant` filter matches, so `is_valid_attachment_target` sees a
+/// legal attachment regardless of subtype — neither CR 704.5m (which only
+/// sweeps an Aura that IS unattached) nor CR 704.5p (which excludes Auras
+/// outright, and only ever unattaches rather than moving to the graveyard)
+/// has anything to act on here. `replace_event` is called directly, without
+/// even needing a priority pass, so this test's correctness does not depend
+/// on either SBA. See `candletrap_real_cast_prevents_enchanted_creatures_combat_damage`
+/// below for the companion test that drives Candletrap through the actual
+/// cast → target → attach → combat production pipeline instead.
 #[test]
 fn candletrap_prevents_enchanted_creatures_combat_damage() {
     let mut scenario = GameScenario::new();
@@ -475,6 +474,76 @@ fn candletrap_prevents_enchanted_creatures_combat_damage() {
              Candletrap's now-populated damage_source_filter — got {other:?}"
         ),
     }
+}
+
+/// CR 614.1a, real-pipeline companion to
+/// `candletrap_prevents_enchanted_creatures_combat_damage`: Candletrap cast
+/// and attached through `GameRunner::cast(..).target_object(..).resolve()`
+/// (not `attach_aura`), then driven through real combat. Candletrap is Gap A
+/// (single-direction passive voice — `parse_damage_source_filter_passive`),
+/// a genuinely different code path than Gaseous Form's Gap B (bidirectional
+/// ellipsis), so Gaseous Form's real-cast test does not exercise this one; a
+/// review finding flagged that no Gap-A card had real-pipeline coverage.
+///
+/// The host is given 1 toughness specifically so this test can assert a
+/// REAL negative: Candletrap shields only the enchanted creature's own
+/// combat damage (source half) — the host itself is not shielded (no
+/// "dealt to" clause), so it must still die to the blocked attacker's power.
+/// A test that only checked "the attacker takes 0" could pass even if the
+/// engine wrongly shielded both directions; checking the host's death too
+/// proves the shield is exactly one-directional, matching the Oracle text.
+#[test]
+fn candletrap_real_cast_prevents_enchanted_creatures_combat_damage() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let candletrap = scenario
+        .add_spell_to_hand(P1, "Candletrap", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(free_cost())
+        .from_oracle_text_with_keywords(&["enchant"], CANDLETRAP_TEXT)
+        .id();
+    let host = scenario.add_creature(P1, "Warden", 3, 1).id();
+    let attacker = scenario.add_creature(P0, "Raider", 3, 3).id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    let _outcome = runner.cast(candletrap).target_object(host).resolve();
+
+    assert_eq!(
+        runner.state().objects[&candletrap].attached_to,
+        Some(engine::game::game_object::AttachTarget::Object(host)),
+        "reach-guard: the real cast pipeline must attach Candletrap to the chosen target"
+    );
+    assert_eq!(
+        runner.state().objects[&candletrap]
+            .replacement_definitions
+            .len(),
+        1,
+        "reach-guard: Candletrap has no 'dealt to' ellipsis half — exactly one \
+         source-scoped ReplacementDefinition, even through the real cast pipeline"
+    );
+
+    runner.state_mut().active_player = P0;
+    runner.advance_to_combat();
+    run_combat(&mut runner, P0, attacker, P1, Some(host));
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&attacker].damage_marked,
+        0,
+        "the enchanted creature's own combat damage while blocking must be prevented \
+         (source half, real cast + real combat) — the attacker must take zero damage"
+    );
+    assert!(
+        !runner.state().battlefield.contains(&host),
+        "Candletrap does NOT shield the enchanted creature's own recipient side — the \
+         1-toughness host must still die to the 3-power attacker's unprevented damage, \
+         proving the shield is genuinely one-directional through the real pipeline"
+    );
 }
 
 /// CR 614.1a: Gap A's passive-voice fix is a general anchor change, not
@@ -608,14 +677,35 @@ fn fog_bank_both_directions_correct_after_unifying_self_ref() {
 /// `DeclareAttackers`/`DeclareBlockers`/combat-damage resolution.
 ///
 /// The other tests in this file that exercise `AttachedTo`-scoped cards use
-/// `attach_aura` (manual field-setting) + a direct `replace_event` probe,
-/// documented as routing around a state-based-action sweep. That diagnosis
-/// was incomplete (a review finding): the sweep fires because the fixture
-/// never sets the `Aura` subtype (CR 301.5b), which CR 704.5p sentence 2
-/// requires for a permanent to be treated as capable of legally staying
-/// attached — not specifically because of *how* it got attached. Setting
-/// `with_subtypes(vec!["Aura"])` before casting fixes the underlying gap and
-/// lets this one card get full real-pipeline coverage, closing that finding.
+/// `attach_aura` (manual field-setting) + a direct `replace_event` probe
+/// instead of a real cast (a review finding on this claim's coverage). This
+/// test closes that gap for one card by driving the real pipeline, which
+/// needs BOTH of the following on the fixture — traced empirically against
+/// `game/casting.rs` and `game/sba.rs`, not assumed:
+///
+///   1. `with_subtypes(vec!["Aura"])` — `casting.rs`'s target-slot builder
+///      (~line 13627, "CR 303.4a: An Aura spell requires a target defined by
+///      its enchant ability") only generates a target slot from the object's
+///      `Keyword::Enchant` filter when `card_types.subtypes` contains
+///      `"Aura"`. Omit it and the branch never runs, so the spell resolves
+///      with no target chosen and nothing attached — `attached_to` stays
+///      `None` while the object stays on the battlefield undisturbed (no SBA
+///      fires, confirmed by removing this call in isolation: no sweep, just
+///      a silently-unattached shield doing nothing). This is unrelated to
+///      CR 704.5m/704.5p SBA sweeps — it's a cast-time target-generation gate.
+///   2. `from_oracle_text_with_keywords(&["enchant"], ...)` — bare-FromStr
+///      keyword inference can't extract `Keyword::Enchant` from the
+///      space-form "Enchant creature" line (see
+///      `metamorphic_alteration.rs`'s `stage_metamorphic`). With the subtype
+///      present but no `Keyword::Enchant`, the same casting.rs branch DOES
+///      run (subtype check passes) but finds no Enchant filter to build a
+///      slot from, so the Aura again resolves with nothing attached — this
+///      time `is_aura` at the SBA layer is genuinely true, so CR 704.5m's
+///      orphan-Aura branch (`check_unattached_auras`, `sba.rs:~1301`, which
+///      gates specifically on `attached_to == None` for an Aura-subtyped
+///      permanent) sweeps it to its owner's graveyard on the next SBA pass —
+///      confirmed empirically as the first failure mode hit while building
+///      this test, before both fixes above were in place together.
 #[test]
 fn gaseous_form_real_cast_and_combat_both_directions() {
     let mut scenario = GameScenario::new();
@@ -626,13 +716,6 @@ fn gaseous_form_real_cast_and_combat_both_directions() {
         .as_enchantment()
         .with_subtypes(vec!["Aura"])
         .with_mana_cost(free_cost())
-        // The MTGJSON-style "enchant" keyword hint is required for "Enchant
-        // creature" to be extracted as `Keyword::Enchant` — bare-FromStr
-        // inference can't parse the space-form line (see
-        // `metamorphic_alteration.rs`'s `stage_metamorphic`). Without it the
-        // cast has no attach target wired up, so the Aura resolves onto the
-        // battlefield unattached and CR 704.5m immediately sweeps it to the
-        // graveyard.
         .from_oracle_text_with_keywords(&["enchant"], GASEOUS_FORM_TEXT)
         .id();
     let host = scenario.add_creature(P1, "Wisp", 3, 3).id();
@@ -653,7 +736,8 @@ fn gaseous_form_real_cast_and_combat_both_directions() {
         runner.state().objects[&gaseous_form].attached_to,
         Some(engine::game::game_object::AttachTarget::Object(host)),
         "reach-guard: the real cast pipeline must attach it to the chosen target \
-         (CR 303.4) — with the Aura subtype now set, no SBA sweep should undo this"
+         (CR 303.4) — with the Aura subtype set, casting.rs's Aura target-slot \
+         branch actually runs and wires the attach through resolution"
     );
     assert_eq!(
         runner.state().objects[&gaseous_form]
@@ -915,4 +999,92 @@ fn heart_of_light_parser_shape_and_self_damage_cr616_choice() {
         "Heart of Light must fully prevent the enchanted creature's self-damage \
          regardless of which co-matching shield the CR 616.1 choice selects"
     );
+}
+
+/// CR 614.1a + CR 615.1a, real-pipeline companion to
+/// `heart_of_light_parser_shape_and_self_damage_cr616_choice`: Heart of Light
+/// cast and attached through `GameRunner::cast(..).target_object(..).resolve()`
+/// (not `attach_aura`), then driven through real combat AND a real
+/// non-combat damage event — a review finding flagged that no `AttachedTo`
+/// card besides Gaseous Form had real-pipeline coverage, and Heart of
+/// Light's own claim ("prevent all damage", not "combat damage") is
+/// distinct enough from Gaseous Form's `CombatOnly` shape that it needs its
+/// own proof `combat_scope: None` is actually honored end-to-end, not just
+/// at the parser-shape level the sibling test above already covers.
+#[test]
+fn heart_of_light_real_cast_prevents_combat_and_noncombat_damage() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let heart_of_light = scenario
+        .add_spell_to_hand(P1, "Heart of Light", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(free_cost())
+        .from_oracle_text_with_keywords(&["enchant"], HEART_OF_LIGHT_TEXT)
+        .id();
+    let host = scenario.add_creature(P1, "Bearer", 3, 3).id();
+    let attacker = scenario.add_creature(P0, "Raider", 3, 3).id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    let _outcome = runner.cast(heart_of_light).target_object(host).resolve();
+
+    assert_eq!(
+        runner.state().objects[&heart_of_light].attached_to,
+        Some(engine::game::game_object::AttachTarget::Object(host)),
+        "reach-guard: the real cast pipeline must attach Heart of Light to the chosen target"
+    );
+    assert_eq!(
+        runner.state().objects[&heart_of_light]
+            .replacement_definitions
+            .len(),
+        2,
+        "reach-guard: the bidirectional recognizer must emit both halves"
+    );
+
+    // Combat half: P0 attacks, host blocks — both directions prevented, same
+    // as Gaseous Form (this card is also bidirectional).
+    runner.state_mut().active_player = P0;
+    runner.advance_to_combat();
+    run_combat(&mut runner, P0, attacker, P1, Some(host));
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&host].damage_marked,
+        0,
+        "the enchanted creature must take zero combat damage when blocking \
+         (recipient half, real cast + real combat)"
+    );
+    assert_eq!(
+        runner.state().objects[&attacker].damage_marked,
+        0,
+        "the enchanted creature's own combat damage while blocking must also be \
+         prevented (source half, real cast + real combat)"
+    );
+
+    // Non-combat half: unlike Gaseous Form (CombatOnly), Heart of Light's
+    // "prevent all damage" has no combat restriction — a distinct, unrelated
+    // attacker dealing NON-combat damage to the real-cast-attached host must
+    // also be fully prevented. Proves combat_scope: None is honored against
+    // the actually-attached production object, not just at parse time.
+    let other_source = scenario_attacker_on_built_runner(&mut runner, P0);
+    let mut events = Vec::new();
+    let proposed = engine::types::proposed_event::ProposedEvent::Damage {
+        source_id: other_source,
+        target: TargetRef::Object(host),
+        amount: 5,
+        is_combat: false,
+        applied: Default::default(),
+    };
+    let result =
+        engine::game::replacement::replace_event(runner.state_mut(), proposed, &mut events);
+    match result {
+        engine::game::replacement::ReplacementResult::Prevented => {}
+        other => panic!(
+            "non-combat damage to the real-cast-attached enchanted creature must be \
+             fully prevented (combat_scope: None) — got {other:?}"
+        ),
+    }
 }
