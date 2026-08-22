@@ -1,16 +1,15 @@
-use engine::game::ability_utils::build_resolved_from_def;
-use engine::game::effects::resolve_ability_chain;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::parser::oracle_effect::parse_effect_chain;
-use engine::types::ability::{AbilityKind, ResolvedAbility, TargetRef};
 use engine::types::card_type::CoreType;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaColor;
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-const ORACLE: &str =
-    "Target player mills five cards, then puts each Goblin card milled this way into their hand.";
+const GRUBS_COMMAND_ORACLE: &str = "Choose two —\n\
+    • Create a token that's a copy of target Goblin you control.\n\
+    • Creatures target player controls get +1/+1 and gain haste until end of turn.\n\
+    • Destroy target artifact or creature.\n\
+    • Target player mills five cards, then puts each Goblin card milled this way into their hand.";
 
 fn mark_goblin(runner: &mut GameRunner, id: ObjectId) {
     let object = runner.state_mut().objects.get_mut(&id).unwrap();
@@ -27,7 +26,7 @@ fn mark_non_goblin(runner: &mut GameRunner, id: ObjectId) {
 }
 
 #[test]
-fn grubs_command_moves_only_milled_goblins_to_hand() {
+fn grubs_command_cast_moves_only_milled_goblins_to_hand() {
     let mut scenario = GameScenario::new_n_player(2, 42);
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -39,13 +38,23 @@ fn grubs_command_moves_only_milled_goblins_to_hand() {
     let non_goblin_a = scenario.add_card_to_library_top(P1, "Non-Goblin A");
     let goblin_a = scenario.add_card_to_library_top(P1, "Goblin A");
 
-    // A battlefield Goblin is the negative control for an unscoped subtype
-    // filter: it must not be moved by the follow-up effect.
+    // This Goblin is a scope control for the tracked-set filter. Mode 1 also
+    // pumps P1's creatures, so only its zone is relevant to this assertion.
     let battlefield_goblin = scenario
         .add_creature(P1, "Battlefield Goblin", 1, 1)
         .with_subtypes(vec!["Goblin"])
         .id();
-    let source = scenario.add_basic_land(P0, ManaColor::Black).id();
+    let grubs_command = scenario
+        .add_spell_to_hand_from_oracle(P0, "Grub's Command", false, GRUBS_COMMAND_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black, ManaCostShard::Red],
+            generic: 3,
+        })
+        .id();
+    for _ in 0..4 {
+        scenario.add_basic_land(P0, ManaColor::Black);
+    }
+    scenario.add_basic_land(P0, ManaColor::Red);
 
     let mut runner = scenario.build();
     for id in [goblin_a, goblin_b] {
@@ -55,27 +64,22 @@ fn grubs_command_moves_only_milled_goblins_to_hand() {
         mark_non_goblin(&mut runner, id);
     }
 
-    assert_eq!(runner.state().players[1].library.len(), 5);
+    let outcome = runner
+        .cast(grubs_command)
+        .modes(&[1, 3])
+        .target_players(&[P1])
+        .resolve();
 
-    let definition = parse_effect_chain(ORACLE, AbilityKind::Spell);
-    let ability = ResolvedAbility {
-        targets: vec![TargetRef::Player(P1)],
-        ..build_resolved_from_def(&definition, source, P0)
-    };
-    let mut events = Vec::new();
-    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
-        .expect("Grubs Command effect chain should resolve");
-
-    assert_eq!(runner.state().players[1].hand.len(), 2);
+    assert_eq!(outcome.state().players[1].hand.len(), 2);
     for id in [goblin_a, goblin_b] {
-        assert_eq!(runner.state().objects[&id].zone, Zone::Hand);
+        assert_eq!(outcome.state().objects[&id].zone, Zone::Hand);
     }
-    assert_eq!(runner.state().players[1].graveyard.len(), 3);
+    assert_eq!(outcome.state().players[1].graveyard.len(), 3);
     for id in [non_goblin_a, non_goblin_b, non_goblin_c] {
-        assert_eq!(runner.state().objects[&id].zone, Zone::Graveyard);
+        assert_eq!(outcome.state().objects[&id].zone, Zone::Graveyard);
     }
     assert_eq!(
-        runner.state().objects[&battlefield_goblin].zone,
+        outcome.state().objects[&battlefield_goblin].zone,
         Zone::Battlefield
     );
 }

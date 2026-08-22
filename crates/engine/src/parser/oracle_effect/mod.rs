@@ -34872,10 +34872,11 @@ fn try_parse_put_zone_change_parts(
                 }) {
                 (
                     true,
-                    tracked_caused_by
-                        .is_some()
-                        .then_some(target_text)
-                        .unwrap_or(rest),
+                    if tracked_caused_by.is_some() {
+                        target_text
+                    } else {
+                        rest
+                    },
                 )
             } else {
                 (false, target_text)

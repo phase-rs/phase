@@ -7267,6 +7267,7 @@ fn target_player_mills_then_puts_milled_goblins_into_hand() {
         Effect::Mill {
             count: QuantityExpr::Fixed { value: 5 },
             target: TargetFilter::Player,
+            ..
         }
     ));
 
