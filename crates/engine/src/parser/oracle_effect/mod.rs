@@ -34878,21 +34878,28 @@ fn try_parse_put_zone_change_parts(
             // matching object from the origin zone. Strip the mass quantifier
             // before target parsing so the filter mirrors the `return all`
             // dispatcher.
-            let (is_mass, target_text) = if let Some((_, rest)) =
-                nom_on_lower(target_text, &target_text.to_ascii_lowercase(), |input| {
+            let (is_mass, target_text) =
+                if nom_on_lower(before.original.trim(), before.lower.trim(), |input| {
                     value((), alt((tag("all "), tag("each ")))).parse(input)
-                }) {
-                let target_text = if let Some(expected_cause) = tracked_caused_by {
-                    tracked_anaphor_member_prefix(rest)
-                        .filter(|(_, actual_cause)| *actual_cause == expected_cause)
-                        .map_or(rest, |(prefix, _)| prefix)
+                })
+                .is_some()
+                {
+                    let target_text =
+                        nom_on_lower(target_text, &target_text.to_ascii_lowercase(), |input| {
+                            value((), alt((tag("all "), tag("each ")))).parse(input)
+                        })
+                        .map_or(target_text, |(_, rest)| rest);
+                    let target_text = if let Some(expected_cause) = tracked_caused_by {
+                        tracked_anaphor_member_prefix(target_text)
+                            .filter(|(_, actual_cause)| *actual_cause == expected_cause)
+                            .map_or(target_text, |(prefix, _)| prefix)
+                    } else {
+                        target_text
+                    };
+                    (true, target_text)
                 } else {
-                    rest
+                    (false, target_text)
                 };
-                (true, target_text)
-            } else {
-                (false, target_text)
-            };
             let up_to = parse_up_to_one_target_prefix(before.lower) || choice_count.is_some();
             // CR 608.2c + CR 608.2k + CR 406.6 + CR 607.2a: a bare plural
             // anaphor whose antecedent is the trigger's linked-exile pool
