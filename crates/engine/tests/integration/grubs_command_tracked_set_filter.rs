@@ -11,6 +11,11 @@ const GRUBS_COMMAND_ORACLE: &str = "Choose two —\n\
     • Destroy target artifact or creature.\n\
     • Target player mills five cards, then puts each Goblin card milled this way into their hand.";
 
+// Grub's Command is a synthetic fixture sourced from issue #7500's complete
+// four-mode Oracle text because it is not present in the checked MTGJSON
+// corpus. The fixture still builds a full card definition and exercises the
+// normal cast/modal/target/stack pipeline.
+
 fn mark_goblin(runner: &mut GameRunner, id: ObjectId) {
     let object = runner.state_mut().objects.get_mut(&id).unwrap();
     object.card_types.core_types = vec![CoreType::Creature];
