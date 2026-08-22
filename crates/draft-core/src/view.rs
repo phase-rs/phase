@@ -1765,12 +1765,7 @@ mod tests {
         session.status = DraftStatus::Deckbuilding;
 
         // Generate pairings
-        session::apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        session::apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let winner_pid = session
             .pairings
@@ -1814,12 +1809,7 @@ mod tests {
             name: "Bot 7".to_string(),
         };
 
-        session::apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        session::apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let view = filter_for_player(&session, 0);
         let bot_standing = view
@@ -1852,12 +1842,7 @@ mod tests {
         let (mut session, _) = test_session(8);
         session.status = DraftStatus::Deckbuilding;
 
-        session::apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        session::apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let view = filter_for_player(&session, 0);
         assert_eq!(view.pairings.len(), 4);
@@ -1873,12 +1858,7 @@ mod tests {
         let (mut session, _) = test_session(8);
         session.status = DraftStatus::Deckbuilding;
 
-        session::apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        session::apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let pairing = session
             .pairings
@@ -1911,12 +1891,7 @@ mod tests {
         let (mut session, _) = test_session(8);
         session.status = DraftStatus::Deckbuilding;
 
-        session::apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        session::apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let pairing = session
             .pairings
@@ -2008,12 +1983,7 @@ mod tests {
         let (mut session, _) = test_session(8);
         session.status = DraftStatus::Deckbuilding;
 
-        session::apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        session::apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let view = filter_for_spectator(&session, SpectatorVisibility::Public);
         assert_eq!(view.pairings.len(), 4);

@@ -1120,7 +1120,7 @@ fn guard_full_create_game_settings_inbound(
 fn client_forbidden_draft_action_reason(action: &draft_core::types::DraftAction) -> Option<String> {
     use draft_core::types::DraftAction;
     match action {
-        DraftAction::GeneratePairings { .. } => {
+        DraftAction::GeneratePairings => {
             Some("GeneratePairings is server-internal; not allowed from client".to_string())
         }
         DraftAction::SetSeatConnected { .. } => {
@@ -9980,7 +9980,7 @@ mod handshake_tests {
         // Regression coverage: this rejection predates GH #1254 and must
         // continue to fire. GeneratePairings is server-internal because
         // match spawning now drives it after deck submission.
-        let action = draft_core::types::DraftAction::GeneratePairings { round: 1 };
+        let action = draft_core::types::DraftAction::GeneratePairings;
         let reason = client_forbidden_draft_action_reason(&action);
         assert!(reason.is_some());
         assert!(reason.unwrap().contains("server-internal"));

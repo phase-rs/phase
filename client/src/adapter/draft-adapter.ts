@@ -496,9 +496,9 @@ export class DraftAdapter {
     return wasm.get_view_for_seat(0) as DraftPlayerView;
   }
 
-  async generatePairings(round: number): Promise<DraftPlayerView> {
+  async generatePairings(): Promise<DraftPlayerView> {
     return this.applyActionAndGetHostView(
-      JSON.stringify({ type: "GeneratePairings", data: { round } }),
+      JSON.stringify({ type: "GeneratePairings" }),
     );
   }
 
