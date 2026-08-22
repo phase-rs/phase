@@ -174,15 +174,23 @@ fn run_combat(
                     break;
                 }
             }
-            WaitingFor::DeclareAttackers { player, .. } if !attacked => {
+            // Scoped to `player == attacker_player`, not just `!attacked`:
+            // an uninvolved third player's DeclareAttackers window (this
+            // driver also runs with a third player on the battlefield, per
+            // the doc comment above) must NOT set the reach-guard flag —
+            // if it did, a production actor-routing bug that skips
+            // `attacker_player`'s own window entirely (or answers it empty
+            // via the fallback arm below because this arm already
+            // "consumed" the flag on the wrong player's turn) would still
+            // report `attacked: true`, making the reach-guard pass for the
+            // exact wrong-actor case it exists to catch (maintainer review
+            // finding on PR #7615).
+            WaitingFor::DeclareAttackers { player, .. }
+                if player == attacker_player && !attacked =>
+            {
                 attacked = true;
-                let attacks = if player == attacker_player {
-                    vec![(attacker, AttackTarget::Player(defend_player))]
-                } else {
-                    vec![]
-                };
                 runner
-                    .declare_attackers(&attacks)
+                    .declare_attackers(&[(attacker, AttackTarget::Player(defend_player))])
                     .expect("declaring the intended attacker must succeed");
             }
             WaitingFor::DeclareAttackers { .. } => {
@@ -190,7 +198,10 @@ fn run_combat(
                     break;
                 }
             }
-            WaitingFor::DeclareBlockers { .. } if !blocked => {
+            // Same fix, symmetric: scoped to `player == defend_player` so an
+            // uninvolved player's DeclareBlockers window can't falsely mark
+            // the intended blocker as having been declared.
+            WaitingFor::DeclareBlockers { player, .. } if player == defend_player && !blocked => {
                 blocked = true;
                 let blocks = if let Some(blk) = blocker {
                     vec![(blk, attacker)]
@@ -276,6 +287,45 @@ fn attach_aura(runner: &mut GameRunner, aura: ObjectId, host: ObjectId) {
         host_obj.attachments.push(aura);
     }
     runner.state_mut().layers_dirty.mark_full();
+}
+
+// ---------------------------------------------------------------------------
+// run_combat harness self-check (maintainer review finding on PR #7615).
+// ---------------------------------------------------------------------------
+
+/// `run_combat`'s reach-guard must fail when the intended attacker never
+/// actually attacks — including when a production actor-routing bug prompts
+/// the WRONG player for `DeclareAttackers` before (or instead of) the
+/// intended `attacker_player`. An earlier version of this driver set the
+/// `attacked` flag on the FIRST `DeclareAttackers` window it saw, regardless
+/// of which player it was for, so a misrouted prompt would still report
+/// `attacked: true` with an empty attack list actually submitted — exactly
+/// the false-green a reach-guard exists to prevent.
+///
+/// Reproduces this directly: P0 is the real active/attacking player in this
+/// scenario, but `run_combat` is deliberately called with `attacker_player:
+/// P1` (a mismatch). P0's own `DeclareAttackers` window fires first; since
+/// `player (P0) != attacker_player (P1)`, the correct behavior is to answer
+/// it via the generic empty-declare fallback WITHOUT setting `attacked`, so
+/// the function returns `false` — P1 is never actually prompted as an
+/// attacker in this 2-player game, so the intended attacker (per the
+/// mismatched call) never attacks, and the reach-guard must say so.
+#[test]
+fn run_combat_reach_guard_fails_when_intended_attacker_is_not_the_actual_actor() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario.add_creature(P0, "Raider", 3, 3).id();
+
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+
+    assert!(
+        !run_combat(&mut runner, P1, attacker, P0, None),
+        "run_combat must return false when the DeclareAttackers window that \
+         actually fires belongs to a different player than the intended \
+         attacker_player — the intended attacker never attacked, so the \
+         reach-guard must not report success"
+    );
 }
 
 // ---------------------------------------------------------------------------
