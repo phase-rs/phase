@@ -34853,15 +34853,30 @@ fn try_parse_put_zone_change_parts(
             // (see `parse_total_mana_value_target_constraint` in `lower.rs`).
             let stripped_mv = strip_total_mana_value_target_phrase(target_text);
             let target_text: &str = stripped_mv.as_deref().unwrap_or(target_text);
+            // CR 608.2c: Keep the full quantified noun phrase for tracked-set
+            // anaphors ("each Goblin card milled this way") so `parse_target`
+            // can parse the member filter before the producer-action suffix.
+            // The mass classification still applies; only the target-parser
+            // input differs. Non-anaphoric mass moves retain the existing
+            // quantifier stripping used by the Rise of the Dark Realms class.
+            let tracked_caused_by =
+                tracked_anaphor_cause(before.lower, from_among_anaphor.is_some());
             // CR 400.7 + CR 110.2a: Mass put-onto-battlefield text moves every
             // matching object from the origin zone. Strip the mass quantifier
             // before target parsing so the filter mirrors the `return all`
-            // dispatcher instead of relying on parse_target to re-strip it.
+            // dispatcher. Tracked-set anaphors keep it so the shared parser can
+            // retain the member restriction while consuming the anaphor.
             let (is_mass, target_text) = if let Some((_, rest)) =
                 nom_on_lower(target_text, &target_text.to_ascii_lowercase(), |input| {
                     value((), alt((tag("all "), tag("each ")))).parse(input)
                 }) {
-                (true, rest)
+                (
+                    true,
+                    tracked_caused_by
+                        .is_some()
+                        .then_some(target_text)
+                        .unwrap_or(rest),
+                )
             } else {
                 (false, target_text)
             };
@@ -34926,8 +34941,6 @@ fn try_parse_put_zone_change_parts(
             // action-agnostic (`None`). Binding to the action (not the zone)
             // keeps a sacrifice redirected to Exile by a replacement counted.
             // The outer `Option` is the tracked-anaphor flag.
-            let tracked_caused_by =
-                tracked_anaphor_cause(before.lower, from_among_anaphor.is_some());
             let is_tracked_anaphor = tracked_caused_by.is_some();
             let target = match tracked_caused_by {
                 Some(caused_by) => TargetFilter::TrackedSetFiltered {
