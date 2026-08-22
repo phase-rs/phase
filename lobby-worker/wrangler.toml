@@ -124,12 +124,20 @@ ALLOWED_ORIGINS = "*"
 #
 #   `ServerHello` is sent unprompted on connect (lobby-do.ts), BEFORE the client
 #   sends `ClientHello` — see the `ws.onopen` comment in
-#   client/src/services/openPhaseSocket.ts. The server therefore advertises one
-#   protocol number, blind, to every caller. A released client accepts
-#   [PROTOCOL_VERSION-1, PROTOCOL_VERSION] of ITS OWN build; once `main` is two
-#   bumps ahead of the last release those two windows are disjoint and no single
-#   advertised number satisfies both. Splitting the deployment is the only fix
-#   that does not evict one channel to serve the other.
+#   client/src/services/openPhaseSocket.ts. The server therefore advertises its
+#   version numbers blind, to every caller, with no idea who is asking.
+#
+#   Clients built before `lobby_protocol_version` existed accept only
+#   [PROTOCOL_VERSION-1, PROTOCOL_VERSION] of THEIR OWN build. Once `main` is two
+#   bumps ahead of the last release those windows are disjoint and no single
+#   advertised number satisfies both channels at once.
+#
+# `LOBBY_PROTOCOL_VERSION` (crates/lobby-broker/src/protocol.rs) since fixes the
+# ROOT cause for every client built after it: the lobby now versions its own
+# message set, so full-game churn no longer slides the lobby window and current
+# clients are no longer evicted by a release they did not install. This split
+# remains necessary regardless — it is what keeps ALREADY-DEPLOYED clients on the
+# legacy gate reachable, and it isolates preview DO state from production's.
 #
 # Non-inheritable keys (vars, durable_objects, migrations, observability,
 # analytics_engine_datasets) MUST be restated here — Wrangler does not inherit

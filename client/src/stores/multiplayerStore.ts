@@ -10,11 +10,7 @@ import type {
   PlayerId,
 } from "../adapter/types";
 import { FORMAT_REGISTRY } from "../data/formatRegistry";
-import {
-  LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL,
-  PROTOCOL_VERSION,
-  type ServerInfo,
-} from "../adapter/ws-adapter";
+import { serverProtocolRejection, type ServerInfo } from "../adapter/ws-adapter";
 import {
   clearWsSession,
   loadWsSession,
@@ -495,12 +491,14 @@ export function isLobbyEntryCompatible(
   return hostBuildCommit === __BUILD_HASH__;
 }
 
-/** True when the client's wire-protocol can speak to the server's advertised mode. */
+/**
+ * True when the client's wire-protocol can speak to the server's advertised
+ * mode. Delegates to `serverProtocolRejection` — the same decision the
+ * handshake makes — so the compatibility badge can never disagree with whether
+ * the connection actually succeeds.
+ */
 export function isServerCompatible(info: ServerInfo | null): boolean {
-  if (!info) return false;
-  const minProtocol =
-    info.mode === "LobbyOnly" ? LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL : PROTOCOL_VERSION;
-  return info.protocolVersion >= minProtocol && info.protocolVersion <= PROTOCOL_VERSION;
+  return info !== null && serverProtocolRejection(info) === null;
 }
 
 // Build the FORMAT_DEFAULTS map from the engine-authored FORMAT_REGISTRY.
