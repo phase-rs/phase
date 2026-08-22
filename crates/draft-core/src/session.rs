@@ -17,9 +17,10 @@ impl DraftSession {
     /// Single authority. `AdvanceRound` deliberately leaves `current_round`
     /// untouched — it only opens the `Pairing` window — so `current_round` is
     /// always the last round whose pairings exist, and generating pairings is
-    /// what commits the next one. Private on purpose: callers outside this
-    /// module must not re-derive it.
-    fn next_pairing_round(&self) -> u8 {
+    /// what commits the next one. Crate-internal on purpose: `view.rs`
+    /// publishes its answer on `DraftPlayerView` so clients read it rather than
+    /// re-deriving it; callers outside this crate must never recompute it.
+    pub(crate) fn next_pairing_round(&self) -> u8 {
         self.current_round + 1
     }
 

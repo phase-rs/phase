@@ -42,8 +42,9 @@ import type {
  *   9 — add engine-owned limited-pool presentation groups
  *  10 — add authenticated draft-effect pick actions
  *  11 — instance-addressable pool entries (`instance_ids`) + engine rarity axis
+ *  12 — publish the engine-derived next pairing round on the player view
  */
-export const DRAFT_PROTOCOL_VERSION = 11 as const;
+export const DRAFT_PROTOCOL_VERSION = 12 as const;
 
 /**
  * Typed reason for a draft pause, used over the wire and on the i18n key path.

@@ -271,6 +271,10 @@ pub struct DraftPlayerView {
     pub standings: Vec<StandingEntry>,
     /// Current tournament round (0 = not started).
     pub current_round: u8,
+    /// The round pairings may next be generated for. Engine-derived from the
+    /// single authority (`DraftSession::next_pairing_round`) so clients never
+    /// recompute it. Always >= 1.
+    pub next_pairing_round: u8,
     /// Tournament format from config.
     pub tournament_format: TournamentFormat,
     /// Pod policy from config.
@@ -510,6 +514,7 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         timer_remaining_ms: None,
         standings,
         current_round: session.current_round,
+        next_pairing_round: session.next_pairing_round(),
         tournament_format: session.config.tournament_format,
         pod_policy: session.config.pod_policy,
         pairings,
@@ -1834,6 +1839,9 @@ mod tests {
         assert_eq!(view.tournament_format, TournamentFormat::Swiss);
         assert_eq!(view.pod_policy, PodPolicy::Competitive);
         assert_eq!(view.current_round, 0);
+        // Pins the engine's `>= 1` guarantee at the lobby state. NOT
+        // discriminating on its own: a hard-coded `1` satisfies it too.
+        assert_eq!(view.next_pairing_round, 1);
         assert!(view.timer_remaining_ms.is_none());
     }
 
@@ -1846,6 +1854,8 @@ mod tests {
 
         let view = filter_for_player(&session, 0);
         assert_eq!(view.pairings.len(), 4);
+        assert_eq!(view.current_round, 1);
+        assert_eq!(view.next_pairing_round, 2);
         for pv in &view.pairings {
             assert_eq!(pv.round, 1);
             assert_eq!(pv.status, PairingStatus::Pending);

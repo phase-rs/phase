@@ -2184,6 +2184,7 @@ mod tests {
             timer_remaining_ms: Some(5000),
             standings: Vec::new(),
             current_round: 0,
+            next_pairing_round: 1,
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,
             pairings: Vec::new(),

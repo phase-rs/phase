@@ -77,6 +77,7 @@ const VIEW: DraftPlayerView = {
   timer_remaining_ms: null,
   standings: [],
   current_round: 0,
+  next_pairing_round: 1,
   tournament_format: "Swiss",
   pod_policy: "Competitive",
   pairings: [],

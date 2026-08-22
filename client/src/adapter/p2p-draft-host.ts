@@ -1966,7 +1966,21 @@ export class P2PDraftHost {
 
       if (view.status === "MatchInProgress") {
         await this.dispatchMatchLaunchesForSeat(view, 0);
-      } else if (view.status === "Pairing" && view.pairings.length === 0) {
+      } else if (view.status === "Pairing") {
+        // `apply_advance_round` is the engine's only writer of `Pairing`, and
+        // generating pairings immediately leaves it for `MatchInProgress`. So
+        // `Pairing` already means "the pairings this window exists to produce do
+        // not exist yet".
+        // `view.pairings` still holds the *previous* round's pairings here
+        // (`compute_pairing_views` filters on `current_round`, which
+        // `AdvanceRound` deliberately does not bump), so testing it for
+        // emptiness made this branch dead for every round after the first.
+        //
+        // Widening it cannot generate a round twice: generating sets status to
+        // `MatchInProgress`, so this branch cannot fire again for the same
+        // round; and `AdvanceRound` requires `RoundComplete`, which the final
+        // round never enters (it transitions straight to `Complete`), so there
+        // is no round past the last one for this branch to invent.
         await this.generatePairings();
         return this.adapter.getViewForSeat(0);
       }
@@ -2081,6 +2095,7 @@ export class P2PDraftHost {
       timer_remaining_ms: null,
       standings: [],
       current_round: 0,
+      next_pairing_round: 1,
       tournament_format: "Swiss",
       pod_policy: "Competitive",
       pairings: [],

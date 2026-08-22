@@ -25,6 +25,7 @@ import { HostControls } from "../components/draft/HostControls";
 import { LimitedDeckBuilder } from "../components/draft/LimitedDeckBuilder";
 import { PackDisplay } from "../components/draft/PackDisplay";
 import { PickTimer } from "../components/draft/PickTimer";
+import { PodErrorBanner } from "../components/draft/PodErrorBanner";
 import { PoolPanel } from "../components/draft/PoolPanel";
 import { ScoreBadge } from "../components/draft/ScoreBadge";
 import { SeatStatusRing } from "../components/draft/SeatStatusRing";
@@ -422,6 +423,7 @@ function PairingPhaseView() {
   const { t } = useTranslation("draft");
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 py-8">
+      <PodErrorBanner />
       <h2 className="text-center text-xl font-medium text-white">
         {t("podPhaseView.tournamentPairings")}
       </h2>
@@ -447,6 +449,7 @@ function MatchInProgressView() {
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 py-8">
+      <PodErrorBanner />
       <h2 className="text-center text-xl font-medium text-white">
         {t("podPhaseView.matchesInProgress")}
       </h2>
@@ -509,6 +512,7 @@ function RoundCompleteView() {
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 py-8">
+      <PodErrorBanner />
       <h2 className="text-center text-xl font-medium text-white">
         {t("podPhaseView.roundComplete")}
       </h2>

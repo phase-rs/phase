@@ -53,6 +53,7 @@ function viewForRound(round: number): DraftPlayerView {
     timer_remaining_ms: null,
     standings: [],
     current_round: round,
+    next_pairing_round: round + 1,
     tournament_format: "Swiss",
     pod_policy: "Casual",
     pairings: [pairing(round, 0)],
