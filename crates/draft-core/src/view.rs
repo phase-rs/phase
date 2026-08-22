@@ -273,7 +273,10 @@ pub struct DraftPlayerView {
     pub current_round: u8,
     /// The round pairings may next be generated for. Engine-derived from the
     /// single authority (`DraftSession::next_pairing_round`) so clients never
-    /// recompute it. Always >= 1.
+    /// recompute it. Always >= 1. Published unconditionally, so once `status`
+    /// is `Complete` it names a round that can never be generated
+    /// (`apply_generate_pairings` accepts only `Deckbuilding`/`Pairing`/
+    /// `RoundComplete`) — read `current_round` on a finished pod.
     pub next_pairing_round: u8,
     /// Tournament format from config.
     pub tournament_format: TournamentFormat,

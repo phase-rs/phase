@@ -223,7 +223,11 @@ export interface DraftPlayerView {
   timer_remaining_ms: number | null;
   standings: StandingEntry[];
   current_round: number;
-  /** Engine-derived round that pairings may next be generated for. Always >= 1. */
+  /**
+   * Engine-derived round that pairings may next be generated for. Always >= 1.
+   * Published unconditionally, so on a `Complete` pod it names a round that can
+   * never be generated — read `current_round` there instead.
+   */
   next_pairing_round: number;
   tournament_format: TournamentFormat;
   pod_policy: PodPolicy;
