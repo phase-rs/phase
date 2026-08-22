@@ -24,7 +24,7 @@ describe("preferencesStore", () => {
         sfxMuted: false,
         musicMuted: false,
         masterMuted: false,
-        multiplayerBoardLayout: "focused",
+        multiplayerBoardLayout: "split",
         aiSeats: [{ difficulty: "Medium", deckId: "Random" }],
         aiBracketFilter: [],
       });
@@ -40,7 +40,10 @@ describe("preferencesStore", () => {
     expect(state.followActiveOpponent).toBe(false);
     expect(state.logDefaultState).toBe("closed");
     expect(state.boardBackground).toBe("auto-wubrg");
-    expect(state.multiplayerBoardLayout).toBe("focused");
+    // Read the store's real initialization snapshot (the getInitialState idiom
+    // used below): the shared beforeEach writes its own defaults snapshot, so a
+    // getState() read here would assert that snapshot, not buildDefaultPreferences().
+    expect(usePreferencesStore.getInitialState().multiplayerBoardLayout).toBe("split");
     expect(state.aiSeats).toEqual([{ difficulty: "Medium", deckId: "Random" }]);
     expect(state.priorityPassingMode).toBe("Standard");
   });
@@ -96,11 +99,13 @@ describe("preferencesStore", () => {
   });
 
   it("setMultiplayerBoardLayout updates multiplayer board layout", () => {
+    // Set the NON-default value: "split" is the default, so asserting it here
+    // would pass with the setter deleted.
     act(() => {
-      usePreferencesStore.getState().setMultiplayerBoardLayout("split");
+      usePreferencesStore.getState().setMultiplayerBoardLayout("focused");
     });
 
-    expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("split");
+    expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("focused");
   });
 
   it("setFollowActiveOpponent updates the value", () => {
@@ -590,7 +595,7 @@ describe("preferencesStore", () => {
     expect(usePreferencesStore.getState().aiBracketFilter).toEqual([]);
   });
 
-  it("v20 → v21 migration defaults multiplayerBoardLayout to focused", () => {
+  it("v20 → v21 migration keeps pre-existing stores on the focused layout", () => {
     localStorage.setItem(
       "phase-preferences",
       JSON.stringify({

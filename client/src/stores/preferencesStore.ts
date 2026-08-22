@@ -302,7 +302,7 @@ function buildDefaultPreferences(): PreferencesState {
     showCardPreviewFooter: true,
     stackDockSide: "right",
     opponentHudDensity: "comfortable",
-    multiplayerBoardLayout: "focused",
+    multiplayerBoardLayout: "split",
     aiSeats: [defaultAiSeat()],
     cedhMode: false,
     aiArchetypeFilter: "Any",
@@ -825,8 +825,11 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       // v19 → v20: Add collapseLands/collapseSupport; legacy stores default to
       //          "auto" (the prior threshold-driven collapse) via the shallow
       //          merge, so existing users see no behavior change.
-      // v20 → v21: Add multiplayerBoardLayout; legacy stores default to
-      //          "focused", preserving the current focused-opponent layout.
+      // v20 → v21: Add multiplayerBoardLayout; legacy stores are pinned to
+      //          "focused", preserving the layout they were already playing on.
+      //          Load-bearing now that the fresh-store default is "split": this
+      //          block is what keeps the new default a NEW-user default rather
+      //          than a layout swap under existing players.
       // v21 → v22: Add telemetryEnabled; legacy stores default to `true` (opt-out,
       //          identity-free crash & usage telemetry) via the shallow merge —
       //          no explicit migration block needed (see flexLayout precedent).
@@ -995,6 +998,9 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           };
         }
 
+        // Pin, not merge: the fresh-store default is "split", so letting a
+        // pre-v21 store fall through to the shallow merge would move existing
+        // players off the layout they have been using.
         if (version < 21) {
           migrated = { ...migrated, multiplayerBoardLayout: "focused" };
         }
