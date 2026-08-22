@@ -11551,7 +11551,7 @@ fn parse_retained_type_clause(tp: TextPair) -> Option<ParsedRetainedTypeClause> 
         (true, descriptor.to_string())
     };
 
-    // CR 205.1b + CR 305.7: parse the type descriptor ("a Cave land", "lands",
+    // CR 205.1b: parse the type descriptor ("a Cave land", "lands",
     // "a planeswalker") through the shared animation building block so a subtype
     // *and* core type are both retained ("It's still a Cave land" → AddType{Land}
     // + AddSubtype{Cave}, Cavernous Maw), not just a bare core type. Strip a
