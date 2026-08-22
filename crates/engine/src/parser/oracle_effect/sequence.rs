@@ -5679,6 +5679,7 @@ pub(super) fn parse_dig_from_among(
             (rest, true, is_reveal)
         } else if let Ok((rest, is_reveal)) = alt((
             value(false, tag::<_, _, OracleError<'_>>("put ")),
+            value(false, tag("puts ")),
             value(true, tag("reveal ")),
             value(false, tag("return ")),
         ))
@@ -5793,6 +5794,7 @@ pub(super) fn parse_dig_from_among(
             value(false, tag("you may put ")),
             value(false, tag("you may return ")),
             value(false, tag("put ")),
+            value(false, tag("puts ")),
             value(true, tag("reveal ")),
             value(false, tag("return ")),
         ))
