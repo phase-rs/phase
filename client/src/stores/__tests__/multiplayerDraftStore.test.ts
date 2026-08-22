@@ -223,7 +223,7 @@ describe("multiplayerDraftStore", () => {
       expect(state.view).toBe(view);
     });
 
-    it("advances currentRound on pairingsGenerated and leaves nextPairingRound to viewUpdated", async () => {
+    it("pairingsGenerated advances currentRound, leaves nextPairingRound to viewUpdated, and supersedes the error", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
         poolInput: { type: "Set", data: { set_pool_json: "{}" } },
         kind: "Premier",
@@ -241,6 +241,15 @@ describe("multiplayerDraftStore", () => {
         next_pairing_round: 3,
       };
       capturedHostEventHandler!({ type: "viewUpdated", view });
+      // Reach-guard: prove the error is live before the boundary, so a null
+      // afterwards cannot mean "it was never set".
+      capturedHostEventHandler!({
+        type: "error",
+        message: "Failed to advance round",
+      });
+      expect(useMultiplayerDraftStore.getState().error).toBe(
+        "Failed to advance round",
+      );
       capturedHostEventHandler!({ type: "pairingsGenerated", round: 3, pairings: [] });
 
       const state = useMultiplayerDraftStore.getState();
@@ -254,6 +263,11 @@ describe("multiplayerDraftStore", () => {
       // inlined `nextPairingRound: event.round + 1` to that handler — the
       // TypeScript re-derivation this work exists to abolish — yields 4 here.
       expect(state.nextPairingRound).toBe(3);
+      // REVERT-FAILING: drop `error: null` from the `pairingsGenerated` handler
+      // and this goes red. A successful round boundary supersedes the banner the
+      // failed attempt raised — without it the retry that WORKED still shows
+      // "Failed to advance round".
+      expect(state.error).toBeNull();
     });
 
     it("handles host-seat Bo3 prompt messages", async () => {

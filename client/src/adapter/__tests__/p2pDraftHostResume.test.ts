@@ -143,9 +143,11 @@ describe("P2PDraftHost.restoreFromPersisted — pairing-window recovery", () => 
     // REVERT-FAILING ASSERTION: pre-fix the predicate also required
     // `view.pairings.length === 0`, so this branch was dead for every round >= 1.
     expect(adapter.generatePairings).toHaveBeenCalled();
-    // The caller (`draftPodHostAdapter`) emits this view and derives host status
-    // from it; a stale `Pairing` view here strands the user on the pairing screen.
-    expect(adapter.getViewForSeat).toHaveBeenCalled();
+    // The caller (`draftPodHostAdapter:236-240`) emits this view and derives host
+    // status from it, so a stale `Pairing` return strands the user on the pairing
+    // screen. Asserting the returned *status*, not that `getViewForSeat` was
+    // called: `generatePairings()` already calls it twice internally
+    // (`p2p-draft-host.ts:1022,1036`), so a call-count assertion is vacuous here.
     expect(restored?.status).toBe("MatchInProgress");
   });
 
