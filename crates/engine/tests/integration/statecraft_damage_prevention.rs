@@ -426,16 +426,16 @@ fn statecraft_follows_new_controller_after_control_change() {
 /// Uses a direct `replace_event` probe (the same production replacement
 /// pipeline `object_replacement_candidate_applies` real combat damage runs
 /// through — not a parser-shape assertion) rather than driving full combat.
-/// `attach_aura` sets `attached_to` directly to a host the Aura's own
-/// `Keyword::Enchant` filter matches, so `is_valid_attachment_target` sees a
-/// legal attachment regardless of subtype — neither CR 704.5m (which only
-/// sweeps an Aura that IS unattached) nor CR 704.5p (which excludes Auras
-/// outright, and only ever unattaches rather than moving to the graveyard)
-/// has anything to act on here. `replace_event` is called directly, without
-/// even needing a priority pass, so this test's correctness does not depend
-/// on either SBA. See `candletrap_real_cast_prevents_enchanted_creatures_combat_damage`
+/// This fixture (via `add_enchantment_from_oracle`) is never subtype-tagged
+/// as an Aura, so it wouldn't even qualify for CR 704.5m's Aura-only gate or
+/// CR 704.5p's Aura exclusion if an SBA pass ran — `replace_event` is called
+/// directly, with no priority pass in between, so no SBA ever gets the
+/// chance to evaluate it either way; this test's correctness rests on that
+/// timing, not on any claim about how these SBAs would treat an untagged
+/// object. See `candletrap_real_cast_prevents_enchanted_creatures_combat_damage`
 /// below for the companion test that drives Candletrap through the actual
-/// cast → target → attach → combat production pipeline instead.
+/// cast → target → attach → combat production pipeline instead, where the
+/// Aura subtype and these SBAs' real behavior are exercised for real.
 #[test]
 fn candletrap_prevents_enchanted_creatures_combat_damage() {
     let mut scenario = GameScenario::new();
