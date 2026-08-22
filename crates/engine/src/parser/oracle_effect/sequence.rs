@@ -10643,6 +10643,30 @@ mod tests {
     }
 
     #[test]
+    fn conjugated_puts_from_among_preserves_selection_cause() {
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast(
+            "Puts each creature card from among them into your hand.",
+            &dig,
+            &mut ParseContext::default(),
+        );
+        let Some(ContinuationAst::DigFromAmong {
+            quantity,
+            filter,
+            destination,
+            caused_by,
+            ..
+        }) = result
+        else {
+            panic!("expected DigFromAmong continuation, got {result:?}");
+        };
+        assert_eq!(quantity, PutCount::All);
+        assert!(matches!(filter, TargetFilter::Typed(_)), "got {filter:?}");
+        assert_eq!(destination, Some(Zone::Hand));
+        assert_eq!(caused_by, None);
+    }
+
+    #[test]
     fn dig_any_number_from_among_lowers_to_up_to_all_seen_cards() {
         let mut defs = vec![AbilityDefinition::new(
             AbilityKind::Spell,
