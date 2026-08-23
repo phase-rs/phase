@@ -5681,7 +5681,7 @@ fn pending_trigger_is_auto_inert_noop(state: &mut GameState, ctx: &PendingTrigge
         source_id: pending.ability.source_id,
         origin,
     };
-    match state.may_trigger_auto_choice(&key) {
+    match state.may_trigger_auto_choice_for_live_prompt(&key) {
         Some(AutoMayChoice::Decline) => true,
         Some(AutoMayChoice::Accept) => pending_trigger_has_no_legal_resolution_targets(state, ctx),
         None => false,
@@ -15489,6 +15489,7 @@ pub mod tests {
             source_id,
             description: None,
             may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
         };
 
         let mut events_out = Vec::new();
@@ -34708,6 +34709,7 @@ pub mod tests {
                 source_id: ObjectId(1),
                 description: None,
                 may_trigger_key: None,
+                same_card_may_trigger_choice_available: false,
             },
             WaitingFor::AbilityModeChoice {
                 player: PlayerId(0),
@@ -35236,6 +35238,7 @@ pub mod tests {
                 source_id: observer,
                 description: Some("paused".to_string()),
                 may_trigger_key: None,
+                same_card_may_trigger_choice_available: false,
             }
         };
         (state, events)

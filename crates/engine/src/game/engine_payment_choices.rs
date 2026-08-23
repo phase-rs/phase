@@ -6,7 +6,8 @@ use crate::types::ability::{
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
-    ActionResult, AutoMayChoice, GameState, PendingContinuation, PendingCostMoveResume, WaitingFor,
+    ActionResult, AutoMayChoice, GameState, MayTriggerAutoChoiceScope,
+    MayTriggerAutoChoiceSelector, PendingContinuation, PendingCostMoveResume, WaitingFor,
     WardSacrificePaymentResume,
 };
 use crate::types::identifiers::ObjectId;
@@ -175,14 +176,33 @@ fn handle_optional_effect_choice_inner(
     Ok(state.waiting_for.clone())
 }
 
+#[cfg(test)]
 pub(super) fn handle_optional_effect_choice_and_remember(
     state: &mut GameState,
     waiting_for: WaitingFor,
     choice: AutoMayChoice,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    handle_optional_effect_choice_and_remember_with_scope(
+        state,
+        waiting_for,
+        choice,
+        MayTriggerAutoChoiceScope::ExactInstance,
+        events,
+    )
+}
+
+pub(super) fn handle_optional_effect_choice_and_remember_with_scope(
+    state: &mut GameState,
+    waiting_for: WaitingFor,
+    choice: AutoMayChoice,
+    scope: MayTriggerAutoChoiceScope,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     let WaitingFor::OptionalEffectChoice {
+        player,
         may_trigger_key: Some(key),
+        same_card_may_trigger_choice_available,
         ..
     } = waiting_for
     else {
@@ -190,7 +210,25 @@ pub(super) fn handle_optional_effect_choice_and_remember(
             "Optional effect cannot be remembered".to_string(),
         ));
     };
-    state.set_may_trigger_auto_choice(key, choice);
+    let selector = match scope {
+        MayTriggerAutoChoiceScope::ExactInstance => MayTriggerAutoChoiceSelector::exact(key),
+        MayTriggerAutoChoiceScope::SameCard => {
+            if !same_card_may_trigger_choice_available {
+                return Err(EngineError::InvalidAction(
+                    "Same-card optional effect cannot be remembered".to_string(),
+                ));
+            }
+            state
+                .same_card_may_trigger_auto_choice_selector(&key)
+                .filter(|selector| selector.player() == player)
+                .ok_or_else(|| {
+                    EngineError::InvalidAction(
+                        "Same-card optional effect identity is no longer valid".to_string(),
+                    )
+                })?
+        }
+    };
+    state.set_may_trigger_auto_choice_selector(selector, choice);
     handle_optional_effect_choice(state, matches!(choice, AutoMayChoice::Accept), events)
 }
 
@@ -2443,6 +2481,7 @@ mod tests {
             source_id: ObjectId(100),
             description: None,
             may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
         };
 
         let mut events = Vec::new();
@@ -2474,6 +2513,7 @@ mod tests {
             source_id: ObjectId(100),
             description: None,
             may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
         };
 
         let mut events = Vec::new();
@@ -2511,6 +2551,7 @@ mod tests {
             source_id: ObjectId(100),
             description: None,
             may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
         };
 
         let mut events = Vec::new();
@@ -2545,6 +2586,7 @@ mod tests {
             source_id: ObjectId(100),
             description: None,
             may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
         };
 
         let mut events = Vec::new();
@@ -2577,6 +2619,7 @@ mod tests {
             source_id: ObjectId(100),
             description: None,
             may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
         };
 
         let mut events = Vec::new();
@@ -2608,6 +2651,7 @@ mod tests {
             source_id: ObjectId(100),
             description: None,
             may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
         };
 
         let mut events = Vec::new();
@@ -2639,6 +2683,7 @@ mod tests {
             source_id,
             description: None,
             may_trigger_key: Some(key.clone()),
+            same_card_may_trigger_choice_available: false,
         };
 
         let mut events = Vec::new();
@@ -2649,6 +2694,7 @@ mod tests {
                 source_id,
                 description: None,
                 may_trigger_key: Some(key.clone()),
+                same_card_may_trigger_choice_available: false,
             },
             AutoMayChoice::Accept,
             &mut events,
@@ -2673,6 +2719,7 @@ mod tests {
                 source_id: ObjectId(100),
                 description: None,
                 may_trigger_key: None,
+                same_card_may_trigger_choice_available: false,
             },
             AutoMayChoice::Accept,
             &mut events,

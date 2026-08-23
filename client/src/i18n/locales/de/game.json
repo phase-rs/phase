@@ -788,6 +788,7 @@
     "nounPlaneswalker": "Planeswalker",
     "nounTargetPermanent": "bleibende Karte als Ziel",
     "nounTarget": "Ziel",
+    "nounOrPlayer": "{{noun}} oder Spieler",
     "confirmTap": "Tappen bestätigen ({{selected}}/{{count}})",
     "keepCurrentTargets": "Aktuelle Ziele behalten",
     "skip": "Überspringen",
@@ -2126,7 +2127,8 @@
     "title": "{{name}} - Optionaler Effekt",
     "yes": "Ja",
     "no": "Nein",
-    "dontAskAgain": "Dieses Spiel nicht mehr fragen"
+    "dontAskAgain": "Dieses Spiel nicht mehr fragen",
+    "dontAskAgainForSameCard": "Auf jede Kopie dieser Karte anwenden"
   },
   "topOrBottom": {
     "cardFallback": "Card",

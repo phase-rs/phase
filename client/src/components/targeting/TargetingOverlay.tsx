@@ -18,12 +18,56 @@ import {
   type BoardChoiceView,
 } from "../../viewmodel/gameStateView.ts";
 import { renderDescription } from "../../utils/description.ts";
-import type { GameEvent, GameObject } from "../../adapter/types.ts";
+import type { GameEvent, GameObject, TargetChoiceKind, TargetObjectCategory } from "../../adapter/types.ts";
 import { GAME_Z_LAYER } from "../../constants/ui.ts";
 import { flattenRichLabel, RichLabel } from "../mana/RichLabel.tsx";
 
 /** Ties the disclosure button to the panel it opens (`aria-controls`). */
 const DESCRIPTION_PANEL_ID = "targeting-description-panel";
+
+/**
+ * The six `targeting.noun*` keys TARGET_NOUN_KEY may name. Defined as a literal
+ * union so a typo in ANY row of the map is a compile error at the map literal.
+ * It cannot be caught at the `t()` call: `t()` accepts a plain `string` here
+ * (see PermanentCard.tsx's shipped `Record<AbilityBlockKind, string>` ->
+ * `t(MAP[k])`), so a mistyped key would otherwise render a raw i18n key.
+ */
+type TargetNounKey =
+  | "targeting.nounSpell"
+  | "targeting.nounCreature"
+  | "targeting.nounPlaneswalker"
+  | "targeting.nounNonlandPermanent"
+  | "targeting.nounTargetPermanent"
+  | "targeting.nounTarget";
+
+/**
+ * CR 109.1: every engine object category gets a noun. TOTAL by construction —
+ * a `Record` over the mirror union, so adding a category engine-side without a
+ * client noun is a type error at `pnpm run type-check`, not a runtime fallback.
+ *
+ * The VALUE type is `TargetNounKey`, not `string`: `t()` accepts a plain
+ * `string` in this repo, so a mistyped key would otherwise ship green and
+ * render a raw i18n key to the user. The union catches it at THIS literal.
+ *
+ * `Object` maps to the generic `nounTarget` ON PURPOSE: `targeting.one` is
+ * `"a {{target}}"` with a hard-coded ungendered article, and every en noun is
+ * consonant-initial so it never renders "a object". Do not add a vowel-initial
+ * noun here without making the article agree first — neither locale gate
+ * compares VALUES, so it would ship green.
+ *
+ * EXPORTED for the catalog gate in TargetingOverlay.test.tsx. The union above
+ * is hand-written and so is checked against itself; only a test that iterates
+ * THIS object can catch a typo duplicated into both. Exporting is what makes
+ * the list under test the list that ships.
+ */
+export const TARGET_NOUN_KEY: Record<TargetObjectCategory, TargetNounKey> = {
+  Spell: "targeting.nounSpell",
+  Creature: "targeting.nounCreature",
+  Planeswalker: "targeting.nounPlaneswalker",
+  NonlandPermanent: "targeting.nounNonlandPermanent",
+  Permanent: "targeting.nounTargetPermanent",
+  Object: "targeting.nounTarget",
+};
 
 export function TargetingOverlay() {
   const { t } = useTranslation("game");
@@ -34,6 +78,7 @@ export function TargetingOverlay() {
   const objects = useGameStore((s) => s.gameState?.objects);
   const stack = useGameStore((s) => s.gameState?.stack);
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
+  const targetKind = useGameStore((s) => s.gameState?.derived?.current_target_kind);
   const selectedCardIds = useUiStore((s) => s.selectedCardIds);
   const clearSelectedCards = useUiStore((s) => s.clearSelectedCards);
 
@@ -103,9 +148,9 @@ export function TargetingOverlay() {
   );
   const sourceName = sourceId != null ? objects?.[sourceId]?.name : undefined;
 
-  const inferredPrompt = buildInferredTargetPrompt({
+  const targetPrompt = buildTargetPrompt({
     waitingFor: isTargetSelection ? waitingFor : null,
-    objects,
+    targetKind,
     activeSlot,
     targetSlots,
     selection,
@@ -174,7 +219,7 @@ export function TargetingOverlay() {
                 ? boardChoicePrompt(boardChoice, selectedBoardChoiceIds, objects, t)
                 : isTapCreatureChoice
                   ? t("targeting.tapUntappedCreatures", { count: waitingFor.data.count })
-                  : inferredPrompt ?? (
+                  : targetPrompt ?? (
                     targetSlots.length > 1
                       ? t("targeting.chooseTargetOf", { current: Math.min(currentTargetSlot + 1, targetSlots.length), total: targetSlots.length })
                       : t("targeting.chooseTarget")
@@ -622,16 +667,16 @@ type TargetingPromptParams = {
       player?: number;
     };
   } | null;
-  objects?: Record<number, GameObject> | undefined;
+  targetKind: TargetChoiceKind | undefined;
   activeSlot: { legal_targets: { Object?: number; Player?: number }[]; optional?: boolean } | undefined;
   targetSlots: { legal_targets: { Object?: number; Player?: number }[]; optional?: boolean }[];
   selection: { current_slot: number } | null;
   t: TFunction<"game">;
 };
 
-function buildInferredTargetPrompt({
+function buildTargetPrompt({
   waitingFor,
-  objects,
+  targetKind,
   activeSlot,
   targetSlots,
   selection,
@@ -646,7 +691,11 @@ function buildInferredTargetPrompt({
     return t("targeting.noLegalTargets");
   }
 
-  const targetWord = inferTargetNoun(activeSlot.legal_targets, objects, t);
+  // The engine classifies the offer (CR 115.1); absent means no live
+  // announcement to name. Fall back to the generic caption rather than
+  // re-inferring — re-inference is the defect #7692 removed.
+  if (!targetKind) return null;
+  const targetWord = targetNoun(targetKind, t);
   const useUpToOne = selection && targetSlots.length === 1 && activeSlot.optional;
 
   // The noun alone: it is the only part that says WHAT the player has to pick,
@@ -661,38 +710,22 @@ function buildInferredTargetPrompt({
     : t("targeting.one", { target: targetWord });
 }
 
-function inferTargetNoun(
-  targets: { Object?: number; Player?: number }[],
-  objects: Record<number, GameObject> | undefined,
-  t: TFunction<"game">,
-): string {
-  const allPlayers = targets.every((target) => "Player" in target);
-  if (allPlayers) return t("targeting.nounPlayer");
-
-  const objectTargets = targets.flatMap((target) =>
-    typeof target.Object === "number" ? [objects?.[target.Object]].filter(Boolean) : [],
-  ) as GameObject[];
-  if (objectTargets.length !== targets.filter((target) => typeof target.Object === "number").length) {
-    return t("targeting.nounTarget");
+/**
+ * CR 115.1 + CR 115.4: render the noun the ENGINE classified. This function
+ * inspects no game object — it maps a discriminant to an i18n key. All
+ * classification lives in `engine::game::derived_views::target_choice_kind`.
+ */
+function targetNoun(kind: TargetChoiceKind, t: TFunction<"game">): string {
+  switch (kind.type) {
+    case "Players":
+      return t("targeting.nounPlayer");
+    case "Objects":
+      return t(TARGET_NOUN_KEY[kind.data.category]);
+    case "ObjectsAndPlayers":
+      return t("targeting.nounOrPlayer", {
+        noun: t(TARGET_NOUN_KEY[kind.data.category]),
+      });
   }
-  if (objectTargets.length === 0) return t("targeting.nounTarget");
-  // CR 112.1: Spells on the stack are not permanents; infer from zone so
-  // Counterspell-style targeting does not fall through to "nonland permanent".
-  if (objectTargets.every((obj) => obj.zone === "Stack")) {
-    return t("targeting.nounSpell");
-  }
-  if (objectTargets.every((obj) => !obj.card_types.core_types.includes("Land"))) {
-    return t("targeting.nounNonlandPermanent");
-  }
-  if (objectTargets.every((obj) => obj.card_types.core_types.includes("Creature"))) {
-    return t("targeting.nounCreature");
-  }
-  if (objectTargets.every((obj) =>
-    obj.card_types.core_types.includes("Planeswalker"),
-  )) {
-    return t("targeting.nounPlaneswalker");
-  }
-  return t("targeting.nounTargetPermanent");
 }
 
 function boardChoicePrompt(

@@ -1661,7 +1661,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         .retain(|pid, _| *pid == viewer);
     filtered
         .may_trigger_auto_choices
-        .retain(|record| record.key.player == viewer);
+        .retain(|record| record.selector.player() == viewer);
     // CR 723.4: "If information about an object in the game would be visible to the player
     // being controlled, it's visible to both that player and the player controlling them."
     // The pin vector's other carriers already answer "may this viewer see it" with this same
@@ -3044,7 +3044,10 @@ mod tests {
         let filtered = filter_state_for_viewer(&state, PlayerId(0));
 
         assert_eq!(filtered.may_trigger_auto_choices.len(), 1);
-        assert_eq!(filtered.may_trigger_auto_choices[0].key.player, PlayerId(0));
+        assert_eq!(
+            filtered.may_trigger_auto_choices[0].selector.player(),
+            PlayerId(0)
+        );
     }
 
     /// CR 603.3b: saved trigger-ordering templates are per-player private preference
@@ -6531,6 +6534,7 @@ mod tests {
             source_id: hidden,
             description: Some("Accepted triggered mana may".to_string()),
             may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
         };
         (state, MARKER)
     }

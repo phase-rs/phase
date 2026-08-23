@@ -84,6 +84,11 @@
     "boardLayoutLegacy": "Legacy",
     "switchToSplitView": "Przełącz na widok podzielonego stołu",
     "switchToLegacyView": "Przełącz na skupiony widok legacy",
+    "multiplayerSplitLayoutNudge": {
+      "message": "Zobacz wszystkich przeciwników naraz w widoku podzielonego stołu.",
+      "trySplit": "Wypróbuj widok podzielony",
+      "dismiss": "Nie teraz"
+    },
     "helpShortcuts": "Pomoc i skróty",
     "showAiHand": "Pokaż rękę AI",
     "hideAiHand": "Ukryj rękę AI",

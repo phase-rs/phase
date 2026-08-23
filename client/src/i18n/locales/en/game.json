@@ -835,6 +835,7 @@
     "nounPlaneswalker": "planeswalker",
     "nounTargetPermanent": "target permanent",
     "nounTarget": "target",
+    "nounOrPlayer": "{{noun}} or player",
     "confirmTap": "Confirm Tap ({{selected}}/{{count}})",
     "confirmSacrifice": "Sacrifice ({{selected}}/{{count}})",
     "skipSacrifice": "Skip Sacrifice",
@@ -2170,7 +2171,8 @@
     "title": "{{name}} - Optional Effect",
     "yes": "Yes",
     "no": "No",
-    "dontAskAgain": "Don't ask again this game"
+    "dontAskAgain": "Don't ask again this game",
+    "dontAskAgainForSameCard": "Apply this to every copy of this card"
   },
   "topOrBottom": {
     "cardFallback": "Card",

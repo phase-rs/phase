@@ -84,6 +84,11 @@
     "boardLayoutLegacy": "Legacy",
     "switchToSplitView": "Passa alla vista tavolo diviso",
     "switchToLegacyView": "Passa alla vista legacy focalizzata",
+    "multiplayerSplitLayoutNudge": {
+      "message": "Vedi tutti gli avversari insieme con la vista tavolo diviso.",
+      "trySplit": "Prova la vista divisa",
+      "dismiss": "Non ora"
+    },
     "helpShortcuts": "Aiuto e scorciatoie",
     "showAiHand": "Mostra mano IA",
     "hideAiHand": "Nascondi mano IA",

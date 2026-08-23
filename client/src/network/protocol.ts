@@ -80,6 +80,11 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * of silently corrupting state.
  *
  * Bumps to date:
+ *  26 — DerivedViews.current_target_kind publishes the engine's CR 115.1
+ *       classification of the live target announcement. The field is optional
+ *       and parses on a v24 peer, so the loss is silent: this client deleted
+ *       inferTargetNoun, so a v24 host would leave a v25 guest naming no
+ *       target at all. The handshake is the only place to refuse it.
  *  23 — WaitingFor::AlternativeCastChoice.alternative_additional_cost_description
  *       changed from a string to a typed Emerge-sacrifice descriptor. Older
  *       clients would receive an object where their modal expects display text.
@@ -127,7 +132,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 25 as const;
+export const WIRE_PROTOCOL_VERSION = 26 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }

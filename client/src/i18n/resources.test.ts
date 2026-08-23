@@ -124,3 +124,28 @@ describe("i18n locale file encoding", () => {
     });
   }
 });
+
+// #7692 makes the FEMININE noun reachable in it/pt for the first time: today an
+// ordinary creature offer renders the masculine `nounNonlandPermanent`, and after
+// the fix it correctly renders `nounCreature` (creatura / criatura), which the
+// hard-coded masculine article disagrees with. The hedge copies the `un(a)` /
+// `un(e)` form es and fr already ship. Neither locale gate compares VALUES, so
+// without these assertions a revert of the hedge reds nothing.
+describe("targeting article agreement (#7692)", () => {
+  it("hedges the it/pt indefinite article so a feminine noun agrees", () => {
+    expect(resources.it.game).toMatchObject({
+      targeting: { one: "un(a) {{target}}", upToOne: "fino a un(a) {{target}}" },
+    });
+    expect(resources.pt.game).toMatchObject({
+      targeting: { one: "um(a) {{target}}", upToOne: "até um(a) {{target}}" },
+    });
+  });
+
+  // German is DECLINED on the record (three-way gender has no two-way bracket
+  // analogue) and Polish carries no article. Pinned so the decline is a decision
+  // in the tree, not an omission a later reader repairs by guessing.
+  it("leaves the de and pl articles untouched", () => {
+    expect(resources.de.game).toMatchObject({ targeting: { one: "eine {{target}}" } });
+    expect(resources.pl.game).toMatchObject({ targeting: { one: "{{target}}" } });
+  });
+});

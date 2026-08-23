@@ -18,8 +18,8 @@ use super::ability::{
     ModalChoice, PermanentEntryMode, PileSource, QuantityExpr, ResolvedAbility,
     SearchDestinationSplit, SearchOrderingHint, SearchSelectionConstraint, StackAbilityKind,
     StaticCondition, TapCreaturesAggregate, TargetFilter, TargetRef, ThisWayCause,
-    TriggerBaseSetInstanceRef, TriggerCondition, TriggerDefinition, TriggerDefinitionRef,
-    TriggerEntry,
+    TriggerBaseSetInstanceRef, TriggerCondition, TriggerDefinition, TriggerDefinitionOccurrenceRef,
+    TriggerDefinitionRef, TriggerEntry,
 };
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
@@ -1844,9 +1844,141 @@ pub struct MayTriggerAutoChoiceKey {
     pub origin: MayTriggerOrigin,
 }
 
+/// CR 603.5: The breadth of a stored optional-trigger answer. Exact instance
+/// remains the default; same-card is only accepted when the live prompt proves
+/// its direct printed provenance.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(tag = "type")]
+pub enum MayTriggerAutoChoiceScope {
+    #[default]
+    ExactInstance,
+    SameCard,
+}
+
+/// CR 603.5: The identity of a persisted optional-trigger answer.
+///
+/// `SameCard` deliberately carries a printed reference rather than `CardId`:
+/// `CardId` identifies one physical object, while `PrintedCardRef` identifies
+/// the printed face shared by physical copies. The `printed_occurrence` keeps
+/// independently functioning printed triggers separate.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(tag = "type", content = "data")]
+pub enum MayTriggerAutoChoiceSelector {
+    ExactInstance {
+        player: PlayerId,
+        source_id: ObjectId,
+        origin: MayTriggerOrigin,
+    },
+    SameCard {
+        player: PlayerId,
+        printed_ref: PrintedCardRef,
+        printed_occurrence: usize,
+    },
+}
+
+impl MayTriggerAutoChoiceSelector {
+    pub fn player(&self) -> PlayerId {
+        match self {
+            Self::ExactInstance { player, .. } | Self::SameCard { player, .. } => *player,
+        }
+    }
+
+    pub fn for_player(&self, player: PlayerId) -> Self {
+        match self {
+            Self::ExactInstance {
+                source_id, origin, ..
+            } => Self::ExactInstance {
+                player,
+                source_id: *source_id,
+                origin: origin.clone(),
+            },
+            Self::SameCard {
+                printed_ref,
+                printed_occurrence,
+                ..
+            } => Self::SameCard {
+                player,
+                printed_ref: printed_ref.clone(),
+                printed_occurrence: *printed_occurrence,
+            },
+        }
+    }
+
+    pub fn exact(key: MayTriggerAutoChoiceKey) -> Self {
+        Self::ExactInstance {
+            player: key.player,
+            source_id: key.source_id,
+            origin: key.origin,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", content = "data")]
+enum MayTriggerAutoChoiceSelectorTagged {
+    ExactInstance {
+        player: PlayerId,
+        source_id: ObjectId,
+        origin: MayTriggerOrigin,
+    },
+    SameCard {
+        player: PlayerId,
+        printed_ref: PrintedCardRef,
+        printed_occurrence: usize,
+    },
+}
+
+impl From<MayTriggerAutoChoiceSelectorTagged> for MayTriggerAutoChoiceSelector {
+    fn from(value: MayTriggerAutoChoiceSelectorTagged) -> Self {
+        match value {
+            MayTriggerAutoChoiceSelectorTagged::ExactInstance {
+                player,
+                source_id,
+                origin,
+            } => Self::ExactInstance {
+                player,
+                source_id,
+                origin,
+            },
+            MayTriggerAutoChoiceSelectorTagged::SameCard {
+                player,
+                printed_ref,
+                printed_occurrence,
+            } => Self::SameCard {
+                player,
+                printed_ref,
+                printed_occurrence,
+            },
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum MayTriggerAutoChoiceSelectorWire {
+    Tagged(MayTriggerAutoChoiceSelectorTagged),
+    LegacyExact(MayTriggerAutoChoiceKey),
+}
+
+impl<'de> Deserialize<'de> for MayTriggerAutoChoiceSelector {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match MayTriggerAutoChoiceSelectorWire::deserialize(deserializer)? {
+            MayTriggerAutoChoiceSelectorWire::Tagged(selector) => Ok(selector.into()),
+            MayTriggerAutoChoiceSelectorWire::LegacyExact(key) => Ok(Self::exact(key)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MayTriggerAutoChoiceRecord {
-    pub key: MayTriggerAutoChoiceKey,
+    /// `key` is accepted only to deserialize pre-selector persisted records.
+    #[serde(alias = "key")]
+    pub selector: MayTriggerAutoChoiceSelector,
     pub choice: AutoMayChoice,
 }
 
@@ -12105,6 +12237,11 @@ pub enum WaitingFor {
         description: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         may_trigger_key: Option<MayTriggerAutoChoiceKey>,
+        /// Engine-issued capability for the optional same-card scope. This is
+        /// deliberately a boolean: clients cannot construct or inspect the
+        /// private printed selector used to persist the answer.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        same_card_may_trigger_choice_available: bool,
     },
     /// CR 702.95a + CR 608.2d: Soulbond partner choice made while the PairWith
     /// effect resolves. The listed objects are legal choices, not targets.
@@ -22058,11 +22195,84 @@ impl GameState {
         self.next_timestamp = self.next_timestamp.max(timestamp.saturating_add(1));
     }
 
+    /// CR 603.5: Derive the only same-card selector the engine may issue for a
+    /// live optional-trigger prompt. Every provenance or identity mismatch
+    /// fails closed; clients only receive availability, never this selector.
+    pub fn same_card_may_trigger_auto_choice_selector(
+        &self,
+        key: &MayTriggerAutoChoiceKey,
+    ) -> Option<MayTriggerAutoChoiceSelector> {
+        let MayTriggerOrigin::Definition { definition_ref } = &key.origin else {
+            return None;
+        };
+        let TriggerDefinitionOccurrenceRef::Printed { printed_index, .. } =
+            &definition_ref.occurrence
+        else {
+            return None;
+        };
+        if definition_ref.source.object_id != key.source_id {
+            return None;
+        }
+        let source = self.objects.get(&key.source_id)?;
+        if source.incarnation != definition_ref.source.incarnation
+            || !source.is_represented_by_a_card()
+            || !source
+                .trigger_definitions
+                .iter_all()
+                .any(|entry| source.trigger_definition_ref(entry) == *definition_ref)
+        {
+            return None;
+        }
+        Some(MayTriggerAutoChoiceSelector::SameCard {
+            player: key.player,
+            printed_ref: source.base_printed_ref.clone()?,
+            printed_occurrence: *printed_index,
+        })
+    }
+
+    pub fn may_trigger_same_card_choice_available(&self, key: &MayTriggerAutoChoiceKey) -> bool {
+        self.same_card_may_trigger_auto_choice_selector(key)
+            .is_some()
+    }
+
+    /// CR 603.5: Legacy exact-instance lookup. Kept as the compatibility
+    /// boundary for callers that deliberately know only the old key shape.
     pub fn may_trigger_auto_choice(&self, key: &MayTriggerAutoChoiceKey) -> Option<AutoMayChoice> {
+        let selector = MayTriggerAutoChoiceSelector::exact(key.clone());
         self.may_trigger_auto_choices
             .iter()
-            .find(|record| record.key == *key)
+            .find(|record| record.selector == selector)
             .map(|record| record.choice)
+    }
+
+    /// CR 603.5: Exact-instance preferences always win over same-card
+    /// preferences. The caller supplies a selector only after the live prompt
+    /// proved it eligible, so malformed persisted same-card entries never
+    /// manufacture authority.
+    pub fn may_trigger_auto_choice_for_prompt(
+        &self,
+        exact: &MayTriggerAutoChoiceKey,
+        same_card: Option<&MayTriggerAutoChoiceSelector>,
+    ) -> Option<AutoMayChoice> {
+        self.may_trigger_auto_choice(exact).or_else(|| {
+            same_card.and_then(|selector| {
+                self.may_trigger_auto_choices
+                    .iter()
+                    .find(|record| record.selector == *selector)
+                    .map(|record| record.choice)
+            })
+        })
+    }
+
+    /// CR 603.5: Resolve a stored answer for a live prompt. Same-card
+    /// preferences are eligible only when this exact live key derives an
+    /// engine-authorized selector; exact-instance choices always win.
+    pub fn may_trigger_auto_choice_for_live_prompt(
+        &self,
+        key: &MayTriggerAutoChoiceKey,
+    ) -> Option<AutoMayChoice> {
+        let same_card = self.same_card_may_trigger_auto_choice_selector(key);
+        self.may_trigger_auto_choice_for_prompt(key, same_card.as_ref())
     }
 
     pub fn set_may_trigger_auto_choice(
@@ -22070,15 +22280,23 @@ impl GameState {
         key: MayTriggerAutoChoiceKey,
         choice: AutoMayChoice,
     ) {
+        self.set_may_trigger_auto_choice_selector(MayTriggerAutoChoiceSelector::exact(key), choice);
+    }
+
+    pub fn set_may_trigger_auto_choice_selector(
+        &mut self,
+        selector: MayTriggerAutoChoiceSelector,
+        choice: AutoMayChoice,
+    ) {
         if let Some(record) = self
             .may_trigger_auto_choices
             .iter_mut()
-            .find(|record| record.key == key)
+            .find(|record| record.selector == selector)
         {
             record.choice = choice;
         } else {
             self.may_trigger_auto_choices
-                .push(MayTriggerAutoChoiceRecord { key, choice });
+                .push(MayTriggerAutoChoiceRecord { selector, choice });
         }
     }
 
@@ -22086,15 +22304,24 @@ impl GameState {
     /// optional ("may") trigger. The key already scopes to one player, source,
     /// and origin.
     pub fn remove_may_trigger_auto_choice(&mut self, key: &MayTriggerAutoChoiceKey) {
+        self.remove_may_trigger_auto_choice_selector(&MayTriggerAutoChoiceSelector::exact(
+            key.clone(),
+        ));
+    }
+
+    pub fn remove_may_trigger_auto_choice_selector(
+        &mut self,
+        selector: &MayTriggerAutoChoiceSelector,
+    ) {
         self.may_trigger_auto_choices
-            .retain(|record| record.key != *key);
+            .retain(|record| record.selector != *selector);
     }
 
     /// CR 603.5: Revoke all stored "don't ask again" auto-choices belonging to
     /// `player` for optional ("may") triggers.
     pub fn clear_may_trigger_auto_choices(&mut self, player: PlayerId) {
         self.may_trigger_auto_choices
-            .retain(|record| record.key.player != player);
+            .retain(|record| record.selector.player() != player);
     }
 
     /// CR 603.3b: upsert a trigger-ordering [`DecisionTemplate`], replacing any existing
@@ -24549,6 +24776,7 @@ mod forced_cascade_window_tests {
                     source_id: ObjectId(1),
                     description: None,
                     may_trigger_key: None,
+                    same_card_may_trigger_choice_available: false,
                 },
             ),
             (
@@ -25310,6 +25538,7 @@ mod tests {
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
     };
     use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
+    use crate::types::triggers::TriggerMode;
 
     #[test]
     fn persisted_legacy_tap_effects_migrate_only_effect_payloads() {
@@ -31594,7 +31823,116 @@ mod tests {
             deserialized.may_trigger_auto_choice(&key),
             Some(AutoMayChoice::Accept)
         );
+        assert!(matches!(
+            deserialized.may_trigger_auto_choices[0].selector,
+            MayTriggerAutoChoiceSelector::ExactInstance { .. }
+        ));
         assert_eq!(state, deserialized);
+    }
+
+    #[test]
+    fn may_trigger_auto_choice_selector_decodes_legacy_key_and_keeps_scopes_independent() {
+        let legacy: MayTriggerAutoChoiceRecord = serde_json::from_value(serde_json::json!({
+            "key": {
+                "player": 0,
+                "source_id": 5,
+                "origin": { "type": "Printed", "trigger_index": 1 }
+            },
+            "choice": { "type": "Accept" }
+        }))
+        .expect("legacy record decodes");
+        assert!(matches!(
+            legacy.selector,
+            MayTriggerAutoChoiceSelector::ExactInstance {
+                player: PlayerId(0),
+                source_id: ObjectId(5),
+                ..
+            }
+        ));
+
+        let exact = MayTriggerAutoChoiceKey {
+            player: PlayerId(0),
+            source_id: ObjectId(5),
+            origin: MayTriggerOrigin::Printed { trigger_index: 1 },
+        };
+        let same = MayTriggerAutoChoiceSelector::SameCard {
+            player: PlayerId(0),
+            printed_ref: PrintedCardRef {
+                oracle_id: "same-card".to_string(),
+                face_name: "Same Card".to_string(),
+            },
+            printed_occurrence: 1,
+        };
+        let mut state = GameState::new_two_player(42);
+        state.set_may_trigger_auto_choice_selector(same.clone(), AutoMayChoice::Decline);
+        state.set_may_trigger_auto_choice(exact.clone(), AutoMayChoice::Accept);
+        assert_eq!(
+            state.may_trigger_auto_choice_for_prompt(&exact, Some(&same)),
+            Some(AutoMayChoice::Accept),
+            "exact-instance choices take precedence over same-card choices"
+        );
+        state.remove_may_trigger_auto_choice(&exact);
+        assert_eq!(
+            state.may_trigger_auto_choice_for_prompt(&exact, Some(&same)),
+            Some(AutoMayChoice::Decline),
+            "removing an exact-instance record leaves the same-card record intact"
+        );
+    }
+
+    #[test]
+    fn same_card_may_trigger_selector_uses_printed_ref_not_per_object_card_id() {
+        let printed_ref = PrintedCardRef {
+            oracle_id: "shared-oracle-id".to_string(),
+            face_name: "Shared Face".to_string(),
+        };
+        let mut state = GameState::new_two_player(42);
+        let make_source = |object_id, card_id| {
+            let mut source = GameObject::new(
+                object_id,
+                card_id,
+                PlayerId(0),
+                "Shared Face".to_string(),
+                Zone::Battlefield,
+            );
+            source.printed_ref = Some(printed_ref.clone());
+            source.base_printed_ref = Some(printed_ref.clone());
+            source.push_printed_trigger(TriggerDefinition::new(TriggerMode::ChangesZone));
+            source
+        };
+        let first = make_source(ObjectId(10), CardId(101));
+        let first_ref = first.trigger_definition_ref(&first.trigger_definitions[0]);
+        let second = make_source(ObjectId(11), CardId(202));
+        let second_ref = second.trigger_definition_ref(&second.trigger_definitions[0]);
+        state.objects.insert(ObjectId(10), first);
+        state.objects.insert(ObjectId(11), second);
+
+        let first_key = MayTriggerAutoChoiceKey {
+            player: PlayerId(0),
+            source_id: ObjectId(10),
+            origin: MayTriggerOrigin::Definition {
+                definition_ref: first_ref,
+            },
+        };
+        let second_key = MayTriggerAutoChoiceKey {
+            player: PlayerId(0),
+            source_id: ObjectId(11),
+            origin: MayTriggerOrigin::Definition {
+                definition_ref: second_ref,
+            },
+        };
+        let first_selector = state
+            .same_card_may_trigger_auto_choice_selector(&first_key)
+            .expect("direct printed trigger on a real card is eligible");
+        let second_selector = state
+            .same_card_may_trigger_auto_choice_selector(&second_key)
+            .expect("another physical copy with the same printed ref is eligible");
+        assert_eq!(first_selector, second_selector);
+
+        state.set_may_trigger_auto_choice_selector(first_selector, AutoMayChoice::Decline);
+        assert_eq!(
+            state.may_trigger_auto_choice_for_prompt(&second_key, Some(&second_selector)),
+            Some(AutoMayChoice::Decline)
+        );
     }
 
     #[test]

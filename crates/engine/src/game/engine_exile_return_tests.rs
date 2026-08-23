@@ -666,6 +666,7 @@ fn exile_return_occurs_before_a_pending_resolution_choice() {
         source_id,
         description: Some("Search your library for a land card".to_string()),
         may_trigger_key: None,
+        same_card_may_trigger_choice_available: false,
     };
     let default_wf = WaitingFor::Priority {
         player: PlayerId(1),

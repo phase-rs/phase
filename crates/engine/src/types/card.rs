@@ -85,7 +85,7 @@ fn is_zero(v: &u32) -> bool {
     *v == 0
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PrintedCardRef {
     pub oracle_id: String,
     pub face_name: String,

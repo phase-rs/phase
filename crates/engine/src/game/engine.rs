@@ -3105,7 +3105,7 @@ fn entry_announces(
     .filter(|gate| {
         gate.key
             .as_ref()
-            .is_none_or(|key| state.may_trigger_auto_choice(key).is_none())
+            .is_none_or(|key| state.may_trigger_auto_choice_for_live_prompt(key).is_none())
     })
     .map(|_| DecisionSlot::may(source.clone()));
     let mut slots = super::ability_utils::build_target_slots(state, ability).ok()?;
@@ -6970,9 +6970,11 @@ pub(super) fn resume_delve_mana_payment(state: &mut GameState) -> WaitingFor {
 enum AutoPassDecision {
     /// No active auto-pass — leave the loop and let the frontend take over.
     Exit,
-    /// Auto-pass completed or was interrupted (opponent action, phase stop,
-    /// stack terminator). Clear the flag and exit.
+    /// Auto-pass completed at a terminal stop. Clear the flag and exit.
     Finish,
+    /// Pause this auto-pass run without clearing the session. The next normal
+    /// action boundary will re-enter the loop and re-evaluate the same mode.
+    Break,
     /// Continue passing priority for this iteration.
     Pass,
 }
@@ -7006,7 +7008,9 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
             let opponent_on_stack = state.stack.last().is_some_and(|top| {
                 top.controller != player && !state.is_priority_yielded(player, top)
             });
-            if opponent_on_stack || state.phase_stop_hit(player) {
+            if opponent_on_stack {
+                AutoPassDecision::Break
+            } else if state.phase_stop_hit(player) {
                 AutoPassDecision::Finish
             } else {
                 AutoPassDecision::Pass
@@ -7325,6 +7329,7 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                         state.auto_pass.remove(&player);
                         break;
                     }
+                    AutoPassDecision::Break => break,
                     AutoPassDecision::Pass => {}
                 }
 
@@ -7996,12 +8001,9 @@ fn apply_action(
     // player can only mutate their own preferences regardless of the payload.
     if let GameAction::SetMayTriggerAutoChoice { op } = &action {
         match op {
-            MayTriggerAutoChoiceOp::Remove { key } => {
-                let actor_key = MayTriggerAutoChoiceKey {
-                    player: actor,
-                    ..key.clone()
-                };
-                state.remove_may_trigger_auto_choice(&actor_key);
+            MayTriggerAutoChoiceOp::Remove { selector } => {
+                let actor_selector = selector.for_player(actor);
+                state.remove_may_trigger_auto_choice_selector(&actor_selector);
             }
             MayTriggerAutoChoiceOp::ClearAll => {
                 state.clear_may_trigger_auto_choices(actor);
@@ -9827,11 +9829,12 @@ fn apply_action(
         }
         (
             waiting_for @ WaitingFor::OptionalEffectChoice { .. },
-            GameAction::DecideOptionalEffectAndRemember { choice },
-        ) => engine_payment_choices::handle_optional_effect_choice_and_remember(
+            GameAction::DecideOptionalEffectAndRemember { choice, scope },
+        ) => engine_payment_choices::handle_optional_effect_choice_and_remember_with_scope(
             state,
             waiting_for.clone(),
             choice,
+            scope,
             &mut events,
         )?,
         // CR 608.2d: Opponent decided on "any opponent may" effect.
@@ -13112,8 +13115,11 @@ pub(super) fn begin_pending_trigger_target_selection(
                     source_id,
                     origin,
                 });
+                let same_card_may_trigger_choice_available = may_trigger_key
+                    .as_ref()
+                    .is_some_and(|key| state.may_trigger_same_card_choice_available(key));
                 if let Some(ref key) = may_trigger_key {
-                    if let Some(choice) = state.may_trigger_auto_choice(key) {
+                    if let Some(choice) = state.may_trigger_auto_choice_for_live_prompt(key) {
                         match choice {
                             AutoMayChoice::Decline => {
                                 drop_mid_construction_pending_trigger(state);
@@ -13140,6 +13146,7 @@ pub(super) fn begin_pending_trigger_target_selection(
                     source_id,
                     description: trigger_description,
                     may_trigger_key,
+                    same_card_may_trigger_choice_available,
                 }));
             }
 
@@ -18683,7 +18690,7 @@ mod stage2_injector_tests {
 
         assert_eq!(
             producers.len() + readers.len() + in_test,
-            41,
+            44,
             "CR 603.5 prompt census drifted. A new PRODUCER must have its recipient bound \
              somewhere — the mint's conjunct (a) covers exactly ONE of them. A new READER is \
              the benign case (U4's own consumption arm was one).\n\
@@ -18691,19 +18698,19 @@ mod stage2_injector_tests {
         );
         assert_eq!(
             (producers.len(), readers.len(), in_test),
-            (5, 8, 28),
-            "the partition, not just the total: five PRODUCTION producers, eight PRODUCTION \
-             readers (they read `state.waiting_for` and never write it), 28 `#[cfg(test)]` lines.\nproducers={producers:#?}\n\
+            (5, 9, 30),
+            "the partition, not just the total: five PRODUCTION producers, nine PRODUCTION \
+             readers (they read `state.waiting_for` and never write it), 30 `#[cfg(test)]` lines.\nproducers={producers:#?}\n\
              readers={readers:#?}"
         );
         assert_eq!(
             producers,
             vec![
-                "game/effects/mod.rs::drive_sequential_repeated_optional_payment {player:ability.controller,source_id:ability.source_id,description:ability.description.clone(),may_trigger_key:None}".to_string(),
-                "game/effects/mod.rs::resolve_chain_body {player:prompt_player,source_id:ability.source_id,description,may_trigger_key}".to_string(),
-                "game/effects/mod.rs::resolve_repeated_optional_payment_choice {player,source_id,description,may_trigger_key:None}".to_string(),
-                "game/effects/scoped_library_search.rs::advance_acceptance {player,source_id,description,may_trigger_key:None}".to_string(),
-                "game/engine.rs::begin_pending_trigger_target_selection {player,source_id,description:trigger_description,may_trigger_key}".to_string(),
+                "game/effects/mod.rs::drive_sequential_repeated_optional_payment {player:ability.controller,source_id:ability.source_id,description:ability.description.clone(),may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
+                "game/effects/mod.rs::resolve_chain_body {player:prompt_player,source_id:ability.source_id,description,may_trigger_key,same_card_may_trigger_choice_available}".to_string(),
+                "game/effects/mod.rs::resolve_repeated_optional_payment_choice {player,source_id,description,may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
+                "game/effects/scoped_library_search.rs::advance_acceptance {player,source_id,description,may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
+                "game/engine.rs::begin_pending_trigger_target_selection {player,source_id,description:trigger_description,may_trigger_key,same_card_may_trigger_choice_available}".to_string(),
             ],
             "the five production producers, each keyed by its ENCLOSING FUNCTION and the \
              CONSTRUCTION it mints, compared as a sorted MULTISET, so a sixth mint inside one \
@@ -19177,6 +19184,7 @@ mod stage2_injector_tests {
             source_id: src,
             description: None,
             may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
         };
         (state, src)
     }

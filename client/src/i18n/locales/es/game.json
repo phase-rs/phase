@@ -788,6 +788,7 @@
     "nounPlaneswalker": "planeswalker",
     "nounTargetPermanent": "permanente objetivo",
     "nounTarget": "objetivo",
+    "nounOrPlayer": "{{noun}} o jugador",
     "confirmTap": "Confirmar giro ({{selected}}/{{count}})",
     "keepCurrentTargets": "Conservar objetivos actuales",
     "skip": "Omitir",
@@ -2126,7 +2127,8 @@
     "title": "{{name}} - Efecto opcional",
     "yes": "Sí",
     "no": "No",
-    "dontAskAgain": "No volver a preguntar en esta partida"
+    "dontAskAgain": "No volver a preguntar en esta partida",
+    "dontAskAgainForSameCard": "Aplicar a cada copia de esta carta"
   },
   "topOrBottom": {
     "cardFallback": "Card",

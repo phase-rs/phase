@@ -3273,7 +3273,7 @@ fn actor_scoped_preferences_do_not_advance_active_auto_pass() {
                 state
                     .may_trigger_auto_choices
                     .iter()
-                    .all(|record| record.key.player != PlayerId(1)),
+                    .all(|record| record.selector.player() != PlayerId(1)),
                 "SetMayTriggerAutoChoice::ClearAll must clear the actor's choices"
             ),
             GameAction::SetTriggerOrderTemplate { .. } => assert!(
@@ -3541,7 +3541,9 @@ fn set_may_trigger_auto_choice_remove_revokes_actor_choice() {
         &mut state,
         PlayerId(0),
         GameAction::SetMayTriggerAutoChoice {
-            op: MayTriggerAutoChoiceOp::Remove { key },
+            op: MayTriggerAutoChoiceOp::Remove {
+                selector: crate::types::game_state::MayTriggerAutoChoiceSelector::exact(key),
+            },
         },
     )
     .expect("SetMayTriggerAutoChoice is legal in any state");
@@ -3586,7 +3588,7 @@ fn set_may_trigger_auto_choice_clear_all_is_actor_scoped() {
         "ClearAll drops only the acting player's auto-choices"
     );
     assert_eq!(
-        state.may_trigger_auto_choices[0].key.player,
+        state.may_trigger_auto_choices[0].selector.player(),
         PlayerId(1),
         "another player's auto-choice survives an actor's ClearAll"
     );
@@ -3622,7 +3624,9 @@ fn set_may_trigger_auto_choice_remove_cannot_target_another_player() {
         PlayerId(1),
         GameAction::SetMayTriggerAutoChoice {
             op: MayTriggerAutoChoiceOp::Remove {
-                key: p0_key.clone(),
+                selector: crate::types::game_state::MayTriggerAutoChoiceSelector::exact(
+                    p0_key.clone(),
+                ),
             },
         },
     )
@@ -3696,8 +3700,9 @@ fn set_trigger_order_template_clear_all_is_actor_scoped() {
     );
 }
 
-/// CR 117.3d: an `UntilEndOfTurn` auto-pass session normally ends (Finish) when
-/// an opponent-controlled trigger tops the stack, so the player can respond.
+/// CR 117.3d: an `UntilEndOfTurn` auto-pass session pauses (Break) when an
+/// opponent-controlled trigger tops the stack, so the player can respond while
+/// retaining the session for after the stack entry resolves.
 /// A matching yield keeps the session auto-passing (Pass) through that trigger;
 /// a non-yielded opponent trigger still Finishes.
 #[test]
@@ -3712,13 +3717,13 @@ fn until_end_of_turn_yielded_opponent_top_passes_not_finishes() {
     let source = ObjectId(500);
     push_token_trigger(&mut state, source, PlayerId(1), Some(4), Some(CardId(77)));
 
-    // Without a yield: the opponent trigger ends the session.
+    // Without a yield: the opponent trigger pauses the session.
     assert!(
         matches!(
             priority_auto_pass_decision(&state, PlayerId(0)),
-            AutoPassDecision::Finish
+            AutoPassDecision::Break
         ),
-        "reach-guard: an un-yielded opponent top finishes the session"
+        "reach-guard: an un-yielded opponent top pauses the session"
     );
 
     // With a matching yield: keep auto-passing through it.
@@ -3738,7 +3743,7 @@ fn until_end_of_turn_yielded_opponent_top_passes_not_finishes() {
         "CR 117.3d: a matching yield keeps the UntilEndOfTurn session passing"
     );
 
-    // A different, non-yielded opponent trigger still finishes.
+    // A different, non-yielded opponent trigger still pauses.
     state.stack.clear();
     push_token_trigger(
         &mut state,
@@ -3750,9 +3755,9 @@ fn until_end_of_turn_yielded_opponent_top_passes_not_finishes() {
     assert!(
         matches!(
             priority_auto_pass_decision(&state, PlayerId(0)),
-            AutoPassDecision::Finish
+            AutoPassDecision::Break
         ),
-        "a non-yielded opponent trigger still finishes the session"
+        "a non-yielded opponent trigger still pauses the session"
     );
 }
 

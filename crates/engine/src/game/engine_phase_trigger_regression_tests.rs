@@ -2119,6 +2119,7 @@ fn optional_effect_choice_accept_preserves_nested_effect_zone_choice_continuatio
         source_id,
         description: None,
         may_trigger_key: None,
+        same_card_may_trigger_choice_available: false,
     };
 
     let result = apply_as_current(

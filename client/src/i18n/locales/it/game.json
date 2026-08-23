@@ -779,8 +779,8 @@
     "chooseTarget": "Scegli un bersaglio",
     "triggerDamageAmount": "This trigger: {{amount}} damage",
     "noLegalTargets": "Nessun bersaglio legale disponibile",
-    "upToOne": "fino a un {{target}}",
-    "one": "un {{target}}",
+    "upToOne": "fino a un(a) {{target}}",
+    "one": "un(a) {{target}}",
     "nounPlayer": "giocatore",
     "nounNonlandPermanent": "permanente non Terra",
     "nounSpell": "magia",
@@ -788,6 +788,7 @@
     "nounPlaneswalker": "planeswalker",
     "nounTargetPermanent": "permanente bersaglio",
     "nounTarget": "bersaglio",
+    "nounOrPlayer": "{{noun}} o giocatore",
     "confirmTap": "Conferma TAP ({{selected}}/{{count}})",
     "keepCurrentTargets": "Mantieni i bersagli attuali",
     "skip": "Salta",
@@ -2126,7 +2127,8 @@
     "title": "{{name}} - Effetto facoltativo",
     "yes": "Sì",
     "no": "No",
-    "dontAskAgain": "Non chiedere di nuovo in questa partita"
+    "dontAskAgain": "Non chiedere di nuovo in questa partita",
+    "dontAskAgainForSameCard": "Applica a ogni copia di questa carta"
   },
   "topOrBottom": {
     "cardFallback": "Card",

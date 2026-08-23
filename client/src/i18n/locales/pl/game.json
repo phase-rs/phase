@@ -790,6 +790,7 @@
     "nounPlaneswalker": "wędrowiec",
     "nounTargetPermanent": "docelowy trwały",
     "nounTarget": "cel",
+    "nounOrPlayer": "{{noun}} lub gracz",
     "confirmTap": "Potwierdź obrócenie ({{selected}}/{{count}})",
     "keepCurrentTargets": "Zachowaj bieżące cele",
     "skip": "Pomiń",
@@ -2126,7 +2127,8 @@
     "title": "{{name}} - Efekt opcjonalny",
     "yes": "Tak",
     "no": "Nie",
-    "dontAskAgain": "Nie pytaj ponownie w tej grze"
+    "dontAskAgain": "Nie pytaj ponownie w tej grze",
+    "dontAskAgainForSameCard": "Zastosuj do każdej kopii tej karty"
   },
   "topOrBottom": {
     "cardFallback": "Karta",

@@ -25,6 +25,7 @@ describe("preferencesStore", () => {
         musicMuted: false,
         masterMuted: false,
         multiplayerBoardLayout: "split",
+        multiplayerSplitLayoutNudgeDismissed: true,
         aiSeats: [{ difficulty: "Medium", deckId: "Random" }],
         aiBracketFilter: [],
       });
@@ -44,6 +45,7 @@ describe("preferencesStore", () => {
     // used below): the shared beforeEach writes its own defaults snapshot, so a
     // getState() read here would assert that snapshot, not buildDefaultPreferences().
     expect(usePreferencesStore.getInitialState().multiplayerBoardLayout).toBe("split");
+    expect(usePreferencesStore.getInitialState().multiplayerSplitLayoutNudgeDismissed).toBe(true);
     expect(state.aiSeats).toEqual([{ difficulty: "Medium", deckId: "Random" }]);
     expect(state.priorityPassingMode).toBe("Standard");
   });
@@ -106,6 +108,15 @@ describe("preferencesStore", () => {
     });
 
     expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("focused");
+  });
+
+  it("updates the multiplayer split-layout nudge dismissal independently", () => {
+    act(() => {
+      usePreferencesStore.getState().setMultiplayerSplitLayoutNudgeDismissed(false);
+    });
+
+    expect(usePreferencesStore.getState().multiplayerSplitLayoutNudgeDismissed).toBe(false);
+    expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("split");
   });
 
   it("setFollowActiveOpponent updates the value", () => {
@@ -612,4 +623,27 @@ describe("preferencesStore", () => {
 
     expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("focused");
   });
+
+  it.each([
+    ["focused", false],
+    ["split", true],
+  ] as const)(
+    "v29 → v30 preserves raw %s layout and sets nudge dismissal to %s",
+    (multiplayerBoardLayout, multiplayerSplitLayoutNudgeDismissed) => {
+      localStorage.setItem(
+        "phase-preferences",
+        JSON.stringify({ state: { multiplayerBoardLayout }, version: 29 }),
+      );
+
+      act(() => {
+        usePreferencesStore.persist.rehydrate();
+      });
+
+      const state = usePreferencesStore.getState();
+      expect(state.multiplayerBoardLayout).toBe(multiplayerBoardLayout);
+      expect(state.multiplayerSplitLayoutNudgeDismissed).toBe(
+        multiplayerSplitLayoutNudgeDismissed,
+      );
+    },
+  );
 });

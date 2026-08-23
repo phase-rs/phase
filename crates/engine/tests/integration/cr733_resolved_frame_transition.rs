@@ -201,6 +201,7 @@ fn direct_choice_install_rejects_a_second_optional_owner_atomically() {
         source_id: ObjectId(100),
         description: None,
         may_trigger_key: None,
+        same_card_may_trigger_choice_available: false,
     };
     let first_frame = optional_effect_frame(&state);
     state
@@ -218,6 +219,7 @@ fn direct_choice_install_rejects_a_second_optional_owner_atomically() {
                 source_id: ObjectId(101),
                 description: None,
                 may_trigger_key: None,
+                same_card_may_trigger_choice_available: false,
             },
         ),
         Err(ResolutionStackError::MultipleDirectChoiceOwners)
