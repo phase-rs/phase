@@ -600,9 +600,8 @@ let sharedEngineHost: symbol | null = null;
 /**
  * Fail-loud contract for a disposed host. With a private worker, `dispose()`
  * tore the engine down and every later call threw `assertInitialized`. A shared
- * worker survives disposal, so a use-after-dispose host (e.g. `getActiveP2PHost()`
- * handing back an adapter that `GameProvider` disposed directly) would silently
- * operate on the live shared engine instead.
+ * worker survives disposal, so a use-after-dispose host would silently operate
+ * on the live shared engine instead.
  */
 function hostDisposedError(): AdapterError {
   return new AdapterError("P2P_ERROR", "P2P host adapter has been disposed", false);

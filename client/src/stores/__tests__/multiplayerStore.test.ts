@@ -610,6 +610,36 @@ describe("multiplayerStore", () => {
     expect(p2pMocks.startPregameGame).toHaveBeenCalledOnce();
   });
 
+  it("transfers a started P2P host to the game route exactly once", async () => {
+    const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+      hostingSettings(),
+      {
+        main_deck: ["Forest"],
+        sideboard: [],
+        commander: ["Goreclaw, Terror of Qal Sisma"],
+      },
+      { useBroker: false },
+    );
+    expect(ok).toBe(true);
+
+    await useMultiplayerStore.getState().startLobbyWithCurrentPlayers();
+    const route = useMultiplayerStore.getState().pendingGameRoute;
+    expect(route).toMatch(/^\/game\/[^?]+\?mode=p2p-host$/);
+    const gameId = route!.slice("/game/".length, -"?mode=p2p-host".length);
+
+    // A different route cannot steal the active host; the correct route can
+    // still claim it afterwards.
+    expect(useMultiplayerStore.getState().takeActiveP2PHost("different-game")).toBeNull();
+    const adapter = useMultiplayerStore.getState().takeActiveP2PHost(gameId);
+    expect(adapter).not.toBeNull();
+    expect(useMultiplayerStore.getState().takeActiveP2PHost(gameId)).toBeNull();
+
+    // The game route owns the transferred adapter. Lobby cancellation cannot
+    // dispose it before the route's own cleanup runs.
+    useMultiplayerStore.getState().cancelHosting();
+    expect(p2pMocks.dispose).not.toHaveBeenCalled();
+  });
+
   it("reports a server host connection error instead of falling through to P2P", async () => {
     useMultiplayerStore.setState({
       hostingStatus: "waiting",

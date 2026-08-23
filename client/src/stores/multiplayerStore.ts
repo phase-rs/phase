@@ -338,7 +338,12 @@ interface MultiplayerActions {
     deck: HostingDeck,
     opts: { useBroker: boolean; roomName?: string | null },
   ) => Promise<boolean>;
-  getActiveP2PHost: () => { adapter: P2PHostAdapter; gameId: string } | null;
+  /**
+   * Transfers the pre-game host adapter to the matching game route. Once
+   * claimed, the game provider is its sole owner and lobby cleanup cannot
+   * later leave a disposed adapter available for a remount.
+   */
+  takeActiveP2PHost: (gameId: string) => P2PHostAdapter | null;
   seatMutate: (mutation: SeatMutation) => void;
   /** Like `seatMutate` but awaits P2P work; server sends are still fire-and-forget. */
   seatMutateAsync: (mutation: SeatMutation) => Promise<void>;
@@ -1229,11 +1234,13 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         }
       },
 
-      getActiveP2PHost: () => {
-        if (activeP2PHostAdapter && activeP2PHostGameId) {
-          return { adapter: activeP2PHostAdapter, gameId: activeP2PHostGameId };
-        }
-        return null;
+      takeActiveP2PHost: (gameId) => {
+        if (!activeP2PHostAdapter || activeP2PHostGameId !== gameId) return null;
+
+        const adapter = activeP2PHostAdapter;
+        activeP2PHostAdapter = null;
+        activeP2PHostGameId = null;
+        return adapter;
       },
 
       seatMutateAsync: async (mutation) => {
