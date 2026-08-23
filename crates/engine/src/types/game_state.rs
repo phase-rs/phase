@@ -22264,6 +22264,17 @@ impl GameState {
         })
     }
 
+    /// CR 603.5: Resolve a stored answer for a live prompt. Same-card
+    /// preferences are eligible only when this exact live key derives an
+    /// engine-authorized selector; exact-instance choices always win.
+    pub fn may_trigger_auto_choice_for_live_prompt(
+        &self,
+        key: &MayTriggerAutoChoiceKey,
+    ) -> Option<AutoMayChoice> {
+        let same_card = self.same_card_may_trigger_auto_choice_selector(key);
+        self.may_trigger_auto_choice_for_prompt(key, same_card.as_ref())
+    }
+
     pub fn set_may_trigger_auto_choice(
         &mut self,
         key: MayTriggerAutoChoiceKey,

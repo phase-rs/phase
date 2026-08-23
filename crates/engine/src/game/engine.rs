@@ -3105,7 +3105,7 @@ fn entry_announces(
     .filter(|gate| {
         gate.key
             .as_ref()
-            .is_none_or(|key| state.may_trigger_auto_choice(key).is_none())
+            .is_none_or(|key| state.may_trigger_auto_choice_for_live_prompt(key).is_none())
     })
     .map(|_| DecisionSlot::may(source.clone()));
     let mut slots = super::ability_utils::build_target_slots(state, ability).ok()?;
@@ -13119,10 +13119,7 @@ pub(super) fn begin_pending_trigger_target_selection(
                     .as_ref()
                     .is_some_and(|key| state.may_trigger_same_card_choice_available(key));
                 if let Some(ref key) = may_trigger_key {
-                    let same_card = state.same_card_may_trigger_auto_choice_selector(key);
-                    if let Some(choice) =
-                        state.may_trigger_auto_choice_for_prompt(key, same_card.as_ref())
-                    {
+                    if let Some(choice) = state.may_trigger_auto_choice_for_live_prompt(key) {
                         match choice {
                             AutoMayChoice::Decline => {
                                 drop_mid_construction_pending_trigger(state);
