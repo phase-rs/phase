@@ -592,6 +592,56 @@ independently-meaningful `FormatConfig` field), it must reject explicitly
 rather than silently drop data. The `CustomFormatId` this constructor
 allocates is the ad-hoc sentinel described above, not a registry-stable ID.
 
+**`label`/`short_label`/`description` construction rule (maintainer review
+round 8) — the one gap this constructor still had.** Round 6 gave
+`CustomFormatDef` a real struct sketch requiring these three fields (see
+above); this constructor's signature (`name` + `&FormatConfig`) never
+specified how a lobby save produces `short_label` or `description`, and
+those two aren't optional — the registry hands them to the frontend exactly
+like `FormatMetadata` already does for built-in formats
+(`crates/engine/src/types/format.rs:24-34`), so an unspecified derivation
+means the Axis-A factory has no defined complete output. Fixed by deriving
+both from `name`/`config` alone — never inventing user-facing rules
+metadata a lobby host didn't provide:
+- `label: name` directly — unchanged from what was already implied.
+- `short_label`: the first 3 alphanumeric characters of `name.trim()`,
+  uppercased. This is not a new UI convention — it's the existing
+  `FormatMetadata.short_label` contract (a fixed 3-character code,
+  load-bearing for the badge width in `GameListItem.tsx`) applied via the
+  *same* derivation the frontend already falls back to today for any
+  format it doesn't recognize (`format.slice(0, 3).toUpperCase()`, present
+  independently in `GameListItem.tsx`, `StatsPanel.tsx`, and
+  `CardCoverageDashboard.tsx`). Moving that derivation into
+  `from_lobby_config` means the engine now supplies a real value for every
+  Axis-A format instead of the frontend silently computing one — per
+  CLAUDE.md's "the engine owns all logic," this was arguably a latent
+  frontend-computes-derived-data gap even before Axis A existed, now closed
+  as a side effect of fixing this finding. Edge case, explicitly allowed:
+  a name with fewer than 3 alphanumeric characters yields a shorter code
+  (there is no meaningful 3-character abbreviation to invent for e.g. a
+  2-character name) — this is a deliberate, documented deviation from the
+  "always exactly 3" convention every hand-curated built-in entry happens
+  to satisfy, not a silent violation of it. `from_lobby_config` rejects an
+  empty `name.trim()` outright (no format to label at all), consistent with
+  the existing "reject explicitly rather than silently drop data" posture
+  from round 2 above.
+- `description`: generated from `StructuralRules` alone via a new
+  `derive_structural_description(&StructuralRules) -> String` helper —
+  Matt's suggested "engine-provided structural description" option. Mirrors
+  the existing built-in phrasing style (`"100-card singleton, 2–4 players"`
+  for Commander, `"Tournament 1v1 Commander, 30 life"` for DuelCommander —
+  both short comma-joined structural fragments, no terminal punctuation)
+  by composing from the same fields those hand-authored strings already
+  describe: deck size + singleton, player count/range, starting life, and
+  `command_zone`/`team_based` when set. E.g. `deck_size: 60, singleton:
+  false, min_players: max_players: 2, starting_life: 20` → `"60-card,
+  2-player, 20 life"`. This is Axis A only — Axis B presets keep their
+  existing hand-authored descriptions unchanged; `derive_structural_description`
+  exists because Axis A has no human curator to write one. Exact wording
+  is an implementation-time polish detail (the shape — which fields
+  contribute and in what order — is the part this design commits to), not
+  an architectural question this proposal needs to settle further.
+
 **`sideboard_policy`'s specific source, made explicit (maintainer review
 round 4, point 2 — round 3 added the field but never stated this)**:
 `structural.sideboard_policy: config.format.sideboard_policy()`. This is a
@@ -1088,6 +1138,15 @@ legality logic on the client.
   mechanism, not a specific saved format's values. Does NOT include
   `archenemy_player` (removed per round 3, CONTEXT.md point 3 — not part of
   `StructuralRules` at all).
+- **NEW — maintainer review round 8**: the same round-trip test also
+  asserts `label == name` verbatim, `short_label` is `name`'s first 3
+  alphanumeric characters uppercased (plus a dedicated case for a
+  fewer-than-3-alphanumeric-character name, asserting the shorter code
+  rather than a panic or silent padding), an empty/whitespace-only `name`
+  is rejected rather than producing an empty `label`, and
+  `derive_structural_description` produces a non-empty, config-derived
+  string for at least two distinct `StructuralRules` values (proving it
+  actually reads the config rather than returning a constant).
 
 ## 7. Delivery surface — RESOLVED via maintainer input, see CONTEXT.md "Maintainer input"
 
