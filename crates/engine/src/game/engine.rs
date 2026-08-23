@@ -6970,9 +6970,11 @@ pub(super) fn resume_delve_mana_payment(state: &mut GameState) -> WaitingFor {
 enum AutoPassDecision {
     /// No active auto-pass — leave the loop and let the frontend take over.
     Exit,
-    /// Auto-pass completed or was interrupted (opponent action, phase stop,
-    /// stack terminator). Clear the flag and exit.
+    /// Auto-pass completed at a terminal stop. Clear the flag and exit.
     Finish,
+    /// Pause this auto-pass run without clearing the session. The next normal
+    /// action boundary will re-enter the loop and re-evaluate the same mode.
+    Break,
     /// Continue passing priority for this iteration.
     Pass,
 }
@@ -7006,7 +7008,9 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
             let opponent_on_stack = state.stack.last().is_some_and(|top| {
                 top.controller != player && !state.is_priority_yielded(player, top)
             });
-            if opponent_on_stack || state.phase_stop_hit(player) {
+            if opponent_on_stack {
+                AutoPassDecision::Break
+            } else if state.phase_stop_hit(player) {
                 AutoPassDecision::Finish
             } else {
                 AutoPassDecision::Pass
@@ -7325,6 +7329,7 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                         state.auto_pass.remove(&player);
                         break;
                     }
+                    AutoPassDecision::Break => break,
                     AutoPassDecision::Pass => {}
                 }
 
