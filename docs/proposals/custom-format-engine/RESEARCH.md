@@ -245,10 +245,12 @@ gating a side-effect on an unconditionally-firing event:**
   and dealing; the immediate-dealing path is load-bearing across thousands of
   lines and hundreds of tests. This is plausibly a multi-week combat rework and
   should be treated as its own sub-project, gated behind
-  `LegacyRuleSet.damage_uses_stack`, and very likely **out of the initial MVP**.
-  Middle School and Classic Magic are still *playable* without it (with a
-  documented rules-fidelity caveat) since it only changes response windows in
-  combat.
+  `LegacyRuleSet.damage_timing: CombatDamageTiming::OnStack`, and very likely
+  **out of the initial MVP**. **Per PLAN.md §7's preset-readiness gate
+  (tightened in maintainer review round 4): Middle School and Classic Magic
+  may NOT be registered as selectable formats until this fully lands — there
+  is no "playable without it, with a caveat" interim state.** This retracts
+  the framing this section originally had.
 
 ## 7. Analogous Trace — `GameFormat::Limited` (phase 53 prior art)
 
@@ -414,7 +416,7 @@ direct access to it.
 
 ```text
 if source_pool.includes_face_up_exile()
-    || state.format_config pre_m10_wish_templating flag is set
+    || state.format_config.custom_rules's legacy.pre_m10_wish_reaches_exile flag is set
 {
     choices.extend(collect_face_up_exile_candidates(state, ability, filter));
 }
@@ -439,11 +441,13 @@ the M10 change* — cite CR 400.11 / 400.11a (the modern boundary being relaxed)
 and CR 701.23j, exactly as mana burn cites the obsolete-glossary entry. The flag
 does **not** implement current CR; it deliberately re-enables removed behavior.
 
-**Naming caveat:** `pre_m10_wish_templating` mislabels a *functional pool-scope*
-toggle as a *wording* one. A clearer name is `pre_m10_wish_reaches_exile` (or
-`wish_reaches_removed_from_game`) — it names the actual behavior (Wishes reach
-owned face-up exile). See PLAN naming note. This is not a no-op / wording-only
-flag; it is a real, testable pool-widening.
+**Naming history (resolved — canonical name is `pre_m10_wish_reaches_exile`
+everywhere in this proposal, including the pseudocode above).** The
+first-pass placeholder name, `pre_m10_wish_templating`, mislabeled a
+*functional pool-scope* toggle as a *wording* one. Flagged by maintainer
+review as a stale reference still appearing in this file when it was
+already reconciled in PLAN.md — fixed here to match. This is not a no-op /
+wording-only flag; it is a real, testable pool-widening.
 
 ## 10. Legend rule — historical scope change is REAL; engine hardcodes modern; flag is SMALL
 

@@ -39,14 +39,16 @@ are a clean proof that the design's two axes — the legal-set-code list vs. the
 `LegacyRuleSet` era-rule flags — are properly orthogonal, not entangled:
 
 - A **modern-era block** needs *only* the legal-set-code axis with **all
-  `LegacyRuleSet` flags false / defaulted** (`mana_burn: false`,
-  `damage_uses_stack: false`, `pre_m10_wish_reaches_exile: false`,
-  `legend_rule_scope: Modern`). It is a `CustomFormatDef` that is purely a
-  set-list restriction.
+  `LegacyRuleSet` axes at their `Modern`/default variant** (`mana_burn:
+  ManaBurnPolicy::Modern`, `damage_timing: CombatDamageTiming::Modern`,
+  `wish_scope: WishOutsideGameScope::PostM10SideboardOnly`,
+  `legend_rule_scope: LegendRuleScope::Modern`). It is a `CustomFormatDef`
+  that is purely a set-list restriction.
 - A **pre-M10-era block** (a block from before the 2010 "M10" rules update)
-  would set `mana_burn: true` (and potentially `pre_m10_wish_reaches_exile` /
-  `legend_rule_scope` depending on the exact era) via the **same** mechanism —
-  proving `LegacyRuleSet` is *not* special-cased to the four EC presets but is a
+  would set `mana_burn: ManaBurnPolicy::Obsolete` (and potentially
+  `wish_scope: WishOutsideGameScope::PreM10ReachesExile` / `legend_rule_scope`
+  depending on the exact era) via the **same** mechanism — proving
+  `LegacyRuleSet` is *not* special-cased to the four EC presets but is a
   genuinely general axis any format opts into based on which era's rules it
   represents. The four EC formats are simply the first four consumers of an axis
   that is open to Block Constructed and any future era format alike.
@@ -164,15 +166,15 @@ CustomFormatRules {                     // the resolved ruleset payload
 //     topology at all (a different `FormatTopology` shape, not a config knob
 //     on top of `IndividualSeats`) — explicit scope exclusion, not a silent
 //     drop; a topology-aware design is its own future project.
-//   - `sideboard_policy` — this is NOT a `FormatConfig` field. It's a
+//   - `sideboard_policy` — NOT a `FormatConfig` field today; it's a
 //     `GameFormat` method (`format.rs:270`,
 //     `fn sideboard_policy(self) -> SideboardPolicy`), computed from the
 //     enum variant for built-in formats, with no `FormatConfig` access to
-//     check anything for `Custom`. `StructuralRules` carries it explicitly;
-//     see the new `FormatConfig::sideboard_policy()` accessor and consumer
-//     migration below (maintainer review round 3, CONTEXT.md point 2) —
-//     round 2 added this field but never specified how anything would
-//     actually READ it for a Custom format, which was itself a gap.
+//     check anything for `Custom`. `StructuralRules` carries the DECLARED
+//     value explicitly; `FormatConfig` gains a matching STORED field (not a
+//     method — see the fallible-validation section below, maintainer
+//     review round 4, which also explains why round 3's method-plus-
+//     `.expect()` design was itself wrong, not just incomplete).
 StructuralRules {
     starting_life: i32,
     min_players: u8,
@@ -183,39 +185,97 @@ StructuralRules {
     commander_damage_threshold: Option<u8>,
     range_of_influence: Option<Box<RangeOfInfluenceConfig>>,  // mirrors FormatConfig's field exactly
     team_based: bool,
-    sideboard_policy: SideboardPolicy,  // no derivation source for Custom, see note above
+    sideboard_policy: SideboardPolicy,  // the DECLARED value for this custom format;
+                                        // FormatConfig.sideboard_policy (a stored field,
+                                        // see the fallible-validation note below) is the
+                                        // RESOLVED value every consumer actually reads —
+                                        // same two-layer shape as uses_commander already has
 }
 
-// --- sideboard_policy accessor and consumer migration (new — maintainer
-// review round 3, CONTEXT.md point 2) ---
+// --- Fallible validation + resolved-context threading (REWRITTEN —
+// maintainer review round 4, CONTEXT.md point 1; round 3's `.expect()`-based
+// accessor was itself wrong, not just incomplete) ---
 //
-// `GameFormat::sideboard_policy(self) -> SideboardPolicy` (`format.rs:270`)
-// is an exhaustive match over the built-in variants with NO access to
-// `FormatConfig` — a `Custom(_)` arm there can only be
-// `unreachable!("call FormatConfig::sideboard_policy() instead")`, since the
-// real answer lives in `custom_rules`, which this method cannot see. The
-// correct authority is one level up:
+// Round 3 added `FormatConfig::sideboard_policy()` as a METHOD with an
+// `.expect("Custom format must carry custom_rules")` arm, and migrated two
+// call sites. Both were mistakes:
+//   (a) `.expect()` panics in production if `custom_rules` is ever `None`
+//       while `format == Custom(_)` — a malformed/inconsistent value should
+//       be rejected where it enters the system, not allowed to exist and
+//       panic downstream wherever it's read.
+//   (b) Two call sites were nowhere near enough. A full audit this round
+//       (grep for every real, non-test consumer of `.uses_commander()` /
+//       `.sideboard_policy()` on a bare `GameFormat`) found SEVEN files:
+//       `game/companion.rs` (4 sites: `companion_offers`/
+//       `companion_starting_deck`-adjacent code at lines 193, 205, 254, 388),
+//       `game/deck_loading.rs` (681, 697), `game/match_flow.rs` (64, 357),
+//       `game/deck_validation.rs` (98, 1881, 1922, 2273, 2320). Round 3 found
+//       none of `companion.rs`'s four; maintainer review round 4 caught one
+//       of them (`companion.rs:252-260`) directly.
 //
-// impl FormatConfig {
-//     pub fn sideboard_policy(&self) -> SideboardPolicy {
-//         match self.format {
-//             GameFormat::Custom(_) => self.custom_rules.as_ref()
-//                 .expect("Custom format must carry custom_rules")
-//                 .structural.sideboard_policy,
-//             other => other.sideboard_policy(),
-//         }
-//     }
-// }
+// **Deeper finding this round, beyond what was flagged**: several of these
+// functions don't take `&FormatConfig` at all — they take a bare
+// `format: GameFormat` parameter (`companion_offers`,
+// `companion_starting_deck`, and — found independently this round, not
+// previously flagged by anyone — `deck_validation.rs`'s
+// `DeckCompatibilityRequest.selected_format: Option<GameFormat>`, threaded
+// through `companion_candidates`, `quick_constructed_check`'s caller, and
+// the format-dispatch `match` in the ~1900-2300 line range). A method-only
+// fix on `FormatConfig` cannot help these — there is no `FormatConfig` in
+// scope at all, only the bare enum. This is the real reason "add an
+// accessor and migrate the two call sites I already knew about" was never
+// going to be sufficient — the actual shape of the problem is that several
+// engine call paths were designed assuming `GameFormat` alone carries all
+// necessary information, which is true for every built-in format and false
+// for `Custom`.
 //
-// Every current call site of `state.format_config.format.sideboard_policy()`
-// — confirmed this session at `game/deck_loading.rs:681` and
-// `game/match_flow.rs:357`; a repo-wide grep for the same pattern at
-// implementation time catches any others — migrates to
-// `state.format_config.sideboard_policy()`. Round 2 added the field to
-// `StructuralRules` but never specified this accessor or the migration,
-// which is why a saved format's sideboard policy would have been silently
-// ignored (both existing consumers would keep reading a meaningless
-// built-in-format answer for `GameFormat::Custom`).
+// **Fix — validated ingestion + resolved fields, not per-call-site patches:**
+//
+// 1. `FormatConfig` construction/deserialization gains fallible validation
+//    of the `format`/`custom_rules` invariant:
+//    `format == GameFormat::Custom(id) ⟺ custom_rules == Some(rules) &&
+//    rules.id == id`. Every constructor (`from_lobby_config`, preset
+//    constructors, and the WASM/network deserialization boundary) goes
+//    through one `fn validate_custom_rules_consistency(&FormatConfig) ->
+//    Result<(), FormatConfigError>` check. A malformed value is rejected at
+//    the boundary — never constructed, never sent, never silently accepted
+//    — so nothing downstream needs to guard against it, and no consumer
+//    needs `.expect()`/`.unwrap()` on `custom_rules`.
+// 2. `sideboard_policy` becomes a STORED FIELD on `FormatConfig`
+//    (`pub sideboard_policy: SideboardPolicy`), computed once at
+//    construction — this MATCHES the existing pattern `uses_commander` and
+//    `supplies_fixed_deck` already use (both are stored fields on
+//    `FormatConfig`, computed at construction time and kept in sync by a
+//    dedicated test, `format.rs:1512`/`:1513` — confirmed this round, not
+//    assumed), not a new pattern invented for this feature. For built-in
+//    formats, construction sets it from `format.sideboard_policy()`; for
+//    `Custom`, from `custom_rules.structural.sideboard_policy` — same shape
+//    as how `uses_commander`/`supplies_fixed_deck` are already populated.
+// 3. Every call site above migrates from calling `.sideboard_policy()` /
+//    `.uses_commander()` on a bare `GameFormat` to reading the STORED FIELD
+//    on the `FormatConfig` (or `DeckCompatibilityRequest`) it already has —
+//    or, where the current signature only carries a bare `GameFormat`
+//    (`companion_offers`, `companion_starting_deck`,
+//    `DeckCompatibilityRequest.selected_format`), the signature widens to
+//    carry the resolved fields (either the whole `&FormatConfig`, or a
+//    small `ResolvedFormatFacts { uses_commander: bool, sideboard_policy:
+//    SideboardPolicy }` copy-type, whichever is less invasive at each call
+//    site — a per-site judgment call for implementation, not resolved here,
+//    but the fields themselves are already validated and computed by step 1
+//    regardless of which shape carries them).
+// 4. This list is the one confirmed by direct grep this session — treat it
+//    as the discovered floor, not a ceiling. Before implementation, run the
+//    same audit this repo's `add-engine-variant` skill already prescribes
+//    for any new enum variant: search for every consumer of `GameFormat`
+//    (not just these two methods) and confirm each one either doesn't need
+//    Custom-awareness (rare — most branch on behavior) or is migrated.
+//
+// `GameFormat::sideboard_policy(self)` and `GameFormat::uses_commander(self)`
+// themselves keep their exhaustive match over built-in variants; each gains
+// a `Custom(_) => unreachable!("read FormatConfig.sideboard_policy /
+// .uses_commander instead — GameFormat alone cannot resolve this")` arm,
+// documented as a guard against exactly the mistake round 3 made, not a
+// path any correct caller should reach.
 
 // Axis B — legality/era-rules. Genuinely new data; no existing UI surface.
 // This is what makes the four EC formats rules-correct; kept exactly as
@@ -283,18 +343,30 @@ LegalityRules {
 // since the ID itself carries no meaning once the full payload travels with
 // it.
 //
-// VERSION SKEW (flagged, not fully resolved here): an older client that has
-// never heard of the `GameFormat::Custom` enum variant at all cannot be
-// rescued by `#[serde(default)]` on `custom_rules` — the failure happens at
-// the enum-variant level during deserialization of `format: GameFormat`
-// itself, before any field-level default ever applies. This is the same
-// class of risk any new `GameFormat` variant already carries, but custom
-// formats make it far more frequent in practice (a new custom format can be
-// created at any time, not just at a client release). The lobby-join flow
-// needs an explicit compatibility check — reject with a clear "this game
-// needs a custom-format-capable client" message — rather than relying on
-// deserialization to fail gracefully. Not designed in depth here; flagged as
-// a real requirement for whoever implements the lobby-join handshake.
+// VERSION SKEW — CONCRETE MODEL (round 4, maintainer review point 4; rounds
+// 2-3 flagged this without designing it). An older client that has never
+// heard of the `GameFormat::Custom` enum variant at all cannot be rescued by
+// `#[serde(default)]` on `custom_rules` — the failure happens at the
+// enum-variant level during deserialization of `format: GameFormat` itself,
+// before any field-level default ever applies.
+//
+// This reuses EXISTING infrastructure rather than inventing a new
+// negotiation protocol: `server-core/src/protocol.rs` already defines
+// `PROTOCOL_VERSION` / `MIN_SUPPORTED_PROTOCOL` / `LOBBY_PROTOCOL_VERSION`
+// (currently `PROTOCOL_VERSION = 33`), checked at connection establishment
+// with its own doc comment stating it "refuses to proceed on mismatch" —
+// confirmed this session, not assumed. The fix: bump `PROTOCOL_VERSION` in
+// the same release that ships `GameFormat::Custom`. A client below the new
+// `MIN_SUPPORTED_PROTOCOL` is rejected at THIS EXISTING handshake gate,
+// before it ever attempts to deserialize a `FormatConfig` carrying a variant
+// it doesn't know — the same mechanism that already protects every other
+// protocol-breaking change, not a custom-format-specific negotiation layer.
+// This is deliberately narrower than "negotiate custom-format support as an
+// independent capability": it ties custom-format support to the same
+// coarse-grained protocol version every other breaking wire change already
+// uses, which is consistent with how this codebase handles compatibility
+// today rather than introducing a new, finer-grained capability-negotiation
+// concept alongside it.
 
 ReprintPolicy {                         // enum — enforceable today only at set-code granularity
     OriginalPrintingsOnly,              // 93-94 / Classic intent (see limitation)
@@ -338,20 +410,60 @@ ReprintPolicy {                         // enum — enforceable today only at se
 //       SpecificSet(SetCode),     // pin to one set's frame (e.g. "Alpha only" preset)
 //   }
 
+// REVISED per maintainer review round 4 (CONTEXT.md point 3): every axis
+// below is now a typed enum, not a bool — `legend_rule_scope` already was;
+// the other three are converted for consistency and because CLAUDE.md's
+// own bool-vs-enum principle applies here: each names a REAL two-value
+// historical space (a pre-removal form vs. the modern absence of the rule),
+// not an arbitrary on/off switch, and a typed variant is self-documenting at
+// every call site (`ManaBurnPolicy::Obsolete` reads correctly; `mana_burn:
+// true` requires the reader to already know which direction "true" points).
+// This mirrors `LegendRuleScope`'s existing shape rather than introducing a
+// new convention.
 LegacyRuleSet {                         // INDEPENDENT era-rule axes (RESEARCH §8, §10)
-    mana_burn: bool,
-    damage_uses_stack: bool,
-    pre_m10_wish_reaches_exile: bool,   // RESEARCH §9: Wishes reach owned face-up
-                                        // exile (pre-M10 "removed from the game").
-                                        // NOTE: renamed from the first-pass
-                                        // placeholder `pre_m10_wish_templating`
-                                        // — it is a functional POOL-SCOPE toggle,
-                                        // not a wording/templating change.
+    mana_burn: ManaBurnPolicy,
+    damage_timing: CombatDamageTiming,
+    wish_scope: WishOutsideGameScope,
     legend_rule_scope: LegendRuleScope, // RESEARCH §10: modern per-controller
                                         // (default) vs pre-M14 any-controller.
-                                        // A typed enum, NOT a bool (the historical
-                                        // space is not a clean binary and this
-                                        // leaves room without a later refactor).
+                                        // Already a typed enum since round 1 —
+                                        // the historical space is not a clean
+                                        // binary and this leaves room without
+                                        // a later refactor. Same reasoning now
+                                        // applied to the three siblings above.
+}
+
+ManaBurnPolicy {                        // RESEARCH §5
+    Modern,                             // no mana burn (removed post-M10). DEFAULT.
+    Obsolete,                            // life loss for unspent mana at real
+                                        // phase-group boundaries (§4's ManaExpiry
+                                        // design). EC/Swedish target era.
+}
+
+CombatDamageTiming {                    // RESEARCH §6
+    Modern,                             // CR 510.2: simultaneous, does not use
+                                        // the stack. DEFAULT.
+    OnStack,                            // pre-modern: combat damage was a
+                                        // triggered ability that used the
+                                        // stack, giving players a priority
+                                        // window between assignment and
+                                        // dealing. LARGE — see §4 and §8.
+}
+
+WishOutsideGameScope {                  // RESEARCH §9
+    PostM10SideboardOnly,               // modern CR 400.11/400.11a: "outside
+                                        // the game" is not a zone; only the
+                                        // sideboard is reachable. DEFAULT.
+    PreM10ReachesExile,                 // pre-M10: a Wish could retrieve an
+                                        // owned card that had been removed
+                                        // from the game (today's exile).
+                                        // Renamed from the first-pass
+                                        // placeholder name during round 1;
+                                        // canonical everywhere in this
+                                        // proposal, including RESEARCH.md
+                                        // (fixed this round — two stale
+                                        // references to the old name had
+                                        // survived there since round 1).
 }
 
 LegendRuleScope {                       // RESEARCH §10: legend-rule controller scope
@@ -413,6 +525,17 @@ independently-meaningful `FormatConfig` field), it must reject explicitly
 rather than silently drop data. The `CustomFormatId` this constructor
 allocates is the ad-hoc sentinel described above, not a registry-stable ID.
 
+**`sideboard_policy`'s specific source, made explicit (maintainer review
+round 4, point 2 — round 3 added the field but never stated this)**:
+`structural.sideboard_policy: config.format.sideboard_policy()`. This is a
+valid, direct call because `from_lobby_config`'s precondition is that
+`config.format` is always a BUILT-IN `GameFormat` at the moment this runs —
+saving a custom format FROM an already-custom format (re-saving a save) is
+out of scope for this design and not offered by the lobby UI; if that need
+ever arises it requires its own resolution path (reading the source's
+already-resolved `FormatConfig.sideboard_policy` field instead of calling
+the method), not assumed to fall out of this constructor for free.
+
 Both paths converge on the same `custom_rules: Option<CustomFormatRules>` field
 and the same `GameFormat::Custom(CustomFormatId)` variant — there is exactly
 one runtime representation of "a custom format," authored two different ways.
@@ -452,18 +575,27 @@ The four formats form an incremental chain. Express it with builder-style reuse,
 mirroring how `FormatConfig::pioneer()` spreads `..Self::standard()`:
 
 - `old_school_93_94()` — base: sets = [LEA, LEB, 2ED, CED, CEI, ARN, ATQ, 3ED,
-  LEG, DRK, FEM]; restricted = [22 names]; banned = [7 names]; legacy = {mana_burn}.
+  LEG, DRK, FEM]; restricted = [22 names]; banned = [7 names]; legacy =
+  `{ mana_burn: ManaBurnPolicy::Obsolete, ..default }` (damage timing and
+  Wish scope stay `Modern`/`PostM10SideboardOnly` — EC's 93-94 lists mana
+  burn as its only legacy exception).
 - `old_school_95()` — `let mut d = old_school_93_94(); d.legal_sets.extend([4ED,
   ICE, CHR, REN, HML]); d.restricted.extend([Demonic Consultation, Mana Crypt]);
   d.banned.extend([Amulet of Quoz, Timmerian Fiends]; legacy unchanged`.
 - `middle_school()` — sets = Fourth Edition..Scourge; restricted = []; banned =
-  [25 names]; reprint = AllowAnyPrinting; legacy = {mana_burn, damage_uses_stack,
-  pre_m10_wish_reaches_exile}.
+  [25 names]; reprint = AllowAnyPrinting; legacy = `{ mana_burn:
+  ManaBurnPolicy::Obsolete, damage_timing: CombatDamageTiming::OnStack,
+  wish_scope: WishOutsideGameScope::PreM10ReachesExile }`. **Per the
+  preset-readiness gate (§7, tightened this round): this preset may not be
+  registered until `CombatDamageTiming::OnStack` (§4/§6, LARGE) is fully
+  implemented — no partial/caveated exposure.**
 - `classic_magic()` — sets = Alpha..Scourge; restricted = [**44** names —
   corrected this round from a "37" mislabel; recounted directly against
-  RESEARCH.md's verbatim list]; banned =
-  [11 names]; reprint = OriginalPrintingsOnly; legacy = {mana_burn,
-  damage_uses_stack, pre_m10_wish_reaches_exile}.
+  RESEARCH.md's verbatim list]; banned = [11 names]; reprint =
+  OriginalPrintingsOnly; legacy = `{ mana_burn: ManaBurnPolicy::Obsolete,
+  damage_timing: CombatDamageTiming::OnStack, wish_scope:
+  WishOutsideGameScope::PreM10ReachesExile }`. **Same registration block as
+  Middle School** — not selectable until `CombatDamageTiming::OnStack` lands.
 
 Set codes must be verified against the engine's `set_catalog` (MTGJSON codes)
 during implementation — the codes above are the expected MTGJSON codes but
@@ -495,17 +627,19 @@ This reuses four existing helpers verbatim and adds only the set-membership +
 name-set sourcing. `GameFormat::Custom` gets one arm in
 `format_compatibility_check` routing to `evaluate_custom_format`.
 
-**Honest gap, flagged by maintainer review round 3 (CONTEXT.md point 5):**
+**Honest gap, flagged by maintainer review rounds 3 and 4 (CONTEXT.md point
+5; round 4 demanded a concrete resolution, not just a flag):**
 `rules.reprint_policy` is declared on `LegalityRules` but **not consumed by
 any step above** — a card passes step 2 based on legal-set membership alone,
-regardless of which `ReprintPolicy` the preset declares. This is the same gap
-as the already-flagged Open item 2 (printing/frame-data gap): real
-enforcement needs the engine-vs-frontend printing cross-reference that item
-already describes, not new work invented here. Per the new preset-readiness
-rule (CONTEXT.md point 5, §7): no preset may be registered as selectable
-while declaring a `ReprintPolicy` this algorithm doesn't enforce — this
-blocks `swedish_old_school()` specifically until Open items 2 and 6 resolve
-(see §7).
+regardless of which `ReprintPolicy` the preset declares. Per the tightened
+preset-readiness gate (§7), no preset may register while declaring a
+`ReprintPolicy` this algorithm doesn't enforce. Two independent resolution
+paths, either sufficient (§7 has the full reasoning): the general
+engine-vs-frontend printing cross-reference (Open item 2) landing, or a
+one-preset verification pass confirming no problematic reprints exist within
+that specific preset's `legal_sets` window. This blocks `swedish_old_school()`
+specifically until one of those two paths completes, plus Open item 6
+(reprint-policy value itself unconfirmed).
 
 `legality_format()` returns `None` for `Custom` (no `LegalityFormat` mapping —
 custom formats don't use the external legality table). `label`, `for_format`,
@@ -602,28 +736,39 @@ correct plan for phase 2's four EC-format presets.
   and clearing-logic wiring, not just a life-loss check at an existing call
   site) but still small and, critically, reuses a proven pattern rather than
   adding a new one.
-- **Pre-M10 Wish exile access** (`pre_m10_wish_reaches_exile`): fully traced in
-  RESEARCH §9. This is a REAL functional difference (not wording-only): pre-M10,
-  the "removed from the game" zone counted as *outside the game*, so a Wish could
-  retrieve an owned card that had been removed from the game (modern: exile); the
-  M10 update (CR 400.11/400.11a — "outside the game is not a zone"; only the
-  sideboard is outside the game) removed this. The engine already implements the
-  modern (post-M10) Wish cycle generically as `Effect::SearchOutsideGame` with
-  `source_pool: OutsideGameSourcePool::Sideboard` (`types/ability.rs:246`), and
-  already implements owned-face-up-exile retrieval for the Karn/Coax class via
+- **Pre-M10 Wish exile access** (`wish_scope: WishOutsideGameScope`, renamed
+  from the placeholder `pre_m10_wish_reaches_exile` bool during round 1 —
+  same field, now typed): fully traced in RESEARCH §9. This is a REAL
+  functional difference (not wording-only): pre-M10, the "removed from the
+  game" zone counted as *outside the game*, so a Wish could retrieve an
+  owned card that had been removed from the game (modern: exile); the M10
+  update (CR 400.11/400.11a — "outside the game is not a zone"; only the
+  sideboard is outside the game) removed this. The engine already
+  implements the modern (post-M10) Wish cycle generically as
+  `Effect::SearchOutsideGame` with `source_pool:
+  OutsideGameSourcePool::Sideboard` (`types/ability.rs:246`), and already
+  implements owned-face-up-exile retrieval for the Karn/Coax class via
   `OutsideGameSourcePool::SideboardAndFaceUpExile` + the tested
-  `collect_face_up_exile_candidates` collector and `put_face_up_exile_into` mover
-  (`game/effects/search_outside_game.rs:72,105,141`). **SMALL** (revise the prior
-  "Medium"): the only change is a one-line pool-widening at the existing resolver
-  hook (`search_outside_game.rs:72`) — when the flag on
-  `GameState.format_config` (`types/game_state.rs:6787`) is set, treat a
-  `Sideboard`-pool search as if it were `SideboardAndFaceUpExile`. No parser
-  change (the flag is a runtime-resolution concern, not a parse concern), no new
-  effect/state/WaitingFor, full reuse of the tested collector/mover. Annotate as
-  a legacy rule reverting the M10 change (cite CR 400.11 / 400.11a / 701.23j).
-- **Damage uses the stack** (`damage_uses_stack`): LARGE (RESEARCH §6). Its own
-  sub-project; likely out of MVP. Gated by the flag so Middle School / Classic
-  are playable without it (with a documented fidelity caveat) until it lands.
+  `collect_face_up_exile_candidates` collector and `put_face_up_exile_into`
+  mover (`game/effects/search_outside_game.rs:72,105,141`). **SMALL**
+  (revise the prior "Medium"): the only change is a one-line pool-widening
+  at the existing resolver hook (`search_outside_game.rs:72`) — when
+  `wish_scope == PreM10ReachesExile` on `GameState.format_config`
+  (`types/game_state.rs:6787`), treat a `Sideboard`-pool search as if it
+  were `SideboardAndFaceUpExile`. No parser change (this is a
+  runtime-resolution concern, not a parse concern), no new
+  effect/state/WaitingFor, full reuse of the tested collector/mover.
+  Annotate as a legacy rule reverting the M10 change (cite CR 400.11 /
+  400.11a / 701.23j).
+- **Combat damage timing** (`damage_timing: CombatDamageTiming`, renamed
+  from `damage_uses_stack: bool` this round): LARGE (RESEARCH §6). Its own
+  sub-project. **Per the tightened preset-readiness gate (§7, maintainer
+  review round 4, point 3): no preset may register while declaring
+  `CombatDamageTiming::OnStack` until this fully lands — there is no
+  "playable with a caveat" tier.** This is a real, meaningful timeline
+  consequence: Middle School and Classic Magic (both require `OnStack`) are
+  blocked from ever being selectable until this LARGE item ships, not
+  available-with-a-caveat in the interim as the original sequencing implied.
 - **Legend-rule scope** (`legend_rule_scope`): SMALL (RESEARCH §10). The pre-M14
   form is *simpler* than the modern one — global (group same-named legendaries
   across all controllers, no `obj.controller == player_id` filter) and choiceless
@@ -667,7 +812,7 @@ legality logic on the client.
 - **Mana burn — pool persistence AND life loss** (revised again — maintainer
   review round 3, CONTEXT.md point 1; round 2's version only tested the
   life-loss gate and would have passed against the wrong mechanism):
-  - With `LegacyRuleSet.mana_burn` set, unspent mana added during
+  - With `mana_burn: ManaBurnPolicy::Obsolete`, unspent mana added during
     `DeclareAttackers` must still be present (not dropped, no life loss) at
     `DeclareBlockers` (a transition WITHIN `PhaseGroup::Combat`) — asserts
     the pool itself persists via `ManaExpiry::EndOfPhaseGroup`, not just that
@@ -687,19 +832,45 @@ legality logic on the client.
     actually dropped after that choice resolves, proving the life-loss
     application reuses the pipeline's existing pause/resume point rather
     than computing before the choice is known.
-- **`FormatConfig::sideboard_policy()` accessor** (new — maintainer review
-  round 3, CONTEXT.md point 2): a `Custom`-format `FormatConfig` with
-  `structural.sideboard_policy: Forbidden` must make `deck_loading.rs`'s
-  sideboard-dropping behavior and `match_flow.rs`'s max-sideboard-size
-  computation both observe `Forbidden` via the new accessor — a regression
-  test pinned to the two migrated call sites specifically, not just the
-  accessor's return value in isolation, so a future revert of the migration
-  (reverting to `.format.sideboard_policy()`) fails visibly.
+- **Fallible `custom_rules` validation, not `.expect()`** (new — maintainer
+  review round 4, CONTEXT.md point 1; supersedes round 3's accessor-only
+  test): a `FormatConfig` with `format: GameFormat::Custom(id)` and
+  `custom_rules: None` must be REJECTED by
+  `validate_custom_rules_consistency` at construction/ingestion, not
+  accepted and later panic wherever `sideboard_policy`/`uses_commander` is
+  read. Same for `custom_rules: Some(rules)` where `rules.id != id`. Both
+  are constructed-then-rejected cases, proving the invariant is enforced at
+  the boundary, not merely documented.
+- **Every real consumer reads the resolved `FormatConfig` field, not the
+  bare-`GameFormat` method** (new — maintainer review round 4, expanding
+  round 3's two-call-site test to the full audited list): for a `Custom`
+  format with `sideboard_policy: Forbidden`, assert `deck_loading.rs`'s
+  sideboard-dropping, `match_flow.rs`'s max-sideboard-size, AND
+  `companion.rs`'s `companion_offers` sideboard-slot branch (the consumer
+  round 3 missed and maintainer review round 4 caught directly) all observe
+  `Forbidden` — three call sites pinned specifically, not just the field's
+  value in isolation, so a future regression to any one of them fails
+  visibly. Same shape for `uses_commander` across its own five real
+  call sites (§1's audit list).
 - **`uses_commander` requires both conditions** (new — maintainer review
   round 3, CONTEXT.md point 4): `command_zone: true` alone (no threshold) and
   `commander_damage_threshold: Some(_)` alone (no command zone) both derive
   `uses_commander: false`; only both together derive `true` — the exact
   mismatched-combination cases the review asked for.
+- **Preset-readiness gate is actually enforced, not just documented** (new —
+  maintainer review round 4, CONTEXT.md point 5 / "no caveated exposure"): a
+  synthetic preset declaring `damage_timing: CombatDamageTiming::OnStack`
+  before that engine support exists must be rejected by the registry/format
+  list at registration time (not merely "not recommended in a doc comment")
+  — the concrete test that proves `middle_school()`/`classic_magic()` cannot
+  silently become selectable by a future author who skips reading §7.
+- **Protocol-version compatibility** (new — maintainer review round 4,
+  CONTEXT.md point 4, version-skew design): a client below the
+  bumped `MIN_SUPPORTED_PROTOCOL` is rejected at the existing hello/handshake
+  gate when the host's `FormatConfig.format` is `Custom` — reusing whatever
+  test harness already covers `protocol_version` mismatch rejection
+  (`server-core/src/protocol.rs`'s existing tests), extended with a
+  Custom-format case rather than a new mechanism.
 - Serde round-trip of `FormatConfig` with `Some(custom_rules)` and `None`.
 - `CustomFormatDef::from_lobby_config`: a `FormatConfig` with non-default
   `starting_life`/`max_players`/`deck_size`/`range_of_influence`/`team_based`/
@@ -753,18 +924,37 @@ legacy rules) is unaffected in scope or design — this only changes what ships
 *first* and *how a player reaches Axis A*, not what Axis B needs to be
 correct.
 
-**Preset-readiness gate (new — maintainer review round 3, CONTEXT.md point
-5).** A preset (Axis B typed constructor OR an Axis A lobby save that sets
-non-default `legality`) must not be registered/exposed as a selectable format
-until every legality/legacy field it declares is BOTH fully specified AND
-actually consumed by the evaluator/engine at an authoritative seam — not
-merely present as a struct field. This is a general rule, not a one-off:
+**Preset-readiness gate (introduced round 3, TIGHTENED round 4 — CONTEXT.md
+points 5 and, this round, the "no caveated exposure" rule from maintainer
+review round 4 point 3).** A preset (Axis B typed constructor OR an Axis A
+lobby save that sets non-default `legality`) must not be registered/exposed
+as a selectable format until every legality/legacy field it declares is BOTH
+fully specified AND actually consumed by the evaluator/engine at an
+authoritative seam — not merely present as a struct field. **Round 4
+tightens this further: there is no intermediate "playable with a fidelity
+caveat" state.** A preset is either fully correct for every axis it declares,
+or it does not appear as a selectable format at all. This directly overrides
+this document's own earlier "Middle School / Classic Magic are
+playable-with-caveat until damage-on-stack lands" framing (§4, §8) — that
+framing is retracted, not merely superseded.
 - `swedish_old_school()` (phase 1) is currently BLOCKED from registration by
-  this rule: it declares a `ReprintPolicy`, which §3 confirms is not yet
-  enforced, and CONTEXT.md's Open item 6 confirms the specific policy value
-  is itself unconfirmed against the primary source. Both must resolve before
-  this preset ships as selectable, even though the engine-level schema and
-  evaluator work (§1, §3) can and should land first.
+  this rule on TWO independent grounds: it declares a `ReprintPolicy`, which
+  §3 confirms is not yet enforced by the evaluator at all, and CONTEXT.md's
+  Open item 6 confirms the specific policy value is itself unconfirmed
+  against the primary source. **Resolution path — either is sufficient**:
+  (a) Open item 2's general engine-vs-frontend printing cross-reference
+  lands, making `ReprintPolicy` enforcement real for every preset at once; or
+  (b) a preset-specific verification pass confirms Swedish Old School's
+  particular restricted-list cards have no problematic reprints *within its
+  own `legal_sets` window* that plain legal-set membership wouldn't already
+  exclude — a materially smaller, one-preset check that could unblock this
+  specific preset without waiting on the general system. Neither path is
+  assumed to succeed without doing it; this document does not assert the
+  gap is moot for Swedish specifically without that verification.
+- `middle_school()` and `classic_magic()` (phase 2) are BLOCKED from
+  registration until `CombatDamageTiming::OnStack` (§4, LARGE) is fully
+  implemented — both declare it, and per the no-caveated-exposure rule
+  neither may register while any declared axis is unimplemented.
 - No phase-2 EC preset may declare `LegendRuleScope::PreM14AnyController`
   until the historical conflation flagged in CONTEXT.md/RESEARCH.md resolves.
   Moot today (all four EC presets default this to `Modern`), but binding on
@@ -802,17 +992,25 @@ first.
 **Phase 2 — the four EC formats + the legacy-rules engine work they need.**
 Ships once phase 1 has proven the schema and both axes end-to-end.
 
-4. **Four EC formats as data (Axis B)** — the four `CustomFormatDef`
-   constructors + registry entries + preset-integrity tests (§2).
-5. **Mana burn** — `LegacyRuleSet.mana_burn` at the drop-site hook. Small.
-   Enables full fidelity for 93-94 / 95 and partial for Middle School / Classic.
-6. **Pre-M10 Wish exile access** (`pre_m10_wish_reaches_exile`) — SMALL
-   (RESEARCH §9); one-line pool-widening at `search_outside_game.rs:72`, gated by
-   the flag, reusing the existing tested face-up-exile collector/mover. Can land
-   with or just after mana burn (step 5).
-7. **Damage uses the stack** — LARGE; its own sub-project; likely post-MVP
-   even within phase 2. Middle School / Classic are playable-with-caveat
-   until it lands.
+4. **`old_school_93_94()` / `old_school_95()` as data (Axis B)** — these two
+   `CustomFormatDef` constructors + registry entries + preset-integrity
+   tests (§2). **Registerable once step 5 (mana burn) lands** — neither
+   needs `CombatDamageTiming::OnStack`, so neither is blocked by step 7.
+5. **Mana burn** — `LegacyRuleSet.mana_burn` (`ManaBurnPolicy`) at the
+   transition/empty-pool seam (§4's `ManaExpiry::EndOfPhaseGroup` design).
+   Small. Unlocks step 4's registration.
+6. **Pre-M10 Wish exile access** (`wish_scope: WishOutsideGameScope`) —
+   SMALL (RESEARCH §9); one-line pool-widening at
+   `search_outside_game.rs:72`, gated by the enum value, reusing the
+   existing tested face-up-exile collector/mover. Can land with or just
+   after mana burn (step 5).
+7. **Combat damage timing (`CombatDamageTiming::OnStack`)** — LARGE; its own
+   sub-project; likely the last thing to land in phase 2. **Per the
+   tightened preset-readiness gate (§7): `middle_school()` and
+   `classic_magic()`'s `CustomFormatDef` constructors and tests can be
+   written and land in source alongside step 4, but neither may be
+   registered/exposed as selectable until this step is fully done — no
+   "playable with a caveat" interim state.**
 8. **Eternal Chaos (stretch)** — depends on 93-94 existing (step 4) **plus** a
    genuinely new in-match pack-opening mechanic (Booster Tutor / Opening
    Ceremony / Summon the Pack + tutor-from-opened-packs errata + pack-based

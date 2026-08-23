@@ -433,6 +433,87 @@ being treated as correct).
   Flag renamed `pre_m10_wish_templating` → `pre_m10_wish_reaches_exile` (it is a
   pool-scope toggle, not a wording change).
 
+## Maintainer review round 4 — CHANGES_REQUESTED, addressed
+
+matthewevans re-reviewed round 3's fix (commit `e1c6c1912`) and opened with
+"several earlier design issues are improved" — none of round 3's five points
+were re-flagged, confirming each was genuinely resolved rather than
+resurfacing. Four new/deeper points were raised. Per direct instruction this
+round, every point across ALL FOUR review rounds was re-audited against
+current source before treating anything as settled — this surfaced one
+additional real gap (`deck_validation.rs`'s `DeckCompatibilityRequest
+.selected_format`) that nobody, including this document, had named yet.
+
+1. **Custom format context handling was partial, and a malformed payload
+   could panic (real, confirmed — the most substantive miss).** Round 3's
+   `FormatConfig::sideboard_policy()` used `.expect("Custom format must
+   carry custom_rules")` — a production panic path if `custom_rules` is
+   ever `None` while `format == Custom(_)`. It also migrated only 2 call
+   sites; a full grep this round for every non-test consumer of
+   `.sideboard_policy()` / `.uses_commander()` on a bare `GameFormat` found
+   SEVEN files: `companion.rs` (4 sites — round 4's own citation),
+   `deck_loading.rs` (2), `match_flow.rs` (2), and, found independently this
+   round and not named by any review, `deck_validation.rs` (5 sites,
+   including `DeckCompatibilityRequest.selected_format: Option<GameFormat>`
+   itself — a request struct with no `FormatConfig`/`custom_rules` field at
+   all, meaning even a corrected accessor couldn't have helped these call
+   sites without a signature change). Fixed: (a) fallible validation of the
+   `format`/`custom_rules` invariant at every construction/ingestion point,
+   rejecting inconsistent values before they can exist, so nothing
+   downstream needs `.expect()`; (b) `sideboard_policy` becomes a STORED
+   FIELD on `FormatConfig` — matching the pattern `uses_commander` and
+   `supplies_fixed_deck` already use (confirmed via `format.rs:1512-1513`'s
+   own consistency test), not a new pattern; (c) every real consumer
+   migrates to read the resolved field, with signatures widened wherever
+   they currently only carry a bare `GameFormat`. See PLAN.md §1.
+2. **`from_lobby_config`'s `sideboard_policy` source was never actually
+   specified (real, confirmed).** Round 3 added the field and the round-3
+   accessor, but never stated how the conversion itself computes the value
+   from a bare `&FormatConfig`. Fixed: explicit —
+   `config.format.sideboard_policy()`, valid because `from_lobby_config`'s
+   precondition is that its input's `format` is always built-in (re-saving
+   an already-custom format is out of scope). See PLAN.md §2.
+3. **`LegacyRuleSet`'s booleans should be typed enums, and no preset may
+   ship in a "playable with a caveat" state (real, confirmed — the second
+   part is a genuine scope tightening, not a bug fix).** `mana_burn`,
+   `damage_uses_stack`, and `pre_m10_wish_reaches_exile` were bools; per
+   CLAUDE.md's own bool-vs-enum principle each names a real two-value
+   historical space (an obsolete pre-removal form vs. modern absence), so
+   each becomes a typed enum (`ManaBurnPolicy`, `CombatDamageTiming`,
+   `WishOutsideGameScope`) mirroring `LegendRuleScope`'s existing shape.
+   Separately and more consequentially: this document's own §8/RESEARCH.md
+   §6 said Middle School / Classic Magic would be "playable-with-caveat"
+   until damage-on-stack lands. **Retracted, not merely superseded** — the
+   preset-readiness gate (§7) now explicitly forbids any partial-fidelity
+   registration. Real consequence: those two EC presets cannot ship as
+   selectable until the LARGE combat-timing rework is fully done, full
+   stop, not available-now-with-a-documented-gap as originally planned. See
+   PLAN.md §1 and §7.
+4. **Version-skew handling and `ReprintPolicy` enforcement both needed a
+   concrete resolution, not a flag (real, confirmed).** Rounds 2-3 correctly
+   identified both gaps but explicitly deferred designing them ("not
+   designed in depth here"). Round 4 required an actual answer for each:
+   - Version skew: this engine already has a working protocol-version gate
+     (`server-core/src/protocol.rs`'s `PROTOCOL_VERSION` /
+     `MIN_SUPPORTED_PROTOCOL`, confirmed this session to already "refuse to
+     proceed on mismatch"). Resolution: bump `PROTOCOL_VERSION` when
+     `GameFormat::Custom` ships, so an incompatible client is rejected at
+     the EXISTING handshake gate — reusing proven infrastructure rather than
+     inventing a custom-format-specific negotiation layer.
+   - `ReprintPolicy` enforcement: two resolution paths, either sufficient —
+     the general engine-vs-frontend printing cross-reference (Open item 2),
+     or a one-preset verification pass scoped just to
+     `swedish_old_school()`'s own restricted-list cards. Until either lands,
+     the preset-readiness gate keeps this preset (and any other declaring a
+     non-trivial `ReprintPolicy`) unregistered — the "explicitly narrow the
+     proposal" branch review round 4 offered as an acceptable alternative to
+     building the full model immediately.
+   - Also fixed: two stale `pre_m10_wish_templating` references in
+     RESEARCH.md (lines 417/442) that survived since round 1 despite
+     PLAN.md already using the canonical `pre_m10_wish_reaches_exile` name
+     throughout — a pure terminology-reconciliation miss, now consistent
+     everywhere.
+
 ## Open (needs a human decision — do NOT resolve unilaterally)
 
 1. ~~**Delivery surface**~~ — **RESOLVED**, see "Maintainer input" section
