@@ -2501,7 +2501,9 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += color_len;
     }
 
-    // CR 205.4b: Parse one or more comma-separated negation prefixes.
+    // CR 109.3: Parse one or more comma-separated negation prefixes. A `non-`
+    // prefix negates exactly one characteristic — card type, subtype, supertype,
+    // or color — and `classify_negation` routes it to the layer that owns it.
     // "noncreature, nonland permanent" → [Non(Creature), Non(Land)] in type_filters
     // "nonartifact, nonblack creature" → Non(Artifact) in type_filters, NotColor("Black") in properties
     //
@@ -3141,7 +3143,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
         }
     }
 
-    // CR 205.3 + CR 205.4b: "that isn't a <Subtype>" relative-clause negation.
+    // CR 205.3: "that isn't a <Subtype>" relative-clause negation.
     // Checked before `parse_that_clause_suffix` so the subtype exclusion short-circuits
     // the generic that-clause branch (which does not recognize subtype negation).
     if let Some((neg_tfs, consumed)) = parse_that_isnt_subtype_suffix(&lower[pos..]) {
@@ -3910,7 +3912,9 @@ enum NegationResult {
     Prop(FilterProp),
 }
 
-/// CR 205.4b: Classify a negated word by semantic layer.
+/// CR 109.3: Classify a negated word by semantic layer. Card type, subtype,
+/// supertype, and color are distinct characteristics, so each negation must be
+/// routed to the one it belongs to.
 /// `parse_non_prefix` strips "non"/"non-" and lowercases, so `negated` is e.g. "black", "basic", "creature".
 fn classify_negation(negated: &str) -> NegationResult {
     if tag::<_, _, OracleError<'_>>("token")
@@ -3955,7 +3959,7 @@ fn classify_negation(negated: &str) -> NegationResult {
         "snow" => NegationResult::Prop(FilterProp::NotSupertype {
             value: Supertype::Snow,
         }),
-        // CR 205.4b: Type/subtype negation → TypeFilter::Non
+        // CR 205.2a + CR 205.3: Card-type / subtype negation → TypeFilter::Non
         _ => {
             let inner = match negated {
                 "creature" => TypeFilter::Creature,
@@ -4017,7 +4021,7 @@ pub(crate) fn starts_with_type_word(text: &str) -> bool {
             return true;
         }
     }
-    // CR 205.4b: Negated type prefix: "noncreature spell", "nonland permanent",
+    // CR 205.2a + CR 205.3: Negated type prefix: "noncreature spell", "nonland permanent",
     // "non-Saga token" (Good King Mog XII chapter II — issue #3294), and
     // negated-adjective compounds like "nontoken modified creature" (Akki
     // Ember-Keeper / issue #3677 class) or "nontoken legendary permanent"
@@ -8101,7 +8105,7 @@ fn parse_except_continuity_exemption_suffix(text: &str) -> Option<(FilterProp, u
     ))
 }
 
-/// CR 205.3 + CR 205.4b: "that isn't a <Subtype>" / "that's not a <Subtype>"
+/// CR 205.3: "that isn't a <Subtype>" / "that's not a <Subtype>"
 /// relative-clause negation suffix. Returns negated type filters to append to
 /// the enclosing target's `neg_type_filters`. Mirrors the `non-<Subtype>`
 /// prefix pattern but expressed as a trailing relative clause
@@ -14280,7 +14284,7 @@ mod tests {
 
     #[test]
     fn nonartifact_nonblack_creature() {
-        // CR 205.4b: "nonartifact" → Non(Artifact) in type_filters, "nonblack" → NotColor in properties
+        // CR 205.2a + CR 105.2: "nonartifact" → Non(Artifact) in type_filters, "nonblack" → NotColor in properties
         let (f, rest) = parse_type_phrase("nonartifact, nonblack creature");
         assert_eq!(
             f,
@@ -17940,7 +17944,7 @@ mod tests {
         assert!(tf.type_filters.contains(&TypeFilter::Creature));
     }
 
-    /// CR 205.2a + CR 205.4b: "noncreature artifact" — negation followed by a
+    /// CR 205.2a: "noncreature artifact" — negation followed by a
     /// concrete core type. The Non(Creature) negation should land in
     /// type_filters alongside Artifact.
     #[test]
@@ -18435,7 +18439,7 @@ mod tests {
         ));
     }
 
-    /// CR 205.3 + CR 205.4b: "target attacking Vampire that isn't a Demon" — the
+    /// CR 205.3: "target attacking Vampire that isn't a Demon" — the
     /// subtype-negation relative clause must append `Non(Subtype("Demon"))` to
     /// the target's type filters so a Vampire Demon is rejected.
     #[test]

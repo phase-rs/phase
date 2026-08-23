@@ -4262,7 +4262,7 @@ pub enum TypeFilter {
     Permanent,
     Card,
     Any,
-    /// CR 205.4b: Negation — matches objects whose type does NOT match the inner filter.
+    /// CR 205.2a + CR 205.3: Negation — matches objects whose type does NOT match the inner filter.
     /// "noncreature" → `Non(Box::new(Creature))`, "non-Human" → `Non(Box::new(Subtype("Human")))`
     Non(Box<TypeFilter>),
     /// CR 205.3: Matches objects with a specific subtype (creature type, land type, etc.).
@@ -5005,7 +5005,7 @@ pub enum FilterProp {
     /// stack object's static printed modality (`obj.modal.is_some()`), a printed
     /// characteristic present from object creation.
     Modal,
-    /// CR 205.4b: Matches objects that do NOT have a specific color.
+    /// CR 105.2: Matches objects that do NOT have a specific color.
     /// Parallel to `HasColor` — used for "nonblack", "nonwhite" in negation stacks.
     NotColor {
         color: ManaColor,

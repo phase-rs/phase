@@ -9302,7 +9302,7 @@ fn trigger_you_cast_legendary_creature_spell() {
     );
 }
 
-/// CR 205.2a + CR 205.4b + CR 601.2: "whenever you cast a noncreature
+/// CR 205.2a + CR 601.2: "whenever you cast a noncreature
 /// artifact spell" — Non(Creature) + Artifact conjunction.
 #[test]
 fn trigger_you_cast_noncreature_artifact_spell() {
