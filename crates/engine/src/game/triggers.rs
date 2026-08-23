@@ -10712,26 +10712,23 @@ fn card_type_set_source_binding_diverges(source: &CardTypeSetSource) -> bool {
 /// wrong `false` deletes a real ability off the stack
 /// (`false_gate_consumes_one_shot`).
 ///
-/// NOT YET ADJUDICATED (deliberately, and narrower than this tail was): the
-/// `FilterProp` payload axis of `Typed`. Props that carry their own nested
-/// `TargetFilter` or a resolution-scoped referent (`SharesQuality`,
-/// `InTrackedSet`, `SameNameAsParentTarget`, …) are still read only for
-/// `Another`. That is a separate ~90-variant classifier; the `ControllerRef`
-/// sub-axis, which is small and reaches the same `ability.targets` binding this
-/// function exists to screen, IS adjudicated — see
-/// [`controller_ref_binding_diverges`].
+/// Every sub-payload of `Typed` is adjudicated, each by the classifier that owns
+/// its axis: [`controller_ref_binding_diverges`] for the controller scope and
+/// [`filter_prop_binding_diverges`] for the property list (which recurses back
+/// here for nested populations, and onward to
+/// [`player_filter_binding_diverges`] and `quantity_expr_binding_diverges`).
+/// Nothing on the `Typed` surface reaches the hoist decision unclassified.
 fn filter_binding_diverges(filter: &TargetFilter) -> bool {
     match filter {
-        // CR 603.4: the `Another` rewrite, plus the controller axis that reaches
-        // `ability.targets` / the per-iteration player through `ControllerRef`.
+        // CR 603.4: both sub-payloads can re-scope the population — the
+        // controller axis through `ability.targets` / the per-iteration player,
+        // and the property axis through nested filters, resolution-published
+        // ledgers and the `Another` rewrite.
         TargetFilter::Typed(tf) => {
             tf.controller
                 .as_ref()
                 .is_some_and(controller_ref_binding_diverges)
-                || tf
-                    .properties
-                    .iter()
-                    .any(|prop| matches!(prop, FilterProp::Another))
+                || tf.properties.iter().any(filter_prop_binding_diverges)
         }
         TargetFilter::Not { filter } => filter_binding_diverges(filter),
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
@@ -10915,6 +10912,316 @@ fn controller_ref_binding_diverges(controller: &ControllerRef) -> bool {
         | ControllerRef::EnchantedPlayer
         // CR 611.2: a player id already snapshotted at resolution — a literal.
         | ControllerRef::SpecificPlayer { .. } => false,
+    }
+}
+
+/// CR 603.4: the PROPERTY axis of [`filter_binding_diverges`] — the last
+/// sub-payload of `TargetFilter::Typed` that could reach the hoist decision
+/// unadjudicated.
+///
+/// A `FilterProp` narrows a population, so the same questions apply as one level
+/// up: does the property read the RESOLVING ability (`targets`, `chosen_x`,
+/// `chosen_players`, the layer recipient), a ledger a RESOLUTION publishes
+/// (`last_named_choice`, the tracked sets, the "this way" lists, the CR 607.2a
+/// exile links), or a `current_trigger_event` with no detection-time fallback?
+/// If so, the fire-time leg cannot reproduce it and the hoist must decline.
+///
+/// EXHAUSTIVE and wildcard-free, like every other classifier on this path, so a
+/// new `FilterProp` must be adjudicated rather than silently defaulting to
+/// "cannot diverge". Each nested payload recurses into the authority that owns
+/// it — `filter_binding_diverges` for a nested `TargetFilter`,
+/// [`controller_ref_binding_diverges`] for a controller scope,
+/// [`player_filter_binding_diverges`] for a player predicate, and
+/// `quantity_expr_binding_diverges` for a comparison operand — so each axis
+/// stays one classifier rather than being re-derived here.
+///
+/// Two distinctions worth keeping straight, both taken from the READERS rather
+/// than from the variant names:
+///
+/// * `ControllerRef::TriggeringPlayer` is NON-divergent because
+///   `quantity::triggering_event_player` falls back to the detection-time
+///   thread-local, while `PlayerFilter::TriggeringPlayer` and
+///   `FilterProp::CouldBeTargetedByTriggeringSpell` DO diverge — their readers
+///   consult `state.current_trigger_event` and nothing else, so at fire time
+///   they see `None` and answer `false` for every candidate.
+/// * A choice PERSISTED on the source (`chosen_attributes`, the chosen creature
+///   type) is non-divergent — the `TriggerSourceContext` carries it on both legs
+///   — while a choice published into GLOBAL state by a resolution
+///   (`state.last_named_choice`) is not.
+fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
+    match prop {
+        // ---- Combinators: recurse. ----
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_binding_diverges),
+        FilterProp::Not { prop } => filter_prop_binding_diverges(prop),
+
+        // ---- Nested populations: recurse into the filter authority. ----
+        //
+        // CR 303.4: `CanEnchant` resolves its referent through
+        // `filter::referenced_targets_for_filter`, which answers the EMPTY list
+        // for every filter except `ParentTarget` / `ParentTargetSlot` — so it
+        // diverges exactly when the nested filter does, and this recursion is
+        // precise rather than merely conservative.
+        FilterProp::CanEnchant { target } => filter_binding_diverges(target),
+        FilterProp::DifferentNameFrom { filter }
+        | FilterProp::TargetsOnly { filter }
+        | FilterProp::Targets { filter } => filter_binding_diverges(filter),
+        // CR 608.2c: the Radiance-class reference. `DistinctFrom` takes its ids
+        // from `ability.targets` for the `ParentTarget` shape, so the nested
+        // filter is the whole question.
+        FilterProp::DistinctFrom { reference } => filter_binding_diverges(reference),
+        // CR 608.2c: with NO reference the shared-quality subject is the
+        // resolution-local effect-context object, which does not exist at fire
+        // time; with one, the nested filter decides.
+        FilterProp::SharesQuality { reference, .. } => reference
+            .as_ref()
+            .is_none_or(|reference| filter_binding_diverges(reference)),
+
+        // ---- Nested player predicates and controller scopes: recurse. ----
+        FilterProp::ControllerMatches { player } => player_filter_binding_diverges(player),
+        FilterProp::Owned { controller } | FilterProp::ProtectorMatches { controller } => {
+            controller_ref_binding_diverges(controller)
+        }
+        FilterProp::MostPrevalentCreatureTypeIn { scope, .. } => {
+            controller_ref_binding_diverges(scope)
+        }
+        FilterProp::Attacking { defender } | FilterProp::AttackedThisTurn { defender } => {
+            defender.as_ref().is_some_and(controller_ref_binding_diverges)
+        }
+        FilterProp::HasAttachment { controller, .. }
+        | FilterProp::HasAnyAttachmentOf { controller, .. }
+        | FilterProp::NameMatchesAnyPermanent { controller } => controller
+            .as_ref()
+            .is_some_and(controller_ref_binding_diverges),
+        FilterProp::CountersPutOnThisTurn { actor, .. } => count_scope_binding_diverges(actor),
+
+        // ---- Comparison operands: recurse into the quantity authority. ----
+        //
+        // CR 107.3a: an operand can be `Variable("X")` — the resolving ability's
+        // `chosen_x`, which is `None` at fire time — or any other
+        // resolution-scoped leaf, so these compose with the existing quantity
+        // classifier instead of being assumed constant.
+        FilterProp::Counters { count, .. } => quantity_expr_binding_diverges(count),
+        FilterProp::Cmc { value, .. } | FilterProp::PtComparison { value, .. } => {
+            quantity_expr_binding_diverges(value)
+        }
+        // CR 202.3d: parity taken from the resolution-published
+        // `state.last_named_choice` diverges; a printed parity does not.
+        FilterProp::ManaValueParity { parity } => {
+            matches!(parity, crate::types::ability::ParitySource::LastNamedChoice)
+        }
+        // CR 115.1 + CR 400.7: the combat relation can be scoped to the parent
+        // target (`ability.targets`, empty at fire time) or to the source, which
+        // the `TriggerSourceContext` carries on both legs.
+        FilterProp::CombatRelation { subject, .. } => matches!(
+            subject,
+            crate::types::ability::CombatRelationSubject::ParentTarget
+        ),
+
+        // ---- ABILITY-BOUND: reads the resolving ability. ----
+        //
+        // CR 115.1: the parent target's NAME, read through `ability.targets`.
+        FilterProp::SameNameAsParentTarget
+        // CR 613.4c: the per-recipient referent, which the fire-time
+        // `FilterContext` carries as `None` — the prop-level counterpart of
+        // `ObjectScope::Recipient`.
+        | FilterProp::AttachedToRecipient
+
+        // ---- RESOLUTION-PUBLISHED LEDGERS (CR 608.2c). ----
+        //
+        // The tracked sets, including the `TrackedSetId(0)` sentinel whose
+        // ladder prefers the ACTIVE resolution chain — declined for the same
+        // reason `TargetFilter::TrackedSet` is.
+        | FilterProp::InTrackedSet { .. }
+        // `state.last_named_choice` is written by the resolution that ran the
+        // naming choice; it is NOT persisted on the source like the
+        // `chosen_attributes` family below.
+        | FilterProp::MatchesLastChosenCardPredicate
+        // CR 607.2a: the source's linked-exile population, declined for the same
+        // reason `TargetFilter::ExiledBySource` is.
+        | FilterProp::SameNameAsExiledBySource
+
+        // ---- TRIGGER-EVENT READ WITH NO DETECTION FALLBACK. ----
+        //
+        // CR 603.2: `targeting::object_could_be_targeted_by_triggering_spell`
+        // opens with `state.current_trigger_event.as_ref()` and returns `false`
+        // when it is absent. At DETECTION time it is ALWAYS absent (the event
+        // lives in the thread-local instead), so this answers `false` for every
+        // candidate on the fire-time leg and whatever the spell allows on the
+        // resolution leg.
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+
+        // ---- BRIDGE-REWRITTEN (CR 603.4, Valakut's ruling). ----
+        //
+        // `oracle_trigger::substitute_another_in_filter` rewrites this to
+        // `OtherThanTriggerObject` on the fire-time leg ONLY, so the two legs
+        // count different populations from the same printed text.
+        | FilterProp::Another => true,
+
+        // ---- Binds IDENTICALLY on both legs. ----
+        //
+        // CR 115.9c: a permissive per-object predicate that reads no binding at
+        // all — its reader is a bare `true`, and the real check runs against the
+        // stack entry's own targets.
+        FilterProp::HasSingleTarget
+        // CR 603.4: the OUTPUT of the `Another` rewrite. Both legs read the
+        // matched event's object through the same dual path, so a filter that
+        // already carries it is symmetric.
+        | FilterProp::OtherThanTriggerObject
+        // CR 613.1 + CR 607.2d: choices PERSISTED on the source or on a player,
+        // read live from the same place on both legs — the prop-level
+        // counterpart of `TargetFilter::HasChosenName`.
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::ControllerChoseLabel { .. }
+        // CR 400.7 + CR 301.5 + CR 303.4: source-relative reads, all served by
+        // the `TriggerSourceContext` the fire-time leg carries.
+        | FilterProp::SameName
+        | FilterProp::AttachedToSource
+        | FilterProp::SaddledSource
+        | FilterProp::ConvokedSource
+        | FilterProp::BlockingSource
+        | FilterProp::PowerGTSource
+        // CR 111.1 + CR 108.2b + CR 202: printed or intrinsic identity.
+        | FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::Named { .. }
+        | FilterProp::HasColor { .. }
+        | FilterProp::NotColor { .. }
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::ColorCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        | FilterProp::HasAdventure
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::Modal
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        // CR 400.1: live zone membership, scanned identically on both legs.
+        | FilterProp::InZone { .. }
+        | FilterProp::InAnyZone { .. }
+        // CR 110.5 + CR 208 + CR 700: live permanent state and designations.
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        | FilterProp::Foretold
+        | FilterProp::Suspected
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::Modified
+        | FilterProp::IsSaddled
+        | FilterProp::Unpaired
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
+        | FilterProp::IsCommander
+        | FilterProp::SharesCreatureTypeWithCommander
+        // CR 506 + CR 508 + CR 509: live combat state.
+        | FilterProp::Blocking
+        | FilterProp::Unblocked
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        // CR 608.2c: per-TURN history keyed by the OBJECT, not by a resolution —
+        // both legs read the same turn's record.
+        | FilterProp::WasPlayed
+        | FilterProp::WasKicked
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        // An unrecognized parser escape hatch matches nothing on either leg.
+        | FilterProp::Other { .. } => false,
+    }
+}
+
+/// CR 115.10 + CR 603.4: the `CountScope` axis of
+/// [`filter_prop_binding_diverges`].
+fn count_scope_binding_diverges(scope: &crate::types::ability::CountScope) -> bool {
+    use crate::types::ability::CountScope;
+    match scope {
+        // CR 115.10: the RESOLVING ability's per-iteration player, which the
+        // fire-time context derives from the matched event instead.
+        CountScope::ScopedPlayer => true,
+        // CR 109.5 + CR 108.3 + CR 613.1: controller-, owner- or
+        // source-persisted keys the fire-time context carries.
+        CountScope::Controller
+        | CountScope::Owner
+        | CountScope::SourceChosenPlayer
+        | CountScope::All
+        | CountScope::Opponents => false,
+    }
+}
+
+/// CR 109.4 + CR 603.4: the `PlayerFilter` axis of
+/// [`filter_prop_binding_diverges`], reached through
+/// `FilterProp::ControllerMatches`.
+///
+/// Exhaustive and wildcard-free for the same reason as its siblings, and
+/// adjudicated against `effects::matches_player_scope` — the single authority
+/// that evaluates these. Several arms are hardcoded `false` THERE because they
+/// require the resolving `ResolvedAbility` and are resolved by
+/// `choose_one_of::choosing_players` instead; that is precisely the fire-time
+/// gap this classifier exists to catch.
+fn player_filter_binding_diverges(player: &PlayerFilter) -> bool {
+    match player {
+        PlayerFilter::AllExcept { exclude } => player_filter_binding_diverges(exclude),
+        // CR 109.4 + CR 115.1: the anchor lives on the resolving ability
+        // (`targets` / `chosen_players`).
+        PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::ChosenPlayer { .. }
+        // CR 608.2c: ledgers a RESOLUTION publishes — the zone-change and action
+        // "this way" lists, the CR 701.38 vote ballots, the tracked sets, and
+        // the CR 607.2a exile links.
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::PerformedActionThisWay { .. }
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::TrackedSetPossessor { .. }
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        // CR 603.2: unlike `ControllerRef::TriggeringPlayer`, these read
+        // `state.current_trigger_event` DIRECTLY, with no detection-time
+        // thread-local fallback, so they match nobody at fire time.
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => true,
+        // CR 109.4: nested populations and value operands decide the rest.
+        PlayerFilter::ControlsCount { filter, count, .. } => {
+            filter_binding_diverges(filter) || quantity_expr_binding_diverges(count)
+        }
+        PlayerFilter::PlayerAttribute { attr, value, .. } => {
+            quantity_ref_binding_diverges(attr) || quantity_expr_binding_diverges(value)
+        }
+        PlayerFilter::OpponentDealtDamage { source, .. } => {
+            source.as_ref().is_some_and(|source| filter_binding_diverges(source))
+        }
+        // CR 109.5 + CR 102.3 + CR 508.5: controller-derived seats, global player
+        // state, and per-turn history the fire-time leg reads the same way.
+        PlayerFilter::Controller
+        | PlayerFilter::Opponent
+        | PlayerFilter::All
+        | PlayerFilter::DefendingPlayer
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer => false,
     }
 }
 
@@ -22239,6 +22546,211 @@ pub mod tests {
             "divergence proof: the RESOLUTION-time leg reads the same gate as TRUE (the \
              TARGET controls two creatures), so a fire-time deletion would have destroyed \
              an ability that was supposed to resolve"
+        );
+    }
+
+    /// CR 115.1 + CR 603.4: the PROPERTY axis of the hoist guard, on a board
+    /// where the two legs genuinely read DIFFERENT populations.
+    ///
+    /// `FilterProp::SameNameAsParentTarget` narrows a population to objects
+    /// sharing the parent target's name, and its reader
+    /// (`filter::parent_target_name`) opens with `let ability = ability?`. The
+    /// fire-time `FilterContext` is built with `ability = None`, so that reader
+    /// answers `None` and the property matches NOTHING — while the resolving
+    /// ability, which does carry the target, matches every same-named object.
+    /// One printed population, two different counts.
+    ///
+    /// This is the axis the `Typed` arm formerly ignored: it read
+    /// `tf.properties` only for `FilterProp::Another` and let every other
+    /// property through as "cannot diverge", so a gate like this one hoisted and
+    /// was evaluated against a population the resolver never counted.
+    ///
+    /// MINIMAL PAIR against the same filter carrying a property whose reading is
+    /// leg-independent (`FilterProp::Token`, a printed identity). Both halves
+    /// count the same three creatures at resolution; they differ only in whether
+    /// the property needs the resolving ability. The `Token` half is the
+    /// reach-guard proving an `ObjectCount` comparison over a property-bearing
+    /// `Typed` filter really does bridge and really is evaluated at fire time.
+    ///
+    /// REVERT-TO-RED: restore the `Another`-only property check in
+    /// `filter_binding_diverges`'s `Typed` arm (or delete
+    /// `filter_prop_binding_diverges`) and the same-name half reports
+    /// `stack == 0` with `monarch == None` — the one-shot deleted by
+    /// `false_gate_consumes_one_shot` on an empty population, even though the
+    /// resolution-time gate was TRUE.
+    #[test]
+    fn resolution_scoped_filter_property_declines_the_fire_time_hoist() {
+        // Unit pins for the families the property axis newly adjudicates, one
+        // per reason a property can fail to be reproducible at fire time.
+        for prop in [
+            // Reads the resolving ability.
+            FilterProp::SameNameAsParentTarget,
+            FilterProp::AttachedToRecipient,
+            // Reads a ledger a RESOLUTION publishes.
+            FilterProp::InTrackedSet {
+                id: crate::types::identifiers::TrackedSetId(1),
+            },
+            FilterProp::MatchesLastChosenCardPredicate,
+            FilterProp::SameNameAsExiledBySource,
+            // Reads `current_trigger_event` with no detection-time fallback.
+            FilterProp::CouldBeTargetedByTriggeringSpell,
+            // Rewritten by the trigger-side bridge on one leg only.
+            FilterProp::Another,
+            // Nested payloads, each decided by the axis classifier that owns it.
+            FilterProp::Owned {
+                controller: ControllerRef::TargetPlayer,
+            },
+            FilterProp::Targets {
+                filter: Box::new(TargetFilter::ParentTarget),
+            },
+            FilterProp::SharesQuality {
+                quality: crate::types::ability::SharedQuality::Name,
+                reference: None,
+                relation: crate::types::ability::SharedQualityRelation::Shares,
+            },
+            FilterProp::ControllerMatches {
+                player: Box::new(PlayerFilter::VotedFor { choice_index: 0 }),
+            },
+        ] {
+            assert!(
+                filter_prop_binding_diverges(&prop),
+                "CR 603.4: {prop:?} cannot be reproduced by the fire-time context, so a \
+                 population narrowed by it must decline the hoist"
+            );
+        }
+        for prop in [
+            FilterProp::Token,
+            FilterProp::Tapped,
+            FilterProp::AttachedToSource,
+            FilterProp::SameName,
+            FilterProp::IsChosenCreatureType,
+            FilterProp::HasSingleTarget,
+            FilterProp::OtherThanTriggerObject,
+            FilterProp::InZone {
+                zone: Zone::Graveyard,
+            },
+            FilterProp::Owned {
+                controller: ControllerRef::You,
+            },
+            FilterProp::ControllerMatches {
+                player: Box::new(PlayerFilter::Controller),
+            },
+        ] {
+            assert!(
+                !filter_prop_binding_diverges(&prop),
+                "CR 400.7 + CR 613.1: {prop:?} reads printed identity, live board state or \
+                 the CR 400.7 source — all of which the fire-time context carries"
+            );
+        }
+
+        /// Three identically-named creatures; the delayed ability targets one of
+        /// them. At RESOLUTION `SameNameAsParentTarget` matches all three; at
+        /// fire time it matches none, because `parent_target_name` needs the
+        /// ability the fire-time context does not have.
+        fn run(prop: FilterProp) -> (usize, usize, Option<PlayerId>) {
+            let mut state = setup();
+            let controller = PlayerId(0);
+            state.active_player = controller;
+            state.priority_player = controller;
+
+            let source = create_object(
+                &mut state,
+                CardId(0x0603_040F),
+                controller,
+                "Namesake Rider".to_string(),
+                Zone::Battlefield,
+            );
+            let pinned = make_creature(&mut state, controller, "Grizzly Bears", 2, 2);
+            make_creature(&mut state, controller, "Grizzly Bears", 2, 2);
+            make_creature(&mut state, controller, "Grizzly Bears", 2, 2);
+            let victim = create_object(
+                &mut state,
+                CardId(0x0603_0410),
+                controller,
+                "Doomed Bystander".to_string(),
+                Zone::Battlefield,
+            );
+
+            let mut ability = ResolvedAbility::new(
+                Effect::BecomeMonarch {
+                    target: TargetFilter::Controller,
+                },
+                vec![TargetRef::Object(pinned)],
+                source,
+                controller,
+            );
+            ability.condition = Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![prop])),
+                    },
+                },
+                comparator: crate::types::ability::Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            });
+            state.delayed_triggers.push(DelayedTrigger {
+                condition: DelayedTriggerCondition::WhenDies {
+                    filter: TargetFilter::SpecificObject { id: victim },
+                },
+                ability: Box::new(ability),
+                controller,
+                source_id: source,
+                one_shot: true,
+                provenance: DelayedInstallIdentity::LegacyDelayed,
+            });
+
+            let death = zone_changed_event(
+                victim,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                vec![CoreType::Creature],
+                Vec::new(),
+            );
+            check_delayed_triggers(&mut state, &[death]);
+            let stack_len = state.stack.len();
+            let remaining = state.delayed_triggers.len();
+            if stack_len == 1 {
+                let mut events = Vec::new();
+                crate::game::stack::resolve_top(&mut state, &mut events);
+            }
+            (stack_len, remaining, state.monarch)
+        }
+
+        // Reach-guard: a printed-identity property counts the same three
+        // NONTOKEN creatures on BOTH legs, so the gate is true at fire time and
+        // the ability is put onto the stack by the hoist rather than by a
+        // decline. This proves the gate bridges and is evaluated at fire time.
+        let (token_stack, _, token_monarch) = run(FilterProp::NonToken);
+        assert_eq!(
+            token_stack, 1,
+            "reach-guard: a printed-identity property binds identically on both legs, so \
+             the gate reads TRUE at fire time and the ability reaches the stack"
+        );
+        assert_eq!(
+            token_monarch,
+            Some(PlayerId(0)),
+            "reach-guard: and it resolves, so the fixture's board really does satisfy the \
+             `>= 2` comparison"
+        );
+
+        let (name_stack, name_remaining, name_monarch) = run(FilterProp::SameNameAsParentTarget);
+        assert_eq!(
+            name_stack, 1,
+            "CR 115.1: `SameNameAsParentTarget` reads `ability.targets` through \
+             `parent_target_name`, which the fire-time context does not carry. 0 here means \
+             the hoist counted an EMPTY population and gated the ability off the stack"
+        );
+        assert_eq!(
+            name_remaining, 0,
+            "CR 603.7b: the bound-object one-shot left the delayed list by FIRING, not by \
+             being consumed by a false gate — see the stack assertion above"
+        );
+        assert_eq!(
+            name_monarch,
+            Some(PlayerId(0)),
+            "divergence proof: the RESOLUTION-time leg reads the same gate as TRUE (three \
+             creatures share the target's name), so a fire-time deletion would have \
+             destroyed an ability that was supposed to resolve"
         );
     }
 
