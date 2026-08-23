@@ -103,10 +103,10 @@ fn saved_cosmic_crucible_mana_prompt_uses_an_issued_action_and_advances() {
         1,
         "the bounded controller must submit the mana choice"
     );
-    assert!(
-        run.break_reason.is_none(),
-        "the issued mana action must apply without a controller break"
-    );
+    assert!(matches!(
+        &run.stop,
+        phase_ai::auto_play::AiActionsStop::ActionBudgetReached { limit: 1 }
+    ));
     assert!(
         contract.contains_action(&state_before, &run[0].action),
         "the controller must submit the exact action from player two's contract"
@@ -423,8 +423,11 @@ fn run_ai_actions_bounded_stops_exactly_at_budget() {
         "bounded run must take exactly its budget of actions"
     );
     assert!(
-        results.break_reason.is_none(),
-        "budget cut the stream — the loop did not end for a break-door reason"
+        matches!(
+            &results.stop,
+            phase_ai::auto_play::AiActionsStop::ActionBudgetReached { limit: 3 }
+        ),
+        "budget cut the stream — the loop did not end for a driver failure"
     );
 }
 
@@ -1211,7 +1214,7 @@ fn scenario_claws_of_gix_witness_board_does_not_dead_end() {
 /// becomes an applied action — it lands in `break_reason`, and a results-only
 /// assertion would miss it.
 fn assert_no_fallback_cancel(run: &phase_ai::auto_play::AiActionsRun, what: &str) {
-    use phase_ai::auto_play::AiActionsBreakReason;
+    use phase_ai::auto_play::AiActionsStop;
 
     assert!(
         !run.results
@@ -1222,12 +1225,12 @@ fn assert_no_fallback_cancel(run: &phase_ai::auto_play::AiActionsRun, what: &str
     );
     assert!(
         !matches!(
-            &run.break_reason,
-            Some(AiActionsBreakReason::ApplyFailed { action, .. })
+            &run.stop,
+            AiActionsStop::ApplyFailed { action, .. }
                 if matches!(**action, GameAction::CancelCast)
         ),
         "{what}: AI dead-ended on an unapplied fallback CancelCast ({:?})",
-        run.break_reason,
+        &run.stop,
     );
 }
 

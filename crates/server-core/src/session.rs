@@ -32,6 +32,7 @@ use engine::types::mana::ManaCost;
 use engine::types::match_config::MatchConfig;
 use engine::types::match_config::MatchForfeitCause;
 use engine::types::player::PlayerId;
+use phase_ai::auto_play::AiActionsStop;
 use phase_ai::config::{AiConfig, AiDifficulty, Platform};
 use phase_ai::session::AiSession;
 use rand::{Rng, SeedableRng};
@@ -97,6 +98,64 @@ pub type ActionResult = (
 /// allocated while the session lock was held. The transport must keep this
 /// pairing intact when it fans a snapshot out to multiple viewers.
 pub type RevisionedActionResult = (u64, ActionResult);
+
+/// The server-visible result of driving the native AI after an authoritative
+/// transition. A non-empty `failure` is terminal for the AI driver, but does
+/// not discard transitions that were already committed before that failure.
+#[derive(Debug)]
+pub struct AiRunOutcome {
+    pub transitions: Vec<RevisionedActionResult>,
+    pub failure: Option<AiDriverFailure>,
+}
+
+/// Internal result of one uninterrupted AI decision batch. Keeping the exact
+/// stop reason until [`GameSession::run_ai`] has consumed a possible
+/// AI-produced Resolve All latch is necessary: a safety cap is terminal only
+/// when an AI submitter is still eligible in the resulting state.
+struct AiActionBatch {
+    transitions: Vec<RevisionedActionResult>,
+    stop: AiActionsStop,
+}
+
+#[derive(Debug)]
+pub enum AiDriverFailure {
+    MissingAiConfig { player: PlayerId },
+    ChooseActionNone { player: PlayerId },
+    ApplyFailed { player: PlayerId, error: String },
+    ActionSafetyCapReached { limit: usize },
+    ResolveAllHandoffSafetyCapReached { limit: usize },
+}
+
+impl AiDriverFailure {
+    pub fn message(&self) -> String {
+        match self {
+            Self::MissingAiConfig { player } => {
+                format!(
+                    "Native AI driver is missing configuration for player {}.",
+                    player.0
+                )
+            }
+            Self::ChooseActionNone { player } => {
+                format!(
+                    "Native AI could not choose an action for player {}.",
+                    player.0
+                )
+            }
+            Self::ApplyFailed { player, error } => {
+                format!(
+                    "Native AI action for player {} was rejected: {error}",
+                    player.0
+                )
+            }
+            Self::ActionSafetyCapReached { limit } => {
+                format!("Native AI stopped after its {limit}-action safety limit.")
+            }
+            Self::ResolveAllHandoffSafetyCapReached { limit } => {
+                format!("Native AI Resolve All hand-off stopped after {limit} iterations.")
+            }
+        }
+    }
+}
 
 /// Maximum server-authorized stack entries in one remote Resolve All request.
 /// The wire request is untrusted, but `0` remains the engine-defined uncapped
@@ -841,13 +900,17 @@ impl GameSession {
     /// turn — out from under the snapshot the table is voting to roll back
     /// to. Every call site (join-fills-the-room, reconnect, fresh AI-game
     /// creation) is gated here once rather than at each caller.
-    pub fn run_ai(&mut self) -> Vec<RevisionedActionResult> {
+    pub fn run_ai(&mut self) -> AiRunOutcome {
         if self.ai_seats.is_empty() || self.pending_takeback.is_some() {
-            return vec![];
+            return AiRunOutcome {
+                transitions: Vec::new(),
+                failure: None,
+            };
         }
 
         let mut transitions = Vec::new();
         let mut handoffs = 0usize;
+        let mut action_safety_cap = None;
         // One pass per Resolve All latch our own AI seats complete. Collapsing
         // that batch hands priority back — possibly to another AI seat — so the
         // ordinary hand-off has to run again, exactly as `handle_resolve_all`
@@ -857,9 +920,7 @@ impl GameSession {
         // is a backstop, not the terminating argument.
         for _ in 0..MAX_AI_RESOLVE_ALL_HANDOFFS {
             let batch = self.run_ai_action_batch();
-            if batch.is_empty() {
-                break;
-            }
+            let batch_empty = batch.transitions.is_empty();
             // POSITIVE evidence that the final Grant was ours: one of the
             // actions we just applied left the game at Ready. Each entry's
             // state is the post-action clone, so a latch minted by this batch
@@ -886,10 +947,40 @@ impl GameSession {
             // compare each entry against its predecessor instead: entry `i`
             // minted the latch iff its post-state is Ready and the state before
             // it was not Ready at that epoch.
-            let minted_here = batch.iter().any(|(_, (post_state, ..))| {
+            let minted_here = batch.transitions.iter().any(|(_, (post_state, ..))| {
                 matches!(post_state.waiting_for, WaitingFor::ResolveAllReady { .. })
             });
-            transitions.extend(batch);
+            transitions.extend(batch.transitions);
+            match batch.stop {
+                AiActionsStop::NoEligibleAiActor | AiActionsStop::ActionBudgetReached { .. } => {}
+                AiActionsStop::MissingAiConfig { player } => {
+                    return AiRunOutcome {
+                        transitions,
+                        failure: Some(AiDriverFailure::MissingAiConfig { player }),
+                    };
+                }
+                AiActionsStop::ChooseActionNone { player } => {
+                    return AiRunOutcome {
+                        transitions,
+                        failure: Some(AiDriverFailure::ChooseActionNone { player }),
+                    };
+                }
+                AiActionsStop::ApplyFailed { player, error, .. } => {
+                    return AiRunOutcome {
+                        transitions,
+                        failure: Some(AiDriverFailure::ApplyFailed {
+                            player,
+                            error: error.to_string(),
+                        }),
+                    };
+                }
+                AiActionsStop::ActionSafetyCapReached { limit } => {
+                    action_safety_cap = Some(limit);
+                }
+            }
+            if batch_empty {
+                break;
+            }
             if !minted_here {
                 break;
             }
@@ -904,18 +995,28 @@ impl GameSession {
         // seats that may still be able to act and nothing left to re-drive
         // them, which is the hang class this hand-off exists to prevent, so it
         // must be diagnosable rather than silent.
-        if handoffs == MAX_AI_RESOLVE_ALL_HANDOFFS {
+        let failure = if handoffs == MAX_AI_RESOLVE_ALL_HANDOFFS && self.ai_seat_can_act() {
             warn!(
                 game = %self.game_code,
                 cap = MAX_AI_RESOLVE_ALL_HANDOFFS,
                 "AI Resolve All hand-off hit its iteration cap"
             );
+            Some(AiDriverFailure::ResolveAllHandoffSafetyCapReached {
+                limit: MAX_AI_RESOLVE_ALL_HANDOFFS,
+            })
+        } else {
+            action_safety_cap
+                .filter(|_| self.ai_seat_can_act())
+                .map(|limit| AiDriverFailure::ActionSafetyCapReached { limit })
+        };
+        AiRunOutcome {
+            transitions,
+            failure,
         }
-        transitions
     }
 
     /// One uninterrupted run of AI decisions from the current state.
-    fn run_ai_action_batch(&mut self) -> Vec<RevisionedActionResult> {
+    fn run_ai_action_batch(&mut self) -> AiActionBatch {
         let mut rng = rand::rng();
         let ai_session = self
             .ai_session
@@ -932,7 +1033,10 @@ impl GameSession {
             debug!(game = %self.game_code, ai_actions = ai_results.len(), "AI actions computed");
         }
 
-        ai_results
+        let stop = ai_results.stop;
+
+        let transitions = ai_results
+            .results
             .into_iter()
             .map(|r| {
                 let (legal, spell_costs, by_object) = engine_legal_actions_full(&r.state);
@@ -957,7 +1061,15 @@ impl GameSession {
                     ),
                 )
             })
-            .collect()
+            .collect();
+
+        AiActionBatch { transitions, stop }
+    }
+
+    fn ai_seat_can_act(&self) -> bool {
+        acting_players(&self.state)
+            .into_iter()
+            .any(|player| self.ai_seats.contains(&player))
     }
 
     /// Consumes a `WaitingFor::ResolveAllReady` latch this session's own AI
@@ -3536,7 +3648,7 @@ mod tests {
         let state_before = session.state.clone();
         let ai_results = session.run_ai();
         assert!(
-            ai_results.is_empty(),
+            ai_results.transitions.is_empty(),
             "run_ai must no-op while a takeback vote is pending, even though the AI seat has a legal action"
         );
         assert_eq!(
@@ -4154,6 +4266,34 @@ mod tests {
         (mgr, code, token0, ai_seat)
     }
 
+    #[test]
+    fn ai_driver_failure_gate_requires_an_authorized_ai_submitter() {
+        let (mut mgr, code, _token0, ai_seat) = single_user_game_vs_ai();
+        let session = mgr.sessions.get_mut(&code).unwrap();
+
+        session.state.waiting_for = WaitingFor::Priority { player: ai_seat };
+        assert!(
+            session.ai_seat_can_act(),
+            "an AI priority holder must keep a capped driver diagnosable"
+        );
+
+        session.state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert!(
+            !session.ai_seat_can_act(),
+            "a human priority holder is a normal hand-off, not an AI driver failure"
+        );
+
+        session.state.waiting_for = WaitingFor::GameOver {
+            winner: Some(ai_seat),
+        };
+        assert!(
+            !session.ai_seat_can_act(),
+            "a terminal state cannot be reported as an AI driver stall"
+        );
+    }
+
     /// Drives the fixture until **`run_ai` itself** publishes a turn boundary
     /// whose active player is the AI seat, and returns that turn number.
     ///
@@ -4187,7 +4327,7 @@ mod tests {
             });
             if let Some(option) = gained {
                 assert!(
-                    !ai_results.is_empty(),
+                    !ai_results.transitions.is_empty(),
                     "a boundary appeared across a `run_ai` call that returned nothing — \
                      the fixture is not measuring what it claims to"
                 );
@@ -4283,7 +4423,7 @@ mod tests {
         let waiting_before = session.state.waiting_for.clone();
         let resumed = session.run_ai();
         assert!(
-            !resumed.is_empty(),
+            !resumed.transitions.is_empty(),
             "a rewind onto an AI-active boundary must resume the AI, not freeze the game"
         );
         assert_ne!(
@@ -4310,7 +4450,7 @@ mod tests {
         let waiting_before = session.state.waiting_for.clone();
         let turn_before = session.state.turn_number;
         assert!(
-            session.run_ai().is_empty(),
+            session.run_ai().transitions.is_empty(),
             "with the human on priority the AI has nothing to do"
         );
         assert_eq!(session.state.waiting_for, waiting_before, "state unchanged");
@@ -6420,6 +6560,7 @@ mod tests {
         // reached, by reading the grant's own broadcast frame.
         assert!(
             transitions
+                .transitions
                 .iter()
                 .any(|(_, (broadcast_state, ..))| matches!(
                     broadcast_state.waiting_for,
@@ -6497,11 +6638,14 @@ mod tests {
         // follow-up AI batch can append further transitions, so asserting only
         // on the last one would pass without the collapse frame ever existing.
         assert!(
-            transitions.len() >= 2,
+            transitions.transitions.len() >= 2,
             "expected the AI grant and the collapsed batch, got {}",
-            transitions.len()
+            transitions.transitions.len()
         );
-        let (_, (granted_state, ..)) = transitions.first().expect("the AI grant transition");
+        let (_, (granted_state, ..)) = transitions
+            .transitions
+            .first()
+            .expect("the AI grant transition");
         assert_eq!(
             granted_state.stack.len(),
             1,
@@ -6509,6 +6653,7 @@ mod tests {
         );
         assert!(
             transitions
+                .transitions
                 .iter()
                 .any(|(_, (broadcast_state, ..))| broadcast_state.stack.is_empty()),
             "no broadcast frame carried the post-collapse state"
@@ -6604,7 +6749,7 @@ mod tests {
         // It becomes testable when that changes; until then, do not add a pin
         // that only appears to cover it.
         assert!(
-            session.run_ai().is_empty(),
+            session.run_ai().transitions.is_empty(),
             "no AI seat may act at a latch with no acting player"
         );
         assert!(

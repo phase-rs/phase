@@ -3771,17 +3771,18 @@ async fn broadcast_game_started(
     game_db: &SharedGameDb,
     game_code: &str,
 ) {
-    let (player_messages, spectator_msg) = {
+    let (player_messages, spectator_msg, ai_failure) = {
         let mut mgr = state.lock().await;
         let Some(session) = mgr.sessions.get_mut(game_code) else {
             return;
         };
 
-        session.run_ai();
+        let ai_failure = session.run_ai().failure.map(|failure| failure.message());
         persist_full_session_async(game_db, session);
         (
             build_game_started_messages(session),
             build_spectator_game_started_message(session),
+            ai_failure,
         )
     };
 
@@ -3796,21 +3797,22 @@ async fn broadcast_game_started(
         }
     }
 
-    let spectator_msg = match spectator_msg {
-        Ok(msg) => msg,
+    match spectator_msg {
+        Ok(spectator_msg) => {
+            let mut specs = game_spectators.lock().await;
+            if let Some(spectators) = specs.get_mut(game_code) {
+                spectators.retain(|sender| sender.send(spectator_msg.clone()).is_ok());
+                if spectators.is_empty() {
+                    specs.remove(game_code);
+                }
+            }
+        }
         Err(reason) => {
             warn!(game = %game_code, %reason, "skipping spectator GameStarted: snapshot too large");
-            return;
-        }
-    };
-
-    let mut specs = game_spectators.lock().await;
-    if let Some(spectators) = specs.get_mut(game_code) {
-        spectators.retain(|sender| sender.send(spectator_msg.clone()).is_ok());
-        if spectators.is_empty() {
-            specs.remove(game_code);
         }
     }
+
+    broadcast_ai_failure(connections, game_code, ai_failure).await;
 }
 
 async fn require_host(identity: &SocketIdentity, socket: &mut WebSocket) -> Result<(), ()> {
@@ -3998,6 +4000,23 @@ async fn broadcast_ai_results(
                     specs.remove(game_code);
                 }
             }
+        }
+    }
+}
+
+async fn broadcast_ai_failure(
+    connections: &SharedConnections,
+    game_code: &str,
+    failure: Option<String>,
+) {
+    let Some(message) = failure else {
+        return;
+    };
+
+    let conns = connections.lock().await;
+    if let Some(players) = conns.get(game_code) {
+        for sender in players.values() {
+            let _ = sender.send(ServerMessage::error(message.clone()));
         }
     }
 }
@@ -4275,10 +4294,13 @@ async fn handle_full_game_submission(
                     .expect("handled action must retain its session")
                     .advance_state_revision();
                 // Run AI follow-up actions (still inside lock — needs &mut state)
-                let ai_results = match mgr.sessions.get_mut(&game_code) {
-                    Some(session) => session.run_ai(),
-                    None => vec![],
-                };
+                let ai_outcome = mgr
+                    .sessions
+                    .get_mut(&game_code)
+                    .expect("handled action must retain its session")
+                    .run_ai();
+                let ai_failure = ai_outcome.failure.as_ref().map(|failure| failure.message());
+                let ai_results = ai_outcome.transitions;
                 let session = mgr.sessions.get(&game_code).unwrap();
                 let eliminated = session.state.eliminated_players.clone();
                 // Captured once, AFTER `run_ai`, and reused for both the human
@@ -4323,6 +4345,7 @@ async fn handle_full_game_submission(
                         game_over_winner,
                         terminal,
                         rewind_targets,
+                        ai_failure,
                     )
                 })
             }
@@ -4348,6 +4371,7 @@ async fn handle_full_game_submission(
             game_over_winner,
             terminal,
             rewind_targets,
+            ai_failure,
         )) => {
             if let Err(reason) = guard_state_snapshot_broadcast(StateSnapshotParts {
                 state: &raw_state,
@@ -4477,6 +4501,8 @@ async fn handle_full_game_submission(
             )
             .await;
 
+            broadcast_ai_failure(connections, &game_code, ai_failure).await;
+
             if !terminal_deliveries.is_empty() {
                 let conns = connections.lock().await;
                 if let Some(players) = conns.get(&game_code) {
@@ -4551,11 +4577,13 @@ async fn handle_resolve_all(
                     // Keep that hand-off under the same lock, then derive the one
                     // final payload from the current session rather than the batch
                     // transition it has already moved past.
-                    let ai_results = session.run_ai();
+                    let ai_outcome = session.run_ai();
+                    let ai_failure = ai_outcome.failure.map(|failure| failure.message());
                     let (raw_state, legal_actions, _auto_pass, spell_costs, by_object) =
                         session.current_broadcast_snapshot();
                     let revision = session.state_revision;
-                    let log_entries = resolve_all_log_tail(&batch_log_entries, &ai_results);
+                    let log_entries =
+                        resolve_all_log_tail(&batch_log_entries, &ai_outcome.transitions);
                     let eliminated = session.state.eliminated_players.clone();
                     let rewind_targets = session.rewind_options();
                     let player_count = session.player_count;
@@ -4588,6 +4616,7 @@ async fn handle_resolve_all(
                                 player_count,
                                 game_over_winner,
                                 terminal,
+                                ai_failure,
                             )),
                         )
                     })
@@ -4622,6 +4651,7 @@ async fn handle_resolve_all(
         player_count,
         game_over_winner,
         terminal,
+        ai_failure,
     )) = payload
     else {
         let _ = tx.send(acknowledgement);
@@ -4726,6 +4756,8 @@ async fn handle_resolve_all(
         }
     }
     let _ = tx.send(acknowledgement);
+
+    broadcast_ai_failure(connections, &game_code, ai_failure).await;
 
     if !terminal_deliveries.is_empty() {
         let conns = connections.lock().await;
@@ -5043,7 +5075,7 @@ async fn handle_client_message(
                     let session = mgr.sessions.get_mut(&game_code).unwrap();
                     let joiner = session.player_for_token(&player_token).unwrap();
                     let started_messages = if session.is_full() {
-                        session.run_ai();
+                        let ai_failure = session.run_ai().failure.map(|failure| failure.message());
                         persist_full_session_async(game_db, session);
                         // The joiner is excluded from the fan-out send below
                         // (`pid != joiner`), so it receives the contest dice via
@@ -5056,7 +5088,7 @@ async fn handle_client_message(
                             Some(player_token.clone()),
                             joiner_events,
                         );
-                        Some((joiner_msg, build_game_started_messages(session)))
+                        Some((joiner_msg, build_game_started_messages(session), ai_failure))
                     } else {
                         None
                     };
@@ -5071,7 +5103,7 @@ async fn handle_client_message(
                         .insert(joiner, tx.clone());
 
                     // Only send GameStarted when the game is full (all seats claimed)
-                    if let Some((msg, other_messages)) = started_messages {
+                    if let Some((msg, other_messages, ai_failure)) = started_messages {
                         if let Ok(json) = serde_json::to_string(&msg) {
                             let _ = socket.send(Message::text(json)).await;
                         }
@@ -5083,6 +5115,13 @@ async fn handle_client_message(
                                     if let Some(sender) = players.get(&pid) {
                                         let _ = sender.send(msg);
                                     }
+                                }
+                            }
+                        }
+                        if let Some(message) = ai_failure {
+                            if let Some(players) = conns.get(&game_code) {
+                                for sender in players.values() {
+                                    let _ = sender.send(ServerMessage::error(message.clone()));
                                 }
                             }
                         }
@@ -5224,6 +5263,7 @@ async fn handle_client_message(
                     player: PlayerId,
                     game_started_msg: Box<ServerMessage>,
                     ai_result: Option<Box<server_core::RevisionedActionResult>>,
+                    ai_failure: Option<String>,
                     /// GH #1507: present when a takeback vote is in flight,
                     /// so the reconnecting socket gets the same prompt it
                     /// would have received had it stayed connected.
@@ -5272,9 +5312,10 @@ async fn handle_client_message(
                         Ok(_filtered_state) => {
                             let session = mgr.sessions.get_mut(&game_code).unwrap();
                             let player = session.player_for_token(&player_token).unwrap();
-                            let ai_results = session.run_ai();
-                            let ai_result = ai_results.last().cloned().map(Box::new);
-                            if ai_result.is_some() {
+                            let ai_outcome = session.run_ai();
+                            let ai_failure = ai_outcome.failure.map(|failure| failure.message());
+                            let ai_result = ai_outcome.transitions.last().cloned().map(Box::new);
+                            if ai_result.is_some() || ai_failure.is_some() {
                                 persist_full_session_async(game_db, session);
                             }
                             // Reconnect: no contest dice (the player must not
@@ -5288,6 +5329,7 @@ async fn handle_client_message(
                                 player,
                                 game_started_msg: Box::new(game_started_msg),
                                 ai_result,
+                                ai_failure,
                                 pending_takeback_msg,
                                 rewind_targets,
                             }
@@ -5338,6 +5380,7 @@ async fn handle_client_message(
                     player,
                     game_started_msg,
                     ai_result,
+                    ai_failure,
                     pending_takeback_msg,
                     rewind_targets,
                 } => {
@@ -5395,6 +5438,8 @@ async fn handle_client_message(
                             }
                         }
                     }
+
+                    broadcast_ai_failure(connections, &game_code, ai_failure).await;
                 }
 
                 ReconnectOutcome::Err(e) => {
@@ -5654,7 +5699,7 @@ async fn handle_client_message(
 
             if !ai_requests.is_empty() && ai_requests.len() as u8 == pc - 1 {
                 // --- AI game path: create, start, and run initial AI actions ---
-                let (game_code, player_token, full_key, game_started_msg) = {
+                let (game_code, player_token, full_key, game_started_msg, ai_failure) = {
                     let mut mgr = state.lock().await;
                     // Sole capacity check for the AI path, under the lock that
                     // inserts — see the `CreateGame` arm for why it cannot move
@@ -5701,7 +5746,14 @@ async fn handle_client_message(
                     };
 
                     let session = mgr.sessions.get_mut(&game_code).unwrap();
-                    session.run_ai();
+                    if let Err(error) = initialize_full_runtime(game_db, session, full_key.clone())
+                    {
+                        mgr.remove_game(&game_code);
+                        let _ = tx.send(ServerMessage::error(error));
+                        return;
+                    }
+                    let ai_failure = session.run_ai().failure.map(|failure| failure.message());
+                    persist_full_session_async(game_db, session);
                     // Initial start of a Play-vs-AI game: the human seat sees
                     // the first-player contest dice. Drain so they are not
                     // re-sent on reconnect.
@@ -5709,14 +5761,13 @@ async fn handle_client_message(
                     let game_started_msg =
                         build_game_started_message(session, PlayerId(0), None, start_events);
 
-                    if let Err(error) = initialize_full_runtime(game_db, session, full_key.clone())
-                    {
-                        mgr.remove_game(&game_code);
-                        let _ = tx.send(ServerMessage::error(error));
-                        return;
-                    }
-
-                    (game_code, player_token, full_key, game_started_msg)
+                    (
+                        game_code,
+                        player_token,
+                        full_key,
+                        game_started_msg,
+                        ai_failure,
+                    )
                 }; // lock dropped
 
                 identity.set_session(game_code.clone(), PlayerId(0), player_token.clone());
@@ -5749,6 +5800,9 @@ async fn handle_client_message(
                 }
                 if let Ok(json) = serde_json::to_string(&game_started_msg) {
                     let _ = socket.send(Message::text(json)).await;
+                }
+                if let Some(message) = ai_failure {
+                    let _ = tx.send(ServerMessage::error(message));
                 }
 
                 info!(game = %game_code, host = %display_name, "AI game started");
@@ -6927,10 +6981,14 @@ async fn handle_client_message(
             // are no AI seats, and its own pending-takeback guard is already
             // cleared by the time we get here. Revisions stay contiguous: the
             // rollback took R+1 above, `run_ai` allocates R+2..R+k.
-            let ai_results = if approved_snapshot.is_some() {
-                session.run_ai()
+            let (ai_results, ai_failure) = if approved_snapshot.is_some() {
+                let ai_outcome = session.run_ai();
+                (
+                    ai_outcome.transitions,
+                    ai_outcome.failure.map(|failure| failure.message()),
+                )
             } else {
-                Vec::new()
+                (Vec::new(), None)
             };
             // Both read AFTER `run_ai`, matching the shipped action path: an AI
             // follow-up can cross a turn (new rewind boundary) or finish a
@@ -7010,6 +7068,7 @@ async fn handle_client_message(
                         &rewind_targets,
                     )
                     .await;
+                    broadcast_ai_failure(connections, &game_code, ai_failure).await;
                 }
                 Ok(server_core::TakebackOutcome::Rejected) => {
                     // request_takeback never returns Rejected — only respond_takeback does.
@@ -7045,10 +7104,14 @@ async fn handle_client_message(
                 });
             // Same reason, same ordering, as the `RequestTakeback` arm above:
             // the rolled-back state can put an AI seat on priority.
-            let ai_results = if approved_snapshot.is_some() {
-                session.run_ai()
+            let (ai_results, ai_failure) = if approved_snapshot.is_some() {
+                let ai_outcome = session.run_ai();
+                (
+                    ai_outcome.transitions,
+                    ai_outcome.failure.map(|failure| failure.message()),
+                )
             } else {
-                Vec::new()
+                (Vec::new(), None)
             };
             // Read AFTER `run_ai` for the same reason as the `RequestTakeback`
             // arm above.
@@ -7102,6 +7165,7 @@ async fn handle_client_message(
                         &rewind_targets,
                     )
                     .await;
+                    broadcast_ai_failure(connections, &game_code, ai_failure).await;
                 }
                 Ok(server_core::TakebackOutcome::Rejected) => {
                     info!(game = %game_code, player = ?player_id, "takeback declined");
