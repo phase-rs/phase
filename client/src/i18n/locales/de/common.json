@@ -84,6 +84,11 @@
     "boardLayoutLegacy": "Legacy",
     "switchToSplitView": "Zur geteilten Tischansicht wechseln",
     "switchToLegacyView": "Zur fokussierten Legacy-Ansicht wechseln",
+    "multiplayerSplitLayoutNudge": {
+      "message": "Mit der geteilten Tischansicht siehst du alle Gegner gleichzeitig.",
+      "trySplit": "Geteilte Ansicht ausprobieren",
+      "dismiss": "Jetzt nicht"
+    },
     "helpShortcuts": "Hilfe & Tastenkürzel",
     "showAiHand": "KI-Hand anzeigen",
     "hideAiHand": "KI-Hand verbergen",

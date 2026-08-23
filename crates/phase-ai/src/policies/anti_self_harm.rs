@@ -5568,6 +5568,7 @@ mod tests {
             source_id,
             description: None,
             may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
         };
 
         let config = AiConfig::default();
@@ -5624,6 +5625,7 @@ mod tests {
             source_id,
             description: None,
             may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
         };
         assert!(matches!(
             optional_effect_accept_verdict(&state),
@@ -5646,6 +5648,7 @@ mod tests {
             source_id,
             description: None,
             may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
         };
         assert!(matches!(
             optional_effect_accept_verdict(&state),
@@ -5668,6 +5671,7 @@ mod tests {
             source_id,
             description: None,
             may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
         };
         assert!(matches!(
             optional_effect_accept_verdict(&state),
@@ -5701,6 +5705,7 @@ mod tests {
             source_id,
             description: None,
             may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
         };
         assert!(matches!(
             optional_effect_accept_verdict(&state),
