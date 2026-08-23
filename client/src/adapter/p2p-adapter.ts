@@ -176,6 +176,9 @@ class NativeP2PBridge {
   /** Preserve the server's revision order while asynchronous PeerJS frame
    * encoding runs; a terminal commitment must follow its final state frame. */
   private revisionQueue: Promise<void> = Promise.resolve();
+  private deliveredRevision = -1;
+  private deliveredFaultIds = new Set<number>();
+  private readonly pendingFaults = new Map<number, { id: number; revision: number; message: string }>();
   private gameCode: string | null = null;
   private fullKey: FullSessionKey | null = null;
 
@@ -187,6 +190,7 @@ class NativeP2PBridge {
     private readonly matchConfig: MatchConfig | undefined,
     private readonly options: NativeP2PHostOptions,
     private readonly onRevision: (revision: number, views: Map<PlayerId, NativeViewerUpdate>) => Promise<void>,
+    private readonly onFault: (fault: { id: number; revision: number; message: string }) => Promise<void>,
     private readonly resumeSession?: NativeP2PServerSession,
   ) {}
 
@@ -348,6 +352,20 @@ class NativeP2PBridge {
 
   private async attachClient(client: WebSocketAdapter): Promise<NativeSessionAttachment> {
     client.onEvent((event) => {
+      if (event.type === "sessionAttached") {
+        // Register the exact authenticated seat before GameStarted/reconnect
+        // can release a local state frame. This membership is the barrier's
+        // recipient set for every following revision.
+        this.clients.set(event.attachment.playerId, client);
+        this.playerTokens.set(event.attachment.playerId, event.attachment.playerToken);
+        return;
+      }
+      if (event.type === "aiDriverFault") {
+        if (this.deliveredFaultIds.has(event.id)) return;
+        this.pendingFaults.set(event.id, { id: event.id, revision: event.revision, message: event.message });
+        this.enqueueFaultBarrier();
+        return;
+      }
       if (event.type !== "stateChanged" || event.serverRevision === undefined) return;
       const revision = event.serverRevision;
       const playerId = client.playerId;
@@ -364,7 +382,11 @@ class NativeP2PBridge {
       if (views.size !== this.clients.size) return;
       this.pendingViews.delete(revision);
       this.revisionQueue = this.revisionQueue
-        .then(() => this.onRevision(revision, views))
+        .then(async () => {
+          await this.onRevision(revision, views);
+          this.deliveredRevision = Math.max(this.deliveredRevision, revision);
+          await this.releaseFaultsThroughDeliveredRevision();
+        })
         .catch((error) => {
           console.error("[NativeP2PBridge] revision fan-out failed:", error);
         });
@@ -377,6 +399,21 @@ class NativeP2PBridge {
     this.clients.set(attachment.playerId, client);
     this.playerTokens.set(attachment.playerId, attachment.playerToken);
     return attachment;
+  }
+
+  private enqueueFaultBarrier(): void {
+    this.revisionQueue = this.revisionQueue
+      .then(() => this.releaseFaultsThroughDeliveredRevision())
+      .catch((error) => console.error("[NativeP2PBridge] AI fault fan-out failed:", error));
+  }
+
+  private async releaseFaultsThroughDeliveredRevision(): Promise<void> {
+    for (const fault of [...this.pendingFaults.values()]) {
+      if (this.deliveredFaultIds.has(fault.id) || this.deliveredRevision < fault.revision) continue;
+      this.pendingFaults.delete(fault.id);
+      this.deliveredFaultIds.add(fault.id);
+      await this.onFault(fault);
+    }
   }
 
   persistence(): NativeP2PServerSession | null {
@@ -818,6 +855,7 @@ export class P2PHostAdapter implements EngineAdapter {
         matchConfig,
         native,
         (revision, views) => this.handleNativeRevision(revision, views),
+        (fault) => this.handleNativeAiDriverFault(fault),
         nativeResume,
       );
     } else {
@@ -1942,6 +1980,21 @@ export class P2PHostAdapter implements EngineAdapter {
     await this.commitTerminalIfComplete(hostUpdate.snapshot, revision);
   }
 
+  /** The native server publishes the fault after its revisioned snapshot.
+   * Keep the same ordering over PeerJS and make the host terminal only after
+   * every active guest received that final filtered state. */
+  private async handleNativeAiDriverFault(
+    fault: { id: number; revision: number; message: string },
+  ): Promise<void> {
+    if (!this.ownsAuthority() || this.gameRunState === "terminal") return;
+    this.gameRunState = "terminal";
+    await Promise.all([...this.guestSessions].map(async ([playerId, session]) => {
+      if (this.disconnectedSeats.has(playerId)) return;
+      await this.send(session, { type: "ai_driver_fault", ...fault });
+    }));
+    this.emit({ type: "error", message: fault.message });
+  }
+
   /**
    * Final state first, terminal statement second. The ordered transport plus
    * the state commitment lets a guest reject a plausible-looking terminal
@@ -2810,6 +2863,7 @@ export class P2PGuestAdapter implements EngineAdapter {
   /** Revision of the cached state frame. A terminal result is bound to this
    * exact final state, not merely to the room code. */
   private cachedRevision: number | null = null;
+  private readonly acceptedAiDriverFaultIds = new Set<number>();
   /**
    * Once true, the adapter is in a terminal state (kicked, reconnect rejected,
    * or disposed). `handleHostDisconnect` bails out so the auto-reconnect loop
@@ -3176,6 +3230,21 @@ export class P2PGuestAdapter implements EngineAdapter {
       }
       case "terminal_result": {
         void this.acceptTerminalResult(msg);
+        break;
+      }
+      case "ai_driver_fault": {
+        if (this.acceptedAiDriverFaultIds.has(msg.id)) break;
+        if (this.cachedRevision !== msg.revision) {
+          this.emit({ type: "terminalUnavailable", message: "Rejected an out-of-order native AI driver fault" });
+          break;
+        }
+        this.acceptedAiDriverFaultIds.add(msg.id);
+        this.terminated = true;
+        const error = new AdapterError("P2P_ERROR", msg.message, false);
+        this.pendingReject?.(error);
+        this.pendingResolve = null;
+        this.pendingReject = null;
+        this.emit({ type: "error", message: msg.message });
         break;
       }
       case "state_update": {

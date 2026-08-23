@@ -14,7 +14,7 @@ use engine::types::player::PlayerId;
 use phase_ai::config::AiDifficulty;
 use serde::{Deserialize, Serialize};
 
-use crate::session::FullSessionKey;
+use crate::session::{AiDriverFault, FullSessionKey};
 use crate::takeback::{RewindOption, RewindTarget};
 
 /// Full game wire protocol version. Kept numerically aligned with the lobby
@@ -569,6 +569,12 @@ pub enum ServerMessage {
         /// rating changes for both seats.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ranked_result: Option<Vec<RankedPlayerResult>>,
+    },
+    /// A durable native AI driver failure. The referenced revision is the
+    /// final authoritative state frame that must be delivered before clients
+    /// surface the fault.
+    AiDriverFault {
+        fault: AiDriverFault,
     },
     /// Terminal-only bootstrap response. `None` means the exact keyed Full
     /// session has no prepared terminal artifact, so the caller may attempt
@@ -2360,8 +2366,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_33() {
-        assert_eq!(PROTOCOL_VERSION, 33);
+    fn protocol_version_is_34() {
+        assert_eq!(PROTOCOL_VERSION, 34);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -2371,7 +2377,7 @@ mod tests {
     /// understand.
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
-    /// this guards — and this test reds while `protocol_version_is_33` stays
+    /// this guards — and this test reds while `protocol_version_is_34` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

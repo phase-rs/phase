@@ -106,6 +106,10 @@ pub type RevisionedActionResult = (u64, ActionResult);
 pub struct AiRunOutcome {
     pub transitions: Vec<RevisionedActionResult>,
     pub failure: Option<AiDriverFailure>,
+    /// The durable terminal record, when this invocation observed or created
+    /// an AI driver failure. Transports must send the final state frames before
+    /// publishing this record.
+    pub fault: Option<AiDriverFault>,
 }
 
 /// Internal result of one uninterrupted AI decision batch. Keeping the exact
@@ -117,13 +121,27 @@ struct AiActionBatch {
     stop: AiActionsStop,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AiDriverFailure {
     MissingAiConfig { player: PlayerId },
     ChooseActionNone { player: PlayerId },
     ApplyFailed { player: PlayerId, error: String },
     ActionSafetyCapReached { limit: usize },
     ResolveAllHandoffSafetyCapReached { limit: usize },
+}
+
+/// Durable, server-authored terminal state for the native AI driver.
+///
+/// This is deliberately separate from `GameState`: it is a transport/runtime
+/// failure, not a Magic game-rule result. The revision is allocated once when
+/// the fault is recorded, so a reconnect can prove it has received the final
+/// state snapshot before showing the fault.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct AiDriverFault {
+    pub id: u64,
+    pub state_revision: u64,
+    pub cause: AiDriverFailure,
 }
 
 impl AiDriverFailure {
@@ -302,6 +320,12 @@ pub struct GameSession {
     /// Read-only snapshots reuse this value; mutators advance it before their
     /// per-viewer views are captured for transport.
     pub state_revision: u64,
+    /// A native AI-driver failure permanently closes this session to further
+    /// game mutations. Persist it so restart/reconnect cannot turn an
+    /// actionable AI priority into a silent freeze again.
+    pub ai_driver_fault: Option<AiDriverFault>,
+    /// Monotonic per-session identifier for durable driver faults.
+    pub next_ai_driver_fault_id: u64,
     pub state: GameState,
     /// Player tokens indexed by seat (0..player_count). Empty string = seat not yet claimed.
     pub player_tokens: Vec<String>,
@@ -400,6 +424,53 @@ pub struct GameSession {
 }
 
 impl GameSession {
+    pub fn ai_driver_fault(&self) -> Option<&AiDriverFault> {
+        self.ai_driver_fault.as_ref()
+    }
+
+    fn reject_if_ai_driver_faulted(&self) -> Result<(), String> {
+        self.ai_driver_fault
+            .as_ref()
+            .map(|fault| {
+                format!(
+                    "Native AI driver fault {}: {}",
+                    fault.id,
+                    fault.cause.message()
+                )
+            })
+            .map_or(Ok(()), Err)
+    }
+
+    fn record_ai_driver_fault(&mut self, cause: AiDriverFailure) -> AiDriverFault {
+        if let Some(fault) = &self.ai_driver_fault {
+            return fault.clone();
+        }
+        let fault = AiDriverFault {
+            id: self.next_ai_driver_fault_id,
+            state_revision: self.advance_state_revision(),
+            cause,
+        };
+        self.next_ai_driver_fault_id = self.next_ai_driver_fault_id.saturating_add(1);
+        self.ai_driver_fault = Some(fault.clone());
+        fault
+    }
+
+    fn ai_driver_fault_transition(&self, fault: &AiDriverFault) -> RevisionedActionResult {
+        let (state, legal_actions, auto_pass, spell_costs, by_object) =
+            self.current_broadcast_snapshot();
+        (
+            fault.state_revision,
+            (
+                state,
+                Vec::new(),
+                legal_actions,
+                Vec::new(),
+                auto_pass,
+                spell_costs,
+                by_object,
+            ),
+        )
+    }
     /// Allocates the revision for one completed authoritative state transition.
     pub fn advance_state_revision(&mut self) -> u64 {
         self.state_revision = self.state_revision.saturating_add(1);
@@ -676,6 +747,9 @@ impl GameSession {
     }
 
     pub fn apply_seat_delta(&mut self, new_state: SeatState, delta: &SeatDelta, db: &CardDatabase) {
+        if self.ai_driver_fault.is_some() {
+            return;
+        }
         let old_player_count = self.player_count;
         let new_player_count = new_state.seats.len() as u8;
 
@@ -820,6 +894,11 @@ impl GameSession {
     }
 
     pub fn start_game(&mut self, db: &CardDatabase) -> Result<(), CedhBracketError> {
+        // A faulted game is never restarted in place: doing so would create a
+        // new playable state behind the durable terminal fault record.
+        if self.ai_driver_fault.is_some() {
+            return Ok(());
+        }
         // Gate: if any AI seat is configured for cEDH difficulty, validate that
         // every submitted deck is declared at the cEDH bracket tier before
         // mutating any session state.
@@ -901,10 +980,18 @@ impl GameSession {
     /// to. Every call site (join-fills-the-room, reconnect, fresh AI-game
     /// creation) is gated here once rather than at each caller.
     pub fn run_ai(&mut self) -> AiRunOutcome {
+        if let Some(fault) = self.ai_driver_fault.clone() {
+            return AiRunOutcome {
+                transitions: Vec::new(),
+                failure: None,
+                fault: Some(fault),
+            };
+        }
         if self.ai_seats.is_empty() || self.pending_takeback.is_some() {
             return AiRunOutcome {
                 transitions: Vec::new(),
                 failure: None,
+                fault: None,
             };
         }
 
@@ -954,24 +1041,36 @@ impl GameSession {
             match batch.stop {
                 AiActionsStop::NoEligibleAiActor | AiActionsStop::ActionBudgetReached { .. } => {}
                 AiActionsStop::MissingAiConfig { player } => {
+                    let failure = AiDriverFailure::MissingAiConfig { player };
+                    let fault = self.record_ai_driver_fault(failure.clone());
+                    transitions.push(self.ai_driver_fault_transition(&fault));
                     return AiRunOutcome {
                         transitions,
-                        failure: Some(AiDriverFailure::MissingAiConfig { player }),
+                        failure: Some(failure),
+                        fault: Some(fault),
                     };
                 }
                 AiActionsStop::ChooseActionNone { player } => {
+                    let failure = AiDriverFailure::ChooseActionNone { player };
+                    let fault = self.record_ai_driver_fault(failure.clone());
+                    transitions.push(self.ai_driver_fault_transition(&fault));
                     return AiRunOutcome {
                         transitions,
-                        failure: Some(AiDriverFailure::ChooseActionNone { player }),
+                        failure: Some(failure),
+                        fault: Some(fault),
                     };
                 }
                 AiActionsStop::ApplyFailed { player, error, .. } => {
+                    let failure = AiDriverFailure::ApplyFailed {
+                        player,
+                        error: error.to_string(),
+                    };
+                    let fault = self.record_ai_driver_fault(failure.clone());
+                    transitions.push(self.ai_driver_fault_transition(&fault));
                     return AiRunOutcome {
                         transitions,
-                        failure: Some(AiDriverFailure::ApplyFailed {
-                            player,
-                            error: error.to_string(),
-                        }),
+                        failure: Some(failure),
+                        fault: Some(fault),
                     };
                 }
                 AiActionsStop::ActionSafetyCapReached { limit } => {
@@ -1009,9 +1108,16 @@ impl GameSession {
                 .filter(|_| self.ai_seat_can_act())
                 .map(|limit| AiDriverFailure::ActionSafetyCapReached { limit })
         };
+        let fault = failure
+            .clone()
+            .map(|failure| self.record_ai_driver_fault(failure));
+        if let Some(fault) = &fault {
+            transitions.push(self.ai_driver_fault_transition(fault));
+        }
         AiRunOutcome {
             transitions,
             failure,
+            fault,
         }
     }
 
@@ -1184,6 +1290,8 @@ impl GameSession {
         PersistedSession {
             game_code: self.game_code.clone(),
             state_revision: self.state_revision,
+            ai_driver_fault: self.ai_driver_fault.clone(),
+            next_ai_driver_fault_id: self.next_ai_driver_fault_id,
             state: PersistedGameState::capture(self.state.clone()),
             player_tokens: self.player_tokens.clone(),
             display_names: self.display_names.clone(),
@@ -1271,6 +1379,8 @@ impl GameSession {
             game_code: ps.game_code,
             full_runtime: None,
             state_revision: ps.state_revision,
+            ai_driver_fault: ps.ai_driver_fault,
+            next_ai_driver_fault_id: ps.next_ai_driver_fault_id.max(1),
             state,
             player_tokens: ps.player_tokens,
             connected: vec![false; pc],
@@ -1444,6 +1554,8 @@ impl SessionManager {
             game_code: game_code.clone(),
             full_runtime: None,
             state_revision: 0,
+            ai_driver_fault: None,
+            next_ai_driver_fault_id: 1,
             state,
             player_tokens,
             connected,
@@ -1505,6 +1617,8 @@ impl SessionManager {
             .sessions
             .get_mut(game_code)
             .ok_or_else(|| format!("Game not found: {}", game_code))?;
+
+        session.reject_if_ai_driver_faulted()?;
         session.cleanup_expired_reservations();
         if session.game_started {
             return Err("Game has already started".to_string());
@@ -1670,6 +1784,7 @@ impl SessionManager {
             .sessions
             .get(game_code)
             .ok_or_else(|| format!("Game not found: {game_code}"))?;
+        session.reject_if_ai_driver_faulted()?;
         let player = session
             .player_for_token(player_token)
             .ok_or_else(|| "Invalid player token".to_string())?;
@@ -1705,6 +1820,8 @@ impl SessionManager {
             .sessions
             .get_mut(game_code)
             .ok_or_else(|| format!("Game not found: {}", game_code))?;
+
+        session.reject_if_ai_driver_faulted()?;
 
         let player = session
             .player_for_token(player_token)
@@ -1902,6 +2019,7 @@ impl SessionManager {
             .sessions
             .get_mut(game_code)
             .ok_or_else(|| format!("Game not found: {game_code}"))?;
+        session.reject_if_ai_driver_faulted()?;
         let requester = session
             .player_for_token(player_token)
             .ok_or_else(|| "Invalid player token".to_string())?;
@@ -2000,6 +2118,8 @@ impl SessionManager {
             .sessions
             .get_mut(game_code)
             .ok_or_else(|| format!("Game not found: {game_code}"))?;
+
+        session.reject_if_ai_driver_faulted()?;
 
         let player = session
             .player_for_token(player_token)
@@ -5525,6 +5645,8 @@ mod tests {
             game_code: "TEST01".to_string(),
             full_runtime: None,
             state_revision: 0,
+            ai_driver_fault: None,
+            next_ai_driver_fault_id: 1,
             state,
             player_tokens: vec!["host_token".to_string(), String::new()],
             connected: vec![true, true],

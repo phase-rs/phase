@@ -127,7 +127,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 24 as const;
+export const WIRE_PROTOCOL_VERSION = 25 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }
@@ -190,6 +190,9 @@ export type P2PMessage = P2PAuthorityWire & (
    * lease-bound; guests pin the first valid terminal id and never reconnect
    * after accepting the commitment for their filtered state. */
   | { type: "terminal_result"; result: P2PTerminalResult }
+  /** Native server AI became unable to advance the authoritative session.
+   * The host sends this only after the exact terminal state revision. */
+  | { type: "ai_driver_fault"; id: number; revision: number; message: string }
   // Lifecycle broadcasts (host → all remaining peers).
   | { type: "player_kicked"; playerId: number; reason: string }
   // Host chose "continue without them" OR guest self-conceded mid-game. Wire
@@ -229,6 +232,7 @@ const VALID_TYPES = new Set([
   "kick",
   "host_left",
   "terminal_result",
+  "ai_driver_fault",
   "player_kicked",
   "player_conceded",
   "player_disconnected",

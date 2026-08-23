@@ -262,7 +262,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 33;
+export const PROTOCOL_VERSION = 34;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -380,6 +380,7 @@ export type WsAdapterEvent =
   | { type: "playerEliminated"; playerId: PlayerId; becameSpectator: boolean }
   | { type: "spectatorJoined"; name: string }
   | { type: "gameOver"; winner: PlayerId | null; reason: string }
+  | { type: "aiDriverFault"; id: number; revision: number; message: string }
   | { type: "error"; message: string }
   | { type: "deckRejected"; reason: string }
   | { type: "reconnecting"; attempt: number; maxAttempts: number }
@@ -1851,6 +1852,21 @@ export class WebSocketAdapter implements EngineAdapter {
         this.rejectPregameMutation(actionRejectionError(data.message));
         this.rejectAbandon(actionRejectionError(data.message));
         this.emit({ type: "error", message: data.message });
+        break;
+      }
+
+      case "AiDriverFault": {
+        const data = msg.data as {
+          fault: { id: number; state_revision: number; cause: unknown };
+        };
+        const message = "Native AI driver stopped; this game can no longer advance.";
+        this.emit({
+          type: "aiDriverFault",
+          id: data.fault.id,
+          revision: data.fault.state_revision,
+          message,
+        });
+        this.emit({ type: "error", message });
         break;
       }
     }
