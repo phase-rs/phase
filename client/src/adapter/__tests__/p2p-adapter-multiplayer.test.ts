@@ -11,8 +11,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 
-import { P2PGuestAdapter, P2PHostAdapter, playerSlotsFromSeatView } from "../p2p-adapter";
-import { AdapterError, AdapterErrorCode, supportsAiDecisionDiagnostics, supportsMatchConcede, type FormatConfig, type GameAction, type GameEvent, type GameLogEntry, type GameState } from "../types";
+import { P2PGuestAdapter, P2PHostAdapter, playerSlotsFromSeatView, type P2PAdapterEvent } from "../p2p-adapter";
+import { AdapterError, AdapterErrorCode, supportsAiDecisionDiagnostics, supportsMatchConcede, type EngineSnapshot, type FormatConfig, type GameAction, type GameEvent, type GameLogEntry, type GameState } from "../types";
+import type { WsAdapterEvent } from "../ws-adapter";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
 import { WIRE_PROTOCOL_VERSION } from "../../network/protocol";
 import { p2pFinalStateCommitment } from "../../services/p2pTerminalResult";
@@ -181,8 +182,16 @@ const nativeWebSocketMocks = vi.hoisted(() => ({
 
 vi.mock("../ws-adapter", () => ({
   WebSocketAdapter: vi.fn().mockImplementation(function () {
+    let playerId: number | null = null;
     return {
-      initializePregame: nativeWebSocketMocks.initializePregame,
+      get playerId() {
+        return playerId;
+      },
+      initializePregame: async () => {
+        const attachment = await nativeWebSocketMocks.initializePregame();
+        playerId = attachment.playerId;
+        return attachment;
+      },
       waitForPlayerSlots: nativeWebSocketMocks.waitForPlayerSlots,
       onEvent: nativeWebSocketMocks.onEvent,
       sendAbandonGame: nativeWebSocketMocks.sendAbandonGame,
@@ -1428,18 +1437,35 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     );
     nativeWebSocketMocks.initializePregame.mockResolvedValue(NATIVE_HOST_ATTACHMENT);
 
-    const events: Array<{ type: string; message?: string }> = [];
+    const events: P2PAdapterEvent[] = [];
     adapter.onEvent((event) => events.push(event));
     await adapter.initialize();
 
-    const host = adapter as unknown as {
-      handleNativeAiDriverFault: (incoming: typeof fault) => Promise<void>;
-    };
-    await host.handleNativeAiDriverFault(fault);
-    await host.handleNativeAiDriverFault(fault);
-    await host.handleNativeAiDriverFault({ ...fault, id: fault.id + 1 });
+    const onNativeEvent = nativeWebSocketMocks.onEvent.mock.calls[0]?.[0] as
+      | ((event: WsAdapterEvent) => void)
+      | undefined;
+    if (!onNativeEvent) throw new Error("Native bridge did not register a WebSocket event listener");
 
-    expect(events.filter((event) => event.type === "error")).toEqual([
+    const finalSnapshot: EngineSnapshot = {
+      state: remoteState("native AI final state"),
+      legalResult: { actions: [], autoPassRecommended: false },
+      seq: 3,
+    };
+    onNativeEvent({
+      type: "stateChanged",
+      snapshot: finalSnapshot,
+      events: [],
+      serverRevision: fault.revision,
+    });
+    await flushPromises();
+    onNativeEvent({ type: "aiDriverFault", ...fault });
+    await flushPromises();
+    onNativeEvent({ type: "aiDriverFault", ...fault });
+    onNativeEvent({ type: "aiDriverFault", ...fault, id: fault.id + 1 });
+    await flushPromises();
+
+    expect(events).toEqual([
+      { type: "stateChanged", snapshot: finalSnapshot, events: [] },
       { type: "error", message: fault.message },
     ]);
   });
