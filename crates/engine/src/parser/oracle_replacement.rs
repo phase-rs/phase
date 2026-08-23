@@ -4073,7 +4073,10 @@ fn parse_enters_with_counters(
         choice.description = Some("your choice of counter".to_string());
 
         // Compose with "enters tapped" if present (mirrors the single-counter
-        // tail below).
+        // tail below). The keyword rider composes here too, for the same reason
+        // it does there — CR 614.1c makes it part of this replacement.
+        let choice =
+            compose_enters_with_keyword_grant(choice, parse_enters_with_keyword_riders(work_text));
         let execute = if has_enters_tapped_phrase(work_text) {
             AbilityDefinition::new(
                 AbilityKind::Spell,
@@ -4200,6 +4203,11 @@ fn parse_enters_with_counters(
     let put_counter = build_enters_counter_ability(
         counter_entries.unwrap_or_else(|| vec![(counter_type, count_expr)]),
     );
+    // CR 614.1c: the "and with <keyword>" rider is part of THIS replacement, so
+    // it composes onto the same execute chain as the counters and inherits the
+    // definition's gate (Invasion kicker cycle).
+    let put_counter =
+        compose_enters_with_keyword_grant(put_counter, parse_enters_with_keyword_riders(work_text));
     let execute = if has_enters_tapped_phrase(work_text) {
         AbilityDefinition::new(
             AbilityKind::Spell,
@@ -4413,6 +4421,104 @@ fn resolve_enters_with_condition(
             None,
         ) => Some(None),
     }
+}
+
+/// CR 614.1c + CR 611.2a: the `"and with <keyword>"` entry rider printed
+/// alongside an enters-with-counters clause by the Invasion kicker cycle —
+/// "…it enters with three +1/+1 counters on it and with trample" (Kavu Titan),
+/// "…two +1/+1 counters and a trample counter on it and with haste"
+/// (Voidpouncer). CR 614.1c makes the whole line ONE replacement effect, so
+/// this rider is a sibling of the counters and of the `"enters tapped"` rider,
+/// not a separate ability.
+///
+/// A corpus sweep over every printed `enters/enter with … counter` line finds
+/// this rider on exactly nine cards (Anavolver, Cetavolver, Faerie Squadron,
+/// Kavu Titan, Necravolver, Pouncing Kavu, Pouncing Wurm, Rakavolver,
+/// Voidpouncer), always gated on kicker.
+///
+/// Scans at `" and with "` boundaries rather than anchoring, because the rider
+/// follows a counter clause of unbounded shape and may not be the first `" and "`
+/// in the line. Each candidate remainder is offered to the shared
+/// `parse_granted_keyword_fragment`; a candidate that is not a keyword simply
+/// does not match, which is what keeps the counter clause's own `" and "`
+/// conjuncts ("…and a trample counter on it") out of this list — "a trample
+/// counter on it" is not a keyword.
+///
+/// The sibling QUOTED-ability rider (`and with "Whenever this creature deals
+/// damage, you gain that much life."` — Anavolver's {B} half, Necravolver's {W}
+/// half, Rakavolver's {1}{W} half) is deliberately NOT handled here: it needs a
+/// granted-ability parse, not a keyword lookup. Those three lines keep their
+/// current counters-only behavior rather than being failed closed, since that
+/// would trade a partial parse for no parse at all. Tracked separately.
+fn parse_enters_with_keyword_riders(text: &str) -> Vec<crate::types::keywords::Keyword> {
+    let mut riders = Vec::new();
+    let mut remaining = text;
+
+    while let Ok((after_marker, _)) = preceded(
+        take_until::<_, _, OracleError<'_>>(" and with "),
+        tag::<_, _, OracleError<'_>>(" and with "),
+    )
+    .parse(remaining)
+    {
+        // The rider runs to the end of the sentence; trailing punctuation is not
+        // part of the keyword name.
+        let candidate = after_marker
+            .split('.')
+            .next()
+            .unwrap_or(after_marker)
+            .trim();
+        if let Some(keyword) =
+            crate::parser::oracle_keyword::parse_granted_keyword_fragment(candidate)
+        {
+            if !riders.contains(&keyword) {
+                riders.push(keyword);
+            }
+        }
+        remaining = after_marker;
+    }
+
+    riders
+}
+
+/// CR 611.2a: wrap `inner` so the entering permanent also gains `keywords` for
+/// as long as it remains on the battlefield.
+///
+/// Modeled as a continuous `AddKeyword` grant on `SelfRef` with
+/// `Duration::UntilHostLeavesPlay` rather than a one-shot effect. The sibling
+/// `"enters tapped"` rider composes a one-shot `SetTapState` because tapping
+/// happens once as the object enters; a granted keyword is not an event but a
+/// characteristic the permanent must keep, and it must end when the object
+/// leaves the battlefield (CR 611.2a) so the new object it becomes elsewhere
+/// does not inherit it.
+///
+/// The gate is inherited for free: this rides the SAME `ReplacementDefinition`
+/// as the counters, whose condition already carries the kicker requirement
+/// (CR 702.33d), so the grant applies exactly when the counters do.
+fn compose_enters_with_keyword_grant(
+    inner: AbilityDefinition,
+    keywords: Vec<crate::types::keywords::Keyword>,
+) -> AbilityDefinition {
+    if keywords.is_empty() {
+        return inner;
+    }
+    let statics = keywords
+        .into_iter()
+        .map(|keyword| {
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+        })
+        .collect();
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GenericEffect {
+            static_abilities: statics,
+            duration: Some(Duration::UntilHostLeavesPlay),
+            target: Some(TargetFilter::SelfRef),
+            end_cost: None,
+        },
+    )
+    .sub_ability(inner)
 }
 
 fn has_enters_tapped_with_counter(text: &str) -> bool {
@@ -18198,8 +18304,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
+        // CR 614.1c: the line is ONE replacement — the "and with flying" rider
+        // is the outer link of the execute chain, the counter its sub-ability.
+        // Asserting only the counter (as this test did while the rider was being
+        // dropped) passes vacuously; assert both.
+        let execute = def.execute.as_deref().expect("execute ability");
+        assert_keyword_grant(execute, Keyword::Flying);
         assert!(matches!(
-            *def.execute.as_ref().unwrap().effect,
+            *execute.sub_ability.as_deref().expect("counter sub-ability").effect,
             Effect::PutCounter {
                 ref counter_type,
                 count: QuantityExpr::Fixed { value: 1 },
@@ -18215,6 +18327,39 @@ mod tests {
         ));
     }
 
+    /// CR 611.2a: assert `ability` is the continuous keyword grant produced by an
+    /// `"and with <keyword>"` entry rider — a `GenericEffect` carrying a
+    /// self-affecting `AddKeyword` static that lasts until the host leaves play.
+    fn assert_keyword_grant(ability: &AbilityDefinition, expected: Keyword) {
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } = &*ability.effect
+        else {
+            panic!(
+                "expected a GenericEffect keyword grant, got {:?}",
+                ability.effect
+            );
+        };
+        assert_eq!(
+            *duration,
+            Some(Duration::UntilHostLeavesPlay),
+            "CR 611.2a: the grant must end when the permanent leaves the battlefield"
+        );
+        let mods: Vec<_> = static_abilities
+            .iter()
+            .flat_map(|s| s.modifications.iter())
+            .collect();
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddKeyword { keyword } if *keyword == expected
+            )),
+            "expected an AddKeyword({expected:?}) modification, got {mods:?}"
+        );
+    }
+
     #[test]
     fn kicked_with_specific_cost_enters_with_counters() {
         // CR 702.33d: "If this creature was kicked with its {1}{R} kicker, it enters with
@@ -18225,8 +18370,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
+        // Both halves of the single replacement — see `kicked_enters_with_counter`.
+        let execute = def.execute.as_deref().expect("execute ability");
+        assert_keyword_grant(execute, Keyword::FirstStrike);
         assert!(matches!(
-            *def.execute.as_ref().unwrap().effect,
+            *execute.sub_ability.as_deref().expect("counter sub-ability").effect,
             Effect::PutCounter {
                 ref counter_type,
                 count: QuantityExpr::Fixed { value: 2 },
@@ -18244,6 +18392,79 @@ mod tests {
             other => panic!(
                 "Expected CastViaKicker {{ variant: None, kicker_cost: Some(_) }}, got {other:?}"
             ),
+        }
+    }
+
+    /// CR 614.1c + CR 611.2a: the `"and with <keyword>"` entry rider is lifted
+    /// for the whole Invasion kicker cycle, across every keyword it prints and
+    /// both counter shapes (plain `"N +1/+1 counters on it"` and the conjoined
+    /// `"two +1/+1 counters and a trample counter on it"` of Voidpouncer, where
+    /// the rider follows a counter list that itself contains `" and "`).
+    #[test]
+    fn kicker_cycle_enters_with_keyword_rider() {
+        for (card, line, keyword) in [
+            (
+                "Kavu Titan",
+                "If this creature was kicked, it enters with three +1/+1 counters on it and with trample.",
+                Keyword::Trample,
+            ),
+            (
+                "Faerie Squadron",
+                "If this creature was kicked, it enters with two +1/+1 counters on it and with flying.",
+                Keyword::Flying,
+            ),
+            (
+                "Pouncing Wurm",
+                "If this creature was kicked, it enters with three +1/+1 counters on it and with haste.",
+                Keyword::Haste,
+            ),
+            // Voidpouncer: the rider trails a CONJOINED counter list, so the
+            // scan must not stop at the list's own " and ".
+            (
+                "Voidpouncer",
+                "If this creature was kicked, it enters with two +1/+1 counters and a trample counter on it and with haste.",
+                Keyword::Haste,
+            ),
+        ] {
+            let def = parse_replacement_line(line, card)
+                .unwrap_or_else(|| panic!("{card}: kicker enters-with line must parse"));
+            let execute = def.execute.as_deref().expect("execute ability");
+            assert_keyword_grant(execute, keyword);
+            assert!(
+                def.condition.is_some(),
+                "{card}: the kicker gate must still reach the condition slot"
+            );
+            assert!(
+                execute.sub_ability.is_some(),
+                "{card}: the counters must survive alongside the keyword grant"
+            );
+        }
+    }
+
+    /// The rider scan must not invent a grant. A `"<keyword> counter"` conjunct
+    /// is a COUNTER, not a granted keyword — the discriminator is that
+    /// `parse_granted_keyword_fragment` rejects "a lifelink counter on it" —
+    /// and a line with no rider at all must stay a bare counter chain.
+    #[test]
+    fn enters_with_keyword_rider_does_not_over_claim() {
+        for (card, line) in [
+            (
+                "Dust Animus",
+                "If you control five or more untapped lands, this creature enters with two +1/+1 counters and a lifelink counter on it.",
+            ),
+            (
+                "Agent's Toolkit",
+                "This artifact enters with a +1/+1 counter, a flying counter, a deathtouch counter, and a shield counter on it.",
+            ),
+        ] {
+            let def = parse_replacement_line(line, card)
+                .unwrap_or_else(|| panic!("{card} must parse"));
+            let execute = def.execute.as_deref().expect("execute ability");
+            assert!(
+                matches!(*execute.effect, Effect::PutCounter { .. }),
+                "{card}: counter conjuncts must not be lifted as a keyword grant, got {:?}",
+                execute.effect
+            );
         }
     }
 

@@ -836,6 +836,7 @@ mod kaya_geist_hunter;
 mod kaya_spirits_justice_per_opponent_exile;
 mod kaysa_green_anthem;
 mod kibo_uktabi_prince_defending_player_sacrifice;
+mod kicker_enters_with_keyword_rider;
 mod kicker_x_cap_search_termination;
 mod kilo_live_offer_from_real_dump;
 mod kiora_self_library_peek_cast;
