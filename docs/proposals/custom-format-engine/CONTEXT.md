@@ -79,6 +79,72 @@ useful — the Axis A save-flow is smaller, ships independently, and is useful
 to every casual multiplayer table, not just old-school players. See PLAN.md §1
 and §7 for the schema and sequencing changes this implies.
 
+## Further narrowing Axis B's MVP — Swedish Old School over the four EC formats
+
+The follow-up ask: building `LegacyRuleSet` end-to-end (mana burn drop-site
+hook, the damage-uses-the-stack combat rework, pre-M10 Wish exile access,
+legend-rule scope) is real engine work with real risk, and doing all of it up
+front makes the MVP harder to test, not easier. Two formats narrow Axis B's
+first slice to something with **zero new legacy-rule engine work**:
+
+- **Premodern needs no work at all.** It is already a native, working
+  `GameFormat` (`FormatConfig::premodern()`) — fully modern rules, a
+  set-window-restricted legal pool. It validates nothing new about this
+  design; it's cited here only as an existing precedent for "old(er) card
+  pool + entirely modern rules," the same shape Swedish Old School turns out
+  to have.
+- **Swedish Old School 93/94** — a *different, real ruleset* from the four EC
+  formats already researched, independently verified this session via
+  `oldschool-mtg.blogspot.com/p/banrestriction.html` (fetched directly, not
+  from memory):
+  - **Legal sets**: Alpha, Beta, Unlimited, Arabian Nights, Antiquities,
+    Legends, The Dark, "Summer Magic" — the same era pool EC's 93-94 uses.
+  - **Banned list**: empty — no card is fully banned under Swedish rules.
+  - **Restricted list** (verbatim, 23 cards, one-copy maximum): Ancestral
+    Recall, Balance, Black Lotus, Braingeyser, Channel, Chaos Orb, Contract
+    from Below, Darkpact, Demonic Tutor, Library of Alexandria, Mana Drain,
+    Mind Twist, Mishra's Workshop, Mox Emerald, Mox Jet, Mox Pearl, Mox Ruby,
+    Mox Sapphire, Regrowth, Sol Ring, Strip Mine, Tempest Efreet, Time Walk,
+    Timetwister, Wheel of Fortune — a **different list from EC's 93-94**, not
+    a duplicate (confirms Axis B's `restricted: Vec<CardName>` shape needs to
+    be a real per-format list, not a shared constant).
+  - **Ante cards**: "must be removed before play unless the tournament is
+    specifically played for ante" (Bronze Tablet, Contract from Below,
+    Darkpact, Demonic Attorney, Jeweled Bird, Rebirth, Tempest Efreet) — a
+    third list-shaped rule distinct from banned/restricted, **not yet modeled
+    anywhere in this schema**. Flagged as a real gap to resolve at
+    implementation time (likely a third named list, or folded into `banned`
+    conditionally on an `ante_enabled` toggle this proposal does not yet
+    have) — do not silently drop it.
+  - **Reprint policy**: the primary source does **not** state one explicitly
+    (only "Only English versions are allowed in Oldschool") — a secondary
+    source (`mtgoldframe.com`) claims no Revised-or-later reprints are
+    allowed, but that was **not** independently confirmed against the primary
+    rules page this session. Do not encode `ReprintPolicy::OriginalPrintingsOnly`
+    for this preset without re-verifying against the primary source or asking
+    the community directly — flagged open, not resolved.
+  - **Legacy rules**: the primary source makes **no mention** of mana burn,
+    damage-on-the-stack, old Wish templating, or a modified legend rule —
+    the plain reading is that Swedish Old School uses fully **modern** rules
+    on the restricted-era pool. This is structurally the same shape as the
+    already-documented **Classic Legacy** validation example (above): old
+    card pool, modern rule engine, `LegacyRuleSet` at its all-`false`/
+    `Modern` defaults. It is a *second* independent confirmation that
+    card-pool era and legacy-rules toggles are properly decoupled axes, and
+    the cheapest possible Axis B instance to build and test — no
+    `LegacyRuleSet` engine wiring is exercised at all.
+
+**Revised sequencing implication** (see PLAN.md §8): Phase 1 ships the general
+engine + Axis A lobby-save + **Swedish Old School as the only new Axis B
+preset**, with `LegacyRuleSet` fields present in the schema (so the type is
+future-proof) but never exercised by anything Phase 1 actually ships. Phase 2
+is the four EC formats (which genuinely need mana burn, and for Middle
+School/Classic Magic, damage-on-the-stack) plus the `LegacyRuleSet` engine
+wiring those require. This is a re-sequencing, not a scope cut — all four EC
+formats and the full legacy-rules axis remain the target; they simply move to
+a phase 2 that ships once the schema and Axis A/Axis B mechanics are already
+proven end-to-end by something smaller and testable.
+
 ## Confirmed (verified against source this session)
 
 - **`GameFormat` is a closed `Copy` enum** with ~23 variants, threaded through
@@ -232,6 +298,21 @@ and §7 for the schema and sequencing changes this implies.
    the custom-format engine itself** and, if ever pursued, belongs to a
    separate, later "tournament/match structure" design, not bundled into
    `CustomFormatDef`/`LegacyRuleSet` here.
+5. **Ante-card handling (new, from the Swedish Old School preset).** "Must be
+   removed before play unless the tournament is specifically played for ante"
+   is a *third* list-shaped rule, distinct from banned (illegal outright) and
+   restricted (legal, max 1) — the schema has no slot for it today. Needs a
+   decision: a third named list on `LegalityRules`, or folding it into
+   `banned` gated by a new `ante_enabled: bool`/toggle. Low urgency (only 7
+   cards; ante itself has no in-engine support and none is proposed here), but
+   should not be silently dropped when the preset ships.
+6. **Swedish Old School's reprint policy is unconfirmed.** Only "English
+   versions are allowed" is stated by the primary source
+   (`oldschool-mtg.blogspot.com/p/banrestriction.html`); a secondary source's
+   "no Revised-or-later reprints" claim was not independently verified this
+   session. Do not encode `ReprintPolicy::OriginalPrintingsOnly` for this
+   preset without re-confirming against the primary source or the community
+   directly.
 
 ## Source data
 
@@ -241,6 +322,10 @@ and §7 for the schema and sequencing changes this implies.
 - **Prior art**: `GameFormat::Limited` planning cycle, phase 53. Retrieved via
   `git show 80404a98b:.planning/phases/53-limited-draft-core/53-01-SUMMARY.md`.
   Summarized in RESEARCH.md §7 (Analogous Trace).
+- **Swedish Old School 93/94 ruleset**, fetched this session (2026-07-15) from
+  `http://oldschool-mtg.blogspot.com/p/banrestriction.html` — the primary
+  source for legal sets, the empty banned list, the 23-card restricted list,
+  the ante-card carve-out, and the (absent) legacy-rules mentions used above.
 
 ## Relationship to adjacent work — scope boundaries (do NOT accommodate here)
 

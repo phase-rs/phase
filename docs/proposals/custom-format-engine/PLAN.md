@@ -271,7 +271,23 @@ See §7 for where each one is surfaced to a player.
 (`CustomFormatDef` = display metadata + `CustomFormatRules`; the registry hands
 the frontend labels/short-labels/descriptions just like `FormatMetadata`.)
 
-## 2. Parameterizing the four EC formats as data (not four blocks)
+## 2. Parameterizing the formats as data (not N blocks)
+
+**Phase 1 preset — `swedish_old_school()` (see CONTEXT.md's "Further narrowing
+Axis B's MVP").** This is the first Axis B preset to actually ship, chosen
+because it needs zero `LegacyRuleSet` engine wiring:
+
+- `swedish_old_school()` — sets = [LEA, LEB, 2ED, ARN, ATQ, LEG, DRK] (verify
+  MTGJSON codes at implementation time, same caveat as below); banned = [] (a
+  genuinely empty list — the schema must support this, not assume non-empty);
+  restricted = [23 names, verbatim in CONTEXT.md]; legacy = default (all
+  `false`/`Modern` — no mana burn, no damage-on-stack, no Wish/legend-rule
+  reversion). Ante-card handling and reprint policy are open per CONTEXT.md
+  items 5–6; do not encode either without resolving those first.
+
+**Phase 2 presets — the four EC formats**, unchanged from the original design,
+now explicitly sequenced after phase 1 (§8) since they need the
+`LegacyRuleSet` wiring in §4:
 
 The four formats form an incremental chain. Express it with builder-style reuse,
 mirroring how `FormatConfig::pioneer()` spreads `..Self::standard()`:
@@ -316,7 +332,13 @@ name-set sourcing. `GameFormat::Custom` gets one arm in
 custom formats don't use the external legality table). `sideboard_policy`,
 `label`, `for_format`, etc. each get a `Custom` arm reading the resolved def.
 
-## 4. Legacy rules wiring
+## 4. Legacy rules wiring — Phase 2 (not needed for the Swedish Old School preset)
+
+Everything in this section is deferred to phase 2 (§8) — the phase-1 preset
+(`swedish_old_school()`, §2) exercises none of it, by design, since the
+Swedish ruleset makes no mention of any of these rules and uses fully modern
+defaults. This section is unchanged from the original design and remains the
+correct plan for phase 2's four EC-format presets.
 
 - **Mana burn** (`LegacyRuleSet.mana_burn`): at the step-end drop site
   (`types/mana.rs:1707`), tally dropped units per player; after the drain, if
@@ -430,30 +452,44 @@ correct.
 
 ## 8. Sequencing
 
+**Phase 1 — general engine + the smallest end-to-end slice.** Deliberately
+excludes all `LegacyRuleSet` engine wiring; ships something real and testable
+first.
+
 1. **General engine** — `CustomFormatId`, `CustomFormatRules` (with
    `StructuralRules` + `LegalityRules` sub-structs, §1), `ReprintPolicy`,
-   `LegacyRuleSet`, `GameFormat::Custom` variant + all match arms,
-   `FormatConfig.custom_rules`, `evaluate_custom_format` reusing existing
-   enforcers, registry export. (Compiler-guided, mirrors phase 53.)
+   `LegacyRuleSet` (present in the schema, unused by anything phase 1 ships),
+   `GameFormat::Custom` variant + all match arms, `FormatConfig.custom_rules`,
+   `evaluate_custom_format` reusing existing enforcers, registry export.
+   (Compiler-guided, mirrors phase 53.)
 2. **Axis A lobby save** — `CustomFormatDef::from_lobby_config`, a "save as
    custom format" action on `HostSetup.tsx`, and a load path so a saved
    `CustomFormatDef` appears as a selectable format on return visits. Small
-   frontend-plus-plumbing slice; ships before the EC formats and is useful on
-   its own to any casual table. Validates the schema's Axis A end from a real
-   UI, ahead of Axis B.
-3. **Four EC formats as data (Axis B)** — the four `CustomFormatDef`
-   constructors + registry entries + preset-integrity tests. Validates the
-   engine's Axis B from step 1; can proceed in parallel with step 2 since they
-   touch disjoint fields of the same schema.
-4. **Mana burn** — `LegacyRuleSet.mana_burn` at the drop-site hook. Small.
+   frontend-plus-plumbing slice; useful on its own to any casual table.
+   Validates the schema's Axis A end from a real UI.
+3. **`swedish_old_school()` preset (Axis B, phase 1)** — the one Axis B
+   preset that needs zero legacy-rules wiring (§2). Validates the engine's
+   Axis B end (legal-set membership, empty banned list, the 23-name
+   restricted list) without touching §4 at all. Resolve CONTEXT.md items 5–6
+   (ante-card handling, reprint policy) before finalizing this preset's
+   constructor. Can proceed in parallel with step 2 — disjoint fields of the
+   same schema.
+
+**Phase 2 — the four EC formats + the legacy-rules engine work they need.**
+Ships once phase 1 has proven the schema and both axes end-to-end.
+
+4. **Four EC formats as data (Axis B)** — the four `CustomFormatDef`
+   constructors + registry entries + preset-integrity tests (§2).
+5. **Mana burn** — `LegacyRuleSet.mana_burn` at the drop-site hook. Small.
    Enables full fidelity for 93-94 / 95 and partial for Middle School / Classic.
-5. **Pre-M10 Wish exile access** (`pre_m10_wish_reaches_exile`) — SMALL
+6. **Pre-M10 Wish exile access** (`pre_m10_wish_reaches_exile`) — SMALL
    (RESEARCH §9); one-line pool-widening at `search_outside_game.rs:72`, gated by
    the flag, reusing the existing tested face-up-exile collector/mover. Can land
-   with or just after mana burn (step 4).
-6. **Damage uses the stack** — LARGE; its own sub-project; likely post-MVP.
-   Middle School / Classic are playable-with-caveat until it lands.
-7. **Eternal Chaos (stretch)** — depends on 93-94 existing (step 3) **plus** a
+   with or just after mana burn (step 5).
+7. **Damage uses the stack** — LARGE; its own sub-project; likely post-MVP
+   even within phase 2. Middle School / Classic are playable-with-caveat
+   until it lands.
+8. **Eternal Chaos (stretch)** — depends on 93-94 existing (step 4) **plus** a
    genuinely new in-match pack-opening mechanic (Booster Tutor / Opening
    Ceremony / Summon the Pack + tutor-from-opened-packs errata + pack-based
    sideboard). Not designed here; flagged as a follow-on that is mostly a new
