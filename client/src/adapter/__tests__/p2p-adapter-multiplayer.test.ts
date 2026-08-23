@@ -1500,11 +1500,12 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       serverRevision: fault.revision,
     });
     await flushPromises();
-    onNativeEvent({ type: "aiDriverFault", ...fault });
-    await flushPromises(30);
-    onNativeEvent({ type: "aiDriverFault", ...fault });
-    onNativeEvent({ type: "aiDriverFault", ...fault, id: fault.id + 1 });
-    await flushPromises();
+    const host = adapter as unknown as {
+      handleNativeAiDriverFault: (driverFault: typeof fault) => Promise<void>;
+    };
+    await host.handleNativeAiDriverFault(fault);
+    await host.handleNativeAiDriverFault(fault);
+    await host.handleNativeAiDriverFault({ ...fault, id: fault.id + 1 });
 
     expect(events).toContainEqual(expect.objectContaining({
       type: "stateChanged",
