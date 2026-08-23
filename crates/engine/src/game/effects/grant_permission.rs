@@ -55,6 +55,11 @@ pub fn resolve(
         // (which skips empties for inline "from among the milled cards"
         // continuations) — see the regression test
         // `tracked_set_sentinel_does_not_reuse_prior_non_empty_set_when_current_move_is_empty`.
+        // CR 700.2 + CR 608.2c: "highest id" == "the set the currently-resolving
+        // instruction published" — the ordering argument is written once, on
+        // `effects::publish_tracked_set`. Deliberately not routed through
+        // `targeting::resolve_tracked_set_id`: that authority SKIPS empty sets, and
+        // under mode scoping not skipping is the correct semantics here.
         TargetFilter::TrackedSet {
             id: TrackedSetId(0),
         } => state

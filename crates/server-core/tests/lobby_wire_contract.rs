@@ -46,6 +46,7 @@ fn canonical_client_frames_parse_via_broker() {
         client_version: "0.1.0".into(),
         build_commit: "abc".into(),
         protocol_version: sc::PROTOCOL_VERSION,
+        lobby_protocol_version: Some(sc::LOBBY_PROTOCOL_VERSION),
     };
     let json = serde_json::to_string(&canonical).unwrap();
     match lb::parse_lobby_client_message(&json) {
@@ -53,10 +54,14 @@ fn canonical_client_frames_parse_via_broker() {
             lb::LobbyClientMessage::ClientHello {
                 client_version,
                 build_commit,
+                lobby_protocol_version,
                 ..
             } => {
                 assert_eq!(client_version, "0.1.0");
                 assert_eq!(build_commit, "abc");
+                // The additive field must survive the canonical -> broker
+                // parse; the broker gates on it.
+                assert_eq!(lobby_protocol_version, Some(lb::LOBBY_PROTOCOL_VERSION));
             }
             other => panic!("expected ClientHello, got {other:?}"),
         },
@@ -174,12 +179,14 @@ fn server_hello_mode_byte_identical() {
         build_commit: "abc".into(),
         protocol_version: lb::PROTOCOL_VERSION,
         mode: lb::ServerMode::LobbyOnly,
+        lobby_protocol_version: Some(lb::LOBBY_PROTOCOL_VERSION),
     };
     let sc_hello = sc::ServerMessage::ServerHello {
         server_version: "0.1.0".into(),
         build_commit: "abc".into(),
         protocol_version: sc::PROTOCOL_VERSION,
         mode: sc::ServerMode::LobbyOnly,
+        lobby_protocol_version: Some(sc::LOBBY_PROTOCOL_VERSION),
         // None + skip_serializing_if keeps the wire identical to the lobby
         // broker's ServerHello, which has no public_url field.
         public_url: None,

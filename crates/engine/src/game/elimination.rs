@@ -827,6 +827,11 @@ fn do_eliminate(
         super::turn_control::recompute_active_player_control(state);
     }
 
+    // A consent run freezes canonical representatives and submitters. Player
+    // elimination changes that topology, so discard the run rather than
+    // allowing a stale prompt or Ready state to authorize anyone.
+    super::turn_control::invalidate_resolve_all_consent(state);
+
     // CR 800.4a + CR 800.4b: a departing searcher/zone owner invalidates its
     // live session, while a departing latched controller ends only that
     // controller's decision/knowledge role and falls back to the searcher.
@@ -907,6 +912,37 @@ fn do_eliminate(
                 search_keys.retain(|searcher| *searcher != player);
             }
         }
+    }
+    // CR 800.4a: "all objects … owned by that player leave the game", so a
+    // departed seat has no hand left to discard and iterating it can only be a
+    // no-op. Drop it from the discard fan-out's not-yet-prompted roster — the
+    // same treatment the scoped-library-search roster above already gets.
+    //
+    // `matching_players` is deliberately NOT pruned, and the reason is PARITY
+    // rather than a rule: the un-paused driver computes its reduction domain
+    // once at clause entry and never re-derives it, so a paused clause that
+    // pruned would answer differently from an identical unpaused one — which is
+    // precisely the divergence this repair exists to remove. CR 800.4i is what
+    // makes the retained seat well-defined: "the effect uses the last known
+    // information about that player before they left the game." The seat's
+    // truthful contribution is zero, and dropping it would silently change a
+    // `Min` answer.
+    //
+    // (Deliberately NOT cited: CR 608.2f, which an earlier revision leaned on.
+    // Read in full it is about simultaneity and APNAP ORDER — it latches no
+    // domain, and both its examples are about ordering. Same class of stretch as
+    // the CR 608.2b citation removed from `discard.rs`.)
+    //
+    // PINNED BY `effects/mod.rs`'s
+    // `eliminating_a_seat_prunes_the_paused_roster_but_not_its_reduction_domain`,
+    // which lives there to reuse the fan-out fixture. It asserts BOTH halves,
+    // so pruning the second list too is a red test rather than a silent change.
+    if let Some(fan_out) = state
+        .pending_discard_batch
+        .as_mut()
+        .and_then(|batch| batch.fan_out.as_mut())
+    {
+        fan_out.remaining_players.retain(|seat| *seat != player);
     }
     if let Some(crate::types::game_state::PendingBatchDeliveries {
         completion:
@@ -1018,6 +1054,36 @@ fn do_eliminate(
         state.pending_replacement = None;
         state.replacement_may_cost_paused = false;
         super::replacement::abandon_post_replacement_continuation(state);
+    }
+
+    // A leaving player gains no life: they are no longer a player in the game, so
+    // there is no one for the owed CR 702.15b gain to be applied to. NO CR 800.4
+    // SUBPART STATES THIS DIRECTLY — a sweep of 800.4 and 800.4a-800.4p returns no
+    // mention of life at all, so this sentence carries no citation on purpose. The
+    // nearest analogues are CR 800.4d (a triggered ability that would be controlled
+    // by a player who has left the game isn't put on the stack), CR 800.4e (combat
+    // damage that would be assigned to a player who has left the game isn't
+    // assigned), and CR 614.9 (damage redirected to or from a player who has left
+    // the game does nothing). 800.4d is the closest in SHAPE — an owed effect for a
+    // departed seat simply does not happen — but it is about triggered abilities,
+    // and the other two are about damage; NONE may be cited as authority for life
+    // gain. A re-sweep of 800.4 and 800.4a-800.4p confirms the enumerated subparts
+    // cover objects, control, creation, combat damage, costs, choices, information,
+    // and turns, and none of them life.
+    //
+    // Drop only THAT seat's owed lifelink gains — the rest of the batch belongs to
+    // other controllers and must still land, and the batch itself must still
+    // complete so its CR 603.3b triggers fire. Per-entry, mirroring
+    // `abandon_pending_spell_casts`, never a blanket null.
+    //
+    // CR 800.4j: when the seat that left is the ACTIVE player, the turn still
+    // continues to its completion, so the batch DOES complete — `auto_advance_once`
+    // discharges it through `resume_pending_combat_lifelink` before the CR 800.4
+    // turn skip. (An earlier revision of this comment claimed the batch "can no
+    // longer complete at all" and that `turns::enter_phase` owned that case; both
+    // halves are false now that the discharge exists.)
+    if let Some(record) = state.pending_combat_lifelink.as_mut() {
+        record.remaining.retain(|gain| gain.controller != player);
     }
 
     // CR 800.4a: A coupled ETB spell-resolution context can outlive its
@@ -1497,6 +1563,9 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,
@@ -1606,9 +1675,11 @@ mod tests {
                     controller_override: None,
                     enter_with_counters: Vec::new(),
                     face_down_profile: None,
+                    chain_referent: crate::types::zones::ChainReferentIntent::Silent,
                     attach_to: None,
                     library_placement: None,
                     exile_duration: None,
+                    exile_controller: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
                     replacement_applied: HashSet::new(),
                     face_down_in_exile: false,
@@ -1623,9 +1694,11 @@ mod tests {
                     controller_override: None,
                     enter_with_counters: Vec::new(),
                     face_down_profile: None,
+                    chain_referent: crate::types::zones::ChainReferentIntent::Silent,
                     attach_to: None,
                     library_placement: None,
                     exile_duration: None,
+                    exile_controller: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
                     replacement_applied: HashSet::new(),
                     face_down_in_exile: false,
@@ -2599,6 +2672,9 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,
@@ -2734,6 +2810,9 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,
@@ -2782,6 +2861,9 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,
@@ -2821,6 +2903,9 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,
@@ -2890,6 +2975,9 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,

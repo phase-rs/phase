@@ -119,6 +119,11 @@
       "planeswalker": "Planeswalker",
       "land": "Land",
       "other": "Andere",
+      "mythic": "Mythisch",
+      "rare": "Selten",
+      "uncommon": "Ungewöhnlich",
+      "common": "Häufig",
+      "rarityOther": "Andere Seltenheiten",
       "manaValue0": "0 CMC",
       "manaValue1": "1 CMC",
       "manaValue2": "2 CMC",
@@ -139,7 +144,10 @@
   },
   "limitedDeck": {
     "poolHeading": "Pool ({{count}})",
+    "searchPool": "Pool durchsuchen...",
     "allAdded": "Alle Karten zum Deck hinzugefügt.",
+    "noFilterMatches": "Keine Karten passen zu den Filtern",
+    "filterUnavailable": "Filter gerade nicht verfügbar — alle Karten werden gezeigt.",
     "mainDeck": "Hauptdeck",
     "emptyDeckHint": "Klicke Karten aus dem Pool an, um sie deinem Deck hinzuzufügen.",
     "addableCards": "Hinzufügbare Karten",
@@ -365,7 +373,11 @@
     "sideboardGame": "Sideboard — Spiel {{number}}",
     "sideboardHint": "Nimm Sideboard-Änderungen vor und reiche dann ein. Dein Pool ist unten verfügbar.",
     "submitSideboard": "Sideboard einreichen",
-    "preparingNext": "Nächstes Spiel wird vorbereitet..."
+    "preparingNext": "Nächstes Spiel wird vorbereitet...",
+    "hideOverlay": "Diesen Bildschirm ausblenden",
+    "showOverlay": "Diesen Bildschirm anzeigen",
+    "hiddenNotice": "Das Sideboarding ist für dieses Spiel weiterhin offen.",
+    "hiddenNoticePlayDraw": "Für dieses Spiel steht die Wahl zwischen Spielen und Ziehen noch aus."
   },
   "podComplete": {
     "title": "Draft abgeschlossen",

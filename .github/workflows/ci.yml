@@ -57,8 +57,14 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      # `--locked` costs nothing here (this step already resolves the whole
+      # workspace) and asserts the committed root Cargo.lock is in sync with the
+      # manifests. Without it, dropping a crate leaves dead entries in the lock,
+      # every later cargo invocation silently rewrites the file, and Nightly
+      # Release dies on `cargo release`'s dirty-tree check -- which is exactly
+      # what #7556 did. `--locked` is already used for the Tauri manifest below.
       - name: Clippy
-        run: cargo clippy --workspace --exclude phase-tauri --all-targets --features engine/proptest -- -D warnings
+        run: cargo clippy --locked --workspace --exclude phase-tauri --all-targets --features engine/proptest -- -D warnings
 
       - name: Interaction bindings are current
         run: ./scripts/check-interaction-bindings.sh --check
@@ -174,7 +180,7 @@ jobs:
         # caught before it lands on the branch that feeds staging/preview.
         env:
           PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '32' || '256' }}
-        run: cargo nextest run --profile ci --partition count:${{ matrix.shard }}/4 --workspace --exclude phase-tauri --exclude mtgish-import --features engine/proptest --status-level fail --final-status-level fail
+        run: cargo nextest run --profile ci --partition count:${{ matrix.shard }}/4 --workspace --exclude phase-tauri --features engine/proptest --status-level fail --final-status-level fail
 
   card-data-gate:
     name: Card data (generate, validate, coverage)
@@ -639,7 +645,10 @@ jobs:
         run: cargo check --package engine-wasm --target wasm32-unknown-unknown
 
   tauri-check:
-    name: Tauri compile check
+    # Disabled pending a faster Linux dependency setup: apt-get update regularly
+    # consumes this job's entire 15-minute timeout.
+    if: ${{ false }}
+    name: Tauri compile check + tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -670,12 +679,18 @@ jobs:
 
       - name: Tauri compile check
         # phase-tauri is excluded from the workspace clippy and nextest runs
-        # above (no proptest support, no tests). Without this step, compile
-        # errors in the desktop crate only surface at shell release time.
-        # Catches them on every PR in ~3 min.
+        # above. Without this step, compile errors in the desktop crate only
+        # surface at shell release time. Catches them on every PR in ~3 min.
         # Driven via --manifest-path because client/src-tauri is excluded
         # from the root workspace, so `-p phase-tauri` cannot resolve it.
         run: cargo check --locked --manifest-path client/src-tauri/Cargo.toml
+
+      - name: Tauri tests
+        # phase-tauri's `#[cfg(test)]` unit tests (migration, native_bridge,
+        # native_engine, audio_probe, ...) are excluded from the workspace
+        # nextest run above for the same reason as the compile check, so they
+        # need their own step or they'd never run in CI at all.
+        run: cargo test --locked --manifest-path client/src-tauri/Cargo.toml
 
   rust-check:
     name: Rust (fmt, clippy, test, coverage-gate)

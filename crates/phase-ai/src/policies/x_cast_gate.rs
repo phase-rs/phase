@@ -401,6 +401,7 @@ mod tests {
             amount: QuantityExpr::Ref {
                 qty: QuantityRef::PreviousEffectAmount {
                     channel: engine::types::ability::DamageChannel::Total,
+                    aggregate: engine::types::ability::AggregateFunction::Sum,
                 },
             },
             player: TargetFilter::Controller,
@@ -772,6 +773,7 @@ mod tests {
             count: QuantityExpr::Ref {
                 qty: QuantityRef::PreviousEffectAmount {
                     channel: engine::types::ability::DamageChannel::Total,
+                    aggregate: engine::types::ability::AggregateFunction::Sum,
                 },
             },
             target: TargetFilter::Controller,

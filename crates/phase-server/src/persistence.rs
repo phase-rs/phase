@@ -1219,6 +1219,8 @@ mod tests {
             persisted: PersistedSession {
                 game_code: game_code.to_string(),
                 state_revision: mutation_revision,
+                ai_driver_fault: None,
+                next_ai_driver_fault_id: 1,
                 state: PersistedGameState::capture(GameState::new_two_player(7)),
                 player_tokens: vec!["player-0".to_string(), "player-1".to_string()],
                 display_names: vec!["P0".to_string(), "P1".to_string()],

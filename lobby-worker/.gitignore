@@ -4,6 +4,6 @@ dist/
 .dev.vars
 
 # Generated wasm-bindgen glue (rebuilt by scripts/build-broker-wasm.sh)
-src/broker-wasm-pkg/
+broker-wasm-pkg/
 # Cargo build artifacts for the standalone wasm-bindgen crate
 broker-wasm/target/

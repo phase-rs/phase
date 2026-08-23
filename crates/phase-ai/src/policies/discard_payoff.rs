@@ -180,6 +180,9 @@ fn candidate_discards_controller(ctx: &PolicyContext<'_>) -> bool {
         // this match at compile time and forces an intentional classification
         // instead of silently bypassing the discard payoff (CR 701.9).
         GameAction::PassPriority
+        | GameAction::BeginResolveAll { .. }
+        | GameAction::RespondResolveAllConsent { .. }
+        | GameAction::RevokeResolveAllConsent { .. }
         | GameAction::ChooseMeldPair { .. }
         | GameAction::ChooseEntryAttackTarget { .. }
         | GameAction::PlayLand { .. }

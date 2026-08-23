@@ -112,7 +112,48 @@ pub(crate) fn drain_pending_connive_reentry(
     }
 }
 
+/// CR 616.1 + CR 510.2 + CR 702.15b: the CR 616.1 round trip, plus the one
+/// turn-based action that can be parked waiting on it.
+///
+/// A simultaneous combat-damage batch (CR 510.2) parks in
+/// `state.pending_combat_lifelink` when a lifelink life gain meets two or more
+/// co-applicable replacements. This is the only boundary that knows where THIS
+/// action's events begin, and the resumed `LifeChanged` must join the batch's own
+/// CR 603.3b trigger batch — so the anchor is captured here, as a LOCAL, and the
+/// drain lives here rather than in the generic priority-boundary resumer
+/// (`engine::resume_pending_continuation_if_priority`, which has no such anchor).
+///
+/// The anchor is deliberately not stored on the record: a persisted index into a
+/// finished action's event vector has no owner that can clear it on every exit
+/// path, and a stale one either panics or folds unrelated events into the batch.
+/// A local cannot go stale, and `action_event_start <= events.len()` holds by
+/// construction.
+///
+/// A wrapper rather than in-arm insertions: the inner handler's `Prevented` arm
+/// alone has eleven early `return Ok(..)` paths. One wrapper is a single
+/// authority covering `Execute`, `Prevented`, `NeedsChoice`, and every early
+/// return. A no-op whenever nothing is parked.
 pub(super) fn handle_replacement_choice(
+    state: &mut GameState,
+    index: usize,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let action_event_start = events.len();
+    let waiting_for = handle_replacement_choice_inner(state, index, events)?;
+    // CR 616.1f: a second ordering choice, or any nested prompt, leaves the record
+    // parked for the next answer; only a settled round trip may close the batch.
+    // Nothing is left behind on this path — the anchor is a local that dies here.
+    if !matches!(waiting_for, WaitingFor::Priority { .. }) {
+        return Ok(waiting_for);
+    }
+    state.waiting_for = waiting_for.clone();
+    Ok(
+        super::combat_damage::resume_pending_combat_lifelink(state, action_event_start, events)
+            .unwrap_or(waiting_for),
+    )
+}
+
+fn handle_replacement_choice_inner(
     state: &mut GameState,
     index: usize,
     events: &mut Vec<GameEvent>,
@@ -170,6 +211,19 @@ pub(super) fn handle_replacement_choice(
         .pending_replacement
         .as_ref()
         .and_then(|pending| pending.library_placement.clone());
+    let parked_exile_controller = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.exile_controller);
+    let parked_exile_duration = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.exile_duration.clone());
+    let parked_exile_tracking = state
+        .pending_replacement
+        .as_ref()
+        .map(|pending| pending.exile_tracking)
+        .unwrap_or_default();
     // CR 120.4a + CR 702.15b: capture the excess-redirect rider and the deferred
     // lifelink bonus BEFORE `continue_replacement` consumes the pending record, so
     // the Damage resume arm can restore them onto the ctx it rebuilds from the
@@ -269,7 +323,11 @@ pub(super) fn handle_replacement_choice(
                         approved,
                         crate::game::zone_pipeline::DeliveryCtx {
                             source_id: cause,
-                            exile_links: crate::game::zone_pipeline::ExileLinkSpec::default(),
+                            exile_links: crate::game::zone_pipeline::ExileLinkSpec {
+                                duration: parked_exile_duration,
+                                controller: parked_exile_controller,
+                                tracking: parked_exile_tracking,
+                            },
                             drain:
                                 crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
                             // CR 701.24a: thread the parked W3 library placement so
@@ -337,6 +395,9 @@ pub(super) fn handle_replacement_choice(
                 }
                 event @ ProposedEvent::TokenEntry { entry_ref, .. } => {
                     if state.has_post_replacement_drain() {
+                        state.waiting_for = WaitingFor::Priority {
+                            player: state.active_player,
+                        };
                         if let Some(waiting_for) = apply_pending_post_replacement_effect(
                             state,
                             Some(entry_ref),
@@ -1019,6 +1080,40 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
+            // CR 608.2c: a discard instruction parked mid-batch by a
+            // replacement-application choice finishes what it still owes BEFORE
+            // any parked continuation runs. The resolving effect follows its
+            // instructions in written order, so later instructions cannot resume
+            // until this action has settled and published its terminal result.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.pending_discard_batch.is_some()
+            {
+                match effects::drain_pending_discard_batch(state, events)
+                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+                {
+                    effects::PendingDiscardBatchOutcome::Idle => {}
+                    effects::PendingDiscardBatchOutcome::PausedForReplacement => {
+                        waiting_for = state.waiting_for.clone();
+                        super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                            state,
+                            events,
+                            replacement_action_event_start,
+                        );
+                    }
+                    effects::PendingDiscardBatchOutcome::Completed => {
+                        effects::drain_pending_continuation(state, events);
+                        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                            waiting_for = state.waiting_for.clone();
+                            super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                                state,
+                                events,
+                                replacement_action_event_start,
+                            );
+                        }
+                    }
+                }
+            }
+
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && (state.active_ability_continuation().is_some()
                     || state.active_change_zone_frame().is_some())
@@ -1164,6 +1259,18 @@ pub(super) fn handle_replacement_choice(
             if let Some(pending) = state.pending_replacement.as_mut() {
                 if pending.library_placement.is_none() {
                     pending.library_placement = parked_library_placement.clone();
+                }
+                if pending.exile_controller.is_none() {
+                    pending.exile_controller = parked_exile_controller;
+                }
+                if pending.exile_duration.is_none() {
+                    pending.exile_duration = parked_exile_duration.clone();
+                }
+                if matches!(
+                    pending.exile_tracking,
+                    crate::types::game_state::ZoneDeliveryExileTracking::None
+                ) {
+                    pending.exile_tracking = parked_exile_tracking;
                 }
                 // CR 120.4a: a SECOND material replacement ordering choice on the
                 // same damage event re-parked a fresh record with
@@ -2502,6 +2609,59 @@ pub(super) fn apply_post_replacement_effect(
     }
 }
 
+thread_local! {
+    /// Set while a post-replacement dispatch is live on THIS thread's call
+    /// stack. Deliberately not `GameState`: liveness describes the call stack,
+    /// not the game, and serializing it would make the very `Dispatching`
+    /// status this module forbids look legitimate across a round trip. Mirrors
+    /// `game::engine::IN_SIMULATION_PROBE`, whose doc records the properties
+    /// this relies on: engine game logic is single-threaded (no rayon /
+    /// par_iter / std::thread::spawn in the apply or legal_actions path),
+    /// `apply()` is fully synchronous, and the tokio server runs each apply
+    /// synchronously within one task on one thread.
+    ///
+    /// KNOWN RESIDUAL: the WASM release profile is `panic = 'abort'`
+    /// (Cargo.toml), so `Drop` does not run on a panic. A panic inside a
+    /// dispatch therefore leaves this set, and the priority-boundary sweep is
+    /// suppressed for the life of that module instance. The suppression is
+    /// reported by a `tracing::warn!` at the sweep site so the condition is
+    /// observable on the native build rather than silent. Native
+    /// (`server-release`) and every test build are `panic = 'unwind'` and are
+    /// unaffected. An unconditional reset at the `apply()` boundary was
+    /// rejected: `apply()` is re-entrant via `SimulationFilter`'s
+    /// clone-and-apply probe, so an ungated reset would clear a live outer
+    /// dispatch's flag inside the probe.
+    static POST_REPLACEMENT_DISPATCH_LIVE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// RAII: sets the flag, restores the PREVIOUS value on drop — nesting-correct,
+/// so the CR 616.1g nested same-frame dispatch (Jace/Swans) keeps it set for
+/// the outer dispatch after the inner one returns.
+#[must_use]
+struct LiveDispatchGuard(bool);
+
+impl LiveDispatchGuard {
+    fn enter() -> Self {
+        LiveDispatchGuard(POST_REPLACEMENT_DISPATCH_LIVE.with(|flag| flag.replace(true)))
+    }
+}
+
+impl Drop for LiveDispatchGuard {
+    fn drop(&mut self) {
+        POST_REPLACEMENT_DISPATCH_LIVE.with(|flag| flag.set(self.0));
+    }
+}
+
+/// True while any `apply_pending_post_replacement_effect` dispatch is between
+/// its `begin_dispatch` and its cleanup on this thread. The priority-boundary
+/// sweeper consults this before retiring a `Dispatching` resident: when it is
+/// false, "ownerless" is a definition rather than an inference, at any frame
+/// depth and at any drain depth.
+pub(crate) fn post_replacement_dispatch_is_live() -> bool {
+    POST_REPLACEMENT_DISPATCH_LIVE.with(std::cell::Cell::get)
+}
+
 pub(crate) fn apply_pending_post_replacement_effect(
     state: &mut GameState,
     object_id: Option<ObjectId>,
@@ -2537,9 +2697,14 @@ pub(crate) fn apply_pending_post_replacement_effect(
         .map(|drain| std::mem::take(&mut drain.applied))
         .unwrap_or_default();
 
-    let (continuation, dispatch) = state
-        .active_post_replacement_drains_mut()?
-        .begin_dispatch()?;
+    let (continuation, dispatch) = state.begin_post_replacement_dispatch()?;
+    // CR 603.3b + CR 608.2c: this dispatch is now live on this thread's call
+    // stack. Constructed AFTER the mint so the `?` early-return path never
+    // enters it, and dropped by RAII at every exit — the
+    // `capture_deferred_entry_events_if_mid_entry_choice` tail, every `?`, and
+    // (on unwind profiles) a panic. While it is held, the priority-boundary
+    // sweeper must not treat a `Dispatching` resident as ownerless.
+    let _live_dispatch = LiveDispatchGuard::enter();
     let waiting_for = match continuation {
         PostReplacementContinuation::Resolved(resolved) => {
             apply_post_replacement_resolved_effect(state, &resolved, replacement_applied, events)
@@ -2554,21 +2719,42 @@ pub(crate) fn apply_pending_post_replacement_effect(
             events,
         ),
     };
-    // CR 615.5: a direct pause retains this dispatch's context on its own entry.
-    // If a nested drain owns the prompt instead, this continuation has completed;
-    // retire its exact `Dispatching` entry below the nested top.
-    if waiting_for.is_some()
-        && state
-            .active_post_replacement_drains()
-            .is_some_and(|drains| drains.dispatch_is_resident_top(dispatch))
-    {
-        let _ = state
-            .active_post_replacement_drains_mut()
-            .is_some_and(|drains| drains.pause_dispatch(dispatch));
+    // CR 614.12a + CR 616.1g: classify by what OWNS the outstanding prompt, never
+    // by whether the two-deep positional accessor can currently see this frame.
+    // The predecessor asked `active_post_replacement_drains()`, which returns None
+    // as soon as this frame's DISTANCE FROM THE STACK TOP exceeds one — whether
+    // because the dispatched continuation raised two or more frames, or because a
+    // parent-of-active insert slid a frame in above it
+    // (`ResolutionStack::insert_parent_of_active`, reached from
+    // `effects::append_to_pending_continuation`). Note the frame need not have
+    // moved at all: `active_post_replacement_parent_index` looks only at the top
+    // and its immediate predecessor, by design. Both arms then degraded to no-ops
+    // and the entry was stranded `Dispatching` — unrecoverable, because every
+    // retirement path is keyed on `Ready`, on `Paused`, or on a handle that dies
+    // with this call. Worse, on the same miss
+    // `GameState::install_post_replacement_drain` mints a SIBLING PostReplacement
+    // frame, and the accessor then hands this cleanup that frame's drain vector —
+    // so the outer `finish_dispatch` could remove an unrelated frame's entry.
+    // The dispatch now names its frame by a stable `PostReplacementFrameId`, bound
+    // to the frame at most once, so both failure modes are closed: the lookup
+    // follows the frame through every `frames.insert` / `frames.swap`, never
+    // resolves to a sibling, and is not invalidated by a nested same-frame
+    // dispatch.
+    if waiting_for.is_some() && state.post_replacement_dispatch_is_resident_top(dispatch) {
+        // This dispatch's own work owns the prompt: park it so the paused-retire
+        // paths (`finish_active_paused_post_replacement_dispatch` and the
+        // `resume_resolution_frames` Paused branch) can finish it after the answer.
+        let _ = state.pause_post_replacement_dispatch(dispatch);
     } else {
-        let _ = state
-            .active_post_replacement_drains_mut()
-            .and_then(|drains| drains.finish_dispatch(dispatch));
+        // Either the continuation completed, or a NESTED drain above this entry
+        // owns the prompt (CR 616.1g) — in both cases this entry's work is done.
+        // Retire exactly `dispatch`, addressed by frame id, wherever that frame
+        // now sits.
+        let _ = state.finish_post_replacement_dispatch(dispatch);
+        // Unchanged from the predecessor, and deliberately NOT folded into the
+        // call above: this removes any empty PostReplacement frame that is now the
+        // stack top, which is a wider set than "the frame this dispatch
+        // addressed". Narrowing it would be a second, unrelated behavioural delta.
         state.remove_empty_active_post_replacement_frame();
     }
     // NOTE: the inherited token-choice applied seed is intentionally NOT cleared
@@ -3053,6 +3239,9 @@ mod tests {
             depth: 0,
             is_optional: true,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,
@@ -3725,6 +3914,9 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,
@@ -4263,6 +4455,7 @@ mod tests {
             discard_frame: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let mut events = Vec::new();
         crate::game::sacrifice::apply_sacrifice_after_replacement(&mut state, event, &mut events);
@@ -4310,7 +4503,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(1),
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
 
         let battlefield_before = state.battlefield.clone();
@@ -4435,7 +4628,7 @@ mod tests {
             sacrifice_at: None,
             source_id: replacement_source,
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let battlefield_before = state.battlefield.clone();
 
@@ -4593,7 +4786,7 @@ mod tests {
             sacrifice_at: None,
             source_id: replacement_source,
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let battlefield_before = state.battlefield.clone();
 
@@ -4768,7 +4961,7 @@ mod tests {
             sacrifice_at: None,
             source_id: replacement_source,
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let battlefield_before = state.battlefield.clone();
 
@@ -4922,7 +5115,7 @@ mod tests {
             sacrifice_at: None,
             source_id: jinnie_source,
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let applied = state
             .post_replacement_token_choice_applied
@@ -5059,7 +5252,7 @@ mod tests {
             sacrifice_at: None,
             source_id: jinnie_source,
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let battlefield_before = state.battlefield.clone();
 
@@ -6182,6 +6375,7 @@ mod tests {
             discard_frame: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::NeedsChoice(player) = result else {
@@ -6388,6 +6582,7 @@ mod tests {
             discard_frame: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::NeedsChoice(player) = result else {
@@ -6510,6 +6705,7 @@ mod tests {
             discard_frame: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::NeedsChoice(player) = result else {
@@ -6967,6 +7163,7 @@ mod tests {
             discard_frame: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::Execute(event) = result else {
@@ -7414,5 +7611,299 @@ mod tests {
             }
             other => panic!("expected CopyTargetChoice, got {other:?}"),
         }
+    }
+
+    /// Park a state on Priority whose single resolution frame is a
+    /// `PostReplacement` holding one `Dispatching` resident — the wedge shape,
+    /// reached the only way it can be reached without a live dispatcher: an
+    /// install followed by a direct `begin_dispatch` whose handle is then
+    /// dropped, exactly as a real dispatcher's handle dies with its call frame.
+    fn state_with_ownerless_dispatching_resident() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_player = PlayerId(0);
+
+        let mut drains = crate::types::game_state::PostReplacementDrainStack::default();
+        assert!(
+            drains.install(
+                crate::types::game_state::PostReplacementDrain::ready(
+                    PostReplacementContinuation::Resolved(Box::new(ResolvedAbility::new(
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                        Vec::new(),
+                        ObjectId(81),
+                        PlayerId(0),
+                    ))),
+                ),
+                crate::types::game_state::ResidentDrainPolicy::KeepResident,
+            ),
+            "the fixture's ready drain installs"
+        );
+        let (_continuation, _handle) = drains
+            .begin_dispatch()
+            .expect("a ready resident begins dispatching");
+        state.resolution_stack.push_post_replacement(drains);
+        state
+    }
+
+    fn resident_is_dispatching(state: &GameState) -> bool {
+        state
+            .active_post_replacement_drains()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident)
+            .is_some_and(|drain| {
+                matches!(
+                    drain.status,
+                    crate::types::game_state::DrainStatus::Dispatching
+                )
+            })
+    }
+
+    /// **H5 — discriminating(U1), two halves.** A `Dispatching` entry whose
+    /// dispatcher is still on this thread's call stack is live work, not a
+    /// strand, and the priority-boundary sweeper must leave it alone.
+    ///
+    /// Carried WITHOUT a CR citation, deliberately. This is an invariant of the
+    /// engine's own dispatch machinery — which in-flight work the sweeper may
+    /// retire — and no rule of the game speaks to it. It formerly cited
+    /// CR 615.5, which says a prevention effect may include an additional effect
+    /// referring to the amount of damage that was prevented, the rest of the
+    /// effect taking place immediately after the prevention itself.
+    ///
+    /// That rule is real authority for the PREVENTION family's additional-effect
+    /// reference, and it is why `begin_dispatch`
+    /// (`types/game_state.rs`) and `apply_pending_post_replacement_effect` above
+    /// both still cite it: the engine satisfies that reference by keeping the
+    /// drain resident with its event context readable, which is how
+    /// `PostReplacementSourceController` resolves Swans of Bryn Argoll. What
+    /// CR 615.5 does NOT speak to is dispatch LIVENESS — whether a `Dispatching`
+    /// entry is still on this thread's call stack — and that is this test's
+    /// actual subject. So the number is dropped HERE rather than swapped for a
+    /// guess. Do not read that omission as a reason to strip CR 615.5 from the
+    /// event-context sites, where it is the correct anchor.
+    ///
+    /// Half (i) holds a `LiveDispatchGuard` across the sweep and asserts the
+    /// drain SURVIVES. Hand-patching `post_replacement_dispatch_is_live()` to
+    /// return `false` turns half (i) red behaviourally — the sweep fires
+    /// mid-dispatch and destroys the event context the running continuation
+    /// reads.
+    ///
+    /// Half (ii) repeats the sweep with no guard held and asserts the drain IS
+    /// retired. It is half (i)'s positive control: without it, half (i) would be
+    /// satisfied by a sweep that never fires at all. Reverting the sweep turns
+    /// half (ii) red.
+    ///
+    /// Half (iii) tests the shared policy FUNCTION rather than one of its callers.
+    /// The guard is the only protection the new entry-side call site in
+    /// `engine::apply_action_boundary_core` has, so it is asserted at the function
+    /// both callers share. Half (iii)'s second call is its own positive control:
+    /// without it, a policy that never sweeps anything would pass.
+    ///
+    /// `LiveDispatchGuard::enter()` stays module-private deliberately — the
+    /// guard's soundness argument is "the dispatcher is the sole thing that can
+    /// make a dispatch live", and a `pub(crate) enter()` would downgrade that
+    /// from a compiler-enforced fact to a convention.
+    #[test]
+    fn h5_a_live_dispatch_suppresses_the_ownerless_sweep_and_its_absence_permits_it() {
+        // Half (i): a live dispatch is on this thread's call stack.
+        let mut state = state_with_ownerless_dispatching_resident();
+        assert!(
+            resident_is_dispatching(&state),
+            "reach-guard: the fixture parks a Dispatching resident"
+        );
+        let mut events = Vec::new();
+        {
+            let _live = LiveDispatchGuard::enter();
+            assert!(
+                post_replacement_dispatch_is_live(),
+                "reach-guard: the guard actually marks the dispatch live"
+            );
+            crate::game::effects::resume_resolution_frames(&mut state, &mut events);
+        }
+        assert!(
+            resident_is_dispatching(&state),
+            "a live dispatch's resident must survive the priority-boundary sweep"
+        );
+        assert_eq!(
+            state.resolution_stack.len(),
+            1,
+            "the frame that owns a live dispatch must survive too"
+        );
+
+        // Half (ii), the positive control: with no dispatch live, the same call
+        // retires the same entry — so half (i) is not passing on an inert sweep.
+        assert!(
+            !post_replacement_dispatch_is_live(),
+            "the guard restored the previous value on drop"
+        );
+        crate::game::effects::resume_resolution_frames(&mut state, &mut events);
+        assert!(
+            state.resolution_stack.is_empty(),
+            "CR 603.3b + CR 608.2c: an ownerless Dispatching resident and its emptied frame retire"
+        );
+
+        // Half (iii): the shared policy FUNCTION, called directly, is guard
+        // suppressed exactly as its `resume_resolution_frames` caller is.
+        let mut direct = state_with_ownerless_dispatching_resident();
+        assert!(
+            resident_is_dispatching(&direct),
+            "reach-guard: the fixture parks a Dispatching resident"
+        );
+        {
+            let _live = LiveDispatchGuard::enter();
+            crate::game::effects::sweep_ownerless_post_replacement_strand(&mut direct);
+        }
+        assert!(
+            resident_is_dispatching(&direct),
+            "a live dispatch's resident survives the shared policy function too"
+        );
+        crate::game::effects::sweep_ownerless_post_replacement_strand(&mut direct);
+        assert!(
+            !resident_is_dispatching(&direct),
+            "half (iii)'s own positive control: with no dispatch live the same direct call retires it"
+        );
+    }
+
+    /// CR 701.9a vs CR 701.21a: the two adjacent post-replacement drains in
+    /// `handle_choose_replacement` publish their completion DIFFERENTLY, and the
+    /// asymmetry is deliberate. The sacrifice drain stamps
+    /// `ThisWayCause::Sacrificed`; the discard drain immediately below stamps
+    /// nothing, because the UN-paused discard path does not stamp either
+    /// (`grep stamp_active_player_action_completion effects/discard.rs` -> 0), so
+    /// a stamping resume would give a paused discard a provenance its own
+    /// un-paused twin never has.
+    ///
+    /// Nothing else pins this. A reader "fixing the inconsistency" between two
+    /// blocks twenty-five lines apart would silently change `Discarded`-this-way
+    /// provenance for the whole class.
+    ///
+    /// A SOURCE census rather than a behavioural assertion, and that is measured:
+    /// `stamp_active_player_action_completion` early-returns unless an active
+    /// ability continuation frame holds a `CompletePlayerAction` chain, so in a
+    /// drain unit test -- which has neither -- adding the call would change no
+    /// observable state and a behavioural assertion would itself be vacuous.
+    ///
+    /// THE WINDOWS ARE BRACE-BALANCED, NOT END-ANCHORED, and that is the whole
+    /// difficulty of this instrument. An earlier revision ended each slice at a
+    /// guessed marker; the marker for the second window happened to sit inside
+    /// the arm, so the "guarded" region collapsed to **36 characters of a
+    /// five-line arm** and the named revert probe only flipped if a stamp landed
+    /// as the arm's very first statement. A census whose window is wrong reports
+    /// a zero that means nothing, and it reports it silently.
+    ///
+    /// Three defences, because a negative result needs all of them, plus one
+    /// CLOSURE that is deliberately not counted among them:
+    ///   0. the text scanned is the CODE half only, via the shared
+    ///      `source_census` authority. MEASURED INERT on today's tree: raw and
+    ///      stripped text are byte-identical for every quantity this test reads
+    ///      (both anchors and the needle at 1, sacrifice window 716 chars,
+    ///      discard window 281, `drain_pending_continuation` present in both —
+    ///      those two char counts are a SNAPSHOT and will rot on any edit to
+    ///      either arm body; the durable claim is the raw/stripped IDENTITY, not
+    ///      the numbers),
+    ///      which is exactly what `source_census.rs` predicts of any census that
+    ///      scans the real tree. It discriminates nothing here and is listed
+    ///      apart from 1-3 for that reason: it closes a shape not currently
+    ///      present rather than catching one that is;
+    ///   1. each anchor must match EXACTLY ONCE in the file, so a deleted
+    ///      production arm cannot let the scan retarget some other text (this
+    ///      doc comment deliberately never spells an anchor literally);
+    ///   2. each window is closed by brace balance, so it always spans the whole
+    ///      arm body;
+    ///   3. each window asserts its OWN non-degeneracy. The positive control on
+    ///      the sacrifice arm proves the file and that anchor are real, but it
+    ///      says nothing about the extent of the DISCARD window -- and the
+    ///      discard window is the one whose zero carries the claim.
+    ///
+    /// REVERT PROBES:
+    ///   * add a stamp call ANYWHERE in the discard arm -- first statement, last
+    ///     statement, or nested inside its `if` -- and half (b) fails. Only the
+    ///     brace-balanced window makes all three positions equivalent.
+    ///   * delete the sacrifice arm's existing stamp -> half (a) fails.
+    ///   * delete either arm outright -> the exactly-once assertion fails, rather
+    ///     than the scan silently sliding onto other text.
+    #[test]
+    fn the_resumed_discard_drain_does_not_stamp_a_completion_while_its_sacrifice_sibling_does() {
+        /// The arm body that follows `anchor`, delimited by brace balance.
+        fn arm_body<'a>(source: &'a str, anchor: &str) -> &'a str {
+            assert_eq!(
+                source.matches(anchor).count(),
+                1,
+                "anchor {anchor:?} must identify exactly one site; a second \
+                 occurrence lets a deleted arm retarget the scan silently"
+            );
+            let after = source.find(anchor).expect("anchor present") + anchor.len();
+            let open = after
+                + source[after..]
+                    .find('{')
+                    .expect("the arm opens a block after its anchor");
+            let mut depth = 0usize;
+            for (offset, ch) in source[open..].char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return &source[open..=open + offset];
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            panic!("unbalanced braces after {anchor:?}");
+        }
+
+        // Routed through the shared comment authority rather than scanned raw,
+        // and this census is exactly the case that module exists for: half (b)
+        // is a NEGATIVE, so a deleted stamp whose spelling survived in a
+        // trailing `//` inside the discard arm would HOLD the zero and hide the
+        // regression, while a comment merely naming the needle would flip it red
+        // on a pure prose edit.
+        //
+        // SCOPE, because "stripping comments" would overclaim: `code_lines`
+        // removes whole-line and trailing `//` comments and a LEADING block
+        // comment. The interior lines of a multi-line `/* … */` survive and are
+        // still scanned — `source_census.rs` says so in its own doc. So a block
+        // comment inside the discard arm naming the needle would still flip
+        // half (b) red. That residue is fail-CLOSED (spurious red, never a
+        // missed site), which is the direction a census may fail in.
+        let source = &crate::source_census::code_lines(include_str!("engine_replacement.rs"));
+        let needle = concat!("stamp_active_player_action_", "completion(");
+        let sacrifice_anchor = concat!("PendingPlayerScopeSacrifice", "Outcome::Completed {");
+        let discard_anchor = concat!("PendingDiscardBatch", "Outcome::Completed =>");
+
+        let sacrifice = arm_body(source, sacrifice_anchor);
+        let discard = arm_body(source, discard_anchor);
+
+        // (0) Non-degeneracy, asserted per window. Both arms run a multi-line
+        // body ending in a `drain_pending_continuation` call guarded by a
+        // `waiting_for` re-check, so a window that cannot see that call has not
+        // spanned its arm and any verdict drawn from it is worthless.
+        for (label, window) in [("sacrifice", sacrifice), ("discard", discard)] {
+            assert!(
+                window.contains("drain_pending_continuation"),
+                "{label} window must span its whole arm body; it stops before the \
+                 arm's last statement, so a scan of it proves nothing (got {} chars)",
+                window.len()
+            );
+        }
+
+        // (a) Positive control: proves the instrument finds a stamp where one
+        // exists. Necessary but NOT sufficient for (b) -- different window.
+        assert!(
+            sacrifice.contains(needle),
+            "(a) positive control: the sacrifice arm must stamp, or this scan is \
+             reading the wrong region and (b)'s zero would mean nothing"
+        );
+
+        // (b) The claim.
+        assert!(
+            !discard.contains(needle),
+            "(b) the resumed discard must publish exactly what the un-paused \
+             discard publishes -- no CompletePlayerAction stamp"
+        );
     }
 }

@@ -1,0 +1,51 @@
+{{- if .Values.scaleOut.enabled }}
+{{- $fullname := include "phase-server.fullname" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-headless
+  labels:
+    {{- include "phase-server.labels" . | nindent 4 }}
+spec:
+  # The StatefulSet's governing Service: gives every pod a stable DNS name and
+  # is not used for routing.
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+    {{- if .Values.metrics.enabled }}
+    - name: metrics
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics
+      protocol: TCP
+    {{- end }}
+  selector:
+    {{- include "phase-server.selectorLabels" . | nindent 4 }}
+{{- range $i := until (int .Values.scaleOut.replicaMax) }}
+---
+{{- /* One Service per ordinal, selecting exactly that pod. Templated for every
+     ordinal up to replicaMax rather than the current replica count, so a new
+     replica is routable the moment it is Ready. An ordinal that does not exist
+     yet simply has no endpoints. */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-{{ $i }}
+  labels:
+    {{- include "phase-server.labels" $ | nindent 4 }}
+    phase-server/ordinal: {{ $i | quote }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: {{ $.Values.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "phase-server.selectorLabels" $ | nindent 4 }}
+    statefulset.kubernetes.io/pod-name: {{ $fullname }}-{{ $i }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,68 @@
+{{- if and .Values.ingress.enabled .Values.traefik.middlewares.enabled }}
+{{- $fullname := include "phase-server.fullname" . }}
+{{- $mw := .Values.traefik.middlewares }}
+{{- $source := include "phase-server.sourceCriterion" . }}
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ $fullname }}-ratelimit
+  labels:
+    {{- include "phase-server.labels" . | nindent 4 }}
+spec:
+  rateLimit:
+    average: {{ $mw.rateLimit.average }}
+    burst: {{ $mw.rateLimit.burst }}
+    sourceCriterion:
+      {{- $source | nindent 6 }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ $fullname }}-inflight
+  labels:
+    {{- include "phase-server.labels" . | nindent 4 }}
+spec:
+  inFlightReq:
+    amount: {{ $mw.inFlightReq.amount }}
+    sourceCriterion:
+      {{- $source | nindent 6 }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ $fullname }}-headers
+  labels:
+    {{- include "phase-server.labels" . | nindent 4 }}
+spec:
+  headers:
+    stsSeconds: {{ int64 $mw.headers.stsSeconds }}
+    stsIncludeSubdomains: false
+    contentTypeNosniff: true
+    frameDeny: true
+    referrerPolicy: no-referrer
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ $fullname }}-backup-ratelimit
+  labels:
+    {{- include "phase-server.labels" . | nindent 4 }}
+spec:
+  rateLimit:
+    average: {{ $mw.backup.rateLimit.average }}
+    period: {{ $mw.backup.rateLimit.period }}
+    burst: {{ $mw.backup.rateLimit.burst }}
+    sourceCriterion:
+      {{- $source | nindent 6 }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ $fullname }}-backup-buffering
+  labels:
+    {{- include "phase-server.labels" . | nindent 4 }}
+spec:
+  buffering:
+    maxRequestBodyBytes: {{ int64 $mw.backup.maxRequestBodyBytes }}
+    memRequestBodyBytes: {{ int64 $mw.backup.maxRequestBodyBytes }}
+{{- end }}

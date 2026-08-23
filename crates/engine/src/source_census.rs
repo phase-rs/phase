@@ -247,6 +247,11 @@ mod tests {
                 "tests/integration/no_top_level_test_binaries.rs",
                 "SECOND WAVE, disclosed not routed: collects `mod` registrations from main.rs.",
             ),
+            (
+                "tests/integration/waiting_for_actor_authority_census.rs",
+                "Parses with `syn` rather than by substring, so comments are excluded by \
+                 construction — the stronger instrument this module approximates.",
+            ),
         ];
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));

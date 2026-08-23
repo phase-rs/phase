@@ -430,6 +430,7 @@ mod tests {
         controller: PlayerId,
     ) -> ResolvedAbility {
         ResolvedAbility {
+            detached_remainder: crate::types::ability::DetachedRemainder::NoProducer,
             effect: Effect::GivePlayerCounter {
                 counter_kind,
                 count,
@@ -462,6 +463,7 @@ mod tests {
             target_choice_timing: crate::types::ability::TargetChoiceTiming::Stack,
             description: None,
             selected_mode_labels: Vec::new(),
+            modal_instruction_ordinal: None,
             player_scope: None,
             starting_with: None,
             chosen_x: None,
@@ -633,6 +635,7 @@ mod tests {
 
     fn make_lose_all(target: TargetFilter, controller: PlayerId) -> ResolvedAbility {
         ResolvedAbility {
+            detached_remainder: crate::types::ability::DetachedRemainder::NoProducer,
             effect: Effect::LoseAllPlayerCounters { target },
             controller,
             original_controller: None,
@@ -661,6 +664,7 @@ mod tests {
             target_choice_timing: crate::types::ability::TargetChoiceTiming::Stack,
             description: None,
             selected_mode_labels: Vec::new(),
+            modal_instruction_ordinal: None,
             player_scope: None,
             starting_with: None,
             chosen_x: None,

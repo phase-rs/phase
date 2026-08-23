@@ -1,0 +1,106 @@
+name: Set up Binaryen
+description: >
+  Install a digest-pinned Binaryen release and put only its verified bin/
+  directory on PATH. Single authority for every wasm-opt consumer in this repo
+  (deploy.yml build-wasm + deploy-lobby-preview, release.yml build-wasm +
+  deploy-lobby-worker) so the version and the digest cannot drift between them.
+
+inputs:
+  version:
+    description: Binaryen release tag suffix — the N in the upstream `version_N` tag.
+    required: false
+    default: "123"
+  sha256:
+    description: >
+      SHA-256 of binaryen-version_<version>-x86_64-linux.tar.gz, as published by
+      the release's own .tar.gz.sha256 sidecar asset. Bump it in the same edit
+      as `version`: a mismatched pair fails the job at the verify step rather
+      than installing unverified executables.
+    required: false
+    default: e959f2170af4c20c552e9de3a0253704d6a9d2766e8fdb88e4d6ac4bae9388fe
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve Binaryen paths and pinned digest
+      id: pin
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        SHA256: ${{ inputs.sha256 }}
+      # Everything lands under RUNNER_TEMP rather than the checkout: the old
+      # `tar xz` into $PWD dropped a 300 MB untracked `binaryen-version_123/`
+      # into the working tree, which is not in .gitignore.
+      run: |
+        set -euo pipefail
+        root="${RUNNER_TEMP}/binaryen"
+        archive="binaryen-version_${VERSION}-x86_64-linux.tar.gz"
+        mkdir -p "$root"
+        # The manifest is regenerated from the pinned input on every run and is
+        # deliberately outside the cached path — it is the trusted side of the
+        # comparison, so a cache entry must never be able to supply it.
+        printf '%s  %s\n' "$SHA256" "$archive" > "${root}/${archive}.sha256"
+        {
+          echo "root=$root"
+          echo "name=$archive"
+          echo "archive=${root}/${archive}"
+          echo "bin=${root}/binaryen-version_${VERSION}/bin"
+          echo "url=https://github.com/WebAssembly/binaryen/releases/download/version_${VERSION}/${archive}"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Restore cached Binaryen archive
+      id: cache
+      uses: actions/cache@v4
+      with:
+        # Cache the ARCHIVE, not the extracted executables. Extracted binaries
+        # restore straight onto PATH with nothing left to check, so a poisoned
+        # entry would execute unverified; an archive is re-checked against the
+        # pinned digest below on the restore path as well as the download path.
+        # It is also the cheaper artifact: ~100 MB archive + ~1.5s of tar vs a
+        # ~300 MB extracted tree.
+        path: ${{ steps.pin.outputs.archive }}
+        # The digest is part of the key, so bumping version/sha256 rolls the
+        # cache by construction. The `binaryen-version_` prefix is the pattern
+        # clear-caches.yml already matches on.
+        key: binaryen-version_${{ inputs.version }}-x86_64-linux-${{ inputs.sha256 }}
+
+    - name: Download Binaryen archive
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        URL: ${{ steps.pin.outputs.url }}
+        ARCHIVE: ${{ steps.pin.outputs.archive }}
+      # -f so an HTML error page can never be handed to tar, and -o so nothing
+      # is piped into an extractor before it has been verified.
+      run: curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 -o "$ARCHIVE" "$URL"
+
+    - name: Verify Binaryen archive against pinned SHA-256
+      shell: bash
+      env:
+        ROOT: ${{ steps.pin.outputs.root }}
+        NAME: ${{ steps.pin.outputs.name }}
+      # Unconditional on purpose. This is the only thing standing between a
+      # remote download *or* a restored cache entry and executables on PATH, so
+      # skipping it on cache hits would leave exactly the gap it exists to close.
+      run: |
+        set -euo pipefail
+        cd "$ROOT"
+        sha256sum -c "${NAME}.sha256"
+
+    - name: Extract Binaryen
+      shell: bash
+      env:
+        ROOT: ${{ steps.pin.outputs.root }}
+        ARCHIVE: ${{ steps.pin.outputs.archive }}
+      run: tar xzf "$ARCHIVE" -C "$ROOT"
+
+    - name: Add Binaryen to PATH
+      shell: bash
+      env:
+        BIN: ${{ steps.pin.outputs.bin }}
+      # Only the verified extracted bin/ — never $ROOT, which also holds the
+      # archive and the manifest.
+      run: |
+        set -euo pipefail
+        test -x "${BIN}/wasm-opt"
+        echo "$BIN" >> "$GITHUB_PATH"

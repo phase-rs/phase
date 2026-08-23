@@ -55,6 +55,13 @@
     "collapse": "Collapse resolving progress",
     "expand": "Expand resolving progress"
   },
+  "resolveAllConsent": {
+    "eyebrow": "Resolve All",
+    "title": "Approve fast resolution?",
+    "subtitle": "All players must approve before the engine resolves a safe stack prefix.",
+    "grant": "Approve",
+    "decline": "Keep priority"
+  },
   "debugCreate": {
     "copies": "Copies",
     "tokenPower": "Power",
@@ -811,10 +818,14 @@
     "sacrificeRange_one": "Sacrifice {{min}}-{{count}} permanent",
     "sacrificeRange_other": "Sacrifice {{min}}-{{count}} permanents",
     "chooseTargetOf": "Choose target {{current}} of {{total}}",
+    "slotProgress": "Target {{current}} of {{total}}",
+    "choosePlayerTarget": "Choose: {{name}}",
+    "expandDescription": "Show the full description",
+    "collapseDescription": "Show less",
+    "descriptionDisclosure": "{{action}}: {{description}}",
     "chooseTarget": "Choose a target",
     "triggerDamageAmount": "This trigger: {{amount}} damage",
     "noLegalTargets": "No legal targets available",
-    "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "up to one {{target}}",
     "one": "a {{target}}",
     "nounPlayer": "player",
@@ -1504,7 +1515,12 @@
       "labelReturn": "Return ({{selected}}/{{count}})",
       "labelExile": "Exile ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
-      "orderTop": "Top"
+      "orderTop": "Top",
+      "orderSecond": "2nd",
+      "orderThird": "3rd",
+      "orderFourth": "4th",
+      "orderFifth": "5th",
+      "orderPosition": "Position {{position}}"
     },
     "drawnThisTurn": {
       "title": "Drawn This Turn",
@@ -1670,7 +1686,11 @@
     "legend": {
       "title": "Legend Rule",
       "subtitle": "Choose which \"{{name}}\" to keep",
-      "keepAria": "Keep {{name}} ({{status}})",
+      "keepAria": "Keep {{name}} ({{identity}}, {{status}})",
+      "keepAriaUnknown": "Keep {{name}} ({{status}})",
+      "identityOriginal": "Original",
+      "identityCopy": "Copy",
+      "identityTokenCopy": "Token copy",
       "statusJustEntered": "Just entered",
       "statusAlready": "Already on battlefield"
     },
@@ -1890,7 +1910,8 @@
         "card": "a card",
         "treasure": "a Treasure",
         "food": "a Food",
-        "tappedFish": "a tapped Fish"
+        "tappedFish": "a tapped Fish",
+        "extraTurn": "an extra turn"
       }
     }
   },

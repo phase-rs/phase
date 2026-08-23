@@ -34,8 +34,8 @@ use engine::game::effects;
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityCondition, AbilityKind, DamageChannel, Effect, ManaContribution, ManaProduction,
-    QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
+    AbilityCondition, AbilityKind, AggregateFunction, DamageChannel, Effect, ManaContribution,
+    ManaProduction, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -64,9 +64,10 @@ fn build_coalition_relic_drain(controller: PlayerId, source: ObjectId) -> Resolv
             produced: ManaProduction::AnyOneColor {
                 count: QuantityExpr::Ref {
                     // CR 608.2c: the counters-removed count is a TOTAL-channel
-                    // amount (CR 120.6) — the excess channel is damage-only.
+                    // amount — the excess channel is damage-only.
                     qty: QuantityRef::PreviousEffectAmount {
                         channel: DamageChannel::Total,
+                        aggregate: AggregateFunction::Sum,
                     },
                 },
                 color_options: vec![

@@ -402,6 +402,8 @@ export type LibraryPosition =
   | { type: "Bottom" }
   | { type: "NthFromTop"; n: number };
 
+export type SearchOrderingHint = "Unordered" | "OrderedToLibraryTop";
+
 // Narrow source-zone type for a `PayCost` exile-from-hand/graveyard cost —
 // only `Hand` (pitch spells) and `Graveyard` (escape) are valid (mirrors the
 // engine's `ExileCostSourceZone`).
@@ -795,6 +797,18 @@ export interface TokenCharacteristics {
   keywords: Keyword[];
 }
 
+/**
+ * Which keyword action put a permanent onto the battlefield face down
+ * (engine `FaceDownCause`). Only meaningful while `face_down` is true.
+ * `TurnedFaceDown` is the Ixidron class, for which no marker token is printed.
+ */
+export type FaceDownCause =
+  | "Manifest"
+  | "Morph"
+  | "Cloak"
+  | "Disguise"
+  | "TurnedFaceDown";
+
 export interface TokenImageRef {
   scryfall_id: string;
   scryfall_oracle_id?: string | null;
@@ -1008,14 +1022,17 @@ export interface GameObject {
   display_visible_to_viewer?: boolean;
   tapped: boolean;
   face_down: boolean;
+  /** Set only while `face_down` is true; absent on older saves. */
+  face_down_cause?: FaceDownCause | null;
   flipped: boolean;
   transformed: boolean;
   damage_marked: number;
   dealt_deathtouch_damage: boolean;
   /** Mirrors engine `Option<AttachTarget>`: null when unattached, otherwise
-   *  a tagged-union pointing at either an Object host (Equipment/most Auras)
-   *  or a Player host (Curse cycle, Faith's Fetters-class). FE consumers must
-   *  inspect `.type` before reading `.data`; do not treat as a bare ObjectId. */
+   *  a tagged-union pointing at either an Object host (Equipment, Faith's
+   *  Fetters, most Auras) or a Player host (Curse cycle, Paradox Haze — the
+   *  `Enchant player` class). FE consumers must inspect `.type` before
+   *  reading `.data`; do not treat as a bare ObjectId. */
   attached_to: AttachTarget | null;
   attachments: ObjectId[];
   paired_with?: ObjectId | null;
@@ -1692,6 +1709,8 @@ export type MulliganDecisionPhase =
 
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
+  | { type: "ResolveAllConsent"; data: { epoch: number; representative: PlayerId } }
+  | { type: "ResolveAllReady"; data: { epoch: number } }
   | { type: "MeldPairChoice"; data: { player: PlayerId; choices: MeldSelection[] } }
   | { type: "MeldAttackTargetChoice"; data: { player: PlayerId; context: MeldSelection; valid_targets: AttackTarget[] } }
   | { type: "EntryAttackTargetChoice"; data: { player: PlayerId; object_id: ObjectId; valid_targets: AttackTarget[] } }
@@ -1744,7 +1763,7 @@ export type WaitingFor =
   | { type: "DigChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_count: number; up_to?: boolean; selectable_cards?: ObjectId[]; kept_destination?: Zone | null; rest_destination?: Zone | null } }
   | { type: "SurveilChoice"; data: { player: PlayerId; cards: ObjectId[] } }
   | { type: "RevealChoice"; data: { player: PlayerId; cards: ObjectId[]; filter: unknown; optional?: boolean } }
-  | { type: "SearchChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; reveal?: boolean; up_to?: boolean; allows_partial_find?: boolean; constraint?: SearchSelectionConstraint; split?: SearchDestinationSplit | null } }
+  | { type: "SearchChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; reveal?: boolean; up_to?: boolean; allows_partial_find?: boolean; constraint?: SearchSelectionConstraint; ordering_hint?: SearchOrderingHint; split?: SearchDestinationSplit | null } }
   | { type: "SearchPartitionChoice"; data: { player: PlayerId; cards: ObjectId[]; primary_destination: Zone; primary_count: number; primary_enter_tapped: boolean; rest_destination: Zone; source_id: ObjectId } }
   | { type: "OutsideGameChoice"; data: { player: PlayerId; source_id: ObjectId; choices: OutsideGameChoiceEntry[]; count: number; reveal?: boolean; up_to?: boolean; destination: Zone } }
   | { type: "ChooseOneOfBranch"; data: { player: PlayerId; controller: PlayerId; source_id: ObjectId; branches: unknown[]; branch_descriptions?: string[]; parent_targets?: TargetRef[]; context?: unknown; remaining_players?: PlayerId[] } }
@@ -2247,6 +2266,12 @@ export type PrecastCopyShortcutResponse =
 
 export type GameAction =
   | { type: "PassPriority" }
+  | { type: "BeginResolveAll"; data: { max_resolutions: number } }
+  | {
+      type: "RespondResolveAllConsent";
+      data: { epoch: number; decision: { type: "Grant" } | { type: "Decline" } };
+    }
+  | { type: "RevokeResolveAllConsent"; data: { epoch: number; representative: PlayerId } }
   | { type: "ChooseMeldPair"; data: { source_id: ObjectId; partner_id: ObjectId } }
   | { type: "ChooseEntryAttackTarget"; data: { target: AttackTarget } }
   | { type: "RollPlanarDie" }
@@ -2967,6 +2992,9 @@ export interface DebugLibraryCardView {
   name: string;
 }
 
+/** Engine-classified identity for a candidate in a legend-rule choice. */
+export type LegendCandidateIdentity = "Original" | "Copy" | "TokenCopy" | "Unknown";
+
 /**
  * Engine-authored projections computed at each state snapshot. Rides
  * alongside GameState through every adapter path. Frontend components
@@ -3013,6 +3041,12 @@ export interface DerivedViews {
    * Face-down permanents are excluded per CR 708.2. Absent when empty.
    */
   copied_permanents?: ObjectId[];
+  /**
+   * CR 704.5j + CR 707.2 / CR 708.2: identity for every current legend-rule
+   * candidate. The choice modal renders this engine-authored map directly.
+   * Keyed by ObjectId-as-string and omitted when no legend choice is pending.
+   */
+  legend_candidate_identities?: Record<string, LegendCandidateIdentity>;
   /** Keyed by attacking commander's current controller (PlayerId as string). */
   commander_damage_by_attacker?: Record<string, CommanderDamageView[]>;
   /**
@@ -3190,6 +3224,7 @@ export type ExileLinkKind =
   | "HideawayLookable"
   | "CraftMaterial"
   | { UntilSourceLeaves: { return_zone: Zone } }
+  | { UntilOpponentBecomesMonarch: { return_zone: Zone; controller: PlayerId } }
   | { ParadigmSource: { player: PlayerId } };
 
 export interface GameState {

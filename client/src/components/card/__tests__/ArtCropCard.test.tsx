@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameObject } from "../../../adapter/types.ts";
 import { useCardImage } from "../../../hooks/useCardImage.ts";
+import { CARD_BACK_URL } from "../../../services/scryfall.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { ArtCropCard } from "../ArtCropCard.tsx";
 
@@ -253,9 +254,13 @@ describe("ArtCropCard", () => {
     );
   });
 
-  it("renders a face-down permanent's projected identity", () => {
+  it("backs the tile of the viewer's OWN face-down permanent with its marker (#7547)", () => {
+    // The engine blanks a face-down permanent's live face (CR 708.2a), so the
+    // TILE always shows the cause marker — the controller's peek lives in the
+    // hover preview, not here. The stored real face must not raise the DFC
+    // badge either: a face-down permanent cannot be a DFC (CR 712.16).
     mockUseCardImage.mockReturnValue({
-      src: "card.png",
+      src: "morph-marker.png",
       isLoading: false,
       isRotated: false,
       isFlip: false,
@@ -263,10 +268,11 @@ describe("ArtCropCard", () => {
     const permanent = {
       ...transformedPermanent(),
       face_down: true,
+      face_down_cause: "Morph" as const,
       display_visible_to_viewer: true,
-      name: "Hidden Sorcery",
+      name: "",
       transformed: false,
-      back_face: null,
+      back_face: { name: "Hooded Hydra", layout_kind: null } as never,
     };
 
     useGameStore.setState({
@@ -275,7 +281,45 @@ describe("ArtCropCard", () => {
 
     render(<ArtCropCard objectId={101} />);
 
-    expect(screen.getByAltText("Hidden Sorcery")).toBeInTheDocument();
+    expect(screen.getByAltText("Morph")).toHaveAttribute("src", "morph-marker.png");
+    expect(screen.queryByText("DFC")).toBeNull();
+  });
+
+  it("falls back to the card back when face-down marker art fails to load", () => {
+    // ArtCropCard is the default battlefield renderer. Keep its marker failure
+    // path covered separately from CardImage: the component owns its own
+    // artError state and must never leave a face-down permanent as a broken
+    // image when a marker printing is unavailable.
+    mockUseCardImage.mockReturnValue({
+      src: "https://cards.scryfall.io/normal/front/m/a/manifest.jpg",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+    const permanent = {
+      ...transformedPermanent(),
+      face_down: true,
+      face_down_cause: "Manifest" as const,
+      transformed: false,
+      back_face: null,
+      color: [],
+      base_color: [],
+    };
+    useGameStore.setState({
+      gameState: { objects: { [permanent.id]: permanent } } as never,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    const marker = screen.getByAltText("Manifest");
+    expect(marker).toHaveAttribute(
+      "src",
+      "https://cards.scryfall.io/normal/front/m/a/manifest.jpg",
+    );
+
+    fireEvent.error(marker);
+
+    expect(screen.getByAltText("Manifest")).toHaveAttribute("src", CARD_BACK_URL);
   });
 
   it("keeps loyalty and P/T readable for planeswalkers and creature planeswalkers", () => {

@@ -10,7 +10,7 @@ use std::io::BufReader;
 
 use engine::ai_support::{
     build_decision_context, build_decision_context_for_semantic_owner, certify_fetch_then_cast,
-    certify_pact_plan, is_pact_payment_cast, is_targeted_exchange_root,
+    certify_pact_plan, is_pact_payment_cast, is_targeted_exchange_root, retarget_actions,
     root_may_yield_adverse_exchange, targeted_exchange_verdict,
     validated_candidate_actions_for_semantic_owner, AiDecisionContract, TargetedExchangeVerdict,
 };
@@ -435,6 +435,13 @@ fn choose_action_with_session_inner(
                 return direct(Some(action));
             }
         }
+    }
+
+    // Resolve All is a user-proposed shortcut, not a tactical game decision.
+    // Answer its finite engine-issued consent domain directly so tactical
+    // scoring cannot randomly select Decline when Grant is available.
+    if matches!(state.waiting_for, WaitingFor::ResolveAllConsent { .. }) {
+        return direct(fallback_action(state, config, &contract).and_then(&bind_specialist));
     }
 
     if let Some(action) = fast_priority_action(state, ai_player, config, session)
@@ -1232,6 +1239,24 @@ pub fn fallback_action(
         // Terminal — no action possible.
         WaitingFor::GameOver { .. } => None,
 
+        // A local player explicitly proposed this shortcut. AI seats accept the
+        // engine-issued consent so the authoritative Ready consumer can
+        // materialize the already-agreed priority cycle.
+        WaitingFor::ResolveAllConsent { .. } => issued(|action| {
+            matches!(
+                action,
+                GameAction::RespondResolveAllConsent {
+                    decision: engine::types::actions::ResolveAllConsentDecision::Grant,
+                    ..
+                }
+            )
+        }),
+        // Ready has no acting player, so no AI decision exists here. The
+        // authorized consumer starts the bounded prefix drain: the granting
+        // client on a local table, and `server-core`'s own `run_ai` hand-off
+        // when the final Grant came from a server-driven AI seat.
+        WaitingFor::ResolveAllReady { .. } => None,
+
         // Priority is the only state where PassPriority is valid.
         WaitingFor::Priority { .. } => Some(GameAction::PassPriority),
 
@@ -2014,12 +2039,50 @@ pub fn fallback_action(
             Some(GameAction::SubmitPayAmount { amount: *min })
         }
 
-        // Retarget: keep current targets.
+        // CR 115.7a: a retarget must change to ANOTHER legal target; keeping the
+        // current targets is rejected by `apply_retarget` whenever the current
+        // target is not in the pool. Share the engine's enumeration so this
+        // fallback and `candidate_actions` cannot drift.
+        //
+        // This arm can yield `None`, and that is deliberate: there is no
+        // submission to fall back to. Falling back
+        // to `current_targets` was tried and is WRONG — worked through, the empty
+        // case is reachable only under `Single` (the `All` arm always pushes the
+        // unchanged anchor, which `retarget_slot_violation` exempts; `ForcedTo`
+        // never parks a prompt at all), and empty under `Single` entails
+        // that the current target is NOT in `legal_new_targets`. `apply_retarget`'s
+        // `Single` arm rejects on precisely that condition — `!legal_new_targets
+        // .contains(&new_targets[0])` — and it runs BEFORE the per-slot authority,
+        // with no unchanged-position exemption. So the fallback is rejected over
+        // its whole live domain; row 2b of `retarget_fallback_action.rs` says the
+        // same thing about the pre-fix behaviour.
+        //
+        //   DEFERRED(out-of-run): a `Single`-scope prompt EVERY member of whose
+        //   stored pool fails the per-slot check has NO reducer-accepted
+        //   submission. (The pool merely excluding the current target is NOT
+        //   sufficient — row 2b of `retarget_fallback_action.rs` is exactly that
+        //   case and its submission IS accepted.) That is a reducer-level gap,
+        //   not an AI one, and it shares the upstream cause already carried
+        //   below — `FilterProp::HasSingleTarget` is permissive with no
+        //   resolution-time validation. `None` is the correct signal for it: the
+        //   AI reporting "I have no legal action" is honest, whereas submitting a
+        //   knowingly-rejected action would launder an engine gap into an AI
+        //   retry loop.
         WaitingFor::RetargetChoice {
-            current_targets, ..
-        } => Some(GameAction::RetargetSpell {
-            new_targets: current_targets.clone(),
-        }),
+            stack_entry_index,
+            scope,
+            current_targets,
+            legal_new_targets,
+            ..
+        } => retarget_actions(
+            state,
+            *stack_entry_index,
+            scope,
+            current_targets,
+            legal_new_targets,
+        )
+        .into_iter()
+        .next(),
 
         // Companion reveal: decline.
         WaitingFor::CompanionReveal { .. } => Some(GameAction::DeclareCompanion {
@@ -2953,6 +3016,15 @@ fn score_candidates_core(
     session: &Arc<AiSession>,
     deadline_override: Option<engine::util::Deadline>,
 ) -> Vec<(GameAction, f64)> {
+    // The scored/parallel-worker path bypasses `choose_action_with_session_inner`.
+    // Preserve Resolve All's user-proposed shortcut semantics here as well: Grant
+    // is chosen from the engine-issued consent domain without tactical scoring.
+    if matches!(state.waiting_for, WaitingFor::ResolveAllConsent { .. }) {
+        let contract = AiDecisionContract::issue(state, ai_player);
+        return fallback_action(state, config, &contract)
+            .map(|action| vec![(action, 1.0)])
+            .unwrap_or_default();
+    }
     if matches!(
         state.waiting_for,
         WaitingFor::ChooseManaColor {
@@ -5264,6 +5336,102 @@ mod tests {
             fallback_action_default(&state),
             Some(GameAction::DeclineShortcut),
             "the no-score fallback must select DeclineShortcut from engine legal actions"
+        );
+    }
+
+    #[test]
+    fn resolve_all_consent_fallback_accepts_the_user_proposed_shortcut() {
+        let mut state = make_state();
+        engine::game::engine::apply(
+            &mut state,
+            P0,
+            GameAction::BeginResolveAll { max_resolutions: 5 },
+        )
+        .expect("the priority holder may propose Resolve All");
+
+        let epoch = match state.waiting_for {
+            engine::types::game_state::WaitingFor::ResolveAllConsent { epoch, .. } => epoch,
+            ref waiting_for => panic!("expected Resolve All consent, got {waiting_for:?}"),
+        };
+
+        assert_eq!(
+            fallback_action_default(&state),
+            Some(GameAction::RespondResolveAllConsent {
+                epoch,
+                decision: engine::types::actions::ResolveAllConsentDecision::Grant,
+            }),
+            "an AI responder must accept the engine-issued shortcut proposal so it can reach Ready"
+        );
+    }
+
+    #[test]
+    fn choose_action_accepts_resolve_all_consent_before_tactical_scoring() {
+        let mut state = make_state();
+        engine::game::engine::apply(
+            &mut state,
+            P0,
+            GameAction::BeginResolveAll { max_resolutions: 5 },
+        )
+        .expect("the priority holder may propose Resolve All");
+
+        let epoch = match state.waiting_for {
+            engine::types::game_state::WaitingFor::ResolveAllConsent { epoch, .. } => epoch,
+            ref waiting_for => panic!("expected Resolve All consent, got {waiting_for:?}"),
+        };
+        assert!(
+            AiDecisionContract::issue(&state, PlayerId(1))
+                .candidates
+                .len()
+                > 1,
+            "Resolve All consent must issue both Grant and Decline before testing AI preference"
+        );
+        let action = choose_action(
+            &state,
+            PlayerId(1),
+            &create_config(AiDifficulty::Medium, Platform::Native),
+            &mut SmallRng::seed_from_u64(7),
+        );
+
+        assert_eq!(
+            action,
+            Some(GameAction::RespondResolveAllConsent {
+                epoch,
+                decision: engine::types::actions::ResolveAllConsentDecision::Grant,
+            }),
+            "normal AI selection must not route this user-proposed shortcut through tactical scoring"
+        );
+    }
+
+    #[test]
+    fn scored_candidates_accept_resolve_all_consent_before_tactical_scoring() {
+        let mut state = make_state();
+        engine::game::engine::apply(
+            &mut state,
+            P0,
+            GameAction::BeginResolveAll { max_resolutions: 5 },
+        )
+        .expect("the priority holder may propose Resolve All");
+
+        let epoch = match state.waiting_for {
+            engine::types::game_state::WaitingFor::ResolveAllConsent { epoch, .. } => epoch,
+            ref waiting_for => panic!("expected Resolve All consent, got {waiting_for:?}"),
+        };
+        let scored = score_candidates(
+            &state,
+            PlayerId(1),
+            &create_config(AiDifficulty::Medium, Platform::Native),
+        );
+
+        assert_eq!(
+            scored,
+            vec![(
+                GameAction::RespondResolveAllConsent {
+                    epoch,
+                    decision: engine::types::actions::ResolveAllConsentDecision::Grant,
+                },
+                1.0,
+            )],
+            "the scored/parallel-worker path must not tactically prefer Decline"
         );
     }
 
@@ -8743,6 +8911,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: engine::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -9216,6 +9385,7 @@ mod tests {
             constraint: SearchSelectionConstraint::DistinctQualities {
                 qualities: vec![SharedQuality::Name],
             },
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -11999,6 +12169,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: engine::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         });
         // The row above cannot discriminate the tutor defect: a 3-card pool is
@@ -12030,6 +12201,7 @@ mod tests {
                 up_to: false,
                 allows_partial_find: false,
                 constraint: engine::types::ability::SearchSelectionConstraint::None,
+                ordering_hint: Default::default(),
                 split: None,
             }
         });

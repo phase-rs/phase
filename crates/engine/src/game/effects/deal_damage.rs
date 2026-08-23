@@ -618,7 +618,8 @@ pub(crate) fn apply_damage_after_replacement(
                 if super::life::apply_damage_life_loss(state, *player_id, actual_amount, events)
                     .is_err()
                 {
-                    // CR 614.7: Life loss replacement needs player choice.
+                    // CR 616.1: two or more co-applicable life-loss replacements — the
+                    // affected player must choose which applies first.
                     return DamageResult::NeedsChoice;
                 }
             }
@@ -917,7 +918,8 @@ pub(crate) fn apply_damage_after_replacement(
             && lifelink_amount > 0
             && super::life::apply_life_gain(state, ctx.controller, lifelink_amount, events).is_err()
         {
-            // CR 614.7: Life-gain replacement needs a player choice. All damage has
+            // CR 616.1: two or more co-applicable life-gain replacements — the gaining
+            // player must choose which applies first. All damage has
             // already been dealt; only this final lifelink gain is deferred.
             return DamageResult::NeedsChoice;
         }

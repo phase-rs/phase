@@ -921,10 +921,30 @@ pub enum ResolvedZoneChangeReplayInvariantError {
 /// records stack positions, frame identities, or displaced frame payloads.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ResolvedFrameTransition {
-    Push { frame: ResolutionFrame },
-    InsertParentOfActive { frame: ResolutionFrame },
-    PopExpected { kind: FrameKind },
-    ReplaceActive { frame: ResolutionFrame },
+    Push {
+        frame: ResolutionFrame,
+    },
+    InsertParentOfActive {
+        frame: ResolutionFrame,
+    },
+    /// Park a prompt-less frame beneath the frame owning the live prompt.
+    ///
+    /// The operand is still native and no position is recorded: the applier
+    /// asks the stack where a parked frame belongs, and the stack answers from
+    /// its own shape. That keeps replay exact — the same frames plus the same
+    /// operand yield the same placement — while leaving the caller no position
+    /// to guess at. See [`ParkedFramePlacement`].
+    ///
+    /// [`ParkedFramePlacement`]: crate::types::resolution::ParkedFramePlacement
+    ParkBeneathLivePrompt {
+        frame: ResolutionFrame,
+    },
+    PopExpected {
+        kind: FrameKind,
+    },
+    ReplaceActive {
+        frame: ResolutionFrame,
+    },
 }
 
 /// One exact resolution-frame transition under its causal rules-execution node.

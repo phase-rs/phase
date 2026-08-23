@@ -2,18 +2,20 @@ use rand::Rng;
 use std::collections::{HashSet, VecDeque};
 use thiserror::Error;
 
-use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
+use crate::types::ability::{DurationEvent, EffectKind, KeywordAction, TargetRef};
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::actions::{
-    DebugAction, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp, TriggerOrderTemplateOp,
+    DebugAction, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp, ResolveAllConsentDecision,
+    TriggerOrderTemplateOp,
 };
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
     CastingVariant, ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode,
     ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume,
-    PendingCounterPostAction, PendingEffectResolved, RetargetScope, StackEntry, StackEntryKind,
+    PendingCounterPostAction, PendingEffectResolved, ResolveAllConsentParticipant,
+    ResolveAllConsentRun, ResolveAllPrioritySnapshot, RetargetScope, StackEntry, StackEntryKind,
     WaitingFor,
 };
 use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
@@ -74,7 +76,10 @@ use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use super::zones;
 
 pub use super::engine_resolve_batch::{
-    resolve_all_fast_forward, ResolveAllCallbackDecision, ResolveAllFastForwardResult,
+    pending_resolve_all_ready_requester, recover_orphaned_resolve_all, resolve_all_fast_forward,
+    resolve_all_ready_access, resolve_all_ready_prefix, resolve_all_ready_prefix_with,
+    ResolveAllCallbackDecision, ResolveAllContinuation, ResolveAllFastForwardResult,
+    ResolveAllReadyAccess,
 };
 
 #[derive(Debug, Clone, Error)]
@@ -789,14 +794,20 @@ fn handle_unlock_room_door(
                 "That door is already unlocked".to_string(),
             ));
         }
+        // CR 709.5e + CR 707.2: the unlock cost is the locked HALF's mana cost,
+        // read from the EFFECTIVE halves (printed order) — the copied snapshot
+        // when a copy effect applies, else the object's own printed halves
+        // (whose orientation `room::own_room_halves` resolves through
+        // `live_face_door`, the same CR 709.5d mapping as before).
+        let halves = super::room::effective_room_halves(obj);
         match door {
-            crate::game::game_object::RoomDoor::Left => obj.mana_cost.clone(),
-            crate::game::game_object::RoomDoor::Right => obj
-                .back_face
+            crate::game::game_object::RoomDoor::Left => halves.left.mana_cost.clone(),
+            crate::game::game_object::RoomDoor::Right => halves
+                .right
                 .as_ref()
-                .map(|face| face.mana_cost.clone())
+                .map(|half| half.mana_cost.clone())
                 .ok_or_else(|| {
-                    EngineError::ActionNotAllowed("Room has no right door face".to_string())
+                    EngineError::ActionNotAllowed("Room has no second door face".to_string())
                 })?,
         }
     };
@@ -1063,6 +1074,62 @@ fn apply_action_boundary_core(
         lifecycle.discard();
         return Err(error);
     }
+    // CR 603.3 + CR 603.3b + CR 608.2c: recover an ownerless post-replacement
+    // strand on the state AS FOUND, before this action touches it.
+    //
+    // A `Dispatching` drain whose dispatcher is not on this thread's call stack
+    // has no owner and no retirement path: `begin_dispatch` refuses it,
+    // `finish_paused_dispatch` pops only `Paused`, and `finish_dispatch` needs a
+    // handle that died with its call frame. It keeps `resolution_stack`
+    // non-empty forever, so `triggers::resolution_completion_can_settle` is
+    // false forever — deferred triggered abilities can never be put on the stack
+    // the next time a player would receive priority (CR 603.3 + CR 603.3b) and
+    // the resolving carrier can never settle (CR 608.2c).
+    //
+    // WHY HERE, and not only at the priority boundary. The sweeper inside
+    // `resume_pending_continuation_if_priority` is evaluated AFTER a reducer arm
+    // has run, and only when the RESULTING state is `Priority`. It therefore
+    // repairs a strand this engine just created, and can never repair one it
+    // merely FOUND — including the reporter's saves, whose strand arrives
+    // through `PersistedGameState::into_game_state()` and is never produced by
+    // any engine write. Measured: the turn-20 capture rests at `Priority`, and
+    // its `PassPriority` advances the phase into the declare-attackers
+    // turn-based action (CR 117.3a + CR 703.1: a turn-based action doesn't use
+    // the stack, and the active player receives priority only AFTER it has been
+    // dealt with — so no player has priority during it), so the post-action
+    // sweep is not entered on that action. This is the only seam
+    // that observes the rest state the engine was parked at, and it is
+    // boundary-type agnostic: an ownerless `Dispatching` resident is not a rules
+    // state at any boundary.
+    //
+    // Live parked work is NOT ownerless and is not touched here: a continuation
+    // awaiting a player's answer (CR 614.12a) is left `Paused` by the
+    // dispatcher's cleanup, and the sweep's exhaustive match pops only
+    // `Dispatching`.
+    //
+    // This is the OUTER action funnel — `apply_action_boundary_core` has exactly
+    // three call sites: two public/simulation entry points and one internal
+    // clone-local life-safety preview. Deliberately NOT `apply_action`, which
+    // the auto-pass and shortcut loops re-enter twelve further ways.
+    //
+    // BEFORE `boundary_snapshot`, deliberately: every failure path restores that
+    // same snapshot, and removing an impossible state is not part of the action
+    // and must not be rolled back with it. CONSEQUENCE, stated so it is not
+    // later read as a bug: an action this boundary REJECTS still leaves
+    // `resolution_stack` repaired, with no `bump_state_revision` and no events,
+    // because the error paths return before `finish_action_boundary` runs. That
+    // is intended — a client that submitted one bad action before its pass must
+    // not stay wedged because of it.
+    //
+    // Re-entrancy is handled by the same live-dispatch guard the priority-
+    // boundary sweep uses: `SimulationFilter`'s clone-and-apply probe re-enters
+    // this function from inside an outer `apply`, and when that outer apply is
+    // inside a dispatch the flag is set, the sweep is suppressed, and recovery
+    // defers to the next boundary at which the flag is clear. No "outermost"
+    // depth test is added: gating on it would leave AI-probe clones unrepaired
+    // while the real state is repaired.
+    effects::sweep_ownerless_post_replacement_strand(state);
+    state.remove_empty_active_post_replacement_frame();
     let boundary_snapshot = state.clone();
     let journal_start = state.resolved_rules_journal.entries().len();
     let is_actor_scoped_preference = action.is_actor_scoped_preference();
@@ -6335,6 +6402,16 @@ fn check_actor_authorization(
     {
         return Ok(());
     }
+    if let GameAction::RevokeResolveAllConsent {
+        epoch,
+        representative,
+    } = action
+    {
+        return (turn_control::resolve_all_granted_submitter(state, *epoch, *representative)
+            == Some(actor))
+        .then_some(())
+        .ok_or(EngineError::WrongPlayer);
+    }
     // CR 103.5: For simultaneous-decision states (MulliganDecision,
     // OpeningHandBottomCards), authorize against the full pending set so any
     // pending player may submit in any order. Falls back to single-player
@@ -7516,6 +7593,261 @@ fn finalize_copy_retarget(
     Ok(())
 }
 
+fn begin_resolve_all_consent(
+    state: &mut GameState,
+    priority_player: PlayerId,
+    max_resolutions: u32,
+) -> Result<WaitingFor, EngineError> {
+    super::priority::pass_priority_legality(state, priority_player)?;
+    let current_representative =
+        super::topology::priority_pass_representative(state, priority_player);
+    let mut representatives = super::topology::priority_pass_participants(state);
+    let Some(current_index) = representatives
+        .iter()
+        .position(|representative| *representative == current_representative)
+    else {
+        return Err(EngineError::ActionNotAllowed(
+            "Resolve All requires a live priority representative".to_string(),
+        ));
+    };
+    representatives.rotate_left(current_index);
+
+    let epoch = state.next_resolve_all_consent_epoch;
+    let next_epoch = epoch.checked_add(1).ok_or_else(|| {
+        EngineError::ActionNotAllowed("Resolve All consent epoch space exhausted".to_string())
+    })?;
+    state.next_resolve_all_consent_epoch = next_epoch;
+    // CR 117.4: a stack object resolves only after every player passes in
+    // succession. Preserve the exact current pass cycle if consent is declined
+    // or revoked before its authorized one-entry materialization begins.
+    state.resolve_all_consent_run = Some(ResolveAllConsentRun {
+        epoch,
+        max_resolutions,
+        priority_snapshot: ResolveAllPrioritySnapshot {
+            waiting_player: priority_player,
+            priority_player: state.priority_player,
+            priority_pass_count: state.priority_pass_count,
+            priority_passes: state.priority_passes.clone(),
+        },
+        participants: representatives
+            .into_iter()
+            .map(|representative| ResolveAllConsentParticipant {
+                representative,
+                authorized_submitter: turn_control::authorized_submitter_for_player(
+                    state,
+                    representative,
+                ),
+                granted: representative == current_representative,
+            })
+            .collect(),
+    });
+
+    resolve_all_consent_waiting_for(state).ok_or_else(|| {
+        EngineError::ActionNotAllowed(
+            "Resolve All requires at least one representative".to_string(),
+        )
+    })
+}
+
+fn resolve_all_consent_waiting_for(state: &GameState) -> Option<WaitingFor> {
+    let run = state.resolve_all_consent_run.as_ref()?;
+    Some(
+        run.next_pending_representative()
+            .map(|representative| WaitingFor::ResolveAllConsent {
+                epoch: run.epoch,
+                representative,
+            })
+            .unwrap_or(WaitingFor::ResolveAllReady { epoch: run.epoch }),
+    )
+}
+
+// CR 117.3d + CR 117.4: A declined optimized batch restores the exact
+// priority-pass sequence it interrupted before ordinary priority handling
+// resumes; this restoration itself resolves no stack object.
+fn restore_resolve_all_priority_snapshot(state: &mut GameState) -> Result<WaitingFor, EngineError> {
+    let run = state.resolve_all_consent_run.take().ok_or_else(|| {
+        EngineError::InvalidAction("Resolve All consent is not active".to_string())
+    })?;
+    let snapshot = run.priority_snapshot;
+    state.priority_player = snapshot.priority_player;
+    state.priority_pass_count = snapshot.priority_pass_count;
+    state.priority_passes = snapshot.priority_passes;
+    Ok(WaitingFor::Priority {
+        player: snapshot.waiting_player,
+    })
+}
+
+/// Installs one player's requested auto-pass mode and, when that player holds
+/// the current Priority window, consumes it through the ordinary pipeline.
+///
+/// `SetAutoPass` and a declined Resolve All consent share this exact reducer
+/// path: both preserve the current stack baseline and must obey the same
+/// shortened-precast-pass restriction.
+fn install_auto_pass_and_pass_priority(
+    state: &mut GameState,
+    auto_pass_owner: PlayerId,
+    mode: AutoPassRequest,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    let WaitingFor::Priority { player } = &state.waiting_for else {
+        unreachable!("auto-pass may only be installed from a Priority window");
+    };
+    let pass_immediately = *player == auto_pass_owner;
+    if pass_immediately && super::precast_copy_shortcut::blocks_pass(state, *player) {
+        return Err(EngineError::ActionNotAllowed(
+            "A shortened pre-cast shortcut requires a different meaningful action before passing"
+                .to_string(),
+        ));
+    }
+    store_auto_pass_request(state, auto_pass_owner, mode);
+    if !pass_immediately {
+        return Ok(ActionResult {
+            events: std::mem::take(events),
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        });
+    }
+    let waiting_for = pass_priority_once_with_pipeline(state, events, None)?;
+    Ok(ActionResult {
+        events: std::mem::take(events),
+        waiting_for,
+        log_entries: vec![],
+    })
+}
+
+fn store_auto_pass_request(
+    state: &mut GameState,
+    auto_pass_owner: PlayerId,
+    mode: AutoPassRequest,
+) {
+    let stored_mode = match mode {
+        AutoPassRequest::UntilStackEmpty => AutoPassMode::UntilStackEmpty {
+            initial_stack_len: state.stack.len(),
+        },
+        AutoPassRequest::UntilTurnBoundary { until } => AutoPassMode::UntilTurnBoundary { until },
+    };
+    state.auto_pass.insert(auto_pass_owner, stored_mode);
+}
+
+/// Stores Resolve All's durable "do not make me pass each frame" intent in
+/// the same engine-owned `UntilStackEmpty` flow as a direct priority request.
+pub(crate) fn install_until_stack_empty_auto_pass_and_pass_priority(
+    state: &mut GameState,
+    auto_pass_owner: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    install_auto_pass_and_pass_priority(
+        state,
+        auto_pass_owner,
+        AutoPassRequest::UntilStackEmpty,
+        events,
+    )
+}
+
+/// Retains Resolve All's durable no-manual-priority preference when a rules
+/// guard prevents its initial immediate pass. The normal auto-pass loop resumes
+/// after that required action completes.
+pub(crate) fn install_until_stack_empty_auto_pass(
+    state: &mut GameState,
+    auto_pass_owner: PlayerId,
+) {
+    store_auto_pass_request(state, auto_pass_owner, AutoPassRequest::UntilStackEmpty);
+}
+
+/// CR 117.3d + CR 117.4: Declining the optimized Resolve All batch preserves
+/// the requester's intent by switching to the ordinary engine auto-pass flow.
+fn decline_resolve_all_consent_with_auto_pass(
+    state: &mut GameState,
+    epoch: u64,
+    representative: PlayerId,
+    response_epoch: u64,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    let waiting_for = respond_resolve_all_consent(
+        state,
+        epoch,
+        representative,
+        response_epoch,
+        ResolveAllConsentDecision::Decline,
+    )?;
+    let WaitingFor::Priority { player } = waiting_for else {
+        unreachable!("declined Resolve All consent must restore Priority");
+    };
+    // `pass_priority_once_with_pipeline` derives the semantic priority seat
+    // from this state. Install the captured Priority window before reusing the
+    // normal SetAutoPass path, rather than passing from the consent prompt.
+    state.waiting_for = WaitingFor::Priority { player };
+    install_until_stack_empty_auto_pass_and_pass_priority(state, player, events)
+}
+
+fn respond_resolve_all_consent(
+    state: &mut GameState,
+    epoch: u64,
+    representative: PlayerId,
+    response_epoch: u64,
+    decision: ResolveAllConsentDecision,
+) -> Result<WaitingFor, EngineError> {
+    if epoch != response_epoch {
+        return Err(EngineError::InvalidAction(
+            "Resolve All consent epoch is stale".to_string(),
+        ));
+    }
+    {
+        let run = state.resolve_all_consent_run.as_mut().ok_or_else(|| {
+            EngineError::InvalidAction("Resolve All consent is not active".to_string())
+        })?;
+        if run.epoch != epoch || run.next_pending_representative() != Some(representative) {
+            return Err(EngineError::InvalidAction(
+                "Resolve All consent response is no longer pending".to_string(),
+            ));
+        }
+        if matches!(decision, ResolveAllConsentDecision::Grant) {
+            let participant = run
+                .participants
+                .iter_mut()
+                .find(|participant| participant.representative == representative)
+                .expect("pending Resolve All representative must be a participant");
+            participant.granted = true;
+        }
+    }
+    if matches!(decision, ResolveAllConsentDecision::Decline) {
+        return restore_resolve_all_priority_snapshot(state);
+    }
+    let waiting_for = resolve_all_consent_waiting_for(state).ok_or_else(|| {
+        EngineError::InvalidAction("Resolve All consent is not active".to_string())
+    })?;
+    // ResolveAllReady has no current actor, so the ordinary waiting-state sync
+    // deliberately leaves `priority_player` alone. Restore the saved priority
+    // cursor now; the Ready consumer validates this exact snapshot before it
+    // begins its first materialized CR 117.4 pass cycle.
+    if matches!(waiting_for, WaitingFor::ResolveAllReady { .. }) {
+        state.priority_player = state
+            .resolve_all_consent_run
+            .as_ref()
+            .expect("an active consent run produced ResolveAllReady")
+            .priority_snapshot
+            .priority_player;
+    }
+    Ok(waiting_for)
+}
+
+fn revoke_resolve_all_consent(
+    state: &mut GameState,
+    epoch: u64,
+    representative: PlayerId,
+) -> Result<WaitingFor, EngineError> {
+    let active = state
+        .resolve_all_consent_run
+        .as_ref()
+        .is_some_and(|run| run.epoch == epoch && run.is_granted(representative));
+    if !active {
+        return Err(EngineError::InvalidAction(
+            "Resolve All consent revocation is stale".to_string(),
+        ));
+    }
+    restore_resolve_all_priority_snapshot(state)
+}
+
 fn apply_action(
     state: &mut GameState,
     actor: PlayerId,
@@ -7877,7 +8209,11 @@ fn apply_action(
     let stack_len_before_action = state.stack.len();
     if !matches!(
         action,
-        GameAction::PassPriority | GameAction::OrderTriggers { .. }
+        GameAction::PassPriority
+            | GameAction::OrderTriggers { .. }
+            | GameAction::BeginResolveAll { .. }
+            | GameAction::RespondResolveAllConsent { .. }
+            | GameAction::RevokeResolveAllConsent { .. }
     ) && !answering_forced_window
     {
         state.loop_detect_ring.clear();
@@ -7898,7 +8234,10 @@ fn apply_action(
     match &action {
         GameAction::SetAutoPass { .. }
         | GameAction::PassPriority
-        | GameAction::ReorderHand { .. } => {}
+        | GameAction::ReorderHand { .. }
+        | GameAction::BeginResolveAll { .. }
+        | GameAction::RespondResolveAllConsent { .. }
+        | GameAction::RevokeResolveAllConsent { .. } => {}
         _ => {
             state.auto_pass.remove(&actor);
         }
@@ -7940,6 +8279,50 @@ fn apply_action(
                 log_entries: vec![],
             });
         }
+        (WaitingFor::Priority { player }, GameAction::BeginResolveAll { max_resolutions }) => {
+            begin_resolve_all_consent(state, *player, max_resolutions)?
+        }
+        (
+            WaitingFor::ResolveAllConsent {
+                epoch,
+                representative,
+            },
+            GameAction::RespondResolveAllConsent {
+                epoch: response_epoch,
+                decision: ResolveAllConsentDecision::Decline,
+            },
+        ) => {
+            return decline_resolve_all_consent_with_auto_pass(
+                state,
+                *epoch,
+                *representative,
+                response_epoch,
+                &mut events,
+            );
+        }
+        (
+            WaitingFor::ResolveAllConsent {
+                epoch,
+                representative,
+            },
+            GameAction::RespondResolveAllConsent {
+                epoch: response_epoch,
+                decision,
+            },
+        ) => respond_resolve_all_consent(
+            state,
+            *epoch,
+            *representative,
+            response_epoch,
+            decision,
+        )?,
+        (
+            WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. },
+            GameAction::RevokeResolveAllConsent {
+                epoch,
+                representative,
+            },
+        ) => revoke_resolve_all_consent(state, epoch, representative)?,
         (WaitingFor::Priority { player }, GameAction::PlayLand { object_id, card_id }) => {
             if state.priority_player
                 != turn_control::authorized_submitter_for_player(state, *player)
@@ -11327,91 +11710,11 @@ fn apply_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
-            let p = *player;
-            let announced_x = x;
-            // CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b + CR 106.6: turning
-            // a face-down permanent face up is a special action whose morph/disguise/
-            // manifest cost must be paid *before* the flip. `turn_face_up_prepare`
-            // validates the action and derives that cost; payment routes through
-            // `PaymentContext::SpecialAction(TurnFaceUp)` so spend-restricted mana
-            // ("only to turn permanents face up", Overgrown Zealot / Tin Street
-            // Gossip) is eligible here while other-context mana is rejected. Mirrors
-            // the `UnlockDoor` special-action handler.
-            let cost = super::morph::turn_face_up_prepare(state, object_id, p)?;
-            let mut cost = casting::apply_special_action_cost_reduction(
-                state,
-                p,
-                crate::types::mana::SpecialAction::TurnFaceUp,
-                cost,
-            );
-
-            // CR 107.3d: "If a cost associated with a special action, such as a suspend
-            // cost or a morph cost, has an {X} ... in it, the value of X is chosen by the
-            // player taking the special action immediately before they pay that cost."
-            // The announcement happens HERE — inside the action, with no priority window
-            // between choosing X and paying it, exactly as the rule describes.
-            //
-            // Warbreak Trumpeter (Morph {X}{X}{R}), Bane of the Living (Morph {X}{B}{B})
-            // and Aurelia's Vindicator (Disguise {X}{3}{W}) are the live faces.
-            let has_x = casting_costs::cost_has_x(&cost);
-            if has_x {
-                // CR 118.3: a player can't announce an X they cannot pay for. The cap is
-                // computed with `object_id: None` deliberately — this is a SPECIAL ACTION,
-                // not a cast, so cast-time cost modifiers and floors must not apply (the
-                // special-action reduction was already applied above).
-                let max_x = casting_costs::max_x_value(state, p, &cost, None);
-                if announced_x > max_x {
-                    return Err(EngineError::InvalidAction(format!(
-                        "X={announced_x} exceeds the maximum payable value of {max_x} for this \
-                         turn-face-up cost"
-                    )));
-                }
-                // CR 107.1b + CR 601.2f: each `{X}` shard becomes `announced_x` generic, so
-                // Warbreak Trumpeter's `{X}{X}{R}` costs 2X + {R}. Without this the X shards
-                // reach mana payment unresolved and are dropped — the permanent flips for
-                // its non-X remainder alone.
-                cost.concretize_x(announced_x);
-            } else if announced_x != 0 {
-                // A cost with no {X} admits no choice: CR 107.3d only grants one "if a cost
-                // ... has an {X} ... in it". Reject rather than silently ignore, so a client
-                // bug cannot masquerade as a legal flip.
-                return Err(EngineError::InvalidAction(
-                    "This permanent's turn-face-up cost has no {X}, so X must be 0".to_string(),
-                ));
-            }
-            casting::pay_special_action_mana_cost(
-                state,
-                p,
-                Some(object_id),
-                &cost,
-                crate::types::mana::SpecialAction::TurnFaceUp,
-                &mut events,
-            )?;
-
-            // CR 702.37f (morph) / CR 702.168e (disguise): "If a permanent's morph cost
-            // includes X, other abilities of that permanent may also refer to X. The value
-            // of X in those abilities is equal to the value of X chosen as the morph special
-            // action was taken." Publish the announced X on the source-keyed carrier BEFORE
-            // the flip emits `TurnedFaceUp`, so `triggers::build_triggered_ability` — the
-            // single trigger-instantiation authority — stamps it onto the turn-face-up
-            // trigger's `chosen_x`.
-            //
-            // The stamp must land at INSTANTIATION, not resolution: Aurelia's Vindicator
-            // spends its X in `multi_target.max` ("exile up to X other target creatures"),
-            // which is consumed during target selection, before the trigger ever resolves.
-            //
-            // Published only when the cost actually HAS an {X} (CR 107.3d grants a choice
-            // only then). A no-X flip leaves the carrier untouched rather than clobbering it
-            // with `Some((.., 0))`: an unrelated activated ability of ANOTHER object may be
-            // on the stack with its own announced X in flight, and that value must survive.
-            // The carrier is cleared at the start of the next `resolve_top`, so this
-            // publication cannot outlive the trigger it is for.
-            if has_x {
-                state.announced_source_x = Some((object_id, announced_x));
-            }
-
-            super::morph::turn_face_up(state, p, object_id, &mut events)?;
-            WaitingFor::Priority { player: p }
+            // CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b: the whole action —
+            // legality, the CR 106.6 spend-restricted payment, CR 107.3d's X
+            // announcement and the flip — belongs to one authority, shared with the
+            // CR 616.1 resume that finishes a payment whose mana source paused.
+            super::morph::handle_turn_face_up(state, *player, object_id, x, &mut events)?
         }
         (
             WaitingFor::TriggerTargetSelection {
@@ -11606,28 +11909,7 @@ fn apply_action(
             GameAction::PassParadigmOffer,
         ) => WaitingFor::Priority { player: *player },
         (WaitingFor::Priority { player }, GameAction::SetAutoPass { mode }) => {
-            if super::precast_copy_shortcut::blocks_pass(state, *player) {
-                return Err(EngineError::ActionNotAllowed(
-                    "A shortened pre-cast shortcut requires a different meaningful action before passing"
-                        .to_string(),
-                ));
-            }
-            // Convert request to stored mode, capturing engine state as needed.
-            let stored_mode = match mode {
-                AutoPassRequest::UntilStackEmpty => AutoPassMode::UntilStackEmpty {
-                    initial_stack_len: state.stack.len(),
-                },
-                AutoPassRequest::UntilTurnBoundary { until } => {
-                    AutoPassMode::UntilTurnBoundary { until }
-                }
-            };
-            state.auto_pass.insert(*player, stored_mode);
-            let wf = pass_priority_once_with_pipeline(state, &mut events, None)?;
-            return Ok(ActionResult {
-                events,
-                waiting_for: wf,
-                log_entries: vec![],
-            });
+            return install_auto_pass_and_pass_priority(state, *player, mode, &mut events);
         }
         // CR 701.34a: Proliferate — player selected targets to proliferate.
         (
@@ -12263,11 +12545,11 @@ fn apply_action(
                 new_targets,
             },
         )?,
-        // CR 115.7: Retarget a single-target spell via a board click. The
+        // CR 115.7a: Retarget a single-target spell via a board click. The
         // universal `ChooseTarget` action — already consumed by every other
-        // targeting state — drives single-target retargets (Bolt Bend,
-        // Redirect, Misdirection) so the player picks the new target directly
-        // on the battlefield instead of through a dialog.
+        // targeting state — drives "change the target of" retargets (Bolt Bend,
+        // Misdirection — NOT Redirect, which is "choose new targets", so CR
+        // 115.7d `All`) so the player picks the new target on the battlefield.
         (
             WaitingFor::RetargetChoice {
                 player,
@@ -12591,23 +12873,28 @@ fn apply_retarget(
 
     // CR 115.7a: "each target can be changed only to another legal target." The
     // `legal_new_targets` pool checked above is flat, so for a multi-slot node it
-    // cannot tell slot 0's legal set from slot 1's. Re-check positionally against
-    // the node's own per-slot filters before mutating the stack. Applies to both
+    // cannot tell slot 0's legal set from slot 1's. Re-check each CHANGED
+    // position against its own slot filter before mutating the stack; CR 115.7d
+    // exempts unchanged positions, which `retarget_slot_violation` applies for
+    // both this caller and the AI generator. Applies to both
     // `Single` and `All`. It is NOT a blanket no-op for `Single`: alongside the
     // two-surfaced-slot `Both`, `mana_multi_role` also admits the context-ref
     // recipient `Both` (surfaced == 1, generic == 0), which is parser-reachable
     // ("That player adds {R} for each card in target opponent's hand"). A
-    // `Single`-scope retarget (Bolt Bend, Redirect) of that shape therefore does
-    // run this per-slot validation — CR 115.7a-correct, and the reason the check
+    // `Single`-scope retarget (Bolt Bend) of that shape therefore does run
+    // this per-slot validation — CR 115.7a-correct, and the reason the check
     // is wired for both scopes rather than only `All`.
     if let Some(ability) = state
         .stack
         .get(stack_entry_index)
         .and_then(|entry| entry.ability())
     {
-        if let Some(slot) =
-            crate::game::ability_utils::retarget_slot_violation(state, ability, &new_targets)
-        {
+        if let Some(slot) = crate::game::ability_utils::retarget_slot_violation(
+            state,
+            ability,
+            current_targets,
+            &new_targets,
+        ) {
             return Err(EngineError::InvalidAction(format!(
                 "Retarget: chosen target is not legal for target slot {slot}"
             )));
@@ -14762,30 +15049,264 @@ pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
     }
 }
 
-/// CR 607.2a + CR 406.6: Check if any exile-return sources have left the battlefield.
-/// If so, move the exiled cards back — linked abilities track which cards were exiled by the source.
+/// CR 607.2a + CR 406.6 + CR 610.3: Check for event-bounded exile returns.
+/// Move linked exiled cards back through the replacement-aware zone pipeline.
+pub(crate) fn duration_event_matches(
+    state: &GameState,
+    source_id: ObjectId,
+    source_incarnation: Option<ObjectIncarnationRef>,
+    controller: PlayerId,
+    duration_event: DurationEvent,
+    event: &GameEvent,
+) -> bool {
+    match (duration_event, event) {
+        (
+            DurationEvent::SourceLeftBattlefield,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                record,
+                ..
+            },
+        ) => {
+            *object_id == source_id
+                && source_incarnation.is_none_or(|expected| {
+                    record
+                        .trigger_source_context
+                        .as_ref()
+                        .is_none_or(|observed| observed.identity.reference == expected)
+                })
+        }
+        (DurationEvent::OpponentBecameMonarch, GameEvent::MonarchChanged { player_id }) => {
+            super::players::is_opponent(state, controller, *player_id)
+        }
+        _ => false,
+    }
+}
+
 pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let mut to_return: Vec<crate::types::game_state::ExileLink> = Vec::new();
+    let mut stack_latches = Vec::new();
+    let mut resolving_latches = Vec::new();
+    let mut deferred_latches = Vec::new();
+    let mut ordered_latches = Vec::new();
 
-    for event in events.iter() {
-        if let GameEvent::ZoneChanged {
-            object_id,
-            from: Some(Zone::Battlefield),
-            ..
-        } = event
-        {
-            // Find exile links where this object was the source and the exile
-            // effect specified an automatic return when that source leaves.
-            for link in &state.exile_links {
-                if link.source_id == *object_id
-                    && matches!(
-                        &link.kind,
-                        crate::types::game_state::ExileLinkKind::UntilSourceLeaves { .. }
+    for (event_index, event) in events.iter().enumerate() {
+        for entry in &state.stack {
+            let StackEntryKind::TriggeredAbility {
+                ability,
+                trigger_event,
+                ..
+            } = &entry.kind
+            else {
+                continue;
+            };
+            let event_follows_trigger = trigger_event
+                .as_ref()
+                .and_then(|trigger| events.iter().position(|candidate| candidate == trigger))
+                .is_none_or(|trigger_index| event_index > trigger_index);
+            if !event_follows_trigger {
+                continue;
+            }
+            for duration_event in [
+                DurationEvent::SourceLeftBattlefield,
+                DurationEvent::OpponentBecameMonarch,
+            ] {
+                if ability.contains_duration_event(duration_event)
+                    && duration_event_matches(
+                        state,
+                        entry.source_id,
+                        ability
+                            .trigger_source
+                            .as_ref()
+                            .map(|source| source.identity.reference),
+                        entry.controller,
+                        duration_event,
+                        event,
                     )
                 {
-                    to_return.push(link.clone());
+                    stack_latches.push((entry.id, duration_event));
                 }
             }
+        }
+
+        if let Some(entry) = state.resolving_stack_entry.as_ref() {
+            if matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }) {
+                if let Some(ability) = entry.ability() {
+                    for duration_event in [
+                        DurationEvent::SourceLeftBattlefield,
+                        DurationEvent::OpponentBecameMonarch,
+                    ] {
+                        if ability.contains_duration_event(duration_event)
+                            && duration_event_matches(
+                                state,
+                                entry.source_id,
+                                ability
+                                    .trigger_source
+                                    .as_ref()
+                                    .map(|source| source.identity.reference),
+                                entry.controller,
+                                duration_event,
+                                event,
+                            )
+                        {
+                            resolving_latches.push(duration_event);
+                        }
+                    }
+                }
+            }
+        }
+
+        for (index, context) in state.deferred_triggers.iter().enumerate() {
+            let event_follows_trigger = context
+                .pending
+                .trigger_event
+                .as_ref()
+                .and_then(|trigger| events.iter().position(|candidate| candidate == trigger))
+                .is_none_or(|trigger_index| event_index > trigger_index);
+            if !event_follows_trigger {
+                continue;
+            }
+            for duration_event in [
+                DurationEvent::SourceLeftBattlefield,
+                DurationEvent::OpponentBecameMonarch,
+            ] {
+                if context
+                    .pending
+                    .ability
+                    .contains_duration_event(duration_event)
+                    && duration_event_matches(
+                        state,
+                        context.pending.source_id,
+                        context
+                            .pending
+                            .ability
+                            .trigger_source
+                            .as_ref()
+                            .map(|source| source.identity.reference),
+                        context.pending.controller,
+                        duration_event,
+                        event,
+                    )
+                {
+                    deferred_latches.push((index, duration_event));
+                }
+            }
+        }
+
+        if let Some(order) = state.pending_trigger_order.as_ref() {
+            for (group_index, group) in order.groups.iter().enumerate() {
+                for (trigger_index, context) in group.triggers.iter().enumerate() {
+                    let event_follows_trigger = context
+                        .pending
+                        .trigger_event
+                        .as_ref()
+                        .and_then(|trigger| {
+                            events.iter().position(|candidate| candidate == trigger)
+                        })
+                        .is_none_or(|origin_index| event_index > origin_index);
+                    if !event_follows_trigger {
+                        continue;
+                    }
+                    for duration_event in [
+                        DurationEvent::SourceLeftBattlefield,
+                        DurationEvent::OpponentBecameMonarch,
+                    ] {
+                        if context
+                            .pending
+                            .ability
+                            .contains_duration_event(duration_event)
+                            && duration_event_matches(
+                                state,
+                                context.pending.source_id,
+                                context
+                                    .pending
+                                    .ability
+                                    .trigger_source
+                                    .as_ref()
+                                    .map(|source| source.identity.reference),
+                                context.pending.controller,
+                                duration_event,
+                                event,
+                            )
+                        {
+                            ordered_latches.push((group_index, trigger_index, duration_event));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (entry_id, duration_event) in stack_latches {
+        if let Some(ability) = state
+            .stack
+            .iter_mut()
+            .find(|entry| entry.id == entry_id)
+            .and_then(StackEntry::ability_mut)
+        {
+            ability.record_duration_event_recursive(duration_event);
+        }
+    }
+    for duration_event in resolving_latches {
+        if let Some(ability) = state
+            .resolving_stack_entry
+            .as_mut()
+            .and_then(StackEntry::ability_mut)
+        {
+            ability.record_duration_event_recursive(duration_event);
+        }
+    }
+    for (index, duration_event) in deferred_latches {
+        if let Some(context) = state.deferred_triggers.get_mut(index) {
+            context.record_duration_event(duration_event);
+        }
+    }
+    for (group_index, trigger_index, duration_event) in ordered_latches {
+        if let Some(context) = state
+            .pending_trigger_order
+            .as_mut()
+            .and_then(|order| order.groups.get_mut(group_index))
+            .and_then(|group| group.triggers.get_mut(trigger_index))
+        {
+            context.record_duration_event(duration_event);
+        }
+    }
+
+    for event in events.iter() {
+        match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                ..
+            } => {
+                // Find exile links where this object was the source and the exile
+                // effect specified an automatic return when that source leaves.
+                for link in &state.exile_links {
+                    if link.source_id == *object_id
+                        && matches!(
+                            &link.kind,
+                            crate::types::game_state::ExileLinkKind::UntilSourceLeaves { .. }
+                        )
+                    {
+                        to_return.push(link.clone());
+                    }
+                }
+            }
+            GameEvent::MonarchChanged { player_id } => {
+                for link in &state.exile_links {
+                    if let crate::types::game_state::ExileLinkKind::UntilOpponentBecomesMonarch {
+                        controller,
+                        ..
+                    } = &link.kind
+                    {
+                        if super::players::is_opponent(state, *controller, *player_id) {
+                            to_return.push(link.clone());
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -14818,11 +15339,14 @@ pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEv
         if !still_in_exile {
             continue;
         }
-        let crate::types::game_state::ExileLinkKind::UntilSourceLeaves { return_zone } = &link.kind
-        else {
-            continue;
+        let return_zone = match &link.kind {
+            crate::types::game_state::ExileLinkKind::UntilSourceLeaves { return_zone }
+            | crate::types::game_state::ExileLinkKind::UntilOpponentBecomesMonarch {
+                return_zone,
+                ..
+            } => *return_zone,
+            _ => continue,
         };
-        let return_zone = *return_zone;
         let gi = match groups.iter().position(|(zone, _)| *zone == return_zone) {
             Some(i) => i,
             None => {
@@ -14964,6 +15488,7 @@ mod priority_reducer_census_tests {
             "ActivateManaSource",
             "ActivateNinjutsu",
             "ActivateStation",
+            "BeginResolveAll",
             "CastPreparedCopy",
             "CastSpell",
             "CastSpellAsSneak",
@@ -14997,7 +15522,12 @@ mod priority_reducer_census_tests {
             .collect::<BTreeSet<_>>();
         let expected_preflight_families = expected
             .iter()
-            .filter(|family| *family != "PassPriority" && *family != "SetAutoPass")
+            .filter(|family| {
+                !matches!(
+                    family.as_str(),
+                    "BeginResolveAll" | "PassPriority" | "SetAutoPass"
+                )
+            })
             .map(|family| (*family).to_owned())
             .collect::<BTreeSet<_>>();
         assert_eq!(preflight_families, expected_preflight_families);
@@ -17968,109 +18498,15 @@ mod stage2_injector_tests {
         );
     }
 
-    /// R23, conjunct 3 — **the PRODUCER census, so a new producer is a COUNTED event.**
+    /// The CR 603.5 prompt sites in ONE source text: `(producers, readers, in_test)`.
     ///
-    /// The struck form of this conjunct pinned `optional_prompt_player`'s own call-site count,
-    /// which is trivially stable at 2 and moves neither when the guard is deleted nor when an
-    /// unguarded producer is added — this plan's own "verify the seam, not the line" defect,
-    /// committed. What actually bounds the mint conjunct's reach is how many things PRODUCE
-    /// `WaitingFor::OptionalEffectChoice`: the conjunct is a fail-closed pre-filter on ONE of
-    /// them, and soundness over the others is discharged at the consumption point.
-    ///
-    /// The five production producers are named individually, and exactly one of them is inside
-    /// the CR 603.5 gate that consults the recipient authority. If a sixth appears, this row
-    /// fails and whoever added it must decide where its recipient is bound.
-    ///
-    /// ⚠ **ADJUDICATED IN U4, NOT RELAXED.** The census moved `34 ⇒ 37`. The PRODUCER half is
-    /// unchanged at **5** and its per-file list is byte-identical (only one line NUMBER moved,
-    /// `game/engine.rs:10433 ⇒ :10493`, because U4's arm sits above it) — that half is what this
-    /// row's claim is about, and it did not move. The `+1` READER is `game/engine.rs`'s new
-    /// `OptionalEffectChoice` arm in `inject_pinned_answer`, i.e. the CONSUMPTION point this
-    /// doc already names as where soundness over the other four producers is discharged; the
-    /// `+2` are U4's own `#[cfg(test)]` fixtures. A new READER is the benign case — adjudicate
-    /// it, do not relax the assert.
-    ///
-    /// ⚠ **RE-ADJUDICATED IN THE 5d LOW-FIX, NOT RELAXED.** One line NUMBER moved again,
-    /// `game/engine.rs:10493 ⇒ :10500`, on the same terms as U4's shift above. Cause: the
-    /// LOW-fix added a net **+7 DOC lines** above that producer (the mint's corrected
-    /// board-not-prompt contract, and the Braids, Conjurer Adept Oracle-text correction) —
-    /// comments only, not one executable line. The producer itself is BYTE-IDENTICAL (the
-    /// `return Ok(Some(WaitingFor::OptionalEffectChoice` head, diffed against `HEAD`), the
-    /// total stays **37** and the partition stays **5/7/25**, and the other four entries are
-    /// unchanged. The two companion asserts above run FIRST and both fired GREEN on the run
-    /// that caught this — which is the evidence that the SET did not move and only this
-    /// entry's coordinate did. A line-number-only shift is the benign case; a changed
-    /// producer set is not, and stays a counted event.
-    ///
-    /// ⚠ **RE-ADJUDICATED ON THE REBASE ONTO UPSTREAM #6842 (`8121fd1c6`), NOT RELAXED.**
-    /// The row fired again; the PRODUCER COUNT IS STILL **5** and no sixth producer exists.
-    /// Four of five coordinates shifted and one did not:
-    /// `game/effects/mod.rs:5896/5973/8927 ⇒ :5918/5995/8949` (uniform **+22**, lines that
-    /// commit adds above them in that file), `game/engine.rs:10500 ⇒ :10589` (**+89**, same
-    /// cause), and `game/effects/scoped_library_search.rs:452` **UNMOVED**.
-    /// Evidence this is a coordinate shift and not a set change: each of the five was re-read
-    /// at its new coordinate and diffed against the pre-rebase tree (`chain3-prefold-backup`)
-    /// at its old one — all five are BYTE-IDENTICAL, same files, same order, and the one
-    /// entry at an unchanged coordinate is byte-identical in place, which a gained-or-lost
-    /// producer could not produce. Same set, new line numbers ⇒ benign, re-baselined here.
-    /// NOTE for the record: this rebase did NOT add a CR 603.5 producer. An earlier report of
-    /// mine said upstream had added one; that was wrong — the row fired on coordinates.
-    ///
-    /// ⚠ **RE-ADJUDICATED ON THE REBASE ONTO UPSTREAM #6851 (`96e41b3ab`), NOT RELAXED.**
-    /// The row fired in CI but not locally, because CI builds the MERGE ref (branch + main)
-    /// while the branch was still based on `e12447f4f`. The PRODUCER COUNT IS STILL **5**, no
-    /// sixth producer exists, and this time only ONE coordinate moved:
-    /// `game/engine.rs:10589 ⇒ :10640` (**+51**), with `game/effects/mod.rs:5918/5995/8949`
-    /// and `game/effects/scoped_library_search.rs:452` all **UNMOVED**.
-    /// Evidence this is a coordinate shift and not a set change, three independent ways:
-    /// (1) all five producers were re-read at their new coordinates and diffed against the
-    /// pre-rebase tree at their old ones — **byte-identical**, same files, same order, with a
-    /// negative control confirming the diff instrument discriminates (the new tree at the OLD
-    /// coordinate `:10589` is a bare `}`, not the producer); (2) the +51 is fully accounted
-    /// for by #6851's own insertions ABOVE this producer in the same file — measured net
-    /// `+51` from `git diff -U0 e12447f4f 96e41b3ab`, so predicted `10589+51 = 10640` equals
-    /// the observed coordinate exactly, and #6851's whole-file delta is also `+51`, i.e. it
-    /// adds nothing below; (3) the total stays **37** and the partition stays **5/7/25**, so
-    /// neither a producer nor a reader was gained or lost. Same set, one new line number ⇒
-    /// benign, re-baselined here.
-    ///
-    /// ⚠ **RE-ADJUDICATED BY C1 (the CR 603.5 may-answer journal), NOT RELAXED.** `37 ⇒ 38`,
-    /// partition `5/7/25 ⇒ 5/8/25`. The PRODUCER half is unchanged at **5** and four of the
-    /// five coordinates did not move at all. The `+1` READER is **`game/engine.rs:8626`** —
-    /// `apply_action`'s `(OptionalEffectChoice, DecideOptionalEffect)` arm, which C1 widened
-    /// from `{ .. }` to bind `player` and `source_id` so it can journal the answer under
-    /// `(DecisionSource, PlayerId)`. It READS the (cloned) `state.waiting_for` scrutinee and
-    /// never writes it, so it is a reader by this instrument's own rule, and it is the same
-    /// benign class as U4's `inject_pinned_answer` arm. Note WHY it became visible at all:
-    /// the instrument deliberately skips multi-line read destructures by excluding lines
-    /// containing `..`, and rustfmt puts `..` on the needle's own line only while the
-    /// pattern body is narrow — adding two bindings pushes it to the next line. The
-    /// exclusion is an approximation, and this is it losing one case, not a new prompt.
-    ///
-    /// The fifth producer's coordinate moved `engine.rs:11942 ⇒ :11977`, and the shift is
-    /// measured rather than assumed: `git diff -U0 <C0f tip> HEAD -- game/engine.rs` has
-    /// exactly six hunks above it — five `+2` journal clears paired with the ring clears at
-    /// `:3274/:3951/:5130/:6334/:7139`, and `+25` for the reducer arm above — summing to
-    /// **+35**, so predicted `11942 + 35 = 11977` equals the observed coordinate exactly.
-    /// Identity re-established, not assumed: the line is **sha256-identical**
-    /// (`8a544e87…5cc7d63`) at the old coordinate in the pre-C1 tree and at the new one
-    /// here, and it is still inside `begin_pending_trigger_target_selection`. C1 adds no
-    /// line matching the needle in a producing position anywhere.
-    #[test]
-    fn the_cr_603_5_prompt_census_is_pinned_so_a_sixth_producer_is_a_counted_event() {
-        /// Every `.rs` under the crate's `src`, and the `#[cfg(test)]`-attributed
-        /// column-0 `mod … {` … column-0 `}` spans inside it. A whole file whose stem
-        /// ends `_tests` is test-only (its parent declares it under `#[cfg(test)]`).
-        fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            for entry in std::fs::read_dir(dir).expect("readable source dir") {
-                let path = entry.expect("readable dir entry").path();
-                if path.is_dir() {
-                    rs_files(&path, out);
-                } else if path.extension().is_some_and(|e| e == "rs") {
-                    out.push(path);
-                }
-            }
-        }
+    /// A producer's key is `file::fn {fields}` — its enclosing column-0 `fn` plus the
+    /// whitespace-stripped field text of the construction minted there, so a REPLACEMENT
+    /// inside an already-pinned function moves the key. A reader keys as `file::fn`.
+    fn cr_603_5_sites(rel: &str, text: &str) -> (Vec<String>, Vec<String>, usize) {
+        use crate::source_census::code as code_of;
+
+        /// The `#[cfg(test)]`-attributed column-0 `mod … {` … column-0 `}` spans.
         fn cfg_test_spans(lines: &[&str]) -> Vec<(usize, usize)> {
             let mut spans = Vec::new();
             let mut i = 0;
@@ -18100,30 +18536,134 @@ mod stage2_injector_tests {
             spans
         }
 
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files = Vec::new();
-        rs_files(&root, &mut files);
-        files.sort();
-        assert!(files.len() > 100, "reach-guard: the walker found the crate");
+        /// The construction's field text, brace-matched over the CODE half from `after` —
+        /// just past its opening `{` on line `n` — to the matching `}`, with ALL whitespace
+        /// removed so re-indenting or re-breaking a field expression cannot move it.
+        /// Unbalanced input runs to EOF and yields a key nothing matches: red, never a
+        /// silent pass.
+        fn fields(lines: &[&str], n: usize, after: usize) -> String {
+            let mut body = String::new();
+            let mut depth = 1usize;
+            let mut rest = &code_of(lines[n])[after..];
+            let mut i = n;
+            loop {
+                for ch in rest.chars() {
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return body;
+                            }
+                        }
+                        _ => {}
+                    }
+                    if !ch.is_whitespace() {
+                        body.push(ch);
+                    }
+                }
+                i += 1;
+                let Some(line) = lines.get(i) else {
+                    return body;
+                };
+                rest = code_of(line);
+            }
+        }
 
-        // COMMENT TEXT IS NOT A CENSUS SITE — this instrument counts CODE, and it had no
-        // comment rule at all until now. The consequence was measured, not theorised: a doc
-        // comment that quoted the needle verbatim counted ITSELF, reading 39 against a pin of
-        // 38, and was worked around by deleting the brace from the quotation (`aa313f122`).
-        // That repaired one sentence and left the counter broken for the next one. The rule now
-        // has ONE home for the whole repository, `crate::source_census`, which the integration
-        // binary compiles from the same file.
-        use crate::source_census::code as code_of;
+        let lines: Vec<&str> = text.lines().collect();
+        let spans = cfg_test_spans(&lines);
+        // A whole file whose stem ends `_tests` is test-only (its parent declares it under
+        // `#[cfg(test)]`).
+        let test_file = rel.trim_end_matches(".rs").ends_with("_tests");
 
         // The needle is ASSEMBLED so this row's own source cannot be counted by its own
         // instrument. `..` excludes multi-line READ destructures whose rest-pattern sits on
         // a later line — the inflation the raw grep suffers from.
         let needle = format!("WaitingFor::{}Choice {{", "OptionalEffect");
         let (mut producers, mut readers, mut in_test) = (Vec::new(), Vec::new(), 0usize);
+        // Enclosing-function tracker for this file: `enclosing` names each site and
+        // `fn_start` bounds the qualifying look-back below, so no coordinate is minted.
+        // Column-0 `fn` headers only — a producer inside an `impl` method would take the
+        // preceding free function's name; all five producers today are free functions.
+        let (mut enclosing, mut fn_start) = (String::new(), 0usize);
+        for (n, line) in lines.iter().enumerate() {
+            let code = code_of(line);
+            if !line.starts_with([' ', '\t']) {
+                let tokens: Vec<&str> = code.split_whitespace().collect();
+                if let Some(at) = tokens.iter().position(|token| *token == "fn") {
+                    enclosing = tokens
+                        .get(at + 1)
+                        .and_then(|token| token.split(['(', '<']).next())
+                        .unwrap_or_default()
+                        .to_string();
+                    fn_start = n;
+                }
+            }
+            let Some(open) = code.find(&needle) else {
+                continue;
+            };
+            if code.contains("..") {
+                continue;
+            }
+            if test_file || spans.iter().any(|(a, b)| (*a..=*b).contains(&n)) {
+                in_test += 1;
+            } else if code.contains("waiting_for = ")
+                || code.contains("Ok(Some(")
+                // `install_direct_choice_frame` owns the actual `state.waiting_for`
+                // write, so its typed prompt argument is a mint, not a read. The
+                // window is the enclosing fn; `code_of` keeps prose out of it.
+                || lines[fn_start..n]
+                    .iter()
+                    .any(|prior| code_of(prior).contains(".install_direct_choice_frame("))
+            {
+                let body = fields(&lines, n, open + needle.len());
+                let trimmed = body.trim_end_matches(',');
+                producers.push(format!("{rel}::{enclosing} {{{trimmed}}}"));
+            } else {
+                readers.push(format!("{rel}::{enclosing}"));
+            }
+        }
+        (producers, readers, in_test)
+    }
+
+    /// R23, conjunct 3 — **the PRODUCER census, so a new producer is a COUNTED event.**
+    ///
+    /// What bounds the mint conjunct's reach is how many things PRODUCE
+    /// `WaitingFor::OptionalEffectChoice`: the conjunct is a fail-closed pre-filter on ONE of
+    /// them, and soundness over the others is discharged at the consumption point. Exactly one
+    /// of the five sits inside the CR 603.5 gate that consults the recipient authority. If a
+    /// sixth appears, this row fails and whoever added it must decide where its recipient is
+    /// bound.
+    ///
+    /// A producer is identified by its ENCLOSING FUNCTION and the CONSTRUCTION it mints
+    /// (`file::fn {fields}`, whitespace stripped), and the qualifying
+    /// `.install_direct_choice_frame(` look-back is bounded by that same function. NO line
+    /// coordinate is asserted, so movement above a producer is not an event and a REPLACEMENT
+    /// inside a pinned function is. The pin is a sorted MULTISET, so a sixth mint in one of
+    /// them still fails here; comment text is never a site (`source_census::code`).
+    #[test]
+    fn the_cr_603_5_prompt_census_is_pinned_so_a_sixth_producer_is_a_counted_event() {
+        /// Every `.rs` under the crate's `src`.
+        fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("readable source dir") {
+                let path = entry.expect("readable dir entry").path();
+                if path.is_dir() {
+                    rs_files(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rs_files(&root, &mut files);
+        files.sort();
+        assert!(files.len() > 100, "reach-guard: the walker found the crate");
+
+        let (mut producers, mut readers, mut in_test) = (Vec::new(), Vec::new(), 0usize);
         for path in &files {
             let text = std::fs::read_to_string(path).expect("readable source file");
-            let lines: Vec<&str> = text.lines().collect();
-            let spans = cfg_test_spans(&lines);
             let rel = path
                 .strip_prefix(&root)
                 .expect("under src")
@@ -18134,62 +18674,21 @@ mod stage2_injector_tests {
                 // separator (backslash on Windows), but the pins are written in
                 // the crate's forward-slash convention. No-op on Unix/CI.
                 .replace('\\', "/");
-            let test_file = rel.trim_end_matches(".rs").ends_with("_tests");
-            for (n, line) in lines.iter().enumerate() {
-                let code = code_of(line);
-                if !code.contains(&needle) || code.contains("..") {
-                    continue;
-                }
-                if test_file || spans.iter().any(|(a, b)| (*a..=*b).contains(&n)) {
-                    in_test += 1;
-                } else if code.contains("waiting_for = ")
-                    || code.contains("Ok(Some(")
-                    // `install_direct_choice_frame` owns the actual
-                    // `state.waiting_for` write. Its typed prompt argument is
-                    // still a production mint, not a reader; the call sits
-                    // within this bounded argument expression. Read through
-                    // `code_of` as well, so prose naming the call cannot
-                    // promote a reader to a producer.
-                    || lines[n.saturating_sub(32)..n]
-                        .iter()
-                        .any(|prior| code_of(prior).contains(".install_direct_choice_frame("))
-                {
-                    producers.push(format!("{rel}:{}", n + 1));
-                } else {
-                    readers.push(format!("{rel}:{}", n + 1));
-                }
-            }
+            let (file_producers, file_readers, file_in_test) = cr_603_5_sites(&rel, &text);
+            producers.extend(file_producers);
+            readers.extend(file_readers);
+            in_test += file_in_test;
         }
+        producers.sort();
 
         assert_eq!(
             producers.len() + readers.len() + in_test,
             41,
             "CR 603.5 prompt census drifted. A new PRODUCER must have its recipient bound \
              somewhere — the mint's conjunct (a) covers exactly ONE of them. A new READER is \
-             the benign case (U4's own consumption arm was one): adjudicate it in this doc and \
-             name the site, do not merely move the number.\n\
+             the benign case (U4's own consumption arm was one).\n\
              producers={producers:#?}\nreaders={readers:#?}"
         );
-        // TEST-FIXTURE DRIFT, adjudicated on THIS branch (plan-v23 Step 5, session 4),
-        // `27 ⇒ 28`. One new line, again in the third (benign) partition:
-        // `game/triggers.rs::approved_construction_prompts` — the fixture that enumerates one
-        // instance of each of the six approved trigger-construction prompts, which the
-        // construction-finisher contract rows iterate. It mints nothing in production and
-        // reads `state.waiting_for` nowhere. The PRODUCER half is unchanged at 5 and the
-        // READER half unchanged at 7, both with byte-identical per-file lists.
-        // TEST-FIXTURE DRIFT, adjudicated on THIS branch (plan-v23 Steps 6/7), `25 ⇒ 27`.
-        // Both new lines are `#[cfg(test)]` fixture waits, i.e. the third partition — the
-        // benign class. The PRODUCER half is unchanged at 5 with a byte-identical per-file
-        // list, and the READER half is unchanged at 7, which is what this row's claim is
-        // about. The two lines are:
-        //   - `game/triggers.rs::observer_helper_fixture` — the paused wait the
-        //     `park_observer_triggers_if_paused` rows need in order to reach that helper's
-        //     collecting branch at all;
-        //   - `game/visibility.rs::triggered_mana_projection_fixture` — the live public
-        //     prompt the Step-6 redaction rows assert survives viewer filtering.
-        // Neither mints a prompt in production; neither reads `state.waiting_for` in
-        // production. Adjudicated, not relaxed: a sixth PRODUCER would still red the
-        // partition assert below before this total could absorb it.
         assert_eq!(
             (producers.len(), readers.len(), in_test),
             (5, 8, 28),
@@ -18200,1186 +18699,27 @@ mod stage2_injector_tests {
         assert_eq!(
             producers,
             vec![
-                // DRIFT LOG for these three, newest last. Every entry is pure line movement
-                // with the producer re-read and sha256-compared at its new coordinate; none has
-                // ever been a real sixth producer.
-                //   #6842 (8121fd1c6): `:5896/:5973/:8927 ⇒ :5918/:5995/:8949`, uniform +22.
-                //   #6933: `engine.rs :10640 ⇒ :11427` (that entry, below).
-                //   #6955 (c9daf66e3): `:8949 ⇒ :8970`, +21 == that commit's insertion count,
-                //     and the other two did NOT move, which located the insertion below them.
-                //   #6961 (2ead7aab1) + v0.44.0: `:5918/:5995/:8970 ⇒ :5996/:6073/:9048`,
-                //     uniform +78 above all three (whole-file delta +153/-15).
-                //   #6957 (this branch, base 4f524c6014): `:5999/:6076/:9051 ⇒
-                //     `:6061/:6138/:9113`, uniform +62 above all three. The two hunks above
-                //     them are `-3` (the `matches!(scope, PlayerFilter::All)` gate replaced by
-                //     a named local) and `+65` (`scope_keeps_scoped_whole_hand_shuffle_local`
-                //     and its doc comment); every other hunk in the file is at `:27733+`, i.e.
-                //     BELOW all three. Identity re-established, not assumed: each producer is
-                //     sha256-identical to `4f524c6014:effects/mod.rs` at its old coordinate.
-                //   #6956 (same branch, second unit): `:9113 ⇒ :9243`, +130, and ONLY that
-                //     entry moved — the other four stayed byte-identical AND in place, which is
-                //     the set-preservation evidence. The +109 is the
-                //     zero-policy pair inserted at `:7030` (+131, minus a 1-line comment
-                //     reflow at `:7020`), i.e. below `:6061`/`:6138` and above `:9113`. The
-                //     only other hunks are in `mod tests`. Producer sha256-identical at its
-                //     new coordinate.
-                //   #6956 fix round (review round 1): `:6061/:6138/:9243 ⇒ :6065/:6142/:9324`,
-                //     +4 above the first two and +81 above the third. The +4 is the
-                //     `AllExcept` recursion arm added to
-                //     `scope_keeps_scoped_whole_hand_shuffle_local`; the further +77 is the
-                //     `amount_channel` classifier that collapses the twin `_ => 0` / `_ => false`
-                //     registry, plus the relay guard. All three producers sha256-identical at
-                //     their new coordinates AND still inside the same enclosing functions
-                //     (`drive_sequential_repeated_optional_payment` ×2, `resolve_chain_body`),
-                //     which is stronger evidence than the coordinate alone.
-                //   THIS PR, REBASED ONTO UPSTREAM `b654513cb` (#6996, #6999, #6998, #7001,
-                //     #6997, #6946): `:6065/:6142/:9324 ⇒ :6175/:6252/:9456`. The three pins
-                //     it replaces were UPSTREAM's own literals, correct for the upstream tree
-                //     — verified by re-deriving them at `b654513cb`, where all three sit
-                //     exactly there — so this shift is THIS BRANCH's commits replayed on top,
-                //     i.e. LOCAL, and the CI-vs-local diagnosis in the header does not apply.
-                //     The shift is NOT UNIFORM (`+110/+110/+132`), and that asymmetry is the
-                //     measurement rather than a puzzle: `git diff -U0 b654513cb HEAD` on this
-                //     file has exactly four hunks. `@@ -5957,0 +5958,110 @@` — C1's
-                //     `upfront_optional_gate` authority plus `OptionalFeasibility` — lands
-                //     above ALL THREE producers and is the whole `+110`. The third producer
-                //     takes a further `+22` from two hunks INSIDE `resolve_chain_body` and
-                //     above its own gate: `@@ -9207,0 +9318,7 @@` (the `optional_for` fan-out
-                //     coupling note) and `@@ -9281,6 +9398,21 @@` (adoption A — the inline
-                //     conjunct chain replaced by the `upfront_optional_gate` call and its
-                //     `debug_assert!`); the fourth hunk is net `0`. Whole-file delta is also
-                //     `+132`, so nothing was added below the third producer, and predicted
-                //     `6065+110`, `6142+110`, `9324+132` equal the observed coordinates
-                //     exactly. Identity re-established, not assumed: each producer at its new
-                //     coordinate is sha256-identical to `b654513cb:effects/mod.rs` at its old
-                //     one (`9869a19f…9b43a2`, `2bc316e3…e861185`, `3134c156…2aeeb66`)
-                //     and to the pre-rebase tip `117baa6a1` at
-                //     `:6109/:6186/:9183`, AND each is still inside the enclosing function
-                //     this row NAMES — `drive_sequential_repeated_optional_payment`,
-                //     `resolve_repeated_optional_payment_choice`, `resolve_chain_body`. The
-                //     diff instrument discriminates: in the NEW tree the three OLD coordinates
-                //     hold a `may_trigger_auto_choice` lookup, a blank line, and a bare `//`,
-                //     none of which mints anything. Set preservation: the two asserts above
-                //     this one ran FIRST and both fired GREEN on the run that caught this —
-                //     total still **37**, partition still **5/7/25** — and the other two
-                //     entries (`scoped_library_search.rs:452`, `engine.rs:11549`) did not move
-                //     at all, both re-read and sha256-confirmed in place. (`engine.rs`'s entry
-                //     has since moved to `:11619` — see the item-2 note on that entry below;
-                //     `scoped_library_search.rs:452` still has not moved.)
-                //   Valakut #7047 fix round: `:9458 ⇒ :9442`, −16, and only that
-                //     effects/mod.rs entry moved relative to current main. The
-                //     `QuantityExpr::any_ref` relocation replaces the 16-line traversal match
-                //     with a delegation; it sits above this producer and below the first two.
-                //     The merge tree therefore retains main's first two coordinates
-                //     (`:6177`/`:6254`) and shifts this one by −16 to `:9442`.
-                //   Random-discard-as-a-cost (#7320, review round 1): `engine.rs:12004 ⇒
-                //     :12019`, +15, and ONLY the engine.rs entry moved — the four
-                //     effects/mod.rs + scoped_library_search entries did not, which is the
-                //     set-preservation evidence. `git diff -U0` on this file has exactly three
-                //     hunks, ALL inside `drain_pending_cost_move_resume` at `:5761`/
-                //     `:5865` (+1/+13 = +14, zero deletions), i.e. entirely ABOVE this
-                //     producer; predicted `12004+14` equals the observed coordinate exactly.
-                //     They add the `RandomDiscardUnlessPayment` delivery resume and its
-                //     dispatch arm — a cost-payment continuation, not
-                //     a prompt mint: it RESUMES an already-minted `UnlessPayment` rather than
-                //     creating a recipient, so it is correctly absent from this census.
-                //     Identity re-established, not assumed: the producer at `:12019` is the
-                //     same announcement-time modal mint this row NAMES — an `Ok(Some(..))` of
-                //     the optional-effect prompt over `player` / `source_id` /
-                //     `trigger_description` / `may_trigger_key` — still inside
-                //     `begin_pending_trigger_target_selection`. (Spelled out rather than
-                //     quoted: the needle above is ASSEMBLED so this row cannot be counted by
-                //     its own instrument, and a verbatim quote here re-introduces exactly the
-                //     self-count that defends against — it inflates `in_test` and reds the
-                //     TOTAL assert instead of this one.) The two asserts
-                //     above this one fired GREEN on the run that caught it — total still 37,
-                //     partition still 5/7/25 — so no producer was added or lost.
-                //
-                // ⚠ THIS ROW FAILS IN CI BEFORE IT FAILS LOCALLY, and that is not a bug in the
-                // row. CI checks out `refs/pull/<n>/merge` — this branch merged with CURRENT
-                // `main` — so an upstream insertion above a producer reds it in CI while the
-                // branch tree stays green, until the branch merges that upstream. Diagnose by
-                // rebuilding the merge tree (`git merge-tree --write-tree HEAD upstream/main`)
-                // and comparing coordinates there, NOT by editing pins to match a local tree.
-                //
-                // Five drifts, all upstream, zero true positives. The pin stays line-exact
-                // because that is what makes a NEW mint a counted event; a function +
-                // content-hash anchor would end the drift class while keeping that property,
-                // and is offered as a follow-up rather than taken unannounced mid-review.
-                // #6812 noted-mana support inserts two lines above all three producers:
-                // `:6210/:6287/:9475 => :6212/:6289/:9477`. The producers remain byte-identical.
-                // #7018 adds the 16-line distinct-player-scope continuation gate above all
-                // three producers: `:6212/:6289/:9477 => :6228/:6305/:9493`.
-                // shifts combine with #6958's paid-cast outcome exclusion and
-                // #6976's conditional-branch exclusions. None creates an
-                // `OptionalEffect` prompt. Re-pinned against the merged source.
-                // Current-main port: #7221's typed player-action completion seam and the
-                // contemporaneous upstream changes moved these three producers. Re-derived
-                // in the merged source, still in their named production functions.
-                //
-                // Fight for the Throne commander-gate unit (base 8035813e6):
-                // `:6640/:6717/:9922 ⇒ :6647/:6724/:9929`, uniform +7. LOCAL, not upstream,
-                // so the CI-vs-local diagnosis in the header does not apply. `git diff -U0`
-                // on effects/mod.rs has exactly four hunks: `@@ -12,7 +12,7 @@` (net 0 — the
-                // `CommanderOwnership` import reflow), `@@ -3238,0 +3239,3 @@` (+3, the
-                // `AbilityCondition::ControlsCommander` leaf arm in
-                // `condition_reads_filter_population`), `@@ -3639,0 +3643,4 @@` (+4, the same
-                // variant joining `should_resolve_subability_on_optional_decline`'s live-gate
-                // list), and `@@ -12474,0 +12482,23 @@` (+23, the `evaluate_condition`
-                // delegation to `game::commander`) which sits BELOW all three producers and
-                // therefore moves none of them. 3 + 4 = the whole +7, and predicted
-                // `6640+7`/`6717+7`/`9922+7` equal the observed coordinates exactly. None of
-                // the three arms mints a prompt — they are condition CLASSIFICATION arms plus
-                // one boolean predicate delegation. Identity re-established, not assumed: each
-                // producer at its new coordinate is sha256-identical to
-                // `8035813e6:effects/mod.rs` at its old one (`a8512b402f8675b7`,
-                // `82c6c569182ae4ed`, `c9d8e7ba3b9e29e2`) and still sits inside the enclosing
-                // function this row NAMES (`drive_sequential_repeated_optional_payment` ×2,
-                // `resolve_chain_body`). The diff instrument discriminates: the three OLD
-                // coordinates now hold a `PendingRepeatedOptionalPayment` field init, a
-                // `payment_unit` argument, and a `trigger_events` clone — none of which mints
-                // anything. Set preservation: the two asserts above this one ran FIRST and
-                // both fired GREEN on the run that caught this (total still 37, partition
-                // still 5/7/25), and the other two entries did not move.
-                //
-                // Fight for the Throne review-fix round (same base 8035813e6):
-                // `:6647/:6724/:9929 ⇒ :6680/:6757/:9964`, i.e. `+40/+40/+42` measured
-                // from BASE (`:6640/:6717/:9922`), not from the row above. LOCAL, not
-                // upstream, so the CI-vs-local diagnosis in the header does not apply.
-                // `git diff -U0 8035813e6` on effects/mod.rs now has eight hunks; the
-                // ones that move a producer are, in order: `@@ -2935,0 +2936,33 @@`
-                // (+33, `condition_survives_false_parent_gate` — the single authority
-                // the CR 603.4 delayed-hoist carve-out now shares with
-                // `resolve_chain_body`), `@@ -3238,0 +3272,3 @@` (+3) and
-                // `@@ -3639,0 +3676,4 @@` (+4) — the two condition-classification arms
-                // already logged above. 33 + 3 + 4 = the `+40` on the first two. The
-                // third takes a further `+2` from the two hunks INSIDE
-                // `resolve_chain_body` and above its own gate:
-                // `@@ -9679,4 +9719,10 @@` (+6, the twin sub-gate clauses collapsed
-                // into the shared `condition_survives_false_parent_gate` call) and
-                // `@@ -9701,5 +9747 @@` (−4, the corresponding conjunct removal); the
-                // remaining hunks (`@@ -12,7 +12,7 @@` net 0, the `evaluate_condition`
-                // delegation, and `mod tests`) are net-zero or BELOW all three.
-                // Predicted `6640+40`/`6717+40`/`9922+42` equal the observed
-                // coordinates exactly. None of the moved code mints a prompt: it is one
-                // boolean condition classifier plus the call sites that consume it.
-                // Identity re-established, not assumed: each producer at its new
-                // coordinate is sha256-identical to `8035813e6:effects/mod.rs` at its
-                // old one (`9869a19f28c791ee`, `2bc316e3aa0297f8`, `8df98486627bfe15`)
-                // and still sits inside the enclosing production function it always
-                // did — `drive_sequential_repeated_optional_payment` (6653-6687),
-                // `resolve_repeated_optional_payment_choice` (6695-6779) and
-                // `resolve_chain_body`. (The row above names the first two as
-                // `drive_sequential_repeated_optional_payment` ×2; re-derived here, the
-                // second is the `resolve_repeated_optional_payment_choice` resume arm,
-                // which is what the older entries called it.) The diff instrument
-                // discriminates: the three OLD coordinates now hold a blank line, an
-                // `.active_repeated_optional_payment_frame_mut()` call and a `//`
-                // comment, none of which mints anything. Set preservation: the two
-                // asserts above this one ran FIRST and both fired GREEN on the run that
-                // caught this (total still 37, partition still 5/7/25), and the other
-                // two entries did not move.
-                //
-                // Fight for the Throne review-fix round 2 (same base 8035813e6):
-                // `:6715/:6792/:9994`, i.e. `+75/+75/+72` measured from BASE
-                // (`:6640/:6717/:9922`), not from the row above. LOCAL, not upstream, so
-                // the CI-vs-local diagnosis in the header does not apply. `git diff -U0
-                // 8035813e6` on effects/mod.rs has eight hunks; above the first two
-                // producers are `@@ -2935,0 +2936,68 @@` (+68 — the condition classifier
-                // of the row above, now also carrying the shared
-                // `sub_outlives_false_parent_gate` authority the CR 603.4 delayed-hoist
-                // carve-out and `resolve_chain_body` both call), `@@ -3238,0 +3307,3 @@`
-                // (+3) and `@@ -3639,0 +3711,4 @@` (+4): 68 + 3 + 4 = the `+75`. The third
-                // producer nets `−3` more from the two hunks INSIDE `resolve_chain_body`
-                // and above its own gate — `@@ -9679,4 +9753,0 @@` (−4, the twin
-                // `sub_survives_false_parent_gate` / `sub_is_replicated_or_branch` locals
-                // collapsed into the one shared call) and `@@ -9698,9 +9769,10 @@` (+1) —
-                // giving `+72`; the remaining hunks (`@@ -12,7 +12,7 @@` net 0, the
-                // `evaluate_condition` delegation, and `mod tests`) are net-zero or BELOW
-                // all three. Predicted `6640+75`/`6717+75`/`9922+72` equal the observed
-                // coordinates exactly. None of the moved code mints a prompt: it is one
-                // boolean sub-classification predicate plus the call site that consumes it.
-                // Identity re-established, not assumed: each producer at its new coordinate
-                // is sha256-identical to `8035813e6:effects/mod.rs` at its old one
-                // (`9869a19f28c791ee`, `2bc316e3aa0297f8`, `8df98486627bfe15`) and still
-                // sits inside the enclosing production function this row NAMES —
-                // `drive_sequential_repeated_optional_payment` (opens 6702),
-                // `resolve_repeated_optional_payment_choice` (opens 6730) and
-                // `resolve_chain_body`. The diff instrument discriminates: the three OLD
-                // coordinates now hold a `return Ok(());`, an
-                // `optional_cost_payments_this_resolution` binding and a
-                // `resolve_optional_effect_decision(` call, none of which mints anything.
-                // Set preservation: the two asserts above this one ran FIRST and both
-                // fired GREEN on the run that caught this (total still 37, partition still
-                // 5/7/25), and the other two entries did not move.
-                //   Fight for the Throne, same branch, same base `8035813e6`:
-                //   `:6715/:6792/:9994 ⇒ :6722/:6799/:10001`, a UNIFORM `+7` on all three,
-                //   i.e. `+82/+82/+79` measured from the base. The row above measured
-                //   `+75/+75/+72` from that same base, so the delta is `+7` and its sole
-                //   cause is that the FIRST hunk GREW: `@@ -2935,0 +2936,68 @@ ⇒
-                //   @@ -2935,0 +2936,75 @@`, the `condition_survives_false_parent_gate`
-                //   doc/authority block picking up seven more lines. No hunk was added or
-                //   removed and none changed size: the other four are byte-for-byte the
-                //   sizes the row above names (`+3` at `:3307 ⇒ :3314`, `+4` at
-                //   `:3711 ⇒ :3718`, `−4` at `:9753 ⇒ :9760`, `+1` at `:9769 ⇒ :9776`) and
-                //   merely shifted by the same `+7`, which is what makes the shift uniform
-                //   even for the third producer (its `−4/+1` pair still nets the same `−3`
-                //   below the other two). Predicted `6640+82`/`6717+82`/`9922+79` against
-                //   `8035813e6` equal the observed coordinates exactly. Identity
-                //   re-established, not assumed: each producer at its new coordinate is
-                //   sha256-identical to `8035813e6:effects/mod.rs` at its old one
-                //   (`7067db50922da31f`, `975791a569b1f587`, `967e35eb66a5780b` over the
-                //   15-line mint expression at each site). This card's own effects/mod.rs
-                //   edits — the two `AbilityCondition::ControlsCommander` registrations at
-                //   `:3314`/`:3718` and the `evaluate_condition` arm below all three — mint
-                //   nothing: they are classifier list entries and one condition evaluator.
-                //
-                // Wheel of Misfortune (#7266), MEASURED ON THE MERGE TREE. This row's
-                // own header warns that a fork branch's pins are correct for the branch
-                // and wrong for `refs/pull/<n>/merge`; both sides of this conflict were
-                // that kind of local-correct. `origin/main` carried `:6306/:6383/:9578`
-                // and the branch carried `:6261/:6338/:9550`; NEITHER is right here, so
-                // the merged file was re-measured rather than either side taken:
-                // `:6306/:6383/:9578 => :6315/:6392/:9606`, i.e. `+9/+9/+28`.
-                //
-                // The asymmetry IS the measurement. This branch's non-test additions to
-                // effects/mod.rs, in file order:
-                //   `pub mod reveal_chosen_numbers;` — 1 line, above all three.
-                //   the `Effect::RevealChosenNumbers` dispatch arm — 3 lines, above all
-                //     three (the dispatch table precedes every producer).
-                //   the `QuantityRef::PlayerChosenNumber` arm in
-                //     `candidate_player_scalar` — 5 lines, above all three.
-                // 1 + 3 + 5 = the uniform `+9` the first two producers take. The third
-                // takes a further `+19` from the depth-0 per-player secret-number ledger
-                // reset in `resolve_ability_chain` (16 lines, plus 3 widening the clear
-                // to retain both `Number` and `RevealedNumber`), which sits above it and
-                // below the first two: 9 + 19 = 28. Predicted and observed agree.
-                //
-                // Nothing added here raises a `WaitingFor`: the two clears and the scalar
-                // read are pure state reads/writes, and the dispatch arm delegates to
-                // `reveal_chosen_numbers::resolve`, which converts
-                // `ChosenAttribute::Number` to `RevealedNumber` and emits an event. The
-                // census set is therefore still exactly 5.
-                //
-                // NOTE for the next drift: upstream refactored the third producer from a
-                // `state.waiting_for = …` assignment form into a bare struct-literal value
-                // inside a returned tuple. It is still one producer and still matches this
-                // row's assembled needle, but a grep for the old assignment form now finds
-                // only two — measure with the needle, not with the assignment.
-                //
-                // And do NOT spell the needle literally in this comment. It is assembled
-                // at the top of this row precisely so the row cannot count itself, but the
-                // walker reads every line of this file: writing the struct-literal form
-                // out in prose here adds a phantom `in_test` hit per mention. Two such
-                // mentions in an earlier draft of this very note pushed the partition to
-                // 27 and reded the row — the instrument working exactly as intended.
-                //
-                // SECOND merge with main (#7221's typed player-action completion seam and
-                // its contemporaries). Same rule, applied again: `main` re-derived these to
-                // `:6640/:6717/:9922` for ITS tree and the branch carried `:6315/:6392/:9606`
-                // for its own; the merged file measures `:6653/:6730/:9954`, a uniform `+13`
-                // over main's coordinates. That `+13` is exactly this branch's four
-                // additions above all three producers: `pub mod reveal_chosen_numbers;` (1),
-                // the `Effect::RevealChosenNumbers` dispatch arm (3), the
-                // `QuantityRef::PlayerChosenNumber` arm in `candidate_player_scalar` (5),
-                // and its arm in main's new `quantity_ref_counts_population_matching` (4).
-                // It is uniform this time — unlike the first merge — because main's own
-                // churn moved the depth-0 ledger reset and the third producer together, so
-                // the branch's extra offset there is already inside main's baseline rather
-                // than stacked on top of it.
-                //
-                // Measure AFTER the last edit to effects/mod.rs, not during: an earlier
-                // pass here recorded `+9` from a measurement taken before that fourth arm
-                // was added, and the row caught the 4-line discrepancy.
-                // Unbounded-number round (same PR): `:6653/:6730/:9954 =>
-                // `:6655/:6732/:9956`, a uniform `+2` — the unbounded-range arm
-                // added to `compute_options`' sibling classifier in this file,
-                // which sits above all three producers. Nothing added raises a
-                // `WaitingFor`; the census set is still exactly 5.
-                //
-                // MERGE OF `origin/main` (`59f5a51e`) INTO THIS BRANCH (First Family's
-                // characteristic-set union). This array conflicted, and the header's rule
-                // applied a third time: `origin/main` carried `:6656/:6733/:9974` and this
-                // branch carried `:6648/:6725/:9947`, each correct for its own tree and
-                // neither correct for the merge. NEITHER SIDE WAS TAKEN — the merged file
-                // was re-measured: `:6656/:6733/:9974 => :6664/:6741/:9982`, a uniform
-                // `+8` over main's coordinates.
-                //
-                // The `+8` is exactly this branch's net insertion into effects/mod.rs, and
-                // all of it sits above the FIRST producer, which is why the shift is
-                // uniform rather than staggered. `git diff -U0 origin/main` on that file
-                // has exactly four hunks, ALL between `:2966` and `:3047`:
-                //   `filter_contains_last_created`'s characteristic-source arm (+1),
-                //   `card_type_set_source_counts_population_matching`'s zone/tracked-set/
-                //     union population cases (+7),
-                //   the `quantity_ref_counts_population_matching` arm the union folds
-                //     into the shared helper (-1), and
-                //   its replacement delegation (+1).
-                // 1 + 7 - 1 + 1 = 8, with nothing below `:3047` — predicted and observed
-                // agree. None of the four raises a prompt: they are population COUNTS
-                // (pure reads over zones, tracked sets and unions), so the census set is
-                // still exactly 5.
-                //
-                // Identity re-established at the new coordinates rather than assumed. Each
-                // producer line is byte-identical by sha256 to the same producer on BOTH
-                // parents — `9869a19f…`, `2bc316e3…` and `8df98486…` respectively, the
-                // same three digests the line carries at `:6656/:6733/:9974` on main and
-                // at `:6648/:6725/:9947` on this branch. The two asserts above this one
-                // fired GREEN on the merged tree — total still 38, partition still 5/8/25
-                // — and the other two entries did not move (`scoped_library_search.rs:452`
-                // unmoved, `engine.rs:12773` unmoved, both re-read and sha256-confirmed in
-                // place). A merge that had gained or lost a producer could not leave two
-                // entries byte-identical AND at their coordinates while moving the other
-                // three by a figure the diff predicts exactly.
-                //
-                // CR-CITATION ROUND (review follow-up), LOCAL not upstream — so the
-                // CI-vs-local diagnosis in the header does not apply, the shift
-                // originates in this same diff. `:6664/:6741/:9982 => :6670/:6747/:9988`,
-                // a uniform `+6`.
-                //
-                // A COMMENT-ONLY round, and the census caught it, which is the row
-                // working exactly as designed rather than a defect in the row.
-                // effects/mod.rs's entire delta is two comment hunks in
-                // `card_type_set_source_counts_population_matching`, both ABOVE all three
-                // producers: `@@ -2976,2 +2976,5 @@` (+3, the `TurnJournal` arm's
-                // citation corrected off CR 601.2a) and `@@ -2979 +2982,4 @@` (+3, the
-                // `AnyOf` arm's off CR 109.2). 3 + 3 = 6, with nothing below `:2985` —
-                // predicted and observed agree. Prose cannot mint a prompt, and the
-                // census agrees: the two asserts above this one fired GREEN on the run
-                // that caught this (total still 38, partition still 5/8/25) and the
-                // panic was on this third assert alone, which is what makes it a
-                // coordinate shift rather than a set change.
-                //
-                // Identity re-established rather than assumed: the three producer lines
-                // are byte-identical by sha256 at their new coordinates to the same
-                // producers at `:6664/:6741/:9982` — `9869a19f…`, `2bc316e3…`,
-                // `8df98486…`, the same digests this log recorded one entry above. The
-                // other two entries did not move (`scoped_library_search.rs:452` and
-                // `engine.rs:12773`, both re-read and sha256-confirmed in place); this
-                // round does not touch either file's producer region at all.
-                //
-                // BOUNDED-UNION-WALKER ROUND (review follow-up), LOCAL not upstream.
-                // `:6670/:6747/:9988 => :6685/:6762/:10003`, a uniform `+15`.
-                //
-                // effects/mod.rs's whole delta is the split of
-                // `card_type_set_source_counts_population_matching` into a bounded
-                // walker plus a leaf classifier, both ABOVE all three producers:
-                // `@@ -2971,0 +2972,16 @@` (+16, the walker and its truncation
-                // contract) and `@@ -2982,7 +2998,6 @@` (-1, the `AnyOf` recursion arm
-                // collapsing to a no-op now that unions are unrolled before the
-                // classifier sees them). 16 - 1 = 15, with nothing below `:3004` —
-                // predicted and observed agree.
-                //
-                // The split moves a recursion; it mints nothing. The census agrees: the
-                // two asserts above this one fired GREEN (total still 38, partition
-                // still 5/8/25) and the panic was on this third assert alone. Identity
-                // re-established rather than assumed — `9869a19f…`, `2bc316e3…`,
-                // `8df98486…` at the new coordinates, the same digests recorded one
-                // entry above — and the other two entries did not move.
-                //
-                // THIRD merge with main (this branch × `origin/main` @ 59f5a51e, which
-                // by now carries Wheel of Misfortune's unbounded-number round). Same rule
-                // as the two merges logged above, applied a third time: each side's pins
-                // were local-correct and BOTH are wrong for the merged tree, so the merged
-                // file was re-measured rather than either side taken. `origin/main`
-                // carried `:6656/:6733/:9974`; this branch carried `:6722/:6799/:10001`;
-                // the merged file measures `:6738/:6815/:10053`.
-                //
-                // The merged coordinates are PREDICTED, not merely observed, and the
-                // prediction is what makes this a measurement rather than a fixup:
-                // `main`'s pins plus this branch's own base-relative offsets — `+82/+82/+79`,
-                // the figure the row immediately above derives from base `8035813e6` and
-                // re-derives twice — give `6656+82`/`6733+82`/`9974+79` =
-                // `:6738`/`:6815`/`:10053`, equal to the observed coordinates exactly.
-                // That the branch's offsets compose additively onto main's is the evidence
-                // the merge introduced no new producer and displaced none: a merge that had
-                // gained or lost one would break the additivity, not just shift a pin.
-                //
-                // Set preservation: the assembled needle finds exactly five hits in the
-                // merged effects/mod.rs (`:6738`, `:6815`, `:10053`, `:14805`, `:15290`);
-                // the last two fall inside the `#[cfg(test)]` span opening at `:13563` and
-                // so are the partition's test half, leaving the same three production
-                // producers this row has always pinned. Total still 37, partition still
-                // 5/7/25. The merge added no `WaitingFor` producer on either side — main's
-                // contribution here is the unbounded-range arm in `compute_options`' sibling
-                // classifier and this branch's is the CR 603.4 delayed-hoist carve-out, both
-                // pure classification code.
-                //
-                // FOURTH MERGE (this branch × `origin/main` @ `2ae92459`). The header's
-                // rule applies again and for the same reason: `origin/main` carried
-                // `:6738/:6815/:10053` and this branch carried `:6685/:6762/:10003`, each
-                // correct for its own tree and NEITHER correct for the merge. Neither side
-                // was taken — the merged file was re-measured to
-                // `:6767/:6844/:10082`, a uniform `+29` over main's coordinates.
-                //
-                // The `+29` is this branch's CUMULATIVE net insertion into
-                // effects/mod.rs relative to main, not any single round's:
-                // `git diff --numstat origin/main` on that file reads `33 4` = `+29`, and
-                // its five hunks all sit between `:3041` and `:3144`, above the first
-                // producer with nothing below. It is the sum of the three rounds this log
-                // records — `+8` (union population), `+6` (CR citations), `+15` (bounded
-                // walker) — which is exactly why the per-round figure is the WRONG one to
-                // compose here.
-                //
-                // Recorded because the first attempt at this entry got it wrong: it
-                // composed only the last round's `+15` onto main and predicted
-                // `:6753/:6830/:10068`, which the measurement contradicted. The pins below
-                // come from measuring the merged tree, and the arithmetic is reconciled
-                // to that measurement rather than the other way round. A prediction is
-                // evidence only when it is made against the cumulative offset.
-                //
-                // Identity re-established rather than assumed — `9869a19f…`, `2bc316e3…`,
-                // `8df98486…` at the new coordinates, the same three digests this log has
-                // carried since the first merge — and the other two entries did not move:
-                // `scoped_library_search.rs:452`, and `engine.rs:12796`, which is main's
-                // own coordinate for that producer (this branch's engine.rs edits are all
-                // in the census array far below it).
-                //
-                // NOTE on the prose above from main: that entry's "total still 37,
-                // partition still 5/7/25" describes an older census. The asserts in this
-                // file read 38 and 5/8/25, and both fired GREEN on the merged tree.
-                //
-                // FIFTH MERGE (this branch × `origin/main` @ `0f37d27b`, Doomsday).
-                // Main's own entry for this round, preserved: "#7403/#7389 move main's
-                // three production pins to `:6738/:6815/:10053`; the Doomsday tracked-set
-                // publication adds seven lines above each. Re-measured in this merged
-                // tree: `:6745/:6822/:10060`. The three sites remain the existing
-                // producers." That is main's coordinate, correct for main.
-                //
-                // Neither side taken, again. Main carried `:6745/:6822/:10060` and this
-                // branch carried `:6767/:6844/:10082`; the merged file measures
-                // `:6774/:6851/:10089`.
-                //
-                // Predicted with the CUMULATIVE offset, which is the lesson the previous
-                // entry records: main's `:6745` plus this branch's `+29` net insertion
-                // into effects/mod.rs gives `6745+29`/`6822+29`/`10060+29` =
-                // `:6774`/`:6851`/`:10089`, equal to the measurement. Main's `+7`
-                // (Doomsday) and this branch's `+29` compose additively, which is the
-                // set-preservation evidence: a merge that gained or lost a producer would
-                // break the additivity rather than merely shift a pin.
-                //
-                // Identity re-established: `9869a19f…`, `2bc316e3…`, `8df98486…` at the
-                // new coordinates. The other two entries did not move.
-                //
-                // CONVERGENT RE-MEASUREMENT, and the strongest evidence in this log. The
-                // maintainer merged the same upstream commit into this branch
-                // independently and in parallel, and recorded it thus: "#7404's Doomsday
-                // tracked-set publication and this branch's characteristic-source work
-                // both shift the producer coordinates. Re-measured in this merged tree:
-                // `:6774/:6851/:10089`. The three sites remain the existing producers."
-                //
-                // Two independent measurements of the same merged tree, agreeing to the
-                // line on all three coordinates. That is what a coordinate this log can
-                // trust looks like — and it is why the two prose entries are BOTH kept
-                // rather than one overwriting the other: they are separate witnesses, not
-                // duplicates.
-                "game/effects/mod.rs:6923".to_string(),
-                "game/effects/mod.rs:7000".to_string(),
-                "game/effects/mod.rs:10238".to_string(),
-                // UNMOVED across the rebase, and that is itself evidence the SET did not
-                // move: a census that had gained or lost a producer would not leave this
-                // entry both byte-identical AND at the same coordinate.
-                "game/effects/scoped_library_search.rs:452".to_string(),
-                // 5d LOW-fix: `:10493 ⇒ :10500`, a doc-only line shift (+7 comment lines
-                // above); producer byte-identical, total 37 and partition 5/7/25 untouched.
-                // Rebase onto #6842: `:10500 ⇒ :10589`, on the same terms — that commit adds
-                // lines above this producer too. Producer byte-identical.
-                // Rebase onto #6851 (96e41b3ab): `:10589 ⇒ :10640`, again on the same terms.
-                // The +51 is exactly #6851's measured net insertion above this line (and its
-                // whole-file delta is also +51, so it adds nothing below). The OTHER FOUR
-                // entries did not move at all this time — a census that had gained or lost a
-                // producer could not leave four entries byte-identical AND in place.
-                //
-                // Fold of upstream #6933 (409956671, merged by the maintainer as d1a5270a4):
-                // `:10640 ⇒ :11427`, +787. engine.rs's whole-file delta over the same range is
-                // +1134, so 787 lands above this producer and 347 below — consistent with a
-                // file that grew around it rather than one that gained a mint. Identity
-                // re-established at the new coordinate rather than assumed: the line is
-                // byte-identical by sha256 to `ea1b0ac19:engine.rs:10640`, and it is still
-                // inside `begin_pending_trigger_target_selection` (fn opens at :11278), which
-                // is the producer this row NAMES below. The old coordinate now holds
-                // copy-target-slot code that mints nothing. The OTHER FOUR entries did not
-                // move, which is the same set-preservation evidence as the previous rebases.
-                //
-                // `PassPriority` structural-legality unit: `:11427 ⇒ :11420`, −7. UNLIKE every
-                // drift above, this one is LOCAL, not upstream — the CI-vs-local diagnosis in
-                // the header does not apply, because the shift originates in this same diff.
-                // The `(Priority, PassPriority)` reducer arm's two inline guards were extracted
-                // into `game::priority::pass_priority_legality`, replacing 11 lines with 4.
-                // That is engine.rs's only hunk ABOVE this producer — `@@ -6798,11 +6798,4 @@`,
-                // net -7, exactly accounting for the shift. The unit's only other engine.rs
-                // hunk is THIS drift-log comment, which sits below the producer and therefore
-                // cannot move it. Identity re-established at the new
-                // coordinate rather than assumed: the line is byte-identical by sha256 to
-                // `93da0ca15:engine.rs:11427`, and it is still inside
-                // `begin_pending_trigger_target_selection` (fn now opens at :11271, itself −7).
-                // The OTHER FOUR entries live in `game/effects/`, which this unit does not
-                // touch at all, and did not move — the same set-preservation evidence.
-                //
-                // THIS PR (C4's answer-beat sampler + C5's `candidate_windows` extraction), ON
-                // TOP OF UPSTREAM'S `:11420`: both insertions land in `engine.rs` ABOVE this
-                // producer and neither is a prompt. The coordinate below is re-derived from the
-                // row's OWN failure output at this base, with the line re-read and
-                // sha256-compared there and the enclosing function re-checked.
-                //
-                // THIS PR (the ACCEPT-WITH-FIXES doc round), ON TOP OF `:11515`: `⇒ :11549`,
-                // +34. LOCAL, not upstream, so the CI-vs-local diagnosis in the header does
-                // not apply. engine.rs's ENTIRE delta this round is two COMMENT hunks, and
-                // both sit above this producer: `@@ -3409,3 +3409,5 @@` in
-                // `drive_one_shortcut_cycle` (+2) and `@@ -11148,3 +11150,35 @@` in
-                // `apply_action` (+32) — 2 + 32 = 34, the whole shift, with nothing below.
-                // A comment round cannot mint a prompt, and the census agrees: total 37 and
-                // partition 5/7/25 are untouched and the other four entries did not move.
-                // Identity re-established rather than assumed: line :11549 is byte-identical
-                // by sha256 (`8a544e878d3e77fb…5cc7d63`) to `c7b18c3c7:engine.rs:11515`, and
-                // it is still inside `begin_pending_trigger_target_selection`, which moved by
-                // the same +34 (opens :11366 ⇒ :11400).
-                //
-                // REBASE ONTO UPSTREAM `b654513cb`: re-derived rather than carried over, and
-                // **UNMOVED** at `:11549`. Upstream's six commits contribute a net ZERO above
-                // this producer, measured on both sides of the rebase: it sits at `:11420` in
-                // the OLD base `dcb8f3808` and at `:11420` in the NEW base `b654513cb`, so
-                // this branch's own `+95` (C4/C5) and `+34` (the doc round) still land it on
-                // `:11549`. That an entry can stay put while three others move by `+110`/`+132`
-                // is the set-preservation evidence for this rebase: a gained or lost producer
-                // could not leave this one byte-identical AND in place. Identity re-checked at
-                // the unchanged coordinate rather than presumed from the unchanged number:
-                // sha256 `a6d7f2f9d1e15de5…5cb032`, matching `117baa6a1:engine.rs:11549`, and
-                // still inside `begin_pending_trigger_target_selection` (opens :11400 here,
-                // :11271 at `b654513cb`).
-                //
-                // THIS PR (the basis-A prose correction), ON TOP OF `a6d1a0e62`: `:11549 ⇒
-                // :11583`, +34. LOCAL, not upstream — the CI-vs-local diagnosis in the header
-                // does not apply. engine.rs's entire delta this round is THREE COMMENT HUNKS
-                // and nothing else. Two sit ABOVE this producer — `@@ -1924,5 +1924,6 @@` in
-                // `bounded_cycle_offer` (+1: the rotted `:481/:668/:710/:808` sibling-scan
-                // coordinates replaced by symbol names) and `@@ -11177,8 +11178,41 @@` in
-                // `apply_action` (+33) — summing to +34, and 11549 + 34 = 11583 exactly. The
-                // third is THIS drift entry, below the producer, which therefore cannot move
-                // it (its own size is deliberately not arithmetic here — a self-counting
-                // entry restates itself every edit). A comment round cannot mint a prompt,
-                // and the census agrees — the two asserts above this one fired GREEN on the
-                // run that caught this (total still 37, partition still 5/7/25) and the other
-                // four entries did not move (`effects/` is untouched by this commit;
-                // `scoped_library_search.rs:452` re-read and sha256-confirmed in place).
-                // Identity re-established rather than assumed: line :11583 is byte-identical
-                // by sha256 (`8a544e878d3e77fb…`, the SAME prefix this log recorded for
-                // `:11549`) to `a6d1a0e62:engine.rs:11549`, and it is still inside
-                // `begin_pending_trigger_target_selection`, which moved by the same +34
-                // (opens :11400 ⇒ :11434).
-                //
-                // ITEM 2 (`loop_period_controller`), REBASED ONTO `fa5fbdfd7`: `:11583 ⇒ :11696`.
-                // The three predecessor entries above were written against bases that are now
-                // history, and the rebase resolved a conflict in THIS array on every one of this
-                // branch's three commits — so the pin was NOT carried from either side of those
-                // conflicts. It was re-derived at the rebased tip, which is the only tree the
-                // assertion runs against.
-                //
-                // LOCATED BY CONTENT, NOT BY ARITHMETIC. Hashing every line in the file that
-                // opens this producer's prompt yields exactly ONE whose sha256 is
-                // `8a544e878d3e77fb` — `:11696`. (The producer's own text is deliberately NOT
-                // quoted in this comment: a prose copy of it would make the locating grep match
-                // twice, and a census that finds its instrument's own documentation is the
-                // stale-coordinate failure wearing a different hat.) A sum-of-hunks figure
-                // would have been the wrong instrument here regardless: three-way conflict
-                // resolution is not a line-shift, so `+113` is a description of where the
-                // producer landed, never the evidence that it is the same producer. Uniqueness of
-                // the hash IS that evidence, and it is what a stale-coordinate defect (the exact
-                // failure this census exists to catch) cannot survive.
-                //
-                // Still inside `begin_pending_trigger_target_selection` (opens `:11547`).
-                // PR #7041's typed trigger-provenance initializers sit above the
-                // first three effects producers and this engine producer. CI
-                // re-derived the same five writes at these coordinates.
-                //
-                // CR 603.3d CARRIER-RELEASE FIX: `:11697 ⇒ :11712`. Pure line movement from
-                // two edits in this file, neither of which mints a prompt: the empty-attackers
-                // auto-submit guard in `run_auto_pass_loop` (`:6457`, +15) and the collapse of
-                // four duplicated mid-construction drop blocks into calls to
-                // `drop_mid_construction_pending_trigger` (`:11511` +14 for its doc comment,
-                // `:11519` +1 for the `pending_trigger_event_batch.clear()` line, then -5 at
-                // each of `:11613`/`:11636`/`:11654`). Those six hunks sum to +15 and
-                // 11697 + 15 = 11712 exactly. The fourth collapsed block (`:11773`, also -5)
-                // sits BELOW this producer and therefore cannot move it, which is why the sum
-                // is +15 rather than the whole-file +10.
-                //
-                // LOCATED BY CONTENT, as this log requires: `:11712` hashes to sha256
-                // `8a544e878d3e77fb…`, the same prefix carried for this producer since
-                // `a6d1a0e62`, and it is the ONLY line in the file matching the producer shape
-                // outside `#[cfg(test)]`. Still inside `begin_pending_trigger_target_selection`,
-                // which moved `:11548 ⇒ :11578` by the +30 of the three hunks above the function
-                // itself — the same arithmetic re-derived against a different anchor.
-                //
-                // SET PRESERVATION: the other four entries are byte-identical AND in place
-                // (`effects/` and `scoped_library_search.rs` are untouched by this change), and
-                // the two tests this change adds contain no line matching the needle, so the
-                // total stays 37 and the partition stays 5/7/25. A drop path releasing a
-                // construction cursor cannot mint a CR 603.5 prompt.
-                //
-                // CR 732 ANNOTATION ROUND (this branch, base `684335b0a`): `:11712 ⇒ :11763`,
-                // `+51`, and ONLY this entry moved — the other four live in `effects/` and
-                // `scoped_library_search.rs`, untouched by a comment-only change. The `+51` is
-                // exactly this file's three hunks, ALL of which land above the producer:
-                // `@@ -4663,0 +4664,36 @@` (the CR 732.1b / 732.1a / 732.2a block on
-                // `try_offer_object_growth_shortcut`) is `+36`, `@@ -4706 +4742,13 @@` (the
-                // no-conditional-actions clause's role) is `+12`, and `@@ -5446,2 +5494,5 @@`
-                // (the `Shorten` deficiency note) is `+3`; predicted `11712+51` equals the
-                // observed coordinate exactly. Identity re-established, not assumed, on three
-                // axes: the line at `:11763` is sha256-identical to
-                // `684335b0a:game/engine.rs:11712`
-                // (`8a544e878d3e77fb80391b95af8f74059540d5ce4ad6fb83559f364df5cc7d63`); that
-                // text occurs exactly ONCE in the file, so the coordinate is unambiguous; and
-                // it is still inside `begin_pending_trigger_target_selection` on both sides.
-                // (That enclosing-function name is a CORRECTION: this row previously said
-                // `apply_retarget`, which is the function ABOVE it — `apply_retarget` ends where
-                // `begin_pending_trigger_target_selection` begins, and the producer sits inside
-                // the latter, as this assertion's own message has always said. The coordinate,
-                // the `+51`, and the digest were unaffected; only the named function was wrong.)
-                // The round is comment-only, so no `waiting_for = ` or `Ok(Some(` line was added
-                // or removed anywhere and the total stays 37 with the partition 5/7/25.
-                //
-                // CR 732 FIX ROUND (same branch, review response): `:11763 ⇒ :11783`, `+20`, and
-                // again ONLY this entry moved — the other four live in `effects/` and
-                // `scoped_library_search.rs`, which this comment-only round does not touch. The
-                // `+20` decomposes over exactly five hunks, ALL above the producer: four
-                // one-line growths in `interactive_loop_bridge` converting the redundancy
-                // proof's four wrong line citations to symbol anchors (`+1` each), plus
-                // `@@ -4750,3 +4754,19 @@` in `try_offer_object_growth_shortcut` (`+16`) for the
-                // `FamilyCollapseState` correction and the lemma closure that follows it.
-                // Predicted `11763+20` equals the observed coordinate exactly. Identity
-                // re-established, not assumed: the line at `:11783` is sha256-identical to
-                // `684335b0a:game/engine.rs:11712` and to `2b20aa73a:game/engine.rs:11763`
-                // (`8a544e878d3e77fb80391b95af8f74059540d5ce4ad6fb83559f364df5cc7d63`); the text
-                // occurs exactly ONCE in the file; and it is still inside
-                // `begin_pending_trigger_target_selection`. Worth recording WHY this drift was
-                // caught late: the round that introduced it shipped while GitHub Actions was in
-                // a major outage, so CI could not answer, and a comment-only diff reads as
-                // incapable of moving a line pin right up until it does.
-                //
-                // SETTLE-GATE LAYER SEPARATION (rebased onto `ea8771200`): `:11783 ⇒ :11828`.
-                // Pure line movement, LOCAL (so the CI-vs-local diagnosis above does not
-                // apply), from four hunks in `resolving_stack_entry_can_settle` /
-                // `settle_finished_resolving_stack_entry` — none of which mints a prompt, and
-                // none of which is even reachable from a prompt path: the readiness doc comment
-                // (+12), the well-formedness conjunct lifted OUT of the readiness gate (-5),
-                // the extracted `resolving_carrier_is_triggered` /
-                // `resolving_carrier_parity_is_coherent` predicates (+16), and the settle-path
-                // `tracing::warn!` (+12). Those sum to +35, then review follow-ups added +10
-                // more above the producer (+2 widening the carrier-kind CR annotation to
-                // `CR 113.3c + CR 603.7`, +8 qualifying the warn's reach — `engine-wasm`
-                // installs no `tracing` subscriber, so that channel is native-only), giving
-                // +45. Every other hunk in this change — the inline
-                // `resolving_carrier_settle_tests` module appended at the end of the file, and
-                // THIS drift entry — sits BELOW this producer and therefore cannot move it,
-                // which is why the sum is +45 and not the whole-file net. (Those two are
-                // deliberately left un-quantified here: a self-counting entry restates itself
-                // every edit.)
-                //
-                // The hunk sizes are quoted WITHOUT `@@` coordinates on purpose: this entry was
-                // rebased, so the coordinates from the pre-rebase base would name lines that no
-                // longer exist. The sizes survive a rebase; the coordinates do not.
-                //
-                // LOCATED BY CONTENT, as this log requires — and the `+45` above is a
-                // PREDICTION that was checked, not the source of this coordinate: `:11828`
-                // hashes to sha256 `8a544e878d3e77fb…5cc7d63`, the same prefix carried for this
-                // producer since `a6d1a0e62`, and it is the UNIQUE line in the file with that
-                // hash (whole-file scan). Still inside
-                // `begin_pending_trigger_target_selection`.
-                //
-                // SET PRESERVATION: the other four entries live in `game/effects/` and
-                // `scoped_library_search.rs`, neither of which this change touches, and the
-                // test module it adds contains no line matching the needle — total still 37,
-                // partition still 5/7/25.
-                // Search-observer dispatch: `:11828 ⇒ :11821`, −7. Removing the retired
-                // `WaitingForWithParkedObservers` match arm is the only hunk above this
-                // producer; it changes trigger-drain timing but does not add a prompt.
-                //
-                // ∞ AXIS-SCOPED REVOCATION ROUND (re-application of the ∞ badge/axis change onto
-                // `b5b8f4ecf`): `:11821 ⇒ :11814`, `-7`. This entry is written the way the
-                // doctrine at the head of this log demands and the way the two rounds above did
-                // NOT get for free: the coordinate was LOCATED BY CONTENT FIRST and the arithmetic
-                // was computed afterwards as a CHECK. Two incoming numbers were available and both
-                // were stale — this file's own `:11828` (pre-edit) and the original branch's
-                // `:11700` (pre-rebase) — which is exactly the situation in which inheriting a
-                // number is wrong. That judgement was vindicated a second time on the rebase onto
-                // `b5b8f4ecf`: the search-observer entry directly above ALSO landed its producer
-                // on `:11821`, from an unrelated hunk, so the 3-way merge saw both sides write the
-                // same coordinate and silently accepted it as AGREEMENT — when in fact the two
-                // shifts are independent and must COMPOSE: `11828 -7 (search-observer) -7 (here)`
-                // = `11814`. A conflict-free auto-merge of this pin would have been wrong by 7.
-                // Four hunks in this file, ALL above the producer, sum to this entry's own `-7`:
-                // the `drive_one_period_frames` caller-list doc going from two lines to three
-                // (`+1`), the deletion of `current_period_counter_targets` plus the rewrite of
-                // `current_period_counter_growth`'s doc into the single-derivation statement
-                // (27 lines to 13, `-14`), the deletion of the second display-registration block
-                // in `materialize_object_growth_shortcut` (12 lines to 1, `-11`), and its
-                // re-insertion below `let growths = …` as one derivation projected to two
-                // consumers (`+17`). Predicted `11821-7` equals the observed coordinate exactly.
-                //
-                // Identity re-established on three axes rather than assumed: the line at `:11814`
-                // is sha256-identical (WITH its trailing newline) to every earlier coordinate this
-                // row has carried —
-                // `8a544e878d3e77fb80391b95af8f74059540d5ce4ad6fb83559f364df5cc7d63`, the prefix
-                // carried since `a6d1a0e62`; that hash is UNIQUE in the file under a whole-file
-                // scan, so the coordinate is unambiguous; and it is still inside
-                // `begin_pending_trigger_target_selection`, which itself moved by the same `-7`
-                // and therefore did not change functions.
-                //
-                // HASHING CONVENTION, recorded because this branch produced the near-miss once:
-                // the line is hashed WITH its trailing newline. Piping through `tr -d '\n'` first
-                // yields `a6d7f2f9d1e15de538f5c2c5803f28e76e86ccd60898c7602a089345a25cb032` — a
-                // DIFFERENT digest for the SAME line. Both are written out in full here so a
-                // future reader who reproduces the wrong one identifies the convention instead of
-                // re-litigating the coordinate.
-                //
-                // SET PRESERVATION: unchanged. The other four entries live in `game/effects/` and
-                // `scoped_library_search.rs`; this change touches neither, and its own new tests
-                // live in `types/game_state.rs`, `derived_views.rs` and `tests/integration/`, so
-                // no line matching the needle is added to this file at all — total still 37,
-                // partition still 5/7/25.
-                //
-                // COLLISION NOTE: a separate in-flight CR 500.5 `max` bugfix also edits this file
-                // above this producer. Whichever lands second MUST re-derive by content; it cannot
-                // reuse this number, and neither entry's arithmetic is authority for the other's.
-                //
-                // CR 500.5 `max` BUGFIX (WB-7048): `:11814 ⇒ :11837`, `+23`. This IS the in-flight
-                // bugfix the COLLISION NOTE directly above anticipated, and it is the one landing
-                // SECOND — so the coordinate was re-derived BY CONTENT exactly as that note
-                // requires, and the arithmetic was computed afterwards as a CHECK, never as the
-                // source. The number above was NOT reused. The insertion is a single expression in
-                // `try_offer_object_growth_shortcut` — the unbounded object-growth producer now
-                // STATES the ceiling it publishes (`Fixed(MAX_SHORTCUT_CYCLES)`) instead of seeding
-                // `Fixed(1)`, since CR 732.2c makes the accepted count binding and that count caps
-                // the CR 500.5 collapse prompt. Its 33 lines replace 10 (23 of the 33 are comment),
-                // netting `+23`; the shift is LOCAL, originating in this diff, not rebase-induced.
-                // That insertion sits ABOVE this producer and BELOW nothing else pinned by this
-                // row. Predicted `11814+23` equals the observed coordinate exactly.
-                //
-                // Identity re-established, hashing convention per the entry above (hashed WITH the
-                // trailing newline — not restated here): the line at `:11837` is sha256-identical
-                // to every earlier coordinate this row has carried, that digest is still UNIQUE
-                // under a whole-file scan, and it is still inside
-                // `begin_pending_trigger_target_selection`.
-                //
-                // SET PRESERVATION: unchanged. The other four entries live in `game/effects/mod.rs`
-                // and `game/effects/scoped_library_search.rs`, neither of which this change touches,
-                // and the inserted expression adds no line matching the needle — total still 37,
-                // partition still 5/7/25.
-                //
-                // The Ward continuation port independently inserts +13 lines above the same
-                // producer, while this branch's durable-knowledge hooks add another 24, so the
-                // combined tree is `:11828 - 7 + 13 + 24 = :11858`.
-                //
-                // MERGE OF `upstream/main` 117b430c2 INTO THIS BRANCH: `:11837` / `:11858` => `:11874`.
-                // This is the case the COLLISION NOTE above was written for, and it arrived as a real
-                // conflict rather than a silent auto-merge. BOTH incoming numbers were stale, each
-                // correct only for its own side: this branch's `:11837` counts the search-observer `-7`,
-                // the axis-scoped `-7` and the CR 500.5 `+23`, but not upstream's insertions; upstream's
-                // `:11858` counts the Ward continuation `+13` and the durable-knowledge hooks `+24`, but
-                // not this branch's. The shifts are INDEPENDENT and COMPOSE, so accepting either side
-                // verbatim would have been wrong by `37` or `16` respectively.
-                //
-                // Resolved BY CONTENT FIRST, arithmetic afterwards as a CHECK, per the doctrine at the
-                // head of this log. The line whose sha256 (WITH trailing newline) is
-                // `8a544e878d3e77fb80391b95af8f74059540d5ce4ad6fb83559f364df5cc7d63` sits at `:11874`
-                // in the merged tree; that digest matches exactly ONE line under a whole-file scan, and
-                // the literal text is likewise unique, so the coordinate is unambiguous. The check:
-                // `11828 -7 (search-observer) -7 (axis-scoped) +23 (CR 500.5) +13 (Ward) +24 (durable
-                // knowledge) = 11874`, which equals the located coordinate exactly. The conflict markers
-                // sat BELOW the producer, so resolving them could not have shifted it.
-                //
-                // #7128 adds forty lines above this producer while introducing the source-bound debug
-                // card entry boundary. The producer remains byte-identical; only its coordinate moves.
-                //
-                // SET PRESERVATION: unchanged. Upstream adds no line matching the needle to this file and
-                // neither does this branch.
-                //
-                // REBASE — this coordinate has absorbed THREE independent shifts and all are folded
-                // here rather than each overwriting the last. From the merge base at `:12004`:
-                //   upstream #7303 round 3: -1  (the `ReturnAsAuraTarget` resume arm's two raw
-                //     attach calls became one call to the entering-Aura attachment authority,
-                //     `-8 +7`, in a hunk ABOVE this producer)
-                //   upstream #4155: +5  (seven lines for abandoned-cast finalization, less two
-                //     removed by its deferred-resume cleanup — also entirely above this producer)
-                //   lane C1 (CR 603.5 may-answer journal): +35  (five `+2` journal clears paired
-                //     with the five ring clears, plus `+25` for the `DecideOptionalEffect` arm)
-                // No two of those hunks overlap, so the shifts compose: 12004 -1 +5 +35 = 12043.
-                // The value below is MEASURED in the rebased file by content digest, never computed
-                // from that sum; the sum is retained only as the prediction it agreed with, and it
-                // did agree. The offset from the enclosing fn is the control and is unchanged at 134.
-                //
-                // Producer identity re-established rather than assumed: the line at the new
-                // coordinate is byte-identical to the base's `:12004` and to upstream's `:12003`
-                // (`return Ok(Some(WaitingFor::OptionalEffectChoice {`), and it is still inside
-                // `begin_pending_trigger_target_selection`. THE OPENING BRACE IS QUOTED WHOLE
-                // AGAIN, and that is the point: it was dropped as a workaround because the census
-                // had no comment filter and this sentence counted ITSELF as the 39th hit against
-                // a pin of 38. Mutilating the prose repaired the sentence, not the counter — the
-                // next whole quotation anywhere in the crate would have broken it again. The
-                // counter now excludes comment text, so this line is a comment and is not a site;
-                // restoring the brace is what makes that repair MEASURED on the real tree rather
-                // than latent. Under the old rule this exact line reds the census at 39.
-                //
-                // TO BE UNAMBIGUOUS FOR THE NEXT READER: the `+1` in `apply_action`'s
-                // `DecideOptionalEffect` arm is a READER, NOT A SIXTH PRODUCER. It destructures the cloned `state.waiting_for`
-                // scrutinee to journal the answer and never assigns `state.waiting_for`; the
-                // producer count in this vec is still five and this branch mints no new prompt.
-                //
-                // ⚠ RE-ADJUDICATED BY C2a (the CR 608.2b target axis on the same journal), NOT
-                // RELAXED. `:11977 ⇒ :12052`, **+75**, and ONLY this entry moved — the three
-                // `effects/mod.rs` pins and `scoped_library_search.rs:452` are in files C2a does
-                // not touch and did not move at all, which is the set-preservation evidence. The
-                // total stays **38** and the partition **5/8/25**: both of those asserts ran and
-                // fired GREEN on the run that caught this, so no producer or reader was gained.
-                // The `+75` is fully accounted for by C2a's own hunks ABOVE this line, measured
-                // with `git diff -U0 70fcd851a -- game/engine.rs`: `-3` (`entry_publishes_pin_slots`'s
-                // may-slot literal collapsing into `DecisionSlot::may`), `+1` (its target-slot
-                // comment), `+53` (`record_trigger_target_answer` and its doc), `+6`/`-2` (the
-                // `DecideOptionalEffect` arm re-expressed over `DecisionSlot::may` +
-                // `LoopAnswerValue::May`), `+1` (`source_id` bound in the `SelectTargets` arm) and
-                // `+19` (both `TriggerTargetSelection` arms' journal calls and their comments) —
-                // summing to exactly `+75`, so predicted `11977 + 75 = 12052` equals the observed
-                // coordinate. EVERY OTHER HUNK IN THIS FILE IS BELOW THIS PRODUCER — row T5 and
-                // this comment block, both inside `mod stage2_injector_tests` — which is why the
-                // shift equals the sum above it exactly. (No whole-file total is quoted here on
-                // purpose: this comment is itself part of that total, so the number could not be
-                // stated without falsifying itself.) Identity
-                // re-established rather than assumed: the line is sha256-identical
-                // (`8a544e87…5cc7d63` — the SAME digest this doc already recorded above) and is
-                // still inside `begin_pending_trigger_target_selection` (`:11843 ⇒ :11918`, the
-                // same `+75`). The diff instrument discriminates: the NEW tree at the OLD
-                // coordinate `:11977` holds a bare `source_id,` struct-field line, which mints
-                // nothing. C2a adds NO line matching the needle in a producing position.
-                //
-                // ⚠ C2a FIX ROUND (round 2/3, closing an independent review's F1/F2): `:12052 ⇒ :12132`,
-                // **+80**. RE-ADJUDICATED BY THE ORCHESTRATOR, NOT BY THE IMPLEMENTER — the executor was
-                // instructed to REPORT the shift and leave the literal alone, precisely so the number could
-                // not be nudged until the row passed. It complied; this line is the orchestrator's.
-                //
-                // Located BY CONTENT FIRST, arithmetic afterwards as a CHECK, per the doctrine at the head of
-                // this log. The line whose sha256 (WITH trailing newline) is
-                // `8a544e878d3e77fb80391b95af8f74059540d5ce4ad6fb83559f364df5cc7d63` sits at `:12132`; that
-                // digest matches exactly ONE line under a whole-file scan, so the coordinate is unambiguous.
-                // It is still inside `begin_pending_trigger_target_selection`, which opens at `:11998` with no
-                // intervening `fn`. The checks, computed AFTER locating the line and never used as its source:
-                // `12052 + 80 = 12132` for the producer and `11918 + 80 = 11998` for the function's opening
-                // line — the SAME `+80`, which is what a set of hunks lying wholly above one producer requires.
-                //
-                // The `+80` is accounted for by six hunks above this producer: `+2` (`EntryPinSlots.target`
-                // doc), `+1` (`legal_targets` doc), `+6` (fn doc), `+37` (the forced-target withhold), `+26`
-                // (writer doc) and `+8` (the writer's multi-slot guard). The remaining hunks are inside
-                // `mod stage2_injector_tests` and therefore below it.
-                //
-                // SET PRESERVATION: unchanged, and this is the conjunct that makes the move a SHIFT rather
-                // than a census drift. The other four entries are byte-identical AND unmoved
-                // (`effects/mod.rs:6252/6329/9522`, `scoped_library_search.rs:452`) — this round touches
-                // neither file. The total (**38**) and partition (**5/8/25**) asserts both ran FIRST and fired
-                // GREEN; the panic was on the third assert alone. Withholding a published `Targets` point
-                // removes a DECISION POINT, not a prompt producer, so no line matching the needle is added or
-                // removed by this round.
-                //
-                // ⚠ C2a FIX ROUND 3 (the cap round, closing the CR 704.5a bound regression the round-2 review
-                // found): `:12132 ⇒ :12302`, **+170**. Orchestrator's adjudication; the executor reported the
-                // shift and left the literal alone, as instructed.
-                //
-                // PURELY POSITIONAL, and that is measured rather than asserted: every hunk this round adds
-                // sits above `engine.rs:3133` (the announcement/charging split — `entry_announces`,
-                // `AnnouncedTarget`/`TargetAnnouncement`/`EntryAnnouncement`, and
-                // `bounded_cycle_charged_targets_for_window`), and there is NO hunk between there and this
-                // producer. The other four entries are byte-identical AND unmoved.
-                //
-                // Located BY CONTENT FIRST, arithmetic afterwards as a CHECK. The line whose sha256 (WITH
-                // trailing newline) is `8a544e878d3e77fb80391b95af8f74059540d5ce4ad6fb83559f364df5cc7d63`
-                // sits at `:12425`, and that digest matches exactly ONE line under a whole-file scan. It is
-                // still inside `begin_pending_trigger_target_selection`, which opens at `:12291` with no
-                // intervening `fn`. Checks computed AFTER locating it: `12302 + 123 = 12425` for the producer
-                // and `12168 + 123 = 12291` for the function's opening line — the SAME `+123`.
-                //
-                // FOURTH re-derivation of this one coordinate (`:12052 → :12132 → :12302 → :12425`),
-                // and the reason it keeps moving is that it is a LINE NUMBER in the most-edited function
-                // of the most-edited file. Every move has been resolved BY CONTENT FIRST — the digest
-                // above has been this producer's identity since `a6d1a0e62` and has never itself changed
-                // — with arithmetic used only as a check that agrees afterwards. A coordinate re-derived
-                // four times to the same content is evidence the pin tracks the right line, not evidence
-                // the pin is fragile.
-                //
-                // SET PRESERVATION (C2a round 4): that round adds a withhold CONDITION, not a prompt
-                // producer. `entry_announces` reports an announcement; it does not assign
-                // `state.waiting_for`, so no line matching the needle is added or removed (grep-counted 0
-                // on both the `+` and `-` sets). Total (38) and partition (5/8/25) both fire GREEN first;
-                // the panic was on the third assert alone, which is what makes it a coordinate shift
-                // rather than a population change.
-                //
-                // item-4 C2b (`WaitingFor::LoopShortcut.declaration`), base `1bc45bb8c`: `:12425 ⇒ :12552`,
-                // `+127`, and ONLY this entry moved — the other four live in `effects/` and
-                // `scoped_library_search.rs`, which this commit does not touch. LOCAL, not upstream, so the
-                // CI-vs-local diagnosis in the header does not apply.
-                //
-                // LOCATED BY CONTENT FIRST, as this log requires: the line at `:12552` is sha256-identical
-                // (`8a544e878d3e77fb80391b95…`, the digest this producer has carried since `a6d1a0e62`) to
-                // `1bc45bb8c:game/engine.rs:12425`, and it is still inside
-                // `begin_pending_trigger_target_selection`, which moved by the same `+127` (opens
-                // `:12291 ⇒ :12418`). Arithmetic afterwards as a CHECK: `git diff -U0` on this file has five
-                // hunks above the producer — `+4` and `+3` (the two `declaration: None` mints with their
-                // reasons, in `reconcile_terminal_result` and `interactive_loop_bridge`), `+5` (the mint
-                // wiring in `certified_bounded_cycle_offer`), `+110` (`build_bounded_declaration` and its
-                // doc), and `+5` (`apply_action`'s `declaration: _` discharge and its deferral note) — which
-                // sum to exactly `+127`. The file's remaining two hunks (`mod bounded_declaration_tests`,
-                // `+302`, and one `#[cfg(test)]` field, `+1`) sit BELOW it.
-                //
-                // SET PRESERVATION: this commit adds a FIELD to `WaitingFor::LoopShortcut` and one
-                // declaration consumer; neither assigns `state.waiting_for` to an
-                // `OptionalEffectChoice`, so no line matching the needle is added or removed. The total (38)
-                // and the partition (5/8/25) both fired GREEN on the run that caught this; the panic was on
-                // this third assert alone, which is what makes it a coordinate shift rather than a
-                // population change.
-                //
-                // item-4 C2b FIX ROUND (F1: `declaration_conforms`, the shared declare-legality
-                // authority), base `908720e6f`: `:12552 ⇒ :12582`, `+30`, and ONLY this entry moved —
-                // the other four live in `effects/` and `scoped_library_search.rs`, untouched here.
-                // LOCAL, not upstream, so the CI-vs-local diagnosis in the header does not apply.
-                //
-                // LOCATED BY CONTENT FIRST, as this log requires: the line at `:12582` is
-                // sha256-identical (`8a544e878d3e77fb80391b95…`, the digest this producer has carried
-                // since `a6d1a0e62`) to `908720e6f:game/engine.rs:12552`, and it is still inside
-                // `begin_pending_trigger_target_selection`, which moved by the same `+30` (opens
-                // `:12418 ⇒ :12448`). Arithmetic afterwards as a CHECK: `git diff -U0` on this file has
-                // five hunks above the producer — `+22` (`build_bounded_declaration`'s "PUBLISHED IS
-                // VALIDATED" doc section), `0` (the `Some(..)` tail rebound to `let template = ..`),
-                // `+10` (step (5)'s `declaration_conforms` call), `-2` (the `required` derivation
-                // DELETED from `handle_declare_shortcut`, now derived once inside the authority) and
-                // `0` (that site's condition rewritten in place) — summing to exactly `+30`. The
-                // file's remaining hunk (row D8 in `mod bounded_declaration_tests`, `+139`) is BELOW.
-                //
-                // SET PRESERVATION: this round adds one validation call and one `#[cfg(test)]` row;
-                // neither assigns `state.waiting_for` an `OptionalEffectChoice`, so no line matching
-                // the needle is added or removed. The total (38) and the partition (5/8/25) both fired
-                // GREEN on the run that caught this; the panic was on this third assert alone.
-                //
-                // ⚠ C3 (the stale-coordinate comment sweep), REBASED ONTO THE C2b FIX ROUND:
-                // `:12582 ⇒ :12590`, `+8`, LOCAL — measured at this tip, not carried. C3's own
-                // hunks above this producer are unchanged and have always summed to `+8`: `+1` in
-                // `shortcut_drive_period` and `+1` in `handle_declare_shortcut` (both replacing a
-                // measured-wrong "8 KB" WS frame cap with `phase-server`'s `MAX_WS_MESSAGE_BYTES`,
-                // 64 KB), `+2` on `reject_shortcut_declaration`'s doc (rotted `MagicCompRules.txt` line
-                // numbers dropped in favour of the CR numbers, which are the stable identifiers), and
-                // `+4` on `handle_decline_shortcut`'s doc (the twice-rotted `engine.rs:3006-3011`
-                // ring-clear coordinate replaced by a SYMBOL reference). `engine.rs`'s entire delta in
-                // C3 is COMMENT HUNKS and nothing else, so a comment round cannot mint a prompt.
-                //
-                // THIS ENTRY'S BASE HAS NOW BEEN RE-DERIVED SIX TIMES, and recording that is the point.
-                // C3 was authored against `70fcd851a` (`:11977 ⇒ :11985`); successive rebases moved its
-                // base to C2a's `:12052`, then `:12132`, then `:12302`, then C2a round 4's `:12425`,
-                // then C2b's `:12552`, and now the C2b fix round's `:12582`. Every stored number was
-                // correct only for the parent it was written against, and every time the CONTENT was
-                // unchanged. **A coordinate is a fact about a tree, not a property of this commit** —
-                // which is exactly why C3 replaces line coordinates with SYMBOL references everywhere
-                // else, and why this row's own pin is the one place that cannot take its own advice.
-                //
-                // Resolved BY CONTENT FIRST, arithmetic afterwards as a CHECK: the line whose sha256
-                // (WITH trailing newline) is `8a544e878d3e77fb80391b95af8f74059540d5ce4ad6fb83559f364df5cc7d63`,
-                // which must match exactly ONE line under a whole-file scan and must still sit inside
-                // `begin_pending_trigger_target_selection` with no intervening `fn`.
-                //
-                // SET PRESERVATION (C3): unchanged. The other four entries live in `game/effects/mod.rs`
-                // and `game/effects/scoped_library_search.rs`, neither of which C3 touches, and a comment
-                // round adds no line matching the needle — total still 38, partition still 5/8/25.
-                //
-                // ⚠ item-4 R1 (the `Ranking` parameterization): `:12590 ⇒ :12575`, `-15`, LOCAL.
-                // Resolved BY CONTENT FIRST per the protocol above: the sha256 above matched exactly
-                // ONE line under a whole-file scan, at `:12575`, and the nearest preceding `fn` is
-                // still `begin_pending_trigger_target_selection` (`:12441`) with none intervening.
-                // Arithmetic CHECK afterwards: `git diff -U0` against the parent shows exactly four
-                // non-zero hunks above the old coordinate — `+2` and `+5` on `shortcut_drive_period`'s
-                // doc (Ruling B's dormancy REASON restated: the type now admits a seat subject, so the
-                // dormancy is a measured producer property rather than a structural one) and `-5`/`-17`
-                // for `slot_source_prompted`'s factoring into
-                // `analysis::decision_template::resolve_ability_instance` (a doc block and its two
-                // inlined zone arms, replaced by one delegating call and a pointer) — summing to `-15`.
-                // SET PRESERVATION: all four hunks are a doc block or a delegating call; none assigns
-                // `state.waiting_for` and none mints a prompt, and this round's remaining `engine.rs`
-                // hunks are inside `#[cfg(test)]` below this producer. The total (38) and the
-                // partition (5/8/25) both fired GREEN on the run that caught this; only this third
-                // assert panicked.
-                //
-                // ⚠ item-4 R2 (the seat-pin provenance split): `:12575 ⇒ :12606`, `+31`, LOCAL.
-                // Resolved BY CONTENT FIRST per the protocol above: the sha256 recorded there
-                // matched exactly ONE line under a whole-file scan, at `:12606`, and the nearest
-                // preceding `fn` is still `begin_pending_trigger_target_selection` (`:12472`) with
-                // none intervening. Arithmetic CHECK afterwards: `git diff -U0` against the parent
-                // shows exactly four hunks above the old coordinate — `+5` on `entry_announces`'
-                // withhold rationale (a comment), `+12` on `shortcut_drive_period`'s dormancy doc
-                // (a comment), and `+1`/`+13` inside `record_trigger_target_answer` (its `use`
-                // list and the `TargetRef::Player` arm re-spelled to
-                // `Scheduled(Constant(Ranking::one(AnnouncementSubject::Seat(..))))`) — summing to
-                // `+31`, and `12575 + 31 = 12606` exactly. SET PRESERVATION: two of the four hunks
-                // are pure comment; the other two are a `use` list and ONE expression inside a
-                // `LoopAnswerValue::Targets` mapping, which assigns no `state.waiting_for` and
-                // mints no `OptionalEffectChoice` prompt. This round's remaining `engine.rs` hunks
-                // are all inside `#[cfg(test)] mod stage2_injector_tests`, BELOW this producer. The
-                // total (38) and the partition (5/8/25) both fired GREEN on the run that caught
-                // this — only this third assert (`:17342`) panicked.
-                //
-                // R2b (the slot-question accessor migration at the last three call sites):
-                // `:12606 ⇒ :12622`, +16. LOCAL, not upstream — the CI-vs-local diagnosis in the
-                // header does not apply. Arithmetic CHECK: `git diff -U0` against the parent has
-                // NINE hunks above the old coordinate, netting exactly `+16`, and
-                // `12606 + 16 = 12622`. SET PRESERVATION: every one of those nine is either a
-                // doc/comment rewrite (the CR 114.2 → CR 114.4 / CR 113.6p sweep, the two
-                // `pinned_*` headers, `slot_source_prompted`'s header, `bounded_cycle_pin_slots`'
-                // class list) or ONE of the two production call-site swaps
-                // (`resolve_source(&slot.source, clone) == Some(source_id)` ⇒
-                // `slot_source_prompted(clone, &slot.source, source_id)`), which changes which
-                // predicate answers a slot question and assigns no `state.waiting_for` — it mints
-                // no `OptionalEffectChoice` prompt. This round's remaining `engine.rs` hunks are
-                // inside `#[cfg(test)] mod stage2_injector_tests`, BELOW this producer. The total
-                // (38) and the partition (5/8/25) both fired GREEN on the run that caught this —
-                // only this third assert panicked. Identity re-established rather than assumed:
-                // line `:12622` is byte-identical by sha256
-                // (`8a544e878d3e77fb…5cc7d63`, the SAME hash this log recorded for `:11549` and
-                // `:11583`) to `10e80db9c:engine.rs:12606`, and it is still inside
-                // `begin_pending_trigger_target_selection`, which moved by the same +16 (opens
-                // `:12472 ⇒ :12488`).
-                //
-                // ⚠ item-4 R3 (the drive-end seam's CR 732.2a doc amendment): `:12622 ⇒ :12646`,
-                // `+24`. LOCAL, and a COMMENT-ONLY round. Resolved BY CONTENT FIRST per the
-                // protocol above: the sha256 this log already records for this producer
-                // (`8a544e878d3e77fb…5cc7d63`) matches EXACTLY ONE line under a whole-file scan
-                // of the new tree, at `:12646` — and exactly one in the parent, at `:12622` — and
-                // it is still inside `begin_pending_trigger_target_selection`, which moved by the
-                // same +24 (opens `:12488 ⇒ :12512`). Arithmetic CHECK afterwards, never as the
-                // source: `git diff -U0` against the parent shows exactly ONE hunk ABOVE this
-                // producer, `@@ -4452,0 +4453,24 @@` inside `materialize_fixed_shortcut` — the
-                // CR 732.2a episode-boundary amendment — and `12622 + 24 = 12646` exactly. (The
-                // file carries a SECOND hunk, this very comment block; it is BELOW the producer
-                // and so contributes nothing to the coordinate. Counting whole-file hunks instead
-                // of hunks-above-the-producer is the arithmetic slip to avoid here.)
-                // SET PRESERVATION: all 24 inserted lines are `//` comments, so no
-                // `waiting_for = ` or `Ok(Some(` line was added and a comment round cannot mint a
-                // prompt. R3's `crates/engine/src` diff is comment-only APART FROM THIS PIN
-                // STRING: with comment lines stripped, `analysis/decision_template.rs` is
-                // byte-identical to the parent and `game/engine.rs` differs in exactly one line —
-                // the pin literal directly below. The total (38) and the partition
-                // (5/8/25) both fired GREEN on the run that caught this — only this third assert
-                // panicked.
-                //
-                // ⚠ item-4 R3 FIX-ROUND 3 (reword of that same block's abort-entry PROBE-PINNED
-                // clause, which called the window "equally live" while reporting `answers=0`):
-                // `:12646 ⇒ :12651`, `+5`. LOCAL, COMMENT-ONLY again, same protocol: the recorded
-                // sha256 (`8a544e878d3e77fb…5cc7d63`, verbatim line + trailing newline) matches
-                // EXACTLY ONE line under a whole-file scan of the new tree, at `:12651` — and
-                // exactly one in the parent, at `:12646` — and it is still inside
-                // `begin_pending_trigger_target_selection`, which moved by the same +5 (opens
-                // `:12512 ⇒ :12517`). Arithmetic CHECK afterwards, never as the source: `git diff
-                // -U0` shows exactly ONE hunk ABOVE this producer, `@@ -4469,2 +4469,7 @@` inside
-                // `materialize_fixed_shortcut` (2 comment lines ⇒ 7), and `12646 + 5 = 12651`.
-                // The other hunk is this very block plus the pin below it — BELOW the producer,
-                // contributing nothing, the same slip the entry above flags. SET PRESERVATION
-                // holds identically: all 5 net inserted lines are `//` comments, so no
-                // `waiting_for = ` or `Ok(Some(` line was added, and the pin below is once more
-                // the ONLY non-comment line in this round's `crates/engine/src` diff.
-                // ⚠ RE-REBASE onto upstream `7127326673`: `:12712 ⇒ :12717`, the **+5** that
-                // upstream #4155 inserts above this producer (seven lines for abandoned-cast
-                // finalization, less two removed by its deferred-resume cleanup). LOCATED BY
-                // CONTENT DIGEST, never by arithmetic: the line whose sha256 is
-                // `8a544e87…5cc7d63` matches exactly ONE line under a whole-file scan and is
-                // still inside `begin_pending_trigger_target_selection`, at the invariant offset
-                // 134. `12712 + 5` is the CHECK that agreed, not the derivation.
-                //
-                // ⚠ item-4 C2 (the manual declare path honours the offer's own published
-                // declaration): `:12717 ⇒ :12759`, `+42`. LOCAL, not upstream. LOCATED BY
-                // CONTENT DIGEST, never by arithmetic: the line whose sha256 is
-                // `8a544e87…5cc7d63` — the digest this log has carried since `a6d1a0e62` —
-                // matches EXACTLY ONE line under a whole-file scan of the new tree, at `:12759`,
-                // and exactly one in the parent, at `:12717`. It is still inside
-                // `begin_pending_trigger_target_selection` (`:12625`) with no intervening `fn`,
-                // at the INVARIANT OFFSET 134 — `12759 - 12625`, and the parent's
-                // `12717 - 12583`. Arithmetic CHECK afterwards, never as the source: `git diff
-                // -U0` against the parent shows FOUR hunks, ALL above this producer — `+4`
-                // (`LoopShortcutOffer`'s new `declaration` field and its doc), `+35`
-                // (`handle_declare_shortcut`'s `or_else` and the placement rationale above it),
-                // `+2` net (`apply_action`'s `declaration: _` discharge rewritten as a bind,
-                // `-5`/`+7`) and `+1` (`declaration: declaration.as_ref(),` in the struct
-                // literal) — summing to exactly `+42`, and `12717 + 42 = 12759`.
-                //
-                // DERIVED TWICE, ACROSS A REBASE, AND THAT IS THE ENTRY'S POINT. This value was
-                // first measured pre-rebase against `b51e45c59`, then DISCARDED unused and
-                // re-derived from scratch against the rebased tree rather than carried — the
-                // discipline the entry six above states as *"a coordinate is a fact about a
-                // tree, not a property of this commit"*. The two derivations agreeing is a
-                // result, not a shortcut that was taken. (The rebase moved this file's OTHER
-                // stale element for us: upstream `d11529d0c` re-pinned
-                // `game/effects/mod.rs:9922 ⇒ :9932`, which arrived through the rebase already
-                // correct and is not this commit's to touch.)
-                //
-                // SET PRESERVATION: C2 adds ONE production statement (an `Option::or_else`) and
-                // one struct field, and rewrites a match-arm binding from `declaration: _` to a
-                // bind. None of the three assigns `state.waiting_for`, so no line matching the
-                // needle is added or removed and no `OptionalEffectChoice` prompt can be minted.
-                // Confirmed by the failure shape rather than by inspection alone: the total (38)
-                // and the partition (5/8/25) both fired GREEN on the run that caught this, and
-                // the panic was on this third assert alone — which is what makes it a coordinate
-                // shift rather than a population change.
-                // ⚠ REBASE onto upstream `635c51ec4` (#7382, pre-entry opponent controller):
-                // `:12759 ⇒ :12763`, +4 from a hunk at `apply_action` `@@ -9867,0 +9868,4 @@`,
-                // entirely above this producer. MEASURED in the rebased file, never computed: the
-                // offset from `begin_pending_trigger_target_selection` is the control and is STILL
-                // 134, which is what re-establishes identity — the same mint text occurs at several
-                // coordinates in this crate, so the offset discriminates where the text cannot.
-                // This rebase raised the literal as a CONFLICT twice and then drifted it SILENTLY a
-                // third time at the tip; only the offset control caught the silent one. That is the
-                // drift class FU-4 (content-hash coordinate anchor) exists to end.
-                // #7320's random-discard continuation adds ten lines above this producer in the
-                // merged tree. Re-derived by the exact producer text at `:12773`, not by carrying
-                // the prior coordinate.
-                // Proliferate frame-orphan fix (#7384): `:12773 ⇒ :12796`, +23, and ONLY this
-                //   engine.rs entry moved — the four `effects/mod.rs` +
-                //   `scoped_library_search` entries were re-read byte-identical AND in
-                //   place, which is the set-preservation evidence. `git diff -U0` on this
-                //   file has exactly seven hunks; six sit at `:11`–`:11687`, entirely ABOVE
-                //   this producer: net `0` (a dropped `PlayerActionKind` import), `+1` (the
-                //   `game_state` import list gaining a line), `-7` and `+9` (the
-                //   `ProliferateChoice` handler taking its frame BEFORE applying counters),
-                //   `+24` (the loop-pin block moved above `apply_proliferate`, plus the
-                //   completion construction) and `-4` (the terminal `EffectResolved` push
-                //   moving into `continue_proliferate_actions`). `0+1-7+9+24-4 = +23`, and
-                //   predicted `12773+23` equals the observed coordinate exactly. The seventh
-                //   and only remaining hunk is THIS drift note, which sits at `:18964` —
-                //   below the producer — so nothing that moved it is unaccounted for.
-                //   Deliberately stated WITHOUT pinning that hunk's own line count or the
-                //   whole-file delta: this note is self-referential, its length feeds any
-                //   such total, and the previous revision of this row asserted a
-                //   whole-file figure that its own next wording edit falsified by exactly
-                //   the size of that edit. The six above-producer hunks are the whole
-                //   load-bearing claim; the seventh is identified by position, which no
-                //   rewording can invalidate.
-                //   None of it mints a prompt: the handler consumes an ALREADY-minted
-                //   `ProliferateChoice`, and the completion defers a keyword action rather
-                //   than creating a recipient, so the census set is still exactly 5.
-                //   Identity re-established, not assumed, on BOTH controls this row uses:
-                //   the line at `:12796` is sha256-identical (`8a544e87…5cc7d63`) to
-                //   `origin/main:crates/engine/src/game/engine.rs:12773`, and its offset from
-                //   `begin_pending_trigger_target_selection` (`:12662`) is STILL 134 — the
-                //   control that caught this row's one historical SILENT drift.
-                "game/engine.rs:12851".to_string(),
+                "game/effects/mod.rs::drive_sequential_repeated_optional_payment {player:ability.controller,source_id:ability.source_id,description:ability.description.clone(),may_trigger_key:None}".to_string(),
+                "game/effects/mod.rs::resolve_chain_body {player:prompt_player,source_id:ability.source_id,description,may_trigger_key}".to_string(),
+                "game/effects/mod.rs::resolve_repeated_optional_payment_choice {player,source_id,description,may_trigger_key:None}".to_string(),
+                "game/effects/scoped_library_search.rs::advance_acceptance {player,source_id,description,may_trigger_key:None}".to_string(),
+                "game/engine.rs::begin_pending_trigger_target_selection {player,source_id,description:trigger_description,may_trigger_key}".to_string(),
             ],
-            "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
-             plus the two repeated-optional-payment drivers, the per-player acceptance cursor \
-             in `scoped_library_search`, and `begin_pending_trigger_target_selection`'s \
-             ANNOUNCEMENT-time modal prompt. Four of the five choose `player` WITHOUT \
+            "the five production producers, each keyed by its ENCLOSING FUNCTION and the \
+             CONSTRUCTION it mints, compared as a sorted MULTISET, so a sixth mint inside one \
+             of these functions still fails here. Four of the five choose `player` WITHOUT \
              consulting the recipient authority, which is exactly why the mint conjunct is a \
-             fail-closed pre-filter and not a soundness proof"
+             fail-closed pre-filter and not a soundness proof. A CR 603.5 producer's \
+             construction changed — if that was intended, update this literal; if it was not, \
+             you changed who or how the optional choice is offered."
         );
 
         // Exactly ONE of them routes through the recipient authority: the CR 603.5 gate.
         let effects_src = std::fs::read_to_string(root.join("game/effects/mod.rs"))
             .expect("readable effects module");
         let authority = format!("{}_prompt_player", "optional");
-        // CODE ONLY, and now the CODE HALF of each line rather than only non-comment lines:
-        // a whole-file `matches()` counted PROSE, and this PR's C1 adds a doc link to the
-        // authority in `upfront_optional_gate`'s comment — a mention that is neither a
-        // definition nor a call. `crate::source_census::code` is the shared rule; the pinned
-        // count is unchanged at 2 (re-measured), and a real second call still trips it because
+        // Counted over the CODE HALF of each line, via `crate::source_census::code`: a prose
+        // mention of the authority is not a call. A real second call still trips this, because
         // a call cannot live in comment text.
         let authority_code_hits = effects_src
             .lines()
@@ -19391,6 +18731,144 @@ mod stage2_injector_tests {
             "one definition + exactly one call — the CR 603.5 gate's `let prompt_player = ..`. \
              A second call inside `effects/mod.rs` means a second producer started consulting \
              the authority and this row's partition needs re-deriving"
+        );
+    }
+
+    /// The producer key's discrimination, on PLANTED input: the real tree cannot exhibit both
+    /// polarities at once, so a repo-scanning assertion for this property is vacuous BY
+    /// CONSTRUCTION. Each arm feeds `cr_603_5_sites` a synthetic source and states what the
+    /// key must and must not move with. The mint spelling is ASSEMBLED, so none of these
+    /// sources is itself a census site.
+    #[test]
+    fn a_producer_key_moves_with_the_construction_and_not_with_its_position() {
+        let mint = format!("WaitingFor::{}Choice {{", "OptionalEffect");
+        let rel = "game/planted.rs";
+        let keys = |lines: &[&str]| cr_603_5_sites(rel, &lines.join("\n")).0;
+        let base_key = format!(
+            "{rel}::mint_one {{player:prompt_player,source_id:ability.source_id,may_trigger_key}}"
+        );
+        let assign = format!("    state.waiting_for = {mint}");
+
+        // BASELINE — the paired positive for the bare negative below: the same scanner,
+        // through the same helpers, returns exactly one key for one construction.
+        let baseline = keys(&[
+            "fn mint_one() {",
+            assign.as_str(),
+            "        player: prompt_player,",
+            "        source_id: ability.source_id,",
+            "        may_trigger_key,",
+            "    };",
+            "}",
+        ]);
+        assert_eq!(
+            baseline,
+            vec![base_key.clone()],
+            "one construction in one function keys as `file::fn {{fields}}`"
+        );
+
+        let moved = keys(&[
+            "// text above the producer",
+            "// more text above the producer",
+            "// and more",
+            "fn mint_one() {",
+            "    let _ = ();",
+            assign.as_str(),
+            "        player: prompt_player,",
+            "        source_id: ability.source_id,",
+            "        may_trigger_key,",
+            "    };",
+            "}",
+        ]);
+        assert_eq!(
+            moved, baseline,
+            "inserting lines above a producer must not move its key"
+        );
+
+        let nested_assign = format!("        state.waiting_for = {mint}");
+        let renested = keys(&[
+            "fn mint_one() {",
+            "    if gate {",
+            nested_assign.as_str(),
+            "            player: prompt_player,",
+            "            source_id: ability",
+            "                .source_id,",
+            "            may_trigger_key,",
+            "        };",
+            "    }",
+            "}",
+        ]);
+        assert_eq!(
+            renested, baseline,
+            "re-indenting the construction and breaking a field expression across lines is \
+             what `rustfmt` does; neither may move the key"
+        );
+
+        let twice = keys(&[
+            "fn mint_one() {",
+            assign.as_str(),
+            "        player: prompt_player,",
+            "        source_id: ability.source_id,",
+            "        may_trigger_key,",
+            "    };",
+            assign.as_str(),
+            "        player: prompt_player,",
+            "        source_id: ability.source_id,",
+            "        may_trigger_key,",
+            "    };",
+            "}",
+        ]);
+        assert_eq!(
+            twice,
+            vec![base_key.clone(), base_key.clone()],
+            "a second mint inside an already-pinned function is a counted event: the keys are \
+             a MULTISET, not a set"
+        );
+
+        let removed = keys(&["fn mint_one() {", "    let _ = ();", "}"]);
+        assert!(
+            removed.is_empty(),
+            "a function that mints nothing yields no key, got {removed:?}"
+        );
+
+        let rebound = keys(&[
+            "fn mint_one() {",
+            assign.as_str(),
+            "        player: ability.controller,",
+            "        source_id: ability.source_id,",
+            "        may_trigger_key,",
+            "    };",
+            "}",
+        ]);
+        assert_eq!(
+            rebound,
+            vec![format!(
+                "{rel}::mint_one {{player:ability.controller,source_id:ability.source_id,may_trigger_key}}"
+            )],
+            "the recipient expression is part of the key"
+        );
+
+        let second_authority = keys(&[
+            "fn mint_one() {",
+            assign.as_str(),
+            "        player: prompt_player,",
+            "        source_id: ability.source_id,",
+            "        may_trigger_key: None,",
+            "    };",
+            "}",
+        ]);
+        assert_eq!(
+            second_authority,
+            vec![format!(
+                "{rel}::mint_one {{player:prompt_player,source_id:ability.source_id,may_trigger_key:None}}"
+            )],
+            "the stored-choice authority is part of the key, with the recipient HELD"
+        );
+
+        assert!(
+            rebound != baseline && second_authority != baseline,
+            "a construction REPLACED inside an already-pinned function must move its key — \
+             recipient rebound: {rebound:?}; stored-choice authority changed: \
+             {second_authority:?}; unchanged construction: {baseline:?}"
         );
     }
 

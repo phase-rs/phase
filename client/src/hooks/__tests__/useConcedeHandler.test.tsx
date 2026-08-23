@@ -27,7 +27,13 @@ vi.mock("../../game/sessionCleanup", () => ({
   clearPromptOverlayState: () => clearPromptOverlayStateMock(),
 }));
 
-vi.mock("../../stores/gameStore", () => ({
+// Only the store handle and `clearGame` are stubbed. The module's pure
+// helpers — `seatSource` and the `GAME_MODE_TRAITS` census behind it, which
+// `getPlayerId()` consults for the conceding seat — come through for real, so
+// this test concedes as the seat the census actually resolves rather than as a
+// seat the mock asserts.
+vi.mock("../../stores/gameStore", async () => ({
+  ...(await vi.importActual<typeof import("../../stores/gameStore")>("../../stores/gameStore")),
   useGameStore: {
     getState: () => ({
       dispatch: dispatchMock,

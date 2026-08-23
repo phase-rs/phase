@@ -25,7 +25,11 @@ fn vohar_parses_effect_discard_condition() {
         .as_ref()
         .and_then(|discard| discard.sub_ability.as_ref())
         .expect("Vohar's loot ability must contain its drain rider");
-    let Some(AbilityCondition::ZoneChangedThisWay { filter }) = &drain.condition else {
+    let Some(AbilityCondition::ZoneChangedThisWay {
+        filter,
+        destination: None,
+    }) = &drain.condition
+    else {
         panic!(
             "Vohar must check the card discarded by the effect: {:?}",
             drain.condition

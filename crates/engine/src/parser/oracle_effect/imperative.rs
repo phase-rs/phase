@@ -24,6 +24,8 @@ use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
 use crate::parser::oracle_nom::enters_under::{bind_control_clause, name_entry_control_antecedent};
+use crate::parser::oracle_nom::filter as nom_filter;
+use crate::parser::oracle_nom::filter::ControlledPermanentsConjunct;
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_nom::quantity as nom_quantity;
 use crate::parser::oracle_nom::target as nom_target;
@@ -37,8 +39,8 @@ use crate::types::ability::{
     CardSelectionMode, CategoryChooserScope, ChoiceType, Chooser, ContinuousModification,
     ControlWindow, ControllerRef, CopyRetargetPermission, CounterAdjustment, DigSource, DoorLockOp,
     Duration, Effect, EffectScope, FaceDownProfile, FilterProp, ForceBlockAttackerRef,
-    GrantedAbilityScope, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PlayerScope,
-    PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef,
+    GrantedAbilityScope, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PerPlayerScope,
+    PlayerScope, PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef,
     ReassembleControlMode, SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment,
     TapStateChange, TargetFilter, TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
     ZoneOwner,
@@ -1846,6 +1848,7 @@ pub(super) fn parse_targeted_action_ast(
                 count = QuantityExpr::Ref {
                     qty: QuantityRef::PreviousEffectAmount {
                         channel: crate::types::ability::DamageChannel::Total,
+                        aggregate: crate::types::ability::AggregateFunction::Sum,
                     },
                 };
             }
@@ -4594,7 +4597,7 @@ pub(super) fn parse_for_each_player_choose_from_zone(
         return Some(ChooseImperativeAst::FromZone {
             count,
             zones,
-            zone_owner: ZoneOwner::EachPlayer,
+            zone_owner: ZoneOwner::Each(PerPlayerScope::AllPlayers),
             filter,
             chooser,
             up_to,
@@ -4691,11 +4694,13 @@ fn parse_controlled_battlefield_body(
 /// optionally zero via "up to one"), accumulated into the chain's tracked set,
 /// then ALL chosen permanents are exiled (`ChangeZoneAll { TrackedSet }`).
 ///
-/// "for each player" iterates every player (`ZoneOwner::EachPlayer`); "for each
-/// other player" excludes the controller (`ZoneOwner::EachOpponent`). Emitted as
-/// a `ChooseFromZone { EachPlayer/EachOpponent }` clause with the mass-exile as
-/// its `sub_ability`, mirroring how the choose-only cards chain a separate
-/// "exile those" sentence.
+/// CR 101.4: "for each player" iterates every player in APNAP order
+/// (`PerPlayerScope::AllPlayers`). CR 102.3: "for each other player" is the same
+/// walk with the controller removed (`PerPlayerScope::OtherPlayers`) — every
+/// player except you, teammates included, which is why this is not the
+/// team-relative opponent set. Emitted as a `ChooseFromZone { Each(..) }` clause
+/// with the mass-exile as its `sub_ability`, mirroring how the choose-only cards
+/// chain a separate "exile those" sentence.
 pub(super) fn parse_for_each_player_exile_controlled(
     lower: &str,
     ctx: &mut ParseContext,
@@ -4704,12 +4709,21 @@ pub(super) fn parse_for_each_player_exile_controlled(
 
     let (after_prefix, iter_scope) = alt((
         value(
-            ZoneOwner::EachOpponent,
+            ZoneOwner::Each(PerPlayerScope::OtherPlayers),
             tag::<_, _, E>("for each other player, "),
         ),
-        value(ZoneOwner::EachOpponent, tag("for each other player ")),
-        value(ZoneOwner::EachPlayer, tag("for each player, ")),
-        value(ZoneOwner::EachPlayer, tag("for each player ")),
+        value(
+            ZoneOwner::Each(PerPlayerScope::OtherPlayers),
+            tag("for each other player "),
+        ),
+        value(
+            ZoneOwner::Each(PerPlayerScope::AllPlayers),
+            tag("for each player, "),
+        ),
+        value(
+            ZoneOwner::Each(PerPlayerScope::AllPlayers),
+            tag("for each player "),
+        ),
     ))
     .parse(lower)
     .ok()?;
@@ -5891,25 +5905,38 @@ pub(super) fn parse_utility_imperative_ast(
     None
 }
 
+/// Parse the target phrase of a "Copy target <stack ability> …" effect.
+///
+/// CR 707.10: copying an activated or triggered ability puts a copy of it onto
+/// the stack. CR 113.3b / CR 113.3c + CR 115.1: the kind spelling defines the
+/// legal target set, so a "triggered ability" phrase must NOT accept an
+/// activated ability (Mister Fantastic / Strionic Resonator / Kirol).
+///
+/// Two independent axes, composed — never enumerated as a spelling×qualifier
+/// product:
+///   1. ability kind → delegated to `nom_target::parse_ability_kind`, the
+///      single authority shared with the counter and cost-condition paths;
+///   2. controller qualifier → the local "you control" tag.
+///
+/// CONTRACT (preserved): returns `None` for any qualifier that is neither
+/// "you control" nor end-of-phrase, so a phrase this combinator cannot fully
+/// model (e.g. "you don't control", or a spell+ability disjunction such as
+/// Return the Favor's) falls through to `parse_stack_object_target` rather than
+/// silently widening to an unscoped `StackAbility`. Source restrictions
+/// ("… from an artifact source") remain in the returned remainder,
+/// byte-identical to pre-delegation behavior.
 fn parse_copy_stack_ability_target(input: &str) -> Option<(TargetFilter, &str)> {
     let (input, _) = opt(tag::<_, _, OracleError<'_>>("target "))
         .parse(input)
         .ok()?;
-    let (input, _) = alt((
-        tag::<_, _, OracleError<'_>>("activated or triggered ability"),
-        tag("triggered or activated ability"),
-        tag("activated ability"),
-        tag("triggered ability"),
-    ))
-    .parse(input)
-    .ok()?;
+    let (input, kind) = nom_target::parse_ability_kind(input).ok()?;
     let (input, _) = nom::character::complete::multispace0::<_, OracleError<'_>>(input).ok()?;
     if let Ok((rem, _)) = tag::<_, _, OracleError<'_>>("you control").parse(input) {
         return Some((
             TargetFilter::StackAbility {
                 controller: Some(ControllerRef::You),
                 tag: None,
-                kind: None,
+                kind,
             },
             rem,
         ));
@@ -5923,7 +5950,7 @@ fn parse_copy_stack_ability_target(input: &str) -> Option<(TargetFilter, &str)> 
             TargetFilter::StackAbility {
                 controller: None,
                 tag: None,
-                kind: None,
+                kind,
             },
             input,
         ));
@@ -5931,6 +5958,19 @@ fn parse_copy_stack_ability_target(input: &str) -> Option<(TargetFilter, &str)> 
     None
 }
 
+/// Build the stack-ability filter for a COUNTER phrase, from its controller
+/// qualifier alone.
+///
+/// CR 113.3b / CR 113.3c: `kind: None` (both kinds legal) is CORRECT here and
+/// is not a dropped axis. Every call site is gated to a phrase that names both
+/// kinds or none: `parse_counter_ast` (this file) requires
+/// "activated or triggered ability" or mass-mode bare "abilities", and both
+/// `oracle_effect::mod` sites require the same phrase. A kind-narrowing counter
+/// phrase ("counter target triggered ability …", Consign to Memory) never
+/// reaches here — it is routed to
+/// `oracle_nom::target::parse_stack_object_target`, which owns the kind axis
+/// via `parse_ability_kind`. Do not add a kind axis here without first widening
+/// those gates; doing so would be dead code.
 pub(super) fn stack_ability_filter_from_text(input: &str) -> TargetFilter {
     let controller = if nom_primitives::scan_contains(input, "you control") {
         Some(ControllerRef::You)
@@ -6009,6 +6049,22 @@ fn parse_attach_recipient<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetF
         {
             return (resolve_it_pronoun(ctx), &trimmed[lower.len()..]);
         }
+        // CR 608.2c: a DEMONSTRATIVE recipient after a clause that produced a
+        // permanent names that permanent — "manifest dread, then attach this
+        // Equipment to that creature" (Conductive Machete, #7531). Same anaphor
+        // and same authority the counter path already uses for the identical
+        // shape ("create a token, then put a counter on that creature"), so the
+        // two consumers cannot disagree about what "that creature" means.
+        //
+        // The DEMONSTRATIVE-only entry point is deliberate: bare "it" is already
+        // resolved by the branch above through
+        // `attach_neuter_recipient_resolves_via_subject`, a wider gate, and
+        // letting it fall through to here would change bare-pronoun attachment
+        // for chains that have nothing to do with a chain-created referent.
+        if let Some(bound) = super::counter::chain_created_demonstrative_binding(lower.trim(), ctx)
+        {
+            return (bound, &trimmed[lower.len()..]);
+        }
     }
     (target, rest)
 }
@@ -6057,10 +6113,17 @@ fn parse_neuter_attach_self_recipient(input: &str) -> OracleResult<'_, ()> {
 ///
 /// Every other chain keeps its pre-existing `parse_target` binding, unchanged:
 ///
-/// * **A chain with an earlier typed object referent** — "it" names that
-///   referent and `ParentTarget` is correct (Aura Graft "gain control of target
-///   Aura … attach **it** to another permanent"; Ogre Geargrabber; Auriok
-///   Survivors).
+/// * **A chain with an earlier typed object referent and NO public-zone move** —
+///   "it" names that referent and `ParentTarget` is correct (Aura Graft "gain
+///   control of target Aura … attach **it** to another permanent"; Ogre
+///   Geargrabber). Their parent is a `GainControl`, so CR 400.7j never applies
+///   and there is no moved card for "it" to name.
+/// * **A chain whose parent MOVES the card to the battlefield** (Sword of the
+///   Meek, Auriok Survivors) — "it" names the moved card under CR 400.7j, so
+///   `ParentTarget` is NOT correct there. It is rewritten to `SelfRef` after
+///   lowering by `lower::rebind_attach_attachment_to_forwarded_source_if_anaphor_names_moved_card`,
+///   because only that pass can see the parent effect. Nothing changes in this
+///   function.
 /// * **The Equipment-ETB class** (Embercleave — "When this Equipment enters,
 ///   attach **it** to target creature you control") — intentionally left at
 ///   `ParentTarget`. It is resolved at RUNTIME by
@@ -6357,15 +6420,22 @@ fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
         } else {
             TargetFilter::Any
         }
-    } else if let Some(permanent_type) = parse_compound_you_and_permanents(text, &lower) {
-        // CR 615 + CR 614.1a: "to you and [<type>] permanents you control" — a
-        // compound player+permanent recipient (Comeuppance's "you and
-        // planeswalkers you control"; Channel Harm's "you and permanents you
-        // control"). Checked BEFORE the bare "to you" scan (which this phrase
-        // also contains) so the permanent leg is not dropped. Lowered to the
-        // dedicated `DamageTargetFilter::PlayerOrPermanentsControlledBy` at
-        // shield creation — never to a bare `Or` that would leak to `valid_card`.
-        TargetFilter::ControllerAndControlledPermanents { permanent_type }
+    } else if let Some(conjunct) = parse_compound_you_and_permanents(text, &lower) {
+        // CR 615 + CR 614.1a: "to you and [other] [<type>] permanents you
+        // control" — a compound player+permanent recipient (Comeuppance's "you
+        // and planeswalkers you control"; Channel Harm's "you and permanents you
+        // control"; The Wanderer's "you and OTHER permanents you control").
+        // Checked BEFORE the bare "to you" scan (which this phrase also contains)
+        // so the permanent leg is not dropped. Lowered to the dedicated
+        // `DamageTargetFilter::PlayerOrPermanentsControlledBy` at shield creation
+        // — never to a bare `Or` that would leak to `valid_card`.
+        //
+        // CR 109.1: `source_scope` carries the "other" article through so the
+        // shield does not claim damage dealt to its own source.
+        TargetFilter::ControllerAndControlledPermanents {
+            permanent_type: conjunct.permanent_type,
+            source_scope: conjunct.source_scope,
+        }
     } else if nom_primitives::scan_contains(rest, "to you")
         || nom_primitives::scan_contains(rest, "to its controller")
     {
@@ -6425,33 +6495,23 @@ fn parse_prevent_that_would_deal_source_filter(text: &str, lower: &str) -> Optio
     }
 }
 
-/// CR 615 + CR 614.1a: Recognize the compound damage recipient "you and
-/// [`<type>`] permanents you control". Returns the permanent-leg type
-/// restriction — `Some(Some(Planeswalker))` for Comeuppance's "you and
-/// planeswalkers you control", `Some(None)` for Channel Harm's bare "you and
-/// permanents you control", and `None` when the phrase is absent. Nom
-/// combinators only — the plural type word is a single `alt()` axis.
-fn parse_compound_you_and_permanents(text: &str, lower: &str) -> Option<Option<CoreType>> {
+/// CR 615 + CR 614.1a + CR 109.1: Recognize the compound damage recipient "you
+/// and \[other\] [`<type>`] permanents you control". Returns the parsed conjunct
+/// — the permanent-leg type restriction plus the CR 109.1 self-exclusion article
+/// — or `None` when the phrase is absent.
+///
+/// The noun phrase itself is NOT re-spelled here: it delegates to
+/// [`nom_filter::parse_controlled_permanents_conjunct`], the single authority
+/// shared with the replacement surface's `parse_damage_target_phrase`. That is
+/// what keeps "artifacts/enchantments/lands you control" and the "other" article
+/// available on both surfaces instead of drifting apart.
+fn parse_compound_you_and_permanents(
+    text: &str,
+    lower: &str,
+) -> Option<ControlledPermanentsConjunct> {
     let region = TextPair::new(text, lower).strip_after("to you and ")?;
-    let (_, permanent_type) = you_and_controlled_permanent_type(region.lower).ok()?;
-    Some(permanent_type)
-}
-
-/// CR 614.1a: "`<plural-type>` you control" tail of the compound recipient. Maps
-/// the plural permanent-type word to its `CoreType` restriction; bare
-/// "permanents" carries no restriction (`None`).
-fn you_and_controlled_permanent_type(input: &str) -> OracleResult<'_, Option<CoreType>> {
-    let (input, permanent_type) = alt((
-        value(Some(CoreType::Planeswalker), tag("planeswalkers")),
-        value(Some(CoreType::Creature), tag("creatures")),
-        value(Some(CoreType::Artifact), tag("artifacts")),
-        value(Some(CoreType::Enchantment), tag("enchantments")),
-        value(Some(CoreType::Land), tag("lands")),
-        value(None, tag("permanents")),
-    ))
-    .parse(input)?;
-    let (input, _) = tag(" you control").parse(input)?;
-    Ok((input, permanent_type))
+    let (_, conjunct) = nom_filter::parse_controlled_permanents_conjunct(region.lower).ok()?;
+    Some(conjunct)
 }
 
 /// CR 615.1 + CR 609.7b: Optional trailing "by [source-filter]" on
@@ -7247,6 +7307,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
         } => Effect::Manifest {
             target,
             count,
+            object_source: None,
             profile,
             enters_under,
         },
@@ -10187,7 +10248,8 @@ pub(super) fn parse_imperative_family_ast(
     // above, before the first-word verb dispatch. The detector is the prefix
     // combinator inside `parse_oneshot_damage_replacement`; on failure it returns
     // `None` and we fall through.
-    if let Some(effect) = crate::parser::oracle_replacement::parse_oneshot_damage_replacement(lower)
+    if let Some(effect) =
+        crate::parser::oracle_replacement::parse_oneshot_damage_replacement(lower, &*ctx)
     {
         return Some(ImperativeFamilyAst::GainKeyword(effect));
     }
@@ -10643,10 +10705,37 @@ pub(super) fn parse_imperative_family_ast(
                 Some(ImperativeFamilyAst::Manifest {
                     target,
                     count,
+                    from_zone: None,
                     enters_under,
                 })
             } else {
-                None
+                // CR 701.40a: "manifest a card from your hand" (Scroll of
+                // Fate) — the manifest twin of the cloak from-hand form below:
+                // the controller chooses a hand card, lowered to a
+                // `ChooseFromZone` parent + `Manifest` sub-chain in
+                // `lower_imperative_family_ast`.
+                let from_hand = all_consuming((
+                    tag::<_, _, OracleError<'_>>("manifest "),
+                    alt((tag("a card"), tag("one card"))),
+                    tag(" from your hand"),
+                    opt(tag(".")),
+                ))
+                .parse(lower.trim())
+                .is_ok();
+
+                if from_hand {
+                    Some(ImperativeFamilyAst::Manifest {
+                        target: TargetFilter::Controller,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        from_zone: Some(Zone::Hand),
+                        // CR 110.2a: the imperative "you" subject manifests, so
+                        // the card enters under the instruction controller's
+                        // control.
+                        enters_under: Some(ControllerRef::You),
+                    })
+                } else {
+                    None
+                }
             }
         }
         // CR 701.58a: "cloak the top card of your library" / "cloak the top N
@@ -12730,6 +12819,44 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 },
             ))
         }
+        // CR 701.40a: "manifest a card from your hand" (Scroll of Fate). The
+        // manifest twin of the cloak from-hand arm below: the controller
+        // chooses a card from their hand — delegated to the `ChooseFromZone`
+        // building block — then manifests it. The `Manifest` sub-ability reads
+        // the chosen card from `object_source` (`ParentTarget`, resolved
+        // against the `ability.targets` the choose forwards — CR 608.2c: later
+        // instructions read the earlier selection). Intercepted here because a
+        // bare Effect cannot express the parent + sub chain — only
+        // `ParsedEffectClause` can.
+        ImperativeFamilyAst::Manifest {
+            target,
+            count,
+            from_zone: Some(zone),
+            enters_under,
+        } => {
+            let mut clause = parsed_clause(Effect::ChooseFromZone {
+                count: 1,
+                zone,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::Controller,
+                filter: None,
+                chooser: Chooser::Controller,
+                up_to: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                constraint: None,
+            });
+            clause.sub_ability = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Manifest {
+                    target,
+                    count,
+                    object_source: Some(TargetFilter::ParentTarget),
+                    profile: None,
+                    enters_under,
+                },
+            )));
+            clause
+        }
         // CR 701.58a: "cloak a card from your hand" (Vannifar). The controller
         // chooses a card from their hand — delegated to the `ChooseFromZone`
         // building block — then cloaks it (CR 701.58a). The `Cloak` sub-ability
@@ -13009,13 +13136,19 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         // carries no effect-specified face-down profile; `enters_under` records
         // the instruction-controller default. The put-form manifest may also
         // seed an effect-specified profile (see `lower_put_ast`).
+        // CR 701.40a: Manifest the top card(s) of a library. The from-hand
+        // form (`from_zone: Some`) is intercepted upstream in
+        // `lower_imperative_family_ast` (Cloak pattern); only the library-top
+        // source reaches here.
         ImperativeFamilyAst::Manifest {
             target,
             count,
             enters_under,
+            ..
         } => Effect::Manifest {
             target,
             count,
+            object_source: None,
             profile: None,
             enters_under,
         },
@@ -20030,30 +20163,52 @@ mod tests {
 
     #[test]
     fn parse_copy_stack_ability_target_preserves_unknown_qualifier_remainder() {
+        use crate::types::ability::StackAbilityKind;
+
+        // CR 113.3b / CR 113.3c: the combined spelling accepts BOTH kinds →
+        // `kind: None`. The controller assertion is the reach-guard: it proves
+        // the parse actually ran rather than the arm being satisfied by a
+        // parse failure.
         let controlled =
             parse_copy_stack_ability_target("target activated or triggered ability you control")
                 .expect("controlled stack ability target should parse");
         assert_eq!(controlled.1, "");
-        assert!(matches!(
+        assert_eq!(
             controlled.0,
             TargetFilter::StackAbility {
                 controller: Some(ControllerRef::You),
                 tag: None,
                 kind: None,
             }
-        ));
+        );
+
+        // CR 115.1: a lone "triggered ability" spelling NARROWS the legal set.
+        // Regression: this returned `kind: None`, letting Mister Fantastic /
+        // Strionic Resonator / Kirol illegally copy an ACTIVATED ability.
+        let triggered_only =
+            parse_copy_stack_ability_target("target triggered ability you control")
+                .expect("triggered-only stack ability target should parse");
+        assert_eq!(triggered_only.1, "");
+        assert_eq!(
+            triggered_only.0,
+            TargetFilter::StackAbility {
+                controller: Some(ControllerRef::You),
+                tag: None,
+                kind: Some(StackAbilityKind::Triggered),
+            }
+        );
 
         let unscoped = parse_copy_stack_ability_target("target triggered ability")
             .expect("unqualified stack ability target should parse");
         assert_eq!(unscoped.1, "");
-        assert!(matches!(
+        assert_eq!(
             unscoped.0,
             TargetFilter::StackAbility {
                 controller: None,
                 tag: None,
-                kind: None,
+                kind: Some(StackAbilityKind::Triggered),
             }
-        ));
+        );
 
         assert!(
             parse_copy_stack_ability_target(
@@ -20061,6 +20216,110 @@ mod tests {
             )
             .is_none(),
             "unknown qualifier must not widen to an unscoped StackAbility target"
+        );
+    }
+
+    /// CR 113.3b: the activated-only spelling is the narrowing sibling of the
+    /// triggered-only case — the axis must be complete, not patched at one leaf.
+    #[test]
+    fn copy_stack_ability_target_narrows_activated_only() {
+        use crate::types::ability::StackAbilityKind;
+
+        let activated = parse_copy_stack_ability_target("target activated ability you control")
+            .expect("activated-only stack ability target should parse");
+        assert_eq!(activated.1, "");
+        assert_eq!(
+            activated.0,
+            TargetFilter::StackAbility {
+                controller: Some(ControllerRef::You),
+                tag: None,
+                kind: Some(StackAbilityKind::Activated),
+            }
+        );
+
+        // Positive sibling in the same test: the two narrowing spellings must
+        // land on DIFFERENT kinds, so neither can pass by the axis collapsing.
+        let triggered = parse_copy_stack_ability_target("target triggered ability you control")
+            .expect("triggered-only stack ability target should parse");
+        assert_eq!(
+            triggered.0,
+            TargetFilter::StackAbility {
+                controller: Some(ControllerRef::You),
+                tag: None,
+                kind: Some(StackAbilityKind::Triggered),
+            }
+        );
+    }
+
+    /// CR 113.3b / CR 113.3c: delegating to the shared axis authority also gives
+    /// the copy path the three combined spellings its private list never had,
+    /// and the longest-match-first ordering is what lets an ANCHORED caller
+    /// consume them whole. Each must leave an EMPTY remainder, so the
+    /// `assert_no_compound_remainder` debug path cannot newly fire on them.
+    #[test]
+    fn copy_stack_ability_target_accepts_all_combined_spellings() {
+        for phrase in [
+            "target activated ability, triggered ability you control",
+            "target triggered ability, activated ability you control",
+            "target triggered ability or activated ability you control",
+            "target activated ability or triggered ability you control",
+        ] {
+            let (filter, rem) = parse_copy_stack_ability_target(phrase)
+                .unwrap_or_else(|| panic!("combined spelling must parse: {phrase}"));
+            assert_eq!(
+                rem, "",
+                "combined spelling must be fully consumed: {phrase}"
+            );
+            assert_eq!(
+                filter,
+                TargetFilter::StackAbility {
+                    controller: Some(ControllerRef::You),
+                    tag: None,
+                    kind: None,
+                },
+                "combined spelling names both kinds, so kind must stay None: {phrase}"
+            );
+        }
+    }
+
+    /// The source restriction stays in the remainder, byte-identical to
+    /// pre-delegation behavior — delegating the kind axis must not change which
+    /// bytes the combinator consumes.
+    #[test]
+    fn copy_stack_ability_target_remainder_survives_source_restriction() {
+        let (filter, rem) = parse_copy_stack_ability_target(
+            "target activated or triggered ability you control from an artifact source",
+        )
+        .expect("source-restricted phrase should still parse its prefix");
+        assert_eq!(rem, " from an artifact source");
+        assert_eq!(
+            filter,
+            TargetFilter::StackAbility {
+                controller: Some(ControllerRef::You),
+                tag: None,
+                kind: None,
+            }
+        );
+    }
+
+    /// Return the Favor must NOT be hijacked by the widened copy combinator —
+    /// the spell+ability disjunction still falls through to
+    /// `parse_stack_object_target`, which is the only combinator that can
+    /// represent its spell legs.
+    #[test]
+    fn copy_stack_ability_target_defers_spell_ability_disjunction() {
+        assert!(
+            parse_copy_stack_ability_target(
+                "target instant spell, sorcery spell, activated ability, or triggered ability"
+            )
+            .is_none(),
+            "a spell+ability disjunction must fall through, not collapse to a bare StackAbility"
+        );
+        // Positive reach-guard: the combinator is otherwise live on this input
+        // shape, so the negative above is not vacuous.
+        assert!(
+            parse_copy_stack_ability_target("target triggered ability you control").is_some(),
+            "the plain controller-qualified phrase must still parse"
         );
     }
 
@@ -21454,6 +21713,7 @@ mod tests {
     /// restriction (Channel Harm).
     #[test]
     fn prevent_compound_recipient_you_and_controlled_permanents() {
+        use crate::types::ability::SourceExclusion;
         use crate::types::card_type::CoreType;
 
         let planeswalker_text =
@@ -21465,7 +21725,8 @@ mod tests {
         assert_eq!(
             target,
             TargetFilter::ControllerAndControlledPermanents {
-                permanent_type: Some(CoreType::Planeswalker)
+                permanent_type: Some(CoreType::Planeswalker),
+                source_scope: SourceExclusion::Include,
             }
         );
 
@@ -21478,8 +21739,37 @@ mod tests {
         assert_eq!(
             target,
             TargetFilter::ControllerAndControlledPermanents {
-                permanent_type: None
+                permanent_type: None,
+                source_scope: SourceExclusion::Include,
             }
+        );
+
+        // CR 109.1: the "other" article must reach the recipient rather than being
+        // dropped, and the permanent leg must not collapse to a bare `Controller`.
+        // Before the shared conjunct authority this phrase matched NO compound arm
+        // at all on this surface (the old copy had no "other" prefix), so the whole
+        // permanent leg was silently lost.
+        //
+        // HONESTY NOTE: the text is The Wanderer's VERBATIM first line, but the
+        // CARD does not reach this parser — a printed static "Prevent all …" line
+        // is claimed earlier by `oracle_replacement::parse_damage_prevention_
+        // replacement`, which still collapses the victim to `Player { Controller }`
+        // and drops the permanent leg. That is a separate, pre-existing gap on the
+        // static-replacement surface and is NOT fixed here; this assertion pins the
+        // `Effect::PreventDamage` surface's own behavior for the same phrase.
+        let wanderer_text =
+            "Prevent all noncombat damage that would be dealt to you and other permanents you control.";
+        let Effect::PreventDamage { target, .. } = parse_prevent_effect(wanderer_text, false)
+        else {
+            panic!("expected PreventDamage");
+        };
+        assert_eq!(
+            target,
+            TargetFilter::ControllerAndControlledPermanents {
+                permanent_type: None,
+                source_scope: SourceExclusion::Exclude,
+            },
+            "The Wanderer must exclude itself from its own noncombat-damage shield"
         );
     }
 

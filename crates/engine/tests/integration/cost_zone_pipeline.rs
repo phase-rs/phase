@@ -4,6 +4,7 @@ use engine::game::effects::resolve_ability_chain;
 use engine::game::game_object::AttachTarget;
 use engine::game::mana_abilities::activate_mana_ability;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::parser::oracle_cost::parse_oracle_cost;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CardPlayMode, CardSelectionMode,
@@ -22,10 +23,10 @@ use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{
-    BatchCompletion, CastPaymentMode, CollectEvidenceResume, GameState,
+    BatchCompletion, CastPaymentMode, CollectEvidenceResume, ExileLinkKind, GameState,
     ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume, ManaChoice,
     PayCostKind, PendingCast, PendingCostMoveResume, PendingReplacement, StackEntryKind,
-    WaitingFor,
+    WaitingFor, ZoneDeliveryExileTracking,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -58,6 +59,53 @@ fn redirect_moved_to(destination: Zone, redirected_to: Zone) -> ReplacementDefin
                 enters_modified_if: None,
             },
         ))
+}
+
+/// CR 616.1: source-linked exile tracking is part of the parked zone-move
+/// request and must survive an optional replacement choice.
+#[test]
+fn exile_tracking_parked_resume_preserves_source_link() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario.add_creature(P0, "Exile Source", 1, 1).id();
+    scenario
+        .add_creature(P0, "Optional Exile Redirect", 0, 0)
+        .as_enchantment()
+        .with_replacement_definition(
+            redirect_moved_to(Zone::Exile, Zone::Graveyard)
+                .mode(ReplacementMode::Optional { decline: None }),
+        );
+    let exiled = scenario
+        .add_creature_to_graveyard(P0, "Tracked Card", 1, 1)
+        .id();
+    let mut runner = scenario.build();
+
+    let mut events = Vec::new();
+    let paused = move_object_for_test(
+        runner.state_mut(),
+        ZoneMoveRequest::effect(exiled, Zone::Exile, source).track_exiled_by_source(),
+        &mut events,
+    );
+    assert!(paused);
+    assert_eq!(
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .map(|pending| pending.exile_tracking),
+        Some(ZoneDeliveryExileTracking::TrackBySource)
+    );
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("decline optional redirect");
+
+    assert_eq!(runner.state().objects[&exiled].zone, Zone::Exile);
+    assert!(runner.state().exile_links.iter().any(|link| {
+        link.exiled_id == exiled
+            && link.source_id == source
+            && matches!(link.kind, ExileLinkKind::TrackedBySource)
+    }));
 }
 
 /// W-R1 (red first): a Dig rest pile sent to the library bottom is an
@@ -778,6 +826,9 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         depth: 0,
         is_optional: false,
         library_placement: None,
+        exile_controller: None,
+        exile_duration: None,
+        exile_tracking: engine::types::game_state::ZoneDeliveryExileTracking::None,
         excess_recipient: None,
         lifelink_bonus: 0,
         may_cost_paid: false,
@@ -4530,6 +4581,9 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         depth: 0,
         is_optional: false,
         library_placement: None,
+        exile_controller: None,
+        exile_duration: None,
+        exile_tracking: engine::types::game_state::ZoneDeliveryExileTracking::None,
         excess_recipient: None,
         lifelink_bonus: 0,
         may_cost_paid: false,

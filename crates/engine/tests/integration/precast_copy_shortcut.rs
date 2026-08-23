@@ -517,6 +517,13 @@ fn precast_shorten_requires_meaningful_divergence_before_manual_or_auto_pass() {
         })
         .expect("shorten at the issued boundary");
 
+    assert!(runner
+        .act(GameAction::BeginResolveAll { max_resolutions: 7 })
+        .is_err());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player } if player == P1
+    ));
     assert!(runner.act(GameAction::PassPriority).is_err());
     assert!(runner
         .act(GameAction::SetAutoPass {

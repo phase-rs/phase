@@ -1,8 +1,8 @@
 use super::*;
 use crate::game::zones::create_object;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ControllerRef, Effect, QuantityExpr, ResolvedAbility,
-    TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
+    AbilityDefinition, AbilityKind, ControllerRef, Effect, ModalChoice, QuantityExpr,
+    ResolvedAbility, TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
 };
 use crate::types::actions::GameAction;
 use crate::types::card_type::{CoreType, Supertype};
@@ -3880,6 +3880,7 @@ fn owner_collected_filter_honors_consumed_ledger_with_empty_queue() {
     let consumed = vec![ConsumedTriggerEventOccurrence {
         event: claimed.clone(),
         occurrence: 0,
+        scope: ConsumedTriggerEventScope::AllCollectors,
     }];
     let survivors = filter_already_collected_trigger_events_from(&state, &events, 0, &consumed);
     assert_eq!(
@@ -4075,4 +4076,488 @@ fn occurrence_exact_witness_consumes_the_occurrence_its_witness_names() {
          reading the index RAW (not via GameEvent equality) is what makes this \
          assertion survive a broken ZoneChangeRecord PartialEq"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Ordered ordinary and delayed trigger contexts that pause while being put on
+// the stack must drain the already-built delayed tail through their own reducer
+// continuation. These fixtures intentionally enter at `OrderTriggers` and
+// complete via `engine::apply_as_current`, rather than calling a construction
+// finalizer directly.
+// ---------------------------------------------------------------------------
+
+fn continuation_source(state: &mut GameState, name: &str) -> ObjectId {
+    create_object(
+        state,
+        CardId(state.next_object_id),
+        PlayerId(0),
+        name.to_string(),
+        Zone::Battlefield,
+    )
+}
+
+fn continuation_pending(
+    source_id: ObjectId,
+    ability: ResolvedAbility,
+    description: &str,
+) -> PendingTrigger {
+    PendingTrigger {
+        source_id,
+        controller: PlayerId(0),
+        condition: None,
+        ability: Box::new(ability),
+        timestamp: source_id.0 as u32,
+        target_constraints: Vec::new(),
+        distribute: None,
+        trigger_event: None,
+        modal: None,
+        mode_abilities: Vec::new(),
+        description: Some(description.to_string()),
+        may_trigger_origin: None,
+        subject_match_count: None,
+        die_result: None,
+        provenance: None,
+    }
+}
+
+/// Builds a continuation fixture through the same definition-to-resolved path
+/// that collected triggers use, preserving definition-owned interaction data.
+fn definition_backed_continuation_pending(
+    state: &GameState,
+    source_id: ObjectId,
+    execute: AbilityDefinition,
+    description: &str,
+) -> PendingTrigger {
+    let definition = TriggerDefinition::new(TriggerMode::ChangesZone).execute(execute);
+    let execute = definition
+        .execute
+        .as_ref()
+        .expect("fixture trigger definition must have an execute body");
+    let mut pending = continuation_pending(
+        source_id,
+        super::build_triggered_ability(state, &definition, source_id, PlayerId(0)),
+        description,
+    );
+    pending
+        .target_constraints
+        .clone_from(&execute.target_constraints);
+    pending.distribute.clone_from(&execute.distribute);
+    pending.modal.clone_from(&execute.modal);
+    pending.mode_abilities.clone_from(&execute.mode_abilities);
+    pending
+}
+
+fn delayed_tail_context(source_id: ObjectId) -> PendingTriggerContext {
+    PendingTriggerContext::delayed(
+        continuation_pending(
+            source_id,
+            ResolvedAbility::new(Effect::NoOp, Vec::new(), source_id, PlayerId(0)),
+            "Delayed tail",
+        ),
+        DelayedInstallIdentity::LegacyDelayed,
+    )
+}
+
+fn begin_paused_continuation_batch(
+    state: &mut GameState,
+    ordinary: PendingTriggerContext,
+    delayed: PendingTriggerContext,
+) {
+    let TriggerOrderingDisposition::PromptForChoice(waiting_for) =
+        begin_trigger_ordering(state, vec![ordinary, delayed])
+    else {
+        panic!("distinct ordinary and delayed contexts must require OrderTriggers");
+    };
+    state.waiting_for = *waiting_for;
+    crate::game::engine::apply_as_current(state, GameAction::OrderTriggers { order: vec![0, 1] })
+        .expect("public reducer must dispatch the ordered trigger batch");
+}
+
+fn assert_delayed_tail_reaches_stack_once(state: &GameState, delayed_source: ObjectId) {
+    assert!(
+        state
+            .pending_trigger_construction_priority_recipient
+            .is_none(),
+        "ordinary ordering must not install a settled-priority recipient"
+    );
+    assert!(
+        state.deferred_triggers.is_empty(),
+        "the construction continuation must consume the delayed tail"
+    );
+    assert_eq!(
+        state
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == delayed_source)
+            .count(),
+        1,
+        "the deferred delayed context must reach the stack exactly once"
+    );
+    assert_eq!(
+        state
+            .stack_trigger_firings
+            .values()
+            .filter(|firing| firing.is_delayed())
+            .count(),
+        1,
+        "the sole delayed stack entry must retain delayed firing provenance"
+    );
+}
+
+/// Target selection drains a delayed tail even though no settled-priority
+/// recipient exists. This uses the public `SelectTargets` reducer arm.
+#[test]
+fn ordered_delayed_tail_drains_after_trigger_target_selection_without_recipient() {
+    let mut state = setup();
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    let ordinary_source = continuation_source(&mut state, "Targeting ordinary");
+    let delayed_source = continuation_source(&mut state, "Delayed observer");
+    let target = make_creature(&mut state, PlayerId(1), "Target", 1, 1);
+    let alternative_target = make_creature(&mut state, PlayerId(1), "Alternative target", 1, 1);
+    let ordinary = definition_backed_continuation_pending(
+        &state,
+        ordinary_source,
+        AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::SetTapState {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            },
+        ),
+        "Ordinary target trigger",
+    );
+
+    begin_paused_continuation_batch(
+        &mut state,
+        PendingTriggerContext::single(ordinary),
+        delayed_tail_context(delayed_source),
+    );
+    let WaitingFor::TriggerTargetSelection { target_slots, .. } = &state.waiting_for else {
+        panic!("ambiguous trigger target must pause through TriggerTargetSelection");
+    };
+    assert!(
+        target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(target))
+            && target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(alternative_target)),
+        "the fixture must keep target selection interactive rather than auto-assigning it"
+    );
+    assert_eq!(state.deferred_triggers.len(), 1);
+    assert!(state
+        .pending_trigger_construction_priority_recipient
+        .is_none());
+
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(target)],
+        },
+    )
+    .expect("public target-selection reducer must finish construction");
+
+    assert_delayed_tail_reaches_stack_once(&state, delayed_source);
+}
+
+/// Triggered modal choice drains the same delayed tail through the public
+/// `SelectModes` reducer arm, without relying on a priority recipient.
+#[test]
+fn ordered_delayed_tail_drains_after_triggered_mode_choice_without_recipient() {
+    let mut state = setup();
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    let ordinary_source = continuation_source(&mut state, "Modal ordinary");
+    let delayed_source = continuation_source(&mut state, "Delayed observer");
+    let mut execute = AbilityDefinition::new(AbilityKind::Database, Effect::NoOp);
+    execute.modal = Some(ModalChoice {
+        min_choices: 1,
+        max_choices: 1,
+        mode_count: 1,
+        mode_descriptions: vec!["Do nothing".to_string()],
+        ..Default::default()
+    });
+    execute.mode_abilities = vec![AbilityDefinition::new(AbilityKind::Database, Effect::NoOp)];
+    let ordinary = definition_backed_continuation_pending(
+        &state,
+        ordinary_source,
+        execute,
+        "Ordinary modal trigger",
+    );
+
+    begin_paused_continuation_batch(
+        &mut state,
+        PendingTriggerContext::single(ordinary),
+        delayed_tail_context(delayed_source),
+    );
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::AbilityModeChoice { .. }
+    ));
+    assert_eq!(state.deferred_triggers.len(), 1);
+    assert!(state
+        .pending_trigger_construction_priority_recipient
+        .is_none());
+
+    crate::game::engine::apply_as_current(&mut state, GameAction::SelectModes { indices: vec![0] })
+        .expect("public triggered-mode reducer must finish construction");
+
+    assert_delayed_tail_reaches_stack_once(&state, delayed_source);
+}
+
+/// Trigger-owned division uses its distinct public `DistributeAmong` reducer
+/// arm, but must reach the same no-recipient delayed-tail outcome.
+#[test]
+fn ordered_delayed_tail_drains_after_trigger_distribution_without_recipient() {
+    let mut state = setup();
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    let ordinary_source = continuation_source(&mut state, "Distribution ordinary");
+    let delayed_source = continuation_source(&mut state, "Delayed observer");
+    let target_a = make_creature(&mut state, PlayerId(1), "Target A", 1, 3);
+    let target_b = make_creature(&mut state, PlayerId(1), "Target B", 1, 3);
+    let ability = AbilityDefinition::new(
+        AbilityKind::Database,
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            damage_source: None,
+            excess: None,
+        },
+    )
+    .multi_target(crate::types::ability::MultiTargetSpec::fixed(2, 2))
+    .distribute(crate::types::game_state::DistributionUnit::Damage);
+    let ordinary = definition_backed_continuation_pending(
+        &state,
+        ordinary_source,
+        ability,
+        "Ordinary divided trigger",
+    );
+
+    begin_paused_continuation_batch(
+        &mut state,
+        PendingTriggerContext::single(ordinary),
+        delayed_tail_context(delayed_source),
+    );
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::TriggerTargetSelection { .. }
+    ));
+    assert_eq!(state.deferred_triggers.len(), 1);
+    assert!(state
+        .pending_trigger_construction_priority_recipient
+        .is_none());
+
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(target_a), TargetRef::Object(target_b)],
+        },
+    )
+    .expect("public trigger target-selection reducer must lead into distribution");
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::DistributeAmong { .. }
+    ));
+
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::DistributeAmong {
+            distribution: vec![
+                (TargetRef::Object(target_a), 1),
+                (TargetRef::Object(target_b), 1),
+            ],
+        },
+    )
+    .expect("public trigger-owned distribution reducer must finish construction");
+
+    assert_delayed_tail_reaches_stack_once(&state, delayed_source);
+}
+
+fn begin_empty_continuation_batch(state: &mut GameState, ordinary: PendingTrigger) {
+    let mut events = Vec::new();
+    let outcome = process_collected_triggers_with_delayed_events(
+        state,
+        vec![PendingTriggerContext::single(ordinary)],
+        &[],
+        &mut events,
+    );
+    assert!(
+        outcome.fired,
+        "the ordinary trigger fixture must reach trigger construction"
+    );
+    state.waiting_for = crate::game::engine::begin_pending_trigger_target_selection(state)
+        .expect("a real pending trigger must begin construction")
+        .expect("the interactive trigger fixture must surface its public prompt");
+    assert!(
+        state.deferred_triggers.is_empty(),
+        "the empty-tail control must begin with no deferred context"
+    );
+    assert!(state
+        .pending_trigger_construction_priority_recipient
+        .is_none());
+}
+
+/// Empty deferred tails are inert after target selection: the public reducer
+/// completes the ordinary trigger without fabricating another trigger or order.
+#[test]
+fn empty_deferred_tail_is_inert_after_trigger_target_selection_without_recipient() {
+    let mut state = setup();
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    let source = continuation_source(&mut state, "Targeting ordinary");
+    let target = make_creature(&mut state, PlayerId(1), "Target", 1, 1);
+    let alternative_target = make_creature(&mut state, PlayerId(1), "Alternative target", 1, 1);
+    let ordinary = definition_backed_continuation_pending(
+        &state,
+        source,
+        AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::SetTapState {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            },
+        ),
+        "Ordinary target trigger",
+    );
+
+    begin_empty_continuation_batch(&mut state, ordinary);
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::TriggerTargetSelection { .. }
+    ));
+    let WaitingFor::TriggerTargetSelection { target_slots, .. } = &state.waiting_for else {
+        unreachable!("the preceding reach guard fixed this waiting state");
+    };
+    assert!(
+        target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(target))
+            && target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(alternative_target)),
+        "the empty-tail control must keep target selection interactive"
+    );
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(target)],
+        },
+    )
+    .expect("target selection with an empty deferred tail must complete");
+
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "empty tail must not fabricate a trigger"
+    );
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.pending_trigger_order.is_none());
+    assert!(state
+        .pending_trigger_construction_priority_recipient
+        .is_none());
+}
+
+/// Empty deferred tails are also inert after triggered mode choice.
+#[test]
+fn empty_deferred_tail_is_inert_after_triggered_mode_choice_without_recipient() {
+    let mut state = setup();
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    let source = continuation_source(&mut state, "Modal ordinary");
+    let mut execute = AbilityDefinition::new(AbilityKind::Database, Effect::NoOp);
+    execute.modal = Some(ModalChoice {
+        min_choices: 1,
+        max_choices: 1,
+        mode_count: 1,
+        mode_descriptions: vec!["Do nothing".to_string()],
+        ..Default::default()
+    });
+    execute.mode_abilities = vec![AbilityDefinition::new(AbilityKind::Database, Effect::NoOp)];
+    let ordinary =
+        definition_backed_continuation_pending(&state, source, execute, "Ordinary modal trigger");
+
+    begin_empty_continuation_batch(&mut state, ordinary);
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::AbilityModeChoice { .. }
+    ));
+    crate::game::engine::apply_as_current(&mut state, GameAction::SelectModes { indices: vec![0] })
+        .expect("mode choice with an empty deferred tail must complete");
+
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "empty tail must not fabricate a trigger"
+    );
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.pending_trigger_order.is_none());
+    assert!(state
+        .pending_trigger_construction_priority_recipient
+        .is_none());
+}
+
+/// Empty deferred tails are inert after trigger-owned distribution as well.
+#[test]
+fn empty_deferred_tail_is_inert_after_trigger_distribution_without_recipient() {
+    let mut state = setup();
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    let source = continuation_source(&mut state, "Distribution ordinary");
+    let target_a = make_creature(&mut state, PlayerId(1), "Target A", 1, 3);
+    let target_b = make_creature(&mut state, PlayerId(1), "Target B", 1, 3);
+    let ability = AbilityDefinition::new(
+        AbilityKind::Database,
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            damage_source: None,
+            excess: None,
+        },
+    )
+    .multi_target(crate::types::ability::MultiTargetSpec::fixed(2, 2))
+    .distribute(crate::types::game_state::DistributionUnit::Damage);
+    let ordinary =
+        definition_backed_continuation_pending(&state, source, ability, "Ordinary divided trigger");
+
+    begin_empty_continuation_batch(&mut state, ordinary);
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::TriggerTargetSelection { .. }
+    ));
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(target_a), TargetRef::Object(target_b)],
+        },
+    )
+    .expect("target selection with an empty deferred tail must lead into distribution");
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::DistributeAmong { .. }
+    ));
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::DistributeAmong {
+            distribution: vec![
+                (TargetRef::Object(target_a), 1),
+                (TargetRef::Object(target_b), 1),
+            ],
+        },
+    )
+    .expect("distribution with an empty deferred tail must complete");
+
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "empty tail must not fabricate a trigger"
+    );
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.pending_trigger_order.is_none());
+    assert!(state
+        .pending_trigger_construction_priority_recipient
+        .is_none());
 }

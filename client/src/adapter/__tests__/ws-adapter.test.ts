@@ -1404,6 +1404,27 @@ describe("WebSocketAdapter", () => {
       );
     });
 
+    it("rejects an in-flight action when the native AI driver faults", async () => {
+      const listener = vi.fn();
+      adapter.onEvent(listener);
+      const pending = adapter.submitAction({ type: "PassPriority" }, 0);
+
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "AiDriverFault",
+          data: { fault: { id: 7, after_state_revision: 3, cause: "ActionSafetyCapReached" } },
+        }),
+      );
+
+      await expect(pending).rejects.toMatchObject({
+        code: "WS_ERROR",
+        recoverable: false,
+      });
+      expect(listener).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
+      expect(listener).toHaveBeenCalledWith(expect.objectContaining({ type: "aiDriverFault" }));
+    });
+
     it("emits an error instead of throwing when a fire-and-forget send hits a closed socket", () => {
       const listener = vi.fn();
       adapter.onEvent(listener);

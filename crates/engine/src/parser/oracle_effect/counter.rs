@@ -86,12 +86,39 @@ fn is_it_pronoun(text: &str) -> bool {
 /// form so this helper reproduces the legacy ungated bare-"it" binding exactly,
 /// making the it-branch refactor provably behavior-preserving. `None` ⇒ the
 /// caller applies its own default (source / parent / typed target).
-pub(super) fn counter_anaphor_created_token_binding(
+/// The demonstrative/definite half of the chain-created anaphor, WITHOUT the
+/// bare object pronoun.
+///
+/// "That creature" / "that token" / "the permanent" name the thing the previous
+/// instruction produced and nothing else. Bare "it" does not: it is the general
+/// anaphor, and every consumer already resolves it through its own subject-aware
+/// authority (`resolve_it_pronoun`, `attach_neuter_recipient_resolves_via_subject`).
+/// A consumer that wants the chain-created referent for a demonstrative must not
+/// get bare "it" smuggled in with it, which is why this is a separate entry point
+/// rather than a flag on [`counter_anaphor_created_token_binding`].
+pub(super) fn chain_created_demonstrative_binding(
     anaphor_lower: &str,
     ctx: &ParseContext,
 ) -> Option<TargetFilter> {
-    let it_pronoun = is_it_pronoun(anaphor_lower);
-    let demonstrative = nom_on_lower(anaphor_lower, anaphor_lower, |i| {
+    if !anaphor_is_chain_created_demonstrative(anaphor_lower) {
+        return None;
+    }
+    // Same gate the composed entry point applies to the demonstrative form: a
+    // non-self trigger subject re-anchors the reference to the triggering object
+    // (Pip-Boy 3000), and only a chain that actually produced something can be
+    // named at all.
+    let subject_allows_token = matches!(
+        ctx.subject,
+        None | Some(TargetFilter::SelfRef) | Some(TargetFilter::Any)
+    );
+    (ctx.token_created_in_chain && subject_allows_token).then_some(TargetFilter::LastCreated)
+}
+
+/// CR 608.2c: the demonstrative and definite back-reference forms.
+/// `the creature` is deliberately EXCLUDED — it legitimately binds a chosen
+/// target slot (Longstalk Brawl) and is genuinely ambiguous.
+fn anaphor_is_chain_created_demonstrative(anaphor_lower: &str) -> bool {
+    nom_on_lower(anaphor_lower, anaphor_lower, |i| {
         value(
             (),
             alt((
@@ -104,7 +131,15 @@ pub(super) fn counter_anaphor_created_token_binding(
         )
         .parse(i)
     })
-    .is_some();
+    .is_some()
+}
+
+pub(super) fn counter_anaphor_created_token_binding(
+    anaphor_lower: &str,
+    ctx: &ParseContext,
+) -> Option<TargetFilter> {
+    let it_pronoun = is_it_pronoun(anaphor_lower);
+    let demonstrative = anaphor_is_chain_created_demonstrative(anaphor_lower);
     if !it_pronoun && !demonstrative {
         return None;
     }

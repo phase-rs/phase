@@ -158,6 +158,15 @@ fn normalize_legacy_attach_waiting_for(state: &mut GameState) {
 }
 
 fn sync_priority_player_from_waiting_for(state: &mut GameState) {
+    // Resolve All temporarily presents consent slots without transferring the
+    // underlying priority window. Its run snapshot owns that priority until a
+    // decline restores it or the Ready consumer materializes its passes.
+    if matches!(
+        &state.waiting_for,
+        WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
+    ) {
+        return;
+    }
     if let Some(player) = state.waiting_for.acting_player() {
         state.priority_player = turn_control::authorized_submitter_for_player(state, player);
     }

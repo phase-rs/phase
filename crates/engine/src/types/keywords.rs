@@ -501,6 +501,15 @@ pub enum GiftKind {
     Food,
     /// Opponent creates a tapped 1/1 blue Fish creature token.
     TappedFish,
+    /// CR 702.174g: "Gift an extra turn" means "The chosen player takes an extra
+    /// turn after this one." The only promised gift that is not an object, which
+    /// is why it sits outside the token family rather than inside it.
+    ///
+    /// Perch Protection is the only shipped card in this class. CR 702.174i's
+    /// Octopus is still missing (#5975); it belongs to the token family
+    /// (Treasure / Food / tapped Fish), which is a parameterization those three
+    /// already want and this variant deliberately does not join.
+    ExtraTurn,
 }
 
 /// CR 702.11d: What a hexproof-from keyword protects against.
@@ -1673,6 +1682,287 @@ impl Keyword {
         }
     }
 
+    /// True when [`Keyword::kind`] IDENTIFIES this keyword ability — the
+    /// returned `KeywordKind` names this ability and no other, so a kind-level
+    /// presence test ("does it have suspend?", CR 702.62a) asks exactly the
+    /// question the Oracle text asks.
+    ///
+    /// False in exactly two situations, each of which makes a kind-level test
+    /// answer a DIFFERENT question than the printed text:
+    ///
+    ///   * `KeywordKind::Unknown` — the catch-all bucket the `kind()` match
+    ///     above assigns to ~60 unrelated keywords (`Banding`, `Melee`,
+    ///     `Storm`, `Toxic`, `Echo`, `StartingIntensity`, …). "Has an
+    ///     Unknown-kind keyword" is TRUE for a creature with banding when the
+    ///     text asked about storm. The off-zone keyword ledger
+    ///     (`game::off_zone_characteristics`) is kind-indexed as well, so these
+    ///     keywords have no per-ability presence answer off the battlefield at
+    ///     all.
+    ///   * the families whose PRINTED keyword name varies with the parameter:
+    ///     "protection from red" (CR 702.16a), "hexproof from black"
+    ///     (CR 702.11d — which shares `KeywordKind::Hexproof` with plain
+    ///     hexproof), "islandwalk" (CR 702.14a), "landcycling" (CR 702.29e),
+    ///     and the partner family (CR 702.124a). Each parameter value is its
+    ///     own keyword ability, and they all share one kind.
+    ///
+    /// A `false` answer means "no exact presence test exists", NOT "use
+    /// `FilterProp::WithKeyword`/`WithoutKeyword` instead": those props are
+    /// discriminant-matched on the live-object path
+    /// (`game::keywords::has_keyword`) and value-matched on the snapshot paths
+    /// (`game::filter::spell_record_matches_property`), so neither is a
+    /// per-ability test either — the first cannot separate protection from red
+    /// from protection from blue, and the second cannot separate `Suspend 4—{U}`
+    /// from `Suspend 0—{}`. Callers should strict-fail so coverage stays honest.
+    ///
+    /// Deliberately conservative: `Partner(DoctorsCompanion)` and
+    /// `Partner(ChooseABackground)` do get their own kinds, but the whole
+    /// partner family answers `false` because under-reporting injectivity only
+    /// costs a strict failure, while over-reporting it ships a wrong guard.
+    ///
+    /// Maintenance: this is a hand-derived property of the `kind()` match above,
+    /// so the census below is exhaustive for the same reason that one is — adding
+    /// a `Keyword` variant fails compilation here until the author makes the
+    /// injectivity call.
+    ///
+    /// Do NOT collapse the `true` arm back into an `other => other.kind() !=
+    /// KeywordKind::Unknown` fallback. That derivation is only sound while every
+    /// non-`Unknown` kind has exactly one `Keyword` variant producing it, which is
+    /// a property of the *current* `kind()` match rather than a guarantee: a new
+    /// variant that aliases an existing non-`Unknown` kind (the
+    /// `Hexproof`/`HexproofFrom` shape) would silently answer `true` and ship the
+    /// wrong guard. A new parameterized family whose parameter renames the printed
+    /// keyword belongs in the first `false` arm.
+    pub fn kind_identifies_ability(&self) -> bool {
+        match self {
+            // CR 702.11d + CR 702.14a + CR 702.16a + CR 702.29e + CR 702.124a:
+            // the PRINTED keyword ability name varies with the parameter, so a
+            // single kind spans several distinct abilities and no kind-level test
+            // can separate them.
+            Keyword::Hexproof
+            | Keyword::HexproofFrom(_)
+            | Keyword::Landwalk(_)
+            | Keyword::Partner(_)
+            | Keyword::Protection(_)
+            | Keyword::Typecycling { .. } => false,
+
+            // The `KeywordKind::Unknown` catch-all bucket — "has an Unknown-kind
+            // keyword" is true for a creature with banding when the text asked
+            // about storm, and the kind-indexed off-zone ledger has no per-ability
+            // answer for these at all.
+            Keyword::Affinity(_)
+            | Keyword::Amplify(_)
+            | Keyword::Backup(_)
+            | Keyword::Banding
+            | Keyword::Bloodthirst(_)
+            | Keyword::Buyback(_)
+            | Keyword::Casualty(_)
+            | Keyword::Compleated
+            | Keyword::Conspire
+            | Keyword::CumulativeUpkeep(_)
+            | Keyword::Daybound
+            | Keyword::Demonstrate
+            | Keyword::Dethrone
+            | Keyword::Discover(_)
+            | Keyword::DoubleTeam
+            | Keyword::Echo(_)
+            | Keyword::Emerge(_)
+            | Keyword::Encore(_)
+            | Keyword::Enlist
+            | Keyword::Entwine(_)
+            | Keyword::Epic
+            | Keyword::Evoke(_)
+            | Keyword::Fortify(_)
+            | Keyword::Gravestorm
+            | Keyword::Haunt
+            | Keyword::Hideaway(_)
+            | Keyword::Impending { .. }
+            | Keyword::Improvise
+            | Keyword::Ingest
+            | Keyword::LevelUp(_)
+            | Keyword::LivingMetal
+            | Keyword::Melee
+            | Keyword::Mentor
+            | Keyword::Mobilize(_)
+            | Keyword::Myriad
+            | Keyword::Nightbound
+            | Keyword::Overload(_)
+            | Keyword::Poisonous(_)
+            | Keyword::Prototype { .. }
+            | Keyword::Provoke
+            | Keyword::Prowl(_)
+            | Keyword::Ravenous
+            | Keyword::ReadAhead
+            | Keyword::Rebound
+            | Keyword::Reinforce { .. }
+            | Keyword::Ripple(_)
+            | Keyword::Saddle(_)
+            | Keyword::Scavenge(_)
+            | Keyword::Soulshift(_)
+            | Keyword::Spectacle(_)
+            | Keyword::SplitSecond
+            | Keyword::Spree
+            | Keyword::Squad(_)
+            | Keyword::StartingIntensity(_)
+            | Keyword::Storm
+            | Keyword::Surge(_)
+            | Keyword::Teamwork(_)
+            | Keyword::Totem
+            | Keyword::Toxic(_)
+            | Keyword::Unknown(_)
+            | Keyword::WebSlinging(_) => false,
+
+            // 1:1 with their kind: the kind names this ability and no other, so a
+            // kind-level presence test asks exactly what the Oracle text asks.
+            Keyword::Absorb(_)
+            | Keyword::Afflict(_)
+            | Keyword::Afterlife(_)
+            | Keyword::Aftermath
+            | Keyword::Annihilator(_)
+            | Keyword::Ascend
+            | Keyword::Assist
+            | Keyword::Augment
+            | Keyword::Awaken { .. }
+            | Keyword::BandsWithOther(_)
+            | Keyword::Bargain
+            | Keyword::Battlecry
+            | Keyword::Bestow(_)
+            | Keyword::Blitz(_)
+            | Keyword::Bushido(_)
+            | Keyword::Cascade
+            | Keyword::Champion(_)
+            | Keyword::Changeling
+            | Keyword::Cipher
+            | Keyword::Cleave(_)
+            | Keyword::CommanderNinjutsu(_)
+            | Keyword::Companion(_)
+            | Keyword::Convoke
+            | Keyword::Craft { .. }
+            | Keyword::Crew { .. }
+            | Keyword::Cycling(_)
+            | Keyword::Dash(_)
+            | Keyword::Deathtouch
+            | Keyword::Decayed
+            | Keyword::Defender
+            | Keyword::Delve
+            | Keyword::Devoid
+            | Keyword::Devour { .. }
+            | Keyword::Disguise(_)
+            | Keyword::Disturb(_)
+            | Keyword::DoubleStrike
+            | Keyword::Dredge(_)
+            | Keyword::Embalm(_)
+            | Keyword::Enchant(_)
+            | Keyword::Equip(_)
+            | Keyword::Escalate(_)
+            | Keyword::Escape(_)
+            | Keyword::EtbCounter { .. }
+            | Keyword::Eternalize(_)
+            | Keyword::Evolve
+            | Keyword::Exalted
+            | Keyword::Exploit
+            | Keyword::Explore
+            | Keyword::Extort
+            | Keyword::Fabricate(_)
+            | Keyword::Fading(_)
+            | Keyword::Fear
+            | Keyword::Firebending(_)
+            | Keyword::FirstStrike
+            | Keyword::Flanking
+            | Keyword::Flash
+            | Keyword::Flashback(_)
+            | Keyword::Flying
+            | Keyword::ForMirrodin
+            | Keyword::Foretell(_)
+            | Keyword::Freerunning(_)
+            | Keyword::Frenzy(_)
+            | Keyword::Fuse
+            | Keyword::Gift(_)
+            | Keyword::Graft(_)
+            | Keyword::Harmonize(_)
+            | Keyword::Haste
+            | Keyword::Horsemanship
+            | Keyword::Increment
+            | Keyword::Indestructible
+            | Keyword::Infect
+            | Keyword::Intimidate
+            | Keyword::JobSelect
+            | Keyword::JumpStart
+            | Keyword::Kicker(_)
+            | Keyword::Lifelink
+            | Keyword::LivingWeapon
+            | Keyword::Madness(_)
+            | Keyword::Mayhem(_)
+            | Keyword::Megamorph(_)
+            | Keyword::Menace
+            | Keyword::Miracle(_)
+            | Keyword::Modular(_)
+            | Keyword::MoreThanMeetsTheEye(_)
+            | Keyword::Morph(_)
+            | Keyword::Mutate(_)
+            | Keyword::Ninjutsu(_)
+            | Keyword::Offering(_)
+            | Keyword::Offspring(_)
+            | Keyword::Outlast(_)
+            | Keyword::Paradigm
+            | Keyword::Persist
+            | Keyword::Phasing
+            | Keyword::Plot(_)
+            | Keyword::Prowess
+            | Keyword::Rampage(_)
+            | Keyword::Reach
+            | Keyword::Reconfigure(_)
+            | Keyword::Recover(_)
+            | Keyword::Renown(_)
+            | Keyword::Replicate(_)
+            | Keyword::Retrace
+            | Keyword::Riot
+            | Keyword::Shadow
+            | Keyword::Shroud
+            | Keyword::Skulk
+            | Keyword::Sneak(_)
+            | Keyword::Soulbond
+            | Keyword::Specialize(_)
+            | Keyword::Splice { .. }
+            | Keyword::StartYourEngines
+            | Keyword::Station
+            | Keyword::Storied
+            | Keyword::Sunburst
+            | Keyword::Suspend { .. }
+            | Keyword::TotemArmor
+            | Keyword::Training
+            | Keyword::Trample
+            | Keyword::TrampleOverPlaneswalkers
+            | Keyword::Transfigure(_)
+            | Keyword::Transmute(_)
+            | Keyword::Tribute(_)
+            | Keyword::Undaunted
+            | Keyword::Undying
+            | Keyword::Unearth(_)
+            | Keyword::Unleash
+            | Keyword::Vanishing(_)
+            | Keyword::Vigilance
+            | Keyword::Ward(_)
+            | Keyword::Warp(_)
+            | Keyword::Waterbend
+            | Keyword::Wither => {
+                // The census above is hand-derived, so it can disagree with
+                // `kind()` in a way the compiler cannot see: a variant listed
+                // here but mapped to the catch-all would hand a kind-level
+                // presence test the shared `Unknown` bucket — the exact
+                // over-report this predicate exists to prevent. Only this arm
+                // can be wrong that way (the other two answer `false`, which is
+                // always safe), and the predicate runs at parse time, so pin the
+                // invariant rather than deriving it.
+                debug_assert_ne!(
+                    self.kind(),
+                    KeywordKind::Unknown,
+                    "{self:?} is censused as kind-identifying but maps to the Unknown bucket",
+                );
+                true
+            }
+        }
+    }
+
     /// CR 601.2f + CR 707.2: Keywords that only function while a player is
     /// casting a spell. A token created by `CopyTokenOf` was not cast, so these
     /// keywords are inert on the copy and are stripped at creation time so the
@@ -1937,8 +2227,7 @@ fn extract_companion_subtypes(text: &str) -> Vec<String> {
 }
 
 /// CR 702.167b: Public re-export of the default craft materials filter (the
-/// creature class) so external crates (the dormant `mtgish-import` converter)
-/// and the keyword deserializers can request it without reaching into the
+/// creature class) so keyword deserializers can request it without reaching into the
 /// `pub(crate)` parser module. The single authority remains
 /// `parser::oracle_keyword::craft_materials_filter`.
 pub fn craft_materials_default() -> TargetFilter {
@@ -3664,6 +3953,78 @@ pub fn has_keyword(obj: &crate::game::game_object::GameObject, keyword: &Keyword
 mod tests {
     use super::*;
     use crate::types::ability::Effect;
+
+    /// CR 702.62a + CR 702.7a: the ordinary case — a keyword whose `kind()` names
+    /// it and nothing else supports a kind-level presence test.
+    #[test]
+    fn kind_identifies_ability_accepts_one_to_one_keywords() {
+        for keyword in [
+            Keyword::Suspend {
+                count: 4,
+                cost: crate::types::mana::ManaCost::generic(1),
+            },
+            Keyword::FirstStrike,
+            Keyword::Flying,
+            Keyword::Ward(WardCost::Mana(crate::types::mana::ManaCost::generic(2))),
+            Keyword::Foretell(crate::types::mana::ManaCost::generic(2)),
+        ] {
+            assert!(
+                keyword.kind_identifies_ability(),
+                "{keyword:?} maps 1:1 onto {:?}",
+                keyword.kind()
+            );
+        }
+    }
+
+    /// The catch-all bucket: ~60 unrelated keywords share `KeywordKind::Unknown`,
+    /// so a kind-level presence test on any of them answers "does it have ANY
+    /// Unknown-kind keyword" — TRUE for a creature with banding when the text
+    /// asked about storm.
+    #[test]
+    fn kind_identifies_ability_rejects_the_unknown_bucket() {
+        for keyword in [
+            Keyword::Storm,
+            Keyword::Banding,
+            Keyword::Melee,
+            Keyword::Mentor,
+            Keyword::Toxic(1),
+            Keyword::StartingIntensity(3),
+            Keyword::Unknown("rapid fire".to_string()),
+        ] {
+            assert_eq!(keyword.kind(), KeywordKind::Unknown);
+            assert!(
+                !keyword.kind_identifies_ability(),
+                "{keyword:?} shares the catch-all kind"
+            );
+        }
+    }
+
+    /// CR 702.11d + CR 702.14a + CR 702.16a + CR 702.29e + CR 702.124a: families
+    /// whose PRINTED keyword name varies with the parameter. Each parameter value
+    /// is its own keyword ability, and they all collapse into one kind —
+    /// `KeywordKind::Hexproof` even absorbs plain hexproof.
+    #[test]
+    fn kind_identifies_ability_rejects_parameter_renamed_families() {
+        assert_eq!(Keyword::Hexproof.kind(), KeywordKind::Hexproof);
+        assert_eq!(
+            Keyword::HexproofFrom(HexproofFilter::Color(crate::types::mana::ManaColor::Black))
+                .kind(),
+            KeywordKind::Hexproof,
+        );
+        for keyword in [
+            Keyword::Hexproof,
+            Keyword::HexproofFrom(HexproofFilter::Color(crate::types::mana::ManaColor::Black)),
+            Keyword::Protection(ProtectionTarget::Color(crate::types::mana::ManaColor::Red)),
+            Keyword::Landwalk("Island".to_string()),
+            Keyword::Partner(PartnerType::Generic),
+        ] {
+            assert!(
+                !keyword.kind_identifies_ability(),
+                "{keyword:?} shares {:?} with a differently-named keyword ability",
+                keyword.kind()
+            );
+        }
+    }
 
     /// CR 702.143d + CR 702 (alt-cost family): `with_cost` maps each variant to
     /// its `Keyword::X(ManaCost)`, and `matches_keyword`/`from_name` round-trip.

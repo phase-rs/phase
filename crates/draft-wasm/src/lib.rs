@@ -532,6 +532,33 @@ pub fn get_view() -> Result<JsValue, JsValue> {
     with_draft(|session| to_js(&filter_for_player(session, 0)))
 }
 
+/// Narrow a limited-pool listing through the ENGINE's filtering authority
+/// (#7546 review): the display sends the listing and a typed `PoolFilter`;
+/// it renders exactly the returned instance ids. Each instance is classified
+/// inside draft-core, so wire-delivered groups (of any protocol vintage) are
+/// not an input. Stateless — usable by P2P guests.
+#[wasm_bindgen]
+pub fn filter_pool_listing(listing_json: &str, filter_json: &str) -> Result<JsValue, JsValue> {
+    let listing: Vec<draft_core::types::DraftCardInstance> = serde_json::from_str(listing_json)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse pool listing: {}", e)))?;
+    let filter: draft_core::view::PoolFilter = serde_json::from_str(filter_json)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse pool filter: {}", e)))?;
+    Ok(to_js(&draft_core::view::filter_pool_listing(
+        &listing, &filter,
+    )))
+}
+
+/// The complete engine-owned filter option lists for a pool, computed from
+/// the instances alone (review round 5): the stateless path a display uses
+/// when its delivered view predates the option fields, so legacy controls
+/// never come from the lossy exclusive presentation buckets.
+#[wasm_bindgen]
+pub fn pool_filter_options(pool_json: &str) -> Result<JsValue, JsValue> {
+    let pool: Vec<draft_core::types::DraftCardInstance> = serde_json::from_str(pool_json)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse pool: {}", e)))?;
+    Ok(to_js(&draft_core::view::pool_filter_options(&pool)))
+}
+
 /// Submit the human player's deck for limited play.
 ///
 /// `main_deck_json`: JSON array of card instance ID strings.

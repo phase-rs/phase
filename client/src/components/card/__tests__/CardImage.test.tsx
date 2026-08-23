@@ -227,3 +227,54 @@ describe("CardImage art fallback (issue #6156)", () => {
     expect(img!.getAttribute("src")).toBe("https://example.invalid/back.png");
   });
 });
+
+describe("CardImage face-down marker (#7532)", () => {
+  it("renders the marker token art for a face-down permanent", () => {
+    mockUseCardImage.mockReturnValue({
+      src: "https://cards.scryfall.io/normal/front/m/a/manifest.jpg",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+
+    render(<CardImage cardName="Hidden" faceDown faceDownCause="Manifest" />);
+
+    const img = screen.getByRole("img");
+    expect(img).toHaveAttribute(
+      "src",
+      "https://cards.scryfall.io/normal/front/m/a/manifest.jpg",
+    );
+  });
+
+  it("falls back to the card back when the marker image fails to load", () => {
+    mockUseCardImage.mockReturnValue({
+      src: "https://cards.scryfall.io/normal/front/m/a/manifest.jpg",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+
+    render(<CardImage cardName="Hidden" faceDown faceDownCause="Manifest" />);
+    const img = screen.getByRole("img");
+    // A resolved marker URL can still 404 (CDN gap, stale printing). A face-down
+    // permanent must never show a broken image, and must not fall through to the
+    // artless text tile either — the card back is its only fallback.
+    fireEvent.error(img);
+
+    expect(screen.getByRole("img")).toHaveAttribute("src", CARD_BACK_URL);
+  });
+
+  it("keeps the card back when no marker applies", () => {
+    mockUseCardImage.mockReturnValue({
+      src: null,
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+
+    // `TurnedFaceDown` (Ixidron) has no printed marker token.
+    render(<CardImage cardName="Hidden" faceDown faceDownCause="TurnedFaceDown" />);
+
+    expect(screen.getByRole("img")).toHaveAttribute("src", CARD_BACK_URL);
+  });
+});

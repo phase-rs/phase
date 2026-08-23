@@ -10,7 +10,7 @@ use crate::types::ability::{
     ManaProduction, ManaSpendRestriction, ManaTargetRole, ModalSelectionConstraint,
     OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit,
     SearchSelectionConstraint, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    SubAbilityLink, TargetFilter,
+    SubAbilityLink, TargetFilter, ThisWayCause,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -457,6 +457,11 @@ pub(crate) enum ContinuationAst {
         /// cards route to a fixed library position (Fertile Thicket).
         #[serde(default)]
         reveal_verb: bool,
+        /// CR 608.2c: The producer action named by an explicit tracked-set suffix
+        /// such as "milled this way". Generic "from among" selection remains
+        /// action-agnostic (`None`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caused_by: Option<ThisWayCause>,
     },
     /// CR 708.2a + CR 205.1a: "They're N/M [types] [subtypes] creatures." after a
     /// put-face-down clause — refines the preceding face-down move's profile.
@@ -747,6 +752,13 @@ pub(crate) enum ImperativeFamilyAst {
     Manifest {
         target: TargetFilter,
         count: QuantityExpr,
+        /// CR 701.40a: Source discriminant, mirroring `Cloak.from_zone`:
+        /// `None` manifests the top `count` cards of `target`'s library;
+        /// `Some(zone)` manifests a card the controller chooses from that zone
+        /// (Scroll of Fate's "manifest a card from your hand"), which lowers
+        /// to a `ChooseFromZone` parent + `Manifest { object_source }`
+        /// sub-chain.
+        from_zone: Option<Zone>,
         /// CR 110.2a: Direct imperative manifest defaults to the instruction's
         /// controller; subject-predicate forms leave this unset so the subject's
         /// library owner controls the manifested card.
@@ -1992,6 +2004,28 @@ fn normalize_play_from_exile_duration(duration: Duration) -> Duration {
 
 // --- Modal types (moved from oracle_modal.rs) ---
 
+/// CR 603.12: The printed instruction a triggered modal's reflexive
+/// connector rides on — `"<trigger>, <instruction>. When you do, choose …"`.
+///
+/// The `"When you do"` connector creates the reflexive triggered ability. The
+/// `"you may "` marker only makes its parent instruction optional, so it cannot
+/// decide whether a reflexive exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) enum ReflexiveModalParent {
+    /// `"…, you may <instruction>. When you do, choose …"` — a declinable
+    /// resolution-time instruction (Caesar, Legion's Emperor). Carries the
+    /// printed instruction text with the `"you may "` marker and connector stripped;
+    /// `trigger_line` is reduced to the bare trigger condition alongside it.
+    MayPay(String),
+    /// `"…, <instruction>. When you do, choose …"` — a mandatory instruction
+    /// (Cemetery Desecrator). No text is carried: the
+    /// instruction stays in `trigger_line`, where the ordinary trigger parser
+    /// lowers it as it already does for every non-modal reflexive (Bone
+    /// Rattler, Diregraf Horde). Lowering then attaches the modal as that
+    /// chain's `WhenYouDo` sub instead of replacing it.
+    Mandatory,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum OracleBlockAst {
     ActivatedModal {
@@ -2008,15 +2042,14 @@ pub(crate) enum OracleBlockAst {
         trigger_line: String,
         header: ModalHeaderAst,
         modes: Vec<ModeAst>,
-        /// CR 603.12 + CR 700.2b: When the trigger gates its modal choice behind
-        /// an optional reflexive cost ("Whenever you attack, you may sacrifice
-        /// another creature. When you do, choose ..."), this holds the cost
-        /// effect text (e.g. "Sacrifice another creature"). The lowering builds
-        /// an `Effect::Sacrifice { optional }` whose `WhenYouDo` sub_ability
-        /// carries the modal, so the modes fire only after the cost is paid.
-        /// `None` for a plain triggered modal (Pip-Boy), where the modal attaches
-        /// directly as the trigger's execute.
-        optional_cost: Option<String>,
+        /// CR 603.12 + CR 700.2b: How the modal choice is introduced.
+        ///
+        /// `None` is a plain triggered modal (Pip-Boy 3000), where the modal
+        /// attaches directly as the trigger's execute. Anything else means a
+        /// reflexive connector stands between the trigger and the mode list,
+        /// and the modal must ride on the printed instruction before it —
+        /// see `ReflexiveModalParent`.
+        reflexive_parent: Option<ReflexiveModalParent>,
     },
     /// CR 614.12c + CR 607.2d: "As [this permanent] enters, choose <A> or
     /// <B>. \n • <A> — <linked ability>. \n • <B> — <linked ability>." The

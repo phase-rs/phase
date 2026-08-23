@@ -25,9 +25,7 @@ use engine::types::mana::ManaCost;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use phase_ai::auto_play::{
-    driver_step, run_ai_actions, run_ai_actions_bounded, AiActionsBreakReason,
-};
+use phase_ai::auto_play::{driver_step, run_ai_actions, run_ai_actions_bounded, AiActionsStop};
 use phase_ai::choose_action;
 use phase_ai::config::{create_config, AiDifficulty, Platform};
 use phase_ai::score_candidates;
@@ -1278,10 +1276,7 @@ fn run_ai_actions_non_empty_batch_carries_break_reason() {
         "P0's DeclareBlockers action should have applied before the batch stopped"
     );
     assert!(
-        matches!(
-            results.break_reason,
-            Some(AiActionsBreakReason::MissingAiConfig { player: P1 })
-        ),
+        matches!(&results.stop, AiActionsStop::MissingAiConfig { player: P1 }),
         "expected MissingAiConfig(P1): P1 is an AI seat with no ai_configs entry, \
          which is not the same stall as NoActor"
     );
@@ -1289,7 +1284,7 @@ fn run_ai_actions_non_empty_batch_carries_break_reason() {
     let step = driver_step(results);
     assert_eq!(step.actions_taken, 1);
     assert!(
-        step.break_reason.is_some(),
+        matches!(step.stop, AiActionsStop::MissingAiConfig { player: P1 }),
         "driver_step must preserve the break reason from a non-empty batch \
          so the driver stops at this boundary instead of discarding it"
     );

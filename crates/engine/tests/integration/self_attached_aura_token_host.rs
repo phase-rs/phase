@@ -464,6 +464,28 @@ impl RoleChain {
     }
 
     fn run_targeting(&mut self, player: Option<PlayerId>) -> ObjectId {
+        let created = self.run_collecting(player);
+        assert_eq!(
+            created.len(),
+            1,
+            "reach guard: exactly one Role token was created"
+        );
+        created[0]
+    }
+
+    /// CR 303.4i: the run where the declared host authority names nothing, so
+    /// the Aura token is NOT created ("If the Aura is a token, it isn't
+    /// created"). The tap reach guard inside `run_collecting` is what keeps this
+    /// from passing vacuously — resolution demonstrably reached the token clause.
+    fn run_expecting_no_token(&mut self) {
+        let created = self.run_collecting(None);
+        assert!(
+            created.is_empty(),
+            "CR 303.4i: an Aura token whose host is undefined is not created, got {created:?}"
+        );
+    }
+
+    fn run_collecting(&mut self, player: Option<PlayerId>) -> Vec<ObjectId> {
         let source = self.source;
         let selected = self.selected;
         let activation = self.runner.activate(source, 0).target_object(selected);
@@ -485,12 +507,7 @@ impl RoleChain {
             self.runner.state().objects[&selected].tapped,
             "reach guard: the parent effect ran, so resolution reached the token clause"
         );
-        assert_eq!(
-            created.len(),
-            1,
-            "reach guard: exactly one Role token was created"
-        );
-        created[0]
+        created
     }
 
     /// The host the created token ended up with, or `None` where the token was
@@ -513,17 +530,16 @@ fn a_context_filter_host_never_falls_back_to_the_selected_target() {
     // CR 400.7j + CR 608.2k: "the object paid as a cost" names nothing here, so
     // the token gets no host — it must NOT inherit the chosen target.
     let mut chain = RoleChain::build(TargetFilter::CostPaidObject);
-    let token = chain.run();
+    // CR 303.4i: the authority names no object, so the host is undefined and the
+    // Role token is not created at all. It used to be created hostless and swept
+    // by the CR 704.5m SBA (#7302); either way it must never inherit the chosen
+    // target, which the attachment count below is what proves.
+    chain.run_expecting_no_token();
     assert_eq!(
         chain.attachments_of(chain.selected),
         0,
         "a reference filter that resolves to nothing must leave the selected \
          target unenchanted"
-    );
-    assert_eq!(
-        chain.host_of(token),
-        None,
-        "no Role may be attached at all when its declared authority named no host"
     );
 
     // The discriminating half: a context filter that DOES name an object
@@ -557,17 +573,14 @@ fn a_paired_source_filter_never_inherits_the_selected_target() {
             .expect("partner")
             .paired_with = Some(source);
     }
-    let token = chain.run();
+    // CR 303.4i: no single host authority exists for the pair, so the host is
+    // undefined and the token is not created.
+    chain.run_expecting_no_token();
 
     assert_eq!(
         chain.attachments_of(chain.selected),
         0,
         "a paired-source reference must not enchant the object the ability selected"
-    );
-    assert_eq!(
-        chain.host_of(token),
-        None,
-        "with no single host authority for the pair, the Role gets no host at all"
     );
 }
 
@@ -708,13 +721,10 @@ fn selenias_curse_enchants_the_targeted_opponent() {
 #[test]
 fn an_unbound_chosen_player_yields_no_host_rather_than_the_controller() {
     let mut chain = RoleChain::build_curse(chosen_player_filter());
-    let token = chain.run();
+    // CR 303.4i: an unbound chosen-player slot names nobody, so the host is
+    // undefined and the Curse token is not created.
+    chain.run_expecting_no_token();
 
-    assert_eq!(
-        chain.host_of(token),
-        None,
-        "an unbound chosen-player slot names nobody, so there is no host"
-    );
     assert_eq!(
         chain.attachments_of(chain.selected),
         0,

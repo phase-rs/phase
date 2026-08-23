@@ -10,11 +10,7 @@ import type {
   PlayerId,
 } from "../adapter/types";
 import { FORMAT_REGISTRY } from "../data/formatRegistry";
-import {
-  LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL,
-  PROTOCOL_VERSION,
-  type ServerInfo,
-} from "../adapter/ws-adapter";
+import { serverProtocolRejection, type ServerInfo } from "../adapter/ws-adapter";
 import {
   clearWsSession,
   loadWsSession,
@@ -342,7 +338,12 @@ interface MultiplayerActions {
     deck: HostingDeck,
     opts: { useBroker: boolean; roomName?: string | null },
   ) => Promise<boolean>;
-  getActiveP2PHost: () => { adapter: P2PHostAdapter; gameId: string } | null;
+  /**
+   * Transfers the pre-game host adapter to the matching game route. Once
+   * claimed, the game provider is its sole owner and lobby cleanup cannot
+   * later leave a disposed adapter available for a remount.
+   */
+  takeActiveP2PHost: (gameId: string) => P2PHostAdapter | null;
   seatMutate: (mutation: SeatMutation) => void;
   /** Like `seatMutate` but awaits P2P work; server sends are still fire-and-forget. */
   seatMutateAsync: (mutation: SeatMutation) => Promise<void>;
@@ -495,12 +496,14 @@ export function isLobbyEntryCompatible(
   return hostBuildCommit === __BUILD_HASH__;
 }
 
-/** True when the client's wire-protocol can speak to the server's advertised mode. */
+/**
+ * True when the client's wire-protocol can speak to the server's advertised
+ * mode. Delegates to `serverProtocolRejection` — the same decision the
+ * handshake makes — so the compatibility badge can never disagree with whether
+ * the connection actually succeeds.
+ */
 export function isServerCompatible(info: ServerInfo | null): boolean {
-  if (!info) return false;
-  const minProtocol =
-    info.mode === "LobbyOnly" ? LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL : PROTOCOL_VERSION;
-  return info.protocolVersion >= minProtocol && info.protocolVersion <= PROTOCOL_VERSION;
+  return info !== null && serverProtocolRejection(info) === null;
 }
 
 // Build the FORMAT_DEFAULTS map from the engine-authored FORMAT_REGISTRY.
@@ -525,7 +528,7 @@ export function migratePersistedMultiplayerState(
 ): unknown {
   if (!persisted || typeof persisted !== "object") return persisted;
   const migrated = persisted as Record<string, unknown>;
-  if (version < 2) {
+  if (version < 3) {
     migrated.serverAddress = migrateOfficialServerAddress(
       migrated.serverAddress,
       DEFAULT_MULTIPLAYER_SERVER_URL,
@@ -1231,11 +1234,13 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         }
       },
 
-      getActiveP2PHost: () => {
-        if (activeP2PHostAdapter && activeP2PHostGameId) {
-          return { adapter: activeP2PHostAdapter, gameId: activeP2PHostGameId };
-        }
-        return null;
+      takeActiveP2PHost: (gameId) => {
+        if (!activeP2PHostAdapter || activeP2PHostGameId !== gameId) return null;
+
+        const adapter = activeP2PHostAdapter;
+        activeP2PHostAdapter = null;
+        activeP2PHostGameId = null;
+        return adapter;
       },
 
       seatMutateAsync: async (mutation) => {
@@ -1471,11 +1476,19 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
     }),
     {
       name: "phase-multiplayer",
-      version: 2,
+      version: 3,
       // v0/v1 → v2: official hosted lobby addresses are deployment defaults,
       // not user intent. A self-hosted build must move returning browsers from
       // the official lobby to its configured default while preserving explicit
       // custom/self-hosted addresses.
+      //
+      // v2 → v3: same rule, re-applied because the official set now spans a
+      // broker PER RELEASE CHANNEL. Without this bump a returning preview
+      // browser keeps its persisted production address, and detectServerUrl
+      // honours any valid stored address, so it would silently stay pinned to a
+      // lobby its build cannot handshake with. Re-running the same migration
+      // repoints it at this channel's broker; a user-typed non-official address
+      // is still preserved.
       migrate: migratePersistedMultiplayerState,
       partialize: (state) => ({
         playerId: state.playerId,

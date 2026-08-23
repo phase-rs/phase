@@ -7,11 +7,12 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCostOrigin,
     BounceSelection, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute, CommanderOwnership,
     ControllerRef, CopyRetargetPermission, DamageAmountScope, DamageAmountThreshold,
-    DamageKindFilter, DelayedTriggerCondition, Effect, FilterProp, ModalChoice, ObjectScope,
-    OriginConstraint, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, RenownSubject,
-    ResolvedAbility, SacrificeCost, StaticCondition, TargetFilter, TargetRef, TributeOutcome,
-    TriggerCondition, TriggerConstraint, TriggerDefinition, TriggerDefinitionOccurrenceRef,
-    TriggerDefinitionRef, TriggerEntry, TriggerGrantProducerKey, TypeFilter, TypedFilter,
+    DamageKindFilter, DelayedTriggerCondition, DurationEvent, Effect, FilterProp, ModalChoice,
+    ObjectScope, OriginConstraint, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+    RenownSubject, ResolvedAbility, SacrificeCost, StaticCondition, TargetFilter, TargetRef,
+    TributeOutcome, TriggerCondition, TriggerConstraint, TriggerDefinition,
+    TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry, TriggerGrantProducerKey,
+    TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -167,6 +168,35 @@ fn pending_trigger_dispatch_origin_is_normal(origin: &PendingTriggerDispatchOrig
 pub struct ConsumedTriggerEventOccurrence {
     pub event: GameEvent,
     pub occurrence: usize,
+    #[serde(default)]
+    pub scope: ConsumedTriggerEventScope,
+}
+
+/// Which trigger collectors have already handled an event occurrence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum ConsumedTriggerEventScope {
+    /// The historical complete-transaction claim: neither collector may revisit it.
+    #[default]
+    AllCollectors,
+    /// A batch owner collected ordinary triggers; delayed triggers still observe it.
+    OrdinaryCollectorsOnly,
+}
+
+/// The trigger collector requesting events from the consumed-occurrence journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TriggerCollectionRequester {
+    Ordinary,
+    Delayed,
+}
+
+impl ConsumedTriggerEventScope {
+    pub(crate) fn consumes(self, requester: TriggerCollectionRequester) -> bool {
+        match (self, requester) {
+            (Self::AllCollectors, _)
+            | (Self::OrdinaryCollectorsOnly, TriggerCollectionRequester::Ordinary) => true,
+            (Self::OrdinaryCollectorsOnly, TriggerCollectionRequester::Delayed) => false,
+        }
+    }
 }
 
 pub struct TriggerBatchOutcome {
@@ -323,6 +353,10 @@ pub struct PendingTriggerContext {
     pub pending: PendingTrigger,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trigger_events: Vec<GameEvent>,
+    /// CR 610.3b: specified duration events observed after this ability
+    /// triggered but before it reached the stack.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) duration_events: Vec<DurationEvent>,
     #[serde(
         default,
         skip_serializing_if = "pending_trigger_dispatch_origin_is_normal"
@@ -348,6 +382,7 @@ impl PendingTriggerContext {
         Self {
             pending,
             trigger_events,
+            duration_events: Vec::new(),
             dispatch_origin: PendingTriggerDispatchOrigin::Normal,
             firing: TriggerFiring::Ordinary,
         }
@@ -357,6 +392,7 @@ impl PendingTriggerContext {
         Self {
             pending,
             trigger_events,
+            duration_events: Vec::new(),
             dispatch_origin: PendingTriggerDispatchOrigin::Normal,
             firing: TriggerFiring::Ordinary,
         }
@@ -367,6 +403,7 @@ impl PendingTriggerContext {
         Self {
             pending,
             trigger_events,
+            duration_events: Vec::new(),
             dispatch_origin: PendingTriggerDispatchOrigin::Delayed,
             firing: identity.firing(),
         }
@@ -374,6 +411,14 @@ impl PendingTriggerContext {
 
     pub(crate) fn firing(&self) -> TriggerFiring {
         self.firing
+    }
+
+    pub(crate) fn record_duration_event(&mut self, event: DurationEvent) {
+        if self.pending.ability.contains_duration_event(event)
+            && !self.duration_events.contains(&event)
+        {
+            self.duration_events.push(event);
+        }
     }
 
     #[cfg(test)]
@@ -3548,6 +3593,7 @@ pub(crate) fn mark_logical_zone_events_consumed_before_priority(
                     ConsumedTriggerEventOccurrence {
                         event: event.clone(),
                         occurrence: trigger_event_occurrence(events, index),
+                        scope: ConsumedTriggerEventScope::AllCollectors,
                     }
                 })
         })
@@ -5264,7 +5310,8 @@ fn collect_pending_triggers_with_collection(
                     let draw_ability =
                         ResolvedAbility::new(draw_effect, Vec::new(), ObjectId(0), monarch_id);
                     let trig_def = TriggerDefinition::new(TriggerMode::Phase)
-                        .description("Monarch draw (CR 725.2)".to_string());
+                        // CR 725.2: the label a viewer sees for this sourceless ability.
+                        .description("The Monarch".to_string());
                     pending.push(PendingTriggerContext::single(PendingTrigger {
                         source_id: ObjectId(0),
                         controller: monarch_id,
@@ -5300,7 +5347,9 @@ fn collect_pending_triggers_with_collection(
                     let venture_ability =
                         ResolvedAbility::new(venture_effect, Vec::new(), ObjectId(0), init_holder);
                     let trig_def = TriggerDefinition::new(TriggerMode::Phase)
-                        .description("Initiative upkeep venture (CR 725.2)".to_string());
+                        // CR 726.2 (NOT 725.2, which is the monarch): the label a viewer
+                        // sees for this sourceless ability.
+                        .description("The Initiative".to_string());
                     pending.push(PendingTriggerContext::single(PendingTrigger {
                         source_id: ObjectId(0),
                         controller: init_holder,
@@ -5440,7 +5489,7 @@ fn collect_pending_triggers_with_collection(
                         );
                         take_init.set_trigger_source_recursive(source_context);
                         let trig_def = TriggerDefinition::new(TriggerMode::DamageDone)
-                            .description("Initiative steal (CR 725.2)".to_string());
+                            .description("Initiative steal (CR 726.2)".to_string());
                         pending.push(PendingTriggerContext::single(PendingTrigger {
                             source_id: *source_id,
                             controller: new_holder,
@@ -5486,7 +5535,8 @@ fn collect_pending_triggers_with_collection(
                     trigger_controller,
                 );
                 let trig_def = TriggerDefinition::new(TriggerMode::LifeLost)
-                    .description("Start your engines! (CR 702.179d)".to_string());
+                    // CR 702.179d: the label a viewer sees for this sourceless ability.
+                    .description("Start your engines!".to_string());
                 pending.push(PendingTriggerContext::single(PendingTrigger {
                     source_id: speed_key_source(),
                     controller: trigger_controller,
@@ -5534,7 +5584,8 @@ fn collect_pending_triggers_with_collection(
                     active,
                 );
                 let trig_def = TriggerDefinition::new(TriggerMode::Phase)
-                    .description("Rad counters (CR 728.1)".to_string());
+                    // CR 728.1: the label a viewer sees for this sourceless ability.
+                    .description("Rad counters".to_string());
                 pending.push(PendingTriggerContext::single(PendingTrigger {
                     source_id: ObjectId(0),
                     controller: active,
@@ -6871,6 +6922,48 @@ pub fn drain_order_triggers_with_identity(
 /// CR 603.3b: Build the next `WaitingFor::OrderTriggers` prompt by finding
 /// the earliest unordered group in APNAP order.
 /// Returns `None` if every group is `ordered` (caller should dispatch).
+/// The name a viewer shows for a triggered ability's source.
+///
+/// CR 113.7 defines an ability's source as the object that generated it; CR
+/// 113.8 instead defines an ability's controller. The inherent ability rules
+/// modeled here directly make four abilities sourceless: CR 725.2 (the monarch),
+/// CR 726.2 (the initiative), CR 728.1 (rad counters), and CR 702.179d (speed).
+/// CR 901.8 separately makes Planechase's planeswalking ability sourceless. The
+/// engine models the four triggers here faithfully, which leaves the wire with
+/// nothing to name.
+///
+/// A sourceless ability names itself: the rule that mints it IS its identity,
+/// which is what `description` already carries — the same short label
+/// ("Prowess", "Storm", "Cascade") every other engine-authored trigger uses.
+/// Printed helper cards do exactly this too, standing a card face in for a rule
+/// that has no object behind it.
+///
+/// Single authority on purpose: the ordering prompt and the stack entry ask the
+/// same question and must not answer it differently. Neither may push the
+/// question to the display layer, which is not allowed to derive game-facing
+/// content.
+fn trigger_source_display_name(
+    state: &GameState,
+    source_id: ObjectId,
+    ability: &ResolvedAbility,
+    description: Option<&str>,
+) -> String {
+    // CR 400.7 + CR 113.7a: the trigger's own captured source is the most
+    // faithful answer, and the only one that survives the source leaving its
+    // zone — `lki()` is what makes "From <name>" still right for a dead source.
+    if let Some(source) = ability.trigger_source.as_ref() {
+        return source.source_read(state).lki().name;
+    }
+    // CR 603.7d: a delayed trigger carries no captured source, but `source_id`
+    // still points at the live object that set it up. Reading the objects map
+    // here is what the ordering prompt did before this helper existed, and
+    // dropping it would have blanked every delayed and co-triggered entry.
+    if let Some(object) = state.objects.get(&source_id) {
+        return object.name.clone();
+    }
+    description.unwrap_or_default().to_string()
+}
+
 fn build_next_order_triggers_prompt(
     state: &GameState,
 ) -> Option<crate::types::game_state::WaitingFor> {
@@ -6883,11 +6976,12 @@ fn build_next_order_triggers_prompt(
         .iter()
         .map(|ctx| PendingTriggerSummary {
             source_id: ctx.pending.source_id,
-            source_name: state
-                .objects
-                .get(&ctx.pending.source_id)
-                .map(|o| o.name.clone())
-                .unwrap_or_default(),
+            source_name: trigger_source_display_name(
+                state,
+                ctx.pending.source_id,
+                &ctx.pending.ability,
+                ctx.pending.description.as_deref(),
+            ),
             description: ctx.pending.description.clone().unwrap_or_default(),
         })
         .collect();
@@ -7091,6 +7185,7 @@ pub(crate) fn park_observer_triggers_if_paused(
     let trigger_events: Vec<GameEvent> = filter_consumed_trigger_events_from(
         events,
         slice_start,
+        TriggerCollectionRequester::Ordinary,
         &state.consumed_before_priority_trigger_events,
     )
     .into_iter()
@@ -7128,6 +7223,7 @@ pub(crate) fn collect_and_drain_observer_triggers_if_settled(
     let trigger_events: Vec<GameEvent> = filter_consumed_trigger_events_from(
         events,
         slice_start,
+        TriggerCollectionRequester::Ordinary,
         &state.consumed_before_priority_trigger_events,
     )
     .into_iter()
@@ -7359,6 +7455,29 @@ fn push_pending_trigger_to_stack_with_firing(
     events: &mut Vec<GameEvent>,
     firing: TriggerFiring,
 ) -> ObjectId {
+    push_pending_trigger_to_stack_with_firing_and_duration_events(
+        state,
+        trigger,
+        trigger_events,
+        Vec::new(),
+        events,
+        firing,
+    )
+}
+
+fn push_pending_trigger_to_stack_with_firing_and_duration_events(
+    state: &mut GameState,
+    mut trigger: PendingTrigger,
+    trigger_events: Vec<GameEvent>,
+    duration_events: Vec<DurationEvent>,
+    events: &mut Vec<GameEvent>,
+    firing: TriggerFiring,
+) -> ObjectId {
+    for duration_event in duration_events {
+        trigger
+            .ability
+            .record_duration_event_recursive(duration_event);
+    }
     let PendingTrigger {
         source_id,
         controller,
@@ -7392,13 +7511,31 @@ fn push_pending_trigger_to_stack_with_firing(
             .insert(entry_id, trigger_events);
     }
     // Capture the observed source name at stack-push time so viewers can render
-    // "From <name>" without rebinding an old trigger to a reused id. Synthetic
-    // game-rule triggers carry no trigger source and deliberately display no name.
-    let source_name = ability
-        .trigger_source
-        .as_ref()
-        .map(|source| source.source_read(state).lki().name)
-        .unwrap_or_default();
+    // "From <name>" without rebinding an old trigger to a reused id.
+    let source_name =
+        trigger_source_display_name(state, source_id, &ability, description.as_deref());
+    // The four source-less inherent triggers constructed here (CR 725.2 monarch,
+    // CR 726.2 initiative, CR 728.1 rad counters, CR 702.179d speed) use the
+    // `ObjectId(0)` no-source sentinel. CR 113.7 governs source; CR 113.8 governs
+    // controller, while CR 901.8 separately makes the planeswalking ability
+    // sourceless. A viewer cannot dereference the sentinel, so such an entry MUST
+    // carry its own name or the display layer is left to invent one.
+    //
+    // Keyed on the sentinel rather than on a list of the four rules, so a fifth
+    // sourceless rule is covered the day it is written.
+    //
+    // Two weaker-looking scopes were measured and rejected as the wrong shape:
+    // `!source_name.is_empty()` for every trigger fails 53 existing tests
+    // (delayed triggers, CR 603.7d, carry neither a captured source nor a
+    // description), and `state.objects.contains_key(&source_id)` fails 10 more
+    // whose fixtures name a source id they never insert. Both of those entries
+    // are still nameable — the first from `source_id`, the second in a real game
+    // where the id exists — so neither is this defect. See the PR's open-gap note.
+    debug_assert!(
+        source_id != ObjectId(0) || !source_name.is_empty(),
+        "a source-less rule ability must carry its own name — the display layer \
+         has no object from which to read one"
+    );
     let crime_candidate = super::casting::targets_commit_crime(
         state,
         &super::ability_utils::flatten_targets_in_chain(&ability),
@@ -7837,12 +7974,14 @@ fn dispatch_pending_trigger_context_with_origin(
     let firing = trigger_context.firing();
     let context_pending = trigger_context.pending.clone();
     let context_events = trigger_context.trigger_events.clone();
+    let context_duration_events = trigger_context.duration_events.clone();
     match dispatch_pending_trigger_context(state, trigger_context, events_out) {
         TriggerDispatchDisposition::DroppedTargetUnresolved if firing.is_delayed() => {
-            push_pending_trigger_to_stack_with_firing(
+            push_pending_trigger_to_stack_with_firing_and_duration_events(
                 state,
                 context_pending,
                 context_events,
+                context_duration_events,
                 events_out,
                 firing,
             );
@@ -8078,6 +8217,7 @@ fn dispatch_pending_trigger_context_core(
     let PendingTriggerContext {
         pending: trigger,
         trigger_events,
+        duration_events,
         firing,
         ..
     } = trigger_context;
@@ -8162,10 +8302,11 @@ fn dispatch_pending_trigger_context_core(
             let controller = trigger.controller;
             let source_id = trigger.source_id;
             let pending_for_state = trigger.clone();
-            let entry_id = push_pending_trigger_to_stack_with_firing(
+            let entry_id = push_pending_trigger_to_stack_with_firing_and_duration_events(
                 state,
                 trigger,
                 trigger_events.clone(),
+                duration_events.clone(),
                 events_out,
                 firing,
             );
@@ -8277,10 +8418,11 @@ fn dispatch_pending_trigger_context_core(
                 restore_trigger_event_context(state, context_snapshot);
                 return TriggerDispatchDisposition::ResolvedInline;
             }
-            push_pending_trigger_to_stack_with_firing(
+            push_pending_trigger_to_stack_with_firing_and_duration_events(
                 state,
                 trigger,
                 trigger_events,
+                duration_events,
                 events_out,
                 firing,
             );
@@ -8320,13 +8462,15 @@ fn dispatch_pending_trigger_context_core(
                             // when the division choice completes.
                             let player = prepared_trigger.controller;
                             let pending_for_state = prepared_trigger.clone();
-                            let entry_id = push_pending_trigger_to_stack_with_firing(
-                                state,
-                                prepared_trigger,
-                                trigger_events.clone(),
-                                events_out,
-                                firing,
-                            );
+                            let entry_id =
+                                push_pending_trigger_to_stack_with_firing_and_duration_events(
+                                    state,
+                                    prepared_trigger,
+                                    trigger_events.clone(),
+                                    duration_events.clone(),
+                                    events_out,
+                                    firing,
+                                );
                             state.pending_trigger_event_batch = trigger_events;
                             state.pending_trigger = Some(Box::new(pending_for_state));
                             state.pending_trigger_firing = Some(firing);
@@ -8344,10 +8488,11 @@ fn dispatch_pending_trigger_context_core(
                     }
                 }
             }
-            push_pending_trigger_to_stack_with_firing(
+            push_pending_trigger_to_stack_with_firing_and_duration_events(
                 state,
                 prepared_trigger,
                 trigger_events,
+                duration_events,
                 events_out,
                 firing,
             );
@@ -8361,10 +8506,11 @@ fn dispatch_pending_trigger_context_core(
             // mutates the on-stack entry's `ability.targets` when each target
             // is chosen.
             let pending_for_state = trigger.clone();
-            let entry_id = push_pending_trigger_to_stack_with_firing(
+            let entry_id = push_pending_trigger_to_stack_with_firing_and_duration_events(
                 state,
                 trigger,
                 trigger_events.clone(),
+                duration_events.clone(),
                 events_out,
                 firing,
             );
@@ -8731,6 +8877,7 @@ fn claim_resumed_triggered_mana_events(
         .map(|index| ConsumedTriggerEventOccurrence {
             event: events[index].clone(),
             occurrence: trigger_event_occurrence(events, index),
+            scope: ConsumedTriggerEventScope::AllCollectors,
         })
         .collect();
     resolve_and_apply_trigger_collection(
@@ -9817,9 +9964,16 @@ pub(crate) fn trigger_event_occurrence(events: &[GameEvent], event_index: usize)
 /// complete action event buffer. An occurrence is an identity within the full
 /// buffer, not within a later continuation slice: rebasing it at `event_start`
 /// can consume an equal-looking event from the wrong resolution segment.
+///
+/// `requester` is the collector performing this scan. An
+/// [`ConsumedTriggerEventScope::OrdinaryCollectorsOnly`] claim suppresses an
+/// ordinary requester but deliberately preserves the occurrence for a delayed
+/// requester; [`filter_consumed_trigger_events`] applies the same rule to the
+/// whole buffer.
 pub(crate) fn filter_consumed_trigger_events_from(
     events: &[GameEvent],
     event_start: usize,
+    requester: TriggerCollectionRequester,
     consumed: &[ConsumedTriggerEventOccurrence],
 ) -> Vec<GameEvent> {
     events[event_start..]
@@ -9827,10 +9981,11 @@ pub(crate) fn filter_consumed_trigger_events_from(
         .enumerate()
         .filter_map(|(offset, event)| {
             let occurrence = trigger_event_occurrence(events, event_start + offset);
-            if !consumed
-                .iter()
-                .any(|consumed| consumed.event == *event && consumed.occurrence == occurrence)
-            {
+            if !consumed.iter().any(|consumed| {
+                consumed.event == *event
+                    && consumed.occurrence == occurrence
+                    && consumed.scope.consumes(requester)
+            }) {
                 Some(event.clone())
             } else {
                 None
@@ -9841,9 +9996,10 @@ pub(crate) fn filter_consumed_trigger_events_from(
 
 pub(crate) fn filter_consumed_trigger_events(
     events: &[GameEvent],
+    requester: TriggerCollectionRequester,
     consumed: &[ConsumedTriggerEventOccurrence],
 ) -> Vec<GameEvent> {
-    filter_consumed_trigger_events_from(events, 0, consumed)
+    filter_consumed_trigger_events_from(events, 0, requester, consumed)
 }
 
 /// CR 603.2c: Remove from `events[event_start..]` the occurrences a trigger
@@ -10016,24 +10172,29 @@ pub(crate) fn filter_already_collected_trigger_events_from(
         .flat_map(|context| context.trigger_events.iter())
         .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
         .collect();
-    filter_consumed_trigger_events_from(events, event_start, consumed)
-        .into_iter()
-        .filter(|event| {
-            if !matches!(event, GameEvent::ZoneChanged { .. }) {
-                return true;
+    filter_consumed_trigger_events_from(
+        events,
+        event_start,
+        TriggerCollectionRequester::Ordinary,
+        consumed,
+    )
+    .into_iter()
+    .filter(|event| {
+        if !matches!(event, GameEvent::ZoneChanged { .. }) {
+            return true;
+        }
+        match queued_zone_change_witnesses
+            .iter()
+            .position(|queued| *queued == event)
+        {
+            Some(index) => {
+                queued_zone_change_witnesses.remove(index);
+                false
             }
-            match queued_zone_change_witnesses
-                .iter()
-                .position(|queued| *queued == event)
-            {
-                Some(index) => {
-                    queued_zone_change_witnesses.remove(index);
-                    false
-                }
-                None => true,
-            }
-        })
-        .collect()
+            None => true,
+        }
+    })
+    .collect()
 }
 
 /// CR 603.2c + CR 510.2: Expand a multi-fire `WheneverEvent` `DamageDone`
@@ -10307,6 +10468,7 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
     match qty {
         QuantityRef::CountersOn { scope, .. }
         | QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
         | QuantityRef::Intensity { scope }
         | QuantityRef::Toughness { scope }
         | QuantityRef::ObjectManaValue { scope }
@@ -10408,6 +10570,7 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
         | QuantityRef::TimesCostPaidThisResolution
         // CR 608.2c: the secret-number ledger is populated BY the
         // resolution that ran the choice (Wheel of Misfortune, Menacing Ogre) and
@@ -10940,6 +11103,7 @@ fn collect_matching_delayed_triggers(
             consumed_events.push(ConsumedTriggerEventOccurrence {
                 occurrence: trigger_event_occurrence(events, event_index),
                 event: events[event_index].clone(),
+                scope: ConsumedTriggerEventScope::AllCollectors,
             });
             let origin = trigger.provenance.origin();
             let binding = super::lifecycle::ImmutableBinding {
@@ -13756,6 +13920,7 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
     match qty {
         // Object-axis refs: read the cost-paid object iff scoped to it.
         QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
         | QuantityRef::Toughness { scope }
         | QuantityRef::Intensity { scope }
         | QuantityRef::ObjectManaValue { scope }
@@ -13847,6 +14012,7 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
         | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
         | QuantityRef::LifeLostThisTurn { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::UnspentMana { .. }
@@ -22116,6 +22282,7 @@ pub mod tests {
             vec![ConsumedTriggerEventOccurrence {
                 event: events[0].clone(),
                 occurrence: 0,
+                scope: ConsumedTriggerEventScope::AllCollectors,
             }],
             "the delayed phase trigger must consume the exact PhaseChanged occurrence it matched"
         );
@@ -22160,9 +22327,11 @@ pub mod tests {
         ];
         let filtered = filter_consumed_trigger_events(
             &events,
+            TriggerCollectionRequester::Ordinary,
             &[ConsumedTriggerEventOccurrence {
                 event: events[0].clone(),
                 occurrence: 1,
+                scope: ConsumedTriggerEventScope::AllCollectors,
             }],
         );
 
@@ -22183,9 +22352,11 @@ pub mod tests {
         let filtered = filter_consumed_trigger_events_from(
             &events,
             1,
+            TriggerCollectionRequester::Ordinary,
             &[ConsumedTriggerEventOccurrence {
                 event: events[1].clone(),
                 occurrence: 1,
+                scope: ConsumedTriggerEventScope::AllCollectors,
             }],
         );
 
@@ -22194,6 +22365,72 @@ pub mod tests {
             vec![events[2].clone()],
             "the suffix-local first upkeep is globally the second occurrence"
         );
+    }
+
+    #[test]
+    fn consumed_trigger_event_scope_partitions_collectors() {
+        assert!(
+            ConsumedTriggerEventScope::AllCollectors.consumes(TriggerCollectionRequester::Ordinary)
+        );
+        assert!(
+            ConsumedTriggerEventScope::AllCollectors.consumes(TriggerCollectionRequester::Delayed)
+        );
+        assert!(ConsumedTriggerEventScope::OrdinaryCollectorsOnly
+            .consumes(TriggerCollectionRequester::Ordinary));
+        assert!(!ConsumedTriggerEventScope::OrdinaryCollectorsOnly
+            .consumes(TriggerCollectionRequester::Delayed));
+    }
+
+    #[test]
+    fn ordinary_only_claim_keeps_delayed_event_and_full_buffer_prefix() {
+        let repeated = GameEvent::PhaseChanged {
+            phase: Phase::Upkeep,
+        };
+        let events = vec![
+            repeated.clone(),
+            repeated.clone(),
+            GameEvent::PhaseChanged { phase: Phase::Draw },
+        ];
+        let consumed = [ConsumedTriggerEventOccurrence {
+            event: repeated,
+            occurrence: trigger_event_occurrence(&events, 1),
+            scope: ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
+        }];
+
+        assert_eq!(
+            filter_consumed_trigger_events(
+                &events,
+                TriggerCollectionRequester::Ordinary,
+                &consumed,
+            ),
+            vec![events[0].clone(), events[2].clone()],
+            "the full-buffer prefix is a distinct occurrence from the claimed suffix"
+        );
+        assert_eq!(
+            filter_consumed_trigger_events(&events, TriggerCollectionRequester::Delayed, &consumed,),
+            events,
+            "ordinary-only collection must leave the raw event for delayed triggers"
+        );
+    }
+
+    #[test]
+    fn consumed_trigger_event_occurrence_defaults_scope_for_historical_json() {
+        let occurrence = ConsumedTriggerEventOccurrence {
+            event: GameEvent::PhaseChanged {
+                phase: Phase::Upkeep,
+            },
+            occurrence: 0,
+            scope: ConsumedTriggerEventScope::AllCollectors,
+        };
+        let mut historical = serde_json::to_value(occurrence).expect("occurrence serializes");
+        historical
+            .as_object_mut()
+            .expect("occurrence serializes as an object")
+            .remove("scope");
+
+        let restored: ConsumedTriggerEventOccurrence =
+            serde_json::from_value(historical).expect("historical occurrence deserializes");
+        assert_eq!(restored.scope, ConsumedTriggerEventScope::AllCollectors);
     }
 
     /// CR 603.2c + CR 510.2 (PR #6884 blocker 1): a MULTI-FIRE combat-damage
@@ -22313,7 +22550,8 @@ pub mod tests {
         // must REMOVE the aggregate, so a subsequent priority scan sees no combat
         // event to re-expand. With a synthetic-keyed consumed entry the aggregate
         // would survive here and the trigger could re-fire.
-        let remaining = filter_consumed_trigger_events(&events, &consumed);
+        let remaining =
+            filter_consumed_trigger_events(&events, TriggerCollectionRequester::Delayed, &consumed);
         assert!(
             !remaining
                 .iter()
@@ -34937,6 +35175,7 @@ pub mod tests {
             state.consumed_before_priority_trigger_events = vec![ConsumedTriggerEventOccurrence {
                 event: repeated.clone(),
                 occurrence: trigger_event_occurrence(&events, 0),
+                scope: ConsumedTriggerEventScope::AllCollectors,
             }];
 
             if settled {
@@ -43287,6 +43526,7 @@ pub mod tests {
                 crate::game::effects::change_zone::deliver_replaced_zone_change(
                     state,
                     event,
+                    None,
                     None,
                     None,
                     false,

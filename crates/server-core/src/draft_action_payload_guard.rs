@@ -57,7 +57,7 @@ pub fn guard_draft_action_payload(action: &DraftAction) -> Result<(), String> {
         }
         DraftAction::StartDraft
         | DraftAction::AdvanceRound
-        | DraftAction::GeneratePairings { .. }
+        | DraftAction::GeneratePairings
         | DraftAction::SetSeatConnected { .. } => {}
     }
     Ok(())

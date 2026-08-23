@@ -264,6 +264,7 @@ pub fn resolve(
                                     clear_markers,
                                     publish_tracked_set: None,
                                     emit_reveal_until_resolved: Some(ability.source_id),
+                                    manifested_for_continuation: None,
                                 },
                             );
                             return Ok(());
@@ -315,6 +316,7 @@ pub fn resolve(
                                     clear_markers,
                                     publish_tracked_set: None,
                                     emit_reveal_until_resolved: Some(ability.source_id),
+                                    manifested_for_continuation: None,
                                 },
                             );
                             return Ok(());
@@ -349,6 +351,7 @@ pub fn resolve(
                                     clear_markers,
                                     publish_tracked_set: None,
                                     emit_reveal_until_resolved: Some(ability.source_id),
+                                    manifested_for_continuation: None,
                                 },
                             );
                             return Ok(());
@@ -390,6 +393,7 @@ pub fn resolve(
                     clear_markers,
                     publish_tracked_set: None,
                     emit_reveal_until_resolved: Some(ability.source_id),
+                    manifested_for_continuation: None,
                 },
             );
             return Ok(());

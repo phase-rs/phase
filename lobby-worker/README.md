@@ -3,7 +3,7 @@
 The official phase.rs lobby broker, running as a single global Cloudflare
 Durable Object. The DO body (`src/lobby-do.ts`) is a thin imperative shell
 around the compiled Rust `lobby-broker` core (`broker-wasm` →
-`src/broker-wasm-pkg`) — the SAME code `phase-server` runs natively, so the two
+`broker-wasm-pkg`) — the SAME code `phase-server` runs natively, so the two
 deployments behave identically by construction. See
 `.planning/lobby-failover-federation-plan.md`.
 

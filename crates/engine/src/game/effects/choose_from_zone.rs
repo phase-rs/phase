@@ -4,7 +4,7 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::players;
 use crate::types::ability::{
     ChooseFromZoneConstraint, Chooser, Effect, EffectError, EffectKind, ForEachCategoryAction,
-    ParentTargetMissingReason, ResolvedAbility, TargetFilter, TargetRef, ZoneOwner,
+    ParentTargetMissingReason, PerPlayerScope, ResolvedAbility, TargetFilter, TargetRef, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -52,17 +52,10 @@ pub fn resolve(
     // accumulating each pick into the chain's tracked set. Routed here before
     // the single-pool path so the per-player prompts never collapse into one
     // candidate scan. Building block for Breach the Multiverse.
-    // CR 102.2: `EachOpponent` is the same iteration with the controller
+    // CR 102.3: `Each(OtherPlayers)` is the same iteration with the controller
     // excluded ("for each OTHER player" — Kaya, Spirits' Justice).
-    if matches!(zone_owner, ZoneOwner::EachPlayer | ZoneOwner::EachOpponent) {
-        let players = if matches!(zone_owner, ZoneOwner::EachOpponent) {
-            crate::game::players::apnap_order(state)
-                .into_iter()
-                .filter(|&p| p != ability.controller)
-                .collect()
-        } else {
-            crate::game::players::apnap_order(state)
-        };
+    if let ZoneOwner::Each(scope) = zone_owner {
+        let players = per_player_iteration_population(state, ability, scope);
         // No pick has accumulated yet — the first one must start a fresh set.
         return prompt_next_each_player(state, ability, players, false, events);
     }
@@ -638,15 +631,29 @@ pub(crate) fn resolve_random_in_chain(
         _ => return false,
     };
 
-    let cards = resolve_candidate_cards(
+    // CR 608.2d: `Each` has no single candidate pool, and a per-player random
+    // pick is unbuilt. No parse produces the combination (of the 43 cards whose
+    // text carries per-player wording, none say "at random"), so rather than
+    // build speculative machinery the pool authority rejects the owner up front
+    // and this arm keeps the rejection loud instead of reading it as an empty
+    // pool. Release behavior is a no-op resolution, as before.
+    let cards = match resolve_candidate_cards(
         state,
         ability,
         zone,
         &additional_zones,
         zone_owner,
         filter.as_ref(),
-    )
-    .unwrap_or_default();
+    ) {
+        Ok(cards) => cards,
+        Err(_) => {
+            debug_assert!(
+                !matches!(zone_owner, ZoneOwner::Each(_)),
+                "a random ChooseFromZone with a per-player zone owner has no resolution path"
+            );
+            Vec::new()
+        }
+    };
 
     // CR 609.3: An empty pool (or count 0) does nothing; the chain then skips
     // any continuation that depends on the missing pick.
@@ -733,7 +740,13 @@ fn prompt_next_each_player(
         // CR 101.4 + CR 608.2c: For "for each player, choose ...", the spell's controller is
         // the chooser regardless of whose zone is scanned (Breach the
         // Multiverse). `Chooser::Opponent` would route to an opponent; honor it.
-        let choosing_player = resolve_chooser(state, ability, chooser);
+        // `Chooser::OwningPlayer` binds the choice to THIS iteration's owner —
+        // each player picks from their own (hidden) zone (Kozilek, the Broken
+        // Reality: "target players each manifest two cards from their hands").
+        let choosing_player = match chooser {
+            Chooser::OwningPlayer => owner,
+            _ => resolve_chooser(state, ability, chooser),
+        };
 
         // CR 608.2: The per-player frame is inserted above the continuation
         // that runs after every player has chosen. Capture the live trigger
@@ -870,6 +883,17 @@ fn collect_player_zone_cards(
 /// 2. The latest non-empty tracked set from any prior publish in this game.
 /// 3. Explicit `TargetRef::Object` targets on the ability.
 /// 4. Direct zone scan (`zone` + `additional_zones`).
+///
+/// CR 101.4: a per-player [`ZoneOwner::Each`] has no single pool at all — it
+/// resolves one prompt per player through `prompt_next_each_player` — so it is
+/// rejected here rather than deeper in the owner resolution. The rejection has
+/// to precede the tracked-set fast paths above: those return before the owner
+/// is ever read, which would otherwise hand a per-player choice the whole
+/// global or prior-chain set. No caller reaches this with `Each` on a supported
+/// path (`resolve` returns to the per-player iteration first, and
+/// `resolve_with_choosing_player` is only entered from below that return), so
+/// the arm exists to keep an unsupported combination loud instead of silently
+/// answered.
 fn resolve_candidate_cards(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -878,6 +902,12 @@ fn resolve_candidate_cards(
     zone_owner: ZoneOwner,
     filter: Option<&TargetFilter>,
 ) -> Result<Vec<ObjectId>, EffectError> {
+    if matches!(zone_owner, ZoneOwner::Each(_)) {
+        return Err(EffectError::MissingParam(
+            "ChooseFromZone Each resolves per-player and has no single candidate pool".to_string(),
+        ));
+    }
+
     if let Some(cards) = chain_tracked_set_cards(state) {
         return Ok(retain_matching_candidates(state, ability, cards, filter));
     }
@@ -1001,6 +1031,45 @@ fn collect_direct_zone_cards(
         .collect())
 }
 
+/// CR 101.4: The players a [`ZoneOwner::Each`] iteration walks, in APNAP order.
+/// One authority for every population leaf, so a new leaf is a match arm here
+/// rather than a new `ZoneOwner` sibling.
+fn per_player_iteration_population(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    scope: PerPlayerScope,
+) -> Vec<PlayerId> {
+    let apnap = crate::game::players::apnap_order(state);
+    match scope {
+        PerPlayerScope::AllPlayers => apnap,
+        // CR 102.3: "each OTHER player" is every player but the controller.
+        // Deliberately not `players::opponents`: that set is team-relative and
+        // excludes a teammate, whom this wording includes.
+        PerPlayerScope::OtherPlayers => apnap
+            .into_iter()
+            .filter(|&p| p != ability.controller)
+            .collect(),
+        // CR 115.1: the iterated set is the ability's CHOSEN `Player` targets.
+        // CR 601.2c: an "up to N" selection may be empty — the loop then
+        // disposes immediately and the parked continuation runs with an empty
+        // tracked set.
+        PerPlayerScope::TargetedPlayers => {
+            let chosen: Vec<PlayerId> = ability
+                .targets
+                .iter()
+                .filter_map(|t| match t {
+                    TargetRef::Player(pid) => Some(*pid),
+                    _ => None,
+                })
+                .collect();
+            apnap
+                .into_iter()
+                .filter(|pid| chosen.contains(pid))
+                .collect()
+        }
+    }
+}
+
 fn resolve_zone_owner(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -1025,9 +1094,11 @@ fn resolve_zone_owner(
         // CR 101.4: `EachPlayer` / `EachOpponent` resolve a *set* of zone
         // owners, not one — they are handled by `prompt_next_each_player`, which
         // scans each iterated player's zone directly and never routes here.
-        ZoneOwner::EachPlayer | ZoneOwner::EachOpponent => Err(EffectError::MissingParam(
-            "ChooseFromZone EachPlayer/EachOpponent resolves per-player, not via single owner"
-                .to_string(),
+        // CR 101.4: `Each` resolves a *set* of zone owners, not one — it is
+        // handled by `prompt_next_each_player`, which scans each iterated
+        // player's zone directly and never routes here.
+        ZoneOwner::Each(_) => Err(EffectError::MissingParam(
+            "ChooseFromZone Each resolves per-player, not via a single owner".to_string(),
         )),
         // CR 400.1: `AllOwners` scans a zone shared across EVERY owner, not a
         // single one — it is handled by the early return in
@@ -1108,6 +1179,18 @@ fn resolve_chooser(state: &GameState, ability: &ResolvedAbility, chooser: Choose
                 .next()
                 .unwrap_or(ability.controller)
         }
+        // CR 608.2c: the resolved zone owner makes the choice. Under an
+        // `Each*` zone owner the per-iteration loop passes the iterated owner
+        // directly (`prompt_next_each_player`) and never routes here; the
+        // single-owner forms resolve through the shared zone-owner authority,
+        // failing closed to the controller (CR 608.2d: an impossible choice is
+        // not offered).
+        Chooser::OwningPlayer => match &ability.effect {
+            Effect::ChooseFromZone { zone_owner, .. } => {
+                resolve_zone_owner(state, ability, *zone_owner).unwrap_or(ability.controller)
+            }
+            _ => ability.controller,
+        },
     }
 }
 
@@ -3380,7 +3463,7 @@ mod tests {
                 count: 1,
                 zone: Zone::Battlefield,
                 additional_zones: Vec::new(),
-                zone_owner: ZoneOwner::EachOpponent,
+                zone_owner: ZoneOwner::Each(PerPlayerScope::OtherPlayers),
                 filter: None,
                 chooser: Chooser::Controller,
                 up_to: true,
@@ -3461,7 +3544,7 @@ mod tests {
                 count: 1,
                 zone: Zone::Battlefield,
                 additional_zones: Vec::new(),
-                zone_owner: ZoneOwner::EachOpponent,
+                zone_owner: ZoneOwner::Each(PerPlayerScope::OtherPlayers),
                 filter: None,
                 chooser: Chooser::Controller,
                 up_to: true,
@@ -3560,7 +3643,7 @@ mod tests {
                     count: 1,
                     zone: Zone::Graveyard,
                     additional_zones: Vec::new(),
-                    zone_owner: ZoneOwner::EachPlayer,
+                    zone_owner: ZoneOwner::Each(PerPlayerScope::AllPlayers),
                     filter: None,
                     chooser: Chooser::Controller,
                     up_to: false,
@@ -3634,7 +3717,7 @@ mod tests {
                     count: 1,
                     zone: Zone::Graveyard,
                     additional_zones: Vec::new(),
-                    zone_owner: ZoneOwner::EachPlayer,
+                    zone_owner: ZoneOwner::Each(PerPlayerScope::AllPlayers),
                     filter: None,
                     chooser: Chooser::Controller,
                     up_to: false,

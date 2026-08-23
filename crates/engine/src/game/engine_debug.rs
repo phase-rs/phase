@@ -308,7 +308,85 @@ pub fn apply_debug_action(
         } => {
             validate_object(state, object_id)?;
             if let Some(fd) = face_down {
-                validate_object_mut(state, object_id)?.face_down = fd;
+                let (zone, was_face_down, has_stored_face, controller) = {
+                    let obj = state.objects.get(&object_id).unwrap();
+                    (
+                        obj.zone,
+                        obj.face_down,
+                        obj.back_face.is_some(),
+                        obj.controller,
+                    )
+                };
+                // CR 702.37e + CR 708.2a: turning a permanent face up must
+                // RESTORE the stored face, not just clear the flag — the same
+                // class as the `transformed` arm below, and for the same reason.
+                // A flag-only write leaves the CR 708.2a vanilla 2/2 installed
+                // (no name, no abilities, no printed P/T), so the tool appears to
+                // do nothing, no CR 613.7f timestamp is drawn, the
+                // "as ~ is turned face up" replacement never applies, and no
+                // `TurnedFaceUp` event reaches the triggers (#7539).
+                //
+                // `morph::turn_face_up` is that single authority, shared with the
+                // paid `GameAction::TurnFaceUp` special action and the free
+                // effect callers, so the tool cannot drift from either. It also
+                // owns the CR 701.40b legality question (a manifested card is
+                // turned up only if it is a creature card with a mana cost), and
+                // reports it as an error rather than silently doing nothing.
+                let on_battlefield = zone == Zone::Battlefield;
+                match (fd, was_face_down) {
+                    // Turn face up: restore the stored face.
+                    (false, true) if on_battlefield && has_stored_face => {
+                        crate::game::morph::turn_face_up(state, controller, object_id, events)?;
+                    }
+                    // CR 708.2a: turning a permanent face down must SNAPSHOT
+                    // the real face and install the 2/2 in its place. The flag
+                    // alone leaves the permanent with its name, printed P/T and
+                    // abilities while claiming to be face down — and `back_face`
+                    // stays empty, so the arm above can never bring it back
+                    // (#7541).
+                    //
+                    // `effects::turn_face_down::turn_permanent_face_down` is
+                    // the direct-turn authority (shared with the Ixidron /
+                    // Cyber Conversion resolver), NOT the battlefield-entry
+                    // profile: a permanent already on the battlefield needs the
+                    // BASE-face snapshot (a live snapshot bakes active
+                    // continuous modifications into the restored card), keeps a
+                    // flipped permanent's stashed normal half, refuses
+                    // double-faced and melded permanents (CR 712.16 /
+                    // CR 730.2j), and emits the `TurnedFaceDown` event the
+                    // triggers observe.
+                    //
+                    // CR 708.2b — "A face-down permanent can't be turned face
+                    // down. If a spell or ability attempts to turn a face-down
+                    // permanent face down, nothing happens" — falls out of the
+                    // `was_face_down` guard rather than being re-asserted.
+                    (true, false) if on_battlefield => {
+                        // The guard already excludes the face-down case, so a
+                        // refusal here is the CR 712.16 / CR 730.2j class.
+                        // Report it, mirroring the face-up arm's error stance,
+                        // rather than silently doing nothing.
+                        if !crate::game::effects::turn_face_down::turn_permanent_face_down(
+                            state,
+                            object_id,
+                            &crate::types::ability::FaceDownProfile::vanilla_2_2()
+                                .caused_by(crate::types::ability::FaceDownCause::TurnedFaceDown),
+                            events,
+                        ) {
+                            return Err(EngineError::InvalidAction(
+                                "Debug: a double-faced or melded permanent can't be turned \
+                                 face down (CR 712.16 / CR 730.2j)"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    // Everything else is a flag write with nothing to move: the
+                    // object is not on the battlefield (no permanent exists to
+                    // turn), it is already in the requested state, or it is face
+                    // down with no stored face for `turn_face_up` to restore.
+                    _ => {
+                        validate_object_mut(state, object_id)?.face_down = fd;
+                    }
+                }
             }
             if let Some(f) = flipped {
                 validate_object_mut(state, object_id)?.flipped = f;
@@ -540,7 +618,7 @@ pub fn apply_debug_action(
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: owner,
-                attach_to: None,
+                attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
             };
             let proposed = ProposedEvent::CreateToken {
                 owner,
@@ -788,6 +866,7 @@ pub fn route_debug_create_to_battlefield(
         controller_override: None,
         enter_transformed: false,
         face_down_profile: None,
+        chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,
         discard_frame: None,
         applied: HashSet::new(),
@@ -801,6 +880,7 @@ pub fn route_debug_create_to_battlefield(
             match super::effects::change_zone::deliver_replaced_zone_change(
                 state,
                 event,
+                None,
                 None,
                 None,
                 false,
@@ -970,7 +1050,7 @@ fn drain_debug_card_entries(
     events: &mut Vec<GameEvent>,
 ) {
     while pending.remaining > 0 && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-        let child_stack_start = state.resolution_stack.len();
+        let child_stack_start = state.resolution_stack.capture_child_boundary();
         let object_id = materialize_debug_card(
             state,
             &pending.source,
@@ -985,9 +1065,9 @@ fn drain_debug_card_entries(
         state.waiting_for = entry.waiting_for;
 
         if !matches!(state.waiting_for, WaitingFor::Priority { .. })
-            || state.resolution_stack.len() > child_stack_start
+            || state.resolution_stack.capture_child_boundary() > child_stack_start
         {
-            if state.resolution_stack.len() > child_stack_start {
+            if state.resolution_stack.capture_child_boundary() > child_stack_start {
                 state
                     .insert_debug_card_entries_parent_at_child_boundary(pending, child_stack_start)
                     .expect("debug-card parent must sit below the entry child stack");

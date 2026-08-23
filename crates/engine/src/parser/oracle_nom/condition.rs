@@ -9167,11 +9167,16 @@ pub(crate) fn parse_unless_condition(input: &str) -> OracleResult<'_, StaticCond
 /// so adding a new tense or verb is a single `tag` arm, not an O(N!)
 /// permutation expansion.
 ///
-/// Returns `(remainder, type_filter)` where `remainder` is the input after
-/// the consumed " this way" suffix (caller is responsible for stripping any
-/// trailing punctuation like ", " or "."). On `wasn't`/`was not` the negation
-/// is exposed via `negated`.
-pub fn parse_zone_changed_this_way_clause(input: &str) -> OracleResult<'_, (TargetFilter, bool)> {
+/// Returns `(remainder, (type_filter, negated, destination))`, where
+/// `remainder` is the input after the consumed " this way" suffix (caller is
+/// responsible for stripping any trailing punctuation like ", " or ".").
+/// `destination` is `Some(zone)` for wording that names an arrival zone
+/// ("enters", "put onto the battlefield", "dies", or "put into a graveyard")
+/// and `None` for cause-bound verbs. On `wasn't`/`was not` the negation is
+/// exposed via `negated`.
+pub fn parse_zone_changed_this_way_clause(
+    input: &str,
+) -> OracleResult<'_, (TargetFilter, bool, Option<crate::types::zones::Zone>)> {
     parse_zone_changed_this_way_clause_scoped(input, ThisWayVerbScope::AnyZoneChange)
 }
 
@@ -9197,7 +9202,7 @@ pub enum ThisWayVerbScope {
 pub fn parse_zone_changed_this_way_clause_scoped(
     input: &str,
     scope: ThisWayVerbScope,
-) -> OracleResult<'_, (TargetFilter, bool)> {
+) -> OracleResult<'_, (TargetFilter, bool, Option<crate::types::zones::Zone>)> {
     // CR 608.2c: A "this way" conditional may be quantified. "at least one" /
     // "one or more" both mean "≥ 1", which the existential `.any()` semantics
     // of `ZoneChangedThisWay` already encode — they value-discard to unit. The
@@ -9210,6 +9215,11 @@ pub fn parse_zone_changed_this_way_clause_scoped(
         // "another "; `parse_type_phrase` maps it to `FilterProp::Another` so the
         // returned-this-way subject excludes the source.
         value((), nom::combinator::peek(tag("another "))),
+        // CR 608.2c: "that <type> … this way" (Saw in Half, Tuktuk Scrapper) —
+        // the anaphor names the parent's own moved object; the ledger holds
+        // exactly the parent's moves, so the existential over it is the same
+        // condition the article forms produce.
+        value((), tag("that ")),
         parse_article,
     ))
     .parse(input)?;
@@ -9245,7 +9255,23 @@ pub fn parse_zone_changed_this_way_clause_scoped(
         alt((tag::<_, _, OracleError<'_>>("enters"), tag("enter"))).parse(after_filter)
     {
         let (rest, _) = tag(" this way").parse(rest)?;
-        return Ok((rest, (filter, false)));
+        return Ok((rest, (filter, false, Some(Zone::Battlefield))));
+    }
+
+    // CR 700.4: "dies this way" — present-tense and DESTINATION-BOUND: dying
+    // IS being put into a graveyard from the battlefield, so a CR 614.1
+    // replacement that redirects the arrival (CR 122.1h finality counters)
+    // defeats the clause. Non-entry verb, so only the general scope offers it.
+    if scope == ThisWayVerbScope::AnyZoneChange {
+        if let Ok((rest, _)) =
+            alt((tag::<_, _, OracleError<'_>>("dies"), tag("die"))).parse(after_filter)
+        {
+            let (rest, _) = tag(" this way").parse(rest)?;
+            return Ok((
+                rest,
+                (filter, false, Some(crate::types::zones::Zone::Graveyard)),
+            ));
+        }
     }
 
     // tense: singular "is"/"was" + plural "are"/"were". Verb number is
@@ -9269,25 +9295,144 @@ pub fn parse_zone_changed_this_way_clause_scoped(
     // " this way" suffix is the discriminator. Under
     // `ThisWayVerbScope::BattlefieldEntry` only the battlefield-entry verb is
     // offered; the non-entry zone-change verbs are withheld.
-    let (rest, _) = match scope {
+    let (rest, destination) = match scope {
         ThisWayVerbScope::AnyZoneChange => alt((
-            tag::<_, _, OracleError<'_>>("put onto the battlefield"),
-            tag("destroyed"),
-            tag("exiled"),
-            tag("sacrificed"),
-            tag("returned"),
-            tag("discarded"),
-            tag("milled"),
-            tag("countered"),
+            // CR 608.2c + CR 614.6: "put onto the battlefield" names the
+            // arrival, so a replacement that redirects the object elsewhere
+            // defeats the clause.
+            value(
+                Some(Zone::Battlefield),
+                tag::<_, _, OracleError<'_>>("put onto the battlefield"),
+            ),
+            value(None, tag("destroyed")),
+            value(None, tag("exiled")),
+            value(None, tag("sacrificed")),
+            value(None, tag("returned")),
+            value(None, tag("discarded")),
+            value(None, tag("milled")),
+            value(None, tag("countered")),
+            // CR 608.2c + CR 122.1h + CR 614.6: destination-bound wording —
+            // the clause names the ARRIVAL zone, so a replacement that
+            // redirects the object elsewhere (finality counters: exile
+            // instead of the graveyard) defeats it.
+            value(
+                Some(crate::types::zones::Zone::Graveyard),
+                tag("put into a graveyard"),
+            ),
         ))
         .parse(rest)?,
-        ThisWayVerbScope::BattlefieldEntry => {
-            tag::<_, _, OracleError<'_>>("put onto the battlefield").parse(rest)?
-        }
+        ThisWayVerbScope::BattlefieldEntry => value(
+            Some(Zone::Battlefield),
+            tag::<_, _, OracleError<'_>>("put onto the battlefield"),
+        )
+        .parse(rest)?,
     };
 
     let (rest, _) = tag(" this way").parse(rest)?;
-    Ok((rest, (filter, negated)))
+    Ok((rest, (filter, negated, destination)))
+}
+
+/// CR 120.3 + CR 608.2c: the recipient axis of a "… is dealt damage this way"
+/// back-reference. CR 120.3 splits damage results by whether the recipient is a
+/// player or a permanent, so the recipient is the parameter this grammar varies
+/// over — not a per-card literal.
+///
+/// The two arms lower to structurally different conditions (see
+/// `oracle_effect::conditions`): `Player` is the *absence* of an object
+/// recipient, `Typed` is a positive filter match on the object recipient.
+///
+/// DISPATCH ASYMMETRY (deliberate, grammatical — not a card carve-out): only
+/// the `Typed` arm is wired into the general condition dispatcher. The general
+/// dispatcher is reached through `clause_shell::peel_clause`, which strips the
+/// recognized condition head off the body. `Typed` riders have self-contained
+/// imperative bodies ("destroy it"), so peeling is harmless. `Player` riders are
+/// pronoun-headed ("they discard a card", "they can't gain life…") and the head
+/// is what supplies the pronoun's antecedent — `oracle_effect::subject`'s
+/// `strip_dealt_damage_this_way_player_anaphor` must see the *whole* sentence to
+/// bind the restriction to `ParentTarget` (Screaming Nemesis, Hordewing Skaab).
+/// Migrating the `Player` arm onto the general dispatcher requires first moving
+/// those pronoun-body recognizers off the un-peeled text.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DamagedThisWayRecipient {
+    /// "a player is dealt damage this way" (Play with Fire, Screaming Nemesis).
+    Player,
+    /// "a Dragon / a creature / an artifact creature / a permanent is dealt
+    /// damage this way" (The Black Arrow).
+    Typed(TargetFilter),
+}
+
+/// CR 120.3 + CR 608.2c: Parse "[quantifier] [recipient] (is|are|was|were) dealt
+/// damage this way" — the recipient-anaphoric clause that gates a rider on who
+/// the parent instruction's damage actually landed on.
+///
+/// This is the plain-damage sibling of [`parse_zone_changed_this_way_clause`]
+/// (zone-change verbs) and of `parse_previous_effect_excess_damage_condition`
+/// (the `excess` channel). It shares the same article × subject × tense × verb
+/// axes, so a new recipient noun is a `parse_type_phrase` concern, not a new
+/// `tag` arm here.
+///
+/// `"dealt excess damage this way"` cannot match: the `excess` token stops the
+/// `"dealt damage"` verb tag, so the excess channel keeps exclusive ownership of
+/// its class.
+///
+/// No negation arm: no printed card says "isn't dealt damage this way", and the
+/// negated form's correct lowering is not a plain `Not` over the conjunction
+/// (the prevented-damage guard would invert with it). Fail closed instead.
+pub fn parse_damaged_this_way_clause(input: &str) -> OracleResult<'_, DamagedThisWayRecipient> {
+    // CR 608.2c: quantifier axis — shared verbatim with the zone-change sibling.
+    // "at least one" / "one or more" / bare article all encode the same
+    // existential "≥ 1 recipient" reading.
+    let (rest, _) = alt((
+        value((), tag::<_, _, OracleError<'_>>("at least one ")),
+        value((), tag("one or more ")),
+        parse_article,
+    ))
+    .parse(input)?;
+
+    // CR 120.3: recipient axis. The player arm is tried first so the typed arm's
+    // vacuity guard never has to reason about the word "player".
+    let (rest, recipient) = alt((
+        value(DamagedThisWayRecipient::Player, tag("player")),
+        parse_damaged_this_way_typed_recipient,
+    ))
+    .parse(rest)?;
+
+    // `parse_type_phrase` returns a slice of its input; trim any whitespace it
+    // left between the noun phrase and the tense verb so the next `tag` matches
+    // cleanly (same normalization the zone-change sibling performs).
+    let rest = rest.trim_start();
+
+    // tense: singular "is"/"was" + plural "are"/"were". Verb number is
+    // grammatically inert here — the condition is existential either way.
+    let (rest, _) = alt((
+        value((), tag::<_, _, OracleError<'_>>("is ")),
+        value((), tag("are ")),
+        value((), tag("was ")),
+        value((), tag("were ")),
+    ))
+    .parse(rest)?;
+
+    let (rest, _) = tag("dealt damage").parse(rest)?;
+    let (rest, _) = tag(" this way").parse(rest)?;
+    Ok((rest, recipient))
+}
+
+/// CR 120.3 + CR 205: the typed-recipient arm of [`parse_damaged_this_way_clause`].
+/// Delegates the noun phrase to [`parse_type_phrase`] — the declared authority for
+/// type/subtype phrases — and folds a `" or a [type]"` continuation through the
+/// shared [`fold_this_way_subject_disjunction`], so a disjunctive recipient sharing
+/// one verb ("a Dragon or a Wurm is dealt damage this way") stays one condition.
+fn parse_damaged_this_way_typed_recipient(
+    input: &str,
+) -> OracleResult<'_, DamagedThisWayRecipient> {
+    let (filter, after_filter) = parse_type_phrase(input);
+    // Fail closed on a vacuous or non-consuming parse, mirroring the zone-change
+    // sibling: `TargetFilter::Any` means the noun was not recognized at all.
+    if matches!(filter, TargetFilter::Any) || after_filter.len() == input.len() {
+        return Err(oracle_err(input));
+    }
+    let (filter, after_filter) = fold_this_way_subject_disjunction(filter, after_filter);
+    Ok((after_filter, DamagedThisWayRecipient::Typed(filter)))
 }
 
 /// CR 608.2c: the bare pronoun subject of a reflexive battlefield-entry
@@ -9349,7 +9494,7 @@ pub fn parse_entry_this_way_clause(input: &str) -> OracleResult<'_, (Option<Targ
     let (rest, subject) = alt((
         map(
             |i| parse_zone_changed_this_way_clause_scoped(i, ThisWayVerbScope::BattlefieldEntry),
-            |(filter, negated)| (Some(filter), negated),
+            |(filter, negated, _destination)| (Some(filter), negated),
         ),
         map(
             parse_you_put_onto_battlefield_this_way_clause,
@@ -9676,7 +9821,13 @@ pub fn parse_you_put_into_hand_this_way_condition(
         )));
     }
     let (rest, _) = tag("into your hand this way").parse(after_filter.trim_start())?;
-    Ok((rest, AbilityCondition::ZoneChangedThisWay { filter }))
+    Ok((
+        rest,
+        AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: Some(Zone::Hand),
+        },
+    ))
 }
 
 /// CR 608.2c + CR 122.1: Parse "you put [counter type] counters on [N] [type]
@@ -9786,6 +9937,7 @@ pub fn parse_you_control_or_returned_this_way_condition(
                 },
                 AbilityCondition::ZoneChangedThisWay {
                     filter: returned_filter,
+                    destination: None,
                 },
             ],
         },
@@ -9807,6 +9959,7 @@ pub fn parse_you_draw_this_way_condition(input: &str) -> OracleResult<'_, Abilit
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::PreviousEffectAmount {
                     channel: crate::types::ability::DamageChannel::Total,
+                    aggregate: AggregateFunction::Sum,
                 },
             },
             comparator: Comparator::GE,
@@ -18659,12 +18812,13 @@ mod tests {
     /// baseline before extending to present tense / multi-word verbs.
     #[test]
     fn test_zone_changed_this_way_was_destroyed_top_level_type() {
-        let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(
+        let (rest, (filter, negated, destination)) = parse_zone_changed_this_way_clause(
             "an enchantment was destroyed this way, you lose 2 life",
         )
         .unwrap();
         assert_eq!(rest, ", you lose 2 life");
         assert!(!negated);
+        assert_eq!(destination, None);
         match filter {
             TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
                 assert_eq!(type_filters, vec![TypeFilter::Enchantment]);
@@ -18677,12 +18831,13 @@ mod tests {
     /// Reborn Avenger's Hero rider after graveyard reanimation.
     #[test]
     fn test_zone_changed_this_way_hero_enters() {
-        let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(
+        let (rest, (filter, negated, destination)) = parse_zone_changed_this_way_clause(
             "a hero enters this way, it enters with an additional +1/+1 counter on it",
         )
         .unwrap();
         assert_eq!(rest, ", it enters with an additional +1/+1 counter on it");
         assert!(!negated);
+        assert_eq!(destination, Some(Zone::Battlefield));
         match filter {
             TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
                 assert!(type_filters.iter().any(
@@ -18698,12 +18853,13 @@ mod tests {
     /// the Holy Relic / Stonehewer Giant case.
     #[test]
     fn test_zone_changed_this_way_is_put_onto_battlefield_equipment() {
-        let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(
+        let (rest, (filter, negated, destination)) = parse_zone_changed_this_way_clause(
             "an equipment is put onto the battlefield this way, you may attach it to a creature you control",
         )
         .unwrap();
         assert_eq!(rest, ", you may attach it to a creature you control");
         assert!(!negated);
+        assert_eq!(destination, Some(Zone::Battlefield));
         match filter {
             TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
                 assert!(type_filters.iter().any(
@@ -18740,12 +18896,13 @@ mod tests {
     /// CR 303.4f: Aura subtype mirrors the Equipment branch — same combinator.
     #[test]
     fn test_zone_changed_this_way_is_put_onto_battlefield_aura() {
-        let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(
+        let (rest, (filter, negated, destination)) = parse_zone_changed_this_way_clause(
             "an aura is put onto the battlefield this way, do something",
         )
         .unwrap();
         assert_eq!(rest, ", do something");
         assert!(!negated);
+        assert_eq!(destination, Some(Zone::Battlefield));
         match filter {
             TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
                 assert!(
@@ -18763,11 +18920,30 @@ mod tests {
     /// "if a creature wasn't destroyed this way" patterns.
     #[test]
     fn test_zone_changed_this_way_wasnt_negated() {
-        let (rest, (_filter, negated)) =
+        let (rest, (_filter, negated, _destination)) =
             parse_zone_changed_this_way_clause("a creature wasn't destroyed this way, do x")
                 .unwrap();
         assert_eq!(rest, ", do x");
         assert!(negated);
+    }
+
+    /// CR 700.4 + CR 614.6: arrival words bind the rider to the resulting
+    /// zone, while cause verbs intentionally remain destination-agnostic.
+    #[test]
+    fn test_zone_changed_this_way_destination_bound_verbs_and_anaphor() {
+        let (rest, (_filter, negated, destination)) =
+            parse_zone_changed_this_way_clause("that creature dies this way, draw a card").unwrap();
+        assert_eq!(rest, ", draw a card");
+        assert!(!negated);
+        assert_eq!(destination, Some(Zone::Graveyard));
+
+        let (rest, (_filter, negated, destination)) = parse_zone_changed_this_way_clause(
+            "that artifact is put into a graveyard this way, draw a card",
+        )
+        .unwrap();
+        assert_eq!(rest, ", draw a card");
+        assert!(!negated);
+        assert_eq!(destination, Some(Zone::Graveyard));
     }
 
     /// Every imperative verb in the `alt` chain must round-trip; this guards
@@ -18784,12 +18960,105 @@ mod tests {
             "countered",
         ] {
             let input = format!("a creature was {verb} this way, x");
-            let (rest, (_filter, negated)) = parse_zone_changed_this_way_clause(&input)
-                .unwrap_or_else(|e| {
+            let (rest, (_filter, negated, _destination)) =
+                parse_zone_changed_this_way_clause(&input).unwrap_or_else(|e| {
                     panic!("verb {verb} failed to parse: {e:?}");
                 });
             assert_eq!(rest, ", x", "verb {verb} produced wrong remainder");
             assert!(!negated);
+        }
+    }
+
+    /// CR 120.3: the typed recipient arm — The Black Arrow's "if a Dragon is
+    /// dealt damage this way, destroy it".
+    #[test]
+    fn test_damaged_this_way_typed_recipient() {
+        let (rest, recipient) =
+            parse_damaged_this_way_clause("a dragon is dealt damage this way, destroy it").unwrap();
+        assert_eq!(rest, ", destroy it");
+        match recipient {
+            DamagedThisWayRecipient::Typed(TargetFilter::Typed(TypedFilter {
+                type_filters,
+                ..
+            })) => assert!(
+                type_filters.iter().any(
+                    |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Dragon"))
+                ),
+                "expected Subtype Dragon, got {type_filters:?}"
+            ),
+            other => panic!("expected a typed recipient, got {other:?}"),
+        }
+    }
+
+    /// CR 120.3: the player recipient arm — Play with Fire / Screaming Nemesis.
+    /// Must not be swallowed by the typed arm.
+    #[test]
+    fn test_damaged_this_way_player_recipient() {
+        let (rest, recipient) =
+            parse_damaged_this_way_clause("a player is dealt damage this way, scry 1").unwrap();
+        assert_eq!(rest, ", scry 1");
+        assert_eq!(recipient, DamagedThisWayRecipient::Player);
+    }
+
+    /// The recipient axis is a `parse_type_phrase` concern, so the whole class
+    /// of nouns comes for free — plural verbs included.
+    #[test]
+    fn test_damaged_this_way_recipient_class() {
+        for input in [
+            "a creature is dealt damage this way",
+            "an artifact creature is dealt damage this way",
+            "a permanent is dealt damage this way",
+            "one or more creatures are dealt damage this way",
+        ] {
+            let (rest, recipient) = parse_damaged_this_way_clause(input)
+                .unwrap_or_else(|e| panic!("{input:?} must parse: {e:?}"));
+            assert_eq!(rest, "", "{input:?} must be fully consumed");
+            assert!(
+                matches!(recipient, DamagedThisWayRecipient::Typed(_)),
+                "{input:?} must be a typed recipient, got {recipient:?}"
+            );
+        }
+
+        let (rest, recipient) =
+            parse_damaged_this_way_clause("a dragon or a wurm is dealt damage this way")
+                .expect("a disjunctive typed recipient must parse");
+        assert_eq!(rest, "", "the disjunctive recipient must be fully consumed");
+        let DamagedThisWayRecipient::Typed(TargetFilter::Or { filters }) = recipient else {
+            panic!("expected a disjunctive typed recipient, got {recipient:?}");
+        };
+        assert_eq!(
+            filters.len(),
+            2,
+            "both disjunctive subtype branches must remain"
+        );
+        for (filter, subtype) in filters.iter().zip(["Dragon", "Wurm"]) {
+            let TargetFilter::Typed(TypedFilter { type_filters, .. }) = filter else {
+                panic!("expected a typed {subtype} branch, got {filter:?}");
+            };
+            assert!(
+                type_filters.iter().any(
+                    |type_filter| matches!(type_filter, TypeFilter::Subtype(name) if name.eq_ignore_ascii_case(subtype))
+                ),
+                "expected the {subtype} subtype branch, got {type_filters:?}"
+            );
+        }
+    }
+
+    /// The `excess` channel keeps exclusive ownership of its clause: the
+    /// `excess` token stops the plain-damage verb tag. Unrecognized nouns and a
+    /// missing recipient both fail closed.
+    #[test]
+    fn test_damaged_this_way_rejects_other_channels() {
+        for input in [
+            "a dragon is dealt excess damage this way",
+            "a thing is dealt damage this way",
+            "is dealt damage this way",
+            "a dragon was destroyed this way",
+        ] {
+            assert!(
+                parse_damaged_this_way_clause(input).is_err(),
+                "{input:?} must not be claimed by the plain-damage channel"
+            );
         }
     }
 
@@ -18806,7 +19075,7 @@ mod tests {
     /// existential `ZoneChangedThisWay` (≥ 1).
     #[test]
     fn test_zone_changed_this_way_at_least_one_subtype() {
-        let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(
+        let (rest, (filter, negated, _destination)) = parse_zone_changed_this_way_clause(
             "at least one angel card is milled this way, you gain 4 life",
         )
         .unwrap();
@@ -18829,7 +19098,7 @@ mod tests {
     /// type + `nonland` negated-type prefix + **plural verb** "are".
     #[test]
     fn test_zone_changed_this_way_one_or_more_nonland_cards_plural() {
-        let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(
+        let (rest, (filter, negated, _destination)) = parse_zone_changed_this_way_clause(
             "one or more nonland cards are exiled this way, you draw a card",
         )
         .unwrap();
@@ -18850,7 +19119,7 @@ mod tests {
     /// **plural verb** "are milled".
     #[test]
     fn test_zone_changed_this_way_one_or_more_cards_plural_milled() {
-        let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(
+        let (rest, (filter, negated, _destination)) = parse_zone_changed_this_way_clause(
             "one or more cards are milled this way, you gain 1 life",
         )
         .unwrap();

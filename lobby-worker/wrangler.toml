@@ -1,7 +1,7 @@
 # Cloudflare Worker + Durable Object for the official phase.rs lobby broker.
 #
 # The DO body (src/lobby-do.ts) is a thin imperative shell around the compiled
-# Rust `lobby-broker` core (lobby-worker/broker-wasm -> src/broker-wasm-pkg).
+# Rust `lobby-broker` core (lobby-worker/broker-wasm -> broker-wasm-pkg).
 # All protocol parsing, dispatch, reservations, capacity caps, build-commit
 # gating, and the staleness reaper live in Rust — the SAME code phase-server
 # runs natively — so the two deployments behave identically by construction.
@@ -12,10 +12,38 @@ compatibility_date = "2026-05-01"
 
 # Build the Rust broker to WASM (+ wasm-bindgen glue) before bundling. wrangler
 # runs this on `wrangler deploy` and `wrangler dev`; the generated glue under
-# src/broker-wasm-pkg/ is gitignored and regenerated. Requires the wasm32 target,
+# broker-wasm-pkg/ is gitignored and regenerated. Requires the wasm32 target,
 # wasm-bindgen-cli (0.2.121), and wasm-opt — the release workflow sets these up.
+#
+# Two rules keep `wrangler dev` from rebuilding itself in a loop. Both are
+# load-bearing:
+#
+#   1. The glue lands in broker-wasm-pkg/ NEXT TO src/, never inside it.
+#      wrangler re-runs this command whenever watch_dir changes, so output
+#      written into a watched directory retriggers the watcher that produced
+#      it. That is an unbounded loop, not merely a slow start. Keep any future
+#      codegen out of the watched tree for the same reason.
+#   2. watch_dir names the Rust build inputs, rather than the default ./src.
+#      This includes the standalone crate, both path dependencies, and the
+#      workspace/config inputs their manifests inherit. Worker TypeScript still
+#      hot-reloads: wrangler watches the bundle's module graph for that,
+#      independently. The only thing this suppresses is a pointless wasm
+#      rebuild on every .ts save.
 [build]
 command = "bash ../scripts/build-broker-wasm.sh release"
+watch_dir = [
+  "broker-wasm/src",
+  "broker-wasm/Cargo.toml",
+  "broker-wasm/Cargo.lock",
+  "broker-wasm/.cargo/config.toml",
+  "../crates/lobby-broker/src",
+  "../crates/lobby-broker/Cargo.toml",
+  "../crates/engine/src",
+  "../crates/engine/Cargo.toml",
+  "../Cargo.toml",
+  "../.cargo/config.toml",
+  "../scripts/build-broker-wasm.sh",
+]
 
 # Single global lobby = one DO instance addressed by a fixed name ("global").
 [[durable_objects.bindings]]
@@ -88,3 +116,73 @@ ALLOWED_ORIGINS = "*"
 # [[routes]]
 # pattern = "lobby.phase-rs.dev"
 # custom_domain = true
+
+# ── Preview environment ────────────────────────────────────────────────────
+# A SECOND Worker script (`phase-lobby-preview`) with its own Durable Object
+# namespace, deployed from `main` on every staging deploy. It exists because one
+# lobby physically cannot serve two client channels:
+#
+#   `ServerHello` is sent unprompted on connect (lobby-do.ts), BEFORE the client
+#   sends `ClientHello` — see the `ws.onopen` comment in
+#   client/src/services/openPhaseSocket.ts. The server therefore advertises its
+#   version numbers blind, to every caller, with no idea who is asking.
+#
+#   Clients built before `lobby_protocol_version` existed accept only
+#   [PROTOCOL_VERSION-1, PROTOCOL_VERSION] of THEIR OWN build. Once `main` is two
+#   bumps ahead of the last release those windows are disjoint and no single
+#   advertised number satisfies both channels at once.
+#
+# `LOBBY_PROTOCOL_VERSION` (crates/lobby-broker/src/protocol.rs) since fixes the
+# ROOT cause for every client built after it: the lobby now versions its own
+# message set, so full-game churn no longer slides the lobby window and current
+# clients are no longer evicted by a release they did not install. This split
+# remains necessary regardless — it is what keeps ALREADY-DEPLOYED clients on the
+# legacy gate reachable, and it isolates preview DO state from production's.
+#
+# Non-inheritable keys (vars, durable_objects, migrations, observability,
+# analytics_engine_datasets) MUST be restated here — Wrangler does not inherit
+# them into a named environment. `main` and [build] are inherited.
+[env.preview]
+name = "phase-lobby-preview"
+
+[[env.preview.durable_objects.bindings]]
+name = "LOBBY"
+class_name = "LobbyDO"
+
+# Independent DO namespace from production: the preview lobby lists preview
+# rooms only. Tag numbering is per-script, so this is also "v1".
+[[env.preview.migrations]]
+tag = "v1"
+new_sqlite_classes = ["LobbyDO"]
+
+[env.preview.observability]
+enabled = true
+head_sampling_rate = 1
+
+[env.preview.observability.logs]
+invocation_logs = false
+
+# Separate dataset so preview traffic never pollutes production telemetry.
+[[env.preview.analytics_engine_datasets]]
+binding = "TELEMETRY"
+dataset = "phase_telemetry_preview"
+
+[env.preview.vars]
+TURN_KEY_ID = "97c7984d6c155084f9d0fdf8090e02f8"
+TURN_TTL_SECONDS = "86400"
+ALLOWED_ORIGINS = "*"
+
+# Stable hostname: lobby-preview.phase-rs.dev, already attached to this Worker
+# as a Cloudflare custom domain (DNS record + TLS cert auto-provisioned in the
+# phase-rs.dev zone). The preview client build points at
+# wss://lobby-preview.phase-rs.dev/ws — see the "Build frontend" step in
+# .github/workflows/deploy.yml.
+#
+# Deliberately NOT declared as a [[routes]] entry, matching the production
+# stanza above. Declaring it makes wrangler reconcile routes on every deploy,
+# which calls GET /zones/<id>/workers/routes — and the CI CLOUDFLARE_API_TOKEN
+# lacks the zone-level Workers Routes permission, so the deploy dies with
+# "Authentication error [code: 10000]" AFTER a ~7 minute wasm build. A custom
+# domain is a Cloudflare-side binding that persists across deploys on its own,
+# so omitting it here costs nothing and keeps CI deployable with the token it
+# has. Attach any future channel's domain out-of-band the same way.

@@ -326,6 +326,7 @@ impl GameSession {
         player: PlayerId,
         target: RewindTarget,
     ) -> Result<TakebackOutcome, String> {
+        self.reject_if_ai_driver_faulted()?;
         if self.pending_takeback.is_some() {
             return Err("A takeback request is already pending for this game".to_string());
         }
@@ -389,6 +390,7 @@ impl GameSession {
         player: PlayerId,
         approve: bool,
     ) -> Result<TakebackOutcome, String> {
+        self.reject_if_ai_driver_faulted()?;
         if self.pending_takeback.is_none() {
             return Err("There is no pending takeback request".to_string());
         }
@@ -411,6 +413,7 @@ impl GameSession {
 
     /// The original requester withdraws their own pending takeback request.
     pub fn cancel_takeback(&mut self, player: PlayerId) -> Result<(), String> {
+        self.reject_if_ai_driver_faulted()?;
         match &self.pending_takeback {
             Some(pending) if pending.requested_by == player => {
                 self.pending_takeback = None;

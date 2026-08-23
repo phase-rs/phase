@@ -59,7 +59,12 @@ pub(crate) struct ParseContext {
     #[allow(dead_code)] // Retained for future nom combinator consumers (D-02).
     pub quantity_ref: Option<QuantityRef>,
     /// Whether we are inside a trigger effect (enables event context refs).
-    #[allow(dead_code)] // Retained for future nom combinator consumers (D-02).
+    ///
+    /// Consumed by `oracle_replacement::parse_oneshot_target_source_prevent`
+    /// (the Awe Strike one-shot target-source prevention branch): inside a
+    /// trigger body "that creature" is an event-context anaphor resolved by
+    /// the trigger machinery, not a target-source capture, so the branch must
+    /// not claim trigger-body text (Ria Ivor keeps its fall-through shapes).
     pub in_trigger: bool,
     /// Whether we are inside a replacement effect.
     #[allow(dead_code)] // Retained for future nom combinator consumers (D-02).

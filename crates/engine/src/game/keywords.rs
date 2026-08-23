@@ -2715,6 +2715,7 @@ mod tests {
             GiftKind::Treasure,
             GiftKind::Food,
             GiftKind::TappedFish,
+            GiftKind::ExtraTurn,
         ] {
             let mut state = GameState::new_two_player(1);
             let id = create_object(

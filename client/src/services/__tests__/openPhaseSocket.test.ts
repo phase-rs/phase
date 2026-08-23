@@ -7,6 +7,7 @@ import {
 } from "../openPhaseSocket";
 import {
   LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL,
+  LOBBY_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
 } from "../../adapter/ws-adapter";
 
@@ -41,6 +42,7 @@ function helloFrame(
     build_commit: string;
     protocol_version: number;
     mode: "Full" | "LobbyOnly";
+    lobby_protocol_version: number;
   }> = {},
 ): string {
   return JSON.stringify({
@@ -119,6 +121,9 @@ describe("openPhaseSocket", () => {
     );
   });
 
+  // LEGACY PATH: this broker advertises no `lobby_protocol_version`, so the
+  // client falls back to the derived `protocol_version` window. Preserved
+  // verbatim so already-deployed brokers stay reachable.
   it("rejects LobbyOnly brokers older than the derived one-version window", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
@@ -130,6 +135,89 @@ describe("openPhaseSocket", () => {
       kind: "protocol_mismatch",
     });
     expect(ws.close).toHaveBeenCalled();
+  });
+
+
+  // ── Lobby-owned protocol version ────────────────────────────────────────
+
+  it("accepts a LobbyOnly broker with a stale full-game protocol when its lobby version is current", async () => {
+    // The regression this whole change exists for. `main` drifting two
+    // GameState-only bumps ahead of the deployed broker used to reject here
+    // with "Server protocol version N is older than supported".
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(
+      helloFrame({
+        protocol_version: PROTOCOL_VERSION - 9,
+        mode: "LobbyOnly",
+        lobby_protocol_version: LOBBY_PROTOCOL_VERSION,
+      }),
+    );
+
+    const socket = await promise;
+    expect(socket.serverInfo.lobbyProtocolVersion).toBe(LOBBY_PROTOCOL_VERSION);
+    expect(ws.close).not.toHaveBeenCalled();
+  });
+
+  it("accepts a LobbyOnly broker whose lobby version is NEWER than this client", async () => {
+    // No ceiling on the lobby surface. This is the case that used to strand
+    // every older desktop build at each protocol-bumping release: the broker
+    // redeploys, the shipped client cannot, and an upper bound evicts it.
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(
+      helloFrame({
+        protocol_version: PROTOCOL_VERSION,
+        mode: "LobbyOnly",
+        lobby_protocol_version: LOBBY_PROTOCOL_VERSION + 5,
+      }),
+    );
+
+    await expect(promise).resolves.toBeDefined();
+    expect(ws.close).not.toHaveBeenCalled();
+  });
+
+  it("still refuses a lobby broker below the lobby floor", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(
+      helloFrame({
+        mode: "LobbyOnly",
+        lobby_protocol_version: LOBBY_PROTOCOL_VERSION - 1,
+      }),
+    );
+
+    await expect(promise).rejects.toMatchObject({ kind: "protocol_mismatch" });
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  it("holds Full servers to an exact match even when they advertise a lobby version", async () => {
+    // A Full server runs the engine; GameState payloads are not compatible
+    // across a bump regardless of what it says about the lobby surface.
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(
+      helloFrame({
+        protocol_version: PROTOCOL_VERSION - 1,
+        mode: "Full",
+        lobby_protocol_version: LOBBY_PROTOCOL_VERSION,
+      }),
+    );
+
+    await expect(promise).rejects.toMatchObject({ kind: "protocol_mismatch" });
+  });
+
+  it("always declares its own lobby protocol version in ClientHello", async () => {
+    // Sent unconditionally: brokers that predate the field ignore it, and a
+    // broker that understands it gates on this instead of protocol_version.
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ mode: "LobbyOnly" }));
+    await promise;
+
+    expect(ws.send).toHaveBeenCalledWith(
+      expect.stringContaining(`"lobby_protocol_version":${LOBBY_PROTOCOL_VERSION}`),
+    );
   });
 
   it("times out and closes the socket when ServerHello never arrives", async () => {

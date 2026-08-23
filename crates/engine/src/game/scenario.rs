@@ -703,6 +703,43 @@ impl GameScenario {
         builder
     }
 
+    /// CR 301.1: Add an artifact to the battlefield with abilities parsed from
+    /// Oracle text. Mirrors [`Self::add_enchantment_from_oracle`]; needed when
+    /// an artifact's own registered activated ability (not a cast) is under
+    /// test — e.g. Scroll of Fate's "{T}: Manifest a card from your hand."
+    pub fn add_artifact_from_oracle(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        oracle_text: &str,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let ts = self.state.next_timestamp();
+        let entered_turn = self.state.turn_number.saturating_sub(1);
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.base_card_types = obj.card_types.clone();
+        obj.timestamp = ts;
+        obj.entered_battlefield_turn = Some(entered_turn);
+        // A pre-existing permanent (entered on a prior turn), matching the
+        // enchantment/land builders (CR 302.6 gates only creatures).
+        obj.summoning_sick = false;
+
+        let mut builder = CardBuilder {
+            state: &mut self.state,
+            id,
+        };
+        builder.from_oracle_text(oracle_text);
+        builder
+    }
+
     /// CR 306.1 + CR 306.5b: Add a planeswalker to the battlefield with its
     /// loyalty abilities parsed from Oracle text and `loyalty` loyalty counters
     /// already on it.
@@ -798,6 +835,44 @@ impl GameScenario {
         obj.card_types.core_types.push(core_type);
         obj.base_card_types = obj.card_types.clone();
         // Instants/sorceries have no power/toughness (unlike creatures)
+
+        let mut builder = CardBuilder {
+            state: &mut self.state,
+            id,
+        };
+        builder.from_oracle_text(oracle_text);
+        builder
+    }
+
+    /// CR 301.1: Add an artifact card to hand with abilities parsed from Oracle
+    /// text.
+    ///
+    /// Distinct from `add_spell_to_hand_from_oracle(..) + as_artifact()`: that
+    /// pair leaves the Sorcery core type in place, producing a card that
+    /// resolves to the graveyard as a spell and therefore never enters the
+    /// battlefield — so no ETB trigger fires. Any Equipment/artifact test that
+    /// needs an enters-the-battlefield ability must start here.
+    ///
+    /// Subtypes (e.g. Equipment, CR 301.5) are the caller's concern — chain
+    /// `.with_subtypes(..)` on the returned builder.
+    pub fn add_artifact_to_hand_from_oracle(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        oracle_text: &str,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.base_card_types = obj.card_types.clone();
+        // CR 301.1: artifacts have no power/toughness unless they are also creatures.
 
         let mut builder = CardBuilder {
             state: &mut self.state,
@@ -1846,6 +1921,8 @@ impl GameRunner {
     pub fn waiting_for_kind(&self) -> &'static str {
         match &self.state.waiting_for {
             WaitingFor::Priority { .. } => "Priority",
+            WaitingFor::ResolveAllConsent { .. } => "ResolveAllConsent",
+            WaitingFor::ResolveAllReady { .. } => "ResolveAllReady",
             WaitingFor::MeldPairChoice { .. } => "MeldPairChoice",
             WaitingFor::MeldAttackTargetChoice { .. } => "MeldAttackTargetChoice",
             WaitingFor::EntryAttackTargetChoice { .. } => "EntryAttackTargetChoice",

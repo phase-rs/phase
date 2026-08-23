@@ -5278,6 +5278,12 @@ mod tests {
             "Bronze Horse replacement must parse without Unimplemented"
         );
         let as_long_as = "as long as";
+        // CR 611.3: Bronze Horse's "as long as" prevention is a CONTINUOUS
+        // shield — the exact `Prevention { .. }` assertion (no
+        // `PreventionOneShot`) pins the one-shot classification from leaking
+        // onto a duration-bound "as long as" shield: if an implementation
+        // misclassified this card as `PreventionOneShot` ("the next time"
+        // single opportunity, CR 615.3), the assertion fails.
         assert!(
             bronze.replacements.iter().any(|r| {
                 r.event == ReplacementEvent::DamageDone
@@ -5289,6 +5295,42 @@ mod tests {
             }),
             "expected gated damage-prevention replacement, got {:#?}",
             bronze.replacements
+        );
+        // CR 615.3: the Awe Strike class — "the next time [target creature]
+        // would deal damage this turn, prevent that damage" — is the one-shot
+        // counterpart of the same shield axis. The spell-side sentence lowers
+        // to `Effect::PreventDamage` carrying the exact one-shot
+        // `And{[ParentTargetSlot{0}, Typed(creature)]}` source filter (the
+        // `is_oneshot_target_source_prevent_shape` discriminator — the single
+        // authority that classifies the shield as `PreventionOneShot` at
+        // resolution). The exact-shape assertions for both classes in this
+        // test prove the parser discriminates continuous ("as long as") from
+        // one-shot ("the next time") prevention and cannot swap one for the
+        // other without failing here.
+        let one_shot = parse_named(
+            "The next time target creature would deal damage this turn, prevent that damage.",
+            "Awe Strike",
+            &["Instant"],
+        );
+        assert!(
+            one_shot.abilities.iter().any(|a| matches!(
+                &*a.effect,
+                Effect::PreventDamage {
+                    damage_source_filter: Some(filter),
+                    ..
+                } if crate::types::ability::is_oneshot_target_source_prevent_shape(filter)
+            )),
+            "the 'the next time' target-source prevention must lower to the one-shot \
+             source-filter shape, got {:#?}",
+            one_shot.abilities
+        );
+        assert!(
+            !one_shot
+                .replacements
+                .iter()
+                .any(|r| r.shield_kind.is_shield()),
+            "the one-shot spell sentence must NOT lower to a replacement definition, got {:#?}",
+            one_shot.replacements
         );
         // KNOWN GAP, pinned deliberately. Bronze Horse DOES report a swallowed
         // `Condition_AsLongAs` — and did so in the shipped card data long before this

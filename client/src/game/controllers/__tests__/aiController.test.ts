@@ -14,14 +14,20 @@ const dispatchMocks = vi.hoisted(() => ({
   dispatchAiActionProposal: vi.fn<
     (proposal: AiActionProposal) => Promise<{ status: "applied" | "stale" }>
   >(),
+  dispatchResolveAll: vi.fn<
+    (requester: number, seats: { playerId: number; difficulty: string }[]) => Promise<void>
+  >(),
 }));
-const { dispatchAiActionProposal } = dispatchMocks;
+const { dispatchAiActionProposal, dispatchResolveAll } = dispatchMocks;
 const notifyEngineLost = vi.fn();
 const attemptStateRehydrate = vi.fn(async () => false);
 const isEnginePanic = vi.fn<(error: unknown) => boolean>(() => false);
 const routePanic = vi.fn<(reason: string, panic?: string) => Promise<void>>(async () => {});
 
-vi.mock("../../dispatch", () => ({ dispatchAiActionProposal: dispatchMocks.dispatchAiActionProposal }));
+vi.mock("../../dispatch", () => ({
+  dispatchAiActionProposal: dispatchMocks.dispatchAiActionProposal,
+  dispatchResolveAll: dispatchMocks.dispatchResolveAll,
+}));
 vi.mock("../../engineRecovery", () => ({
   attemptStateRehydrate: () => attemptStateRehydrate(),
   isEnginePanic: (error: unknown) => isEnginePanic(error),
@@ -88,6 +94,8 @@ beforeEach(() => {
   // of nested retries to fit inside that same window.
   randomSpy = vi.spyOn(Math, "random").mockReturnValue(1);
   dispatchAiActionProposal.mockReset();
+  dispatchResolveAll.mockReset();
+  dispatchResolveAll.mockResolvedValue(undefined);
   notifyEngineLost.mockReset();
   attemptStateRehydrate.mockReset();
   attemptStateRehydrate.mockResolvedValue(false);
@@ -247,6 +255,204 @@ describe("AI proposal controller", () => {
 
     expect(getAiActionProposal).toHaveBeenCalledTimes(2);
     expect(dispatchAiActionProposal).toHaveBeenCalledOnce();
+    controller.dispose();
+  });
+
+  it("starts Resolve All with the engine-issued actor after an AI representative grants consent", async () => {
+    const consent = {
+      type: "ResolveAllConsent",
+      data: { epoch: 7, representative: 1 },
+    } as WaitingFor;
+    const ready = { type: "ResolveAllReady", data: { epoch: 7 } } as WaitingFor;
+    const state = buildGameState({ waiting_for: consent, priority_player: 0, stack: [] });
+    storeState.gameState = state;
+    storeState.waitingFor = consent;
+    const issued: AiActionProposal = {
+      token: "engine-bound-consent",
+      semanticOwner: 1,
+      actor: 0,
+      action: {
+        type: "RespondResolveAllConsent",
+        data: { epoch: 7, decision: { type: "Grant" } },
+      },
+    };
+    const getAiActionProposal = vi.fn(async () => issued);
+    storeState.adapter = { getAiActionProposal };
+    dispatchAiActionProposal.mockImplementation(async () => {
+      storeState.gameState = { ...state, waiting_for: ready };
+      storeState.waitingFor = ready;
+      storeSubscriber?.();
+      return { status: "applied" };
+    });
+
+    const seats = [{ playerId: 1, difficulty: "Medium" }];
+    const controller = createAIController({ seats });
+    controller.start();
+    await runOnce();
+
+    expect(getAiActionProposal).toHaveBeenCalledWith("Medium", 1);
+    expect(dispatchAiActionProposal).toHaveBeenCalledWith(issued);
+    expect(dispatchResolveAll).toHaveBeenCalledWith(0, seats);
+    controller.dispose();
+  });
+
+  it("does not start Resolve All after an AI representative declines consent", async () => {
+    const consent = {
+      type: "ResolveAllConsent",
+      data: { epoch: 7, representative: 1 },
+    } as WaitingFor;
+    const state = buildGameState({ waiting_for: consent, priority_player: 0, stack: [] });
+    const issued: AiActionProposal = {
+      token: "engine-bound-consent-decline",
+      semanticOwner: 1,
+      actor: 0,
+      action: {
+        type: "RespondResolveAllConsent",
+        data: { epoch: 7, decision: { type: "Decline" } },
+      },
+    };
+    storeState.gameState = state;
+    storeState.waitingFor = consent;
+    storeState.adapter = { getAiActionProposal: vi.fn(async () => issued) };
+    dispatchAiActionProposal.mockResolvedValue({ status: "applied" });
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    await runOnce();
+
+    expect(dispatchAiActionProposal).toHaveBeenCalledWith(issued);
+    expect(dispatchResolveAll).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it("does not act when the local human is the Resolve All consent representative", async () => {
+    const consent = {
+      type: "ResolveAllConsent",
+      data: { epoch: 7, representative: 0 },
+    } as WaitingFor;
+    const state = buildGameState({ waiting_for: consent, priority_player: 1, stack: [] });
+    const getAiActionProposal = vi.fn(async () => proposal(PASS));
+    storeState.gameState = state;
+    storeState.waitingFor = consent;
+    storeState.adapter = { getAiActionProposal };
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    await runOnce();
+
+    expect(getAiActionProposal).not.toHaveBeenCalled();
+    expect(dispatchAiActionProposal).not.toHaveBeenCalled();
+    expect(dispatchResolveAll).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it("does not start Resolve All when the Ready epoch differs from the submitted consent", async () => {
+    const consent = {
+      type: "ResolveAllConsent",
+      data: { epoch: 7, representative: 1 },
+    } as WaitingFor;
+    const ready = { type: "ResolveAllReady", data: { epoch: 8 } } as WaitingFor;
+    const state = buildGameState({ waiting_for: consent, priority_player: 0, stack: [] });
+    storeState.gameState = state;
+    storeState.waitingFor = consent;
+    storeState.adapter = {
+      getAiActionProposal: vi.fn<() => Promise<AiActionProposal>>(async () => ({
+        token: "engine-bound-consent",
+        semanticOwner: 1,
+        actor: 0,
+        action: {
+          type: "RespondResolveAllConsent",
+          data: { epoch: 7, decision: { type: "Grant" } },
+        },
+      })),
+    };
+    dispatchAiActionProposal.mockImplementation(async () => {
+      storeState.gameState = { ...state, waiting_for: ready };
+      storeState.waitingFor = ready;
+      storeSubscriber?.();
+      return { status: "applied" };
+    });
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    await runOnce();
+
+    expect(dispatchResolveAll).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it("does not start Resolve All for a stale consent submission even if Ready coincides", async () => {
+    const consent = {
+      type: "ResolveAllConsent",
+      data: { epoch: 7, representative: 1 },
+    } as WaitingFor;
+    const ready = { type: "ResolveAllReady", data: { epoch: 7 } } as WaitingFor;
+    const state = buildGameState({ waiting_for: consent, priority_player: 0, stack: [] });
+    storeState.gameState = state;
+    storeState.waitingFor = consent;
+    storeState.adapter = {
+      getAiActionProposal: vi.fn<() => Promise<AiActionProposal>>(async () => ({
+        token: "engine-bound-consent",
+        semanticOwner: 1,
+        actor: 0,
+        action: {
+          type: "RespondResolveAllConsent",
+          data: { epoch: 7, decision: { type: "Grant" } },
+        },
+      })),
+    };
+    dispatchAiActionProposal.mockImplementation(async () => {
+      storeState.gameState = { ...state, waiting_for: ready };
+      storeState.waitingFor = ready;
+      storeSubscriber?.();
+      return { status: "stale" };
+    });
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    await runOnce();
+
+    expect(dispatchResolveAll).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it("does not start Resolve All after a pending consent submission is superseded by a new session", async () => {
+    const consent = {
+      type: "ResolveAllConsent",
+      data: { epoch: 7, representative: 1 },
+    } as WaitingFor;
+    const ready = { type: "ResolveAllReady", data: { epoch: 7 } } as WaitingFor;
+    const state = buildGameState({ waiting_for: consent, priority_player: 0, stack: [] });
+    const pendingSubmission = deferred<{ status: "applied" | "stale" }>();
+    storeState.gameState = state;
+    storeState.waitingFor = consent;
+    storeState.adapter = {
+      getAiActionProposal: vi.fn<() => Promise<AiActionProposal>>(async () => ({
+        token: "engine-bound-consent",
+        semanticOwner: 1,
+        actor: 0,
+        action: {
+          type: "RespondResolveAllConsent",
+          data: { epoch: 7, decision: { type: "Grant" } },
+        },
+      })),
+    };
+    dispatchAiActionProposal.mockReturnValue(pendingSubmission.promise);
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    await runOnce();
+
+    storeState.gameSessionGeneration += 1;
+    storeSubscriber?.();
+    storeState.gameState = { ...state, waiting_for: ready };
+    storeState.waitingFor = ready;
+    storeSubscriber?.();
+    pendingSubmission.resolve({ status: "applied" });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(dispatchResolveAll).not.toHaveBeenCalled();
     controller.dispose();
   });
 

@@ -68,6 +68,7 @@ fn ninja_pump_static() -> StaticDefinition {
         source_object: None,
         bypass_beneficiary: None,
         protection_does_not_remove: None,
+        room_door: None,
     }
 }
 

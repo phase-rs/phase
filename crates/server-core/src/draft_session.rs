@@ -521,13 +521,10 @@ impl DraftSessionManager {
         if session.session.status != DraftStatus::Pairing {
             return Ok(());
         }
-        let round = session.session.current_round.max(1);
-        draft_core::session::apply(
-            &mut session.session,
-            DraftAction::GeneratePairings { round },
-            None,
-        )
-        .map_err(|e| format!("GeneratePairings failed: {e}"))?;
+        // The reducer derives the round (`DraftSession::next_pairing_round`);
+        // deriving it here is what made round 2 unreachable.
+        draft_core::session::apply(&mut session.session, DraftAction::GeneratePairings, None)
+            .map_err(|e| format!("GeneratePairings failed: {e}"))?;
         Ok(())
     }
 
@@ -785,7 +782,7 @@ fn authorize_client_draft_action(seat: usize, action: DraftAction) -> Result<Dra
         // generate pairings, report results, or replace a seat with a bot.
         DraftAction::StartDraft
         | DraftAction::AdvanceRound
-        | DraftAction::GeneratePairings { .. }
+        | DraftAction::GeneratePairings
         | DraftAction::ReportMatchResult { .. }
         | DraftAction::ReplaceSeatWithBot { .. } => {
             if seat == DRAFT_HOST_SEAT {

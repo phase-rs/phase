@@ -6,6 +6,7 @@ import { onEngineLost, onEngineSlow } from "../../game/engineRecovery";
 import { exportGameStateDebugZip } from "../../services/gameStateExport";
 import { useGameStore } from "../../stores/gameStore";
 import type { GameState } from "../../adapter/types";
+import { copyText } from "../../services/copyText";
 
 /**
  * Layer 3 fallback for engine state loss — the user-facing prompt.
@@ -106,16 +107,14 @@ export function EngineLostModal() {
   const diagnostic = buildDiagnostic(snapshot);
 
   const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(diagnostic);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // Clipboard API can fail in insecure contexts. Fall back to opening
-      // a prompt so the user can copy manually rather than leaving them
-      // stuck — the whole point of this modal is making the report easy.
+    if (!(await copyText(diagnostic))) {
+      // Fall back to a prompt so the user can copy manually rather than being
+      // left stuck — the whole point of this modal is making the report easy.
       window.prompt(t("engineLost.copyPrompt"), diagnostic);
+      return;
     }
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 2000);
   };
 
   const handleExport = async () => {

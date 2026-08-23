@@ -16,6 +16,9 @@ import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useEngineCardData, useCardParseDetails, useCardRulings, type ParsedItem } from "../../hooks/useEngineCardData.ts";
 import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { tokenFiltersForObject } from "../../services/cardImageLookup.ts";
+import { CARD_BACK_URL } from "../../services/scryfall.ts";
+import { faceDownMarkerRef } from "./faceDownMarker.ts";
+import { shouldRenderCardBack } from "../../viewmodel/cardProps.ts";
 import type { CardRuling } from "../../services/engineRuntime.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -314,6 +317,28 @@ function CardPreviewInner({
   const backParseDetails = useCardParseDetails(backFaceName);
 
   const isToken = obj?.display_source === "Token";
+  // Face-down permanents (#7547): opponents preview the cause MARKER full
+  // size (it carries the mechanic's reminder text); the controller previews
+  // the real card alone — the marker would only cover its rules text, and the
+  // controller already knows the mechanic (playtest call, 2026-08-19).
+  const previewMarkerRef = faceDownMarkerRef(
+    obj?.face_down ?? false,
+    obj?.face_down_cause,
+  );
+  const markerIsPrimary =
+    previewMarkerRef != null && obj != null && shouldRenderCardBack(obj);
+  // A hidden face-down PERMANENT whose cause has NO marker printing (unknown
+  // cause from an older save, or the Ixidron class) still gets a preview: the
+  // plain card back. It reveals nothing (CR 708.2a — the public face is a
+  // blank 2/2), and every art lookup below is suppressed so neither the
+  // generic label nor a blanked ref can leak into a network search.
+  // Battlefield only: a face-down card in a hidden zone (hideaway exile,
+  // issue #2889) has no public characteristics at all and keeps no preview.
+  const genericFaceDownBack =
+    obj != null
+    && obj.zone === "Battlefield"
+    && shouldRenderCardBack(obj)
+    && previewMarkerRef == null;
   // For transformed DFCs, the active face is the back (Scryfall faceIndex 1).
   // The engine swaps obj.name to the active face, but Scryfall always indexes
   // 0=front, 1=back regardless of search name — so we must flip the index.
@@ -321,17 +346,27 @@ function CardPreviewInner({
   const defaultFaceIndex = faceIndex ?? (isTransformed ? 1 : 0);
   // Battlefield path: route through oracle_id when the engine attached one.
   // Deck-builder path: `obj` is null, so we keep the name-based fallback.
-  const { src, isLoading, isRotated, isFlip } = useCardImage(cardName, {
-    size: "normal",
-    faceIndex: defaultFaceIndex,
-    isToken,
-    tokenFilters: isToken && obj ? tokenFiltersForObject(obj) : undefined,
-    tokenImageRef: isToken && obj ? obj.token_image_ref : undefined,
-    oracleId: obj?.printed_ref?.oracle_id,
-    faceName: obj?.printed_ref?.face_name,
-    scryfallId,
-    sourcePrinting,
-  });
+  const suppressArtLookup = markerIsPrimary || genericFaceDownBack;
+  const { src, isLoading, isRotated, isFlip } = useCardImage(
+    genericFaceDownBack ? "" : cardName,
+    {
+      size: "normal",
+      faceIndex: defaultFaceIndex,
+      isToken: isToken || markerIsPrimary,
+      tokenFilters: isToken && obj && !genericFaceDownBack
+        ? tokenFiltersForObject(obj)
+        : undefined,
+      tokenImageRef: markerIsPrimary
+        ? previewMarkerRef
+        : isToken && obj && !genericFaceDownBack
+          ? obj.token_image_ref
+          : undefined,
+      oracleId: suppressArtLookup ? undefined : obj?.printed_ref?.oracle_id,
+      faceName: suppressArtLookup ? undefined : obj?.printed_ref?.face_name,
+      scryfallId,
+      sourcePrinting,
+    },
+  );
   const classLevel = obj?.class_level;
   const previewRef = useRef<HTMLDivElement | null>(null);
   const pointerRef = useRef<{ x: number; y: number } | null>(null);
@@ -383,8 +418,16 @@ function CardPreviewInner({
     faceName: showOtherFace ? otherFaceName : undefined,
   });
 
-  const activeSrc = showOtherFace ? otherFaceImgResult.src : src;
-  const activeLoading = showOtherFace ? otherFaceImgResult.isLoading : isLoading;
+  const activeSrc = genericFaceDownBack
+    ? CARD_BACK_URL
+    : showOtherFace
+      ? otherFaceImgResult.src
+      : src;
+  const activeLoading = genericFaceDownBack
+    ? false
+    : showOtherFace
+      ? otherFaceImgResult.isLoading
+      : isLoading;
   const activeRotated = showOtherFace ? otherFaceImgResult.isRotated : isRotated;
   const displayName = showOtherFace ? backFaceName! : cardName;
   const showInfoPanel = obj?.zone === "Battlefield";
@@ -687,10 +730,8 @@ function CardPreviewInner({
       <MobilePreviewOverlay
         cardName={cardName}
         backFaceName={backFaceName}
-        faceIndex={defaultFaceIndex}
-        obj={obj}
+        art={{ src: activeSrc, isLoading: activeLoading, isRotated: activeRotated, isFlip }}
         onDismiss={onDismiss ?? dismissPreview}
-        sourcePrinting={sourcePrinting}
         layout={mobileLayout ?? "modal"}
         report={reportContext}
       />
@@ -792,35 +833,26 @@ function CardPreviewInner({
 /** Mobile/tablet: card anchored right (landscape) or center (portrait), whole card visible. */
 function MobilePreviewOverlay({
   cardName,
-  faceIndex,
-  obj,
+  art,
   onDismiss,
-  sourcePrinting,
   layout = "modal",
   report,
 }: {
   cardName: string;
   backFaceName: string | null;
-  faceIndex?: number;
-  obj: GameObject | null;
+  /** The parent's RESOLVED art state (marker / generic back / peek already
+   *  applied). The overlay must never run its own lookup: a second
+   *  `useCardImage` with raw `printed_ref` fields is exactly the mobile
+   *  hidden-information bypass the PR 7551 review flagged. */
+  art: { src: string | null; isLoading: boolean; isRotated: boolean; isFlip: boolean };
   onDismiss: () => void;
-  sourcePrinting?: SourcePrinting;
   layout?: "modal" | "compact";
   /** In-game report context; absent in the deck builder. Only the full modal
    *  layout hosts the button — the compact peek dismisses on any tap. */
   report?: CardReportContext;
 }) {
   const { t } = useTranslation("game");
-  const { src, isLoading, isRotated, isFlip } = useCardImage(cardName, {
-    size: "normal",
-    faceIndex,
-    isToken: obj?.display_source === "Token",
-    tokenFilters: obj?.display_source === "Token" ? tokenFiltersForObject(obj) : undefined,
-    tokenImageRef: obj?.display_source === "Token" ? obj.token_image_ref : undefined,
-    oracleId: obj?.printed_ref?.oracle_id,
-    faceName: obj?.printed_ref?.face_name,
-    sourcePrinting,
-  });
+  const { src, isLoading, isRotated, isFlip } = art;
 
   // Issue #6156 on the mobile path: both arms below used to gate the art on
   // `src &&`, so an artless token (no official paper printing) opened an

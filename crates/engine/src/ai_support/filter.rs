@@ -564,6 +564,7 @@ struct ObjectFingerprint {
     power: Option<i32>,
     toughness: Option<i32>,
     base_power: Option<i32>,
+    base_toughness: Option<i32>,
     name: String,
     foretold: bool,
     is_saddled: bool,
@@ -637,6 +638,7 @@ impl Hash for ObjectFingerprint {
         self.power.hash(h);
         self.toughness.hash(h);
         self.base_power.hash(h);
+        self.base_toughness.hash(h);
         self.mana_cost.mana_value().hash(h);
         self.cost_x_paid.hash(h);
         self.damage_marked.hash(h);
@@ -693,7 +695,8 @@ fn object_fingerprint(state: &GameState, id: ObjectId) -> Option<ObjectFingerpri
         counters: obj.counters.clone(),
         power: obj.power,
         toughness: obj.toughness,
-        base_power: obj.base_power,
+        base_power: obj.layer_base_power.or(obj.base_power),
+        base_toughness: obj.layer_base_toughness.or(obj.base_toughness),
         name: obj.name.clone(),
         foretold: obj.foretold,
         is_saddled: obj.is_saddled,
@@ -1081,6 +1084,12 @@ fn condition_reads_only_memo_safe_state(c: &ParsedCondition) -> bool {
         | ParsedCondition::PlayerCountAtLeast { .. }
         | ParsedCondition::HasCityBlessing
         | ParsedCondition::HasEnduringStory
+        // CR 702.179e: reads the controller's `speed` plus a controller-scoped
+        // battlefield scan for the CR 101.1 cap-raising static (via
+        // `game::speed`) — the same two apply()-constant sources as the
+        // designation predicates above and `ControlsCommander` below. No combat,
+        // damage, or pending-cast history.
+        | ParsedCondition::HasMaxSpeed
         // CR 903.3 / CR 903.3d: a controller-scoped battlefield scan for a commander
         // (via `game::commander`), like the other `YouControl*` predicates — reads no
         // combat/damage/pending-cast history, so it is memo-safe.
@@ -1932,6 +1941,7 @@ mod tests {
             up_to: true,
             allows_partial_find: true,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
         state

@@ -81,6 +81,7 @@ mod tests {
 
     fn make_ability(amount: QuantityExpr, controller: PlayerId) -> ResolvedAbility {
         ResolvedAbility {
+            detached_remainder: crate::types::ability::DetachedRemainder::NoProducer,
             effect: Effect::GrantExtraLoyaltyActivations {
                 amount,
                 target: TargetFilter::Controller,
@@ -112,6 +113,7 @@ mod tests {
             target_choice_timing: crate::types::ability::TargetChoiceTiming::Stack,
             description: None,
             selected_mode_labels: Vec::new(),
+            modal_instruction_ordinal: None,
             player_scope: None,
             starting_with: None,
             chosen_x: None,

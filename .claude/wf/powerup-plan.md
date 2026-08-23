@@ -183,7 +183,7 @@ The **parser is the detector** throughout.
 
 ## 3. Step-by-Step Implementation Plan
 
-> Verification cadence per CLAUDE.md: `cargo fmt --all` directly; everything else via Tilt (`tilt logs clippy/test-engine`, `./scripts/tilt-wait.sh`). Do NOT run `cargo build/clippy/test` directly. mtgish is out of scope — touch nothing under `mtgish/`, `crates/mtgish-import/`, `data/mtgish-*`.
+> Verification cadence per CLAUDE.md: `cargo fmt --all` directly; everything else via Tilt (`tilt logs clippy/test-engine`, `./scripts/tilt-wait.sh`). Do NOT run `cargo build/clippy/test` directly.
 
 ### Step 1 — Add `AbilityTag::PowerUp` + `keyword_str()` (gate (a))
 - **`types/ability.rs:11645`** — add to `AbilityTag` (after `Backup`): `/// CR 602.5b + CR 602.1: This ability originated from a Power-up keyword definition.\nPowerUp,`. (Re-grep `602.5b` and `602.1` before writing — verified `MagicCompRules.txt:2541`, `:2510`.)

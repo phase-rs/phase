@@ -1889,8 +1889,10 @@ fn zone_change_token_predicate_parses_present_and_past_negation_forms() {
         ("is a token", FilterProp::Token),
         ("was a token", FilterProp::Token),
         ("isn't a token", FilterProp::NonToken),
+        ("isn’t a token", FilterProp::NonToken),
         ("is not a token", FilterProp::NonToken),
         ("wasn't a token", FilterProp::NonToken),
+        ("wasn’t a token", FilterProp::NonToken),
         ("was not a token", FilterProp::NonToken),
     ] {
         let (rest, condition) =
@@ -1908,6 +1910,255 @@ fn zone_change_token_predicate_parses_present_and_past_negation_forms() {
             other => panic!("expected token filter condition for {text}, got {other:?}"),
         }
     }
+}
+
+fn assert_dies_event_object_filter(
+    condition: &TriggerCondition,
+    expected_types: &[TypeFilter],
+    negated: bool,
+) {
+    let condition = match (condition, negated) {
+        (TriggerCondition::Not { condition }, true) => condition.as_ref(),
+        (condition, false) => condition,
+        (other, expected) => panic!("wrong polarity (negated={expected}): {other:?}"),
+    };
+    let TriggerCondition::ZoneChangeObjectMatchesFilter {
+        origin: Some(Zone::Battlefield),
+        destination: Zone::Graveyard,
+        filter: TargetFilter::Typed(filter),
+    } = condition
+    else {
+        panic!("expected battlefield-to-graveyard event-object filter, got {condition:?}");
+    };
+    assert_eq!(filter.type_filters, expected_types);
+}
+
+#[test]
+fn princess_yue_gendered_dies_condition_keeps_composite_lki_filter() {
+    let def = parse_trigger_line(
+        "When Princess Yue dies, if she was a nonland creature, return this card to the battlefield tapped under your control. She's a land named Moon. She gains \"{T}: Add {C}.\" (She's still legendary.)",
+        "Princess Yue",
+    );
+    assert_eq!(def.constraint, None);
+    assert_dies_event_object_filter(
+        def.condition.as_ref().expect("Princess intervening-if"),
+        &[
+            TypeFilter::Creature,
+            TypeFilter::Non(Box::new(TypeFilter::Land)),
+        ],
+        false,
+    );
+}
+
+#[test]
+fn fang_gendered_dies_condition_keeps_negative_subtype_lki_filter() {
+    let def = parse_trigger_line(
+        "When Fang dies, if he wasn't a Spirit, return this card to the battlefield under your control. He's a Spirit in addition to his other types.",
+        "Fang, Roku's Companion",
+    );
+    assert_eq!(def.constraint, None);
+    assert_dies_event_object_filter(
+        def.condition.as_ref().expect("Fang intervening-if"),
+        &[TypeFilter::Subtype("Spirit".to_string())],
+        true,
+    );
+}
+
+#[test]
+fn gendered_dies_condition_factors_pronoun_copula_article_and_descriptor() {
+    for (pronoun, copula, article, descriptor, expected_types, negated) in [
+        (
+            "it",
+            "was",
+            "a",
+            "Spirit",
+            vec![TypeFilter::Subtype("Spirit".to_string())],
+            false,
+        ),
+        (
+            "he",
+            "wasn't",
+            "an",
+            "Artifact",
+            vec![TypeFilter::Artifact],
+            true,
+        ),
+        (
+            "he",
+            "wasn’t",
+            "an",
+            "Artifact",
+            vec![TypeFilter::Artifact],
+            true,
+        ),
+        (
+            "she",
+            "was not",
+            "a",
+            "Spirit",
+            vec![TypeFilter::Subtype("Spirit".to_string())],
+            true,
+        ),
+        (
+            "she",
+            "was",
+            "a",
+            "nonland creature",
+            vec![
+                TypeFilter::Creature,
+                TypeFilter::Non(Box::new(TypeFilter::Land)),
+            ],
+            false,
+        ),
+    ] {
+        let line = format!(
+            "When this creature dies, if {pronoun} {copula} {article} {descriptor}, draw a card."
+        );
+        let def = parse_trigger_line(&line, "Grammar Probe");
+        assert_dies_event_object_filter(
+            def.condition.as_ref().expect("leading dies condition"),
+            &expected_types,
+            negated,
+        );
+        assert!(matches!(
+            def.execute
+                .as_deref()
+                .map(|ability| ability.effect.as_ref()),
+            Some(Effect::Draw { .. })
+        ));
+    }
+
+    let legacy = parse_trigger_line(
+        "When this creature dies, if it was a creature, draw a card.",
+        "Legacy Bare Core Probe",
+    );
+    assert_eq!(
+        legacy.condition,
+        Some(TriggerCondition::WasType {
+            card_type: CoreType::Creature,
+        }),
+        "positive bare-core `it was` keeps the stable WasType representation"
+    );
+}
+
+#[test]
+fn gendered_past_type_condition_does_not_hoist_outside_leading_dies_position() {
+    let leading = parse_trigger_line(
+        "When this creature dies, if she was a land, draw a card.",
+        "Leading Probe",
+    );
+    assert_dies_event_object_filter(
+        leading
+            .condition
+            .as_ref()
+            .expect("positive leading-dies reach guard"),
+        &[TypeFilter::Land],
+        false,
+    );
+    assert!(matches!(
+        leading
+            .execute
+            .as_deref()
+            .map(|ability| ability.effect.as_ref()),
+        Some(Effect::Draw { .. })
+    ));
+
+    let non_dies = parse_trigger_line(
+        "When this creature enters, if she was a land, draw a card.",
+        "Non-Dies Probe",
+    );
+    assert_eq!(non_dies.mode, TriggerMode::ChangesZone);
+    assert_eq!(non_dies.destination, Some(Zone::Battlefield));
+    assert_eq!(non_dies.condition, None);
+    assert!(matches!(
+        non_dies
+            .execute
+            .as_deref()
+            .map(|ability| ability.effect.as_ref()),
+        Some(Effect::Draw { .. })
+    ));
+    let non_dies_card = parse_oracle_text(
+        "When this creature enters, if she was a land, draw a card.",
+        "Non-Dies Probe",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        non_dies_card.parse_warnings.iter().any(|warning| matches!(
+            warning,
+            OracleDiagnostic::SwallowedClause {
+                detector,
+                description,
+                line_index: 0,
+                ..
+            } if detector == "Condition_If"
+                && description == "When this creature enters, if she was a land, draw a card."
+        )),
+        "the non-dies clause must remain an exact honest deferral: {:?}",
+        non_dies_card.parse_warnings
+    );
+
+    let trailing = parse_trigger_line(
+        "When this creature dies, draw a card if she was a land.",
+        "Trailing Probe",
+    );
+    assert_eq!(trailing.mode, TriggerMode::ChangesZone);
+    assert_eq!(trailing.origin, Some(Zone::Battlefield));
+    assert_eq!(trailing.destination, Some(Zone::Graveyard));
+    assert_eq!(trailing.condition, None);
+    assert!(matches!(
+        trailing
+            .execute
+            .as_deref()
+            .map(|ability| ability.effect.as_ref()),
+        Some(Effect::Draw { .. })
+    ));
+    assert_eq!(
+        trailing
+            .execute
+            .as_deref()
+            .and_then(|ability| ability.condition.clone()),
+        None,
+        "unsupported gendered trailing predicate must not fabricate a resolution condition"
+    );
+    let trailing_card = parse_oracle_text(
+        "When this creature dies, draw a card if she was a land.",
+        "Trailing Probe",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        trailing_card.parse_warnings.iter().any(|warning| matches!(
+            warning,
+            OracleDiagnostic::SwallowedClause {
+                detector,
+                description,
+                line_index: 0,
+                ..
+            } if detector == "Condition_If"
+                && description == "When this creature dies, draw a card if she was a land."
+        )),
+        "the trailing predicate must remain an exact honest deferral: {:?}",
+        trailing_card.parse_warnings
+    );
+
+    let leading_card = parse_oracle_text(
+        "When this creature dies, if she was a land, draw a card.",
+        "Leading Probe",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        leading_card.parse_warnings.iter().all(|warning| !matches!(
+            warning,
+            OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+        )),
+        "the paired positive must represent its condition: {:?}",
+        leading_card.parse_warnings
+    );
 }
 
 #[test]
@@ -15575,9 +15826,15 @@ fn trigger_may_have_self_become_named_equipment_if_you_do() {
     assert!(
         modifications.iter().any(|modification| matches!(
             modification,
-            ContinuousModification::SetName { name } if name == "Everflame, Heroes' Legacy"
+            ContinuousModification::SetTextName { name } if name == "Everflame, Heroes' Legacy"
         )),
-        "expected SetName in {modifications:?}",
+        "expected SetTextName in {modifications:?}",
+    );
+    assert!(
+        !modifications
+            .iter()
+            .any(|modification| matches!(modification, ContinuousModification::SetName { .. })),
+        "resolving non-copy name changes must not use copy-layer SetName: {modifications:?}",
     );
     assert!(
         modifications.iter().any(|modification| matches!(
@@ -19077,6 +19334,7 @@ fn trigger_coalition_relic_charge_counter_drain() {
                         QuantityExpr::Ref {
                             qty: QuantityRef::PreviousEffectAmount {
                                 channel: crate::types::ability::DamageChannel::Total,
+                                aggregate: AggregateFunction::Sum,
                             }
                         },
                         "for-each tail must dispatch to PreviousEffectAmount"
@@ -22380,20 +22638,23 @@ fn plain_etb_has_no_cast_variant_condition() {
 
 #[test]
 fn extract_if_it_wasnt_blocking_as_zone_change_lookback() {
-    let (cleaned, cond) = extract_if_condition("if it wasn't blocking, draw a card");
-    assert_eq!(cleaned, "draw a card");
-    assert_eq!(
-        cond.unwrap(),
-        TriggerCondition::Not {
-            condition: Box::new(TriggerCondition::ZoneChangeObjectMatchesFilter {
-                origin: Some(Zone::Battlefield),
-                destination: Zone::Graveyard,
-                filter: TargetFilter::Typed(
-                    TypedFilter::creature().properties(vec![FilterProp::Blocking])
-                ),
-            }),
-        }
-    );
+    for apostrophe in ["wasn't", "wasn’t"] {
+        let (cleaned, cond) =
+            extract_if_condition(&format!("if it {apostrophe} blocking, draw a card"));
+        assert_eq!(cleaned, "draw a card");
+        assert_eq!(
+            cond.unwrap(),
+            TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::ZoneChangeObjectMatchesFilter {
+                    origin: Some(Zone::Battlefield),
+                    destination: Zone::Graveyard,
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![FilterProp::Blocking])
+                    ),
+                }),
+            }
+        );
+    }
 }
 
 /// CR 506.5: the disjunctive "attacking or blocking alone" intervening-if
@@ -28677,6 +28938,7 @@ fn valakut_exploration_end_step_trigger_hoists_gate_and_keeps_damage_shape() {
                     qty:
                         QuantityRef::PreviousEffectAmount {
                             channel: DamageChannel::Total,
+                            aggregate: AggregateFunction::Sum,
                         },
                 },
             player_filter: PlayerFilter::Opponent,

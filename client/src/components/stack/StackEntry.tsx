@@ -9,12 +9,13 @@ import { UnimplementedMechanicsBadge } from "../card/UnimplementedMechanicsBadge
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
-import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
 import { renderDescription } from "../../utils/description.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { PopoverMenu } from "../menu/PopoverMenu.tsx";
@@ -51,7 +52,8 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   const isMobile = useIsMobile();
   const playerId = usePlayerId();
   const objects = useGameStore((s) => s.gameState?.objects);
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
+  const canActForWaitingState = useCanActForWaitingState();
   const pendingCast = useGameStore((s) => s.gameState?.pending_cast);
   const inspectObject = useUiStore((s) => s.inspectObject);
 
@@ -65,17 +67,28 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(() => {
     inspectObject(entry.source_id);
     setPreviewSticky(true);
+    onHoverChange?.(true);
   });
 
   const sourceObj = objects?.[entry.source_id];
   // Prefer the engine-pre-resolved source name on triggered abilities (so the
   // display layer doesn't dereference ObjectId -> GameObject -> name itself).
   // Fall back to the objects map for spells/activated entries that don't carry
-  // a captured name, and to "Unknown" for synthetic game-rule triggers whose
-  // source_id is ObjectId(0).
+  // a captured name.
+  //
+  // There is deliberately NO last-resort literal here. This line used to end in
+  // `|| "Unknown"` for the rule-defined sourceless abilities this engine
+  // constructs (CR 725.2 monarch, CR 726.2 initiative, CR 728.1 rad counters,
+  // and CR 702.179d speed). CR 113.7 defines an ability's source; CR 113.8
+  // instead defines its controller. (CR 901.8 separately gives Planechase's
+  // planeswalking ability no source.) "Unknown" is game-facing text no rule
+  // ever produced, invented by the display layer because the wire carried
+  // nothing. The engine names those abilities now, so the invention has nothing
+  // left to cover; if a name is ever missing again, an empty label is the honest
+  // answer and the engine-side guard is what should fail.
   const triggerSourceName =
     entry.kind.type === "TriggeredAbility" ? entry.kind.data.source_name : undefined;
-  const sourceName = details?.source_name || triggerSourceName || sourceObj?.name || "Unknown";
+  const sourceName = details?.source_name || triggerSourceName || sourceObj?.name || "";
   const imageLookup = sourceObj
     ? cardImageLookup(sourceObj)
     : { name: "", faceIndex: 0, oracleId: undefined, faceName: undefined };
@@ -160,23 +173,16 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   const controllerInitial =
     entry.controller === playerId ? t("stack.controllerInitialYou") : t("stack.controllerInitialOpp", { seat: entry.controller });
 
-  // Targeting: check if this stack entry is a valid target for the current selection
-  const isHumanTargetSelection =
-    (waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection")
-    && waitingFor.data.player === playerId;
-  // CR 115.7: A single-target retarget can redirect to another spell/ability on
-  // the stack (Bolt Bend on a counterspell), so stack entries are click targets.
-  const isRetargetChoice = waitingFor?.type === "RetargetChoice"
-    && waitingFor.data.player === playerId
-    && waitingFor.data.scope.type === "Single";
-  const currentTargetRefs = isHumanTargetSelection
-    ? (waitingFor.data.selection?.current_legal_targets ?? [])
-    : isRetargetChoice
-      ? waitingFor.data.legal_new_targets
-      : [];
-  const isValidTarget = (isHumanTargetSelection || isRetargetChoice) && currentTargetRefs.some(
-    (target) => "Object" in target && target.Object === entry.id,
-  );
+  // Targeting: whether the engine is currently asking THIS seat to choose an
+  // object and this stack entry is one of the choices. `getWaitingForObjectChoiceIds`
+  // is the single WaitingFor -> choosable-ObjectId authority the battlefield,
+  // zones, and attachment dialogs already read; the stack reads it too, so every
+  // variant whose engine-authored legal set can name a stack object lights up
+  // here without a per-variant branch — CR 115.7 retargets (Bolt Bend onto a
+  // counterspell), CR 707.10c "may choose new targets for the copy", and plain
+  // CR 601.2c target announcement alike.
+  const isValidTarget =
+    canActForWaitingState && getWaitingForObjectChoiceIds(waitingFor).includes(entry.id);
 
   // Ring style: targeting glow overrides default ring
   const ringClass = isValidTarget

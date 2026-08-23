@@ -469,6 +469,7 @@ fn classify_deferred_life_root(
             ManaAbilityResume::Priority
             | ManaAbilityResume::CompanionToHand { .. }
             | ManaAbilityResume::EndContinuousEffect { .. }
+            | ManaAbilityResume::TurnFaceUp { .. }
             | ManaAbilityResume::UnlessPayment { .. }
             | ManaAbilityResume::EffectPayCost { .. } => PaymentContinuationState::NotAffiliated,
         },
@@ -559,9 +560,13 @@ fn record_root_from_resume(
         ManaAbilityResume::FinalizePendingManaPayment { player } => {
             Some(root_from_global(state, *player)?)
         }
+        // Special actions and effect payments are not a CAST's payment root:
+        // they carry their own typed continuation and never resume into a
+        // pending cast (CR 116.1 — a special action does not use the stack).
         ManaAbilityResume::Priority
         | ManaAbilityResume::CompanionToHand { .. }
         | ManaAbilityResume::EndContinuousEffect { .. }
+        | ManaAbilityResume::TurnFaceUp { .. }
         | ManaAbilityResume::UnlessPayment { .. }
         | ManaAbilityResume::EffectPayCost { .. } => None,
     };

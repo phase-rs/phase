@@ -11,8 +11,9 @@ use engine::types::game_state::{
 use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 use engine::types::resolution::{
-    FrameKind, MultiDrawFrame, OptionalEffectFrame, PendingCoinFlip, PendingCoinFlipKind,
-    ResolutionFrame, ResolutionStackError, ResolutionStateWire,
+    CipherEncodeStage, FrameKind, MultiDrawFrame, OptionalEffectFrame, PendingCipherEncode,
+    PendingCoinFlip, PendingCoinFlipKind, ResolutionFrame, ResolutionStackError,
+    ResolutionStateWire,
 };
 use engine::types::resolved_commands::{
     ResolvedCommandOrdinal, ResolvedFrameTransition, ResolvedFrameTransitionCommand,
@@ -174,6 +175,7 @@ fn optional_effect_frame_cannot_survive_into_search_choice_parent_insertion() {
         up_to: false,
         allows_partial_find: false,
         constraint: Default::default(),
+        ordering_hint: Default::default(),
         split: None,
     };
     let before = state.resolution_stack.clone();
@@ -432,4 +434,123 @@ fn resolution_state_wire_v2_round_trip_preserves_frame_transition_journal_and_st
 
     assert_eq!(restored.resolved_rules_journal, expected_journal);
     assert_eq!(frames(&restored), expected_stack);
+}
+
+/// The parking transition records an operand and no position: replay reaches
+/// the same stack by asking the stack again, not by reading back a slot.
+///
+/// The fixture is the shape that makes the distinction observable — a paused
+/// post-replacement/draw pair, where "below the top" and "outside the pair" are
+/// different positions (CR 614.11a + CR 121.6b keep the pair adjacent).
+#[test]
+fn parking_beneath_a_live_prompt_journals_its_operand_and_replays_to_the_same_stack() {
+    let mut state = GameState::new_two_player(103);
+    state
+        .resolution_stack
+        .push_inner(paused_post_replacement_frame());
+    state.resolution_stack.push_inner(active_multi_draw_frame());
+    let prompt_owner = optional_effect_frame(&state);
+    state.resolution_stack.push_inner(prompt_owner.clone());
+    state.waiting_for = WaitingFor::OpponentMayChoice {
+        player: PlayerId(1),
+        source_id: ObjectId(7),
+        description: None,
+        remaining: Vec::new(),
+    };
+
+    // The parked frame must own no prompt — parking a direct-choice owner
+    // beneath another frame buries it, which `validate` rejects on its own
+    // terms. A `Parked` Cipher offer is exactly such a frame.
+    let parked = ResolutionFrame::CipherEncode(PendingCipherEncode {
+        stage: CipherEncodeStage::Parked,
+        card_id: ObjectId(41),
+        controller: PlayerId(0),
+        creatures: vec![ObjectId(42)],
+    });
+    state
+        .resolve_and_apply_frame_transition(ResolvedFrameTransition::ParkBeneathLivePrompt {
+            frame: parked.clone(),
+        })
+        .expect("a prompt-less frame always has a place beneath the live prompt");
+
+    assert!(
+        matches!(
+            frames(&state).as_slice(),
+            [
+                ResolutionFrame::CipherEncode(_),
+                ResolutionFrame::PostReplacement(_),
+                ResolutionFrame::MultiDraw(_),
+                ResolutionFrame::OptionalEffect(_)
+            ]
+        ),
+        "the parked frame sits outside the pair, not between its halves: {:?}",
+        frames(&state)
+            .iter()
+            .map(ResolutionFrame::kind)
+            .collect::<Vec<_>>()
+    );
+
+    let recorded = state
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .filter_map(|entry| match &entry.command {
+            Some(ResolvedRulesCommand::FrameTransition(command)) => Some(command),
+            _ => None,
+        })
+        .find(|command| {
+            matches!(
+                &command.transition,
+                ResolvedFrameTransition::ParkBeneathLivePrompt { .. }
+            )
+        })
+        .expect("the parking transition is journaled")
+        .clone();
+    assert_command_round_trip(&recorded);
+
+    // Replay: the same operand against the same prior stack reaches the same
+    // placement, which is what makes a position-free record sufficient.
+    let mut replayed = GameState::new_two_player(103);
+    replayed
+        .resolution_stack
+        .push_inner(paused_post_replacement_frame());
+    replayed
+        .resolution_stack
+        .push_inner(active_multi_draw_frame());
+    replayed.resolution_stack.push_inner(prompt_owner);
+    replayed.waiting_for = WaitingFor::OpponentMayChoice {
+        player: PlayerId(1),
+        source_id: ObjectId(7),
+        description: None,
+        remaining: Vec::new(),
+    };
+    replayed
+        .apply_resolved_frame_transition(&command(ResolvedFrameTransition::ParkBeneathLivePrompt {
+            frame: parked,
+        }))
+        .expect("replaying the recorded transition applies");
+    assert_eq!(frames(&replayed), frames(&state));
+}
+
+/// A post-replacement frame whose resident drain is PAUSED — the only status
+/// under which `validate` protects the pair's adjacency (CR 614.11a).
+fn paused_post_replacement_frame() -> ResolutionFrame {
+    let mut drains = PostReplacementDrainStack::default();
+    assert!(drains.install(post_replacement_drain(), ResidentDrainPolicy::KeepResident));
+    let (_, dispatch) = drains
+        .begin_dispatch()
+        .expect("a ready drain begins dispatching");
+    assert!(drains.pause_dispatch(dispatch));
+    ResolutionFrame::PostReplacement(drains)
+}
+
+/// A multi-draw child with an ACTIVE draw sequence, which the paired-adjacency
+/// check requires (CR 121.2: a multi-card draw is that many individual draws).
+fn active_multi_draw_frame() -> ResolutionFrame {
+    let mut draw_sequences = DrawSequenceStack::default();
+    draw_sequences.push(PlayerId(0), 1);
+    ResolutionFrame::MultiDraw(MultiDrawFrame {
+        draw_sequences,
+        connive_reentry: None,
+    })
 }

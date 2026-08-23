@@ -19,6 +19,31 @@ use crate::session::AiSession;
 /// Typical AI sequences (mulligans + full turn) are 30–50 actions.
 const MAX_AI_ACTIONS_PER_SEQUENCE: usize = 200;
 
+/// Identifies whether a batch bound belongs to the caller or to the module's
+/// infinite-loop safety cap. A caller requesting exactly the cap remains a
+/// caller budget; only a larger request is truncated by the safety cap.
+#[derive(Clone, Copy)]
+enum ActionLimit {
+    SafetyCap,
+    CallerBudget { requested: usize },
+}
+
+impl ActionLimit {
+    fn effective(self) -> usize {
+        match self {
+            Self::SafetyCap => MAX_AI_ACTIONS_PER_SEQUENCE,
+            Self::CallerBudget { requested } => requested.min(MAX_AI_ACTIONS_PER_SEQUENCE),
+        }
+    }
+
+    fn is_safety_cap(self) -> bool {
+        match self {
+            Self::SafetyCap => true,
+            Self::CallerBudget { requested } => requested > MAX_AI_ACTIONS_PER_SEQUENCE,
+        }
+    }
+}
+
 /// Result of a single AI action: the action taken and the resulting events.
 pub struct AiActionResult {
     pub action: GameAction,
@@ -27,19 +52,14 @@ pub struct AiActionResult {
     pub log_entries: Vec<GameLogEntry>,
 }
 
-/// Which of `run_ai_actions`'s four break doors (see its doc comment) ended
-/// the batch before the safety cap. `None` means the loop ran out AI actions
-/// to take for a benign reason the caller already distinguishes elsewhere
-/// (hit `MAX_AI_ACTIONS_PER_SEQUENCE`, or the very first iteration found no
-/// actor at all — that case is folded into `NoActor` below instead, so `None`
-/// in practice only means "hit the safety cap").
+/// Why an AI action batch stopped.
 ///
 /// Diagnostic surface for phase#6080 (the driver-stall family): today the only
 /// signal at these break points is a `tracing::error`/`tracing::warn` that no
 /// harness subscriber captures. Exposing the reason as typed data lets a
 /// caller like `ai_commander` print it instead of installing a subscriber.
 #[derive(Debug, Clone)]
-pub enum AiActionsBreakReason {
+pub enum AiActionsStop {
     /// No AI seat can currently act. Two causes are still folded together
     /// here: `WaitingFor::acting_players()` returned empty (`GameOver`, or an
     /// empty pending set), or it returned one or more players and none of
@@ -49,7 +69,7 @@ pub enum AiActionsBreakReason {
     /// all, and the simultaneous-decision variants (`MulliganDecision`,
     /// `OpeningHandBottomCards`) can pend several at once, so naming one
     /// would be arbitrary. A missing AI *configuration* is `MissingAiConfig`.
-    NoActor,
+    NoEligibleAiActor,
     /// `player` is in `ai_players` but has no entry in `ai_configs`. Distinct
     /// from `NoActor`: an actor *was* found and *is* AI-controlled, so the
     /// remedy is caller wiring (register a config for this seat), not "wait
@@ -68,17 +88,38 @@ pub enum AiActionsBreakReason {
         action: Box<GameAction>,
         error: EngineError,
     },
+    /// The module-wide safety budget was exhausted while an AI-controlled
+    /// submitter still had work. This is a driver failure, not a benign handoff.
+    ActionSafetyCapReached { limit: usize },
+    /// A caller-provided smaller budget was exhausted while an AI-controlled
+    /// submitter still had work. The caller owns continuation from this point.
+    ActionBudgetReached { limit: usize },
 }
 
 /// Outcome of a `run_ai_actions` batch.
 ///
-/// `Deref`s to `Vec<AiActionResult>` so the many existing callers that only
-/// care about the actions taken (`.is_empty()`, `.len()`, indexing, iterating
-/// by reference) are source-compatible; only diagnostic consumers need
-/// `break_reason`.
+/// `Deref`s to `Vec<AiActionResult>` so callers that only care about actions
+/// taken (`.is_empty()`, `.len()`, indexing, iterating by reference) remain
+/// source-compatible.
 pub struct AiActionsRun {
     pub results: Vec<AiActionResult>,
-    pub break_reason: Option<AiActionsBreakReason>,
+    pub stop: AiActionsStop,
+}
+
+fn eligible_ai_decision(
+    state: &GameState,
+    ai_players: &HashSet<PlayerId>,
+) -> Option<(PlayerId, PlayerId)> {
+    state
+        .waiting_for
+        .acting_players()
+        .into_iter()
+        .find_map(|semantic_owner| {
+            let actor = turn_control::authorized_submitter_for_player(state, semantic_owner);
+            ai_players
+                .contains(&actor)
+                .then_some((semantic_owner, actor))
+        })
 }
 
 impl std::ops::Deref for AiActionsRun {
@@ -133,13 +174,13 @@ pub fn run_ai_actions(
 ) -> AiActionsRun {
     // Thin delegate: existing callers get the full safety-cap budget and
     // exactly the prior semantics.
-    run_ai_actions_bounded(
+    run_ai_actions_with_limit(
         state,
         ai_players,
         ai_configs,
         rng,
         session,
-        MAX_AI_ACTIONS_PER_SEQUENCE,
+        ActionLimit::SafetyCap,
     )
 }
 
@@ -151,11 +192,9 @@ pub fn run_ai_actions(
 /// batch below it (to honor an action budget) but never *enlarge* one past it.
 /// This function never returns more than that many `AiActionResult`s.
 ///
-/// `max_actions == 0` returns an empty run with `break_reason == None` — no
-/// actor is inspected. A caller that loops on this function must therefore
-/// guarantee a positive budget before each call (`run_driver_loop` does, via
-/// its `total >= action_cap` `DriverExit::CapReached` abort door firing before
-/// the next iteration).
+/// `max_actions == 0` returns `ActionBudgetReached { limit: 0 }` — no actor is
+/// inspected. A caller that loops on this function must therefore guarantee a
+/// positive budget before each call.
 ///
 /// The "hit safety cap" warning stays keyed to `MAX_AI_ACTIONS_PER_SEQUENCE`,
 /// not `max_actions`: a small operator budget reaching its bound is expected,
@@ -169,36 +208,58 @@ pub fn run_ai_actions_bounded(
     session: &Arc<AiSession>,
     max_actions: usize,
 ) -> AiActionsRun {
-    let mut results = Vec::new();
-    let mut break_reason = None;
+    run_ai_actions_with_limit(
+        state,
+        ai_players,
+        ai_configs,
+        rng,
+        session,
+        ActionLimit::CallerBudget {
+            requested: max_actions,
+        },
+    )
+}
 
-    for _ in 0..max_actions.min(MAX_AI_ACTIONS_PER_SEQUENCE) {
+fn run_ai_actions_with_limit(
+    state: &mut GameState,
+    ai_players: &HashSet<PlayerId>,
+    ai_configs: &HashMap<PlayerId, AiConfig>,
+    rng: &mut impl Rng,
+    session: &Arc<AiSession>,
+    action_limit: ActionLimit,
+) -> AiActionsRun {
+    let mut results = Vec::new();
+    let limit = action_limit.effective();
+
+    if limit == 0 {
+        return AiActionsRun {
+            results,
+            stop: AiActionsStop::ActionBudgetReached { limit },
+        };
+    }
+
+    for _ in 0..limit {
         // CR 723.5: Under turn control (Mindslaver, Emrakul), the authorized
         // submitter is the controller — not the active player. Only run AI when
         // that submitter is an AI seat; otherwise wait for the human controller
         // (issue #1189).
-        let decision = state
-            .waiting_for
-            .acting_players()
-            .into_iter()
-            .find_map(|semantic_owner| {
-                let actor = turn_control::authorized_submitter_for_player(state, semantic_owner);
-                ai_players
-                    .contains(&actor)
-                    .then_some((semantic_owner, actor))
-            });
+        let decision = eligible_ai_decision(state, ai_players);
 
         let Some((semantic_owner, actor)) = decision else {
-            break_reason = Some(AiActionsBreakReason::NoActor);
-            break;
+            return AiActionsRun {
+                results,
+                stop: AiActionsStop::NoEligibleAiActor,
+            };
         };
 
         let config = match ai_configs.get(&actor) {
             Some(c) => c,
             None => {
                 tracing::warn!(player = ?actor, "AI seat has no config — stopping AI loop");
-                break_reason = Some(AiActionsBreakReason::MissingAiConfig { player: actor });
-                break;
+                return AiActionsRun {
+                    results,
+                    stop: AiActionsStop::MissingAiConfig { player: actor },
+                };
             }
         };
 
@@ -207,8 +268,10 @@ pub fn run_ai_actions_bounded(
             Some(a) => a,
             None => {
                 tracing::warn!(player = ?actor, "choose_action returned None — stopping AI loop");
-                break_reason = Some(AiActionsBreakReason::ChooseActionNone { player: actor });
-                break;
+                return AiActionsRun {
+                    results,
+                    stop: AiActionsStop::ChooseActionNone { player: actor },
+                };
             }
         };
 
@@ -221,12 +284,14 @@ pub fn run_ai_actions_bounded(
                 ?actor,
                 "AI action violated decision contract"
             );
-            break_reason = Some(AiActionsBreakReason::ApplyFailed {
-                player: actor,
-                action: Box::new(action),
-                error,
-            });
-            break;
+            return AiActionsRun {
+                results,
+                stop: AiActionsStop::ApplyFailed {
+                    player: actor,
+                    action: Box::new(action),
+                    error,
+                },
+            };
         }
 
         // The decision owner and authenticated AI actor are intentionally
@@ -243,37 +308,44 @@ pub fn run_ai_actions_bounded(
             }
             Err(e) => {
                 tracing::error!(player = ?actor, error = %e, "AI action apply failed — stopping");
-                break_reason = Some(AiActionsBreakReason::ApplyFailed {
-                    player: actor,
-                    action: Box::new(action),
-                    error: e,
-                });
-                break;
+                return AiActionsRun {
+                    results,
+                    stop: AiActionsStop::ApplyFailed {
+                        player: actor,
+                        action: Box::new(action),
+                        error: e,
+                    },
+                };
             }
         }
     }
 
-    if results.len() >= MAX_AI_ACTIONS_PER_SEQUENCE {
+    if action_limit.is_safety_cap() {
         tracing::warn!(
-            count = results.len(),
+            count = limit,
             "AI action loop hit safety cap — possible infinite loop"
         );
     }
 
     AiActionsRun {
         results,
-        break_reason,
+        stop: if eligible_ai_decision(state, ai_players).is_none() {
+            AiActionsStop::NoEligibleAiActor
+        } else if action_limit.is_safety_cap() {
+            AiActionsStop::ActionSafetyCapReached { limit }
+        } else {
+            AiActionsStop::ActionBudgetReached { limit }
+        },
     }
 }
 
 /// Driver-relevant outcome of processing one `run_ai_actions` batch: how many
-/// actions to add to a caller's running total, and the break reason to stop
-/// and report at this batch boundary, if the batch carries one.
+/// actions to add to a caller's running total and its exact stop condition.
 ///
 /// phase#6080 follow-up: a batch can complete one or more actions (`results`
-/// non-empty) and *still* carry a `break_reason` — e.g. it applies two
+/// non-empty) and *still* carry a stop reason — e.g. it applies two
 /// actions, then the third choice is `ChooseActionNone` or the fourth
-/// `apply()` call fails. A driver that only inspects `break_reason` when
+/// `apply()` call fails. A driver that only inspects the stop reason when
 /// `results.is_empty()` silently discards the diagnostic for exactly that
 /// case, loops again, and may report a misleading `NoActor`/unknown reason
 /// once a later, unrelated batch happens to come back empty. `driver_step`
@@ -281,7 +353,7 @@ pub fn run_ai_actions_bounded(
 /// re-derive it ad hoc.
 pub struct DriverStep {
     pub actions_taken: usize,
-    pub break_reason: Option<AiActionsBreakReason>,
+    pub stop: AiActionsStop,
 }
 
 /// Extracts the [`DriverStep`] for one batch. Callers should process
@@ -290,13 +362,13 @@ pub struct DriverStep {
 pub fn driver_step(results: AiActionsRun) -> DriverStep {
     DriverStep {
         actions_taken: results.results.len(),
-        break_reason: results.break_reason,
+        stop: results.stop,
     }
 }
 
 /// Why [`run_driver_loop`] returned: it either hit the action cap exactly, or a
-/// batch carried a break reason ([`AiActionsBreakReason`]) at its boundary. One
-/// fact, one type — not an `aborted: bool` plus an `Option<AiActionsBreakReason>`
+/// batch carried a stop reason ([`AiActionsStop`]) at its boundary. One
+/// fact, one type — not an `aborted: bool` plus an `Option<AiActionsStop>`
 /// pair whose two illegal combinations (aborted with a reason, not-aborted with
 /// none) a caller would have to defend against.
 #[derive(Debug)]
@@ -304,7 +376,7 @@ pub enum DriverExit {
     /// `total_actions` reached `action_cap` with no break door firing first.
     CapReached,
     /// A batch stopped early at its boundary; carries the reason to report.
-    BatchBreak(AiActionsBreakReason),
+    BatchBreak(AiActionsStop),
 }
 
 /// Outcome of a [`run_driver_loop`] run: the total actions taken and why it
@@ -365,24 +437,25 @@ pub fn run_driver_loop(
             run_ai_actions_bounded(state, ai_players, ai_configs, rng, session, remaining);
         on_batch(&mut results, &*state, total);
 
-        // phase#6080 follow-up: a batch can complete actions and still carry a
-        // break_reason, so capture the reason from EVERY batch — not only empty
-        // ones — and stop at this batch boundary. The break-reason check stays
-        // BEFORE the cap check so a genuine break door is reported instead of a
-        // cap abort when both are true on the same batch.
         let step = driver_step(results);
         total += step.actions_taken;
-        if let Some(reason) = step.break_reason {
-            return DriverOutcome {
-                total_actions: total,
-                exit: DriverExit::BatchBreak(reason),
-            };
-        }
-        if total >= action_cap {
-            return DriverOutcome {
-                total_actions: total,
-                exit: DriverExit::CapReached,
-            };
+        match step.stop {
+            AiActionsStop::ActionBudgetReached { .. }
+            | AiActionsStop::ActionSafetyCapReached { .. }
+                if total >= action_cap =>
+            {
+                return DriverOutcome {
+                    total_actions: total,
+                    exit: DriverExit::CapReached,
+                };
+            }
+            AiActionsStop::ActionSafetyCapReached { .. } if total < action_cap => continue,
+            stop => {
+                return DriverOutcome {
+                    total_actions: total,
+                    exit: DriverExit::BatchBreak(stop),
+                };
+            }
         }
     }
 }
@@ -403,23 +476,20 @@ mod tests {
     #[test]
     fn driver_step_preserves_break_reason_from_non_empty_batch() {
         // The exact regression: a batch that completed an action must not
-        // have its break_reason discarded just because `results` isn't
+        // have its stop reason discarded just because `results` isn't
         // empty.
         let state = GameState::new_two_player(1);
         let run = AiActionsRun {
             results: vec![dummy_result(&state)],
-            break_reason: Some(AiActionsBreakReason::ChooseActionNone {
+            stop: AiActionsStop::ChooseActionNone {
                 player: PlayerId(1),
-            }),
+            },
         };
         let step = driver_step(run);
         assert_eq!(step.actions_taken, 1);
         assert!(
-            matches!(
-                step.break_reason,
-                Some(AiActionsBreakReason::ChooseActionNone { .. })
-            ),
-            "break_reason from a non-empty batch must survive driver_step"
+            matches!(step.stop, AiActionsStop::ChooseActionNone { .. }),
+            "stop reason from a non-empty batch must survive driver_step"
         );
     }
 
@@ -428,28 +498,55 @@ mod tests {
         // Existing behavior (empty batch + break reason) must still work.
         let run = AiActionsRun {
             results: Vec::new(),
-            break_reason: Some(AiActionsBreakReason::NoActor),
+            stop: AiActionsStop::NoEligibleAiActor,
         };
         let step = driver_step(run);
         assert_eq!(step.actions_taken, 0);
+        assert!(matches!(step.stop, AiActionsStop::NoEligibleAiActor));
+    }
+
+    #[test]
+    fn driver_step_preserves_budget_stop() {
+        let state = GameState::new_two_player(1);
+        let run = AiActionsRun {
+            results: vec![dummy_result(&state), dummy_result(&state)],
+            stop: AiActionsStop::ActionBudgetReached { limit: 2 },
+        };
+        let step = driver_step(run);
+        assert_eq!(step.actions_taken, 2);
         assert!(matches!(
-            step.break_reason,
-            Some(AiActionsBreakReason::NoActor)
+            step.stop,
+            AiActionsStop::ActionBudgetReached { limit: 2 }
         ));
     }
 
     #[test]
-    fn driver_step_ordinary_batch_is_unaffected() {
-        // Ordinary caller path: batch completed actions and hit no break
-        // door (e.g. hit the safety cap) — driver_step must not fabricate a
-        // stop signal.
-        let state = GameState::new_two_player(1);
-        let run = AiActionsRun {
-            results: vec![dummy_result(&state), dummy_result(&state)],
-            break_reason: None,
-        };
-        let step = driver_step(run);
-        assert_eq!(step.actions_taken, 2);
-        assert!(step.break_reason.is_none());
+    fn zero_sized_bounded_batch_is_a_normal_budget_stop() {
+        let mut state = GameState::new_two_player(1);
+        let mut rng = rand::rng();
+        let session = AiSession::arc_from_game(&state);
+        let run = run_ai_actions_bounded(
+            &mut state,
+            &HashSet::new(),
+            &HashMap::new(),
+            &mut rng,
+            &session,
+            0,
+        );
+
+        assert!(run.is_empty());
+        assert!(matches!(
+            run.stop,
+            AiActionsStop::ActionBudgetReached { limit: 0 }
+        ));
+    }
+
+    #[test]
+    fn exact_cap_caller_budget_is_not_a_safety_cap() {
+        assert!(!ActionLimit::CallerBudget {
+            requested: MAX_AI_ACTIONS_PER_SEQUENCE,
+        }
+        .is_safety_cap());
+        assert!(ActionLimit::SafetyCap.is_safety_cap());
     }
 }

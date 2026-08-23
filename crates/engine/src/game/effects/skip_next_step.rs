@@ -97,6 +97,7 @@ mod tests {
         scope: SkipScope,
     ) -> ResolvedAbility {
         ResolvedAbility {
+            detached_remainder: crate::types::ability::DetachedRemainder::NoProducer,
             effect: Effect::SkipNextStep {
                 target: TargetFilter::Controller,
                 step,
@@ -130,6 +131,7 @@ mod tests {
             target_choice_timing: crate::types::ability::TargetChoiceTiming::Stack,
             description: None,
             selected_mode_labels: Vec::new(),
+            modal_instruction_ordinal: None,
             player_scope: None,
             starting_with: None,
             chosen_x: None,

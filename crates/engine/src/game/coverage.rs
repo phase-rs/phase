@@ -22,11 +22,12 @@ use crate::types::ability::{
     CountScope, CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode,
     Duration, EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
     ForEachCategoryAction, GameRestriction, LibraryPosition, ManaProduction, ObjectProperty,
-    ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
-    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption,
-    SpellCastingOptionKind, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, VoteSubject, ZoneRef,
+    ObjectScope, ParsedCondition, PerpetualModification, PlayerFilter, PlayerScope, PtStat,
+    PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta,
+    SpellCastingOption, SpellCastingOptionKind, SpellStackToGraveyardReplacement, StackAbilityKind,
+    StaticCondition, StaticDefinition, TapStateChange, TargetFilter, TriggerDefinition, TypeFilter,
+    TypedFilter, VoteSubject, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -560,45 +561,30 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::OriginalSource => "original source".into(),
         TargetFilter::SourceOrPaired => "source or paired creature".into(),
         TargetFilter::ExiledCardByIndex { index } => format!("exiled card {index}"),
-        TargetFilter::StackAbility { tag: Some(tag), .. } => format!("{tag:?} ability on stack"),
+        // CR 113.3b / CR 113.3c + CR 109.4: render the two independent axes
+        // (ability kind, controller scope) compositionally. Enumerating the
+        // product as separate match arms silently dropped one axis whenever a
+        // new combination became reachable — the trailing kind-only catch-alls
+        // swallowed controller-bearing filters and rendered them without the
+        // "you control" scope.
         TargetFilter::StackAbility {
-            controller: None,
-            tag: None,
-            kind: None,
-        } => "ability on stack".into(),
-        TargetFilter::StackAbility {
-            controller: None,
-            tag: None,
-            kind: Some(crate::types::ability::StackAbilityKind::Triggered),
-        } => "triggered ability on stack".into(),
-        TargetFilter::StackAbility {
-            controller: None,
-            tag: None,
-            kind: Some(crate::types::ability::StackAbilityKind::Activated),
-        } => "activated ability on stack".into(),
-        TargetFilter::StackAbility {
-            controller: Some(ControllerRef::You),
-            tag: None,
-            kind: None,
-        } => "ability you control on stack".into(),
-        TargetFilter::StackAbility {
-            controller: Some(ControllerRef::Opponent),
-            tag: None,
-            kind: None,
-        } => "ability opponent controls on stack".into(),
-        TargetFilter::StackAbility {
-            controller: Some(controller),
-            tag: None,
-            kind: None,
-        } => format!("ability scoped to {controller:?} on stack"),
-        TargetFilter::StackAbility {
-            kind: Some(crate::types::ability::StackAbilityKind::Triggered),
-            ..
-        } => "triggered ability on stack".into(),
-        TargetFilter::StackAbility {
-            kind: Some(crate::types::ability::StackAbilityKind::Activated),
-            ..
-        } => "activated ability on stack".into(),
+            controller,
+            tag,
+            kind,
+        } => {
+            let kind_word = match kind {
+                None => "ability",
+                Some(StackAbilityKind::Triggered) => "triggered ability",
+                Some(StackAbilityKind::Activated) => "activated ability",
+            };
+            let tag_prefix = tag
+                .as_ref()
+                .map_or_else(String::new, |tag| format!("{tag:?} "));
+            let controller_suffix = controller.as_ref().map_or_else(String::new, |controller| {
+                format!(" {}", fmt_controller(controller))
+            });
+            format!("{tag_prefix}{kind_word}{controller_suffix} on stack")
+        }
         TargetFilter::StackSpell => "spell on stack".into(),
         TargetFilter::AttachedTo => "attached permanent".into(),
         TargetFilter::LastCreated => "last created".into(),
@@ -624,10 +610,21 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::PostReplacementDamageSource => "prevented event's damage source".into(),
         TargetFilter::PostReplacementDamageTarget => "prevented damage target".into(),
         TargetFilter::PostReplacementDamageTargetOwner => "prevented damage target's owner".into(),
-        TargetFilter::ControllerAndControlledPermanents { permanent_type } => {
+        // CR 109.1: the "other" article is part of the human-readable scope — a
+        // change between "you and permanents you control" and "you and OTHER
+        // permanents you control" must be visible in the coverage/parse diff.
+        TargetFilter::ControllerAndControlledPermanents {
+            permanent_type,
+            source_scope,
+        } => {
+            let other = if source_scope.is_exclude() {
+                "other "
+            } else {
+                ""
+            };
             match permanent_type {
-                Some(ct) => format!("you and {ct:?}s you control"),
-                None => "you and permanents you control".into(),
+                Some(ct) => format!("you and {other}{ct:?}s you control"),
+                None => format!("you and {other}permanents you control"),
             }
         }
         TargetFilter::SpecificObject { id } => format!("object #{}", id.0),
@@ -1228,6 +1225,9 @@ fn fmt_duration(d: &Duration) -> String {
         }
         Duration::UntilHostLeavesPlay => "while on battlefield".to_string(),
         Duration::UntilSourceExilesAnotherCard => "until source exiles another card".to_string(),
+        Duration::UntilOpponentBecomesMonarch => {
+            "until an opponent becomes the monarch".to_string()
+        }
         Duration::UntilNextStepOf { step, player } => {
             format!(
                 "until next {} ({})",
@@ -1408,6 +1408,20 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's power".into(),
             ObjectScope::AmassedArmy => "amassed Army's power".into(),
             ObjectScope::BatchSource => "batch source's power".into(),
+        },
+        QuantityRef::BasePower { scope } => match scope {
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                "self base power".into()
+            }
+            ObjectScope::Target => "target's base power".into(),
+            ObjectScope::Recipient => "recipient's base power".into(),
+            ObjectScope::EventSource => "event source's base power".into(),
+            ObjectScope::EventTarget => "event target's base power".into(),
+            ObjectScope::CostPaidObject => "referenced object's base power".into(),
+            ObjectScope::OtherRevealedCard => "other revealed card's base power".into(),
+            ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's base power".into(),
+            ObjectScope::AmassedArmy => "amassed Army's base power".into(),
+            ObjectScope::BatchSource => "batch source's base power".into(),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1601,7 +1615,29 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             format!("# of counter kinds among {}", fmt_target(filter))
         }
         QuantityRef::VoteCount { choice_index } => format!("# of votes for choice {choice_index}"),
-        QuantityRef::PreviousEffectAmount { .. } => "amount from preceding effect".into(),
+        QuantityRef::PreviousEffectAmount { channel, aggregate } => match (channel, aggregate) {
+            // Byte-identical to the pre-change string, so no existing card's
+            // coverage signature moves. Must stay FIRST: the Excess-channel
+            // corpus cards are all `Sum` and must keep hitting this arm.
+            (_, AggregateFunction::Sum) => "amount from preceding effect".into(),
+            // CR 120.10: excess damage is "equal to the difference" beyond lethal —
+            // one amount per damaged permanent, never a per-player tally. Naming a
+            // "single player's" extremum over it would describe a reduction that
+            // never happened. (The per-player table the Total channel publishes is
+            // an engine structure; no CR governs its shape, so none is cited for it.)
+            // No parser path builds that pair today; the arm exists so the renderer
+            // stays honest if one ever does.
+            (crate::types::ability::DamageChannel::Total, AggregateFunction::Max) => {
+                "greatest single player's amount from preceding effect".into()
+            }
+            (crate::types::ability::DamageChannel::Total, AggregateFunction::Min) => {
+                "least single player's amount from preceding effect".into()
+            }
+            (crate::types::ability::DamageChannel::Excess, _) => {
+                "excess amount from preceding effect".into()
+            }
+        },
+        QuantityRef::PreviousEffectCount => "count from preceding effect".into(),
         QuantityRef::TrackedSetSize => "cards moved".into(),
         QuantityRef::FilteredTrackedSetSize { filter, .. } => {
             format!("filtered tracked set ({})", fmt_target(filter))
@@ -3393,6 +3429,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target_filter,
             redirect_object_filter,
             recipient_object_filter,
+            redirect_lifetime,
             ..
         } => {
             if let Some(m) = modification {
@@ -3400,6 +3437,15 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if let Some(r) = redirect_to {
                 d.push(("redirect_to".into(), format!("{r:?}")));
+            }
+            // CR 614.5 vs CR 611.2a: parser-alterable, and the difference between
+            // "protects one damage event" and "protects the rest of the turn" —
+            // omitting it would make that flip invisible to the parse diff.
+            if !redirect_lifetime.is_one_opportunity() {
+                d.push((
+                    "redirect_lifetime".into(),
+                    format!("{redirect_lifetime:?}"),
+                ));
             }
             if let Some(a) = redirect_amount {
                 d.push(("redirect_amount".into(), format!("{a:?}")));
@@ -3918,6 +3964,30 @@ fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
             d.push(("repeat_for".into(), fmt_quantity(rf)));
         }
     }
+    // CR 702.178a: the "Max speed —" prefix is a GATE, not an effect — it lowers
+    // to an `activation_restrictions` entry, and that field is otherwise absent
+    // from the per-card parse signature. Without this projection the gate is
+    // invisible to the parse-diff, so adding or losing it on a card reads as
+    // "no card-parse changes".
+    //
+    // Scoped to exactly the shape `keyword_prefix_activation_restriction`
+    // (parser/oracle.rs) produces, mirroring the `repeat_for` discipline above:
+    // projecting the whole `activation_restrictions` surface would migrate every
+    // card printing an "Activate only if …" clause in one shot, which is a
+    // deliberate global coverage-schema migration and not this change.
+    // COUPLING: if another keyword prefix is ever lowered to an activation
+    // restriction, widen this scope in lockstep or that new class is false-green
+    // in the parse-diff.
+    if def.activation_restrictions.iter().any(|r| {
+        matches!(
+            r,
+            ActivationRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::HasMaxSpeed),
+            }
+        )
+    }) {
+        d.push(("gate".into(), "max speed".into()));
+    }
     if def.optional_targeting {
         d.push(("targeting".into(), "optional (up to)".into()));
     }
@@ -4158,9 +4228,13 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         AbilityCondition::FirstCombatPhaseOfTurn => "first combat phase of the turn".into(),
         AbilityCondition::FirstEndStepOfTurn => "first end step of the turn".into(),
         AbilityCondition::CurrentPhaseIs { .. } => "current phase matches".into(),
-        AbilityCondition::ZoneChangedThisWay { filter } => {
-            format!("{} changed zones this way", fmt_target(filter))
-        }
+        AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination,
+        } => match destination {
+            Some(zone) => format!("{} was put into {zone:?} this way", fmt_target(filter)),
+            None => format!("{} changed zones this way", fmt_target(filter)),
+        },
         AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
             format!("cost-paid object is {}", fmt_target(filter))
         }
@@ -4748,7 +4822,8 @@ fn replacement_details(repl: &ReplacementDefinition) -> Vec<(String, String)> {
         ReplacementMode::Optional { .. } => d.push(("mode".into(), "optional".into())),
         ReplacementMode::MayCost { .. } => d.push(("mode".into(), "may pay cost".into())),
     }
-    // Shield kind, including the prevented amount (ShieldKind::Prevention).
+    // Shield kind, including the prevented amount (ShieldKind::Prevention /
+    // the one-shot ShieldKind::PreventionOneShot).
     if !repl.shield_kind.is_none() {
         d.push(("shield".into(), format!("{:?}", repl.shield_kind)));
     }
@@ -8134,10 +8209,24 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventSource => ("EventSourcePower", Handled),
             ObjectScope::EventTarget => ("EventTargetPower", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectPower", Handled),
-            ObjectScope::OtherRevealedCard => ("OtherRevealedCardPower", Handled),
-            ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardPower", Handled),
+            ObjectScope::OtherRevealedCard => ("OtherRevealedCardPower", Unhandled),
+            ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardPower", Unhandled),
             ObjectScope::AmassedArmy => ("AmassedArmyPower", Handled),
             ObjectScope::BatchSource => ("BatchSourcePower", Handled),
+        },
+        QuantityRef::BasePower { scope } => match scope {
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                ("SelfBasePower", Handled)
+            }
+            ObjectScope::Target => ("TargetBasePower", Handled),
+            ObjectScope::Recipient => ("RecipientBasePower", Handled),
+            ObjectScope::EventSource => ("EventSourceBasePower", Handled),
+            ObjectScope::EventTarget => ("EventTargetBasePower", Handled),
+            ObjectScope::CostPaidObject => ("CostPaidObjectBasePower", Handled),
+            ObjectScope::OtherRevealedCard => ("OtherRevealedCardBasePower", Unhandled),
+            ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardBasePower", Unhandled),
+            ObjectScope::AmassedArmy => ("AmassedArmyBasePower", Handled),
+            ObjectScope::BatchSource => ("BatchSourceBasePower", Handled),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -8148,8 +8237,8 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventSource => ("EventSourceToughness", Handled),
             ObjectScope::EventTarget => ("EventTargetToughness", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectToughness", Handled),
-            ObjectScope::OtherRevealedCard => ("OtherRevealedCardToughness", Handled),
-            ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardToughness", Handled),
+            ObjectScope::OtherRevealedCard => ("OtherRevealedCardToughness", Unhandled),
+            ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardToughness", Unhandled),
             ObjectScope::AmassedArmy => ("AmassedArmyToughness", Handled),
             ObjectScope::BatchSource => ("BatchSourceToughness", Handled),
         },
@@ -8241,6 +8330,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::DistinctCounterKindsAmong { .. } => ("DistinctCounterKindsAmong", Handled),
         QuantityRef::VoteCount { .. } => ("VoteCount", Handled),
         QuantityRef::PreviousEffectAmount { .. } => ("PreviousEffectAmount", Handled),
+        QuantityRef::PreviousEffectCount => ("PreviousEffectCount", Handled),
         QuantityRef::TrackedSetSize => ("TrackedSetSize", Handled),
         QuantityRef::FilteredTrackedSetSize { .. } => ("FilteredTrackedSetSize", Handled),
         QuantityRef::TrackedSetAggregate { .. } => ("TrackedSetAggregate", Handled),
@@ -11516,6 +11606,71 @@ pub fn format_semantic_audit_markdown(summary: &SemanticAuditSummary) -> String 
 #[cfg(test)]
 mod tests {
 
+    /// CR 113.3b / CR 113.3c + CR 109.4: the ability-kind and controller axes
+    /// are independent, so `fmt_target` must render BOTH. Enumerated per-product
+    /// arms could not: the trailing kind-only catch-all swallowed
+    /// controller-bearing filters and dropped the "you control" scope — which
+    /// would make a newly-narrowed copy filter look like a controller misparse
+    /// in coverage output.
+    #[test]
+    fn fmt_target_composes_stack_ability_controller_and_kind() {
+        use crate::types::ability::{ControllerRef, StackAbilityKind, TargetFilter};
+
+        let stack_ability = |controller: Option<ControllerRef>, kind: Option<StackAbilityKind>| {
+            super::fmt_target(&TargetFilter::StackAbility {
+                controller,
+                tag: None,
+                kind,
+            })
+        };
+
+        // The newly reachable combination (Mister Fantastic / Strionic
+        // Resonator / Kirol). Pre-change this rendered "triggered ability on
+        // stack", silently dropping "you control".
+        assert_eq!(
+            stack_ability(Some(ControllerRef::You), Some(StackAbilityKind::Triggered)),
+            "triggered ability you control on stack"
+        );
+        assert_eq!(
+            stack_ability(Some(ControllerRef::You), Some(StackAbilityKind::Activated)),
+            "activated ability you control on stack"
+        );
+
+        // All six pre-existing renderings must be byte-identical.
+        assert_eq!(stack_ability(None, None), "ability on stack");
+        assert_eq!(
+            stack_ability(None, Some(StackAbilityKind::Triggered)),
+            "triggered ability on stack"
+        );
+        assert_eq!(
+            stack_ability(None, Some(StackAbilityKind::Activated)),
+            "activated ability on stack"
+        );
+        assert_eq!(
+            stack_ability(Some(ControllerRef::You), None),
+            "ability you control on stack"
+        );
+        assert_eq!(
+            stack_ability(Some(ControllerRef::Opponent), None),
+            "ability opponent controls on stack"
+        );
+        assert_eq!(
+            stack_ability(Some(ControllerRef::TargetPlayer), None),
+            "ability target player controls on stack"
+        );
+
+        // Tags may coexist with either narrowing axis. The formatter must not
+        // let the tag-specific form hide its controller or ability kind.
+        assert_eq!(
+            super::fmt_target(&TargetFilter::StackAbility {
+                controller: Some(ControllerRef::TargetPlayer),
+                tag: Some(crate::types::ability::AbilityTag::Backup),
+                kind: Some(StackAbilityKind::Triggered),
+            }),
+            "Backup triggered ability target player controls on stack"
+        );
+    }
+
     /// #7317 — an ability's `activation_zone` must reach the parse-diff
     /// signature, under a key that does NOT collide with the `from` that
     /// `effect_details` already emits for a `ChangeZone` origin.
@@ -13672,6 +13827,7 @@ mod tests {
                     source_object: None,
                     bypass_beneficiary: None,
                     protection_does_not_remove: None,
+                    room_door: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -13721,6 +13877,7 @@ mod tests {
                     source_object: None,
                     bypass_beneficiary: None,
                     protection_does_not_remove: None,
+                    room_door: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -15107,6 +15264,7 @@ mod tests {
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -15142,6 +15300,7 @@ mod tests {
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -15175,6 +15334,7 @@ mod tests {
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         });
 
         let findings = audit_card_lines(oracle, &face);
@@ -15357,6 +15517,7 @@ mod tests {
             (
                 AbilityCondition::ZoneChangedThisWay {
                     filter: TargetFilter::Any,
+                    destination: None,
                 },
                 "ZoneChangedThisWay",
             ),
@@ -15541,6 +15702,7 @@ mod tests {
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         });
 
         assert!(
@@ -15574,6 +15736,7 @@ mod tests {
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         });
 
         assert!(
@@ -15617,6 +15780,7 @@ mod tests {
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -15651,6 +15815,7 @@ mod tests {
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -15687,6 +15852,7 @@ mod tests {
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -15729,6 +15895,7 @@ mod tests {
                 source_object: None,
                 bypass_beneficiary: None,
                 protection_does_not_remove: None,
+                room_door: None,
             });
         }
 
@@ -15898,11 +16065,60 @@ mod tests {
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         });
 
         assert!(
             card_face_gaps(&face).is_empty(),
             "CantHaveKeyword(Flying) should be covered by is_data_carrying_static()"
+        );
+    }
+    /// The `fmt_quantity_ref` `PreviousEffectAmount` arms are ORDER-DEPENDENT:
+    /// the `(_, Sum)` arm must stay first so every Excess-channel corpus card
+    /// (all of which are `Sum`) keeps rendering the pre-change string. Nothing
+    /// enforced that ordering — reordering the arms would silently move the
+    /// coverage signature of every Excess card, reddening CI's coverage check
+    /// with no indication of the cause. rustc emits NO `unreachable pattern`
+    /// warning for the reorder, so the compiler will not catch it either. These
+    /// six assertions -- one per channel/aggregate pair -- are that guard.
+    #[test]
+    fn previous_effect_amount_renders_every_channel_aggregate_pair() {
+        use crate::types::ability::{AggregateFunction, DamageChannel};
+        let render = |channel, aggregate| {
+            fmt_quantity_ref(&QuantityRef::PreviousEffectAmount { channel, aggregate })
+        };
+
+        // Order-dependent: `(_, Sum)` is matched before the Excess catch-all, so
+        // the Excess+Sum pair renders the SUM string, not the excess one.
+        assert_eq!(
+            render(DamageChannel::Total, AggregateFunction::Sum),
+            "amount from preceding effect"
+        );
+        assert_eq!(
+            render(DamageChannel::Excess, AggregateFunction::Sum),
+            "amount from preceding effect",
+            "the (_, Sum) arm must stay FIRST: Excess+Sum is the shape the corpus \
+             actually holds, and it must keep the pre-change signature"
+        );
+        assert_eq!(
+            render(DamageChannel::Total, AggregateFunction::Max),
+            "greatest single player's amount from preceding effect"
+        );
+        assert_eq!(
+            render(DamageChannel::Total, AggregateFunction::Min),
+            "least single player's amount from preceding effect"
+        );
+        assert_eq!(
+            render(DamageChannel::Excess, AggregateFunction::Max),
+            "excess amount from preceding effect"
+        );
+        // The pair space is 2 channels x 3 aggregates = 6, which is more than the
+        // four match arms; `(Excess, Min)` routes through the same catch-all as
+        // `(Excess, Max)` and is asserted so the name's claim of completeness is
+        // literally true rather than true-of-the-arms.
+        assert_eq!(
+            render(DamageChannel::Excess, AggregateFunction::Min),
+            "excess amount from preceding effect"
         );
     }
 }

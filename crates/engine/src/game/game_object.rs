@@ -212,7 +212,7 @@ pub enum PhaseOutCause {
 
 /// Stored back-face data for double-faced cards (DFCs).
 /// Populated when a Transform-layout card enters the game.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct BackFaceData {
     pub name: String,
     pub power: Option<i32>,
@@ -430,6 +430,23 @@ pub struct GameObject {
     // Battlefield state
     pub tapped: bool,
     pub face_down: bool,
+    /// Which keyword action put this permanent face down (CR 701.40a manifest,
+    /// CR 702.37a morph, CR 701.58a cloak, CR 702.168a disguise). `None` for a
+    /// face-up permanent.
+    ///
+    /// CR 708.2a makes every face-down permanent look alike, so this is not a
+    /// characteristic — it is the public record of how the permanent got here,
+    /// which the 2024-09-20 Duskmourn rulings require play to keep visible. No
+    /// game rule reads it; it exists so the display layer can show the marker
+    /// the physical game uses.
+    ///
+    /// Only meaningful while `face_down` is true. It is stamped on every
+    /// face-down entry and deliberately NOT cleared when the permanent turns
+    /// face up — a dozen unrelated paths clear `face_down`, and requiring each
+    /// to remember a second field is how a stale marker would eventually ship.
+    /// Read it gated on `face_down`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_down_cause: Option<crate::types::ability::FaceDownCause>,
     pub flipped: bool,
     pub transformed: bool,
     /// CR 701.27f: Number of successful transforms/conversions of this object.
@@ -499,6 +516,17 @@ pub struct GameObject {
     pub name: String,
     pub power: Option<i32>,
     pub toughness: Option<i32>,
+    /// CR 208.4b + CR 613.4a-b: Current base power after layer 7a/7b set effects.
+    /// `base_power` remains the printed/copiable baseline; this derived carrier
+    /// is reset from it at the start of each layer pass and is updated by
+    /// layer-7a/7b setters, before layer-7c modifications are applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer_base_power: Option<i32>,
+    /// CR 208.4b + CR 613.4a-b: Current base toughness after layer 7a/7b set
+    /// effects. `base_toughness` remains the printed/copiable baseline; this
+    /// carrier stays paired with `layer_base_power` through layer evaluation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer_base_toughness: Option<i32>,
     pub loyalty: Option<u32>,
     /// CR 306.5b: Printed loyalty is the entry-counter baseline; battlefield
     /// loyalty itself is counter-derived (CR 306.5c).
@@ -1123,6 +1151,32 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_unlocks: Option<RoomUnlockState>,
 
+    /// CR 707.2 + CR 709.5b + CR 613.1a: the Room half data the winning
+    /// Layer-1a copy effect carried (`CopiableValues::room_halves`).
+    /// Layer-derived: set by `apply_copiable_values`, cleared by the Step-1
+    /// seed — so it expires with the copy effect. `room::effective_room_halves`
+    /// prefers it over the object's own printed halves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copied_room_halves: Option<crate::types::ability::RoomCopiableHalves>,
+
+    /// CR 707.9b: where the LAST Layer-1 copy naming of this object came
+    /// from this pass — `None` when no copy effect named it. An `Exception`
+    /// ("except its name is X") is the copy's final copiable name, so the
+    /// Room door gate must not replace it. Layer-derived: assigned by every
+    /// applied copy (`apply_copiable_values`) and by the `SetName` arm,
+    /// cleared by the Step-1 seed — a LATER ordinary copy therefore resets
+    /// an earlier exception (CR 613.1a timestamp order).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer1_name_origin: Option<crate::types::ability::CopiedNameOrigin>,
+
+    /// CR 707.9b: the BASE name's origin for a MATERIALIZED object (duplicate
+    /// conjure / copy-token creation of an exception-named copy) — persistent,
+    /// unlike the layer-derived marker above. The Step-1 seed restores the
+    /// runtime marker from this, so the exception outlives every later layer
+    /// pass. `None` for every ordinarily printed object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_name_origin: Option<crate::types::ability::CopiedNameOrigin>,
+
     /// CR 716.3: Class enchantment level. Present only on Class permanents.
     /// Class level is NOT a counter (CR 716) — proliferate/counter manipulation must not interact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1284,6 +1338,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         display_visible_to_viewer: _,
         tapped: _,
         face_down: _,
+        face_down_cause: _,
         flipped: _,
         transformed: _,
         transformation_count: _,
@@ -1300,6 +1355,8 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         name: _,
         power: _,
         toughness: _,
+        layer_base_power: _,
+        layer_base_toughness: _,
         loyalty: _,
         printed_loyalty: _,
         defense: _,
@@ -1420,6 +1477,9 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         assigns_no_combat_damage: _,
         case_state: _,
         room_unlocks: _,
+        copied_room_halves: _,
+        layer1_name_origin: _,
+        base_name_origin: _,
         class_level: _,
         cast_from_zone: _,
         cast_controller: _,
@@ -1669,6 +1729,8 @@ impl GameObject {
                 // change permanent and zone-independent.
                 self.base_power = Some(*power);
                 self.base_toughness = Some(*toughness);
+                self.layer_base_power = Some(*power);
+                self.layer_base_toughness = Some(*toughness);
             }
             PerpetualModification::ModifyPowerToughness {
                 power_delta,
@@ -1686,6 +1748,8 @@ impl GameObject {
                     .saturating_add(*toughness_delta);
                 self.base_power = Some(base_power);
                 self.base_toughness = Some(base_toughness);
+                self.layer_base_power = Some(base_power);
+                self.layer_base_toughness = Some(base_toughness);
             }
             PerpetualModification::GrantKeywords { keywords } => {
                 for keyword in keywords {
@@ -1734,6 +1798,8 @@ impl GameObject {
                 }
                 self.base_power = Some(*power);
                 self.base_toughness = Some(*toughness);
+                self.layer_base_power = Some(*power);
+                self.layer_base_toughness = Some(*toughness);
                 for keyword in keywords {
                     if !self.base_keywords.contains(keyword) {
                         self.base_keywords.push(keyword.clone());
@@ -2050,8 +2116,8 @@ impl GameObject {
             // so `PtComparison { scope: Base }` look-back filters read the
             // event-time base (a base-1/1 with a +1/+1 counter records base 1,
             // current 2).
-            base_power: self.base_power,
-            base_toughness: self.base_toughness,
+            base_power: self.layer_base_power.or(self.base_power),
+            base_toughness: self.layer_base_toughness.or(self.base_toughness),
             // CR 709.4b: Off the stack, a split card's colors are the combined
             // colors of both halves (`effective_colors` no-ops for single-face).
             colors: self.effective_colors(),
@@ -2094,8 +2160,14 @@ impl GameObject {
         if self.base_power.is_none() && self.power.is_some() {
             self.base_power = self.power;
         }
+        if self.layer_base_power.is_none() {
+            self.layer_base_power = self.base_power;
+        }
         if self.base_toughness.is_none() && self.toughness.is_some() {
             self.base_toughness = self.toughness;
+        }
+        if self.layer_base_toughness.is_none() {
+            self.layer_base_toughness = self.base_toughness;
         }
         if self.base_loyalty.is_none() && self.loyalty.is_some() {
             self.base_loyalty = self.loyalty;
@@ -2171,6 +2243,7 @@ impl GameObject {
             display_visible_to_viewer: false,
             tapped: false,
             face_down: false,
+            face_down_cause: None,
             flipped: false,
             transformed: false,
             transformation_count: 0,
@@ -2188,6 +2261,8 @@ impl GameObject {
             name: name.clone(),
             power: None,
             toughness: None,
+            layer_base_power: None,
+            layer_base_toughness: None,
             loyalty: None,
             printed_loyalty: None,
             defense: None,
@@ -2298,6 +2373,9 @@ impl GameObject {
             assigns_no_combat_damage: false,
             case_state: None,
             room_unlocks: None,
+            copied_room_halves: None,
+            layer1_name_origin: None,
+            base_name_origin: None,
             class_level: None,
             cast_from_zone: None,
             cast_controller: None,
@@ -2324,8 +2402,8 @@ impl GameObject {
             toughness: self.toughness,
             // CR 208.4b + CR 613.4b: Layer-7b base values, mirroring how
             // `power`/`toughness` capture the post-layer-7 current values.
-            base_power: self.base_power,
-            base_toughness: self.base_toughness,
+            base_power: self.layer_base_power.or(self.base_power),
+            base_toughness: self.layer_base_toughness.or(self.base_toughness),
             // CR 202.3d + CR 709.4b: combined mana value / colors for a split card
             // off the stack (no-op for single-face, on-stack, and battlefield
             // Rooms, which gate out) so look-back queries read the CR-correct
@@ -2481,7 +2559,73 @@ impl GameObject {
         }
         if self.card_types.subtypes.iter().any(|s| s == "Room") {
             self.room_unlocks = Some(RoomUnlockState::default());
+            self.install_room_door_text();
         }
+    }
+
+    /// CR 709.5 + CR 709.5h: stamp each Room half's trigger and static
+    /// definitions with its door and install the OTHER half's alongside the
+    /// live face's — into the BASE sets, so layer recomputation and base
+    /// re-materialization preserve them. Which half's text currently
+    /// *functions* is then decided by the unlock designations
+    /// (`room::door_text_functions`, applied by
+    /// `functioning_abilities::active_trigger_definitions`, the statics
+    /// gathers, and the layers continuous-effect gather), not by face
+    /// residency; the unlock trigger matcher additionally fires a stamped
+    /// trigger only for its own door's event.
+    ///
+    /// The live face's door follows the cast orientation (`modal_back_face`
+    /// records that the right half is showing — the CR 709.5d mapping,
+    /// see `room::live_face_door`). Idempotent: a `None` stamp is claimed
+    /// once, and the other half is merged only while absent.
+    fn install_room_door_text(&mut self) {
+        let live_door = crate::game::room::live_face_door(self);
+        let other_door = match live_door {
+            RoomDoor::Left => RoomDoor::Right,
+            RoomDoor::Right => RoomDoor::Left,
+        };
+        let base = Arc::make_mut(&mut self.base_trigger_definitions);
+        for definition in base.iter_mut() {
+            if definition.room_door.is_none() {
+                definition.room_door = Some(live_door);
+            }
+        }
+        if let Some(back) = &self.back_face {
+            if !base
+                .iter()
+                .any(|definition| definition.room_door == Some(other_door))
+            {
+                base.extend(back.trigger_definitions.iter_all().map(|printed| {
+                    let mut definition = printed.clone();
+                    definition.room_door = Some(other_door);
+                    definition
+                }));
+            }
+        }
+        self.materialize_base_trigger_definitions();
+
+        // CR 709.5: same install for the halves' static abilities — a locked
+        // half doesn't have its rules text, so both halves' statics live
+        // door-stamped in the base set and the functioning gathers decide.
+        let base_statics = Arc::make_mut(&mut self.base_static_definitions);
+        for definition in base_statics.iter_mut() {
+            if definition.room_door.is_none() {
+                definition.room_door = Some(live_door);
+            }
+        }
+        if let Some(back) = &self.back_face {
+            if !base_statics
+                .iter()
+                .any(|definition| definition.room_door == Some(other_door))
+            {
+                base_statics.extend(back.static_definitions.iter_all().map(|printed| {
+                    let mut definition = printed.clone();
+                    definition.room_door = Some(other_door);
+                    definition
+                }));
+            }
+        }
+        self.static_definitions = Arc::clone(&self.base_static_definitions).into();
     }
 
     /// CR 613.1 + CR 400.7: Revert layer-derived characteristics to the object's
@@ -2494,6 +2638,8 @@ impl GameObject {
         self.name = self.base_name.clone();
         self.power = self.base_power;
         self.toughness = self.base_toughness;
+        self.layer_base_power = self.base_power;
+        self.layer_base_toughness = self.base_toughness;
         self.loyalty = self.base_loyalty;
         self.printed_loyalty = self.base_printed_loyalty;
         // CR 310.4a + CR 400.7: Battle defense reverts to printed baseline off the battlefield.

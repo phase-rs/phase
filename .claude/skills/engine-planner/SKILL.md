@@ -9,8 +9,6 @@ Produce an implementation plan for the phase.rs engine. Design for the class, no
 
 This skill produces the plan only. The plan-review loop belongs to the caller — when invoked from `/engine-implementer`, the orchestrator owns the loop. When invoked standalone, run `/review-engine-plan` against the plan yourself and iterate until clean.
 
-> **⚠️ `mtgish` is dormant — out of scope for ALL plans.** Never plan changes to `mtgish/`, `crates/mtgish-import/`, or `data/mtgish-*`. The import pipeline is not a live consumer of the engine or parser; new variants, parser patterns, and effects do NOT need to be mirrored there. If a task description references mtgish, surface the contradiction and stop — do not silently include mtgish in the plan.
-
 ## Input
 
 A task description: parser enhancement/fix, or engine mechanic enhancement/fix. May reference cards, Oracle text patterns, CR rules, or coverage gaps.
@@ -77,6 +75,52 @@ Find the existing feature most similar to what you're implementing. Trace it end
 ### Step 3: Read every file you will touch
 
 Before proposing changes, read every file you plan to modify. Understand existing patterns, abstractions, and conventions in each.
+
+### Step 3.5: Probe it — measure, don't trace
+
+Steps 2 and 3 tell you what the code *looks like*. Only a probe that compiles and runs tells you what it
+*does*. For a rules engine this intricate, plans built by tracing repeatedly encode plausible-but-wrong
+assertions that survive plan review and break at implementation — or ship a predicate that is true for
+the wrong reason. Probing early is also the cheap path: a reviewer handed no fresh evidence has nothing
+to do but audit your prose, and that loop does not converge.
+
+So probe. A throwaway `#[test]` or scratch driver, compiled and run, is worth more than any amount of
+re-reading. Probe whatever the design would change if it turned out false: a predicate's runtime
+verdict, which branch is actually taken, an observed count or delta, "X never happens", "this conjunct
+is what refuses". Assertions that look obvious from the source are exactly where this pays — the classic
+failure is a predicate whose body reads correctly and whose verdict is decided by inputs the source
+never mentions. Say plainly which assertions you probed and which you didn't; an unprobed assertion is
+fine as long as it is labelled, and dangerous the moment it is quietly promoted to fact.
+
+Three things make a probe worth believing:
+
+- **It reached the code under test.** Print a positive marker beside the verdict — a nonzero count, a
+  hit on the production branch, the value at the seam. A zero with no positive control showing the
+  instrument fires at all is not a negative result; it is a probe that told you nothing. This is Step
+  4's paired-positive-reach-guard rule one step earlier, applied to evidence rather than to tests.
+- **It ran against a real board.** Prefer committed fixtures and dumps over synthetic state. Synthetic
+  input proves the predicate reads a field; a real board proves what it answers in production.
+- **It finished.** A run that died partway still printed everything up to the point it died. If it
+  didn't exit cleanly, you didn't measure it.
+
+**Write claims in the form that survives the next edit.** A probe yields a snapshot — a count, a
+coordinate, a cardinality. Transcribing it is fragile: the next edit falsifies it, review correctly
+flags it, and the repair mints a fresh snapshot for the round after. Prefer the formulation that stays
+true — a symbol name over a line number, "every case in §Y" over "the four cases". Where only the figure
+carries the information, name the command that regenerates it. **A falsified snapshot is repaired by
+reformulating it, not by refreshing it.**
+
+**Probing needs the cargo target lock and a stable tree.** Use an isolated `CARGO_TARGET_DIR` and the
+worktree's absolute path; never build in a checkout another process (e.g. Tilt) owns. Serialize probe
+activity behind any active implementation executor on a shared worktree — read-only discovery may run
+concurrently. Never put a scratch target dir on tmpfs. Keep one isolated target dir per worktree and
+*reuse* it across probes — deleting it between runs buys nothing and re-imposes the full dependency
+rebuild that talks planners out of probing in the first place. Because that isolation exists,
+target-directory lock contention is not a reason to withhold builds: if you catch yourself writing "do
+not run cargo" into a brief, name the isolated target dir instead. Shared `CARGO_HOME` registry/package-
+cache locks are a separate lock domain that target-dir isolation doesn't touch, and can still delay a
+build. Capacity is the one thing isolation cannot fix — a fresh target dir costs disk rather than saving
+it — so a genuinely full or saturated box is worth naming, and worth probing once it clears.
 
 ### Step 4: Answer architectural questions
 

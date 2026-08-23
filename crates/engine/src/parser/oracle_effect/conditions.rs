@@ -10,10 +10,12 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
+use super::super::oracle_nom::condition as nom_condition;
 use super::super::oracle_nom::condition::{
     inject_controller_you, parse_cast_using_teamwork_phrase,
     parse_scoped_player_opponent_and_has_condition, parse_spell_target_superlative_suffix,
     parse_you_put_onto_battlefield_this_way_clause, parse_zone_changed_this_way_clause,
+    DamagedThisWayRecipient,
 };
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
@@ -922,7 +924,10 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
             let body_lower = strip_reflexive_conditional_body_separator(after_clause);
             let offset = text.len() - body_lower.len();
             return (
-                Some(AbilityCondition::ZoneChangedThisWay { filter }),
+                Some(AbilityCondition::ZoneChangedThisWay {
+                    filter,
+                    destination: Some(Zone::Battlefield),
+                }),
                 text[offset..].to_string(),
             );
         }
@@ -940,17 +945,23 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
             let body_lower = strip_reflexive_conditional_body_separator(after_clause);
             let offset = text.len() - body_lower.len();
             return (
-                Some(AbilityCondition::ZoneChangedThisWay { filter }),
+                Some(AbilityCondition::ZoneChangedThisWay {
+                    filter,
+                    destination: None,
+                }),
                 text[offset..].to_string(),
             );
         }
-        if let Ok((after_clause, (filter, _negated))) =
+        if let Ok((after_clause, (filter, _negated, destination))) =
             nom_cond::parse_zone_changed_this_way_clause(rest)
         {
             let body_lower = strip_reflexive_conditional_body_separator(after_clause);
             let offset = text.len() - body_lower.len();
             return (
-                Some(AbilityCondition::ZoneChangedThisWay { filter }),
+                Some(AbilityCondition::ZoneChangedThisWay {
+                    filter,
+                    destination,
+                }),
                 text[offset..].to_string(),
             );
         }
@@ -966,7 +977,10 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
                 let body_lower = strip_reflexive_conditional_body_separator(after_clause);
                 let offset = text.len() - body_lower.len();
                 return (
-                    Some(AbilityCondition::ZoneChangedThisWay { filter }),
+                    Some(AbilityCondition::ZoneChangedThisWay {
+                        filter,
+                        destination: None,
+                    }),
                     text[offset..].to_string(),
                 );
             }
@@ -981,7 +995,10 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
                 let body_lower = strip_reflexive_conditional_body_separator(after_clause);
                 let offset = text.len() - body_lower.len();
                 return (
-                    Some(AbilityCondition::ZoneChangedThisWay { filter }),
+                    Some(AbilityCondition::ZoneChangedThisWay {
+                        filter,
+                        destination: None,
+                    }),
                     text[offset..].to_string(),
                 );
             }
@@ -1537,7 +1554,10 @@ pub(super) fn try_parse_moved_card_subtype_attach_followup(
     if !after_dot.trim().is_empty() {
         return None;
     }
-    let condition = AbilityCondition::ZoneChangedThisWay { filter };
+    let condition = AbilityCondition::ZoneChangedThisWay {
+        filter,
+        destination: None,
+    };
     let attach = Effect::Attach {
         attachment: TargetFilter::SelfRef,
         target: TargetFilter::ParentTarget,
@@ -5387,6 +5407,31 @@ fn parse_or_if_disjunction(text: &str, ctx: &mut ParseContext) -> Option<Ability
     Some(AbilityCondition::Or { conditions })
 }
 
+/// CR 613.1f + CR 702.1: single authority for lowering a keyword-presence
+/// ANAPHOR ("if it has <kw>" / "if it doesn't have <kw>") onto a
+/// `KeywordKind`-level `FilterProp`.
+///
+/// Both polarities must answer the same question at the same seam, and both
+/// must survive the subject being OFF the battlefield — the whole class exiles
+/// its subject first (suspend, foretell, time counters). Only the kind-level
+/// props (`HasKeywordKind` / `WithoutKeywordKind`) do that: they route through
+/// `object_has_effective_keyword_kind`, which consults the off-zone Layer-6
+/// ledger, while the object-level props read `obj.keywords`, which the layer
+/// system never refreshes in exile.
+///
+/// Returns `None` — a deliberate strict failure, leaving the clause to the
+/// swallowed-clause / `Unimplemented` path so coverage stays honest — when
+/// `Keyword::kind()` does NOT identify the parsed ability
+/// ([`Keyword::kind_identifies_ability`] documents both families). Falling back
+/// to `FilterProp::WithKeyword`/`WithoutKeyword` there is NOT an option: those
+/// are discriminant-matched on the live path, so they cannot separate
+/// protection from red from protection from blue, and they read the stale
+/// off-zone keyword vec besides — i.e. they would reintroduce the
+/// always-wrong-guard failure mode this lowering exists to remove.
+fn keyword_presence_kind(keyword: &Keyword) -> Option<crate::types::keywords::KeywordKind> {
+    keyword.kind_identifies_ability().then(|| keyword.kind())
+}
+
 pub(super) fn try_nom_condition_as_ability_condition(
     text: &str,
     ctx: &mut ParseContext,
@@ -5532,7 +5577,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
     // `strip_if_you_do_conditional` uses — so prefix ("if a creature card is
     // exiled this way, …") and suffix ("… if at least one creature card was
     // exiled this way") forms produce the identical
-    // `AbilityCondition::ZoneChangedThisWay { filter }` representation.
+    // `AbilityCondition::ZoneChangedThisWay { filter, destination: None }` representation.
     if let Some(condition) = parse_outcome_this_way_condition(lower.as_str()) {
         return Some(condition);
     }
@@ -5549,6 +5594,16 @@ pub(super) fn try_nom_condition_as_ability_condition(
         return Some(condition);
     }
 
+    // CR 120.3 + CR 608.2c: "a Dragon is dealt damage this way" — the plain-damage
+    // channel of the "this way" back-reference, tried immediately after its more
+    // specific `excess` sibling above (the `excess` token stops this arm's verb
+    // tag, so the two can never contend). Both are `all_consuming`, so neither can
+    // partially consume the other's clause.
+    if let Some(condition) = parse_previous_effect_typed_damage_recipient_condition(lower.as_str())
+    {
+        return Some(condition);
+    }
+
     if let Some(condition) = parse_die_result_condition(lower.as_str()) {
         return Some(condition);
     }
@@ -5557,9 +5612,40 @@ pub(super) fn try_nom_condition_as_ability_condition(
         return Some(condition);
     }
 
-    // CR 702.62a: "it doesn't have [keyword]" / "it does not have [keyword]" — pronoun
-    // subject lacks-keyword check (e.g., "If it doesn't have suspend, it gains suspend").
-    // Mirrors the "~ doesn't have" / "this creature doesn't have" handler in oracle_condition.rs.
+    // CR 702.62a + CR 608.2c + CR 608.2k + CR 400.7: "it doesn't have [keyword]" /
+    // "it does not have [keyword]" — the negative-polarity twin of the "it has
+    // [keyword]" arm later in this same function.
+    //
+    // `it` is an ANAPHOR to the object introduced by the preceding instruction,
+    // by the ability's COST, or by the trigger condition — CR 608.2k enumerates
+    // all three — and NOT to the ability's source. This arm emits the
+    // CONTEXT-FREE (target / trigger-subject) reading;
+    // `rewrite_keyword_anaphor_for_cost_paid_parent` (oracle_effect/mod.rs)
+    // re-anchors it to `CostPaidObjectMatchesFilter` when the preceding clause
+    // binds its subject through the cost. That split mirrors
+    // `rewrite_cost_paid_exiled_reflexive_for_effect_exile_parent`, whose doc
+    // states the governing principle: only the clause context can disambiguate
+    // these subject classes.
+    //
+    // This arm previously emitted `SourceLacksKeyword`, whose evaluator reads
+    // `ability.source_id` — making the guard unconditionally true for every card
+    // whose `it` is not the source (Kang Prime, Jhoira of the Ghitu, Suspend,
+    // Delay, …), so an exiled card that already had the keyword was re-granted
+    // and its printed parameters clobbered.
+    //
+    // CR 613.1f + CR 702.62b: the prop is the KIND-level, off-zone-aware
+    // `WithoutKeywordKind`, not `WithoutKeyword`. `WithoutKeyword` reads
+    // `obj.keywords`, which the layer system refreshes only for battlefield,
+    // hand, and stack objects — never exile, where most of this class evaluates.
+    // `WithoutKeywordKind` routes through `object_has_effective_keyword_kind` on
+    // the live path and through the zone-change record's keywords on the snapshot
+    // path, so BOTH lowering targets read it correctly. It is also the CR-correct
+    // reading: CR 702.62a defines suspend as "Suspend N—[cost]", so "it doesn't
+    // have suspend" is a keyword-ABILITY presence test, parameters aside.
+    //
+    // The kind-level prop is only sound where `Keyword::kind()` IDENTIFIES the
+    // ability, which is NOT every keyword — `keyword_presence_kind` below is the
+    // single authority for that test and strict-fails the rest.
     if let Ok((keyword_text, _)) = alt((
         tag::<_, _, OracleError<'_>>("it doesn't have "),
         tag("it does not have "),
@@ -5570,8 +5656,15 @@ pub(super) fn try_nom_condition_as_ability_condition(
             .trim()
             .parse()
             .unwrap_or(Keyword::Unknown(String::new()));
-        if !matches!(keyword, Keyword::Unknown(_)) {
-            return Some(AbilityCondition::SourceLacksKeyword { keyword });
+        if let Some(value) = keyword_presence_kind(&keyword) {
+            return Some(AbilityCondition::TargetMatchesFilter {
+                filter: TargetFilter::Typed(TypedFilter {
+                    properties: vec![FilterProp::WithoutKeywordKind { value }],
+                    ..Default::default()
+                }),
+                use_lki: false,
+                subject_slot: None,
+            });
         }
     }
 
@@ -5678,6 +5771,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
         return Some(AbilityCondition::Not {
             condition: Box::new(AbilityCondition::ZoneChangedThisWay {
                 filter: TargetFilter::Any,
+                destination: None,
             }),
         });
     }
@@ -5972,19 +6066,32 @@ pub(super) fn try_nom_condition_as_ability_condition(
     }
 
     // CR 608.2c + CR 702.1: "it has [keyword]" — affirmative pronoun keyword check
-    // (e.g. "If it has flying, ..."). Routed through TargetMatchesFilter +
-    // FilterProp::WithKeyword, the same abstraction the "it's a [type]" arm uses
-    // (no SourceHasKeyword sibling to SourceLacksKeyword). Disjoint prefix from the
-    // "it doesn't have" arm above, so ordering is irrelevant.
+    // (e.g. "If it has flying, ..."). Routed through TargetMatchesFilter, the
+    // same abstraction the "it's a [type]" arm uses.
+    //
+    // CR 613.1f: shares `keyword_presence_kind` with its negative twin — the
+    // "it doesn't have [keyword]" arm above — so both polarities emit the same
+    // kind-level, off-zone-aware prop and strict-fail on the same keywords. The
+    // affirmative arm previously emitted the object-level
+    // `FilterProp::WithKeyword`, a shape `filter_is_bare_keyword_kind_predicate`
+    // does not accept, so `rewrite_keyword_anaphor_for_cost_paid_parent` could
+    // never re-anchor this polarity: an "if it has <kw>" clause after a
+    // cost-paid parent found neither an object target nor (for an activated
+    // ability) a trigger event and failed closed. Both polarities now reach that
+    // rewrite, and `rewrite_filter_keyword` (oracle_effect/mod.rs) already swaps
+    // `HasKeywordKind` for "the same is true for <kw list>" replication.
+    //
+    // Disjoint prefix from the negative arm, so ordering between them is
+    // irrelevant.
     if let Ok((keyword_text, _)) = tag::<_, _, OracleError<'_>>("it has ").parse(lower.as_str()) {
         let keyword: Keyword = keyword_text
             .trim()
             .parse()
             .unwrap_or(Keyword::Unknown(String::new()));
-        if !matches!(keyword, Keyword::Unknown(_)) {
+        if let Some(value) = keyword_presence_kind(&keyword) {
             return Some(AbilityCondition::TargetMatchesFilter {
                 filter: TargetFilter::Typed(TypedFilter {
-                    properties: vec![FilterProp::WithKeyword { value: keyword }],
+                    properties: vec![FilterProp::HasKeywordKind { value }],
                     ..Default::default()
                 }),
                 use_lki: false,
@@ -6626,33 +6733,101 @@ fn parse_previous_effect_excess_damage_condition(lower: &str) -> Option<AbilityC
     })
 }
 
-/// CR 120.3 + CR 608.2c: "a player is dealt damage this way" gates a rider
-/// on both the recipient and the damage event emitted by the preceding
-/// instruction. Deal-damage targets are either players or permanents, so a
-/// player target is represented by the negated permanent match; the total
-/// channel prevents the rider from firing when all damage was prevented.
-fn parse_previous_effect_player_damage_condition(lower: &str) -> Option<AbilityCondition> {
-    all_consuming(tag::<_, _, OracleError<'_>>(
-        "a player is dealt damage this way",
-    ))
-    .parse(lower)
-    .ok()?;
-    Some(AbilityCondition::And {
-        conditions: vec![
-            AbilityCondition::PreviousEffectAmount {
-                comparator: Comparator::GT,
-                rhs: QuantityExpr::Fixed { value: 0 },
-                channel: DamageChannel::Total,
-            },
-            AbilityCondition::Not {
-                condition: Box::new(AbilityCondition::TargetMatchesFilter {
-                    filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)),
-                    use_lki: true,
+/// CR 120.3 + CR 608.2c: "[recipient] is dealt damage this way" gates a rider on
+/// both the recipient and the damage event emitted by the preceding instruction.
+/// Recognition is delegated to [`nom_condition::parse_damaged_this_way_clause`],
+/// the single authority for this clause's grammar; this function owns only the
+/// lowering of the recipient axis into an `AbilityCondition`.
+fn parse_previous_effect_damage_recipient_condition(
+    lower: &str,
+) -> Option<DamagedThisWayRecipient> {
+    all_consuming(nom_condition::parse_damaged_this_way_clause)
+        .parse(lower)
+        .ok()
+        .map(|(_, recipient)| recipient)
+}
+
+/// CR 120.3 + CR 615.1: lower a parsed "dealt damage this way" recipient into the
+/// resolution-time gate.
+///
+/// Both arms conjoin `PreviousEffectAmount { GT 0, Total }`: CR 615.1 prevention
+/// shields can reduce the dealt amount to zero, in which case nothing "is dealt
+/// damage this way" and the rider must not fire.
+///
+/// Deal-damage targets are either players or permanents (CR 120.3), so the
+/// player arm is the *negated* permanent match while the typed arm is a positive
+/// filter match. The typed arm additionally conjoins
+/// [`AbilityCondition::HasObjectTarget`]: `TargetMatchesFilter` falls back to
+/// `TargetFilter::TriggeringSource` when the ability carries no object target
+/// (`game/effects/mod.rs`), which in a *triggered* ability would bind the
+/// anaphor to the ability's own source rather than to a damage recipient. `And`
+/// short-circuits, so the guard stops that fallback from ever being consulted
+/// when the damage landed on a player.
+fn previous_effect_damage_recipient_to_condition(
+    recipient: DamagedThisWayRecipient,
+) -> AbilityCondition {
+    let damage_was_dealt = AbilityCondition::PreviousEffectAmount {
+        comparator: Comparator::GT,
+        rhs: QuantityExpr::Fixed { value: 0 },
+        channel: DamageChannel::Total,
+    };
+    match recipient {
+        DamagedThisWayRecipient::Player => AbilityCondition::And {
+            conditions: vec![
+                damage_was_dealt,
+                AbilityCondition::Not {
+                    condition: Box::new(AbilityCondition::TargetMatchesFilter {
+                        filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)),
+                        use_lki: true,
+                        subject_slot: None,
+                    }),
+                },
+            ],
+        },
+        // CR 704.3 + CR 400.7: `use_lki: false`. The rider resolves inside the
+        // same resolution that dealt the damage, and state-based actions are
+        // checked only when a player would receive priority — so the damaged
+        // permanent has not been destroyed yet and is still the same object.
+        // There is no zone change, so last-known information never applies.
+        DamagedThisWayRecipient::Typed(filter) => AbilityCondition::And {
+            conditions: vec![
+                damage_was_dealt,
+                AbilityCondition::HasObjectTarget,
+                AbilityCondition::TargetMatchesFilter {
+                    filter,
+                    use_lki: false,
                     subject_slot: None,
-                }),
-            },
-        ],
-    })
+                },
+            ],
+        },
+    }
+}
+
+/// CR 120.3 + CR 608.2c: the player-recipient arm of the "dealt damage this way"
+/// gate. Kept as a distinct entry point because it is dispatched from the
+/// body-scoped call site rather than the general condition dispatcher — see the
+/// dispatch-asymmetry note on [`DamagedThisWayRecipient`].
+fn parse_previous_effect_player_damage_condition(lower: &str) -> Option<AbilityCondition> {
+    match parse_previous_effect_damage_recipient_condition(lower)? {
+        recipient @ DamagedThisWayRecipient::Player => {
+            Some(previous_effect_damage_recipient_to_condition(recipient))
+        }
+        DamagedThisWayRecipient::Typed(_) => None,
+    }
+}
+
+/// CR 120.3 + CR 608.2c: the typed-recipient arm of the "dealt damage this way"
+/// gate — "if a Dragon is dealt damage this way, destroy it" (The Black Arrow),
+/// "if a creature is dealt damage this way, …". Wired into the general condition
+/// dispatcher so it composes with any rider body; see the dispatch-asymmetry
+/// note on [`DamagedThisWayRecipient`] for why the player arm is not.
+fn parse_previous_effect_typed_damage_recipient_condition(lower: &str) -> Option<AbilityCondition> {
+    match parse_previous_effect_damage_recipient_condition(lower)? {
+        typed @ DamagedThisWayRecipient::Typed(_) => {
+            Some(previous_effect_damage_recipient_to_condition(typed))
+        }
+        DamagedThisWayRecipient::Player => None,
+    }
 }
 
 /// CR 701.8a + CR 608.2c: Vohar's drain checks the card discarded by the
@@ -6670,6 +6845,7 @@ fn parse_effect_discard_instant_or_sorcery_condition(lower: &str) -> Option<Abil
             TypeFilter::Instant,
             TypeFilter::Sorcery,
         ]))),
+        destination: None,
     })
 }
 
@@ -6999,14 +7175,20 @@ pub(super) fn parse_zone_change_object_has_keyword_condition(
 ///     unlocks the whole "if you put a [type] onto the battlefield this way,
 ///     [bonus]" fetch/ramp payoff class).
 fn parse_outcome_this_way_condition(lower: &str) -> Option<AbilityCondition> {
-    let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(lower)
-        .or_else(|_| parse_you_put_onto_battlefield_this_way_clause(lower))
+    let (rest, (filter, negated, destination)) = parse_zone_changed_this_way_clause(lower)
+        .or_else(|_| {
+            parse_you_put_onto_battlefield_this_way_clause(lower)
+                .map(|(rest, (filter, negated))| (rest, (filter, negated, Some(Zone::Battlefield))))
+        })
         .ok()?;
     if !rest.trim().is_empty() {
         return None;
     }
     Some(maybe_negate(
-        AbilityCondition::ZoneChangedThisWay { filter },
+        AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination,
+        },
         negated,
     ))
 }
@@ -7465,6 +7647,7 @@ mod tests {
         assert_eq!(body, "you gain 4 life");
         let Some(AbilityCondition::ZoneChangedThisWay {
             filter: TargetFilter::Typed(TypedFilter { type_filters, .. }),
+            destination: Some(Zone::Battlefield),
         }) = cond
         else {
             panic!("expected ZoneChangedThisWay Artifact, got {cond:?}");
@@ -7483,6 +7666,7 @@ mod tests {
         assert_eq!(body, "you gain 2 life");
         let Some(AbilityCondition::ZoneChangedThisWay {
             filter: TargetFilter::Typed(TypedFilter { type_filters, .. }),
+            destination: Some(Zone::Hand),
         }) = cond
         else {
             panic!("expected ZoneChangedThisWay Town, got {cond:?}");
@@ -7542,6 +7726,7 @@ mod tests {
         assert_eq!(body, "surveil 1");
         let Some(AbilityCondition::ZoneChangedThisWay {
             filter: TargetFilter::Typed(TypedFilter { properties, .. }),
+            destination: None,
         }) = cond
         else {
             panic!("expected ZoneChangedThisWay, got {cond:?}");
@@ -7561,6 +7746,7 @@ mod tests {
         );
         let Some(AbilityCondition::ZoneChangedThisWay {
             filter: TargetFilter::Or { filters },
+            destination: None,
         }) = cond
         else {
             panic!("expected ZoneChangedThisWay Or, got {cond:?}");
@@ -8425,7 +8611,11 @@ mod tests {
             "if at least one angel card is milled this way, you gain 4 life",
         );
         assert_eq!(body, "you gain 4 life");
-        let Some(AbilityCondition::ZoneChangedThisWay { filter }) = condition else {
+        let Some(AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: None,
+        }) = condition
+        else {
             panic!("expected ZoneChangedThisWay condition, got {condition:?}");
         };
         match filter {
@@ -8447,7 +8637,11 @@ mod tests {
             "if a hero enters this way, it enters with an additional +1/+1 counter on it",
         );
         assert_eq!(body, "it enters with an additional +1/+1 counter on it");
-        let Some(AbilityCondition::ZoneChangedThisWay { filter }) = condition else {
+        let Some(AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: Some(Zone::Battlefield),
+        }) = condition
+        else {
             panic!("expected ZoneChangedThisWay condition, got {condition:?}");
         };
         match filter {
@@ -8466,7 +8660,11 @@ mod tests {
             "when you put one or more equipment onto the battlefield this way, you may attach one of them to a samurai you control",
         );
         assert_eq!(body, "you may attach one of them to a samurai you control");
-        let Some(AbilityCondition::ZoneChangedThisWay { filter }) = condition else {
+        let Some(AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: Some(Zone::Battlefield),
+        }) = condition
+        else {
             panic!("expected ZoneChangedThisWay condition, got {condition:?}");
         };
         match filter {
@@ -8495,7 +8693,11 @@ mod tests {
             &mut ParseContext::default(),
         );
         assert_eq!(body, "you gain 4 life.");
-        let Some(AbilityCondition::ZoneChangedThisWay { filter }) = condition else {
+        let Some(AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: Some(Zone::Battlefield),
+        }) = condition
+        else {
             panic!("expected ZoneChangedThisWay condition, got {condition:?}");
         };
         match filter {
@@ -8520,7 +8722,11 @@ mod tests {
         let condition =
             parse_outcome_this_way_condition("you put a creature onto the battlefield this way")
                 .expect("active-voice put gate must lower to ZoneChangedThisWay");
-        let AbilityCondition::ZoneChangedThisWay { filter } = condition else {
+        let AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: Some(Zone::Battlefield),
+        } = condition
+        else {
             panic!("expected ZoneChangedThisWay condition, got {condition:?}");
         };
         match filter {
@@ -8548,7 +8754,11 @@ mod tests {
             "when you discard a card this way, target player mills cards equal to its mana value",
         );
         assert_eq!(body, "target player mills cards equal to its mana value");
-        let Some(AbilityCondition::ZoneChangedThisWay { filter }) = condition else {
+        let Some(AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: None,
+        }) = condition
+        else {
             panic!("expected ZoneChangedThisWay condition, got {condition:?}");
         };
         match filter {
@@ -8575,7 +8785,11 @@ mod tests {
             &mut ParseContext::default(),
         );
         assert_eq!(body, "You gain 2 life");
-        let Some(AbilityCondition::ZoneChangedThisWay { filter }) = condition else {
+        let Some(AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: None,
+        }) = condition
+        else {
             panic!("expected ZoneChangedThisWay condition, got {condition:?}");
         };
         let TargetFilter::Typed(TypedFilter { type_filters, .. }) = filter else {
@@ -8616,6 +8830,7 @@ mod tests {
                 Some(AbilityCondition::Not {
                     condition: Box::new(AbilityCondition::ZoneChangedThisWay {
                         filter: TargetFilter::Any,
+                        destination: None,
                     }),
                 }),
                 "expected Not {{ ZoneChangedThisWay {{ Any }} }} for {text:?}",
@@ -8776,6 +8991,120 @@ mod tests {
             Some(AbilityCondition::Not { condition })
                 if matches!(*condition, AbilityCondition::SourceMatchesFilter { .. })
         ));
+    }
+
+    /// CR 120.3 + CR 608.2c: The Black Arrow — "If a Dragon is dealt damage this
+    /// way, destroy it." The Dragon gate must survive as a condition; dropping it
+    /// makes the rider destroy every damaged creature.
+    #[test]
+    fn leading_dragon_dealt_damage_this_way_gates_the_rider() {
+        let (condition, body) = strip_leading_general_conditional(
+            "If a Dragon is dealt damage this way, destroy it.",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(body, "destroy it.");
+        let Some(AbilityCondition::And { conditions }) = condition else {
+            panic!("expected a conjunction gate, got {condition:?}");
+        };
+        // CR 615.1: fully prevented damage means nothing was dealt this way.
+        assert!(
+            conditions.contains(&AbilityCondition::PreviousEffectAmount {
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Fixed { value: 0 },
+                channel: DamageChannel::Total,
+            })
+        );
+        // Guards the `TargetMatchesFilter` fallback to the triggering source.
+        assert!(conditions.contains(&AbilityCondition::HasObjectTarget));
+        // CR 704.3 + CR 400.7: present tense, not LKI — SBAs have not run yet.
+        assert!(
+            conditions.iter().any(|condition| matches!(
+                condition,
+                AbilityCondition::TargetMatchesFilter {
+                    filter: TargetFilter::Typed(filter),
+                    use_lki: false,
+                    subject_slot: None,
+                } if filter.type_filters.iter().any(
+                    |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Dragon"))
+                )
+            )),
+            "expected a Dragon recipient filter, got {conditions:?}"
+        );
+    }
+
+    /// The gate is parameterized over the recipient noun and independent of the
+    /// rider body — it is a condition production, not a per-card carve-out.
+    #[test]
+    fn leading_dealt_damage_this_way_covers_the_recipient_class() {
+        for (text, expected_body) in [
+            (
+                "If a creature is dealt damage this way, exile it.",
+                "exile it.",
+            ),
+            (
+                "If an artifact creature is dealt damage this way, destroy it.",
+                "destroy it.",
+            ),
+            (
+                "If a permanent is dealt damage this way, scry 1.",
+                "scry 1.",
+            ),
+        ] {
+            let (condition, body) =
+                strip_leading_general_conditional(text, &mut ParseContext::default());
+            assert_eq!(body, expected_body, "{text:?}");
+            assert!(
+                matches!(condition, Some(AbilityCondition::And { .. })),
+                "{text:?} must produce a gated rider, got {condition:?}"
+            );
+        }
+    }
+
+    /// The player arm keeps its own lowering (negated permanent match) and is not
+    /// claimed by the typed arm — Play with Fire's AST must be unchanged.
+    #[test]
+    fn player_dealt_damage_this_way_keeps_the_negated_permanent_shape() {
+        let condition =
+            parse_previous_effect_player_damage_condition("a player is dealt damage this way")
+                .expect("the player recipient must still lower");
+        let AbilityCondition::And { conditions } = condition else {
+            panic!("expected a conjunction gate");
+        };
+        assert!(conditions.iter().any(|condition| matches!(
+            condition,
+            AbilityCondition::Not { condition }
+                if matches!(condition.as_ref(), AbilityCondition::TargetMatchesFilter {
+                    filter: TargetFilter::Typed(filter),
+                    use_lki: true,
+                    ..
+                } if filter.type_filters == vec![TypeFilter::Permanent])
+        )));
+        assert!(
+            parse_previous_effect_typed_damage_recipient_condition(
+                "a player is dealt damage this way"
+            )
+            .is_none(),
+            "the typed arm must not claim the player recipient"
+        );
+    }
+
+    /// The `excess` channel is the lexically more specific sibling and keeps its
+    /// clause; the plain-damage arm must not shadow it.
+    #[test]
+    fn excess_damage_this_way_still_lowers_to_the_excess_channel() {
+        let (condition, body) = strip_leading_general_conditional(
+            "If a creature is dealt excess damage this way, draw a card.",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(body, "draw a card.");
+        assert_eq!(
+            condition,
+            Some(AbilityCondition::PreviousEffectAmount {
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Fixed { value: 0 },
+                channel: DamageChannel::Excess,
+            })
+        );
     }
 
     #[test]
@@ -9656,7 +9985,10 @@ mod tests {
                 .expect("Iron Man Equipment attach follow-up must be recognized");
         assert!(!is_optional, "the attach itself is mandatory once gated");
         match cond {
-            AbilityCondition::ZoneChangedThisWay { filter } => match filter {
+            AbilityCondition::ZoneChangedThisWay {
+                filter,
+                destination: None,
+            } => match filter {
                 TargetFilter::Typed(t) => assert!(
                     t.type_filters.iter().any(|f| matches!(
                         f,
@@ -9866,7 +10198,9 @@ mod tests {
         );
     }
 
-    /// CR 608.2c + CR 702.1: "If it has [keyword]" gates on FilterProp::WithKeyword.
+    /// CR 608.2c + CR 702.1 + CR 613.1f: "If it has [keyword]" gates on the
+    /// kind-level `FilterProp::HasKeywordKind` — the same off-zone-aware prop its
+    /// negative twin uses (`keyword_presence_kind` is the shared authority).
     /// Pre-fix this dropped to `None` (only the negative "it doesn't have" arm
     /// existed), dropping the else-branch.
     #[test]
@@ -9887,10 +10221,10 @@ mod tests {
             panic!("expected Typed filter for keyword");
         };
         assert!(
-            tf.properties.contains(&FilterProp::WithKeyword {
-                value: Keyword::Flying
+            tf.properties.contains(&FilterProp::HasKeywordKind {
+                value: crate::types::keywords::KeywordKind::Flying
             }),
-            "expected WithKeyword(Flying) property, got {:?}",
+            "expected HasKeywordKind(Flying) property, got {:?}",
             tf.properties
         );
     }

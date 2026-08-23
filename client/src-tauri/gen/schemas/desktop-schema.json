@@ -387,6 +387,12 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Allows shell content to read the boot-time audio-device health verdict. Granted to both the local (dev/bootstrap) and remote capabilities: the dev origin classifies as local, and the verdict is read-only.",
+          "type": "string",
+          "const": "allow-audio-boot-health",
+          "markdownDescription": "Allows shell content to read the boot-time audio-device health verdict. Granted to both the local (dev/bootstrap) and remote capabilities: the dev origin classifies as local, and the verdict is read-only."
+        },
+        {
           "description": "Allows first-party remote content to confirm legacy storage import.",
           "type": "string",
           "const": "allow-confirm-legacy-import",

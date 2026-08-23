@@ -45,8 +45,7 @@ const DRIFTGLOOM: &str =
     "When this creature enters, exile target creature an opponent controls until this \
      creature leaves the battlefield. If that creature had power 2 or less, put a +1/+1 \
      counter on this creature.";
-// Verified identical to the engine's authoritative card data (data/mtgish-cards.json:
-// PutPermanentIntoItsOwnersHand → If(IsTapped) → CreateTokens(MapToken)).
+// Verified against the engine's authoritative card data.
 const BRACKISH_BLUNDER: &str =
     "Return target creature to its owner's hand. If it was tapped, create a Map token.";
 

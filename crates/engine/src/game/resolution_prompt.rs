@@ -571,11 +571,19 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         context: _,   // SpellContext: cast-time fact snapshot, not a live choice
         description: _, // display string
         selected_mode_labels: _, // display strings, no resolution-time choice
-        min_x_value: _, // u32
-        cant_be_copied: _, // bool
-        copy_count_status: _, // status tag
-        forward_result: _, // bool
-        chosen_x: _,  // concrete cast-time X (chosen at announcement, not resolution)
+        // CR 700.2 + CR 700.2a: mode-root position marker. The modes were CHOSEN
+        // at announcement (`modal` / `mode_abilities`, folded into the verdict
+        // above); this records only where each chosen mode's instructions begin
+        // in the linearized chain. It raises no `WaitingFor` and gates no prompt.
+        modal_instruction_ordinal: _,
+        // CR 608.2c: split-remainder marker. Raises no `WaitingFor` and gates no
+        // prompt; it only decides whether a producer publishes its tracked set.
+        detached_remainder: _,
+        min_x_value: _,                  // u32
+        cant_be_copied: _,               // bool
+        copy_count_status: _,            // status tag
+        forward_result: _,               // bool
+        chosen_x: _, // concrete cast-time X (chosen at announcement, not resolution)
         cost_paid_object: _, // concrete captured-object snapshot
         cost_paid_object_ids: _, // concrete captured-object ids (issue #4948)
         effect_context_object: _, // concrete captured-object snapshot
@@ -585,7 +593,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         target_selection_mode: _, // Chosen/Random tag (announce-time)
         chosen_players: _, // concrete chosen player ids (already selected)
         replacement_applied: _, // replacement provenance set, no prompt
-        sub_link: _,  // SubAbilityLink kind tag
+        sub_link: _, // SubAbilityLink kind tag
         sibling_condition: _, // SiblingCondition replication marker, no resolution-time choice
         parent_target_missing_reason: _, // seam flag
     } = a;

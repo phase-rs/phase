@@ -12,7 +12,7 @@
  * projects their events into reactive Zustand state for the React UI.
  */
 
-import { create } from "zustand";
+import { create, type StateCreator } from "zustand";
 
 import type {
   DraftCardInstance,
@@ -66,6 +66,17 @@ import { FORMAT_DEFAULTS } from "./multiplayerStore";
 
 export type DraftRole = "host" | "guest";
 
+/**
+ * The pod SESSION's phase.
+ *
+ * Every member is the projection of an engine or adapter session status — the
+ * union of the ranges of `phaseForDraftViewStatus`, `hostStatusToPhase` and
+ * `guestStatusToPhase`. Nothing else belongs here.
+ *
+ * The Bo3 intergame window is deliberately NOT a member: the pod session is
+ * `MatchInProgress` for the whole match, individual games included. See
+ * {@link DraftPodScreen} and {@link draftPodScreen}.
+ */
 export type MultiplayerDraftPhase =
   | "idle"
   | "connecting"
@@ -74,12 +85,92 @@ export type MultiplayerDraftPhase =
   | "deckbuilding"
   | "pairing"
   | "matchInProgress"
-  | "betweenGames"
   | "roundComplete"
   | "complete"
   | "error"
   | "kicked"
   | "hostLeft";
+
+/**
+ * The screen the pod UI shows.
+ *
+ * Every member but `betweenGames` is a `MultiplayerDraftPhase` — the projection
+ * of the pod session's engine/adapter status. `betweenGames` is not a sibling of
+ * `matchInProgress`: the pod session is `MatchInProgress` for the whole match,
+ * individual games included, so the Bo3 intergame window is a refinement *within*
+ * that phase, not an alternative to it. Keeping it out of `MultiplayerDraftPhase`
+ * is what stops the five status writers (`statusChanged`, `viewUpdated`,
+ * `draftStarted` on the host; `statusChanged`, `viewUpdated` on the guest) from
+ * overwriting it — the clobber is no longer a rule to remember, it is a value
+ * `tsc` refuses to accept.
+ */
+export type DraftPodScreen = MultiplayerDraftPhase | "betweenGames";
+
+/**
+ * Single authority for which pod screen the store's state calls for.
+ *
+ * The overlay is called for exactly while BOTH hold:
+ *   1. the pod session is still in a match (`phase === "matchInProgress"`), and
+ *   2. an intergame prompt is live (`sideboardPrompt !== null`).
+ *
+ * Conjunct 1 is released by every writer that moves the pod session on — round
+ * boundary, tournament end, `Abandoned`, adapter error, `kicked`, `hostLeft`,
+ * `leave`, `reset`. Conjunct 2 is released by the four writers that end the
+ * window: `bo3GameStarted`, host `bo3GameStart`, guest `bo3GameStart`, and
+ * `disposeMatchAdapter`.
+ *
+ * Conjunct 2 is an inference from a proxy, and the proxy's lifecycle has a hole:
+ * nothing closes the window when the pod host's intergame orchestration
+ * deadlocks. Do NOT "fix" that by latching a flag — a latch is what the phase
+ * member was and what stranded the user. The deadlock's release is the viewer's,
+ * via `DraftPodPage`'s local overlay dismissal, which suppresses the *rendering*
+ * without touching this state.
+ *
+ * Keyed on `sideboardPrompt` alone, not `sideboardPrompt || playDrawPrompt`,
+ * because `playDrawPrompt` is strictly nested inside it: the writers that set it
+ * (`bo3ChoosePlayDraw`, host and guest) leave `sideboardPrompt` untouched, all
+ * three writers that set `sideboardPrompt` null `playDrawPrompt`, and every
+ * writer that clears one clears both. A `playDrawPrompt !== null` disjunct would
+ * be unreachable, so no test could discriminate it. The nesting is pinned
+ * directly instead — see the store tests.
+ */
+export function draftPodScreen(
+  state: Pick<MultiplayerDraftState, "phase" | "sideboardPrompt">,
+): DraftPodScreen {
+  return state.phase === "matchInProgress" && state.sideboardPrompt !== null
+    ? "betweenGames"
+    : state.phase;
+}
+
+/**
+ * Stable identity of the live intergame prompt, or `null` when none is live.
+ *
+ * Exists so a viewer's decision to hide the overlay can be scoped to the prompt
+ * it was made about. Returning a primitive keeps it usable as a zustand selector
+ * without `useShallow`.
+ *
+ * The third component is not redundant. One intergame window delivers TWO
+ * prompts, and they carry the same `matchId` and the same `gameNumber`:
+ * `transitionToPlayDraw` (`p2p-draft-host.ts`) sends the play/draw prompt with
+ * `gameNumber: state.gameNumber`, and `bo3ChoosePlayDraw` sets `playDrawPrompt`
+ * while leaving `sideboardPrompt` set. Without the discriminator a dismissal
+ * made about sideboarding would carry straight over and suppress the play/draw
+ * decision — a different decision, on a 10-second timer that auto-chooses
+ * (`startPlayDrawTimer` -> `autoChoosePlayDraw`).
+ *
+ * Note that `playDrawPrompt`'s nesting inside `sideboardPrompt` has OPPOSITE
+ * consequences at the two layers, and both are deliberate: `draftPodScreen`
+ * keys on `sideboardPrompt` alone because the nesting means there is only one
+ * screen answer, while this key must discriminate the prompt type precisely
+ * because the nesting means the two prompts otherwise share an identity.
+ */
+export function intergamePromptKey(
+  state: Pick<MultiplayerDraftState, "sideboardPrompt" | "playDrawPrompt">,
+): string | null {
+  return state.sideboardPrompt
+    ? `${state.sideboardPrompt.matchId}#${state.sideboardPrompt.gameNumber}#${state.playDrawPrompt ? "pd" : "sb"}`
+    : null;
+}
 
 export interface PairingInfo {
   round: number;
@@ -109,6 +200,7 @@ interface MultiplayerDraftState {
   timerRemainingMs: number | null;
   standings: StandingEntry[];
   currentRound: number;
+  nextPairingRound: number;
   pairings: PairingView[];
   /** Full deck submitted during deckbuilding (mainDeck + lands). */
   submittedDeck: string[];
@@ -146,6 +238,8 @@ interface MultiplayerDraftActions {
   submitPickWithDraftEffect: (effectCardInstanceId: string, cardInstanceIds: string[]) => Promise<void>;
   /** Both: select a card (UI highlight before confirming pick). */
   selectCard: (cardInstanceId: string | null) => void;
+  /** Both: dismiss the current error banner. */
+  clearError: () => void;
   /** Both: confirm the currently selected card as pick. */
   confirmPick: () => Promise<void>;
   /** Both: pick a card from the current pack using a deterministic draft heuristic. */
@@ -497,6 +591,7 @@ const initialState: MultiplayerDraftState = {
   timerRemainingMs: null,
   standings: [],
   currentRound: 0,
+  nextPairingRound: 1,
   pairings: [],
   submittedDeck: [],
   matchPairing: null,
@@ -506,11 +601,81 @@ const initialState: MultiplayerDraftState = {
   sideboardSubmitted: false,
 };
 
+/**
+ * Single authority for how long a pod error lives.
+ *
+ * An error belongs to the phase it was raised in; a *change* of phase retires
+ * it. Wrapping the store's setter — rather than writing `error: null` into each
+ * success arm — gives one rule for both roles: guests write `phase` from many
+ * arms of `handleGuestEvent` and cleared it at none, while the host had a
+ * single ad-hoc supersession on `pairingsGenerated`.
+ *
+ * Two properties are load-bearing and neither is incidental:
+ *
+ * - It fires only when `phase` actually *changes*. `viewUpdated` writes `phase`
+ *   on every broadcast — a pick, a seat connecting, a seat dropping — so clearing
+ *   on the mere presence of the key would erase an error the user has not read.
+ *   That form was considered and rejected when this banner was introduced.
+ * - The incoming payload wins. `kicked` and `hostLeft` write `phase` and `error`
+ *   in one `set()`; spreading the payload last preserves the reason they carry.
+ *
+ * Not covered, deliberately: a retry that does not change phase — `startMatch`
+ * fails and succeeds while `phase` is already `matchInProgress`. Dismissal
+ * (`clearError`) remains the clearing path for that case.
+ *
+ * The Bo3 intergame window is no longer a phase at all — it is derived by
+ * `draftPodScreen` from (`phase`, `sideboardPrompt`), and the three enter sites
+ * (`handleBetweenGamesPrompt` and the two `bo3SideboardPrompt` arms) write no
+ * `phase`. Three consequences for this rule, all intended:
+ *
+ * - Entering the window is not a transition, so an unread error survives it.
+ * - Neither is any `viewUpdated`/`statusChanged`/`draftStarted` broadcast
+ *   *during* the window: the phase is already `matchInProgress`, so a seat
+ *   dropping mid-window no longer retires the banner. That narrowing was this
+ *   block's own complaint and is now gone.
+ * - Nor is the Bo3 game *boundary*: `bo3GameStarted` and the two `bo3GameStart`
+ *   arms write `phase: "matchInProgress"` into a state whose phase is already
+ *   `matchInProgress`, so the equal-phase short-circuit below returns `next`
+ *   unchanged. An error raised earlier in the match therefore rides into game 2
+ *   until the pod phase actually moves. This is a deliberate delta, not a bug;
+ *   `clearError` remains the user's dismissal path.
+ *
+ * Scope: this wraps the *initializer's* setter, so it covers every write made
+ * inside this module. It is not zustand middleware and does not rebind
+ * `api.setState`, so `useMultiplayerDraftStore.setState(…)` bypasses the rule.
+ * That is fine today — production has no such call site (only tests do) — but a
+ * future production write through `setState` would not be phase-scoped.
+ */
+function clearErrorOnPhaseChange(set: SetFn): SetFn {
+  return (partial) =>
+    set((state) => {
+      const next = typeof partial === "function" ? partial(state) : partial;
+      return next.phase === undefined || next.phase === state.phase
+        ? next
+        : { error: null, ...next };
+    });
+}
+
+/** Applies {@link clearErrorOnPhaseChange} to the store's setter.
+ *
+ * Borrows the `create<T>()(middleware(initializer))` *shape* from `gameStore`,
+ * but it is not zustand middleware: it wraps only the initializer's `set`, so
+ * external `useMultiplayerDraftStore.setState(…)` calls are not phase-scoped.
+ * No production code does that (tests do); see `clearErrorOnPhaseChange`. */
+function phaseScopedError(
+  initializer: (
+    set: SetFn,
+    get: () => MultiplayerDraftState & MultiplayerDraftActions,
+  ) => MultiplayerDraftState & MultiplayerDraftActions,
+): StateCreator<MultiplayerDraftState & MultiplayerDraftActions> {
+  return (set, get) => initializer(clearErrorOnPhaseChange(set), get);
+}
+
 // ── Store ──────────────────────────────────────────────────────────────
 
 export const useMultiplayerDraftStore = create<
   MultiplayerDraftState & MultiplayerDraftActions
->()((set, get) => ({
+>()(phaseScopedError((set, get) => ({
   ...initialState,
 
   hostDraft: async (config) => {
@@ -601,6 +766,8 @@ export const useMultiplayerDraftStore = create<
   selectCard: (cardInstanceId) => {
     set({ selectedCard: cardInstanceId });
   },
+
+  clearError: () => set({ error: null }),
 
   confirmPick: async () => {
     const { selectedCard, submitPick } = get();
@@ -973,8 +1140,11 @@ export const useMultiplayerDraftStore = create<
   },
 
   handleBetweenGamesPrompt: (prompt) => {
+    // No `phase` write: entering the overlay is not a phase transition. The pod
+    // session is already `matchInProgress` here (`startMatch` writes it before
+    // the match adapter that emits this prompt exists), and the screen is
+    // derived by `draftPodScreen` from this prompt.
     set({
-      phase: "betweenGames",
       sideboardPrompt: {
         matchId: prompt.matchId,
         gameNumber: prompt.gameNumber,
@@ -1010,7 +1180,7 @@ export const useMultiplayerDraftStore = create<
     disposeMatchAdapter(set);
     set(initialState);
   },
-}));
+})));
 
 // ── Event handlers ─────────────────────────────────────────────────────
 
@@ -1090,6 +1260,7 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
         timerRemainingMs: event.view.timer_remaining_ms ?? null,
         standings: event.view.standings ?? [],
         currentRound: event.view.current_round ?? 0,
+        nextPairingRound: event.view.next_pairing_round ?? 1,
         pairings: event.view.pairings ?? [],
       });
       {
@@ -1123,7 +1294,16 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       set({ paused: false, pauseReason: null });
       break;
     case "pairingsGenerated":
-      set({ phase: "matchInProgress", currentRound: event.round, pairings: event.pairings });
+      // No `error: null` here. `clearErrorOnPhaseChange` retires the banner one
+      // step earlier, when `roundAdvanced` / `statusChanged("pairing")` moves the
+      // phase into `pairing` — off `roundComplete` at a round boundary, off
+      // `deckbuilding` at round 0 — and it does the same for guests, which this
+      // host-only arm never could.
+      set({
+        phase: "matchInProgress",
+        currentRound: event.round,
+        pairings: event.pairings,
+      });
       saveDraftPodProgress("matchInProgress");
       break;
     case "matchStart":
@@ -1132,7 +1312,9 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       break;
     case "roundAdvanced":
       disposeMatchAdapter(set);
-      set({ phase: "pairing", currentRound: event.newRound });
+      // `currentRound` is engine-owned: `viewUpdated` and `pairingsGenerated`
+      // both write it from engine state moments later.
+      set({ phase: "pairing" });
       saveDraftPodProgress("pairing");
       break;
     case "roundComplete":
@@ -1165,8 +1347,9 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       saveDraftPodProgress("matchInProgress");
       break;
     case "bo3SideboardPrompt":
+      // No `phase` write — see `draftPodScreen`. The pod session is already
+      // `matchInProgress` when a prompt arrives.
       set({
-        phase: "betweenGames",
         sideboardPrompt: {
           matchId: event.matchId,
           gameNumber: event.gameNumber,
@@ -1226,6 +1409,7 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
         timerRemainingMs: event.view.timer_remaining_ms ?? null,
         standings: event.view.standings ?? [],
         currentRound: event.view.current_round ?? 0,
+        nextPairingRound: event.view.next_pairing_round ?? 1,
         pairings: event.view.pairings ?? [],
       });
       break;
@@ -1284,8 +1468,9 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
     case "reconnectFailed":
       break;
     case "bo3SideboardPrompt":
+      // No `phase` write — see `draftPodScreen`. The pod session is already
+      // `matchInProgress` when a prompt arrives.
       set({
-        phase: "betweenGames",
         sideboardPrompt: {
           matchId: event.matchId,
           gameNumber: event.gameNumber,

@@ -1,4 +1,6 @@
-use crate::types::ability::{Effect, EffectError, EffectKind, FaceDownProfile, ResolvedAbility};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, FaceDownCause, FaceDownProfile, ResolvedAbility,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
@@ -24,61 +26,22 @@ pub fn resolve(
     let (target, profile) = match &ability.effect {
         Effect::TurnFaceDown { target, profile } => (
             target.clone(),
-            profile.clone().unwrap_or_else(FaceDownProfile::vanilla_2_2),
+            // CR 708.2: whatever characteristics the effect specifies, the
+            // ACTION here is a plain turn-face-down (Ixidron, Cyber Conversion)
+            // — no keyword action, and no marker token printed for it. The
+            // constructor default (manifest) and any authored profile both get
+            // the cause restated, so the profiled path cannot inherit a marker
+            // the rules never gave it.
+            profile
+                .clone()
+                .unwrap_or_else(FaceDownProfile::vanilla_2_2)
+                .caused_by(FaceDownCause::TurnedFaceDown),
         ),
         _ => return Ok(()),
     };
 
-    let mut changed = false;
     for id in crate::game::effects::resolved_battlefield_object_ids(state, ability, &target) {
-        let Some(obj) = state.objects.get_mut(&id) else {
-            continue;
-        };
-        // CR 708.2b: A face-down permanent can't be turned face down — nothing
-        // happens and its characteristics are unchanged.
-        if obj.face_down {
-            continue;
-        }
-        // CR 712.16 + CR 730.2j: Double-faced and melded permanents already on
-        // the battlefield can't be turned face down — nothing happens.
-        if crate::game::transform::is_double_faced_permanent(obj) {
-            continue;
-        }
-        // CR 708.2a + CR 708.8 + CR 613: Preserve the real face from the
-        // object's printed/base characteristics. Snapshotting from base fields
-        // (not the live fields) avoids baking in any continuous-effect
-        // modifications (e.g. a +1/+1 anthem that has inflated power/toughness)
-        // that are currently active. `apply_back_face_to_object` on turn-up
-        // writes these values into both live and base fields, so the layer
-        // system then reapplies all continuous effects from the correct printed
-        // baseline — not from an already-inflated one.
-        //
-        // CR 710.4 + CR 710.2: a FLIPPED flip permanent (CR 712.16 does not
-        // cover flip cards, so Ixidron / Cyber Conversion may legally turn one
-        // face down) already owns this slot: `flip::flip_permanent` stashed the
-        // NORMAL half there, and that half is what must reappear when the
-        // permanent leaves the battlefield. Overwriting it with a base snapshot
-        // — which, for a flipped permanent, is the ALTERNATIVE half — would put
-        // a flipped Kenzo the Hardhearted in the graveyard instead of Bushi
-        // Tenderfoot. Keep the flip stash; `zones::apply_zone_exit_cleanup`
-        // runs the CR 708.9 face-down restore BEFORE the CR 710.4 flip revert
-        // precisely so this single slot serves both.
-        let snapshot = match &obj.back_face {
-            Some(flip_stash) if obj.flipped => flip_stash.clone(),
-            _ => crate::game::printed_cards::snapshot_object_base_face(obj),
-        };
-        // CR 708.2a + CR 205.1a: Apply the effect-specified (or default vanilla
-        // 2/2) face-down body.
-        crate::game::morph::apply_face_down_creature_characteristics(obj, &profile);
-        obj.back_face = Some(snapshot);
-        changed = true;
-        events.push(GameEvent::TurnedFaceDown { object_id: id });
-    }
-
-    // CR 613: the new face-down copiable characteristics (Layer 1) require a
-    // full layer re-derive (mirrors the turn-face-up path).
-    if changed {
-        crate::game::layers::mark_layers_full(state);
+        turn_permanent_face_down(state, id, &profile, events);
     }
 
     events.push(GameEvent::EffectResolved {
@@ -87,6 +50,79 @@ pub fn resolve(
         subject: None,
     });
     Ok(())
+}
+
+/// CR 708.2a + CR 708.2b + CR 712.16 + CR 730.2j + CR 710.4: turn ONE face-up
+/// battlefield permanent face down — the single direct-turn authority, shared
+/// by the resolving-effect path above and the sandbox `SetFaceState` tool, so
+/// the two cannot drift on eligibility, snapshot source, cause stamping, the
+/// emitted event, or the layer re-derive.
+///
+/// Distinct from `zone_pipeline::apply_face_down_entry_profile`, which serves a
+/// permanent ENTERING the battlefield: an entrant carries no live continuous
+/// modifications (its live face IS its printed face), owns no flip stash, and
+/// cannot be an on-battlefield DFC/meld — none of the guards below apply there.
+///
+/// Returns whether the permanent actually turned; `false` covers CR 708.2b
+/// (already face down — nothing happens) and CR 712.16 / CR 730.2j
+/// (double-faced or melded — nothing happens). Callers that must NOT be silent
+/// (the sandbox tool) convert `false` into their own error.
+pub(crate) fn turn_permanent_face_down(
+    state: &mut GameState,
+    object_id: crate::types::identifiers::ObjectId,
+    profile: &FaceDownProfile,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let Some(obj) = state.objects.get_mut(&object_id) else {
+        return false;
+    };
+    // CR 708.2b: A face-down permanent can't be turned face down — nothing
+    // happens and its characteristics are unchanged.
+    if obj.face_down {
+        return false;
+    }
+    // CR 712.16 + CR 730.2j: Double-faced and melded permanents already on
+    // the battlefield can't be turned face down — nothing happens.
+    if crate::game::transform::is_double_faced_permanent(obj) {
+        return false;
+    }
+    // CR 708.2a + CR 708.8 + CR 613: Preserve the real face from the
+    // object's printed/base characteristics. Snapshotting from base fields
+    // (not the live fields) avoids baking in any continuous-effect
+    // modifications (e.g. a +1/+1 anthem that has inflated power/toughness)
+    // that are currently active. `apply_back_face_to_object` on turn-up
+    // writes these values into both live and base fields, so the layer
+    // system then reapplies all continuous effects from the correct printed
+    // baseline — not from an already-inflated one.
+    //
+    // CR 710.4 + CR 710.2: a FLIPPED flip permanent (CR 712.16 does not
+    // cover flip cards, so Ixidron / Cyber Conversion may legally turn one
+    // face down) already owns this slot: `flip::flip_permanent` stashed the
+    // NORMAL half there, and that half is what must reappear when the
+    // permanent leaves the battlefield. Overwriting it with a base snapshot
+    // — which, for a flipped permanent, is the ALTERNATIVE half — would put
+    // a flipped Kenzo the Hardhearted in the graveyard instead of Bushi
+    // Tenderfoot. Keep the flip stash; `zones::apply_zone_exit_cleanup`
+    // runs the CR 708.9 face-down restore BEFORE the CR 710.4 flip revert
+    // precisely so this single slot serves both.
+    let snapshot = match &obj.back_face {
+        Some(flip_stash) if obj.flipped => flip_stash.clone(),
+        _ => crate::game::printed_cards::snapshot_object_base_face(obj),
+    };
+    // CR 708.2a + CR 205.1a: Apply the effect-specified (or default vanilla
+    // 2/2) face-down body.
+    crate::game::morph::apply_face_down_creature_characteristics(obj, profile);
+    // The public record of what turned this permanent face down. The zone
+    // authority (`zone_pipeline::apply_face_down_entry_profile`) stamps the
+    // same field for an ENTERING face-down permanent; this authority turns a
+    // permanent already on the battlefield, so it stamps its own.
+    obj.face_down_cause = Some(profile.cause);
+    obj.back_face = Some(snapshot);
+    events.push(GameEvent::TurnedFaceDown { object_id });
+    // CR 613: the new face-down copiable characteristics (Layer 1) require a
+    // full layer re-derive (mirrors the turn-face-up path).
+    crate::game::layers::mark_layers_full(state);
+    true
 }
 
 #[cfg(test)]
@@ -149,6 +185,7 @@ mod tests {
             extra_core_types: vec![CoreType::Artifact],
             subtypes: vec!["Cyberman".to_string()],
             ward: None,
+            cause: crate::types::ability::FaceDownCause::TurnedFaceDown,
         }
     }
 

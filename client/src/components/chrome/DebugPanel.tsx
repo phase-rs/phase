@@ -18,6 +18,7 @@ import { useGameStore } from "../../stores/gameStore";
 import { getPlayerDisplayName } from "../../stores/multiplayerStore";
 import { useUiStore } from "../../stores/uiStore";
 import { DebugActions } from "./DebugActions";
+import { copyText } from "../../services/copyText";
 
 const SCROLL_THRESHOLD = 40; // px from bottom to count as "at bottom"
 
@@ -220,9 +221,10 @@ export function DebugPanel({
       setStatus({ type: "error", message: "No console entries to copy" });
       return;
     }
-    navigator.clipboard.writeText(formatEntries(visibleEntries))
-      .then(() => setStatus({ type: "success", message: `Copied ${visibleEntries.length} entries` }))
-      .catch(() => setStatus({ type: "error", message: "Failed to copy console" }));
+    void copyText(formatEntries(visibleEntries)).then((copied) =>
+      setStatus(copied
+        ? { type: "success", message: `Copied ${visibleEntries.length} entries` }
+        : { type: "error", message: "Failed to copy console" }));
   }, [visibleEntries, formatEntries]);
 
   const handleExportZip = useCallback(() => {
