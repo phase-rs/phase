@@ -574,7 +574,10 @@ custom_format_registry() -> Vec<CustomFormatDef>   // parallel to GameFormat::re
 **Lobby saves (Axis A)** produce the identical `CustomFormatDef` shape from a
 different origin — a name plus the live `FormatConfig` a host just finished
 tuning, with `legality` left at defaults (`legal_sets: None`, empty
-banned/restricted, default `LegacyRuleSet`):
+banned/restricted, default `LegacyRuleSet`) and `reprint_policy: None`
+(maintainer review round 7 — a lobby save has no authored paper-format
+reprint intent to declare; see the `CustomFormatDef` struct above for the
+full reasoning):
 
 ```text
 CustomFormatDef::from_lobby_config(name: String, config: &FormatConfig) -> CustomFormatDef
@@ -617,16 +620,28 @@ CustomFormatDef {
     label: String,                      // "Swedish Old School 93/94", parallel to FormatMetadata
     short_label: String,
     description: String,
-    reprint_policy: ReprintPolicy,      // MOVED HERE per round 6 — authoring
-                                        // intent/documentation for a human,
-                                        // never read by evaluate_custom_format
-                                        // or anything else engine-side. Lives
-                                        // beside label/description because
-                                        // it belongs to the same "describes
-                                        // the preset for a reader" category
-                                        // as they do, not beside legal_sets/
-                                        // banned/restricted/legacy, which
-                                        // ARE all genuinely enforced.
+    reprint_policy: Option<ReprintPolicy>,  // REVISED per maintainer review
+                                        // round 7: MUST be Option, not a bare
+                                        // ReprintPolicy — round 6 moved the
+                                        // field but missed that an Axis-A
+                                        // lobby save has no authored paper-
+                                        // format reprint intent at all (it
+                                        // isn't modeling any published
+                                        // ruleset), so none of the three real
+                                        // variants would be honest for it.
+                                        // `None` = "no reprint intent to
+                                        // declare" (every Axis A lobby save);
+                                        // `Some(policy)` = a real, sourced
+                                        // paper-format intent (every Axis B
+                                        // preset — old_school_93_94(),
+                                        // old_school_95(), middle_school(),
+                                        // classic_magic(), swedish_old_school()
+                                        // all set this explicitly; see §2).
+                                        // Same `Option<T>`-over-forcing-a-value
+                                        // pattern this proposal already uses
+                                        // for `legal_sets` (§1) and
+                                        // `range_of_influence` — not a new
+                                        // convention.
 }
 ```
 
@@ -666,8 +681,13 @@ not appear as a selectable format until that item resolves:
   restrict the pool); restricted = [**25** names, verbatim in CONTEXT.md —
   corrected this round from a "23" miscount]; legacy = default (all
   `false`/`Modern` — no mana burn, no damage-on-stack, no Wish/legend-rule
-  reversion). Ante-card handling and reprint policy are open per CONTEXT.md
-  items 5–6; do not encode either without resolving those first.
+  reversion). `reprint_policy` (on `CustomFormatDef`): `None` for now — NOT
+  a value pending confirmation, but the genuinely correct value until
+  CONTEXT.md Open item 6 resolves (there is no confirmed authored intent to
+  declare yet; `None` says exactly that, distinctly from a lobby save's
+  permanent `None`, which has no intent to declare, period). Ante-card
+  handling remains open per Open item 5 separately; do not encode either
+  without resolving its own item first.
 
 **Phase 2 presets — the four EC formats**, unchanged from the original design,
 now explicitly sequenced after phase 1 (§8) since they need the
@@ -681,8 +701,9 @@ mirroring how `FormatConfig::pioneer()` spreads `..Self::standard()`:
   `{ mana_burn: ManaBurnPolicy::Obsolete, ..default }` (damage timing and
   Wish scope stay `Modern`/`PostM10SideboardOnly` — EC's 93-94 lists mana
   burn as its only legacy exception). `reprint_policy` (on `CustomFormatDef`):
-  `AllowSpecialReprintSets` — RESEARCH.md's §1 subsection for this format
-  explicitly includes CE/ICE as legal reprint sources within `legal_sets`.
+  `Some(AllowSpecialReprintSets)` — RESEARCH.md's §1 subsection for this
+  format explicitly includes CE/ICE as legal reprint sources within
+  `legal_sets`.
 - `old_school_95()` — `let mut d = old_school_93_94(); d.legal_sets.extend([4ED,
   ICE, CHR, REN, HML]); d.restricted.extend([Demonic Consultation, Mana Crypt]);
   d.banned.extend([Amulet of Quoz, Timmerian Fiends]; legacy unchanged`.
@@ -690,7 +711,7 @@ mirroring how `FormatConfig::pioneer()` spreads `..Self::standard()`:
   []; banned = [25 names]; legacy = `{ mana_burn: ManaBurnPolicy::Obsolete,
   damage_timing: CombatDamageTiming::OnStack, wish_scope:
   WishOutsideGameScope::PreM10ReachesExile }`. `reprint_policy` (on the
-  `CustomFormatDef`, not `rules` — round 6): `AllowAnyPrinting`. **Per the
+  `CustomFormatDef`, not `rules` — round 6): `Some(AllowAnyPrinting)`. **Per the
   preset-readiness gate (§7, tightened this round): this preset may not be
   registered until `CombatDamageTiming::OnStack` (§4/§6, LARGE) is fully
   implemented — no partial/caveated exposure.**
@@ -700,8 +721,8 @@ mirroring how `FormatConfig::pioneer()` spreads `..Self::standard()`:
   `{ mana_burn: ManaBurnPolicy::Obsolete, damage_timing:
   CombatDamageTiming::OnStack, wish_scope:
   WishOutsideGameScope::PreM10ReachesExile }`. `reprint_policy` (on the
-  `CustomFormatDef`): `OriginalPrintingsOnly`. **Same registration block as
-  Middle School** — not selectable until `CombatDamageTiming::OnStack` lands.
+  `CustomFormatDef`): `Some(OriginalPrintingsOnly)`. **Same registration block
+  as Middle School** — not selectable until `CombatDamageTiming::OnStack` lands.
 
 Set codes must be verified against the engine's `set_catalog` (MTGJSON codes)
 during implementation — the codes above are the expected MTGJSON codes but
@@ -956,6 +977,16 @@ legality logic on the client.
   guarantee (`evaluate_custom_format` takes `&CustomFormatRules`, which has
   no such field to accidentally read) — the runtime test exists to catch a
   future regression that reintroduces the field in the wrong place.
+- **`reprint_policy` is `Option`, and every constructor sets the correct arm**
+  (new — maintainer review round 7): `CustomFormatDef::from_lobby_config`
+  always produces `reprint_policy: None` — assert this directly, not just
+  that construction succeeds, so a future edit can't silently start
+  fabricating a value for an Axis A save. Each of the five Axis B
+  constructors (`old_school_93_94`, `old_school_95`, `middle_school`,
+  `classic_magic`, and `swedish_old_school` once Open item 6 resolves)
+  produces `Some(_)` with its own specific documented variant — five
+  separate assertions, not one shared "is `Some`" check, so a copy-paste
+  preset that forgets to set its own value is caught.
 - Set-membership legality: assert cards from in-pool and out-of-pool sets pass /
   fail — for arbitrary set lists, not just the four presets.
 - **`legal_sets: None` accepts every card** (new — maintainer review round 2,

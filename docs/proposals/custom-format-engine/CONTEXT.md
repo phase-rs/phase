@@ -61,12 +61,17 @@ corrects an emphasis mistake in how they were sequenced:
   ("structural params reuse `FormatConfig`'s existing fields (life/deck/etc.)")
   rather than a first-class part of `CustomFormatRules` — that was the gap.
 - **Axis B — legality/era-rules config**: `legal_sets`, `banned`, `restricted`,
-  `reprint_policy`, `LegacyRuleSet` (mana burn, damage-on-stack, pre-M10 Wish,
+  `LegacyRuleSet` (mana burn, damage-on-stack, pre-M10 Wish,
   legend-rule scope). This is genuinely new data with no existing UI surface,
   and it's what actually makes the four EC formats *rules-correct* — no amount
   of tuning Axis A knobs produces a faithful Old School 93-94. This axis keeps
   every finding already in RESEARCH.md/CONTEXT.md/PLAN.md; none of that work
-  is discarded.
+  is discarded. (`reprint_policy` is deliberately NOT listed here — as of
+  maintainer review round 6, it lives on `CustomFormatDef`'s display-metadata
+  side, not inside the resolved `CustomFormatRules` Axis A/B split at all.
+  This paragraph originally listed it alongside the real Axis B fields when
+  it was first written in round 1, before that move — flagged by maintainer
+  review round 7 as a stale cross-reference and fixed here.)
 
 **Resolution of Open item 1**: ship (c) — one `CustomFormatDef`/
 `CustomFormatRules` schema — but enter it through Axis A first, via the
@@ -617,6 +622,32 @@ contract flagged as ambiguous, correctly:
    longer needs to "exempt" `reprint_policy`, since it isn't on the
    resolved-rules struct for the gate to see at all. See PLAN.md §1, §2,
    §3, and §7.
+
+## Maintainer review round 7 — CHANGES_REQUESTED, addressed
+
+matthewevans re-reviewed round 6's fix (commit `5098e4bd`) and confirmed:
+"Moving `ReprintPolicy` out of the resolved rules payload correctly resolves
+the prior semantic contradiction" — the structural move itself was right.
+One construction gap remained:
+
+1. **Lobby-created formats had no legitimate `reprint_policy` value (real,
+   confirmed).** Round 6 made `CustomFormatDef.reprint_policy` a required
+   `ReprintPolicy` (not `Option`), but `from_lobby_config(name,
+   &FormatConfig)` has no source for one — a lobby save has no authored
+   paper-format reprint intent at all (it isn't modeling any published
+   ruleset), so forcing any of the three real variants onto it would be
+   fabricated metadata, not an honest gap the way `legal_sets: None` etc.
+   already are for the same reason. Fixed: `reprint_policy:
+   Option<ReprintPolicy>` — `None` for `from_lobby_config` (and, for now,
+   for `swedish_old_school()` pending Open item 6), `Some(_)` with a real,
+   sourced value for every other Axis B preset. Same `Option<T>`-over-
+   forcing-a-value pattern this proposal already uses for `legal_sets` and
+   `range_of_influence` — not a new convention introduced for this one
+   field. Also fixed a stale cross-reference this round caught: CONTEXT.md's
+   original round-1 "Axis B" field list still named `reprint_policy`
+   alongside the genuinely resolved-legality fields, unchanged since before
+   round 6 moved it. See PLAN.md §1, §2, and §6 for the schema, preset, and
+   test changes.
 
 ## Open (needs a human decision — do NOT resolve unilaterally)
 
