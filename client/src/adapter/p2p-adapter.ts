@@ -45,6 +45,7 @@ import type { BrokerClient } from "../services/brokerClient";
 import type { FullSessionKey } from "../services/multiplayerSession";
 import {
   clearP2PHostSession,
+  type NativeAiDriverFault,
   type NativeP2PServerSession,
   type PersistedP2PHostSession,
   saveGame,
@@ -711,6 +712,9 @@ export class P2PHostAdapter implements EngineAdapter {
   /** First committed terminal statement fences every subsequent action and
    * reconnect. Its id is immutable for this adapter incarnation. */
   private terminalResult: P2PTerminalResult | null = null;
+  /** Native AI faults are terminal and must also be replayed to a guest that
+   * reconnects after the live PeerJS fan-out completed. */
+  private nativeAiDriverFault: NativeAiDriverFault | null = null;
   readonly supportsMatchConcede: true | undefined;
   private matchConcedeSent = false;
 
@@ -910,6 +914,7 @@ export class P2PHostAdapter implements EngineAdapter {
       this.eliminatedSeats.add(pid);
     }
     this.gameStarted = session.gameStarted;
+    this.nativeAiDriverFault = session.nativeAiDriverFault ?? null;
 
     // Every persisted guest is "disconnected" from the resumed host's
     // POV until they dial back in. Arming a grace window for each means
@@ -926,7 +931,9 @@ export class P2PHostAdapter implements EngineAdapter {
     // Mid-game resume: the game is paused until at least one guest
     // reconnects. Pre-game resume (lobby): state stays "running" since
     // `initializeGame` hasn't been called yet.
-    if (this.gameStarted && this.disconnectedSeats.size > 0) {
+    if (this.nativeAiDriverFault !== null) {
+      this.gameRunState = "terminal";
+    } else if (this.gameStarted && this.disconnectedSeats.size > 0) {
       this.gameRunState = "paused-disconnect";
     }
   }
@@ -980,6 +987,7 @@ export class P2PHostAdapter implements EngineAdapter {
       hostDeckData: this.hostDeckData,
       gameStarted: this.gameStarted,
       seatState: this.pregameSeatState,
+      ...(this.nativeAiDriverFault ? { nativeAiDriverFault: this.nativeAiDriverFault } : {}),
       ...(nativeSession ? { nativeSession } : {}),
     };
   }
@@ -1987,7 +1995,9 @@ export class P2PHostAdapter implements EngineAdapter {
     fault: { id: number; revision: number; message: string },
   ): Promise<void> {
     if (!this.ownsAuthority() || this.gameRunState === "terminal") return;
+    this.nativeAiDriverFault = fault;
     this.gameRunState = "terminal";
+    this.saveSession();
     await Promise.all([...this.guestSessions].map(async ([playerId, session]) => {
       if (this.disconnectedSeats.has(playerId)) return;
       await this.send(session, { type: "ai_driver_fault", ...fault });
@@ -2637,6 +2647,9 @@ export class P2PHostAdapter implements EngineAdapter {
         playerNames: this.playerNamesForSeats(),
         ...legalActionsToWire(legalResult),
       });
+      if (this.nativeAiDriverFault !== null) {
+        await this.send(session, { type: "ai_driver_fault", ...this.nativeAiDriverFault });
+      }
       if (this.terminalResult !== null) {
         const result = await this.terminalResultForRecipient(pid as PlayerId, state);
         await this.send(session, { type: "terminal_result", result });

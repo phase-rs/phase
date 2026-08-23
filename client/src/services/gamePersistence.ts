@@ -105,11 +105,22 @@ export interface PersistedP2PHostSession {
   gameStarted: boolean;
   seatState?: SeatState;
   /**
+   * Native AI driver failure retained so reconnecting guests receive the same
+   * terminal fault after the resumed host has restored their state snapshot.
+   */
+  nativeAiDriverFault?: NativeAiDriverFault;
+  /**
    * Present when the desktop host delegated authority to its local
    * phase-server. The server persists the game state; IndexedDB retains only
    * the opaque credentials needed to reconnect each host-local viewer.
    */
   nativeSession?: NativeP2PServerSession;
+}
+
+export interface NativeAiDriverFault {
+  id: number;
+  revision: number;
+  message: string;
 }
 
 export interface NativeP2PServerSession {

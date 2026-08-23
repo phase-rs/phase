@@ -1337,6 +1337,46 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(mockSubmitAction).not.toHaveBeenCalled();
   });
 
+  it("replays a native AI driver fault after reconnecting guest's snapshot", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+
+    const setup = (await guest.getSentMessages()).find(
+      (message): message is { type: "game_setup"; playerToken: string } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type: string }).type === "game_setup",
+    );
+    expect(setup).toBeDefined();
+    guest.simulateClose();
+
+    const fault = { id: 7, revision: 3, message: "Native AI driver stopped" };
+    const host = adapter as unknown as {
+      authoritativeRevision: number;
+      handleNativeAiDriverFault: (fault: typeof fault) => Promise<void>;
+    };
+    host.authoritativeRevision = fault.revision;
+    await host.handleNativeAiDriverFault(fault);
+
+    const reconnectedGuest = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: setup!.playerToken,
+    });
+    await flushPromises();
+
+    const messages = await reconnectedGuest.getSentMessages();
+    expect(messages.map((message) => (message as { type: string }).type)).toEqual([
+      "reconnect_ack",
+      "ai_driver_fault",
+    ]);
+    expect(messages[1]).toMatchObject({ type: "ai_driver_fault", ...fault });
+  });
+
   it("kick adds token to denylist; subsequent reconnect with same token is rejected", async () => {
     const { adapter, emitConnection } = makeHost(3, 5_000);
     await adapter.initialize();
