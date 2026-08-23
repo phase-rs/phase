@@ -120,7 +120,7 @@ describe("OptionalEffectModalContent", () => {
   });
 
   it("resets the same-card checkbox for each prompt", () => {
-    const keyed = {
+    const keyed: NonNullable<OptionalEffectWaitingFor["data"]["may_trigger_key"]> = {
       player: 0,
       source_id: 100,
       origin: { type: "Printed", trigger_index: 0 },
