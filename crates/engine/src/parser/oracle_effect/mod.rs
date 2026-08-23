@@ -34746,24 +34746,6 @@ fn try_fold_token_repeat_into_count(effect: &mut Effect, qty: &QuantityExpr) -> 
 /// (the put-continuation is an ordinary zone change), `Some(caused_by)` when one
 /// is. Verb arms are composed with `alt(tag(...))`, scanned at word boundaries,
 /// so the dimension is a single combinator rather than enumerated permutations.
-fn parse_tracked_anaphor_suffix(
-    input: &str,
-) -> nom::IResult<&str, Option<ThisWayCause>, OracleError<'_>> {
-    alt((
-        value(
-            Some(ThisWayCause::Exiled),
-            tag::<_, _, OracleError<'_>>("exiled this way"),
-        ),
-        value(Some(ThisWayCause::Sacrificed), tag("sacrificed this way")),
-        value(Some(ThisWayCause::Destroyed), tag("destroyed this way")),
-        value(Some(ThisWayCause::Milled), tag("milled this way")),
-        value(Some(ThisWayCause::Discarded), tag("discarded this way")),
-        value(Some(ThisWayCause::Returned), tag("returned this way")),
-        value(None, tag("revealed this way")),
-    ))
-    .parse(input)
-}
-
 fn tracked_anaphor_cause(before_lower: &str, is_dig_anaphor: bool) -> Option<Option<ThisWayCause>> {
     // A dig-style "from among …" anaphor is always a selection set.
     if is_dig_anaphor {
@@ -34772,18 +34754,21 @@ fn tracked_anaphor_cause(before_lower: &str, is_dig_anaphor: bool) -> Option<Opt
     // CR 608.2c: each verb phrase maps to the producer action that made the
     // member part of the set. `None` = selection set (reveal); `Some(cause)` =
     // a producer keyword action.
-    nom_primitives::scan_at_word_boundaries(before_lower, parse_tracked_anaphor_suffix)
-}
-
-/// Extract the member phrase before a tracked-set producer suffix, preserving
-/// the cause parsed by the same suffix vocabulary as `tracked_anaphor_cause`.
-/// The caller supplies text after the mass quantifier, so `each Goblin card
-/// milled this way` becomes `Goblin card` before `parse_target` sees it.
-fn tracked_anaphor_member_prefix(target_text: &str) -> Option<(&str, Option<ThisWayCause>)> {
-    let lower = target_text.to_ascii_lowercase();
-    let (prefix, caused_by, _) =
-        nom_primitives::scan_preceded(&lower, parse_tracked_anaphor_suffix)?;
-    Some((target_text[..prefix.len()].trim_end(), caused_by))
+    nom_primitives::scan_at_word_boundaries(before_lower, |input| {
+        alt((
+            value(
+                Some(ThisWayCause::Exiled),
+                tag::<_, _, OracleError<'_>>("exiled this way"),
+            ),
+            value(Some(ThisWayCause::Sacrificed), tag("sacrificed this way")),
+            value(Some(ThisWayCause::Destroyed), tag("destroyed this way")),
+            value(Some(ThisWayCause::Milled), tag("milled this way")),
+            value(Some(ThisWayCause::Discarded), tag("discarded this way")),
+            value(Some(ThisWayCause::Returned), tag("returned this way")),
+            value(None, tag("revealed this way")),
+        ))
+        .parse(input)
+    })
 }
 
 #[cfg(test)]
@@ -34868,38 +34853,18 @@ fn try_parse_put_zone_change_parts(
             // (see `parse_total_mana_value_target_constraint` in `lower.rs`).
             let stripped_mv = strip_total_mana_value_target_phrase(target_text);
             let target_text: &str = stripped_mv.as_deref().unwrap_or(target_text);
-            // CR 608.2c: Strip the mass quantifier before parsing the member
-            // filter. For tracked-set anaphors, also strip the producer-action
-            // suffix ("Goblin card milled this way") using the same generic
-            // suffix vocabulary that determines `caused_by`.
-            let tracked_caused_by =
-                tracked_anaphor_cause(before.lower, from_among_anaphor.is_some());
             // CR 400.7 + CR 110.2a: Mass put-onto-battlefield text moves every
             // matching object from the origin zone. Strip the mass quantifier
             // before target parsing so the filter mirrors the `return all`
-            // dispatcher.
-            let (is_mass, target_text) =
-                if nom_on_lower(before.original.trim(), before.lower.trim(), |input| {
+            // dispatcher instead of relying on parse_target to re-strip it.
+            let (is_mass, target_text) = if let Some((_, rest)) =
+                nom_on_lower(target_text, &target_text.to_ascii_lowercase(), |input| {
                     value((), alt((tag("all "), tag("each ")))).parse(input)
-                })
-                .is_some()
-                {
-                    let target_text =
-                        nom_on_lower(target_text, &target_text.to_ascii_lowercase(), |input| {
-                            value((), alt((tag("all "), tag("each ")))).parse(input)
-                        })
-                        .map_or(target_text, |(_, rest)| rest);
-                    let target_text = if let Some(expected_cause) = tracked_caused_by {
-                        tracked_anaphor_member_prefix(target_text)
-                            .filter(|(_, actual_cause)| *actual_cause == expected_cause)
-                            .map_or(target_text, |(prefix, _)| prefix)
-                    } else {
-                        target_text
-                    };
-                    (true, target_text)
-                } else {
-                    (false, target_text)
-                };
+                }) {
+                (true, rest)
+            } else {
+                (false, target_text)
+            };
             let up_to = parse_up_to_one_target_prefix(before.lower) || choice_count.is_some();
             // CR 608.2c + CR 608.2k + CR 406.6 + CR 607.2a: a bare plural
             // anaphor whose antecedent is the trigger's linked-exile pool
@@ -34961,6 +34926,8 @@ fn try_parse_put_zone_change_parts(
             // action-agnostic (`None`). Binding to the action (not the zone)
             // keeps a sacrifice redirected to Exile by a replacement counted.
             // The outer `Option` is the tracked-anaphor flag.
+            let tracked_caused_by =
+                tracked_anaphor_cause(before.lower, from_among_anaphor.is_some());
             let is_tracked_anaphor = tracked_caused_by.is_some();
             let target = match tracked_caused_by {
                 Some(caused_by) => TargetFilter::TrackedSetFiltered {
