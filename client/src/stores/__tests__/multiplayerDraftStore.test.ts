@@ -13,7 +13,7 @@ import {
   type DraftPodScreen,
 } from "../multiplayerDraftStore";
 import type { DraftPlayerView } from "../../adapter/draft-adapter";
-import { DraftPauseReason } from "../../network/draftProtocol";
+import { DraftPauseReason, type DraftMatchLaunch } from "../../network/draftProtocol";
 
 // ── Mocks ──────────────────────────────────────────────────────────────
 
@@ -1001,6 +1001,77 @@ describe("multiplayerDraftStore", () => {
       expect(state.error).toBe("boom");
       expect(state.phase).toBe("matchInProgress");
       expect(draftPodScreen(state)).toBe("betweenGames");
+    });
+
+    // S9 — pins the safety property that a dismissable overlay depends on:
+    // dismissing it routes the page back to the in-match view, whose
+    // `startMatch` button is therefore reachable mid-window.
+    //
+    // Nothing at that call site guards it. The property is structural, in the
+    // store: `matchAdapter` is written to `null` in exactly two places —
+    // `disposeMatchAdapter`, whose single `set()` also nulls `matchPairing`,
+    // `sideboardPrompt` and `playDrawPrompt`, and `initialState`, where the
+    // prompts are null too. So a live prompt implies a live adapter, and
+    // `startMatch`'s `if (matchAdapter) return gameId` short-circuits ahead of
+    // every branch that could build a second adapter or send a start request.
+    // The one state with `matchPairing` live and `matchAdapter` null is the
+    // window before the adapter is first built, where no prompt exists.
+    //
+    // Two reviewers have now read this seam as a live hazard, so the
+    // short-circuit is load-bearing documentation as much as code — pin it.
+    it("starts no second match while a match adapter is live", async () => {
+      await enterOverlay("host");
+      const matchPairing: DraftMatchLaunch = {
+        type: "HumanHost",
+        matchId: "bo3-1",
+        matchRoomCode: "MATCH",
+        round: 1,
+        localSeat: 0,
+        opponentSeat: 1,
+        opponentName: "Alice",
+        matchHostPeerId: "peer-0",
+        deckPayload: {
+          player: { main_deck: [], sideboard: [], commander: [] },
+          opponent: { main_deck: [], sideboard: [], commander: [] },
+          ai_decks: [],
+        },
+        matchConfig: { match_type: "Bo3" },
+        binding: {
+          podId: "pod-1",
+          matchId: "bo3-1",
+          round: 1,
+          sessionKey: "session",
+          lease: "lease",
+          nonce: "nonce",
+          revision: 1,
+          matchAuthoritySeat: 0,
+        },
+      };
+      const adapter = { dispose() {} };
+      useMultiplayerDraftStore.setState({ matchPairing, matchAdapter: adapter });
+
+      // Reach-guards. `startMatch` returns `null` on `!matchPairing` one line
+      // above the short-circuit, so without the first of these the row could
+      // pass while measuring that early return instead; without the second it
+      // would measure adapter construction.
+      const before = useMultiplayerDraftStore.getState();
+      expect(before.matchPairing).toBe(matchPairing);
+      expect(before.matchAdapter).toBe(adapter);
+      expect(before.sideboardPrompt).not.toBeNull();
+
+      const gameId = await useMultiplayerDraftStore.getState().startMatch();
+
+      const state = useMultiplayerDraftStore.getState();
+      // REVERT-FAILING (measured): delete `if (matchAdapter) return gameId;`
+      // from `startMatch` and this is the only red row in the whole client
+      // suite — control falls into the HumanHost arm, tries to stand up a
+      // second P2P host, and `startMatch` returns `null` out of its catch
+      // instead of the id of the match already in progress.
+      expect(gameId).toBe("draft-match-bo3-1");
+      expect(state.matchAdapter).toBe(adapter);
+      expect(state.sideboardPrompt).toBe(before.sideboardPrompt);
+      expect(state.playDrawPrompt).toBeNull();
+      expect(state.error).toBeNull();
     });
   });
 });
