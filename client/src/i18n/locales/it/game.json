@@ -2126,7 +2126,8 @@
     "title": "{{name}} - Effetto facoltativo",
     "yes": "Sì",
     "no": "No",
-    "dontAskAgain": "Non chiedere di nuovo in questa partita"
+    "dontAskAgain": "Non chiedere di nuovo in questa partita",
+    "dontAskAgainForSameCard": "Applica a ogni copia di questa carta"
   },
   "topOrBottom": {
     "cardFallback": "Card",

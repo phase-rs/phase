@@ -2170,7 +2170,8 @@
     "title": "{{name}} - Optional Effect",
     "yes": "Yes",
     "no": "No",
-    "dontAskAgain": "Don't ask again this game"
+    "dontAskAgain": "Don't ask again this game",
+    "dontAskAgainForSameCard": "Apply this to every copy of this card"
   },
   "topOrBottom": {
     "cardFallback": "Card",

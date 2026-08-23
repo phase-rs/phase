@@ -8,6 +8,7 @@ type OptionalEffectWaitingFor = Extract<WaitingFor, { type: "OptionalEffectChoic
 
 function optionalWaitingFor(
   mayTriggerKey?: OptionalEffectWaitingFor["data"]["may_trigger_key"],
+  sameCardAvailable = false,
 ): OptionalEffectWaitingFor {
   return {
     type: "OptionalEffectChoice",
@@ -16,6 +17,7 @@ function optionalWaitingFor(
       source_id: 100,
       description: "You may gain 1 life.",
       may_trigger_key: mayTriggerKey,
+      same_card_may_trigger_choice_available: sameCardAvailable,
     },
   };
 }
@@ -75,7 +77,7 @@ describe("OptionalEffectModalContent", () => {
 
     expect(dispatch).toHaveBeenCalledWith({
       type: "DecideOptionalEffectAndRemember",
-      data: { choice: { type: "Accept" } },
+      data: { choice: { type: "Accept" }, scope: { type: "ExactInstance" } },
     });
 
     cleanup();
@@ -92,7 +94,50 @@ describe("OptionalEffectModalContent", () => {
 
     expect(declineDispatch).toHaveBeenCalledWith({
       type: "DecideOptionalEffectAndRemember",
-      data: { choice: { type: "Decline" } },
+      data: { choice: { type: "Decline" }, scope: { type: "ExactInstance" } },
     });
+  });
+
+  it("shows the engine-gated same-card checkbox and dispatches that scope", () => {
+    const dispatch = renderModal(
+      optionalWaitingFor(
+        {
+          player: 0,
+          source_id: 100,
+          origin: { type: "Printed", trigger_index: 0 },
+        },
+        true,
+      ),
+    );
+
+    fireEvent.click(screen.getByLabelText("Apply this to every copy of this card"));
+    fireEvent.click(screen.getByRole("button", { name: "Yes" }));
+
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "DecideOptionalEffectAndRemember",
+      data: { choice: { type: "Accept" }, scope: { type: "SameCard" } },
+    });
+  });
+
+  it("resets the same-card checkbox for each prompt", () => {
+    const keyed = {
+      player: 0,
+      source_id: 100,
+      origin: { type: "Printed", trigger_index: 0 },
+    };
+    const { rerender } = render(
+      <OptionalEffectModalContent waitingFor={optionalWaitingFor(keyed, true)} dispatch={vi.fn()} />,
+    );
+
+    fireEvent.click(screen.getByLabelText("Apply this to every copy of this card"));
+    expect(screen.getByLabelText("Apply this to every copy of this card")).toBeChecked();
+
+    rerender(
+      <OptionalEffectModalContent
+        waitingFor={{ ...optionalWaitingFor(keyed, true), data: { ...optionalWaitingFor(keyed, true).data, source_id: 101 } }}
+        dispatch={vi.fn()}
+      />,
+    );
+    expect(screen.getByLabelText("Apply this to every copy of this card")).not.toBeChecked();
   });
 });

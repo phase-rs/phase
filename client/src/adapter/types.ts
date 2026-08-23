@@ -831,6 +831,8 @@ export type CastChoice = { type: "Cast" } | { type: "Decline" };
 
 export type AutoMayChoice = { type: "Accept" } | { type: "Decline" };
 
+export type MayTriggerAutoChoiceScope = { type: "ExactInstance" } | { type: "SameCard" };
+
 export type MayTriggerOrigin =
   | { type: "Definition"; definition_ref: TriggerDefinitionRef }
   | { type: "Printed"; trigger_index: number }
@@ -842,17 +844,32 @@ export interface MayTriggerAutoChoiceKey {
   origin: MayTriggerOrigin;
 }
 
+export interface PrintedCardRef {
+  oracle_id: string;
+  face_name: string;
+}
+
+export type MayTriggerAutoChoiceSelector =
+  | {
+      type: "ExactInstance";
+      data: { player: PlayerId; source_id: ObjectId; origin: MayTriggerOrigin };
+    }
+  | {
+      type: "SameCard";
+      data: { player: PlayerId; printed_ref: PrintedCardRef; printed_occurrence: number };
+    };
+
 export interface MayTriggerAutoChoiceRecord {
-  key: MayTriggerAutoChoiceKey;
+  selector: MayTriggerAutoChoiceSelector;
   choice: AutoMayChoice;
 }
 
 // CR 603.5: The mutation a `SetMayTriggerAutoChoice` action performs on the
 // acting player's stored "don't ask again" auto-choices for optional ("may")
-// triggers. `Remove` echoes a stored key verbatim; `ClearAll` drops every
+// triggers. `Remove` echoes a stored selector verbatim; `ClearAll` drops every
 // stored auto-choice belonging to the acting player.
 export type MayTriggerAutoChoiceOp =
-  | { type: "Remove"; data: { key: MayTriggerAutoChoiceKey } }
+  | { type: "Remove"; data: { selector: MayTriggerAutoChoiceSelector } }
   | { type: "ClearAll" };
 
 // CR 603.3b: A live `OrderTriggers` answer is the only way to save a
@@ -1829,7 +1846,7 @@ export type WaitingFor =
     }
   | { type: "CollectEvidenceChoice"; data: { player: PlayerId; minimum_mana_value: number; cards: ObjectId[]; resume: unknown } }
   | { type: "HarmonizeTapChoice"; data: { player: PlayerId; eligible_creatures: ObjectId[]; pending_cast: PendingCast } }
-  | { type: "OptionalEffectChoice"; data: { player: PlayerId; source_id: ObjectId; description?: string; may_trigger_key?: MayTriggerAutoChoiceKey } }
+  | { type: "OptionalEffectChoice"; data: { player: PlayerId; source_id: ObjectId; description?: string; may_trigger_key?: MayTriggerAutoChoiceKey; same_card_may_trigger_choice_available?: boolean } }
   | { type: "PairChoice"; data: { player: PlayerId; source_id: ObjectId; choices: ObjectId[] } }
   | { type: "OpponentMayChoice"; data: { player: PlayerId; source_id: ObjectId; description?: string; remaining: PlayerId[] } }
   | { type: "LoopShortcut"; data: { proposer: PlayerId; predicted_winner: PlayerId | null; certificate: LoopCertificate; schema: ShortcutDecisionSchema } }
@@ -2341,7 +2358,7 @@ export type GameAction =
   | { type: "CastSpellAsWebSlinging"; data: { hand_object: ObjectId; card_id: CardId; creature_to_return: ObjectId; payment_mode?: CastPaymentMode } }
   | { type: "ActivateNinjutsu"; data: { ninjutsu_object_id: ObjectId; creature_to_return: ObjectId } }
   | { type: "DecideOptionalEffect"; data: { accept: boolean } }
-  | { type: "DecideOptionalEffectAndRemember"; data: { choice: AutoMayChoice } }
+  | { type: "DecideOptionalEffectAndRemember"; data: { choice: AutoMayChoice; scope?: MayTriggerAutoChoiceScope } }
   | { type: "PayUnlessCost"; data: { pay: boolean } }
   // CR 118.12a: Choose a branch of a disjunctive unless-cost. The
   // discriminant is `Decline` (effect happens) or `Pay { index }` (the

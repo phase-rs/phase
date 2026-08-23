@@ -7245,7 +7245,9 @@ pub(crate) fn stored_may_answer(
     ability: &ResolvedAbility,
 ) -> Option<AutoMayChoice> {
     let gate = upfront_optional_gate(state, ability, OptionalFeasibility::Probe)?;
-    state.may_trigger_auto_choice(gate.key.as_ref()?)
+    let key = gate.key.as_ref()?;
+    let same_card = state.same_card_may_trigger_auto_choice_selector(key);
+    state.may_trigger_auto_choice_for_prompt(key, same_card.as_ref())
 }
 
 /// CR 603.12a + CR 608.2c: True when this ability is a "you may pay {cost} up to
@@ -7360,6 +7362,7 @@ fn drive_sequential_repeated_optional_payment(
         source_id: ability.source_id,
         description: ability.description.clone(),
         may_trigger_key: None,
+        same_card_may_trigger_choice_available: false,
     };
     Ok(())
 }
@@ -7437,6 +7440,7 @@ pub(super) fn resolve_repeated_optional_payment_choice(
                     source_id,
                     description,
                     may_trigger_key: None,
+                    same_card_may_trigger_choice_available: false,
                 };
                 return Ok(());
             }
@@ -11240,8 +11244,13 @@ fn resolve_chain_body(
         // authority with `Probe` and run the feasibility clone a second time, which is the
         // exact defect `OptionalFeasibility` exists to prevent. Same key, same store, same
         // answer, one probe.
+        let same_card_may_trigger_choice_available = may_trigger_key
+            .as_ref()
+            .is_some_and(|key| state.may_trigger_same_card_choice_available(key));
         if let Some(ref key) = may_trigger_key {
-            if let Some(choice) = state.may_trigger_auto_choice(key) {
+            let same_card = state.same_card_may_trigger_auto_choice_selector(key);
+            if let Some(choice) = state.may_trigger_auto_choice_for_prompt(key, same_card.as_ref())
+            {
                 resolve_optional_effect_decision(
                     state,
                     ability.clone(),
@@ -11277,6 +11286,7 @@ fn resolve_chain_body(
                     source_id: ability.source_id,
                     description,
                     may_trigger_key,
+                    same_card_may_trigger_choice_available,
                 },
             )
             .map_err(|error| EffectError::InvalidParam(error.to_string()))?;

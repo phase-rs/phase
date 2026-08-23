@@ -8001,12 +8001,9 @@ fn apply_action(
     // player can only mutate their own preferences regardless of the payload.
     if let GameAction::SetMayTriggerAutoChoice { op } = &action {
         match op {
-            MayTriggerAutoChoiceOp::Remove { key } => {
-                let actor_key = MayTriggerAutoChoiceKey {
-                    player: actor,
-                    ..key.clone()
-                };
-                state.remove_may_trigger_auto_choice(&actor_key);
+            MayTriggerAutoChoiceOp::Remove { selector } => {
+                let actor_selector = selector.for_player(actor);
+                state.remove_may_trigger_auto_choice_selector(&actor_selector);
             }
             MayTriggerAutoChoiceOp::ClearAll => {
                 state.clear_may_trigger_auto_choices(actor);
@@ -9832,11 +9829,12 @@ fn apply_action(
         }
         (
             waiting_for @ WaitingFor::OptionalEffectChoice { .. },
-            GameAction::DecideOptionalEffectAndRemember { choice },
-        ) => engine_payment_choices::handle_optional_effect_choice_and_remember(
+            GameAction::DecideOptionalEffectAndRemember { choice, scope },
+        ) => engine_payment_choices::handle_optional_effect_choice_and_remember_with_scope(
             state,
             waiting_for.clone(),
             choice,
+            scope,
             &mut events,
         )?,
         // CR 608.2d: Opponent decided on "any opponent may" effect.
@@ -13117,8 +13115,14 @@ pub(super) fn begin_pending_trigger_target_selection(
                     source_id,
                     origin,
                 });
+                let same_card_may_trigger_choice_available = may_trigger_key
+                    .as_ref()
+                    .is_some_and(|key| state.may_trigger_same_card_choice_available(key));
                 if let Some(ref key) = may_trigger_key {
-                    if let Some(choice) = state.may_trigger_auto_choice(key) {
+                    let same_card = state.same_card_may_trigger_auto_choice_selector(key);
+                    if let Some(choice) =
+                        state.may_trigger_auto_choice_for_prompt(key, same_card.as_ref())
+                    {
                         match choice {
                             AutoMayChoice::Decline => {
                                 drop_mid_construction_pending_trigger(state);
@@ -13145,6 +13149,7 @@ pub(super) fn begin_pending_trigger_target_selection(
                     source_id,
                     description: trigger_description,
                     may_trigger_key,
+                    same_card_may_trigger_choice_available,
                 }));
             }
 
@@ -19182,6 +19187,7 @@ mod stage2_injector_tests {
             source_id: src,
             description: None,
             may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
         };
         (state, src)
     }

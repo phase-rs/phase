@@ -2242,11 +2242,31 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
         actions.extend([
             GameAction::DecideOptionalEffectAndRemember {
                 choice: AutoMayChoice::Accept,
+                scope: crate::types::game_state::MayTriggerAutoChoiceScope::ExactInstance,
             },
             GameAction::DecideOptionalEffectAndRemember {
                 choice: AutoMayChoice::Decline,
+                scope: crate::types::game_state::MayTriggerAutoChoiceScope::ExactInstance,
             },
         ]);
+        if matches!(
+            &state.waiting_for,
+            WaitingFor::OptionalEffectChoice {
+                same_card_may_trigger_choice_available: true,
+                ..
+            }
+        ) {
+            actions.extend([
+                GameAction::DecideOptionalEffectAndRemember {
+                    choice: AutoMayChoice::Accept,
+                    scope: crate::types::game_state::MayTriggerAutoChoiceScope::SameCard,
+                },
+                GameAction::DecideOptionalEffectAndRemember {
+                    choice: AutoMayChoice::Decline,
+                    scope: crate::types::game_state::MayTriggerAutoChoiceScope::SameCard,
+                },
+            ]);
+        }
     }
 
     // Build spell costs map. The frontend display layer needs the

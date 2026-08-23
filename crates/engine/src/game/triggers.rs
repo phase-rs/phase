@@ -15489,6 +15489,7 @@ pub mod tests {
             source_id,
             description: None,
             may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
         };
 
         let mut events_out = Vec::new();
@@ -34708,6 +34709,7 @@ pub mod tests {
                 source_id: ObjectId(1),
                 description: None,
                 may_trigger_key: None,
+                same_card_may_trigger_choice_available: false,
             },
             WaitingFor::AbilityModeChoice {
                 player: PlayerId(0),
@@ -35236,6 +35238,7 @@ pub mod tests {
                 source_id: observer,
                 description: Some("paused".to_string()),
                 may_trigger_key: None,
+                same_card_may_trigger_choice_available: false,
             }
         };
         (state, events)

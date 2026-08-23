@@ -30,8 +30,8 @@ use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::game_state::{
     ActionResult, AutoMayChoice, CastPaymentMode, CastingVariant, CombatDamageAssignmentMode,
     ConvokeMode, CounterCostChoice, CounterMoveChoice, CounterRemoveChoice, GameState, ManaChoice,
-    ManaChoiceContext, ManaChoicePrompt, OutsideGameChoiceSource, PayCostKind, PileSide,
-    PtDirection, ShardChoice, ShardOptions, TargetEffectDetail, WaitingFor,
+    ManaChoiceContext, ManaChoicePrompt, MayTriggerAutoChoiceScope, OutsideGameChoiceSource,
+    PayCostKind, PileSide, PtDirection, ShardChoice, ShardOptions, TargetEffectDetail, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::interaction::{
@@ -4176,6 +4176,13 @@ fn auto_may_choice_code(choice: AutoMayChoice) -> &'static str {
     }
 }
 
+fn auto_may_scope_code(scope: MayTriggerAutoChoiceScope) -> &'static str {
+    match scope {
+        MayTriggerAutoChoiceScope::ExactInstance => "exactInstance",
+        MayTriggerAutoChoiceScope::SameCard => "sameCard",
+    }
+}
+
 fn dungeon_code(dungeon: DungeonId) -> &'static str {
     match dungeon {
         DungeonId::LostMineOfPhandelver => "lostMineOfPhandelver",
@@ -4822,10 +4829,14 @@ fn project_action_payload(
                 push_value_surface(surfaces, InteractionRoleCode::Splice, "decline");
             }
         }
-        GameAction::DecideOptionalEffectAndRemember { choice } => push_value_surface(
+        GameAction::DecideOptionalEffectAndRemember { choice, scope } => push_value_surface(
             surfaces,
             InteractionRoleCode::Choice,
-            auto_may_choice_code(*choice),
+            format!(
+                "{}:{}",
+                auto_may_choice_code(*choice),
+                auto_may_scope_code(*scope)
+            ),
         ),
         GameAction::ChooseUnlessCostBranch { choice } => match choice {
             UnlessCostBranch::Decline => {

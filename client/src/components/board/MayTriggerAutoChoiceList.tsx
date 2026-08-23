@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 
-import type { MayTriggerAutoChoiceKey } from "../../adapter/types.ts";
+import type { MayTriggerAutoChoiceSelector } from "../../adapter/types.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { PopoverMenu } from "../menu/PopoverMenu.tsx";
@@ -13,7 +13,7 @@ import { PopoverMenu } from "../menu/PopoverMenu.tsx";
  * `PriorityYieldList` so the action rail height stays constant no matter how
  * many auto-choices accumulate. Purely a display + dispatch surface: the engine
  * owns the state (redacted per-viewer in `may_trigger_auto_choices`), enforces
- * actor scoping on the write, and each remove echoes the stored key verbatim.
+ * actor scoping on the write, and each remove echoes the stored selector verbatim.
  */
 export function MayTriggerAutoChoiceList() {
   const { t } = useTranslation("game");
@@ -22,16 +22,7 @@ export function MayTriggerAutoChoiceList() {
 
   if (!choices || choices.length === 0) return null;
 
-  const rowKey = (key: MayTriggerAutoChoiceKey) => {
-    switch (key.origin.type) {
-      case "Printed":
-        return `${key.player}-${key.source_id}-p${key.origin.trigger_index}`;
-      case "Keyword":
-        return `${key.player}-${key.source_id}-k${key.origin.keyword}`;
-      case "Definition":
-        return `${key.player}-${key.source_id}-d${JSON.stringify(key.origin.definition_ref)}`;
-    }
-  };
+  const rowKey = (selector: MayTriggerAutoChoiceSelector) => JSON.stringify(selector);
 
   return (
     <PopoverMenu
@@ -79,7 +70,9 @@ export function MayTriggerAutoChoiceList() {
           <ul className="flex flex-col">
             {choices.map((record) => {
               const sourceName =
-                objects?.[record.key.source_id]?.name ??
+                (record.selector.type === "ExactInstance"
+                  ? objects?.[record.selector.data.source_id]?.name
+                  : record.selector.data.printed_ref.face_name) ??
                 t("mayTriggerAutoChoice.sourceFallback");
               const decision =
                 record.choice.type === "Accept"
@@ -87,7 +80,7 @@ export function MayTriggerAutoChoiceList() {
                   : t("mayTriggerAutoChoice.decline");
               return (
                 <li
-                  key={rowKey(record.key)}
+                  key={rowKey(record.selector)}
                   className="flex items-center justify-between gap-2 px-3 py-1.5"
                 >
                   <span className="truncate text-sm text-gray-200">
@@ -102,7 +95,7 @@ export function MayTriggerAutoChoiceList() {
                     onClick={() =>
                       dispatchAction({
                         type: "SetMayTriggerAutoChoice",
-                        data: { op: { type: "Remove", data: { key: record.key } } },
+                        data: { op: { type: "Remove", data: { selector: record.selector } } },
                       })
                     }
                   >

@@ -3273,7 +3273,7 @@ fn actor_scoped_preferences_do_not_advance_active_auto_pass() {
                 state
                     .may_trigger_auto_choices
                     .iter()
-                    .all(|record| record.key.player != PlayerId(1)),
+                    .all(|record| record.selector.player() != PlayerId(1)),
                 "SetMayTriggerAutoChoice::ClearAll must clear the actor's choices"
             ),
             GameAction::SetTriggerOrderTemplate { .. } => assert!(
@@ -3541,7 +3541,9 @@ fn set_may_trigger_auto_choice_remove_revokes_actor_choice() {
         &mut state,
         PlayerId(0),
         GameAction::SetMayTriggerAutoChoice {
-            op: MayTriggerAutoChoiceOp::Remove { key },
+            op: MayTriggerAutoChoiceOp::Remove {
+                selector: crate::types::game_state::MayTriggerAutoChoiceSelector::exact(key),
+            },
         },
     )
     .expect("SetMayTriggerAutoChoice is legal in any state");
@@ -3586,7 +3588,7 @@ fn set_may_trigger_auto_choice_clear_all_is_actor_scoped() {
         "ClearAll drops only the acting player's auto-choices"
     );
     assert_eq!(
-        state.may_trigger_auto_choices[0].key.player,
+        state.may_trigger_auto_choices[0].selector.player(),
         PlayerId(1),
         "another player's auto-choice survives an actor's ClearAll"
     );
@@ -3622,7 +3624,9 @@ fn set_may_trigger_auto_choice_remove_cannot_target_another_player() {
         PlayerId(1),
         GameAction::SetMayTriggerAutoChoice {
             op: MayTriggerAutoChoiceOp::Remove {
-                key: p0_key.clone(),
+                selector: crate::types::game_state::MayTriggerAutoChoiceSelector::exact(
+                    p0_key.clone(),
+                ),
             },
         },
     )
