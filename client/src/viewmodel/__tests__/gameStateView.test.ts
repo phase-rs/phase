@@ -42,6 +42,7 @@ import {
   isFaceDownExileCardVisibleToViewer,
   isOneOnOne,
   isSplitBoardActive,
+  resolveMultiplayerBoardLayout,
   resolveFocusedOpponent,
   shouldRenderFocusedOpponentTopRow,
 } from "../gameStateView";
@@ -153,6 +154,13 @@ describe("getVisibleBoardPlayerIds", () => {
 });
 
 describe("split board ownership helpers", () => {
+  it("resolves split only at desktop multiplayer widths", () => {
+    expect(resolveMultiplayerBoardLayout("split", 3, true)).toBe("focused");
+    expect(resolveMultiplayerBoardLayout("split", 3, false)).toBe("split");
+    expect(resolveMultiplayerBoardLayout("split", 2, false)).toBe("focused");
+    expect(resolveMultiplayerBoardLayout("focused", 4, false)).toBe("focused");
+  });
+
   it("activates split layout only for 3+ player games", () => {
     expect(isSplitBoardActive("split", 4)).toBe(true);
     expect(isSplitBoardActive("split", 2)).toBe(false);

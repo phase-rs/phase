@@ -29,6 +29,9 @@ interface GameMenuProps {
   onToggleAiHand: () => void;
   multiplayerBoardLayout?: MultiplayerBoardLayout;
   onToggleMultiplayerBoardLayout?: () => void;
+  showMultiplayerSplitLayoutNudge?: boolean;
+  onTryMultiplayerSplitLayout?: () => void;
+  onDismissMultiplayerSplitLayoutNudge?: () => void;
   onSettingsClick: () => void;
   onHelpClick: () => void;
   onConcede?: () => void;
@@ -59,6 +62,9 @@ export function GameMenu({
   onToggleAiHand,
   multiplayerBoardLayout,
   onToggleMultiplayerBoardLayout,
+  showMultiplayerSplitLayoutNudge = false,
+  onTryMultiplayerSplitLayout,
+  onDismissMultiplayerSplitLayoutNudge,
   onSettingsClick,
   onHelpClick,
   onConcede,
@@ -169,6 +175,37 @@ export function GameMenu({
               }}
             />
           )}
+          {showMultiplayerSplitLayoutNudge &&
+            onTryMultiplayerSplitLayout &&
+            onDismissMultiplayerSplitLayoutNudge && (
+              <div className="mx-2 mb-1 rounded-md border border-cyan-300/20 bg-cyan-300/8 px-3 py-2">
+                <p className="text-xs leading-4 text-slate-200">
+                  {t("gameMenu.multiplayerSplitLayoutNudge.message")}
+                </p>
+                <div className="mt-2 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onDismissMultiplayerSplitLayoutNudge();
+                      setOpen(false);
+                    }}
+                    className="rounded px-2 py-1 text-xs font-semibold text-slate-300 transition-colors hover:bg-white/10 hover:text-white"
+                  >
+                    {t("gameMenu.multiplayerSplitLayoutNudge.dismiss")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onTryMultiplayerSplitLayout();
+                      setOpen(false);
+                    }}
+                    className="rounded bg-cyan-300 px-2 py-1 text-xs font-semibold text-slate-950 transition-colors hover:bg-cyan-200"
+                  >
+                    {t("gameMenu.multiplayerSplitLayoutNudge.trySplit")}
+                  </button>
+                </div>
+              </div>
+            )}
           <div className="my-1 border-t border-gray-700/70" />
           <MenuSectionLabel label={t("gameMenu.sections.tools")} />
           {showReportCard && onReportCardClick && (

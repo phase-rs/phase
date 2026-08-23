@@ -32,8 +32,9 @@ let capturedFormatConfig: FormatConfig | undefined;
 let capturedOnWsEvent: ((event: WsAdapterEvent) => void) | undefined;
 let capturedOnP2PEvent: ((event: P2PAdapterEvent) => void) | undefined;
 
-const { mockClearPromptOverlayState, mockSetGameState, storeOverrides } = vi.hoisted(() => ({
+const { mockClearPromptOverlayState, mockIsMobile, mockSetGameState, storeOverrides } = vi.hoisted(() => ({
   mockClearPromptOverlayState: vi.fn(),
+  mockIsMobile: vi.fn(() => false),
   mockSetGameState: vi.fn(),
   // Mutable slice of the mocked game store. Defaults match the previous
   // hardcoded values, so every pre-existing test is unaffected; tests that
@@ -194,7 +195,7 @@ vi.mock("../../hooks/usePlayerId", () => ({
 }));
 
 vi.mock("../../hooks/useIsMobile", () => ({
-  useIsMobile: () => false,
+  useIsMobile: () => mockIsMobile(),
   useIsCompactHeight: () => false,
 }));
 
@@ -307,7 +308,11 @@ beforeEach(() => {
   storeOverrides.gameState = null;
   storeOverrides.gameMode = null;
   storeOverrides.waitingFor = null;
-  usePreferencesStore.setState({ multiplayerBoardLayout: "focused" });
+  mockIsMobile.mockReturnValue(false);
+  usePreferencesStore.setState({
+    multiplayerBoardLayout: "focused",
+    multiplayerSplitLayoutNudgeDismissed: true,
+  });
   capturedConcedeDialogProps = undefined;
   vi.clearAllMocks();
 });
@@ -460,6 +465,7 @@ describe("GamePage — cEDH bracket-violation blocking modal", () => {
 
 describe("GamePage — multiplayer board layout during board choices", () => {
   it("forces split visibility for an authorized untap choice at a three-player table", () => {
+    mockIsMobile.mockReturnValue(true);
     const untapCandidate = gameObjectFactory
       .creature(2, 2)
       .onBattlefield()
@@ -499,6 +505,98 @@ describe("GamePage — multiplayer board layout during board choices", () => {
 
     expect(screen.getByTestId("game-board-layout")).toHaveAttribute("data-layout", "focused");
   });
+
+  it("resolves a raw split preference to focused on mobile outside an untap choice", () => {
+    mockIsMobile.mockReturnValue(true);
+    usePreferencesStore.setState({ multiplayerBoardLayout: "split" });
+    const permanent = gameObjectFactory
+      .creature(2, 2)
+      .onBattlefield()
+      .withId(10)
+      .ownedBy(0)
+      .build();
+    const gameState = gameStateFactory
+      .withPlayers(0, 1, 2)
+      .withObjects(permanent)
+      .priority(0)
+      .build();
+    storeOverrides.gameState = gameState;
+    storeOverrides.waitingFor = gameState.waiting_for;
+
+    renderGamePage();
+
+    expect(screen.getByTestId("game-board-layout")).toHaveAttribute("data-layout", "focused");
+  });
+
+  it("offers the wide focused-layout nudge without writing preferences on render", () => {
+    const permanent = gameObjectFactory
+      .creature(2, 2)
+      .onBattlefield()
+      .withId(10)
+      .ownedBy(0)
+      .build();
+    const gameState = gameStateFactory
+      .withPlayers(0, 1, 2)
+      .withObjects(permanent)
+      .priority(0)
+      .build();
+    storeOverrides.gameState = gameState;
+    storeOverrides.waitingFor = gameState.waiting_for;
+    usePreferencesStore.setState({
+      multiplayerBoardLayout: "focused",
+      multiplayerSplitLayoutNudgeDismissed: false,
+    });
+
+    renderGamePage();
+
+    expect(capturedGameMenuProps?.showMultiplayerSplitLayoutNudge).toBe(true);
+    expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("focused");
+    expect(usePreferencesStore.getState().multiplayerSplitLayoutNudgeDismissed).toBe(false);
+
+    act(() => (capturedGameMenuProps?.onTryMultiplayerSplitLayout as () => void)());
+    expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("split");
+    expect(usePreferencesStore.getState().multiplayerSplitLayoutNudgeDismissed).toBe(false);
+  });
+
+  it("dismisses the nudge without changing the raw layout", () => {
+    const gameState = gameStateFactory.withPlayers(0, 1, 2).priority(0).build();
+    storeOverrides.gameState = gameState;
+    storeOverrides.waitingFor = gameState.waiting_for;
+    usePreferencesStore.setState({
+      multiplayerBoardLayout: "focused",
+      multiplayerSplitLayoutNudgeDismissed: false,
+    });
+
+    renderGamePage();
+
+    act(() => (capturedGameMenuProps?.onDismissMultiplayerSplitLayoutNudge as () => void)());
+
+    expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("focused");
+    expect(usePreferencesStore.getState().multiplayerSplitLayoutNudgeDismissed).toBe(true);
+  });
+
+  it.each([
+    ["mobile", true, "focused", false],
+    ["raw split", false, "split", false],
+    ["dismissed focused", false, "focused", true],
+  ] as const)(
+    "withholds the nudge for a %s cohort",
+    (_cohort, isMobile, multiplayerBoardLayout, multiplayerSplitLayoutNudgeDismissed) => {
+      const gameState = gameStateFactory.withPlayers(0, 1, 2).priority(0).build();
+      storeOverrides.gameState = gameState;
+      storeOverrides.waitingFor = gameState.waiting_for;
+      mockIsMobile.mockReturnValue(isMobile);
+      usePreferencesStore.setState({
+        multiplayerBoardLayout,
+        multiplayerSplitLayoutNudgeDismissed,
+      });
+
+      renderGamePage();
+
+      expect(capturedGameMenuProps?.showMultiplayerSplitLayoutNudge).toBe(false);
+      expect(capturedGameMenuProps?.onTryMultiplayerSplitLayout).toBeUndefined();
+    },
+  );
 });
 
 describe("GamePage — toast surface", () => {
