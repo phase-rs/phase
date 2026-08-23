@@ -284,6 +284,102 @@ fn uncrewed_vehicle_leg_is_targetable_but_small_creature_is_not() {
     outcome.assert_zone(&[vehicle], Zone::Graveyard);
 }
 
+/// Row 17: the EXCLUSION-ONLY leg shape. CR 205.4b: "nonartifact permanent"
+/// scopes the disjunct by exclusion, producing `[Permanent, Non(Artifact)]` —
+/// no creature noun anywhere in it. An enchantment satisfies that leg and CR
+/// 208.3 gives it no power, so distributing "with power 4 or greater" there
+/// makes `pt_value_from_pair`'s `power.unwrap_or(0)` reject every noncreature
+/// nonartifact permanent — silently deleting the entire first half of the
+/// disjunction, exactly the Make Your Move defect wearing a negation.
+///
+/// NOTE ON THE DISCRIMINATOR. The natural pairing — "a small creature must be
+/// rejected" — is NOT assertable for this shape, and asserting it would be
+/// wrong: a 2/2 creature IS a nonartifact permanent, so once the first leg is
+/// correctly unrestricted the small creature becomes legal THROUGH THAT LEG
+/// (CR 115.1a). That is the printed meaning of "target nonartifact permanent or
+/// creature with power 4 or greater" — the first disjunct carries no power
+/// restriction at all. The reach-guard therefore uses an ARTIFACT, which both
+/// legs exclude (`distribute_neg_type_filters_to_or` shares `Non(Artifact)`
+/// across the disjunction), proving the filter still discriminates rather than
+/// matching everything.
+///
+/// No printed card prints this wording; like the Vehicle row above it is a
+/// structural fixture for the class.
+#[test]
+fn exclusion_only_leg_admits_a_powerless_enchantment_but_still_excludes_artifacts() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Negation Class Guard",
+            true,
+            "Destroy target nonartifact permanent or creature with power 4 or greater.",
+        )
+        .id();
+    scenario.with_mana_pool(P0, make_your_move_mana());
+    let mut runner: GameRunner = scenario.build();
+
+    // A powerless, noncreature, nonartifact permanent: satisfies the exclusion
+    // leg and nothing else.
+    let enchantment = add_noncreature_permanent(
+        runner.state_mut(),
+        9004,
+        P1,
+        "Opp Enchantment",
+        CoreType::Enchantment,
+    );
+    // An artifact: excluded by `Non(Artifact)` on BOTH legs.
+    let artifact = add_noncreature_permanent(
+        runner.state_mut(),
+        9005,
+        P1,
+        "Opp Artifact",
+        CoreType::Artifact,
+    );
+
+    let filter = destroy_target_filter(runner.state(), spell);
+    let legal = find_legal_targets(runner.state(), &filter, P0, spell);
+
+    // The claim: flips from illegal to legal when the exclusion leg stops
+    // inheriting the creature leg's power restriction.
+    assert!(
+        legal.contains(&TargetRef::Object(enchantment)),
+        "CR 205.4b + CR 208.3: a nonartifact permanent with no power must be \
+         legal through the unrestricted exclusion leg: {legal:?}"
+    );
+    // Reach-guard: the filter is not simply matching everything.
+    assert!(
+        !legal.contains(&TargetRef::Object(artifact)),
+        "an artifact is excluded by Non(Artifact) on both legs: {legal:?}"
+    );
+
+    // AST row: the restriction lives on the creature leg only.
+    let TargetFilter::Or { filters } = &filter else {
+        panic!("expected an Or target filter, got {filter:?}");
+    };
+    for leg in filters {
+        let TargetFilter::Typed(typed) = leg else {
+            panic!("expected every leg Typed, got {leg:?}");
+        };
+        let has_pt = typed
+            .properties
+            .iter()
+            .any(|p| matches!(p, engine::types::ability::FilterProp::PtComparison { .. }));
+        let anchors_creature = typed
+            .type_filters
+            .contains(&engine::types::ability::TypeFilter::Creature);
+        assert_eq!(
+            has_pt, anchors_creature,
+            "CR 208.1: only the creature-anchored leg may carry the power \
+             restriction, got {typed:?}"
+        );
+    }
+
+    let outcome = runner.cast(spell).target_objects(&[enchantment]).resolve();
+    outcome.assert_zone(&[enchantment], Zone::Graveyard);
+}
+
 /// AST-shape guard mirroring `issue_2941_vivien_reid.rs`: the parsed filter must
 /// match the already-correct Broken Wings shape. Complements the runtime rows —
 /// they prove the legs match objects, this pins exactly which leg carries the

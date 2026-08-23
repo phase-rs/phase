@@ -4750,36 +4750,63 @@ fn leg_pins_noncreature_core_type(type_filters: &[TypeFilter]) -> bool {
     type_filters.iter().any(is_noncreature_core_type_pin)
 }
 
-/// Returns true when this single `TypeFilter` names a card-type SCOPE at all, as
-/// opposed to one of the three type-open universals.
+/// Returns true when this single `TypeFilter` positively ANCHORS the leg to
+/// something that can be a creature — the noun a printed power/toughness
+/// restriction could have been written on.
 ///
-/// CR 205.2a enumerates the card types; `Permanent` (CR 110.1: a permanent is a
-/// card or token on the battlefield, whatever its type), `Card` (CR 108.2: a
-/// reference to a "card" means only a Magic card or an object represented by
-/// one, again whatever its type), and `Any` are not among them — each is a
-/// "whatever its type" quantifier that names no card type. Every other variant
-/// names a card type (CR 205.2a) or a subtype pool (CR 205.3) and therefore
-/// scopes the leg to something.
+/// CR 208.1: power and toughness are printed on a creature card, so the
+/// postnominal "with power N or greater" modifies a creature noun. A leg may
+/// receive that restriction by distribution only if it names such a noun
+/// itself. Two families qualify:
+/// * `Creature` — CR 205.2a, the card type itself.
+/// * A subtype from a pool that can belong to a creature — CR 205.3m (creature
+///   and kindred subtypes). Delegated to `is_noncreature_core_type_pin` so the
+///   creature-vs-noncreature subtype split has exactly one authority: CR 205.3d
+///   gives each noncreature subtype pool to one card type (CR 205.3g artifact,
+///   205.3h enchantment, 205.3i land, 205.3j planeswalker, 205.3k spell,
+///   205.3q battle), and everything else is creature-capable.
+///
+/// EXCLUSION IS NOT AN ANCHOR — this is the half that `Non(_)` gets wrong if it
+/// is treated as merely "scoping" the leg. `Non(Artifact)` restricts the leg to
+/// nonartifacts, which still includes every noncreature nonartifact permanent;
+/// an enchantment satisfies it and has no power (CR 208.3). So
+/// "target nonartifact or creature with power 4 or greater" must leave the
+/// `nonartifact` disjunct unrestricted — the restriction was printed on the
+/// `creature` noun, and `Non(Artifact)` is not that noun. The one negation that
+/// DOES decide the question, `Non(Creature)`, is handled upstream by
+/// `is_noncreature_core_type_pin` (it rejects, rather than anchors).
+///
+/// The type-open universals `Permanent` (CR 110.1), `Card` (CR 108.2) and `Any`
+/// are likewise not anchors: each is a "whatever its type" quantifier that names
+/// no creature noun. That subsumes the type-open rejection this predicate
+/// replaced — a `[Card]`, `[Permanent]`, `[Any]` or empty leg simply has no
+/// anchor.
 ///
 /// EXHAUSTIVE BY CONSTRUCTION, for the same reason as its two sibling
 /// authorities `type_filter_guarantees_creature` and
 /// `is_noncreature_core_type_pin`: a new `TypeFilter` variant must be classified
 /// here rather than defaulting into a silent behavior.
-fn type_filter_names_a_card_type_scope(tf: &TypeFilter) -> bool {
+fn type_filter_anchors_creature(tf: &TypeFilter) -> bool {
     match tf {
-        // CR 110.1 / CR 108.2: "a permanent" / "a card" name no card type — they
-        // are the quantifiers a type noun would otherwise narrow. `Any` is the
-        // parser's own not-yet-known placeholder and is likewise type-open.
-        TypeFilter::Permanent | TypeFilter::Card | TypeFilter::Any => false,
-        // A type disjunction scopes the leg only when EVERY alternative does: a
-        // single type-open alternative reopens the whole disjunction. Plain
-        // logic on the AST, not a rules decision.
+        // CR 205.2a: the creature card type.
+        TypeFilter::Creature => true,
+        // CR 205.3m: creature and kindred subtypes anchor; the noncreature
+        // subtype pools do not. Single authority, see doc above.
+        TypeFilter::Subtype(_) => !is_noncreature_core_type_pin(tf),
+        // A type disjunction anchors only when EVERY alternative does: one
+        // non-anchoring alternative (e.g. `AnyOf[Creature, Subtype("Vehicle")]`,
+        // where CR 301.7a leaves an uncrewed Vehicle with no power) means the
+        // leg can match a powerless object. Plain logic on the AST.
         TypeFilter::AnyOf(inner) => {
-            !inner.is_empty() && inner.iter().all(type_filter_names_a_card_type_scope)
+            !inner.is_empty() && inner.iter().all(type_filter_anchors_creature)
         }
-        // CR 205.2a card types, CR 205.3 subtype pools, and CR 205.4b negations
-        // all name a scope. `Non(_)` scopes by exclusion, which is still a scope.
-        TypeFilter::Creature
+        // CR 205.4b: a negation scopes by exclusion, which is not a creature
+        // noun — see EXCLUSION IS NOT AN ANCHOR above. CR 308.1: `Kindred`
+        // alone names no creature either, since each kindred card has another
+        // card type. The remaining card types are noncreature, and
+        // `Permanent`/`Card`/`Any` are type-open quantifiers.
+        TypeFilter::Non(_)
+        | TypeFilter::Kindred
         | TypeFilter::Land
         | TypeFilter::Artifact
         | TypeFilter::Enchantment
@@ -4787,9 +4814,9 @@ fn type_filter_names_a_card_type_scope(tf: &TypeFilter) -> bool {
         | TypeFilter::Sorcery
         | TypeFilter::Planeswalker
         | TypeFilter::Battle
-        | TypeFilter::Kindred
-        | TypeFilter::Non(_)
-        | TypeFilter::Subtype(_) => true,
+        | TypeFilter::Permanent
+        | TypeFilter::Card
+        | TypeFilter::Any => false,
     }
 }
 
@@ -4800,9 +4827,12 @@ fn type_filter_names_a_card_type_scope(tf: &TypeFilter) -> bool {
 ///    even though it also pins a noncreature type.
 /// 2. CR 208.3 — a leg pinned to a noncreature card type has no power or
 ///    toughness, so the restriction would be vacuous. Reject.
-/// 3. TYPE-OPEN — a leg naming no card type at all ("a card named X", "a green
-///    card", "a permanent card", or an `[Any]` leg whose type noun was never
-///    backfilled). Reject.
+/// 3. NOT CREATURE-ANCHORED — the leg names no noun that could be a creature.
+///    Reject. This covers the type-open shapes ("a card named X", "a green
+///    card", "a permanent card", an `[Any]` leg whose type noun was never
+///    backfilled) AND the exclusion-only shapes (`[Any, Non(Artifact)]` from
+///    "target nonartifact or …", `[Permanent, Non(Land)]` from "nonland
+///    permanent or …").
 ///
 /// Case 3 is the CR 208.1 postnominal-binding reading, and it is the half that
 /// `leg_pins_noncreature_core_type` alone cannot decide. "Search your library
@@ -4812,6 +4842,12 @@ fn type_filter_names_a_card_type_scope(tf: &TypeFilter) -> bool {
 /// vacuous the way an `[Artifact]` leg is — `game::filter::pt_value_from_pair`
 /// would still match creature cards through it — so the defect is quieter, but
 /// it is the same defect: a restriction bound to the wrong disjunct.
+///
+/// A negation leg is the sharpest instance: `[Any, Non(Artifact)]` is satisfied
+/// by an enchantment, which CR 208.3 gives no power, so distributing the
+/// restriction there silently deletes the whole `nonartifact` half of the
+/// disjunction. It is NOT enough to ask whether the leg is *scoped*; it must be
+/// scoped to something that can be a creature. See `type_filter_anchors_creature`.
 ///
 /// FAILS CLOSED, WHICH IS WHY ORDERING IS NO LONGER LOAD-BEARING FOR SAFETY. A
 /// leg still holding `[TypeFilter::Any]` because `distribute_core_type_to_or`
@@ -4832,17 +4868,16 @@ fn type_filter_names_a_card_type_scope(tf: &TypeFilter) -> bool {
 /// relocation witness — see `pt_hosting_leg_props` for why the two predicates
 /// are now intentionally different.
 fn leg_admits_creature_pt(type_filters: &[TypeFilter]) -> bool {
-    // CR 205.2b: "artifact creature" satisfies both, and keeps the restriction.
-    if type_filters.iter().any(type_filter_guarantees_creature) {
-        return true;
-    }
-    // CR 208.3: pinned to a card type that has no power or toughness.
-    if type_filters.iter().any(is_noncreature_core_type_pin) {
+    // CR 208.3: pinned to a card type that has no power or toughness. Keeps the
+    // CR 205.2b carve-out internally, so an "artifact creature" leg is not
+    // pinned and survives to the anchor test below.
+    if leg_pins_noncreature_core_type(type_filters) {
         return false;
     }
-    // CR 208.1: the restriction binds to a type noun. A leg that names no card
-    // type scope was never the noun it was printed on.
-    type_filters.iter().any(type_filter_names_a_card_type_scope)
+    // CR 208.1: the restriction was printed on a creature noun, so the leg must
+    // name one. Absence of a disqualifying pin is NOT sufficient — an
+    // exclusion-only or type-open leg has no anchor and is left unrestricted.
+    type_filters.iter().any(type_filter_anchors_creature)
 }
 
 /// Type-conditional leg-locality gate: may `prop` be distributed onto `typed`?
@@ -15538,36 +15573,62 @@ mod tests {
     /// gate itself rather than through any one grammar.
     ///
     /// `leg_pins_noncreature_core_type` answers "is a P/T restriction VACUOUS
-    /// here?", which is only half the binding question. A leg that names no card
-    /// type at all — `[Card]` ("a green card"), `[Permanent]` ("a permanent
-    /// card"), `[Any]` (a type noun that was never backfilled), or no filters at
-    /// all ("a card named X") — is not vacuous, but it is not the noun the
-    /// restriction was printed on either (CR 208.1). `leg_admits_creature_pt`
-    /// rejects all four, which is what lets `oracle_effect::search` compose an
-    /// `Or` with no type backfill and still bind correctly.
+    /// here?", which is only half the binding question. The other half is CR
+    /// 208.1: the restriction was printed on a creature noun, so a leg must NAME
+    /// one to receive it. Two families fail that test without being vacuous:
+    /// * type-open — `[Card]` ("a green card"), `[Permanent]` ("a permanent
+    ///   card"), `[Any]` (a type noun never backfilled), or no filters at all
+    ///   ("a card named X");
+    /// * exclusion-only — `[Any, Non(Artifact)]` ("target nonartifact or
+    ///   creature with power 4 or greater"), `[Permanent, Non(Land)]`. An
+    ///   exclusion narrows the leg but names no creature: an enchantment
+    ///   satisfies `Non(Artifact)` and CR 208.3 gives it no power, so
+    ///   distributing there would delete the whole `nonartifact` disjunct.
     ///
-    /// The accept rows are the discriminator: a gate that simply rejected
-    /// everything it could not prove to be a creature would fail the
-    /// `Subtype("Goblin")` row (CR 205.3m creature subtypes name no card type,
-    /// so `type_filter_guarantees_creature` is false there) and the CR 205.2b
+    /// The accept rows are the discriminator: a gate that rejected everything it
+    /// could not prove to be a creature would fail the `Subtype("Goblin")` row
+    /// (CR 205.3m creature subtypes name no card type, so
+    /// `type_filter_guarantees_creature` is false there) and the CR 205.2b
     /// artifact-creature row.
     #[test]
-    fn leg_admits_creature_pt_rejects_type_open_legs_but_keeps_creature_scopes() {
+    fn leg_admits_creature_pt_rejects_unanchored_legs_but_keeps_creature_scopes() {
         for types in [
             vec![TypeFilter::Card],
             vec![TypeFilter::Permanent],
             vec![TypeFilter::Any],
             vec![],
-            // A disjunction is only as scoped as its loosest alternative.
+            // A disjunction anchors only if every alternative does.
             vec![TypeFilter::AnyOf(vec![
                 TypeFilter::Creature,
                 TypeFilter::Card,
             ])],
+            // CR 301.7a: an uncrewed Vehicle has no power, so a leg that may be
+            // either is not anchored.
+            vec![TypeFilter::AnyOf(vec![
+                TypeFilter::Creature,
+                TypeFilter::Subtype("Vehicle".to_string()),
+            ])],
+            // CR 205.4b + CR 208.3: exclusion-only legs. `Non(Artifact)` is
+            // satisfied by a powerless enchantment.
+            vec![
+                TypeFilter::Any,
+                TypeFilter::Non(Box::new(TypeFilter::Artifact)),
+            ],
+            vec![
+                TypeFilter::Permanent,
+                TypeFilter::Non(Box::new(TypeFilter::Land)),
+            ],
+            vec![TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                "Human".to_string(),
+            )))],
+            // CR 308.1: a kindred card has ANOTHER card type; `Kindred` alone
+            // names no creature.
+            vec![TypeFilter::Kindred],
         ] {
             assert!(
                 !leg_admits_creature_pt(&types),
-                "CR 208.1: a leg naming no card type must not receive a P/T \
-                 restriction printed on a sibling noun: {types:?}"
+                "CR 208.1: a leg that names no creature noun must not receive a \
+                 P/T restriction printed on a sibling noun: {types:?}"
             );
         }
 
@@ -15575,16 +15636,19 @@ mod tests {
             vec![TypeFilter::Creature],
             // CR 205.2b: an object with more than one card type satisfies either.
             vec![TypeFilter::Artifact, TypeFilter::Creature],
-            // CR 205.3m: a creature subtype names a scope that can be a creature.
+            // CR 205.3m: a creature subtype anchors even though it names no card
+            // type of its own.
             vec![TypeFilter::Subtype("Goblin".to_string())],
-            // CR 205.4b: scoping by exclusion is still scoping.
-            vec![TypeFilter::Non(Box::new(TypeFilter::Artifact))],
-            // CR 308.1: a kindred card has another card type, possibly creature.
-            vec![TypeFilter::Kindred],
+            // An exclusion RIDING ALONG with a real creature anchor still
+            // distributes — the anchor is what matters, not the negation.
+            vec![
+                TypeFilter::Creature,
+                TypeFilter::Non(Box::new(TypeFilter::Artifact)),
+            ],
         ] {
             assert!(
                 leg_admits_creature_pt(&types),
-                "a creature-compatible scope must keep receiving the restriction: \
+                "a creature-anchored leg must keep receiving the restriction: \
                  {types:?}"
             );
         }
