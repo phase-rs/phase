@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 196,
+      "date": "2026-08-23",
+      "title": "Kozilek manifests from every hand",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Kozilek, the Broken Reality can finally manifest a card from each chosen player’s hand, then draw for the creatures it manifested\n• Princess Yue joins the card pool, with her power- and life-total ability working as printed\n• Scroll of Fate can manifest a card from your hand, and megamorph creatures receive their +1/+1 counter when you pay to turn them face up\n\n🛠️ Cards That Now Work Right\n• Room permanents show only the name of their unlocked door or doors, including when copied, as the rules require\n• “This way” follow-up effects now check whether their parent instruction actually happened — including graveyard-bound effects stopped by finality counters\n• Damage-prevention shields that care about both the source and recipient now apply to the correct damage\n• Per-opponent spells such as Diluvian Primordial skip the invisible, preselected opponent step and go straight to the card choice\n\n⚔️ Combat & Gameplay\n• Draft pods advance cleanly into round two, report the next pairing round, and keep an error visible only for the phase where it occurred\n• Multiplayer targeting no longer prompts you to choose a player who was already fixed by a “for each opponent” effect\n\n🖥️ Interface\n• You can click a spell on the stack when a copy needs a new target\n• Commander art uses its printed-card reference, the board starts in the split layout, and targeting a player is consistent across every seat surface\n• Desktop games no longer connect to a local server when they should use the selected remote one\n\n🌐 Multiplayer\n• Preview multiplayer now uses its own lobby protocol and broker, keeping preview builds compatible as the main game evolves",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1540983656414322729"
+    },
+    {
       "id": 195,
       "date": "2026-08-21",
       "title": "Morph and disguise creatures finally flip face up",
