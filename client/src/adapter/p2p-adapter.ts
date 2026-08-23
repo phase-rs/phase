@@ -1980,7 +1980,7 @@ export class P2PHostAdapter implements EngineAdapter {
     await this.commitTerminalIfComplete(hostUpdate.snapshot, revision);
   }
 
-  /** The native server publishes the fault after its revisioned snapshot.
+  /** The native server publishes the fault after its final state snapshot.
    * Keep the same ordering over PeerJS and make the host terminal only after
    * every active guest received that final filtered state. */
   private async handleNativeAiDriverFault(
@@ -3234,7 +3234,7 @@ export class P2PGuestAdapter implements EngineAdapter {
       }
       case "ai_driver_fault": {
         if (this.acceptedAiDriverFaultIds.has(msg.id)) break;
-        if (this.cachedRevision !== msg.revision) {
+        if (this.cachedRevision === null || this.cachedRevision < msg.revision) {
           this.emit({ type: "terminalUnavailable", message: "Rejected an out-of-order native AI driver fault" });
           break;
         }

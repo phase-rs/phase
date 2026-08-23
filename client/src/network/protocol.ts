@@ -191,7 +191,7 @@ export type P2PMessage = P2PAuthorityWire & (
    * after accepting the commitment for their filtered state. */
   | { type: "terminal_result"; result: P2PTerminalResult }
   /** Native server AI became unable to advance the authoritative session.
-   * The host sends this only after the exact terminal state revision. */
+   * The host sends this only after the final state revision it depends on. */
   | { type: "ai_driver_fault"; id: number; revision: number; message: string }
   // Lifecycle broadcasts (host → all remaining peers).
   | { type: "player_kicked"; playerId: number; reason: string }

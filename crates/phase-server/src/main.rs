@@ -7399,6 +7399,20 @@ async fn handle_client_message(
                     return;
                 };
 
+                if let Some(fault) = session.ai_driver_fault() {
+                    let msg = ServerMessage::ActionRejected {
+                        reason: format!(
+                            "Native AI driver fault {}: {}",
+                            fault.id,
+                            fault.cause.message()
+                        ),
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+
                 let public_before = session.lobby_meta.as_ref().is_some_and(|meta| meta.public);
                 let mut seat_state = session.seat_state();
                 let delta_result = {

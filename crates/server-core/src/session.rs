@@ -140,7 +140,10 @@ pub enum AiDriverFailure {
 #[serde(rename_all = "snake_case")]
 pub struct AiDriverFault {
     pub id: u64,
-    pub state_revision: u64,
+    /// The last state revision a client must have applied before rendering
+    /// this out-of-band driver failure. The session revision is then bumped
+    /// separately as a durable persistence fence.
+    pub after_state_revision: u64,
     pub cause: AiDriverFailure,
 }
 
@@ -428,7 +431,7 @@ impl GameSession {
         self.ai_driver_fault.as_ref()
     }
 
-    fn reject_if_ai_driver_faulted(&self) -> Result<(), String> {
+    pub(crate) fn reject_if_ai_driver_faulted(&self) -> Result<(), String> {
         self.ai_driver_fault
             .as_ref()
             .map(|fault| {
@@ -447,29 +450,17 @@ impl GameSession {
         }
         let fault = AiDriverFault {
             id: self.next_ai_driver_fault_id,
-            state_revision: self.advance_state_revision(),
+            after_state_revision: self.state_revision,
             cause,
         };
+        // Allocate a fresh persistence revision without inventing a state
+        // transition for clients to render. This lets the database fence the
+        // durable fault while delivery remains ordered after the last actual
+        // state frame.
+        self.advance_state_revision();
         self.next_ai_driver_fault_id = self.next_ai_driver_fault_id.saturating_add(1);
         self.ai_driver_fault = Some(fault.clone());
         fault
-    }
-
-    fn ai_driver_fault_transition(&self, fault: &AiDriverFault) -> RevisionedActionResult {
-        let (state, legal_actions, auto_pass, spell_costs, by_object) =
-            self.current_broadcast_snapshot();
-        (
-            fault.state_revision,
-            (
-                state,
-                Vec::new(),
-                legal_actions,
-                Vec::new(),
-                auto_pass,
-                spell_costs,
-                by_object,
-            ),
-        )
     }
     /// Allocates the revision for one completed authoritative state transition.
     pub fn advance_state_revision(&mut self) -> u64 {
@@ -1043,7 +1034,6 @@ impl GameSession {
                 AiActionsStop::MissingAiConfig { player } => {
                     let failure = AiDriverFailure::MissingAiConfig { player };
                     let fault = self.record_ai_driver_fault(failure.clone());
-                    transitions.push(self.ai_driver_fault_transition(&fault));
                     return AiRunOutcome {
                         transitions,
                         failure: Some(failure),
@@ -1053,7 +1043,6 @@ impl GameSession {
                 AiActionsStop::ChooseActionNone { player } => {
                     let failure = AiDriverFailure::ChooseActionNone { player };
                     let fault = self.record_ai_driver_fault(failure.clone());
-                    transitions.push(self.ai_driver_fault_transition(&fault));
                     return AiRunOutcome {
                         transitions,
                         failure: Some(failure),
@@ -1066,7 +1055,6 @@ impl GameSession {
                         error: error.to_string(),
                     };
                     let fault = self.record_ai_driver_fault(failure.clone());
-                    transitions.push(self.ai_driver_fault_transition(&fault));
                     return AiRunOutcome {
                         transitions,
                         failure: Some(failure),
@@ -1111,9 +1099,6 @@ impl GameSession {
         let fault = failure
             .clone()
             .map(|failure| self.record_ai_driver_fault(failure));
-        if let Some(fault) = &fault {
-            transitions.push(self.ai_driver_fault_transition(fault));
-        }
         AiRunOutcome {
             transitions,
             failure,
@@ -2213,6 +2198,7 @@ impl SessionManager {
         let player = session
             .player_for_token(player_token)
             .ok_or_else(|| "Invalid player token".to_string())?;
+        session.reject_if_ai_driver_faulted()?;
         if session.pending_takeback.is_some() {
             return Err(
                 "A takeback request is pending — resolve it before conceding the match".to_string(),
@@ -4412,6 +4398,57 @@ mod tests {
             !session.ai_seat_can_act(),
             "a terminal state cannot be reported as an AI driver stall"
         );
+    }
+
+    #[test]
+    fn ai_driver_fault_fences_persistence_without_synthetic_state_transition() {
+        let (mut mgr, code, _token0, ai_seat) = single_user_game_vs_ai();
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        session.ai_configs.remove(&ai_seat);
+        session.state.waiting_for = WaitingFor::Priority { player: ai_seat };
+        let before = session.state_revision;
+
+        let outcome = session.run_ai();
+
+        assert!(outcome.transitions.is_empty());
+        assert!(matches!(
+            outcome.failure,
+            Some(AiDriverFailure::MissingAiConfig { player }) if player == ai_seat
+        ));
+        let fault = outcome
+            .fault
+            .expect("missing configuration records a fault");
+        assert_eq!(fault.after_state_revision, before);
+        assert_eq!(session.state_revision, before + 1);
+        assert_eq!(
+            session.to_persisted().state_revision,
+            before + 1,
+            "the durable snapshot must be fenced beyond the last delivered state"
+        );
+    }
+
+    #[test]
+    fn ai_driver_fault_blocks_takebacks_and_match_concede() {
+        let (mut mgr, code, token0, _ai_seat) = single_user_game_vs_ai();
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        session.record_ai_driver_fault(AiDriverFailure::ActionSafetyCapReached { limit: 1 });
+
+        for result in [
+            session
+                .request_takeback(PlayerId(0), RewindTarget::LastAction)
+                .map(|_| ()),
+            session.respond_takeback(PlayerId(0), true).map(|_| ()),
+            session.cancel_takeback(PlayerId(0)),
+        ] {
+            assert!(result
+                .expect_err("a terminal AI driver fault blocks takeback mutation")
+                .contains("Native AI driver fault"));
+        }
+
+        let err = mgr
+            .handle_match_concede(&code, &token0)
+            .expect_err("a terminal AI driver fault blocks match concede");
+        assert!(err.contains("Native AI driver fault"));
     }
 
     /// Drives the fixture until **`run_ai` itself** publishes a turn boundary

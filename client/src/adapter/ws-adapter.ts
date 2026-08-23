@@ -1857,13 +1857,13 @@ export class WebSocketAdapter implements EngineAdapter {
 
       case "AiDriverFault": {
         const data = msg.data as {
-          fault: { id: number; state_revision: number; cause: unknown };
+          fault: { id: number; after_state_revision: number; cause: unknown };
         };
         const message = "Native AI driver stopped; this game can no longer advance.";
         this.emit({
           type: "aiDriverFault",
           id: data.fault.id,
-          revision: data.fault.state_revision,
+          revision: data.fault.after_state_revision,
           message,
         });
         this.emit({ type: "error", message });
