@@ -382,6 +382,77 @@ LegalityRules {
 // since the ID itself carries no meaning once the full payload travels with
 // it.
 //
+// RUNTIME DISPLAY IDENTITY (round 9, maintainer review) — the gap: §7's
+// claim below ("`label`, `for_format`, etc. each get a `Custom` arm reading
+// the resolved def") is WRONG for an Axis-A save, and the two functions'
+// signatures make it wrong in two DIFFERENT ways, not one:
+//   - `GameFormat::label(self) -> &'static str` (crates/engine/src/types/
+//     format.rs:395) cannot return owned, per-save `String` data (`label`
+//     on `CustomFormatDef`, round 6) from a `&'static str`-returning
+//     function no matter what's threaded in — this is a signature problem,
+//     not just a missing-context problem.
+//   - Even with the right signature, there is no "the resolved def" to read
+//     for Axis A specifically: (a) above already establishes
+//     `SavedCustomFormat.name` is client-local-only and never enters
+//     `CustomFormatRules`/`FormatConfig.custom_rules`, so a peer holding a
+//     live `GameState` mid-match has ONLY the rules payload — no name, no
+//     lookup key back to the saving client's local storage. This is
+//     different from Axis B: a registry-backed preset's `GameFormat::
+//     Custom(id)` carries a STABLE id every peer's `custom_format_registry()`
+//     already has an entry for (see (a)/(b) above), so a real name IS
+//     resolvable there without transporting anything extra.
+//
+// RESOLUTION — axis-differentiated, no new wire surface (Matt's option (b),
+// not (a) — deliberately, not by default): adding a `custom_label` field to
+// `FormatConfig` would re-open the exact wire-compatibility/version-skew
+// surface round 1's CodeRabbit pass and this section's VERSION SKEW note
+// already treat as a real cost, for a purely cosmetic value. Axis A's own
+// design already decided the engine "never learns about 'saved format #3'"
+// (above) — extending that same boundary to the display NAME, not just the
+// identity, is the consistent reading of that decision, not a new one:
+//   - `GameFormat::label(self) -> Cow<'static, str>` (signature change,
+//     REQUIRED regardless of axis, since `CustomFormatDef.label: String` can
+//     never satisfy `&'static str`): built-in variants return
+//     `Cow::Borrowed(...)` unchanged — zero behavior change for all 21
+//     existing variants. `Custom(id)`: look up `custom_format_registry()` by
+//     `id`; a HIT (Axis B) returns `Cow::Owned(def.label.clone())` — the
+//     real preset name, genuinely resolvable, no transport gap. A MISS
+//     (Axis A's ad-hoc sentinel id, never registered) returns
+//     `Cow::Borrowed("Custom Format")` — a fixed, honest, generic runtime
+//     label. The real player-chosen name stays exactly where round 2 always
+//     said it lives: the local `SavedCustomFormat`/lobby picker, never
+//     promised at runtime for an ad-hoc save. `short_label`/`description`
+//     need NO equivalent fix — both are registry/picker-time-only data (§2's
+//     `custom_format_registry()` → frontend picker), never read by a
+//     runtime engine function the way `label`/`for_format` are; this gap is
+//     specific to those two pre-existing bare-`GameFormat` functions, not a
+//     property of display metadata in general.
+//   - **Second, independently-found instance of the same root cause**:
+//     `FormatConfig::for_format(format: GameFormat) -> Self`
+//     (`format.rs:1056`) has exactly two real callers today, both in
+//     `deck_validation.rs` (lines 1075, 2256 — confirmed by direct grep this
+//     round, not assumed from the doc comment's claimed "lobby broker"
+//     caller, which does not exist anywhere in the codebase today; flag
+//     that stale doc comment for correction too), both reading
+//     `.deck_size` off the returned default config. For `Custom`, `for_format`
+//     has the identical problem as `label` did before round 3/4's
+//     `sideboard_policy`/`uses_commander` fix: a bare id has no default
+//     structural rules to reconstruct (Axis A has none at all; Axis B's are
+//     real but `for_format`'s own doc comment already accepts "customizations
+//     not recovered" for built-ins, so a registry-default lookup would be a
+//     silently-approximate answer for a value — `deck_size` — that's supposed
+//     to be exact for deck-legality gating). Fix identically to
+//     `sideboard_policy`: `for_format` gains a `Custom(_) => unreachable!("for_format
+//     cannot resolve an ad-hoc Custom format's deck_size — read
+//     custom_rules.structural.deck_size from the resolved request/config
+//     instead")` arm, and both `deck_validation.rs` call sites migrate to
+//     prefer `request.custom_rules.as_ref().map(|r|
+//     usize::from(r.structural.deck_size))` when present, falling back to
+//     `for_format` only for genuine built-in formats — the exact same
+//     two-tier shape §1's `sideboard_policy` fix already established for
+//     `DeckCompatibilityRequest`, extended to cover `deck_size` (a site the
+//     original round-4 audit's line list did not separately enumerate).
+//
 // VERSION SKEW — CONCRETE MODEL (round 4, maintainer review point 4; rounds
 // 2-3 flagged this without designing it). An older client that has never
 // heard of the `GameFormat::Custom` enum variant at all cannot be rescued by
@@ -866,12 +937,24 @@ missing-enforcement gap on a rules field, which is exactly the contradiction
 round 6 caught.
 
 `legality_format()` returns `None` for `Custom` (no `LegalityFormat` mapping —
-custom formats don't use the external legality table). `label`, `for_format`,
-etc. each get a `Custom` arm reading the resolved def. `sideboard_policy` is
-the one exception to "add a `Custom` arm on the `GameFormat` method" — see the
-dedicated accessor design in §1: the correct arm lives on `FormatConfig::
-sideboard_policy()`, not on `GameFormat::sideboard_policy()` itself, since the
-latter has no access to `custom_rules`.
+custom formats don't use the external legality table). **REVISED — round 9,
+maintainer review; the previous text here ("`label`, `for_format`, etc. each
+get a `Custom` arm reading the resolved def") was wrong and is retracted, not
+refined — see §1's "Runtime display identity" for why "the resolved def" does
+not exist to read at runtime for an Axis-A save.** `sideboard_policy` and
+`uses_commander` are NOT "add a `Custom` arm on the `GameFormat` method" —
+the correct arm lives on `FormatConfig::sideboard_policy()`, not
+`GameFormat::sideboard_policy()`, since the latter has no access to
+`custom_rules` (§1). `label` and `for_format` follow the same "the bare enum
+cannot resolve this" shape, generalized: `label` becomes
+`Cow<'static, str>`-returning with a registry-lookup-or-generic-fallback
+`Custom` arm (§1), and `for_format` gets the same `unreachable!()` guard
+`sideboard_policy`/`uses_commander` already use, with its two real callers
+migrated to read `custom_rules.structural.deck_size` directly (§1). No
+`GameFormat` method gains a `Custom` arm that "reads the resolved def" — none
+of them have one to read; every fix here is either a registry lookup keyed
+by a stable id (Axis B only) or a caller migration to a type that actually
+carries `custom_rules` (both axes).
 
 ## 4. Legacy rules wiring — Phase 2 (not needed for the Swedish Old School preset)
 
@@ -1147,6 +1230,37 @@ legality logic on the client.
   `derive_structural_description` produces a non-empty, config-derived
   string for at least two distinct `StructuralRules` values (proving it
   actually reads the config rather than returning a constant).
+- **NEW — maintainer review round 9 (runtime display identity, §1)**:
+  - `GameFormat::label()` for a registry-backed Axis-B id (e.g.
+    `old_school_93_94()`'s id) returns `Cow::Owned` matching that preset's
+    real `CustomFormatDef.label` — proving the registry lookup actually
+    fires, not just that the function compiles.
+  - `GameFormat::label()` for an Axis-A sentinel id (never present in
+    `custom_format_registry()`) returns exactly `"Custom Format"` — the
+    documented generic fallback, not a panic, not an empty string, and
+    critically NOT the saving player's original chosen name (proving the
+    boundary is actually honored, since silently leaking the name back in
+    would look like a fix while re-opening the exact "resolved def doesn't
+    exist here" gap this round closes).
+    `GameFormat::label()` for every existing built-in variant still returns
+    the identical `&'static str` value as before this change (a
+    `Cow::Borrowed` equality check against the pre-round-9 constants) —
+    proving the signature change is genuinely behavior-preserving for the
+    21 existing variants, not just source-compatible.
+  - `FormatConfig::for_format(GameFormat::Custom(_))` — a dedicated test
+    asserting this panics via the documented `unreachable!()` (matching the
+    existing `sideboard_policy`/`uses_commander` guard-arm test pattern,
+    §1/§3), i.e. proving no caller path can silently receive a
+    wrong-but-plausible default `deck_size` for a Custom format.
+  - `evaluate_selected_format`'s deck-size check (`deck_validation.rs:1075`
+    and the sibling call at `:2256`) with a `DeckCompatibilityRequest`
+    carrying `custom_rules` for an Axis-A lobby save with `deck_size: 30`
+    (a value distinct from every built-in format's — confirmed by direct
+    check against `format.rs`'s constructors, which range over 40/50/60/100
+    only) rejects a 60-card deck sized to the default `for_format` would
+    otherwise silently fall back to — the concrete regression test for the
+    deck-size correctness bug this round's audit found, not just the
+    display-label issue Matt's review text quoted.
 
 ## 7. Delivery surface — RESOLVED via maintainer input, see CONTEXT.md "Maintainer input"
 
