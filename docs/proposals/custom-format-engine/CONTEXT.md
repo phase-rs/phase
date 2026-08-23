@@ -649,16 +649,109 @@ One construction gap remained:
    round 6 moved it. See PLAN.md §1, §2, and §6 for the schema, preset, and
    test changes.
 
+## Maintainer review round 8 — CHANGES_REQUESTED, addressed
+
+matthewevans re-reviewed round 7's fix (commit `83eabc081`) and confirmed
+`Option<ReprintPolicy>` "correctly gives lobby saves an honest `None`
+value," with one construction gap remaining:
+
+1. **`from_lobby_config` had no defined rule for `label`/`short_label`/
+   `description` (real, confirmed).** `CustomFormatDef` requires all three
+   non-optionally since round 6, but the constructor's signature (`name` +
+   `&FormatConfig`) never specified how `short_label`/`description` are
+   derived. Fixed: `label = name` directly; `short_label` = `name`'s first 3
+   alphanumeric characters uppercased (the same convention the frontend
+   already independently falls back to for any unrecognized format,
+   `format.slice(0, 3).toUpperCase()` in `GameListItem.tsx` and others — not
+   a new convention); `description` via a new
+   `derive_structural_description(&StructuralRules)` helper mirroring
+   built-in formats' existing comma-joined structural phrasing. Empty/
+   whitespace-only `name` is rejected, consistent with round 2's "reject
+   explicitly rather than silently drop data" posture. See PLAN.md §1 and
+   §6.
+
+## Maintainer review round 9 — CHANGES_REQUESTED, addressed
+
+matthewevans re-reviewed round 8's fix (commit `9698d1ac5`) and found the
+round-8 fix incomplete at a deeper level:
+
+1. **`CustomFormatDef`'s display metadata never reaches a running game
+   (real, confirmed).** `SavedCustomFormat.name` is client-local-only by
+   round 2's own identity design and never enters
+   `CustomFormatRules`/`FormatConfig.custom_rules` — so once a game starts,
+   there is no name to read. Worse than a missing-data problem:
+   `GameFormat::label(self) -> &'static str` (`format.rs:395`) cannot
+   return `CustomFormatDef.label` (a `String`) regardless of what's threaded
+   in — a signature problem. Fixed: `label()` becomes
+   `Cow<'static, str>`-returning; built-in variants unchanged
+   (`Cow::Borrowed`); `Custom(id)` resolves via a `custom_format_registry()`
+   lookup by id — a hit (Axis B, stable registry id) returns the real name,
+   a miss (Axis A's ad-hoc sentinel id, never registered) returns a fixed
+   `"Custom Format"` fallback. No new wire surface added; the real
+   player-chosen name for an ad-hoc save stays exactly where round 2 always
+   said it lives — the local picker, never promised at runtime.
+2. **Second, independently-found instance of the same root cause.**
+   `FormatConfig::for_format(bare GameFormat)` (`format.rs:1056`) is called
+   for `.deck_size` at two real `deck_validation.rs` sites (confirmed by
+   direct grep, not the doc comment's stale claimed "lobby broker" caller,
+   which doesn't exist in the codebase today), silently returning a wrong
+   default size for `Custom`. Fixed identically to the existing
+   `sideboard_policy`/`uses_commander` pattern: an `unreachable!()` guard
+   arm, with both call sites migrated to read
+   `custom_rules.structural.deck_size` when present. See PLAN.md §1 and §6
+   for both fixes and their required tests.
+
+## Maintainer review round 10 — CHANGES_REQUESTED, addressed
+
+matthewevans re-reviewed round 9's fix (commit `6ec2f2adc`) and raised a
+different, deeper-history finding:
+
+1. **The rollout registers Old School 93-94/95 with no gate tied to their
+   own source rules' printing-fidelity requirement (real, confirmed).**
+   RESEARCH.md:34 cites the actual EC source: "non-foil reprints with
+   original frame + art." `legal_sets` (set-code membership) cannot express
+   this, and PLAN.md §8 schedules these two presets as registerable once
+   mana burn lands alone — with no gate acknowledging the printing-fidelity
+   axis at all, even though CONTEXT.md's own item 2 (above) already flagged
+   it as a live, unresolved "needs a human decision" item. The plan and the
+   open-items list had drifted out of sync with each other.
+   **Resolved directly this round, in discussion, not left open**: see item
+   2 above (now resolved) and PLAN.md §1's "RESOLVED — round 10" note.
+   Legality enforcement is not extended (no engine data exists to enforce
+   foil/frame against, and that's permanent, not a placeholder); the source
+   rules' spirit is instead honored by making `ArtChainEntry`'s existing
+   `{type: "oldest"}` per-player preference `legal_sets`-aware — general to
+   every format, zero engine change, not gated on `ReprintPolicy`. The
+   registration gate for Old School 93-94/95 is unchanged from §8 (mana
+   burn only) since printing fidelity is now explicitly a display concern,
+   not a legality one.
+
 ## Open (needs a human decision — do NOT resolve unilaterally)
 
 1. ~~**Delivery surface**~~ — **RESOLVED**, see "Maintainer input" section
    above: (c), entered via Axis A (structural config) through the existing
    lobby first, Axis B (legality/legacy-rules) as audited presets validating
    the same schema. PLAN.md §1 and §7 updated accordingly.
-2. **Reprint-policy fidelity — corrected/sharpened this round.** The original
-   framing ("no frame/art metadata per printing, full stop") was too
-   pessimistic. There are **two disjoint printing systems in this codebase
-   today, and only one of them lacks frame data**:
+2. ~~**Reprint-policy fidelity**~~ — **RESOLVED, round 10** (maintainer
+   review flagged the rollout registering Old School 93-94/95 with no gate
+   tied to this gap; resolved directly, not left open): legality stays
+   `legal_sets`-membership-only, permanently, not pending further work —
+   foil/frame data doesn't exist anywhere in the engine's card database to
+   enforce against. The source rules' printing-fidelity intent is instead
+   honored by a DISPLAY fix, general to every format: `ArtChainEntry`'s
+   existing `{type: "oldest"}` per-player preference mode becomes
+   `legal_sets`-aware (restricts candidate printings to the active format's
+   legal set list before picking the oldest, when one is declared), fixing
+   a real gap where "oldest printing" could mean a promo/non-tournament
+   printing the format doesn't even recognize (e.g. Chronicles' City of
+   Brass reprint is fine, its Junior Super Series promo printing is not).
+   Zero engine change, zero new `ArtChainEntry` variant, not gated on
+   `ReprintPolicy` — see PLAN.md §1's "RESOLVED — round 10" note for the
+   full design and why (a) new engine-owned printing-derived state was not
+   chosen over (b) extending the existing frontend preference system. The
+   original framing below ("no frame/art metadata per printing, full stop")
+   was too pessimistic and is kept for its still-accurate research, not as
+   a live open question:
    - **Engine/MTGJSON side** (`CardDatabase::printings_for`,
      `crates/engine/src/database/card_db.rs:227`): a bare `Vec<String>` of set
      codes, sourced from MTGJSON `AtomicCards.json`
@@ -700,15 +793,16 @@ One construction gap remained:
      unrelated purpose (`client/public/set-list.json`, deck-builder set
      filter). So an "oldest legal printing" ordering is a **wiring problem**,
      not a new-data-acquisition problem — cheaper than true frame-level
-     enforcement, which would need Scryfall's frame fields cross-referenced
-     against the format's legal-set list, and a decision on whether that
-     cross-reference is new engine-owned derived state (per "engine owns all
-     logic") or an extension of the frontend's existing cosmetic
-     `ArtChainEntry` preference system seeded by the format (a real
-     architectural fork — see PLAN.md's new `PrintingDefault` note). Whether
-     the approximation (set-code-list membership only) is acceptable for v1,
-     or whether the Scryfall-engine cross-reference should be built, is a
-     product decision.
+     enforcement.
+   - **Decided, round 10**: the legal-set-membership approximation is
+     permanent for LEGALITY (no engine-owned frame/foil enforcement will be
+     built — there's no data to enforce against), paired with a real,
+     general DISPLAY fix (Scryfall's already-existing frame/`released_at`
+     data, cross-referenced against the active format's `legal_sets`, via
+     the frontend's existing `ArtChainEntry` preference system rather than
+     new engine-owned derived state) — see PLAN.md §1's "RESOLVED — round
+     10" note for the full design. This is no longer an open product
+     decision.
 3. **Classic Magic B&R cadence.** EC updates Classic's banlist twice yearly
    (Jan 1 / Jul 1). Bundled-preset data is version-controlled, so updates are
    ordinary edits — but whether we want a dated/versioned banlist history is

@@ -504,43 +504,74 @@ LegalityRules {
 // typed enum (not deleted, not a bool) purely so a preset's authored intent
 // stays machine-readable for whoever eventually builds Open item 2.
 
-// NOT YET DESIGNED — flagged, not resolved, per CONTEXT.md open item #2.
-// `ReprintPolicy` (now on `CustomFormatDef`, not `LegalityRules`) documents
-// a preset's REPRINT INTENT for a human reading it; it does not gate
-// legality — legal-set membership alone does that (§3). A user follow-up
-// asks for a sibling, independent axis: DISPLAY DEFAULT
-// (which specific legal printing's frame/art renders by default when a card
-// is added to a deck under this format) — e.g. an old-rules format should
-// default old-frame Alpha/Beta art over a modern reprint's, without forcing
-// the player to manually pick a printing every time.
+// RESOLVED — round 10, maintainer review + direct follow-up discussion.
+// CONTEXT.md open item #2 asked whether the legal-set-membership
+// approximation (frame/art/foil never enforced) is acceptable for v1, or
+// whether the frontend/engine printing cross-reference should be built.
+// Round 10's review sharpened this into a real objection: the rollout (§8)
+// registers Old School 93-94/95 once mana burn lands, with no gate at all
+// tied to their SOURCE rules' printing-fidelity requirement
+// (RESEARCH.md:34, "non-foil reprints with original frame + art").
 //
-// Per CONTEXT.md's corrected finding: this is NOT the same gap as
-// ReprintPolicy's set-code-membership approximation. Legality (engine/MTGJSON,
-// set-codes only) and frame/art data (frontend/Scryfall, already has
-// released_at/border_color/frame_effects/full_art via `scryfall-printings.json`
-// + `preferencesStore`'s `ArtChainEntry`) are two disjoint systems today that
-// have never been cross-referenced. Building this means either (a) new
-// engine-owned derived state — a WASM-exposed "preferred printing for name X
-// given format Y" API, reusing `SetCatalog`/`SetMeta.release_date` (already
-// loaded, already projected to `client/public/set-list.json` for an unrelated
-// purpose) for chronological ordering — or (b) extending the frontend's
-// existing `ArtChainEntry` cosmetic-preference chain with a new variant seeded
-// by the format's reprint policy, treating this as display preference rather
-// than engine-derived game state. (a) fits "engine owns all logic" more
-// cleanly; (b) reuses a system that already does exactly this job for
-// individual players today. This fork needs the same maintainer conversation
-// as the rest of this design — do not build either without it.
+// Resolution reached this round, confirmed directly, not left as a
+// maintainer-only decision:
+//   1. **Legality enforcement is NOT extended to cover this, and that's
+//      final, not a placeholder.** Foil status and frame/border are not
+//      tracked anywhere in MTGJSON/`CardDatabase` (CONTEXT.md item 2's own
+//      research already established this — oracle-level data only). There
+//      is no engine-owned data to enforce against, and building one is out
+//      of scope for this proposal. `legal_sets` membership remains the
+//      WHOLE legality check, unchanged from every prior round. The
+//      registration gate for Old School 93-94/95 stays exactly as §8
+//      already has it — keyed to `IMPLEMENTED_LEGACY_AXES`/mana burn only,
+//      no new blocking axis added.
+//   2. **What actually resolves the spirit of the source rules is a DISPLAY
+//      feature, not a legality feature — general to every format, not
+//      Custom-specific.** `preferencesStore.ts`'s existing `ArtChainEntry`
+//      already has an `{type: "oldest"}` mode (CONTEXT.md item 2's research)
+//      that shows a card's globally-oldest printing — this pre-dates this
+//      proposal and is unrelated to any format's legality. The gap: it does
+//      not know about the ACTIVE FORMAT's `legal_sets` at all, so "oldest
+//      printing" can be a printing the current format doesn't even
+//      recognize as legal (a promo/judge-gift printing, for instance — a
+//      real, concrete example: Chronicles' City of Brass reprint is a
+//      legitimate reprint many old-school rulesets allow, but its Junior
+//      Super Series promo printing is not, despite being the same card).
+//      Fix: make `{type: "oldest"}`'s resolution legal-set-aware — when the
+//      active format has `legal_sets: Some(list)`, restrict the candidate
+//      printings to `list` before picking the earliest by `released_at`;
+//      when `legal_sets: None` (every built-in format today, and Axis-A
+//      lobby saves), behavior is byte-for-byte unchanged from today, since
+//      there is no format-imposed set restriction to respect and any
+//      printing of a legal card is already equally tournament-legal. This
+//      is a fix to one existing preference mode's resolution logic, not a
+//      new `ArtChainEntry` variant, and not gated on `ReprintPolicy` at
+//      all — `legal_sets` alone drives it, so it benefits EVERY format that
+//      declares a restricted printing pool, not just the three Axis-B
+//      presets that happen to set a `ReprintPolicy` value.
+//   3. **Stays a per-player preference, not a forced override.** A player
+//      who wants to see a specific printing (their own foil, a different
+//      art) keeps that choice under `ArtChainEntry`'s other modes;
+//      `{type: "oldest"}` becoming legal-set-aware only changes what THAT
+//      mode itself resolves to, exactly like any other bug-fix to an
+//      existing preference's resolution logic.
+//   4. **Zero engine change required.** `legal_sets` is already available
+//      client-side via the resolved `FormatConfig`/registry (both axes);
+//      the frontend already has the full Scryfall printing dataset
+//      (`scryfall-printings.json`) and `pickOldestPrinting()`. This is
+//      exactly option (b) CONTEXT.md's original two-way fork offered,
+//      chosen over (a) (new engine-owned derived state) because it reuses
+//      an existing, working, tested system rather than building a parallel
+//      one — consistent with "reuse existing building blocks."
 //
-// Whatever shape it takes, per CLAUDE.md's bool-vs-enum rule (and consistent
-// with ReprintPolicy itself being a 3-way enum, not a bool), a bare
-// `use_old_frame: bool` field would be the wrong shape. If/when designed, this
-// should be a typed axis analogous to `ArtChainEntry` — sketch only, NOT a
-// final design:
-//   PrintingDefault {
-//       Newest,                   // today's implicit behavior
-//       OldestLegal,              // oldest printing within this format's legal_sets
-//       SpecificSet(SetCode),     // pin to one set's frame (e.g. "Alpha only" preset)
-//   }
+// `ReprintPolicy`'s three variants (`AllowSpecialReprintSets`,
+// `AllowAnyPrinting`, `OriginalPrintingsOnly`, §2) remain exactly what round
+// 6/7 already resolved them to be — authoring-intent documentation metadata
+// on `CustomFormatDef`, consumed by nothing. This resolution deliberately
+// does NOT wire them into the display fix above; `legal_sets` alone is a
+// sufficient and simpler driver, and conflating the two would resurrect
+// exactly the "field whose consumption story keeps changing" pattern
+// rounds 5-7 already spent three rounds correcting.
 
 // REVISED per maintainer review round 4 (CONTEXT.md point 3): every axis
 // below is now a typed enum, not a bool — `legend_rule_scope` already was;
@@ -1261,6 +1292,24 @@ legality logic on the client.
     otherwise silently fall back to — the concrete regression test for the
     deck-size correctness bug this round's audit found, not just the
     display-label issue Matt's review text quoted.
+- **NEW — maintainer review round 10 (`ArtChainEntry`'s `{type: "oldest"}`
+  becomes `legal_sets`-aware, §1)**:
+  - A card with printings both inside and outside a format's declared
+    `legal_sets` resolves to the oldest printing WITHIN `legal_sets` when
+    `{type: "oldest"}` is active — not the card's globally-oldest printing —
+    the direct regression test for the Chronicles-vs-promo-printing gap
+    this round's discussion identified.
+  - The same resolution with `legal_sets: None` (every built-in format,
+    and Axis-A lobby saves) returns byte-identical output to today's
+    pre-round-10 `{type: "oldest"}` behavior — proving the fix is additive
+    and doesn't regress the existing preference for formats with no set
+    restriction.
+  - A card with NO printings inside `legal_sets` at all (a data
+    inconsistency — the card is nominally legal per some other printing
+    check, but every one of its Scryfall-side printings sits outside the
+    declared set list) falls back to the pre-fix global-oldest behavior
+    rather than panicking or rendering nothing — the explicit degenerate
+    case this design must not leave undefined.
 
 ## 7. Delivery surface — RESOLVED via maintainer input, see CONTEXT.md "Maintainer input"
 
