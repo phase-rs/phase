@@ -2672,8 +2672,11 @@ export class P2PHostAdapter implements EngineAdapter {
         playerNames: this.playerNamesForSeats(),
         ...legalActionsToWire(legalResult),
       });
-      if (this.nativeAiDriverFault !== null) {
-        await this.send(session, { type: "ai_driver_fault", ...this.nativeAiDriverFault });
+      if (this.deliveredNativeAiDriverFault !== null) {
+        await this.send(session, {
+          type: "ai_driver_fault",
+          ...this.deliveredNativeAiDriverFault,
+        });
       }
       if (this.terminalResult !== null) {
         const result = await this.terminalResultForRecipient(pid as PlayerId, state);

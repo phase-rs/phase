@@ -1371,7 +1371,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     };
     const host = adapter as unknown as {
       authoritativeRevision: number;
-      handleNativeAiDriverFault: (fault: typeof fault) => Promise<void>;
+      handleNativeAiDriverFault: (driverFault: typeof fault) => Promise<void>;
     };
     host.authoritativeRevision = fault.revision;
     await host.handleNativeAiDriverFault(fault);
@@ -1388,6 +1388,42 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       "ai_driver_fault",
     ]);
     expect(messages[1]).toMatchObject({ type: "ai_driver_fault", ...fault });
+  });
+
+  it("waits for a resumed native fault's final revision before replaying it to a reconnecting guest", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+
+    const setup = (await guest.getSentMessages()).find(
+      (message): message is { type: "game_setup"; playerToken: string } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type: string }).type === "game_setup",
+    );
+    expect(setup).toBeDefined();
+    guest.simulateClose();
+
+    const host = adapter as unknown as {
+      nativeAiDriverFault: { id: number; revision: number; message: string } | null;
+      deliveredNativeAiDriverFault: { id: number; revision: number; message: string } | null;
+    };
+    host.nativeAiDriverFault = { id: 7, revision: 3, message: "Native AI driver stopped" };
+    host.deliveredNativeAiDriverFault = null;
+
+    const reconnectedGuest = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: setup!.playerToken,
+    });
+    await flushPromises();
+
+    expect((await reconnectedGuest.getSentMessages()).map(
+      (message) => (message as { type: string }).type,
+    )).toEqual(["reconnect_ack"]);
   });
 
   it("renders a persisted native AI driver fault once when the host resumes", async () => {
