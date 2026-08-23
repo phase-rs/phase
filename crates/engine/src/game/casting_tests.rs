@@ -42486,10 +42486,23 @@ fn animate_dead_grant_survives_cleanup_then_ordinary_removal_still_sacrifices() 
     assert_eq!(state.objects[&creature_id].zone, Zone::Battlefield);
 
     // Force-remove the Aura via an unrelated effect (NOT the duration bug),
-    // then resolve the delayed leaves-battlefield trigger using the CORRECT
-    // function for Effect::CreateDelayedTrigger-created abilities (CR 603.7).
+    // routed through the real replacement-aware zone pipeline (CR 614) rather
+    // than a direct `zones::move_to_zone` call — a departure replacement could
+    // otherwise prevent or modify this move, and this test must observe the
+    // same event stream production would emit. Then resolve the delayed
+    // leaves-battlefield trigger using the CORRECT function for
+    // Effect::CreateDelayedTrigger-created abilities (CR 603.7).
     let mut events = Vec::new();
-    zones::move_to_zone(&mut state, aura_id, Zone::Graveyard, &mut events);
+    let move_result = zone_pipeline::move_object(
+        &mut state,
+        ZoneMoveRequest::effect(aura_id, Zone::Graveyard, aura_id),
+        &mut events,
+    );
+    assert!(
+        matches!(move_result, ZoneMoveResult::Done),
+        "unrelated-effect removal must complete synchronously with no pending \
+         replacement choice for this simple removal"
+    );
     crate::game::triggers::check_delayed_triggers(&mut state, &events);
     assert_eq!(
         state.stack.len(),
