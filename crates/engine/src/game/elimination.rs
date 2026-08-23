@@ -253,6 +253,13 @@ pub fn eliminate_players_simultaneously(
         state.pending_trigger = None;
         state.pending_trigger_entry = None;
         state.pending_trigger_event_batch.clear();
+        // CR 117.3c: The construction priority recipient is scheduling state for
+        // a batch that no longer exists. Leaving it installed would durably
+        // serialize a departed player into a terminal `GameOver` snapshot — the
+        // exact leak the surrounding comment already calls out for the reused
+        // singleton engine. The terminal arm needs no re-point, because there is
+        // no later construction to route.
+        state.pending_trigger_construction_priority_recipient = None;
         for firing in terminal_firings {
             crate::game::lifecycle::record_delayed_terminal(
                 firing,
@@ -332,6 +339,20 @@ pub fn eliminate_players_simultaneously(
             if !players::is_alive(state, waiting_pid) {
                 let next = players::next_player(state, waiting_pid);
                 state.waiting_for = WaitingFor::Priority { player: next };
+            }
+        }
+
+        // CR 800.4a: A live trigger-construction batch can carry a priority
+        // recipient who is not the prompt's controller, so neither cursor-
+        // clearing site above fires when that recipient alone leaves. Priority
+        // passes to the next player in turn order who is still in the game
+        // (`docs/MagicCompRules.txt:6424`), so the carried recipient is
+        // re-pointed rather than stranded — the same authority and remedy the
+        // `waiting_for` re-point directly above uses for a dead acting player.
+        if let Some(recipient) = state.pending_trigger_construction_priority_recipient {
+            if !players::is_alive(state, recipient) {
+                state.pending_trigger_construction_priority_recipient =
+                    Some(players::next_player_in_turn_order(state, recipient));
             }
         }
     }
@@ -806,6 +827,11 @@ fn do_eliminate(
         super::turn_control::recompute_active_player_control(state);
     }
 
+    // A consent run freezes canonical representatives and submitters. Player
+    // elimination changes that topology, so discard the run rather than
+    // allowing a stale prompt or Ready state to authorize anyone.
+    super::turn_control::invalidate_resolve_all_consent(state);
+
     // CR 800.4a + CR 800.4b: a departing searcher/zone owner invalidates its
     // live session, while a departing latched controller ends only that
     // controller's decision/knowledge role and falls back to the searcher.
@@ -887,6 +913,37 @@ fn do_eliminate(
             }
         }
     }
+    // CR 800.4a: "all objects … owned by that player leave the game", so a
+    // departed seat has no hand left to discard and iterating it can only be a
+    // no-op. Drop it from the discard fan-out's not-yet-prompted roster — the
+    // same treatment the scoped-library-search roster above already gets.
+    //
+    // `matching_players` is deliberately NOT pruned, and the reason is PARITY
+    // rather than a rule: the un-paused driver computes its reduction domain
+    // once at clause entry and never re-derives it, so a paused clause that
+    // pruned would answer differently from an identical unpaused one — which is
+    // precisely the divergence this repair exists to remove. CR 800.4i is what
+    // makes the retained seat well-defined: "the effect uses the last known
+    // information about that player before they left the game." The seat's
+    // truthful contribution is zero, and dropping it would silently change a
+    // `Min` answer.
+    //
+    // (Deliberately NOT cited: CR 608.2f, which an earlier revision leaned on.
+    // Read in full it is about simultaneity and APNAP ORDER — it latches no
+    // domain, and both its examples are about ordering. Same class of stretch as
+    // the CR 608.2b citation removed from `discard.rs`.)
+    //
+    // PINNED BY `effects/mod.rs`'s
+    // `eliminating_a_seat_prunes_the_paused_roster_but_not_its_reduction_domain`,
+    // which lives there to reuse the fan-out fixture. It asserts BOTH halves,
+    // so pruning the second list too is a red test rather than a silent change.
+    if let Some(fan_out) = state
+        .pending_discard_batch
+        .as_mut()
+        .and_then(|batch| batch.fan_out.as_mut())
+    {
+        fan_out.remaining_players.retain(|seat| *seat != player);
+    }
     if let Some(crate::types::game_state::PendingBatchDeliveries {
         completion:
             Some(crate::types::game_state::BatchCompletion::LibrarySearchDeliverySettled {
@@ -929,6 +986,12 @@ fn do_eliminate(
         state.pending_trigger_entry = None;
         state.pending_trigger = None;
         state.pending_trigger_event_batch.clear();
+        // CR 117.3c: The batch this recipient was scheduled for has ceased with
+        // its tracked entry. Clear it with the cursors — unconditionally, not
+        // only when the departing player happens to be the recipient — so the
+        // next construction cannot consume a stale carrier and mis-route its
+        // terminal priority.
+        state.pending_trigger_construction_priority_recipient = None;
     }
 
     // CR 800.4a + CR 616.1 + CR 704.4: Abandon a parked replacement choice this
@@ -991,6 +1054,36 @@ fn do_eliminate(
         state.pending_replacement = None;
         state.replacement_may_cost_paused = false;
         super::replacement::abandon_post_replacement_continuation(state);
+    }
+
+    // A leaving player gains no life: they are no longer a player in the game, so
+    // there is no one for the owed CR 702.15b gain to be applied to. NO CR 800.4
+    // SUBPART STATES THIS DIRECTLY — a sweep of 800.4 and 800.4a-800.4p returns no
+    // mention of life at all, so this sentence carries no citation on purpose. The
+    // nearest analogues are CR 800.4d (a triggered ability that would be controlled
+    // by a player who has left the game isn't put on the stack), CR 800.4e (combat
+    // damage that would be assigned to a player who has left the game isn't
+    // assigned), and CR 614.9 (damage redirected to or from a player who has left
+    // the game does nothing). 800.4d is the closest in SHAPE — an owed effect for a
+    // departed seat simply does not happen — but it is about triggered abilities,
+    // and the other two are about damage; NONE may be cited as authority for life
+    // gain. A re-sweep of 800.4 and 800.4a-800.4p confirms the enumerated subparts
+    // cover objects, control, creation, combat damage, costs, choices, information,
+    // and turns, and none of them life.
+    //
+    // Drop only THAT seat's owed lifelink gains — the rest of the batch belongs to
+    // other controllers and must still land, and the batch itself must still
+    // complete so its CR 603.3b triggers fire. Per-entry, mirroring
+    // `abandon_pending_spell_casts`, never a blanket null.
+    //
+    // CR 800.4j: when the seat that left is the ACTIVE player, the turn still
+    // continues to its completion, so the batch DOES complete — `auto_advance_once`
+    // discharges it through `resume_pending_combat_lifelink` before the CR 800.4
+    // turn skip. (An earlier revision of this comment claimed the batch "can no
+    // longer complete at all" and that `turns::enter_phase` owned that case; both
+    // halves are false now that the discharge exists.)
+    if let Some(record) = state.pending_combat_lifelink.as_mut() {
+        record.remaining.retain(|gain| gain.controller != player);
     }
 
     // CR 800.4a: A coupled ETB spell-resolution context can outlive its
@@ -1470,6 +1563,9 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,
@@ -1579,9 +1675,11 @@ mod tests {
                     controller_override: None,
                     enter_with_counters: Vec::new(),
                     face_down_profile: None,
+                    chain_referent: crate::types::zones::ChainReferentIntent::Silent,
                     attach_to: None,
                     library_placement: None,
                     exile_duration: None,
+                    exile_controller: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
                     replacement_applied: HashSet::new(),
                     face_down_in_exile: false,
@@ -1596,9 +1694,11 @@ mod tests {
                     controller_override: None,
                     enter_with_counters: Vec::new(),
                     face_down_profile: None,
+                    chain_referent: crate::types::zones::ChainReferentIntent::Silent,
                     attach_to: None,
                     library_placement: None,
                     exile_duration: None,
+                    exile_controller: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
                     replacement_applied: HashSet::new(),
                     face_down_in_exile: false,
@@ -2572,6 +2672,9 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,
@@ -2707,6 +2810,9 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,
@@ -2755,6 +2861,9 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,
@@ -2794,6 +2903,9 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,
@@ -2863,6 +2975,9 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,
@@ -3627,6 +3742,274 @@ mod tests {
                 .iter()
                 .any(|s| s.controller == other_controller && s.target_player == other_owner),
             "an unrelated control by a living controller survives (non-vacuous)"
+        );
+    }
+
+    /// Put a real in-construction triggered-ability entry on the stack for
+    /// `controller`, park the construction cursors on it, and open a live
+    /// `AbilityModeChoice` prompt for that same player. Returns the entry id.
+    fn open_live_trigger_construction_prompt(
+        state: &mut GameState,
+        controller: PlayerId,
+    ) -> ObjectId {
+        let source = create_object(
+            state,
+            CardId(state.next_object_id),
+            controller,
+            "Construction prompt source".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let trigger = crate::game::triggers::PendingTrigger::ordinary(
+            source,
+            controller,
+            None,
+            Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    target: crate::types::ability::TargetFilter::Controller,
+                },
+                Vec::new(),
+                source,
+                controller,
+            )),
+            state.turn_number,
+        );
+        let mut events = Vec::new();
+        let entry = crate::game::triggers::push_pending_trigger_to_stack(
+            state,
+            trigger.clone(),
+            &mut events,
+        );
+        state.pending_trigger = Some(Box::new(trigger));
+        state.pending_trigger_entry = Some(entry);
+        state.pending_trigger_firing = Some(crate::types::identifiers::TriggerFiring::Ordinary);
+        state.waiting_for = WaitingFor::AbilityModeChoice {
+            player: controller,
+            modal: crate::types::ability::ModalChoice {
+                min_choices: 1,
+                max_choices: 1,
+                mode_count: 2,
+                ..Default::default()
+            },
+            source_id: source,
+            mode_abilities: Vec::new(),
+            is_activated: false,
+            ability_index: None,
+            ability_cost: None,
+            unavailable_modes: Vec::new(),
+        };
+        entry
+    }
+
+    fn concede(state: &mut GameState, player_id: PlayerId) {
+        crate::game::engine::apply(
+            state,
+            player_id,
+            crate::types::actions::GameAction::Concede { player_id },
+        )
+        .expect("concession is always legal");
+    }
+
+    /// CR 800.4a (plan Step 5, elimination site 1): `do_eliminate`'s
+    /// tracked-entry-gone cleanup clears the construction priority recipient
+    /// beside the three construction cursors it already clears — and it does so
+    /// **with the cursors**, not only when the departing player happens to be
+    /// the carried recipient. Both clones below exercise the same site.
+    ///
+    /// Revert discriminator: with only this site's clearing removed, the
+    /// uncleared `Some(P1)` survives into the game-continues arm, where the
+    /// re-point branch sees a no-longer-alive P1 and installs `Some(P2)` — so
+    /// the `== None` assertion reads `Some(P2)` and fails.
+    #[test]
+    fn tracked_entry_cleanup_clears_the_construction_priority_recipient() {
+        // Clone A: the leaver is both the prompt controller and the recipient.
+        let mut state = setup_three_player();
+        let entry = open_live_trigger_construction_prompt(&mut state, PlayerId(1));
+        state.pending_trigger_construction_priority_recipient = Some(PlayerId(1));
+        assert!(
+            state.stack.iter().any(|e| e.id == entry),
+            "positive reach guard: the tracked entry is really on the stack"
+        );
+
+        concede(&mut state, PlayerId(1));
+
+        assert!(
+            !state.stack.iter().any(|e| e.id == entry),
+            "the leaver's trigger entry ceases to exist (CR 800.4a)"
+        );
+        assert_eq!(state.pending_trigger, None);
+        assert_eq!(state.pending_trigger_entry, None);
+        assert!(state.pending_trigger_event_batch.is_empty());
+        assert_eq!(
+            state.pending_trigger_construction_priority_recipient, None,
+            "the recipient is cleared beside the three construction cursors"
+        );
+        let restored: GameState =
+            serde_json::from_value(serde_json::to_value(&state).expect("serialize"))
+                .expect("trusted round trip");
+        assert_eq!(
+            restored.pending_trigger_construction_priority_recipient, None,
+            "the cleared recipient must survive trusted serde"
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { player } if player != PlayerId(1)),
+            "CR 800.4a hands the wait to a surviving player, got {:?}",
+            state.waiting_for
+        );
+
+        // Clone B (non-carrier): the eliminated prompt controller is NOT the
+        // carried recipient, so the site must still clear with the cursors.
+        let mut state = setup_three_player();
+        let entry = open_live_trigger_construction_prompt(&mut state, PlayerId(2));
+        state.pending_trigger_construction_priority_recipient = Some(PlayerId(1));
+        assert!(
+            state.stack.iter().any(|e| e.id == entry),
+            "positive reach guard: the tracked entry is really on the stack"
+        );
+        assert!(
+            players::is_alive(&state, PlayerId(1)),
+            "positive reach guard: the carried recipient is a DIFFERENT, still-living \
+             player, so any clearing observed below came from this site rather than \
+             from the departed-recipient re-point"
+        );
+
+        concede(&mut state, PlayerId(2));
+
+        assert!(!state.stack.iter().any(|e| e.id == entry));
+        assert_eq!(state.pending_trigger_entry, None);
+        assert_eq!(
+            state.pending_trigger_construction_priority_recipient, None,
+            "the site clears the recipient with the cursors, not only when the two coincide"
+        );
+    }
+
+    /// CR 800.4a (plan Step 5, elimination site 2): the terminal `GameOver`
+    /// cleanup clears the recipient beside the same three cursors, in a fixture
+    /// where **no leaving player controls the tracked entry** — so this site is
+    /// provably the only one that can clear it.
+    ///
+    /// Revert discriminator: with only this site's clearing removed, a player
+    /// who has left the game stays installed in a serialized `GameOver` state.
+    /// No other branch masks it — site 1 never fires here, and the
+    /// game-continues re-point cannot run on the terminal path.
+    #[test]
+    fn terminal_game_over_cleanup_clears_the_construction_priority_recipient() {
+        let mut state = setup_three_player();
+        let entry = open_live_trigger_construction_prompt(&mut state, PlayerId(0));
+        state.pending_trigger_construction_priority_recipient = Some(PlayerId(1));
+
+        concede(&mut state, PlayerId(2));
+
+        // Pre-terminal reach guard: P1 controls no stack entry, so the
+        // tracked-entry-gone site is false and this row provably exercises the
+        // terminal branch rather than site 1.
+        assert_eq!(
+            state.pending_trigger_construction_priority_recipient,
+            Some(PlayerId(1)),
+            "a still-living recipient is neither cleared nor re-pointed"
+        );
+        assert_eq!(state.pending_trigger_entry, Some(entry));
+        assert!(
+            state.stack.iter().any(|e| e.id == entry),
+            "the tracked entry is still on the stack before the final concession"
+        );
+
+        concede(&mut state, PlayerId(1));
+
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::GameOver {
+                    winner: Some(PlayerId(0))
+                }
+            ),
+            "the single game-over check crowns P0, got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(state.pending_trigger, None);
+        assert_eq!(state.pending_trigger_entry, None);
+        assert!(state.pending_trigger_event_batch.is_empty());
+        assert_eq!(
+            state.pending_trigger_construction_priority_recipient, None,
+            "a departed player must not stay installed in a terminal snapshot"
+        );
+        let restored: GameState =
+            serde_json::from_value(serde_json::to_value(&state).expect("serialize"))
+                .expect("trusted round trip");
+        assert_eq!(
+            restored.pending_trigger_construction_priority_recipient,
+            None
+        );
+    }
+
+    /// CR 800.4a (plan Step 5, elimination site 3 — the new game-continues
+    /// re-point): when the carried recipient alone leaves and neither cursor-
+    /// clearing site fires, priority passes to the next player still in the
+    /// game rather than stranding a departed recipient.
+    ///
+    /// Revert discriminator: without the re-point, `Some(P1)` stays installed
+    /// with P1 out of the game, and the finisher would later return
+    /// `WaitingFor::Priority { player: P1 }` for a departed player. Neither
+    /// cursor-clearing row detects this; both still pass.
+    #[test]
+    fn game_continues_repoints_a_departed_construction_priority_recipient() {
+        let mut state = setup_three_player();
+        let entry = open_live_trigger_construction_prompt(&mut state, PlayerId(0));
+        state.pending_trigger_construction_priority_recipient = Some(PlayerId(1));
+
+        concede(&mut state, PlayerId(1));
+
+        // Neither clearing site fired: the tracked entry is P0's and survives,
+        // and the game continues so the terminal arm was never entered.
+        assert!(
+            state.stack.iter().any(|e| e.id == entry),
+            "P0's tracked entry survives an opponent's departure"
+        );
+        assert_eq!(state.pending_trigger_entry, Some(entry));
+        assert!(
+            matches!(state.waiting_for, WaitingFor::AbilityModeChoice { player, .. } if player == PlayerId(0)),
+            "the construction prompt is still live and unchanged for P0, got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            state.pending_trigger_construction_priority_recipient,
+            Some(PlayerId(2)),
+            "the departed recipient is re-pointed to the next living player, not stranded"
+        );
+        let restored: GameState =
+            serde_json::from_value(serde_json::to_value(&state).expect("serialize"))
+                .expect("trusted round trip");
+        assert_eq!(
+            restored.pending_trigger_construction_priority_recipient,
+            Some(PlayerId(2)),
+            "the re-pointed recipient must survive trusted serde"
+        );
+    }
+
+    /// CR 800.4a + CR 101.4: the re-point follows the CURRENT turn-order
+    /// direction, not fixed seating. Under `TurnDirection::Reversed` the next
+    /// player in turn order after a departed P1 is P0, not seat-forward P2.
+    ///
+    /// Revert discriminator: `players::next_player` (seat-forward) re-points to
+    /// P2 here; `players::next_player_in_turn_order` re-points to P0.
+    #[test]
+    fn game_continues_repoints_a_departed_recipient_in_reversed_turn_order() {
+        let mut state = setup_three_player();
+        state.turn_direction = crate::types::phase::TurnDirection::Reversed;
+        let entry = open_live_trigger_construction_prompt(&mut state, PlayerId(0));
+        state.pending_trigger_construction_priority_recipient = Some(PlayerId(1));
+
+        concede(&mut state, PlayerId(1));
+
+        assert!(
+            state.stack.iter().any(|e| e.id == entry),
+            "P0's tracked entry survives an opponent's departure"
+        );
+        assert_eq!(
+            state.pending_trigger_construction_priority_recipient,
+            Some(PlayerId(0)),
+            "under reversed turn order the departed recipient re-points backward \
+             through seating (the next player in TURN order), not seat-forward"
         );
     }
 }

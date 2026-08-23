@@ -1304,6 +1304,7 @@ fn alternative_cast_siblings_use_stable_typed_codes() {
         normal_cost: ManaCost::NoCost,
         alternative_cost: Some(ManaCost::NoCost),
         alternative_additional_cost: None,
+        alternative_additional_cost_description: None,
     };
     bind(runner.state_mut(), "alternative-cast-codes");
 

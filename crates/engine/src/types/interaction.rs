@@ -66,6 +66,7 @@ pub struct ActiveInteractionSlot {
 pub enum SimultaneousDecisionKind {
     Mulligan,
     OpeningBottom,
+    ResolveAllConsent,
 }
 
 /// Stable protocol classification of an engine prompt. This deliberately

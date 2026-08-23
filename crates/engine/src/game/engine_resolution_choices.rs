@@ -5,7 +5,7 @@ use rand::seq::SliceRandom;
 
 use crate::types::ability::{
     AbilityCost, ChoiceType, ChosenAttribute, DigRestOrder, Effect, EffectKind, GuessOutcome,
-    LibraryPosition, QuantityExpr, QuantityRef, ResolvedAbility, TargetRef, ThisWayCause,
+    LibraryPosition, QuantityExpr, QuantityRef, ResolvedAbility, TargetRef,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
@@ -628,6 +628,24 @@ fn batch_or_drain_observer_triggers(
             .collect();
         super::triggers::collect_triggers_into_deferred(state, &trigger_events);
         None
+    }
+}
+
+/// CR 603.2 + CR 603.3b: Preserve triggers from events that occurred while a
+/// resolution choice paused; they trigger now and wait for the next priority
+/// window's APNAP placement rather than being lost with the action's event slice.
+pub(crate) fn defer_observer_triggers_for_paused_choice(
+    state: &mut GameState,
+    events: &[GameEvent],
+    event_start: usize,
+) {
+    let trigger_events: Vec<GameEvent> = events[event_start..]
+        .iter()
+        .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
+        .cloned()
+        .collect();
+    if !trigger_events.is_empty() {
+        super::triggers::collect_triggers_into_deferred(state, &trigger_events);
     }
 }
 
@@ -1812,7 +1830,10 @@ pub(super) fn handle_resolution_choice(
                     Zone::Battlefield,
                     source_id,
                 )
-                .face_down(face_down),
+                // CR 608.2c + CR 701.62a: the same producer as `manifest_card`,
+                // reached through the two-card choice instead of synchronously.
+                .face_down(face_down)
+                .publishing_chain_referent(),
                 events,
             ) {
                 crate::game::zone_pipeline::ZoneMoveResult::Done => {}
@@ -1835,6 +1856,10 @@ pub(super) fn handle_resolution_choice(
                             clear_markers: cards.clone(),
                             publish_tracked_set: None,
                             emit_reveal_until_resolved: None,
+                            // #7467 review round 2: the entry paused, so the
+                            // publish below never runs — the completion drain
+                            // publishes instead, once the entry completed.
+                            manifested_for_continuation: Some(manifest_id),
                         },
                     );
                     return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -1842,6 +1867,15 @@ pub(super) fn handle_resolution_choice(
                     ));
                 }
             }
+
+            // CR 608.2c + CR 701.62a (#7467): the manifested creature enters
+            // from THIS continuation, so its `ZoneChanged` never reaches the
+            // resolver-side harvest — the chain's tracked set was published
+            // EMPTY when the head parked. Re-publish it here so a chained
+            // consumer ("Manifest dread X times, then put X +1/+1 counters on
+            // each of those creatures" — Valgavoth's Onslaught) binds the
+            // creature, the same seam as the search-choice publish above.
+            effects::publish_battlefield_object_for_pending_continuation(state, manifest_id);
 
             // CR 614.6 + CR 701.62a class: route the non-manifested cards to the
             // graveyard through the simultaneous-move batch so each card's own
@@ -2075,6 +2109,7 @@ pub(super) fn handle_resolution_choice(
                                     clear_markers,
                                     publish_tracked_set: None,
                                     emit_reveal_until_resolved: None,
+                                    manifested_for_continuation: None,
                                 },
                             );
                             return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -2139,6 +2174,7 @@ pub(super) fn handle_resolution_choice(
                     clear_markers,
                     publish_tracked_set: None,
                     emit_reveal_until_resolved: None,
+                    manifested_for_continuation: None,
                 }),
                 events,
             ) {
@@ -3498,6 +3534,7 @@ pub(super) fn handle_resolution_choice(
                                     clear_markers: Vec::new(),
                                     publish_tracked_set: None,
                                     emit_reveal_until_resolved: None,
+                                    manifested_for_continuation: None,
                                 },
                             );
                             return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -3625,6 +3662,7 @@ pub(super) fn handle_resolution_choice(
                                     clear_markers: Vec::new(),
                                     publish_tracked_set: Some(kept.clone()),
                                     emit_reveal_until_resolved: None,
+                                    manifested_for_continuation: None,
                                 },
                             );
                             return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -3687,6 +3725,7 @@ pub(super) fn handle_resolution_choice(
                                 clear_markers: Vec::new(),
                                 publish_tracked_set: Some(publish_set),
                                 emit_reveal_until_resolved: None,
+                                manifested_for_continuation: None,
                             },
                         );
                         return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -3862,6 +3901,7 @@ pub(super) fn handle_resolution_choice(
                 allows_partial_find,
                 constraint,
                 split,
+                ..
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
@@ -4674,6 +4714,15 @@ pub(super) fn handle_resolution_choice(
                 }
             }
 
+            // CR 608.2d: A resolving player can't choose one eligible card
+            // more than once to satisfy a multi-card discard selection.
+            let unique_chosen: HashSet<ObjectId> = chosen.iter().copied().collect();
+            if unique_chosen.len() != chosen.len() {
+                return Err(EngineError::InvalidAction(
+                    "Selected cards must be distinct".to_string(),
+                ));
+            }
+
             let current_hand: std::collections::HashSet<ObjectId> = state
                 .players
                 .iter()
@@ -4694,8 +4743,14 @@ pub(super) fn handle_resolution_choice(
                 }
             }
 
+            let chosen_refs = chosen
+                .iter()
+                .filter_map(|id| state.objects.get(id))
+                .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
+                .collect::<Vec<_>>();
+
             let events_before_effect = events.len();
-            for &card_id in &chosen {
+            for (index, &card_id) in chosen.iter().enumerate() {
                 if let effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) =
                     effects::discard::discard_caused_by_effect_with_source_and_frame(
                         state,
@@ -4708,100 +4763,43 @@ pub(super) fn handle_resolution_choice(
                 {
                     state.waiting_for =
                         super::replacement::replacement_choice_waiting_for(choice_player, state);
+                    state.pending_discard_batch = Some(Box::new(
+                        crate::types::game_state::PendingDiscardBatch {
+                            player,
+                            cursor: crate::types::game_state::DiscardBatchCursor::Ordered {
+                                remaining: chosen_refs[index + 1..].to_vec(),
+                            },
+                            completion:
+                                crate::types::game_state::PendingDiscardBatchCompletion::DiscardChoice {
+                                    chosen: chosen_refs,
+                                },
+                            source_id,
+                            effect_kind,
+                            paused_card: crate::types::identifiers::ObjectIncarnationRef::of(
+                                card_id,
+                                state.objects[&card_id].incarnation,
+                            ),
+                            discard_frame,
+                            fan_out: None,
+                            preceding_events: events[events_before_effect..].to_vec(),
+                        },
+                    ));
+                    defer_observer_triggers_for_paused_choice(state, events, events_before_effect);
                     return Ok(action_result_outcome(events, state.waiting_for.clone()));
                 }
             }
             let events_after_move = events.len();
 
-            // CR 608.2e + CR 608.2c: APNAP discard steps accumulate into one
-            // tracked set. The discard handler is the single authority for
-            // recording the cards it moved — `discard_as_cost_with_source`
-            // runs outside `resolve_effect`, so its non-interactive sibling's
-            // `next_sub_needs_tracked_set` publish never fires for it. Publish
-            // the cards that reached the graveyard here; `chain_tracked_set_id`
-            // is preserved across the per-opponent continuation pause, so each
-            // opponent's publish extends the same set and the "draw a card for
-            // each card discarded this way" tail reads the union.
-            // CR 701.9c: only graveyard-bound cards count — a replacement
-            // redirect (Madness) to another zone is excluded by the filter.
-            let discarded_to_graveyard: Vec<ObjectId> = events[events_before_effect..]
-                .iter()
-                .filter_map(|ev| match ev {
-                    GameEvent::ZoneChanged {
-                        object_id,
-                        to: Zone::Graveyard,
-                        ..
-                    } => Some(*object_id),
-                    _ => None,
-                })
-                .collect();
-            if !discarded_to_graveyard.is_empty() {
-                // CR 608.2c: A `ZoneChangedThisWay` reflexive gate ("When you
-                // discard a card this way, …" — Talion's Messenger, The Ancient
-                // One) reads `last_zone_changed_ids`. The synchronous resolve path
-                // populates that ledger from the discard's `ZoneChanged` events
-                // (`effects/mod.rs`), but a discard that paused for an interactive
-                // `DiscardChoice` (hand > 1) moves the chosen card HERE, after the
-                // parent effect already returned. Re-publish the just-moved cards
-                // into the ledger so the deferred gate, re-evaluated when the
-                // stashed continuation drains, sees the discarded objects.
-                state.last_zone_changed_ids = discarded_to_graveyard.clone();
-                // CR 701.9a + CR 608.2c: stamp these members with the producer
-                // action `Discarded` so a `caused_by: Some(Discarded)` "discarded
-                // this way" consumer counts them while a `caused_by: None`
-                // consumer still reads the whole id-only set. The cause is the
-                // action, independent of final zone (CR 614.6).
-                let with_causes = discarded_to_graveyard
-                    .into_iter()
-                    .map(|id| (id, Some(ThisWayCause::Discarded)))
-                    .collect();
-                effects::publish_tracked_set_with_causes(state, with_causes);
-            }
-
-            // CR 608.2c: "discard a card. If you do, [effect]" — the IfYouDo
-            // sub_ability condition evaluates against optional_effect_performed.
-            // Set it on the stashed continuation before draining so the gate
-            // evaluates true when at least one card was actually discarded.
-            // Mirrors the recursive AutoMayChoice::Accept path in effects/mod.rs.
-            if !chosen.is_empty() {
-                if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                    frame
-                        .pending
-                        .chain
-                        .set_optional_effect_performed_recursive(true);
-                }
-            }
-
-            // CR 701.9a + CR 608.2c: A Recruit discard that paused for card
-            // selection now has its terminal LKI result in the operation-owned
-            // frame. Stamp that result only onto the deferred direct child before
-            // the continuation drains; the ordinary parent→child hand-off clears
-            // it again for grandchildren.
-            if let Some(frame_id) = discard_frame {
-                effects::discard::hand_off_recruit_discard_result(state, frame_id);
-            }
-
-            // CR 608.2c + CR 400.7j: A reflexive sub deferred across this
-            // interactive discard may name the discarded card anaphorically —
-            // "When you discard a card this way, target player mills cards equal
-            // to ITS mana value" (The Ancient One). The synchronous resolve path
-            // captures that referent via `parent_referent_context_from_events`
-            // (`effects/mod.rs`); the interactive path moves the card here, after
-            // the parent returned, so capture it now and stamp it onto the stashed
-            // continuation. The discarded card is in the public graveyard, so its
-            // characteristics are read live. Mirrors the `EffectZoneChoice` path.
-            if let Some(snapshot) =
-                effects::parent_referent_context_from_events(state, &events[events_before_effect..])
-            {
-                if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                    frame
-                        .pending
-                        .chain
-                        .set_effect_context_object_recursive(snapshot);
-                }
-            }
-
-            state.last_effect_count = Some(chosen.len() as i32);
+            let completion =
+                crate::types::game_state::PendingDiscardBatchCompletion::DiscardChoice {
+                    chosen: chosen_refs,
+                };
+            effects::finalize_discard_choice_completion(
+                state,
+                &completion,
+                discard_frame,
+                &events[events_before_effect..],
+            );
             events.push(GameEvent::EffectResolved {
                 kind: effect_kind,
                 source_id,
@@ -6675,6 +6673,21 @@ pub(super) fn handle_resolution_choice(
             // of clobbering it with `Priority`; otherwise resolution is complete,
             // so return to priority and let the resulting zone change's triggers /
             // SBAs process.
+            // CR 702.99a: the offer's own frame owns this prompt (issue #7470),
+            // so consume it BEFORE the card moves — the encode's zone change can
+            // park frames of its own, and a stale owner underneath them would
+            // fail `validate` at the next prompt. This holds for BOTH answers:
+            // a decline (`creature: None`) ends the offer just as an acceptance
+            // does, so it must consume the owner just as an acceptance does.
+            //
+            // The error is surfaced rather than swallowed: it means some other
+            // frame is sitting on top of this prompt's owner, which is the exact
+            // corruption this frame was introduced to make impossible. `Ok(None)`
+            // is not that — it is an empty stack, i.e. no owner to leave stale,
+            // which is what a game saved before this frame existed restores as.
+            state
+                .take_active_cipher_encode_frame()
+                .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
             match crate::game::cipher::handle_encode_choice(state, card_id, creature, events) {
                 crate::game::zone_pipeline::ZoneMoveResult::Done => {
                     ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {
@@ -7333,6 +7346,7 @@ fn route_kept_card_or_defer(
                     clear_markers,
                     publish_tracked_set: None,
                     emit_reveal_until_resolved: None,
+                    manifested_for_continuation: None,
                 },
             );
             Some(ResolutionChoiceOutcome::WaitingFor(
@@ -8005,6 +8019,7 @@ pub(crate) fn run_batch_completion(
             clear_markers,
             publish_tracked_set,
             emit_reveal_until_resolved,
+            manifested_for_continuation,
         } => {
             // The dig path (`publish_tracked_set.is_some()`) routes the rest pile
             // through `route_rest_partition` (ordered library bottom); the
@@ -8033,6 +8048,7 @@ pub(crate) fn run_batch_completion(
                                 clear_markers,
                                 publish_tracked_set,
                                 emit_reveal_until_resolved,
+                                manifested_for_continuation,
                             },
                         );
                         return crate::game::zone_pipeline::BatchMoveResult::NeedsChoice;
@@ -8053,6 +8069,7 @@ pub(crate) fn run_batch_completion(
                     clear_markers,
                     publish_tracked_set: None,
                     emit_reveal_until_resolved,
+                    manifested_for_continuation,
                 };
                 return effects::reveal_until::move_rest_then(
                     state,
@@ -8084,6 +8101,13 @@ pub(crate) fn run_batch_completion(
                     source_id,
                     subject: None,
                 });
+            }
+            // CR 608.2c + CR 701.62a (#7467): the paused manifest entry has
+            // completed by now — publish its object for the parked consumer,
+            // the deferred mirror of the synchronous `ManifestDreadChoice`
+            // publish (same gate, same battlefield filter).
+            if let Some(manifested) = manifested_for_continuation {
+                effects::publish_battlefield_object_for_pending_continuation(state, manifested);
             }
             finish_with_continuation(state, player, events);
             crate::game::zone_pipeline::BatchMoveResult::Done
@@ -9490,6 +9514,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -10489,6 +10514,8 @@ mod tests {
             trigger_definitions: std::sync::Arc::default(),
             replacement_definitions: std::sync::Arc::default(),
             static_definitions: std::sync::Arc::default(),
+            room_halves: None,
+            name_origin: Default::default(),
         })
     }
 

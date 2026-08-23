@@ -685,7 +685,7 @@ pub(crate) enum AttachmentAuthority<'a> {
 /// Player hosts are Auras-only (see [`attach_to_player`]); a copy exception that
 /// adds or removes the `Aura` subtype (CR 205.1a) changes the answer, so this
 /// reads the authority rather than the stored object.
-fn authority_is_aura(
+pub(crate) fn authority_is_aura(
     state: &GameState,
     attachment_id: ObjectId,
     authority: AttachmentAuthority<'_>,

@@ -223,7 +223,6 @@ Runtime tests use `add_real_card` + rehydrate and drive the REAL declare-attacke
 
 ## Constraints honored
 - Do NOT touch `StaticMode` (#4010/#3958) — scope rides `attack_defended`; ✓.
-- mtgish dormant — not referenced; ✓.
 - Surgical/additive; no whole-file rewrites; commit by pathspec; Tilt-first (no raw cargo); ✓.
 - All parser dispatch via nom combinators; ✓ (Nom Compliance section).
 - No bool flags — `AttackTargetFilter` + `RestrictionPlayerScope` + `RestrictionExpiry` typed enums; ✓.

@@ -25,6 +25,7 @@ import { HostControls } from "../components/draft/HostControls";
 import { LimitedDeckBuilder } from "../components/draft/LimitedDeckBuilder";
 import { PackDisplay } from "../components/draft/PackDisplay";
 import { PickTimer } from "../components/draft/PickTimer";
+import { PodErrorBanner } from "../components/draft/PodErrorBanner";
 import { PoolPanel } from "../components/draft/PoolPanel";
 import { ScoreBadge } from "../components/draft/ScoreBadge";
 import { SeatStatusRing } from "../components/draft/SeatStatusRing";
@@ -33,8 +34,10 @@ import { StandingsTable } from "../components/draft/StandingsTable";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { MenuShell } from "../components/menu/MenuShell";
 import {
+  draftPodScreen,
+  intergamePromptKey,
   useMultiplayerDraftStore,
-  type MultiplayerDraftPhase,
+  type DraftPodScreen,
 } from "../stores/multiplayerDraftStore";
 import { useDraftPodStore } from "../stores/draftPodStore";
 
@@ -422,6 +425,7 @@ function PairingPhaseView() {
   const { t } = useTranslation("draft");
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 py-8">
+      <PodErrorBanner />
       <h2 className="text-center text-xl font-medium text-white">
         {t("podPhaseView.tournamentPairings")}
       </h2>
@@ -447,6 +451,7 @@ function MatchInProgressView() {
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 py-8">
+      <PodErrorBanner />
       <h2 className="text-center text-xl font-medium text-white">
         {t("podPhaseView.matchesInProgress")}
       </h2>
@@ -509,6 +514,7 @@ function RoundCompleteView() {
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 py-8">
+      <PodErrorBanner />
       <h2 className="text-center text-xl font-medium text-white">
         {t("podPhaseView.roundComplete")}
       </h2>
@@ -524,7 +530,7 @@ function RoundCompleteView() {
 
 // ── Between Games View (Bo3) ─────────────────────────────────────────
 
-function BetweenGamesView() {
+function BetweenGamesView({ onDismiss }: { onDismiss: () => void }) {
   const { t } = useTranslation("draft");
   const sideboardPrompt = useMultiplayerDraftStore((s) => s.sideboardPrompt);
   const playDrawPrompt = useMultiplayerDraftStore((s) => s.playDrawPrompt);
@@ -541,6 +547,7 @@ function BetweenGamesView() {
     const timerSec = timerRemainingMs != null ? Math.ceil(timerRemainingMs / 1000) : null;
     return (
       <div className="mx-auto flex w-full max-w-md flex-col items-center gap-6 py-8">
+        <PodErrorBanner />
         <h2 className="text-xl font-medium text-white">{t("betweenGames.game", { number: playDrawPrompt.gameNumber })}</h2>
         <ScoreBadge score={playDrawPrompt.score} player={seatIndex === 0 ? 0 : 1} size="md" />
         <p className="text-sm text-white/60">{t("betweenGames.lostPreviousGame")}</p>
@@ -561,6 +568,9 @@ function BetweenGamesView() {
             {t("betweenGames.drawFirst")}
           </button>
         </div>
+        <button onClick={onDismiss} className={menuButtonClass({ tone: "neutral", size: "xs" })}>
+          {t("betweenGames.hideOverlay")}
+        </button>
       </div>
     );
   }
@@ -569,6 +579,7 @@ function BetweenGamesView() {
   if (sideboardSubmitted) {
     return (
       <div className="mx-auto flex w-full max-w-md flex-col items-center gap-6 py-8">
+        <PodErrorBanner />
         <h2 className="text-xl font-medium text-white">{t("betweenGames.sideboarding")}</h2>
         {sideboardPrompt && (
           <ScoreBadge score={sideboardPrompt.score} player={seatIndex === 0 ? 0 : 1} size="md" />
@@ -582,6 +593,9 @@ function BetweenGamesView() {
           </p>
         )}
         <div className="h-6 w-6 animate-spin rounded-full border-2 border-white/20 border-t-emerald-400" />
+        <button onClick={onDismiss} className={menuButtonClass({ tone: "neutral", size: "xs" })}>
+          {t("betweenGames.hideOverlay")}
+        </button>
       </div>
     );
   }
@@ -593,6 +607,7 @@ function BetweenGamesView() {
 
     return (
       <div className="mx-auto flex w-full max-w-4xl flex-col gap-4 py-8">
+        <PodErrorBanner />
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <h2 className="text-xl font-medium text-white">
@@ -618,14 +633,25 @@ function BetweenGamesView() {
         >
           {t("betweenGames.submitSideboard")}
         </button>
+        <button onClick={onDismiss} className={menuButtonClass({ tone: "neutral", size: "xs" })}>
+          {t("betweenGames.hideOverlay")}
+        </button>
       </div>
     );
   }
 
-  // Fallback — should not reach here
+  // Fallback — unreachable BY CONSTRUCTION, and retained only for the function's
+  // totality: `draftPodScreen` answers `"betweenGames"` only when
+  // `sideboardPrompt !== null`, and the `sideboardSubmitted` branch above fires
+  // before this one. It keeps the banner and the dismiss control so it cannot
+  // become a dead end if the rule ever widens.
   return (
     <div className="mx-auto flex w-full max-w-md flex-col items-center gap-6 py-8">
+      <PodErrorBanner />
       <p className="text-sm text-white/60">{t("betweenGames.preparingNext")}</p>
+        <button onClick={onDismiss} className={menuButtonClass({ tone: "neutral", size: "xs" })}>
+          {t("betweenGames.hideOverlay")}
+        </button>
     </div>
   );
 }
@@ -758,10 +784,13 @@ function PodErrorView({
 // ── Phase-based Content ───────────────────────────────────────────────
 
 function phaseContent(
-  phase: MultiplayerDraftPhase,
+  screen: DraftPodScreen,
   onLeave: () => void,
+  onDismissOverlay: () => void,
 ): React.ReactNode {
-  switch (phase) {
+  // No `default` arm: `tsc` is what makes a future `DraftPodScreen` member
+  // impossible to forget here.
+  switch (screen) {
     case "idle":
     case "connecting":
       return <PodSetup />;
@@ -772,7 +801,7 @@ function phaseContent(
     case "deckbuilding":
       return <PodDeckBuilder />;
     case "betweenGames":
-      return <BetweenGamesView />;
+      return <BetweenGamesView onDismiss={onDismissOverlay} />;
     case "pairing":
       return <PairingPhaseView />;
     case "matchInProgress":
@@ -784,14 +813,22 @@ function phaseContent(
     case "error":
     case "kicked":
     case "hostLeft":
-      return <PodErrorView phase={phase} onLeave={onLeave} />;
+      return <PodErrorView phase={screen} onLeave={onLeave} />;
   }
 }
 
 // ── Page ───────────────────────────────────────────────────────────────
 
 export function DraftPodPage() {
+  const { t } = useTranslation("draft");
   const phase = useMultiplayerDraftStore((s) => s.phase);
+  const screen = useMultiplayerDraftStore(draftPodScreen);
+  const promptKey = useMultiplayerDraftStore(intergamePromptKey);
+  // Selects the banner's copy and nothing else. A fourth primitive selector
+  // rather than a substring test on `promptKey`, whose shape is
+  // `intergamePromptKey`'s business.
+  const playDrawPending = useMultiplayerDraftStore((s) => s.playDrawPrompt !== null);
+  const [dismissedPromptKey, setDismissedPromptKey] = useState<string | null>(null);
   const leave = useMultiplayerDraftStore((s) => s.leave);
   const resetPod = useDraftPodStore((s) => s.reset);
   const resumeHostedPod = useDraftPodStore((s) => s.resumeHostedPod);
@@ -809,6 +846,16 @@ export function DraftPodPage() {
     navigate("/");
   }, [leave, resetPod, navigate]);
 
+  // A dismissal is scoped to the prompt it was made about, so it expires by
+  // construction when the next game's prompt — or the same game's play/draw
+  // decision — arrives: no effect, no cleanup, and no latch that could outlive
+  // the window it was hiding.
+  const overlayDismissed = promptKey !== null && promptKey === dismissedPromptKey;
+  const visibleScreen: DraftPodScreen = overlayDismissed ? phase : screen;
+
+  // `showBack` stays on `phase`: it is `idle`/`connecting` only — both of which
+  // `draftPodScreen` returns verbatim — and it is a session-level affordance,
+  // not a screen-level one.
   const showBack = phase === "idle" || phase === "connecting";
 
   return (
@@ -819,7 +866,30 @@ export function DraftPodPage() {
           out-of-match surface. Each phase view renders its own heading, so no
           MenuShell title is passed. */}
       <MenuShell layout="stacked">
-        <div className="flex w-full flex-col">{phaseContent(phase, handleLeave)}</div>
+        {/* Gated on `screen`, not `visibleScreen`, so it appears exactly while a
+            live overlay is being suppressed and disappears the instant either
+            conjunct releases — no separate teardown. `draftPodScreen` answers
+            `"betweenGames"` only when `phase === "matchInProgress"`, so the
+            screen underneath is provably `MatchInProgressView` and nothing else. */}
+        {screen === "betweenGames" && overlayDismissed && (
+          <div
+            role="status"
+            className="mb-3 flex items-center justify-between gap-3 rounded-xl border border-amber-400/25 bg-amber-400/10 px-4 py-2"
+          >
+            <span className="text-sm text-white/70">
+              {t(playDrawPending ? "betweenGames.hiddenNoticePlayDraw" : "betweenGames.hiddenNotice")}
+            </span>
+            <button
+              onClick={() => setDismissedPromptKey(null)}
+              className={menuButtonClass({ tone: "neutral", size: "xs" })}
+            >
+              {t("betweenGames.showOverlay")}
+            </button>
+          </div>
+        )}
+        <div className="flex w-full flex-col">
+          {phaseContent(visibleScreen, handleLeave, () => setDismissedPromptKey(promptKey))}
+        </div>
       </MenuShell>
 
       <HostControls />

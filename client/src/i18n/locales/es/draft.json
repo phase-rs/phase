@@ -119,6 +119,11 @@
       "planeswalker": "Planeswalker",
       "land": "Tierra",
       "other": "Otro",
+      "mythic": "Mítica",
+      "rare": "Rara",
+      "uncommon": "Infrecuente",
+      "common": "Común",
+      "rarityOther": "Otras rarezas",
       "manaValue0": "0 CMC",
       "manaValue1": "1 CMC",
       "manaValue2": "2 CMC",
@@ -139,7 +144,10 @@
   },
   "limitedDeck": {
     "poolHeading": "Grupo ({{count}})",
+    "searchPool": "Buscar en tu pool...",
     "allAdded": "Todas las cartas añadidas al mazo.",
+    "noFilterMatches": "Ninguna carta coincide con los filtros",
+    "filterUnavailable": "Los filtros no están disponibles ahora — se muestran todas las cartas.",
     "mainDeck": "Mazo principal",
     "emptyDeckHint": "Haz clic en las cartas del grupo para añadirlas a tu mazo.",
     "addableCards": "Cartas añadibles",
@@ -365,7 +373,11 @@
     "sideboardGame": "Banquillo — Partida {{number}}",
     "sideboardHint": "Haz cambios en el banquillo y luego envía los datos. Tu selección está disponible a continuación.",
     "submitSideboard": "Enviar banquillo",
-    "preparingNext": "Preparando la siguiente partida..."
+    "preparingNext": "Preparando la siguiente partida...",
+    "hideOverlay": "Ocultar esta pantalla",
+    "showOverlay": "Mostrar esta pantalla",
+    "hiddenNotice": "El banquillo sigue abierto para esta partida.",
+    "hiddenNoticePlayDraw": "Aún queda por elegir entre jugar o robar en esta partida."
   },
   "podComplete": {
     "title": "Draft completado",

@@ -2,6 +2,7 @@ import { strToU8, zipSync } from "fflate";
 
 import type { GameState } from "../adapter/types.ts";
 import { useGameStore } from "../stores/gameStore.ts";
+import { copyText } from "./copyText";
 
 interface GameStateDebugSnapshot {
   gameState: GameState;
@@ -46,7 +47,9 @@ export function serializeGameStateDebugSnapshot(gameState: GameState, pretty = f
 }
 
 export async function copyGameStateDebugSnapshot(gameState: GameState): Promise<void> {
-  await navigator.clipboard.writeText(serializeGameStateDebugSnapshot(gameState, true));
+  if (!(await copyText(serializeGameStateDebugSnapshot(gameState, true)))) {
+    throw new Error("Clipboard write failed");
+  }
 }
 
 export async function exportGameStateDebugZip(gameState: GameState): Promise<string> {

@@ -2072,7 +2072,9 @@ describe("PermanentCard", () => {
     expect(getByLabelText("Face-down card")).toHaveAttribute("data-face-down", "true");
   });
 
-  it("renders a face-down permanent's identity when the engine projects it to this viewer", () => {
+  it("keeps the tile backed even when the engine projects the identity to this viewer (#7547)", () => {
+    // The controller's peek lives in the hover preview; the battlefield tile
+    // shows the cause marker exactly as the physical card lies face down.
     const gameState = makeState();
     gameState.objects[1].face_down = true;
     gameState.objects[1].display_visible_to_viewer = true;
@@ -2080,7 +2082,7 @@ describe("PermanentCard", () => {
 
     renderPermanent();
 
-    expect(screen.getByLabelText("Test Creature")).toHaveAttribute("data-face-down", "false");
+    expect(screen.getByLabelText("Face-down card")).toHaveAttribute("data-face-down", "true");
   });
 
   it("dispatches the engine-provided turn-face-up action", () => {

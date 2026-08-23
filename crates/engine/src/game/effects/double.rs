@@ -318,6 +318,7 @@ mod tests {
         targets: Vec<TargetRef>,
     ) -> ResolvedAbility {
         ResolvedAbility {
+            detached_remainder: crate::types::ability::DetachedRemainder::NoProducer,
             effect: Effect::Double {
                 target_kind,
                 target,
@@ -359,6 +360,7 @@ mod tests {
             target_choice_timing: crate::types::ability::TargetChoiceTiming::Stack,
             description: None,
             selected_mode_labels: Vec::new(),
+            modal_instruction_ordinal: None,
             repeat_for: None,
             min_x_value: 0,
             announced_x: None,
@@ -367,6 +369,7 @@ mod tests {
             forward_result: false,
             unless_pay: None,
             distribution: None,
+            distribute: None,
             target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
             chosen_players: Vec::new(),
             repeat_until: None,

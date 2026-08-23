@@ -85,6 +85,21 @@ pub fn resolve(
                 obj.tapped = true;
             }
         }
+        // CR 702.174g: "Gift an extra turn" means "The chosen player takes an
+        // extra turn after this one." CR 500.7 owns the queue, so this routes
+        // through the same authority `Effect::ExtraTurn` uses rather than
+        // touching `extra_turns` directly.
+        //
+        // "After this one" is the ANCHOR: the extra turn follows the turn during
+        // which the gift resolved, which is `state.active_player`'s — not the
+        // recipient's next turn. `enqueue_extra_turn` takes that anchor as its
+        // third argument, exactly as the effect resolver passes it.
+        GiftKind::ExtraTurn => {
+            // CR 805.8: with shared team turns the extra turn is taken by the
+            // recipient's team; the same normalization the effect resolver does.
+            let recipient = crate::game::topology::normalize_shared_turn_recipient(state, opponent);
+            crate::game::turns::enqueue_extra_turn(state, recipient, state.active_player);
+        }
     }
 
     events.push(GameEvent::EffectResolved {
@@ -217,6 +232,41 @@ mod tests {
         assert!(events.iter().any(
             |e| matches!(e, GameEvent::CardDrawn { player_id, .. } if *player_id == PlayerId(1))
         ));
+    }
+
+    /// CR 702.174g + CR 500.7: the promised extra turn is queued for the chosen
+    /// player, anchored after the turn during which the gift resolved.
+    #[test]
+    fn gift_extra_turn_queues_a_turn_for_the_recipient() {
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+
+        let ability = make_gift_ability(GiftKind::ExtraTurn, true);
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state
+                .extra_turns
+                .iter()
+                .map(|turn| (turn.player, turn.anchor))
+                .collect::<Vec<_>>(),
+            vec![(PlayerId(1), state.active_player)],
+            "CR 702.174g: the CHOSEN player takes the extra turn, after this one"
+        );
+    }
+
+    /// The negative that keeps the row above honest: an unpromised gift queues
+    /// nothing, so the assertion is about the promise and not about the queue
+    /// being writable.
+    #[test]
+    fn gift_extra_turn_queues_nothing_when_not_promised() {
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+
+        let ability = make_gift_ability(GiftKind::ExtraTurn, false);
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.extra_turns.is_empty());
     }
 
     #[test]

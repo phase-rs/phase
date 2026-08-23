@@ -811,6 +811,41 @@ pub fn generic_effect_application_filter<'a>(
     }
 }
 
+/// CR 508.1a + CR 608.2c + CR 611.2c: SINGLE AUTHORITY for "which static on this
+/// `GenericEffect` names the population `those creatures` freezes" — shared by the
+/// parser's population-publisher routing (`oracle_effect::lower`) and the runtime's
+/// publish arm (`effects::affected_objects_from_events`) so lowering can never mark
+/// a head a publisher that resolution then declines to publish.
+///
+/// Eligible modes are the ones whose population is FROZEN at resolution rather than
+/// re-evaluated live at each future check: a coercion requirement (`MustAttack` /
+/// `MustAttackDefender`, CR 508.1a/d) or a `Continuous` grant.
+///
+/// Selection is `find_map`, NOT `find`-then-ask: a chain may carry an earlier
+/// eligible static with no application filter (a `Continuous` coercion with neither
+/// an outer `target` nor an `affected`), and taking it would suppress a later
+/// application-bearing broadcast static — so neither routing nor publishing would
+/// see the actual population. Shape mirrors the `any`-quantified sibling
+/// `is_mass_coerce_static` (`oracle_effect/mod.rs`) rather than a first-wins scan.
+pub fn generic_effect_population_filter<'a>(
+    target_filter: Option<&'a TargetFilter>,
+    static_abilities: &'a [StaticDefinition],
+) -> Option<&'a TargetFilter> {
+    static_abilities
+        .iter()
+        .filter(|static_def| {
+            matches!(
+                static_def.mode,
+                crate::types::statics::StaticMode::MustAttack
+                    | crate::types::statics::StaticMode::MustAttackDefender { .. }
+                    | crate::types::statics::StaticMode::Continuous
+            )
+        })
+        .find_map(|static_def| {
+            generic_effect_application_filter(target_filter, static_def.affected.as_ref())
+        })
+}
+
 fn snapshot_transient_modifications(
     state: &GameState,
     ability: &ResolvedAbility,

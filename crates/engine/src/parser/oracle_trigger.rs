@@ -18,7 +18,8 @@ use super::oracle_ir::context::{ParseContext, TriggerConditionScope};
 use super::oracle_ir::doc::PrintedTriggerIndex;
 use super::oracle_ir::effect_chain::{DieResultBranchIr, EffectChainIr};
 use super::oracle_ir::trigger::{
-    FirstTimeLimit, ReflexivePaymentIr, TriggerBody, TriggerIr, TriggerModifiers, TriggerNodeIr,
+    effect_chain_has_terminal_roll_die, FirstTimeLimit, ReflexiveParent, ReflexiveParentIr,
+    TriggerBody, TriggerIr, TriggerModifiers, TriggerNodeIr,
 };
 use super::oracle_modal::try_parse_inline_modal_ir;
 use super::oracle_nom::condition::parse_elided_subject_state_condition;
@@ -51,9 +52,10 @@ use crate::types::ability::{
     AdditionalCostOrigin, AdditionalCostPaymentSource, AggregateFunction, AttachmentKind,
     AttackersDeclaredCountSubject, CardSelectionMode, CastManaObjectScope, CastManaSpentMetric,
     CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CountScope, CounterTriggerFilter,
-    DamageChannel, DamageKindFilter, DestinationConstraint, DieResultFilter, Effect, EffectScope,
-    FilterProp, ManaAbilityProducedFilter, ObjectScope, OriginConstraint, ParsedCondition,
-    PlayerFilter, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
+    DamageAmountScope, DamageAmountThreshold, DamageChannel, DamageKindFilter,
+    DestinationConstraint, DieResultFilter, Effect, EffectScope, FilterProp,
+    ManaAbilityProducedFilter, ObjectScope, OriginConstraint, ParsedCondition, PlayerFilter,
+    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
     SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, StaticCondition,
     SubAbilityLink, TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition,
     TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
@@ -1505,14 +1507,14 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             optional = false;
             let effect_chain =
                 parse_effect_chain_ir(&reflexive_effect_text, AbilityKind::Spell, &mut effect_ctx);
-            Some(TriggerBody::ReflexivePayment(Box::new(
-                ReflexivePaymentIr {
+            Some(TriggerBody::Reflexive(Box::new(ReflexiveParentIr {
+                parent: ReflexiveParent::MayPay {
                     cost,
-                    effect_chain,
                     payment_chain: None,
-                    modal: None,
                 },
-            )))
+                effect_chain,
+                modal: None,
+            })))
         } else if is_unsupported_disjunctive_reflexive_optional_payment(&effect_for_parse) {
             Some(TriggerBody::EffectChain(EffectChainIr::single_clause(
                 &effect_for_parse,
@@ -1763,9 +1765,22 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             modifiers,
             &ir.die_results,
         ))),
-        Some(TriggerBody::ReflexivePayment(reflexive)) => {
-            let mut reflexive_ability =
-                lower_trigger_effect_chain(&reflexive.effect_chain, modifiers, &ir.die_results);
+        Some(TriggerBody::Reflexive(reflexive)) => {
+            let reflexive_owns_die_results =
+                effect_chain_has_terminal_roll_die(&reflexive.effect_chain);
+            let (reflexive_die_results, parent_die_results): (
+                &[DieResultBranchIr],
+                &[DieResultBranchIr],
+            ) = if reflexive_owns_die_results {
+                (ir.die_results.as_slice(), &[])
+            } else {
+                (&[], ir.die_results.as_slice())
+            };
+            let mut reflexive_ability = lower_trigger_effect_chain(
+                &reflexive.effect_chain,
+                modifiers,
+                reflexive_die_results,
+            );
             reflexive_ability.condition = Some(AbilityCondition::WhenYouDo);
 
             if let Some(modal) = &reflexive.modal {
@@ -1779,20 +1794,39 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 );
             }
 
-            let mut pay_ability = match &reflexive.payment_chain {
-                Some(chain) => lower_trigger_effect_chain(chain, modifiers, &[]),
-                None => AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::PayCost {
-                        cost: reflexive.cost.clone(),
-                        scale: None,
-                        payer: TargetFilter::Controller,
-                    },
-                ),
+            // CR 603.12: the parent is either an optional instruction the
+            // controller may decline or a mandatory instruction. Both build the
+            // same parent → `WhenYouDo` sub shape.
+            let mut parent_ability = match &reflexive.parent {
+                ReflexiveParent::MayPay {
+                    cost,
+                    payment_chain,
+                } => {
+                    let mut pay_ability = match payment_chain {
+                        Some(chain) => {
+                            lower_trigger_effect_chain(chain, modifiers, parent_die_results)
+                        }
+                        None => AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::PayCost {
+                                cost: cost.clone(),
+                                scale: None,
+                                payer: TargetFilter::Controller,
+                            },
+                        ),
+                    };
+                    pay_ability.optional = true;
+                    pay_ability
+                }
+                // CR 603.12 + CR 608.2c: a mandatory instruction is the next
+                // printed instruction, not an offer — it carries no `optional`
+                // flag and no decline prompt.
+                ReflexiveParent::Mandatory { instruction } => {
+                    lower_trigger_effect_chain(instruction, modifiers, parent_die_results)
+                }
             };
-            pay_ability.optional = true;
-            pay_ability.sub_ability = Some(Box::new(reflexive_ability));
-            Some(Box::new(pay_ability))
+            parent_ability.sub_ability = Some(Box::new(reflexive_ability));
+            Some(Box::new(parent_ability))
         }
         Some(TriggerBody::Modal(modal)) => Some(Box::new(
             lower_trigger_effect_chain(&modal.marker, modifiers, &[]).with_modal(
@@ -1932,6 +1966,23 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     if is_spell_cast_trigger_mode(&def.mode) {
         if let Some(cond) = def.condition.as_mut() {
             remap_self_cast_scope_to_triggering_spell(cond);
+        }
+    }
+
+    // CR 508.5 + CR 603.2 + CR 603.4: resolve the intervening-if's "that player"
+    // anaphor against the trigger clause's own player nouns. On
+    // "Whenever a creature attacks one of your opponents, if that player ...",
+    // the antecedent is the ATTACKED player, but `parse_inner_condition` cannot
+    // see the trigger clause and emits the generic `ScopedPlayer` anchor — which
+    // `targeting::extract_player_from_event` resolves to the ATTACKING player
+    // for an `AttackersDeclared` event. Placed here, after the intervening-if
+    // has been ANDed onto `def.condition` above and after the event clause has
+    // produced `mode`/`valid_source`/`valid_target`/`attack_target_filter`,
+    // because the condition parser can see none of them. Direct sibling of the
+    // spell-cast anaphor remap directly above.
+    if attack_intervening_if_anaphor_is_defending_player(&def) {
+        if let Some(cond) = def.condition.as_mut() {
+            rebind_attack_anaphor_to_defending_player(cond);
         }
     }
 
@@ -2412,6 +2463,7 @@ fn remap_self_scope_to_event_source_in_quantity(expr: &mut QuantityExpr) {
 fn remap_self_scope_to_event_source_in_ref(qty: &mut QuantityRef) {
     let scope = match qty {
         QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
         | QuantityRef::Toughness { scope }
         | QuantityRef::ObjectManaValue { scope }
         | QuantityRef::ObjectColorCount { scope }
@@ -4425,6 +4477,152 @@ fn remap_self_cast_scope_in_quantity(expr: &mut QuantityExpr) {
     }
 }
 
+/// CR 508.5 + CR 603.2 + CR 603.4: True when a bare "that player"/"that
+/// opponent" anaphor inside this attack trigger's intervening-if has the
+/// ATTACKED player as its only antecedent.
+///
+/// Three conjuncts, each with its own reason:
+/// - `mode == Attacks` — only attack declarations produce an attacked-player
+///   noun. Ghirapur Orrery's `Phase` mode reaches the same anaphor with a
+///   different antecedent and must not be touched.
+/// - `valid_source` is absent OR is not a player-scope filter — the clause names
+///   no ATTACKING-PLAYER noun. Same predicate the runtime matcher gates on in
+///   `trigger_matchers::matching_attack_events`. "Whenever a CREATURE attacks
+///   one of your opponents" qualifies; "Whenever a PLAYER attacks you"
+///   (Suppressor Skyguard) does not, because there the attacking player is also
+///   a candidate antecedent. An OBJECT filter in `valid_source` is an
+///   attacking-creature noun, not a player noun, and must NOT block the rebind.
+/// - the clause names an ATTACKED-PLAYER noun — see
+///   [`attack_clause_names_attacked_player`], which owns that question.
+///
+/// When the attacked-player noun is the controller ("attacks you"), the attacked
+/// player IS the controller, so `DefendingPlayer` and the controller name the
+/// same player and the rebind cannot diverge.
+// pub(crate) so the `AttackTargetFilter` variant matrix in `oracle_tests.rs`
+// can drive the production gate directly rather than a hand-built proxy.
+pub(crate) fn attack_intervening_if_anaphor_is_defending_player(def: &TriggerDefinition) -> bool {
+    def.mode == TriggerMode::Attacks
+        && def
+            .valid_source
+            .as_ref()
+            .is_none_or(|filter| !filter.is_player_scope())
+        && attack_clause_names_attacked_player(def)
+}
+
+/// CR 508.5 + CR 725.1: does this attack clause name a unique ATTACKED PLAYER —
+/// the antecedent a bare "that player" anaphor needs?
+///
+/// Two distinct noun sources, which is why this is a `match` on
+/// `attack_target_filter` rather than one flat `valid_target.is_some()` conjunct:
+///
+/// - `Monarch` is SELF-SUFFICIENT. "attacks the monarch" names the attacked
+///   player by DESIGNATION (CR 725.1), and the parser emits it with
+///   `valid_target: None` — the designation is the whole noun, so there is no
+///   residual player filter to record (The Spear of Bashenga). Requiring
+///   `valid_target` here made this arm dead on the production path: a real
+///   "Whenever a creature attacks the monarch, if that player …" card failed the
+///   gate and kept the `ScopedPlayer` anchor, which
+///   `targeting::extract_player_from_event` resolves to the ATTACKING player for
+///   `AttackersDeclared`. `Monarch` is a Player-type attack per
+///   `trigger_matchers::attack_target_type_matches`, with an added CR 725.1
+///   identity constraint, so the defending player is still unique.
+/// - `Player` / `PlayerOrPlaneswalker` are attack SCOPES, not nouns: they say a
+///   player may be attacked, not WHICH one. The named player lives in
+///   `valid_target` ("attacks you", "attacks one of your opponents"), so without
+///   it the clause is the bare "Whenever ~ attacks" shape (Goblin Guide) and
+///   supplies no antecedent.
+///
+/// `Planeswalker` and `Battle` name no player noun at all — the correct anaphor
+/// for a battle would be "its protector" (CR 310.8d), a different reference.
+/// `Owner`, `OwnerOrPlaneswalker` and `PlayerOrPermanents` are attack-RESTRICTION
+/// scopes with no arm in `attack_target_type_matches`, so a trigger carrying one
+/// never fires at all. Exhaustive — a future attack scope must decide here.
+fn attack_clause_names_attacked_player(def: &TriggerDefinition) -> bool {
+    match def.attack_target_filter.as_ref() {
+        Some(AttackTargetFilter::Monarch) => true,
+        Some(AttackTargetFilter::Player | AttackTargetFilter::PlayerOrPlaneswalker) => {
+            def.valid_target.is_some()
+        }
+        Some(
+            AttackTargetFilter::Planeswalker
+            | AttackTargetFilter::Battle
+            | AttackTargetFilter::Owner
+            | AttackTargetFilter::OwnerOrPlaneswalker
+            | AttackTargetFilter::PlayerOrPermanents,
+        )
+        | None => false,
+    }
+}
+
+/// CR 508.5 + CR 603.2: Rebind [`PlayerScope::ScopedPlayer`] to
+/// [`PlayerScope::DefendingPlayer`] throughout an attack trigger's
+/// intervening-if.
+///
+/// `parse_inner_condition` cannot see the owning trigger, so the generic anaphor
+/// lands as `ScopedPlayer`, which resolves through
+/// `targeting::extract_player_from_event` — for `GameEvent::AttackersDeclared`
+/// that is the ATTACKING player, not the attacked one. Only here, where the
+/// trigger clause's player nouns are known, can the antecedent be resolved.
+/// Direct sibling of `remap_self_cast_scope_to_triggering_spell` above, which
+/// does the same job for the spell-cast "it"/"this spell" anaphor.
+///
+/// Generic over the condition tree, not specific to any predicate: it repairs
+/// the antecedent for `IsMonarch { player }` and for every `QuantityRef`
+/// carrying a player axis (hand size, life total, cards drawn, …).
+/// `ControllerRef::ScopedPlayer` inside a nested `TargetFilter` is deliberately
+/// NOT rewritten — no "that player controls …" grammar currently produces one,
+/// and rewriting controller axes inside arbitrary filters would over-reach.
+fn rebind_attack_anaphor_to_defending_player(cond: &mut TriggerCondition) {
+    match cond {
+        TriggerCondition::IsMonarch {
+            player: player @ PlayerScope::ScopedPlayer,
+        } => *player = PlayerScope::DefendingPlayer,
+        TriggerCondition::QuantityComparison { lhs, rhs, .. } => {
+            rebind_attack_anaphor_in_quantity(lhs);
+            rebind_attack_anaphor_in_quantity(rhs);
+        }
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+            conditions
+                .iter_mut()
+                .for_each(rebind_attack_anaphor_to_defending_player);
+        }
+        TriggerCondition::Not { condition } => rebind_attack_anaphor_to_defending_player(condition),
+        // All other variants are leaves that carry no `PlayerScope`, which
+        // `TriggerCondition::designation_player_anchor` enforces exhaustively
+        // for the designation family — nothing to rebind.
+        _ => {}
+    }
+}
+
+/// Recursive `QuantityExpr` companion of
+/// [`rebind_attack_anaphor_to_defending_player`]. Exhaustive over `QuantityExpr`
+/// — no wildcard — so a new arithmetic wrapper is a compile error rather than a
+/// silently skipped nested [`PlayerScope`]. The leaf question is delegated to
+/// the equally exhaustive [`QuantityRef::player_scope_mut`].
+fn rebind_attack_anaphor_in_quantity(expr: &mut QuantityExpr) {
+    match expr {
+        QuantityExpr::Ref { qty } => {
+            if let Some(player @ PlayerScope::ScopedPlayer) = qty.player_scope_mut() {
+                *player = PlayerScope::DefendingPlayer;
+            }
+        }
+        QuantityExpr::Fixed { .. } => {}
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => rebind_attack_anaphor_in_quantity(inner),
+        QuantityExpr::UpTo { max } => rebind_attack_anaphor_in_quantity(max),
+        QuantityExpr::Power { exponent, .. } => rebind_attack_anaphor_in_quantity(exponent),
+        QuantityExpr::Difference { left, right } => {
+            rebind_attack_anaphor_in_quantity(left);
+            rebind_attack_anaphor_in_quantity(right);
+        }
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter_mut().for_each(rebind_attack_anaphor_in_quantity);
+        }
+    }
+}
+
 // pub(crate) so the runtime gate tests in game/triggers.rs can drive the
 // production bridge directly (discriminating against this function rather than a
 // hand-built filter). Sole non-test caller remains parse_trigger_line below.
@@ -4599,9 +4797,14 @@ pub(crate) fn static_condition_to_trigger_condition(
             StaticCondition::SourceIsTapped => Some(TriggerCondition::Not {
                 condition: Box::new(TriggerCondition::SourceIsTapped),
             }),
-            // CR 725.1: "if you're not the monarch" / "if an opponent is the monarch".
-            StaticCondition::IsMonarch => Some(TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::IsMonarch),
+            // CR 725.1 + CR 109.5: "if you're not the monarch" / "if an opponent
+            // is the monarch". The subject scope must survive the bridge —
+            // collapsing it to `Controller` here would silently rebind
+            // "that player is the monarch" to the ability's controller.
+            StaticCondition::IsMonarch { player } => Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::IsMonarch {
+                    player: player.clone(),
+                }),
             }),
             // CR 725.1: "if there is a monarch" (negated no-monarch check).
             StaticCondition::NoMonarch => Some(TriggerCondition::Not {
@@ -4662,8 +4865,11 @@ pub(crate) fn static_condition_to_trigger_condition(
             })
         }
 
-        // CR 725.1: Monarch status bridges directly.
-        StaticCondition::IsMonarch => Some(TriggerCondition::IsMonarch),
+        // CR 725.1 + CR 109.5: Monarch status bridges directly, carrying its
+        // subject scope. Never collapse `player` to `Controller` here.
+        StaticCondition::IsMonarch { player } => Some(TriggerCondition::IsMonarch {
+            player: player.clone(),
+        }),
         // CR 726.3: Initiative status bridges directly.
         StaticCondition::IsInitiative => Some(TriggerCondition::IsInitiative),
         // CR 725.1: "there is no monarch" bridges directly.
@@ -5698,6 +5904,24 @@ fn extract_if_condition_with_card_name(
         return result;
     }
 
+    // CR 603.4 + CR 603.10a + CR 700.4: A leading past-tense pronoun predicate
+    // after a proven dies head binds to the battlefield-to-graveyard event
+    // object's last-known characteristics. Keep this ahead of the legacy
+    // source-only `WasType` arm so gendered pronouns and composite descriptors
+    // use the event snapshot. Negation wraps only the coherent snapshot
+    // predicate, so a non-dies event can never fail open through `Not`.
+    if let Some((before, condition, rest)) = scan_preceded(&lower, |input| {
+        parse_gendered_dies_event_object_condition(input, trigger_zone_change)
+    })
+    .filter(|(before, _, _)| before.trim().is_empty())
+    {
+        let clause_len = lower.len() - before.len() - rest.len();
+        return (
+            strip_condition_clause(text, before.len(), clause_len),
+            Some(condition),
+        );
+    }
+
     // CR 400.7 + CR 603.10: "if it was a [type]" / "if it was an [type]"
     // Nom combinator: prefix dispatch + typed core type extraction.
     {
@@ -5927,6 +6151,99 @@ fn extract_if_condition_with_card_name(
     }
 
     (text.to_string(), None)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiesEventObjectPronoun {
+    It,
+    He,
+    She,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PastCopulaPolarity {
+    Positive,
+    Negative,
+}
+
+fn parse_gendered_dies_event_object_condition<'a>(
+    input: &'a str,
+    trigger_zone_change: Option<(Zone, Zone)>,
+) -> OracleResult<'a, TriggerCondition> {
+    if trigger_zone_change != Some((Zone::Battlefield, Zone::Graveyard)) {
+        return Err(oracle_err(input));
+    }
+
+    let (rest, _) = tag("if ").parse(input)?;
+    let (rest, pronoun) = alt((
+        value(DiesEventObjectPronoun::It, tag("it ")),
+        value(DiesEventObjectPronoun::He, tag("he ")),
+        value(DiesEventObjectPronoun::She, tag("she ")),
+    ))
+    .parse(rest)?;
+    let (rest, polarity) = alt((
+        value(PastCopulaPolarity::Negative, tag("wasn't ")),
+        value(PastCopulaPolarity::Negative, tag("wasn’t ")),
+        value(PastCopulaPolarity::Negative, tag("was not ")),
+        value(PastCopulaPolarity::Positive, tag("was ")),
+    ))
+    .parse(rest)?;
+    let (descriptor, _) = alt((tag("an "), tag("a "))).parse(rest)?;
+
+    // All three pronouns name the same grammatical role here: the object whose
+    // death produced the zone-change event. Keeping the axis typed and matched
+    // exhaustively prevents a future pronoun from silently inheriting it.
+    match pronoun {
+        DiesEventObjectPronoun::It | DiesEventObjectPronoun::He | DiesEventObjectPronoun::She => {}
+    }
+
+    let (filter, rest) = parse_type_phrase(descriptor);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(oracle_err(input));
+    }
+    // Preserve the legacy positive bare-core `if it was a <CoreType>` shape.
+    // Existing exported cards encode that narrow grammar as `WasType`; the new
+    // event-snapshot condition owns gendered pronouns, negative copulas,
+    // subtypes, and composite descriptors without rewriting that stable wire
+    // representation.
+    if pronoun == DiesEventObjectPronoun::It
+        && polarity == PastCopulaPolarity::Positive
+        && matches!(&filter,
+            TargetFilter::Typed(typed)
+                if typed.controller.is_none()
+                    && typed.properties.is_empty()
+                    && matches!(typed.type_filters.as_slice(),
+                        [TypeFilter::Creature]
+                            | [TypeFilter::Land]
+                            | [TypeFilter::Instant]
+                            | [TypeFilter::Sorcery]
+                            | [TypeFilter::Artifact]
+                            | [TypeFilter::Enchantment]
+                            | [TypeFilter::Planeswalker]
+                            | [TypeFilter::Battle]))
+    {
+        return Err(oracle_err(input));
+    }
+    alt((
+        value((), eof),
+        value((), peek(one_of::<_, _, OracleError<'_>>(",."))),
+    ))
+    .parse(rest)?;
+
+    let condition = TriggerCondition::ZoneChangeObjectMatchesFilter {
+        origin: Some(Zone::Battlefield),
+        destination: Zone::Graveyard,
+        filter,
+    };
+    Ok((
+        rest,
+        match polarity {
+            PastCopulaPolarity::Positive => condition,
+            PastCopulaPolarity::Negative => TriggerCondition::Not {
+                condition: Box::new(condition),
+            },
+        },
+    ))
 }
 
 /// CR 603.4 + CR 700.4 + CR 120.1: dies-trigger intervening-if
@@ -6470,7 +6787,7 @@ fn parse_zone_change_object_filter_predicate(
 
     let (rest, negated) = alt((
         value(false, tag("was ")),
-        value(true, tag("wasn't ")),
+        value(true, alt((tag("wasn't "), tag("wasn’t ")))),
         value(true, tag("was not ")),
     ))
     .parse(input)?;
@@ -6600,7 +6917,10 @@ fn zone_change_object_token_condition(negated: bool) -> TriggerCondition {
 
 fn parse_zone_change_object_token_predicate(input: &str) -> OracleResult<'_, TriggerCondition> {
     let (rest, contracted_negation) = alt((
-        value(true, alt((tag("isn't"), tag("wasn't")))),
+        value(
+            true,
+            alt((tag("isn't"), tag("isn’t"), tag("wasn't"), tag("wasn’t"))),
+        ),
         value(false, alt((tag("is"), tag("was")))),
     ))
     .parse(input)?;
@@ -11104,7 +11424,7 @@ fn try_parse_event(
     //   "deal[s] [combat|noncombat] [N or more] damage [to <recipient>]".
     // Composed from three independent axes:
     //   * damage-kind adjective   → `DamageKindFilter::{CombatOnly, NoncombatOnly}`
-    //   * "N or more" quantifier  → `damage_amount = Some((GE, N))`
+    //   * "N or more" quantifier  → `damage_amount = Some({GE, N, PerSource})`
     //   * recipient "to <…>"      → `valid_target` via `parse_damage_to_qualifier`
     // Singular ("deals") and plural ("deal", for &-names) collapse into one
     // verb alternative. Unlocks Deus of Calamity ("~ deals 6 or more damage to
@@ -11120,7 +11440,18 @@ fn try_parse_event(
             let mut def = make_base();
             def.mode = TriggerMode::DamageDone;
             def.damage_kind = kind;
-            def.damage_amount = amount;
+            // CR 603.2: the SOURCE-led grammar names the damaging source, so its
+            // threshold reads that source's share and never aggregates across
+            // simultaneous sources. Deus of Calamity's ruling is explicit ("6
+            // damage to an opponent at one time … won't keep track of
+            // accumulated damage"). Constructed explicitly rather than relying
+            // on `DamageAmountScope`'s `#[default]`, so the pole this grammar
+            // means is written at the site and is pinned by a test.
+            def.damage_amount = amount.map(|(comparator, threshold)| DamageAmountThreshold {
+                comparator,
+                threshold,
+                scope: DamageAmountScope::PerSource,
+            });
             def.valid_source = Some(subject.clone());
             // CR 120.1 + CR 208.1 + CR 603.4: Taii Wakeen's damage==recipient-P/T
             // shape ("to <object> equal to that <object>'s toughness/power") is
@@ -11624,9 +11955,16 @@ fn try_parse_event(
             /// CR 120.2b: noncombat damage, dealt as an effect of a spell or ability.
             /// `Any` matches either.
             kind: DamageKindFilter,
-            /// CR 603.2 + CR 120.1: optional per-event threshold ("3 or more",
-            /// "exactly N"). `None` for the unquantified majority.
-            amount: Option<(Comparator, u32)>,
+            /// CR 603.2 + CR 120.1 + CR 120.4b: optional amount threshold
+            /// ("3 or more", "exactly N") together with the aggregation domain
+            /// it is evaluated over. `None` for the unquantified majority.
+            ///
+            /// The received-damage grammar's default, absent a source tail, is
+            /// `DamageAmountScope::WholeEvent` (CR 120.4b: damage is dealt in
+            /// one simultaneous event and triggers fire at that granularity),
+            /// so the threshold is NOT per-event for this voice — the scope
+            /// axis names which domain applies.
+            amount: Option<DamageAmountThreshold>,
         },
         BecomesTapped,
         TappedForMana,
@@ -11675,16 +12013,40 @@ fn try_parse_event(
         }
         Ok((rest, SimpleEvent::BecomesUnattached(Some(filter))))
     }
-    /// CR 120.1 + CR 120.2a + CR 120.2b + CR 120.6 + CR 120.10 + CR 510 + CR 603.2:
-    /// Passive-voice damage-received trigger event —
-    /// `"is|are dealt [excess ][combat |noncombat ][N or more ]damage"`.
+    /// CR 120.4 + CR 120.4b: the source-scoping tail on the received-damage
+    /// grammar — `"…by a single source"` (Pain Magnification). It narrows the
+    /// threshold's aggregation domain from the whole simultaneous damage event
+    /// (the grammar's default, CR 120.4b) to one source's share.
     ///
-    /// Composes the grammar's four independent axes rather than enumerating their
+    /// A single `tag()` on one axis; the leading `opt(space1)` lets the caller
+    /// apply it directly to the remainder left by `parse_damage_predicate_tail`
+    /// whether or not that remainder kept its separating space.
+    fn parse_single_source_scope(input: &str) -> OracleResult<'_, DamageAmountScope> {
+        value(
+            DamageAmountScope::PerSource,
+            preceded(opt(space1), tag("by a single source")),
+        )
+        .parse(input)
+    }
+    /// CR 120.1 + CR 120.2a + CR 120.2b + CR 120.4b + CR 120.10 + CR 510 + CR 603.2:
+    /// Passive-voice damage-received trigger event —
+    /// `"is|are dealt [excess ][combat |noncombat ][N or more ]damage[ by a single source]"`.
+    ///
+    /// Composes the grammar's five independent axes rather than enumerating their
     /// product (CLAUDE.md: "Compose nom combinators, don't enumerate permutations"):
     ///   voice   — `"is dealt "` / `"are dealt "` (singular vs plural subject)
     ///   channel — optional `"excess "` → `DamageChannel::{Total, Excess}`
     ///   kind    — optional `"combat "` / `"noncombat "` → `DamageKindFilter`
-    ///   amount  — optional `"N or more "` / `"exactly N "` → `Option<(Comparator, u32)>`
+    ///   amount  — optional `"N or more "` / `"exactly N "` → `Option<DamageAmountThreshold>`
+    ///   scope   — optional `"by a single source"` → `DamageAmountScope`
+    ///
+    /// POLARITY NOTE. The *type* default is `PerSource`, which is serde
+    /// back-compat for every card that predates the axis. The *received-damage
+    /// grammar's* default, absent a tail, is `WholeEvent` (CR 120.4b). These are
+    /// deliberately different: the type default governs deserialization of data
+    /// written before the axis existed, while the grammar default governs what
+    /// the printed English means. `try_parse_source_deals_damage_trigger` never
+    /// calls this combinator, so the source-led grammar keeps `PerSource`.
     ///
     /// The kind/amount/head-noun tail is delegated to `parse_damage_predicate_tail`,
     /// the SAME combinator the active-voice (`"deals damage"`) grammar uses, so a
@@ -11710,6 +12072,31 @@ fn try_parse_event(
                 nom::error::ErrorKind::Verify,
             )));
         }
+        // CR 120.4b: the received-damage grammar's unscoped default reads the
+        // whole simultaneous damage event. "…by a single source" narrows that
+        // domain to one source's share. (CR 120.9 is adjacent, not governing:
+        // it fixes what an EFFECT's "the damage dealt" reads, not how a
+        // threshold is scoped.)
+        //
+        // The restriction is carried on `DamageAmountThreshold`, which exists
+        // only when an amount is present — so with no amount there is nowhere
+        // for the scope to live. Do not consume the tail at all in that case:
+        // leaving it unconsumed hands it to the arm's existing unconsumed-tail
+        // guard, which already refuses it in every newly-opened cell AND
+        // preserves the four `previously_covered` cells byte-identically
+        // (Chandra's Phoenix, Glyph of Life). Consuming it unconditionally
+        // would emit `DamageReceived` with the restriction silently dropped in
+        // every newly-opened cell that has no threshold to carry the scope.
+        let (rest, scope) = if amount.is_some() {
+            opt(parse_single_source_scope).parse(rest)?
+        } else {
+            (rest, None)
+        };
+        let amount = amount.map(|(comparator, threshold)| DamageAmountThreshold {
+            comparator,
+            threshold,
+            scope: scope.unwrap_or(DamageAmountScope::WholeEvent),
+        });
         Ok((
             rest,
             SimpleEvent::DealtDamage {
@@ -11961,11 +12348,19 @@ fn try_parse_event(
                     kind: None,
                 });
             }
-            // CR 120.1 + CR 120.2a + CR 120.2b + CR 120.6 + CR 120.10: the channel axis
-            // selects the runtime mode (total damage => `DamageReceived`, excess damage
-            // => `ExcessDamageAll`); the kind and amount axes are carried straight onto
-            // the typed `TriggerDefinition` fields the matchers already read
+            // CR 120.1 + CR 120.2a + CR 120.2b + CR 120.4b + CR 120.10: the channel axis
+            // selects the runtime mode (total damage => `DamageReceived`; excess damage
+            // => `ExcessDamageAll`, which is the sense CR 120.10 governs here); the
+            // kind, amount, and scope axes are carried straight onto the typed
+            // `TriggerDefinition` fields the matchers already read
             // (`match_damage_received` honors both `damage_kind` and `damage_amount`).
+            //
+            // CR 120.4b governs the amount axis: damage dealt simultaneously is dealt
+            // in ONE damage event and damage triggers fire at that granularity, so an
+            // unscoped received-damage threshold reads the whole event's summed amount
+            // for a recipient. `parse_dealt_damage_event` records which domain applies
+            // in `DamageAmountThreshold.scope`; `game/triggers.rs` is the only place
+            // that reads it.
             //
             // `batched` is NOT set here, and must not be: no `SimpleEvent` arm touches
             // it. The caller `parse_trigger_condition` sets it from a `"one or more "`
@@ -12002,26 +12397,6 @@ fn try_parse_event(
                         | (DamageChannel::Excess, DamageKindFilter::NoncombatOnly, None)
                 );
                 if !previously_covered && !remaining.trim().is_empty() {
-                    return None;
-                }
-                // CR 120.4b + CR 120.4d: damage dealt simultaneously is dealt in a
-                // SINGLE damage event, so a received-damage amount threshold is a
-                // property of the whole event, not of one source's share. Innocent
-                // Bystander ("is dealt 3 or more damage") is the entire population
-                // of this cell and its ruling is explicit — it "triggers only if
-                // it's dealt 3 or more damage all at once" — so two sources each
-                // dealing 2 simultaneously must fire it, and Boros Reckoner's
-                // ruling confirms the same event model ("triggers once and one
-                // target is dealt that much damage"). `match_damage_*` applies
-                // `damage_amount` per `(source, amount)` pair and would under-fire
-                // both. Aggregation is an axis this arm cannot model, so — exactly
-                // as with an unconsumed tail above — it refuses the def rather than
-                // emit a silently-wrong one. Ordered AFTER the tail guard so that
-                // guard still owns the refusal for tail-bearing lines (Pain
-                // Magnification), each guard keeping its own falsifying test. Every
-                // cell the eight former `tag()` arms reached carried no amount, so
-                // this refusal cannot regress a previously supported line.
-                if amount.is_some() {
                     return None;
                 }
                 def.mode = match channel {
@@ -12659,6 +13034,18 @@ fn try_parse_source_deals_damage_trigger(lower: &str) -> Option<(TriggerMode, Tr
 
     // Shared predicate tail: optional kind, optional "N or more", "damage".
     let (after_damage, (damage_kind, threshold)) = parse_damage_predicate_tail(rest).ok()?;
+    // CR 603.2: this grammar is SOURCE-led — it names the damaging source, so
+    // its threshold reads only that source's share and never aggregates across
+    // simultaneous sources (Dragonborn Champion must not fire on two 3-damage
+    // sources; Ghyrson Starn's "exactly 1" would break entirely under an
+    // aggregate reading). Built once here so all five recipient-axis exits
+    // below share one explicit construction rather than five copies of it, and
+    // so no exit can silently fall back on `DamageAmountScope`'s `#[default]`.
+    let threshold = threshold.map(|(comparator, threshold)| DamageAmountThreshold {
+        comparator,
+        threshold,
+        scope: DamageAmountScope::PerSource,
+    });
 
     let mut def = make_base();
     def.mode = TriggerMode::DamageDone;

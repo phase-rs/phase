@@ -49,6 +49,13 @@
     "collapse": "Contraer progreso de resolución",
     "expand": "Expandir progreso de resolución"
   },
+  "resolveAllConsent": {
+    "eyebrow": "Resolver todo",
+    "title": "¿Aprobar la resolución rápida?",
+    "subtitle": "Todos los jugadores deben aprobar antes de que el motor resuelva un prefijo seguro de la pila.",
+    "grant": "Aprobar",
+    "decline": "Conservar prioridad"
+  },
   "debugCreate": {
     "copies": "Copias",
     "tokenPower": "Power",
@@ -764,10 +771,14 @@
     "tapUntappedCreatures_one": "Gira {{count}} criatura sin girar",
     "tapUntappedCreatures_other": "Gira {{count}} criaturas sin girar",
     "chooseTargetOf": "Elige el objetivo {{current}} de {{total}}",
+    "slotProgress": "Objetivo {{current}} de {{total}}",
+    "choosePlayerTarget": "Elegir: {{name}}",
+    "expandDescription": "Mostrar la descripción completa",
+    "collapseDescription": "Mostrar menos",
+    "descriptionDisclosure": "{{action}}: {{description}}",
     "chooseTarget": "Elige un objetivo",
     "triggerDamageAmount": "This trigger: {{amount}} damage",
     "noLegalTargets": "No hay objetivos legales disponibles",
-    "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "hasta un(a) {{target}}",
     "one": "un(a) {{target}}",
     "nounPlayer": "jugador",
@@ -1460,7 +1471,12 @@
       "labelReturn": "Devolver ({{selected}}/{{count}})",
       "labelExile": "Exiliar ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
-      "orderTop": "Superior"
+      "orderTop": "Superior",
+      "orderSecond": "2.º",
+      "orderThird": "3.º",
+      "orderFourth": "4.º",
+      "orderFifth": "5.º",
+      "orderPosition": "Posición {{position}}"
     },
     "drawnThisTurn": {
       "title": "Robadas este turno",
@@ -1626,7 +1642,11 @@
     "legend": {
       "title": "Regla de leyendas",
       "subtitle": "Elige qué \"{{name}}\" conservar",
-      "keepAria": "Conservar {{name}} ({{status}})",
+      "keepAria": "Conservar {{name}} ({{identity}}, {{status}})",
+      "keepAriaUnknown": "Conservar {{name}} ({{status}})",
+      "identityOriginal": "Original",
+      "identityCopy": "Copia",
+      "identityTokenCopy": "Copia de ficha",
       "statusJustEntered": "Acaba de entrar",
       "statusAlready": "Ya en el campo de batalla"
     },
@@ -1758,7 +1778,22 @@
     "emergeEyebrow": "Emerger",
     "emergeNormalLabel": "Lanzar normalmente",
     "emergeAltLabel": "Lanzar con Emerger",
-    "emergeSubtitle": "Lanza {{name}} normalmente, o paga su coste de Emerger sacrificando una criatura, reduciendo el coste en el valor de maná de esa criatura.",
+    "emergeSubtitle": "Lanza {{name}} normalmente, o paga su coste de Emerger sacrificando {{sacrifice}}, reduciendo el coste en el valor de maná de ese permanente.",
+    "emergeFallbackSacrifice": "un permanente que cumpla los requisitos",
+    "emergeSacrificeQuality": {
+      "artifact": "un artefacto",
+      "battle": "una batalla",
+      "card": "una carta",
+      "creature": "una criatura",
+      "enchantment": "un encantamiento",
+      "instant": "un instantáneo",
+      "kindred": "un tipo tribal",
+      "land": "una tierra",
+      "permanent": "un permanente",
+      "planeswalker": "un planeswalker",
+      "sorcery": "un conjuro",
+      "subtype": "un permanente del tipo {{subtype}}"
+    },
     "impendingEyebrow": "Inminencia",
     "impendingNormalLabel": "Lanzar normalmente",
     "impendingAltLabel": "Lanzar con Inminencia",
@@ -1831,7 +1866,8 @@
         "card": "una carta",
         "treasure": "un Tesoro",
         "food": "un Alimento",
-        "tappedFish": "un Pez girado"
+        "tappedFish": "un Pez girado",
+        "extraTurn": "un turno adicional"
       }
     }
   },

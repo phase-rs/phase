@@ -217,6 +217,7 @@ function queuedLocalActionStillApplies(next: PendingLocalAction): boolean {
   if (
     next.action.type === "SetPhaseStops"
     || next.action.type === "SetPriorityPassingMode"
+    || next.action.type === "CancelAutoPass"
   ) {
     return true;
   }
@@ -224,8 +225,10 @@ function queuedLocalActionStillApplies(next: PendingLocalAction): boolean {
   if (Object.is(next.waitingFor, waitingFor)) return true;
   if (!waitingForActorMatches(waitingFor, gameState, next.actor)) return false;
   if (legalActions.some((action) => actionsEqual(action, next.action))) return true;
+  // Resolve All begins from Priority but is deliberately absent from normal
+  // legal actions: it opens its own engine-authored consent protocol.
   return (
-    next.action.type === "PassPriority" &&
+    (next.action.type === "PassPriority" || next.action.type === "BeginResolveAll") &&
     waitingFor?.type === "Priority" &&
     gameState != null
   );
@@ -966,7 +969,6 @@ const BATCH_CHUNK_SIZE = 5;
 // thread responsive, while this still lets the overlay update during truly
 // pathological stacks.
 const BATCH_CHUNK_INSTANT = 5_000;
-const BATCH_CHUNK_BASE_DELAY_MS = 150;
 let batchResolveInProgress = false;
 
 export async function dispatchResolveAll(
@@ -979,7 +981,13 @@ export async function dispatchResolveAll(
     debugLog("dispatchResolveAll: no adapter");
     return;
   }
-  if (
+  const waitingFor = useGameStore.getState().gameState?.waiting_for;
+  if (waitingFor?.type === "ResolveAllReady") {
+    if (!batchAdapter.resolveAll) {
+      debugLog("dispatchResolveAll: consent is Ready but the adapter cannot consume it");
+      return;
+    }
+  } else if (
     !batchAdapter.resolveAll
     || (aiSeats.length === 0 && batchAdapter.resolveAllUsesServerAi !== true)
   ) {
@@ -998,8 +1006,24 @@ export async function dispatchResolveAll(
     return;
   }
 
+  // Resolve All starts as an ordinary engine action so every representative
+  // receives the explicit Phase-1 Grant/Decline prompt. A later invocation
+  // after Ready consumes that already-issued authorization; it never starts a
+  // second run or asks a future AI decision speculatively.
+  if (waitingFor?.type !== "ResolveAllReady") {
+    const stackLen = useGameStore.getState().gameState?.stack.length ?? 0;
+    const maxResolutions =
+      stackPressureFromLength(stackLen) === "Instant"
+        ? BATCH_CHUNK_INSTANT
+        : BATCH_CHUNK_SIZE;
+    await dispatchAction(
+      { type: "BeginResolveAll", data: { max_resolutions: maxResolutions } },
+      requester,
+    );
+    return;
+  }
+
   batchResolveInProgress = true;
-  const multiplier = usePreferencesStore.getState().animationSpeedMultiplier;
   const { setIsResolvingAll, setResolutionProgress } = useGameStore.getState();
   setIsResolvingAll(true);
   // Storm-origin denominator: latched from the FIRST chunk's `total` because
@@ -1010,69 +1034,29 @@ export async function dispatchResolveAll(
   let resolvedSoFar = 0;
 
   try {
-    for (;;) {
-      // Re-evaluate pressure each iteration: a storm shrinks as it drains, so
-      // it eventually drops back to the animated 5-at-a-time path near the end.
-      const stackLen = useGameStore.getState().gameState?.stack.length ?? 0;
-      const instant = stackPressureFromLength(stackLen) === "Instant";
-      const chunkSize = instant ? BATCH_CHUNK_INSTANT : BATCH_CHUNK_SIZE;
+    const stackLen = useGameStore.getState().gameState?.stack.length ?? 0;
+    const maxResolutions =
+      stackPressureFromLength(stackLen) === "Instant"
+        ? BATCH_CHUNK_INSTANT
+        : BATCH_CHUNK_SIZE;
+    const batchResult: BatchResolveResult = await batchAdapter.resolveAll(
+      requester, aiSeats, maxResolutions,
+    );
 
-      const batchResult: BatchResolveResult = await batchAdapter.resolveAll(
-        requester, aiSeats, chunkSize,
-      );
-
-      if (latchedTotal === 0) latchedTotal = batchResult.total;
-      resolvedSoFar += batchResult.itemsResolved;
-      // Keep the throughput tracker warm so a storm draining below Instant keeps
-      // its animated tail fast instead of snapping back to full pacing.
-      // `itemsResolved` is a net-shrink count (can lag the true gross when a
-      // resolution spawns triggers) — an acceptable under-count here since the
-      // batch path is already depth-gated, where the depth axis dominates pacing.
-      if (batchResult.itemsResolved > 0) recordStackResolutions(batchResult.itemsResolved);
-      // Surface progress only for a genuine storm (trivial multi-item resolves
-      // drain too fast to render). Clamp to the latched total: `itemsResolved`
-      // is a net-shrink count that can lag the true gross when a resolution
-      // spawns triggers, so clamping keeps the bar monotonic and lets it
-      // complete. `resolved`/`total` are engine-provided — no frontend derivation.
-      if (latchedTotal >= STACK_PRESSURE_ELEVATED) {
-        setResolutionProgress({
-          resolved: Math.min(resolvedSoFar, latchedTotal),
-          total: latchedTotal,
-        });
-      }
-
-      // One atomic pair per chunk, committed through the single authority. The
-      // store's `waitingFor` therefore comes from the snapshot's own state, not
-      // from `batchResult.waitingFor` — the pair must stay self-consistent.
-      // Equivalent or fresher: worker FIFO or ordered WebSocket state updates
-      // guarantee this snapshot reflects at least the chunk's end state.
-      const snapshot = await batchAdapter.getSnapshot();
-      useGameStore.getState().commitEngineSnapshot(snapshot);
-
-      // Anything other than Priority ends the drain — GameOver included, since
-      // the drain only continues while this seat keeps receiving priority.
-      const done =
-        batchResult.itemsResolved === 0 ||
-        snapshot.state.stack.length === 0 ||
-        snapshot.state.waiting_for.type !== "Priority";
-      if (done) break;
-
-      if (instant) {
-        // Yield one frame so the resolution-progress overlay repaints between
-        // chunks. This rAF is the load-bearing progress fix — without it,
-        // back-to-back Instant chunks never let the browser paint, producing
-        // the "wait, then N vanish at once" symptom.
-        await new Promise<void>((r) => requestAnimationFrame(() => r()));
-        continue;
-      }
-
-      const chunkDelay = Math.round(BATCH_CHUNK_BASE_DELAY_MS * multiplier);
-      if (chunkDelay > 0) {
-        await new Promise<void>((r) => setTimeout(r, chunkDelay));
-      } else {
-        await new Promise<void>((r) => requestAnimationFrame(() => r()));
-      }
+    if (latchedTotal === 0) latchedTotal = batchResult.total;
+    resolvedSoFar += batchResult.itemsResolved;
+    if (batchResult.itemsResolved > 0) recordStackResolutions(batchResult.itemsResolved);
+    if (latchedTotal >= STACK_PRESSURE_ELEVATED) {
+      setResolutionProgress({
+        resolved: Math.min(resolvedSoFar, latchedTotal),
+        total: latchedTotal,
+      });
     }
+
+    // The Ready authorization is one run only. Commit one atomic snapshot
+    // after its proved prefix, then return control to ordinary priority.
+    const snapshot = await batchAdapter.getSnapshot();
+    useGameStore.getState().commitEngineSnapshot(snapshot);
 
     const { gameId, adapter } = useGameStore.getState();
     const newState = useGameStore.getState().gameState;

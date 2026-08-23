@@ -17,8 +17,8 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, CardSelectionMode, DamageChannel, Effect, QuantityExpr,
-    QuantityRef, TargetFilter,
+    AbilityDefinition, AbilityKind, AggregateFunction, CardSelectionMode, DamageChannel, Effect,
+    QuantityExpr, QuantityRef, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
@@ -63,6 +63,7 @@ fn draw_then_discard_that_many(draw: Effect) -> AbilityDefinition {
             count: QuantityExpr::Ref {
                 qty: QuantityRef::PreviousEffectAmount {
                     channel: DamageChannel::Total,
+                    aggregate: AggregateFunction::Sum,
                 },
             },
             target: TargetFilter::Controller,

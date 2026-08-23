@@ -1699,6 +1699,904 @@ fn unlock_room_door_special_action_marks_door_and_emits_trigger_event() {
     )));
 }
 
+/// CR 709.5h: unlocking a particular half triggers THAT half's "when you
+/// unlock this door" ability. The cast half (left, unlocked on entry) carries
+/// a GainLife-3 marker trigger; the locked right half carries GainLife 7.
+/// Paying the right door's unlock cost must put the RIGHT half's trigger on
+/// the stack — not re-fire the cast half's (Moldering Gym // Weight Room:
+/// paying Weight Room's {5}{G} ran Moldering Gym's land search a second time
+/// and Weight Room's ability never existed for the engine).
+#[test]
+fn unlocking_the_right_door_fires_the_right_halfs_trigger() {
+    let mut state = setup_game_at_main_phase();
+    let room = create_object(
+        &mut state,
+        CardId(901),
+        PlayerId(0),
+        "Moldering Gym".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        let front_trigger =
+            TriggerDefinition::new(TriggerMode::UnlockDoor).execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    player: TargetFilter::Controller,
+                },
+            ));
+        obj.trigger_definitions.push(front_trigger.clone());
+        Arc::make_mut(&mut obj.base_trigger_definitions).push(front_trigger);
+        let mut back = room_back_face("Weight Room");
+        back.trigger_definitions
+            .push(
+                TriggerDefinition::new(TriggerMode::UnlockDoor).execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 7 },
+                        player: TargetFilter::Controller,
+                    },
+                )),
+            );
+        obj.back_face = Some(back);
+        // The real ETB pipeline stamps and installs both halves' door text
+        // (`reset_for_battlefield_entry` → `install_room_door_text`).
+        obj.reset_for_battlefield_entry(1, 1);
+        // The front half was the cast half: its door entered unlocked.
+        obj.room_unlocks = Some(crate::game::game_object::RoomUnlockState {
+            left_unlocked: true,
+            right_unlocked: false,
+        });
+    }
+
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Right,
+        },
+    )
+    .unwrap();
+
+    let fired: Vec<i32> = state
+        .stack
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility { ability, .. } => match &ability.effect {
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value },
+                    ..
+                } => Some(*value),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        fired,
+        vec![7],
+        "CR 709.5h: the just-unlocked RIGHT half's trigger (marker 7) must fire, \
+         and the cast half's (marker 3) must not"
+    );
+}
+
+/// CR 709.5e + CR 709.5j: doors are PRINTED halves, not live/back slots.
+/// After the back half was cast (`modal_back_face`), the LEFT door's unlock
+/// cost is the back_face's mana cost and its trigger is the back_face's —
+/// `room::live_face_door` is the shared orientation authority. Before the fix
+/// the cost lookup read `obj.mana_cost` for Left unconditionally (the WRONG
+/// half once the faces swapped), and the trigger re-fired the live half.
+#[test]
+fn after_casting_the_back_half_the_left_door_uses_the_front_halfs_cost_and_trigger() {
+    let mut state = setup_game_at_main_phase();
+    let room = create_object(
+        &mut state,
+        CardId(902),
+        PlayerId(0),
+        "Weight Room".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        // The right (second printed) half was cast: faces are swapped.
+        obj.modal_back_face = true;
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        };
+        let live_trigger =
+            TriggerDefinition::new(TriggerMode::UnlockDoor).execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 7 },
+                    player: TargetFilter::Controller,
+                },
+            ));
+        obj.trigger_definitions.push(live_trigger.clone());
+        Arc::make_mut(&mut obj.base_trigger_definitions).push(live_trigger);
+        let mut front = room_back_face("Moldering Gym");
+        front.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        };
+        front
+            .trigger_definitions
+            .push(
+                TriggerDefinition::new(TriggerMode::UnlockDoor).execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 3 },
+                        player: TargetFilter::Controller,
+                    },
+                )),
+            );
+        obj.back_face = Some(front);
+        obj.reset_for_battlefield_entry(1, 1);
+        obj.room_unlocks = Some(crate::game::game_object::RoomUnlockState {
+            left_unlocked: false,
+            right_unlocked: true,
+        });
+    }
+    // Exactly the FRONT half's {G} in the pool: the unlock succeeds only if
+    // the Left door resolves to the back_face slot (the front-printed half).
+    state.players[0]
+        .mana_pool
+        .add(ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]));
+
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Left,
+        },
+    )
+    .expect("the left door's unlock cost is the front half's {G}");
+
+    assert!(state.objects[&room].room_unlocks.unwrap().left_unlocked);
+    let fired: Vec<i32> = state
+        .stack
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility { ability, .. } => match &ability.effect {
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value },
+                    ..
+                } => Some(*value),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        fired,
+        vec![3],
+        "CR 709.5h: the LEFT door's trigger is the front-printed half's (marker 3), \
+         not the live half's (marker 7)"
+    );
+}
+
+/// CR 709.5 + CR 709.5c: a locked half doesn't have its rules text, so the
+/// right half's static ability must not function until the right door is
+/// unlocked — and must stop again when that door is re-locked (CR 709.5g,
+/// Marina Vendrell class). The locked right half carries an
+/// AdditionalLandDrop static as a countable marker; the front (cast) half
+/// carries none.
+#[test]
+fn unlocking_the_right_door_turns_on_that_halfs_static() {
+    let mut state = setup_game_at_main_phase();
+    let room = create_object(
+        &mut state,
+        CardId(903),
+        PlayerId(0),
+        "Moldering Gym".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        let mut back = room_back_face("Weight Room");
+        back.static_definitions
+            .push(StaticDefinition::new(StaticMode::AdditionalLandDrop {
+                count: 2,
+            }));
+        obj.back_face = Some(back);
+        // The real ETB pipeline stamps and installs both halves' door text.
+        obj.reset_for_battlefield_entry(1, 1);
+        // The front half was the cast half: its door entered unlocked.
+        obj.room_unlocks = Some(crate::game::game_object::RoomUnlockState {
+            left_unlocked: true,
+            right_unlocked: false,
+        });
+    }
+
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, PlayerId(0)),
+        0,
+        "CR 709.5: the locked right half's static must not function"
+    );
+
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Right,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, PlayerId(0)),
+        2,
+        "CR 709.5c: the unlocked right half's static must function"
+    );
+
+    // CR 709.5g: locking the half removes the designation — its text is gone again.
+    assert!(crate::game::room::lock_door_designation(
+        &mut state,
+        room,
+        RoomDoor::Right
+    ));
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, PlayerId(0)),
+        0,
+        "CR 709.5g: a re-locked half's static must stop functioning"
+    );
+}
+
+/// CR 709.5d: a Room entering the battlefield without being cast enters with
+/// NEITHER unlocked designation — so even the live face's static (its printed
+/// rules text) must not function until a door is unlocked (CR 709.5).
+#[test]
+fn a_room_entering_uncast_has_no_functioning_static_until_unlocked() {
+    let mut state = setup_game_at_main_phase();
+    let room = create_object(
+        &mut state,
+        CardId(904),
+        PlayerId(0),
+        "Moldering Gym".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        let front_static = StaticDefinition::new(StaticMode::AdditionalLandDrop { count: 2 });
+        obj.static_definitions.push(front_static.clone());
+        Arc::make_mut(&mut obj.base_static_definitions).push(front_static);
+        obj.back_face = Some(room_back_face("Weight Room"));
+        // Entering uncast: `reset_for_battlefield_entry` leaves both doors
+        // locked (CR 709.5d — neither half was cast as a spell).
+        obj.reset_for_battlefield_entry(1, 1);
+    }
+
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, PlayerId(0)),
+        0,
+        "CR 709.5d + CR 709.5: with neither door unlocked, no half's static functions"
+    );
+
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Left,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, PlayerId(0)),
+        2,
+        "CR 709.5c: unlocking the left door turns its half's static on"
+    );
+}
+
+/// CR 709.5: a locked half doesn't have its NAME. On the battlefield a Room's
+/// name is therefore the printed-order combination of its unlocked halves:
+/// neither → no name at all (CR 709.5d uncast entry), one → that half alone,
+/// both → "Left // Right". Re-locking (CR 709.5g) takes the name away again.
+#[test]
+fn a_rooms_battlefield_name_follows_its_unlock_designations() {
+    let mut state = setup_game_at_main_phase();
+    let room = create_object(
+        &mut state,
+        CardId(905),
+        PlayerId(0),
+        "Moldering Gym".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        obj.back_face = Some(room_back_face("Weight Room"));
+        // Entering uncast: `reset_for_battlefield_entry` leaves both doors
+        // locked (CR 709.5d — neither half was cast as a spell).
+        obj.reset_for_battlefield_entry(1, 1);
+    }
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&room].name, "",
+        "CR 709.5d + CR 709.5: with both doors locked the permanent has neither half's name"
+    );
+
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Left,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        state.objects[&room].name, "Moldering Gym",
+        "CR 709.5c: one unlocked half contributes exactly its own name"
+    );
+
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Right,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        state.objects[&room].name, "Moldering Gym // Weight Room",
+        "CR 709.5: a fully unlocked Room has both halves' names, in printed order"
+    );
+
+    // CR 709.5g: re-locking the left door takes its half's name away again.
+    assert!(crate::game::room::lock_door_designation(
+        &mut state,
+        room,
+        RoomDoor::Left
+    ));
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&room].name, "Weight Room",
+        "CR 709.5g: a re-locked half's name is gone; the right half's remains"
+    );
+}
+
+/// CR 709.5d: the same name rule with the RIGHT half cast — `modal_back_face`
+/// swaps the faces, so the live face is the right door and the back face slot
+/// holds the FIRST printed half. The combined name must keep printed order,
+/// not face residency ("Moldering Gym // Weight Room", never the reverse).
+#[test]
+fn a_room_cast_from_its_right_half_keeps_printed_name_order() {
+    let mut state = setup_game_at_main_phase();
+    let room = create_object(
+        &mut state,
+        CardId(906),
+        PlayerId(0),
+        "Weight Room".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        obj.modal_back_face = true;
+        obj.back_face = Some(room_back_face("Moldering Gym"));
+        obj.reset_for_battlefield_entry(1, 1);
+        // The right (live) half was the cast half: its door entered unlocked.
+        obj.room_unlocks = Some(crate::game::game_object::RoomUnlockState {
+            left_unlocked: false,
+            right_unlocked: true,
+        });
+    }
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&room].name, "Weight Room",
+        "CR 709.5d: only the cast (right) half's name exists"
+    );
+
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Left,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        state.objects[&room].name, "Moldering Gym // Weight Room",
+        "CR 709.5: printed order wins — the left-printed half leads even though \
+         it lives in the back-face slot"
+    );
+}
+
+/// Build a battlefield Room with a stamped front-half marker static, entered
+/// UNCAST (both doors locked, CR 709.5d) so its own text contributes nothing.
+fn uncast_room_with_front_marker(
+    state: &mut GameState,
+    card: u64,
+    front: &str,
+    back: &str,
+) -> ObjectId {
+    let room = create_object(
+        state,
+        CardId(card),
+        PlayerId(0),
+        front.to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&room).unwrap();
+    obj.card_types.core_types.push(CoreType::Enchantment);
+    obj.card_types.subtypes.push("Room".to_string());
+    // The copiable snapshot reads BASE characteristics — mirror the types
+    // there so the source is a Room in its copiable form too.
+    obj.base_card_types = obj.card_types.clone();
+    // CR 709.5e: give the LEFT half a real unlock cost ({1}) so a copy's
+    // unlock exercises the COPIED cost instead of succeeding for free.
+    obj.mana_cost = ManaCost::Cost {
+        shards: vec![],
+        generic: 1,
+    };
+    obj.base_mana_cost = obj.mana_cost.clone();
+    let front_static = StaticDefinition::new(StaticMode::AdditionalLandDrop { count: 2 });
+    obj.static_definitions.push(front_static.clone());
+    Arc::make_mut(&mut obj.base_static_definitions).push(front_static);
+    obj.back_face = Some(room_back_face(back));
+    obj.reset_for_battlefield_entry(1, 1);
+    room
+}
+
+/// CR 707.2 + CR 709.5 + CR 613.1a: an ordinary permanent under a copy effect
+/// of a Room takes the Room's COPIABLE form — both halves, door-gated. It has
+/// no unlocked designations of its own (designations are status, CR 709.5c),
+/// so it sits fully locked: no name, no functioning half text. Unlocking a
+/// door turns exactly that half on; copy expiry reverts everything.
+#[test]
+fn an_ordinary_permanent_copying_a_room_gains_its_door_gated_form() {
+    let mut state = setup_game_at_main_phase();
+    let source = uncast_room_with_front_marker(&mut state, 907, "Moldering Gym", "Weight Room");
+    let bear = create_object(
+        &mut state,
+        CardId(908),
+        PlayerId(0),
+        "Plain Bear".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&bear)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Creature);
+
+    let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
+    let effect_id = state.add_transient_continuous_effect(
+        bear,
+        PlayerId(0),
+        crate::types::ability::Duration::Permanent,
+        TargetFilter::SpecificObject { id: bear },
+        vec![crate::types::ability::ContinuousModification::CopyValues {
+            values: Box::new(values),
+            display_source: crate::game::game_object::DisplaySource::Card,
+            printed_ref: None,
+            token_image_ref: None,
+        }],
+        None,
+    );
+    crate::game::layers::evaluate_layers(&mut state);
+
+    assert_eq!(
+        state.objects[&bear].name, "",
+        "CR 709.5c + CR 709.5: the copy has no unlocked designations, so it has \
+         neither half's name"
+    );
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, PlayerId(0)),
+        0,
+        "CR 709.5: both the source's and the copy's halves are locked — no text functions"
+    );
+
+    // CR 709.5e + CR 707.2: the copy is a Room permanent; its controller pays
+    // the locked LEFT half's COPIED cost ({1}) — fund exactly that much and
+    // assert the unlock consumes it, so a copy path that drops the half cost
+    // or defaults it to free fails here.
+    state.players[0]
+        .mana_pool
+        .add(crate::types::mana::ManaUnit::new(
+            crate::types::mana::ManaType::Green,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: bear,
+            door: RoomDoor::Left,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        state.players[0].mana_pool.mana.len(),
+        0,
+        "CR 709.5e: the copied left half's {{1}} unlock cost must consume the mana"
+    );
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&bear].name, "Moldering Gym",
+        "CR 709.5c: the unlocked left half contributes exactly its own (copied) name"
+    );
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, PlayerId(0)),
+        2,
+        "CR 709.5 + CR 707.2: the copied, now-unlocked front half's static functions"
+    );
+
+    // Copy expiry: the bear reverts wholesale; the lingering designation is
+    // harmless on a non-Room.
+    state
+        .transient_continuous_effects
+        .retain(|e| e.id != effect_id);
+    crate::game::layers::mark_layers_full(&mut state);
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&bear].name, "Plain Bear",
+        "copy expiry restores the recipient's own name"
+    );
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, PlayerId(0)),
+        0,
+        "copy expiry takes the copied half text with it"
+    );
+}
+
+/// CR 707.2 + CR 709.5c: a Room under a copy effect of ANOTHER Room keeps its
+/// own designations (status) but shows the COPIED halves' names through them
+/// — and reverts to its own halves when the copy expires.
+#[test]
+fn a_room_under_a_copy_effect_shows_the_copied_rooms_halves() {
+    let mut state = setup_game_at_main_phase();
+    let source = uncast_room_with_front_marker(&mut state, 909, "Bright Hall", "Dim Cellar");
+    let room = create_object(
+        &mut state,
+        CardId(910),
+        PlayerId(0),
+        "Moldering Gym".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        obj.back_face = Some(room_back_face("Weight Room"));
+        obj.reset_for_battlefield_entry(1, 1);
+        // The front half was the cast half: its door entered unlocked.
+        obj.room_unlocks = Some(crate::game::game_object::RoomUnlockState {
+            left_unlocked: true,
+            right_unlocked: false,
+        });
+    }
+
+    let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
+    let effect_id = state.add_transient_continuous_effect(
+        room,
+        PlayerId(0),
+        crate::types::ability::Duration::Permanent,
+        TargetFilter::SpecificObject { id: room },
+        vec![crate::types::ability::ContinuousModification::CopyValues {
+            values: Box::new(values),
+            display_source: crate::game::game_object::DisplaySource::Card,
+            printed_ref: None,
+            token_image_ref: None,
+        }],
+        None,
+    );
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&room].name, "Bright Hall",
+        "CR 707.2 + CR 709.5c: the surviving left designation now shows the \
+         COPIED left half's name"
+    );
+
+    // CR 709.5e: unlock the right door — the copied right half's name joins.
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Right,
+        },
+    )
+    .unwrap();
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&room].name, "Bright Hall // Dim Cellar",
+        "CR 709.5: both designations show the copied halves in printed order"
+    );
+
+    // Copy expiry: designations persist (status), the OWN halves return.
+    state
+        .transient_continuous_effects
+        .retain(|e| e.id != effect_id);
+    crate::game::layers::mark_layers_full(&mut state);
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&room].name, "Moldering Gym // Weight Room",
+        "copy expiry restores the object's own halves under its surviving designations"
+    );
+}
+
+/// CR 707.3: an object copying an ALREADY-COPIED Room uses the new copiable
+/// values — the snapshot a later copy takes must carry the COPIED halves, not
+/// the recipient's printed ones.
+#[test]
+fn a_copy_of_an_already_copied_room_snapshots_the_copied_halves() {
+    let mut state = setup_game_at_main_phase();
+    let source = uncast_room_with_front_marker(&mut state, 911, "Bright Hall", "Dim Cellar");
+    let bear = create_object(
+        &mut state,
+        CardId(912),
+        PlayerId(0),
+        "Plain Bear".to_string(),
+        Zone::Battlefield,
+    );
+    let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
+    state.add_transient_continuous_effect(
+        bear,
+        PlayerId(0),
+        crate::types::ability::Duration::Permanent,
+        TargetFilter::SpecificObject { id: bear },
+        vec![crate::types::ability::ContinuousModification::CopyValues {
+            values: Box::new(values),
+            display_source: crate::game::game_object::DisplaySource::Card,
+            printed_ref: None,
+            token_image_ref: None,
+        }],
+        None,
+    );
+    crate::game::layers::evaluate_layers(&mut state);
+
+    // CR 707.3: the bear's CURRENT copiable values are the Room's — including
+    // the halves. `compute_current_copiable_values` is the snapshot every
+    // become-copy / conjure-duplicate resolution takes.
+    let snapshot = crate::game::layers::compute_current_copiable_values(&state, bear)
+        .expect("the bear exists");
+    let halves = snapshot
+        .room_halves
+        .expect("CR 707.3: the copied Room halves are part of the new copiable values");
+    assert_eq!(halves.left.name, "Bright Hall");
+    assert_eq!(
+        halves.left.mana_cost,
+        ManaCost::Cost {
+            shards: vec![],
+            generic: 1,
+        },
+        "CR 707.3: the copied left half's unlock cost is part of the new copiable values"
+    );
+    assert_eq!(
+        halves.right.as_ref().map(|half| half.name.as_str()),
+        Some("Dim Cellar")
+    );
+}
+
+/// CR 707.9b + CR 709.5: an "except its name is X" copy exception is part of
+/// the COPIABLE values and is the copy's final name — the Room door gate
+/// removes locked HALves' names, never a separate name exception. The
+/// exception also propagates through a chained copy (CR 707.3).
+#[test]
+fn a_set_name_exception_survives_the_room_name_derivation() {
+    let mut state = setup_game_at_main_phase();
+    let source = uncast_room_with_front_marker(&mut state, 915, "Bright Hall", "Dim Cellar");
+    let bear = create_object(
+        &mut state,
+        CardId(916),
+        PlayerId(0),
+        "Plain Bear".to_string(),
+        Zone::Battlefield,
+    );
+    let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
+    state.add_transient_continuous_effect(
+        bear,
+        PlayerId(0),
+        crate::types::ability::Duration::Permanent,
+        TargetFilter::SpecificObject { id: bear },
+        vec![
+            crate::types::ability::ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display_source: crate::game::game_object::DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            },
+            // CR 707.9b: the "except its name is X" rider follows CopyValues
+            // within the same effect, exactly as production installs it.
+            crate::types::ability::ContinuousModification::SetName {
+                name: "Wrong Turn".to_string(),
+            },
+        ],
+        None,
+    );
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&bear].name, "Wrong Turn",
+        "CR 707.9b: the name exception is the copy's final name — the door          gate must not erase it while both halves are locked"
+    );
+
+    // CR 709.5e: unlocking a door changes the half text, never the exception name.
+    state.players[0]
+        .mana_pool
+        .add(crate::types::mana::ManaUnit::new(
+            crate::types::mana::ManaType::Green,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: bear,
+            door: RoomDoor::Left,
+        },
+    )
+    .unwrap();
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&bear].name, "Wrong Turn",
+        "CR 707.9b: the exception stays the final name after unlocking too"
+    );
+
+    // CR 707.3: a chained copy sees the overridden name as a copiable value.
+    let bear2 = create_object(
+        &mut state,
+        CardId(917),
+        PlayerId(0),
+        "Second Bear".to_string(),
+        Zone::Battlefield,
+    );
+    let chained = crate::game::layers::compute_current_copiable_values(&state, bear)
+        .expect("the copy exists");
+    assert_eq!(
+        chained.name, "Wrong Turn",
+        "CR 707.9b: the exception is part of the snapshot a later copy takes"
+    );
+    state.add_transient_continuous_effect(
+        bear2,
+        PlayerId(0),
+        crate::types::ability::Duration::Permanent,
+        TargetFilter::SpecificObject { id: bear2 },
+        vec![crate::types::ability::ContinuousModification::CopyValues {
+            values: Box::new(chained),
+            display_source: crate::game::game_object::DisplaySource::Card,
+            printed_ref: None,
+            token_image_ref: None,
+        }],
+        None,
+    );
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&bear2].name, "Wrong Turn",
+        "CR 707.3 + CR 707.9b: the chained copy keeps the exception name —          the door gate must not rename it to a half string"
+    );
+
+    // CR 613.1a: a LATER ordinary copy replaces the exception wholesale — the
+    // marker must reset with it, so the door gate applies again. The bear's
+    // left door is still unlocked from above, so the copied left name shows.
+    let plain = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
+    state.add_transient_continuous_effect(
+        bear,
+        PlayerId(0),
+        crate::types::ability::Duration::Permanent,
+        TargetFilter::SpecificObject { id: bear },
+        vec![crate::types::ability::ContinuousModification::CopyValues {
+            values: Box::new(plain),
+            display_source: crate::game::game_object::DisplaySource::Card,
+            printed_ref: None,
+            token_image_ref: None,
+        }],
+        None,
+    );
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&bear].name, "Bright Hall",
+        "CR 613.1a: the later ordinary copy resets the exception marker"
+    );
+}
+
+/// CR 707.9b: a MATERIALIZED duplicate of an exception-named Room copy keeps
+/// the exception through every LATER layer pass — `base_name_origin` restores
+/// the runtime marker at each Step-1 seed, so the door gate never renames it.
+#[test]
+fn a_materialized_exception_name_survives_later_layer_passes() {
+    let mut state = setup_game_at_main_phase();
+    let source = uncast_room_with_front_marker(&mut state, 918, "Bright Hall", "Dim Cellar");
+    let mut values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
+    values.name = "Wrong Turn".to_string();
+    values.name_origin = crate::types::ability::CopiedNameOrigin::Exception;
+
+    let duplicate = create_object(
+        &mut state,
+        CardId(919),
+        PlayerId(0),
+        "Conjured".to_string(),
+        Zone::Battlefield,
+    );
+    crate::game::printed_cards::install_copiable_values_as_base(
+        state.objects.get_mut(&duplicate).unwrap(),
+        &values,
+    );
+
+    // A later full pass re-seeds from base — the exception must survive it.
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&duplicate].name, "Wrong Turn",
+        "CR 707.9b: the materialized exception is base state and outlives the pass"
+    );
+
+    // CR 709.5e: unlocking a door changes half text, never the exception name.
+    state.players[0]
+        .mana_pool
+        .add(crate::types::mana::ManaUnit::new(
+            crate::types::mana::ManaType::Green,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: duplicate,
+            door: RoomDoor::Left,
+        },
+    )
+    .unwrap();
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&duplicate].name, "Wrong Turn",
+        "CR 707.9b: the exception stays the final name after unlocking too"
+    );
+}
+
+/// CR 709.5b: a materialized duplicate of a Room (conjure — Endless Corridor
+/// conjures a duplicate of ITSELF) keeps both printed halves: the base slots
+/// hold the left half, a synthesized back face the right one, so
+/// `own_room_halves` round-trips identity, unlock costs, and door existence.
+#[test]
+fn a_materialized_duplicate_of_a_room_keeps_both_halves() {
+    let mut state = setup_game_at_main_phase();
+    let source = uncast_room_with_front_marker(&mut state, 913, "Bright Hall", "Dim Cellar");
+    let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
+
+    let duplicate = create_object(
+        &mut state,
+        CardId(914),
+        PlayerId(0),
+        "Conjured".to_string(),
+        Zone::Hand,
+    );
+    let obj = state.objects.get_mut(&duplicate).unwrap();
+    crate::game::printed_cards::install_copiable_values_as_base(obj, &values);
+
+    let halves = crate::game::room::own_room_halves(obj);
+    assert_eq!(
+        halves.left.name, "Bright Hall",
+        "CR 709.5b: the duplicate's base slots hold the left half"
+    );
+    assert_eq!(
+        halves.left.mana_cost,
+        ManaCost::Cost {
+            shards: vec![],
+            generic: 1,
+        },
+        "CR 709.5e: the left door's unlock cost survives materialization"
+    );
+    assert_eq!(
+        halves.right.as_ref().map(|half| half.name.as_str()),
+        Some("Dim Cellar"),
+        "CR 709.5b: the right half survives as the synthesized back face"
+    );
+}
+
 /// CR 106.6 + CR 116.2m + CR 709.5e: Smoky Lounge produces {R}{R} restricted
 /// to "cast Room spells and unlock doors". The door-unlock half lowers to
 /// `OnlyForSpecialAction(UnlockDoor)`; paying a Room's unlock cost routes
@@ -1724,11 +2622,14 @@ fn unlock_door_restricted_mana_pays_room_unlock_cost() {
         let obj = state.objects.get_mut(&room).unwrap();
         obj.card_types.subtypes.push("Room".to_string());
         obj.room_unlocks = Some(Default::default());
-        // CR 709.5e: left door's unlock cost is the object's mana cost ({R}).
+        // CR 709.5e: left door's unlock cost is the half's printed mana cost
+        // ({R}) — the half projection reads the BASE fields, as the card
+        // pipeline fills them.
         obj.mana_cost = ManaCost::Cost {
             shards: vec![crate::types::mana::ManaCostShard::Red],
             generic: 0,
         };
+        obj.base_mana_cost = obj.mana_cost.clone();
     }
 
     // Smoky Lounge's restricted {R}: only for casting Room spells OR unlocking
@@ -1998,12 +2899,14 @@ fn inquisitive_glimmer_reduces_room_unlock_cost() {
             let obj = state.objects.get_mut(&room).unwrap();
             obj.card_types.subtypes.push("Room".to_string());
             obj.room_unlocks = Some(Default::default());
-            // CR 709.5e: the left door's unlock cost is the object's mana
-            // cost — a flat {3} generic here.
+            // CR 709.5e: the left door's unlock cost is the half's printed
+            // mana cost — a flat {3} generic here, mirrored to BASE as the
+            // card pipeline fills it (the half projection reads base fields).
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![],
                 generic: 3,
             };
+            obj.base_mana_cost = obj.mana_cost.clone();
         }
         if with_glimmer {
             let glimmer = create_object(

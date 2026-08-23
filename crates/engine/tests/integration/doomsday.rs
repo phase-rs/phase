@@ -2,6 +2,7 @@
 //! exile, and five-card library ordering.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::types::ability::SearchOrderingHint;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
@@ -78,8 +79,14 @@ fn doomsday_exiles_search_remainder_and_orders_five_chosen_cards() {
     }
 
     let search_cards = match &cast.state().waiting_for {
-        WaitingFor::SearchChoice { cards, count, .. } => {
+        WaitingFor::SearchChoice {
+            cards,
+            count,
+            ordering_hint,
+            ..
+        } => {
             assert_eq!(*count, 5, "Doomsday must require five selected cards");
+            assert_eq!(*ordering_hint, SearchOrderingHint::OrderedToLibraryTop);
             assert!(chosen.iter().all(|id| cards.contains(id)));
             cards.clone()
         }

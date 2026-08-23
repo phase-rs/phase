@@ -238,6 +238,10 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     filtered.interaction_generation = 0;
     filtered.next_interaction_serial = "1".to_string();
     filtered.active_interaction_slots.clear();
+    // Resolve All consent's frozen authority and priority restoration snapshot
+    // are server-private. The public WaitingFor state is sufficient to render
+    // the current consent or ready status.
+    filtered.resolve_all_consent_run = None;
     // Product knowledge is projection authority, never transport payload. Its
     // effect is applied below before hidden cards are redacted; viewers receive
     // identities they learned, not the audience facts or library epochs behind
@@ -247,10 +251,45 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // The replacement-resume cursor is server authority and can retain private
     // object IDs and last-known snapshots from a cost payment.
     filtered.pending_cost_move_resume = None;
+    // The EFFECT layer's twin of the cursor above, redacted for the same
+    // reason: `PendingDiscardBatch` retains the object IDs of cards still in a
+    // hand (a hidden zone, CR 400.2), the instruction's pre-pause event span,
+    // and full `ResolvedAbility` clones of the paused clause. The projected
+    // `WaitingFor::ReplacementChoice` is the complete viewer-facing interaction
+    // surface, so no viewer — including the choosing player — needs the carrier
+    // itself. Viewer projections are display-only clones; the authoritative
+    // state the drain resumes from is never filtered.
+    filtered.pending_discard_batch = None;
+    // CR 510.2 + CR 616.1: the parked combat-damage batch is server authority.
+    // Its `batch_events` can carry rider-created `ZoneChanged` records and other
+    // effect events that `filter_events_for_viewer` would redact in the live
+    // stream, and its `prevention_tally` names replacement sources. The projected
+    // `WaitingFor::ReplacementChoice` is the complete viewer-facing interaction
+    // surface, so no viewer — including the choosing player — needs the carrier
+    // itself.
+    filtered.pending_combat_lifelink = None;
+    // CR 608.2h: a paused player-scope clause retains its frozen aggregate in
+    // authoritative state so save/restore resumes the same application. The
+    // value can encode hidden-zone information (for example, hand sizes), so it
+    // belongs with the private discard cursor rather than any viewer payload.
+    filtered.clause_minimum_snapshot = None;
     // Deferred life-cost owners can embed a complete PendingCast, including
     // hidden card and target context. The projected WaitingFor is the only
     // viewer-facing interaction surface.
     filtered.pending_deferred_life_cost_resume = None;
+    // CR 605.4a: The triggered-mana continuation is trusted persistence
+    // authority. Its pending context can carry hidden object identities,
+    // last-known source snapshots, controller-only event batches, chosen
+    // players, legal-mode sets, the current rules-execution node, and a
+    // suspended parent/payment cursor. The projected WaitingFor is the complete
+    // public interaction surface, so this is cleared for every viewer —
+    // including the controller who owns the prompt — before the later
+    // per-controller pending-trigger redaction.
+    filtered.pending_triggered_mana_resume = None;
+    // CR 117.3c: The construction priority recipient is engine scheduling
+    // authority for who receives priority after the batch finishes announcing.
+    // No viewer projection carries it.
+    filtered.pending_trigger_construction_priority_recipient = None;
     // Resolution frames are server-authoritative continuations. They can carry
     // private object identities, trigger source contexts, and resolved ability
     // payloads; the separately projected `WaitingFor` prompt is the complete
@@ -1150,6 +1189,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         allows_partial_find,
         ref constraint,
         ref split,
+        ordering_hint,
     } = state.waiting_for
     {
         if !can_view_private_for_player(player) {
@@ -1162,6 +1202,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 up_to,
                 allows_partial_find,
                 constraint: constraint.clone(),
+                ordering_hint,
                 split: split.clone(),
             };
         }
@@ -3436,6 +3477,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -3449,6 +3491,47 @@ mod tests {
             filtered.objects.get(&card_id).map(|obj| obj.name.as_str()),
             Some("Hidden Tutor Target")
         );
+    }
+
+    #[test]
+    fn redacted_search_choice_preserves_ordering_hint() {
+        let mut state = GameState::new_two_player(42);
+        let card_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hidden Ordered Target".to_string(),
+            Zone::Library,
+        );
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            library_owner: Some(PlayerId(0)),
+            cards: vec![card_id],
+            count: 1,
+            reveal: false,
+            up_to: false,
+            allows_partial_find: false,
+            constraint: crate::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: crate::types::ability::SearchOrderingHint::OrderedToLibraryTop,
+            split: None,
+        };
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(1));
+
+        match filtered.waiting_for {
+            WaitingFor::SearchChoice {
+                cards,
+                ordering_hint,
+                ..
+            } => {
+                assert_eq!(cards, vec![ObjectId(0)]);
+                assert_eq!(
+                    ordering_hint,
+                    crate::types::ability::SearchOrderingHint::OrderedToLibraryTop
+                );
+            }
+            other => panic!("expected SearchChoice, got {other:?}"),
+        }
     }
 
     /// CR 101.4a + CR 701.23i: In a three-player simultaneous library search,
@@ -3511,6 +3594,7 @@ mod tests {
             up_to: true,
             allows_partial_find: true,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -3625,6 +3709,7 @@ mod tests {
                         up_to: false,
                         allows_partial_find: false,
                         constraint: crate::types::ability::SearchSelectionConstraint::None,
+                        ordering_hint: Default::default(),
                     },
                     PreparedScopedLibrarySearchChoice {
                         player: later_searcher,
@@ -3638,6 +3723,7 @@ mod tests {
                         up_to: false,
                         allows_partial_find: false,
                         constraint: crate::types::ability::SearchSelectionConstraint::None,
+                        ordering_hint: Default::default(),
                     },
                 ],
                 next_selection_index: 2,
@@ -3661,6 +3747,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -4135,6 +4222,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -6155,6 +6243,296 @@ mod tests {
             state.pending_deferred_life_cost_resume.is_some(),
             "filtering must not alter the authoritative deferred life-cost continuation"
         );
+    }
+
+    /// CR 400.2 + CR 608.2c: `pending_discard_batch` is the EFFECT layer's twin
+    /// of the cost cursor above. It retains the object IDs of cards still in a
+    /// HAND — a hidden zone — plus the instruction's pre-pause event span, so it
+    /// must be absent from every viewer projection, including the projection of
+    /// the player who owns the live replacement prompt. `hide_card` is an
+    /// allowlist, so a new state carrier defaults to LEAKED and this has to be
+    /// measured rather than assumed.
+    ///
+    /// REVERT PROBE (RUN, not reasoned): delete
+    /// `filtered.pending_discard_batch = None;` from `filter_state_for_viewer`.
+    /// Observed first failure — "viewer PlayerId(0) must not receive the parked
+    /// discard batch". The later per-viewer and wire-string assertions never run
+    /// (the first panic ends the test), so it is that one which discriminates.
+    #[test]
+    fn parked_discard_batch_is_absent_from_every_viewer_projection() {
+        let mut state = GameState::new_two_player(42);
+        let hidden = create_object(
+            &mut state,
+            CardId(70_007),
+            PlayerId(0),
+            "Hand Secret".to_string(),
+            Zone::Hand,
+        );
+        state.pending_discard_batch =
+            Some(Box::new(crate::types::game_state::PendingDiscardBatch {
+                player: PlayerId(0),
+                cursor: crate::types::game_state::DiscardBatchCursor::All {
+                    remaining: vec![hidden],
+                },
+                completion: crate::types::game_state::PendingDiscardBatchCompletion::Standard,
+                source_id: ObjectId(9_300),
+                effect_kind: crate::types::ability::EffectKind::Discard,
+                paused_card: crate::types::identifiers::ObjectIncarnationRef::of(hidden, 0),
+                discard_frame: None,
+                fan_out: None,
+                preceding_events: Vec::new(),
+            }));
+        state.clause_minimum_snapshot =
+            Some(crate::types::game_state::ClauseMinimumSnapshot::default());
+
+        let authoritative = serde_json::to_string(&state.pending_discard_batch)
+            .expect("the authoritative batch serializes");
+        assert!(
+            authoritative.contains(&hidden.0.to_string()),
+            "reach guard: the authoritative carrier really does hold the hand card's ID"
+        );
+
+        for viewer in [PlayerId(0), PlayerId(1)] {
+            let view = filter_state_for_viewer(&state, viewer);
+            assert!(
+                view.pending_discard_batch.is_none(),
+                "viewer {viewer:?} must not receive the parked discard batch"
+            );
+            assert!(
+                view.clause_minimum_snapshot.is_none(),
+                "viewer {viewer:?} must not receive the paused clause's private aggregate"
+            );
+            let wire = serde_json::to_string(&view).expect("the filtered snapshot serializes");
+            assert!(
+                !wire.contains("\"pendingDiscardBatch\":{")
+                    && !wire.contains("\"pending_discard_batch\":{"),
+                "viewer {viewer:?}'s snapshot must not serialize the carrier at all"
+            );
+        }
+
+        assert!(
+            state.pending_discard_batch.is_some(),
+            "filtering must not alter the authoritative server carrier"
+        );
+    }
+
+    /// CR 510.2 + CR 616.1: `pending_combat_lifelink` is the parked
+    /// combat-damage batch. Its `batch_events` can carry effect events that
+    /// `filter_events_for_viewer` redacts in the live stream — a hidden-zone
+    /// `ZoneChanged` among them — and its `prevention_tally` names replacement
+    /// sources, so it must be absent from every viewer projection including the
+    /// choosing player's own.
+    ///
+    /// REVERT PROBE: delete `filtered.pending_combat_lifelink = None;` from
+    /// `filter_state_for_viewer` — the first per-viewer assertion below fails.
+    #[test]
+    fn parked_combat_lifelink_is_absent_from_every_viewer_projection() {
+        let mut state = GameState::new_two_player(42);
+        let hidden = create_object(
+            &mut state,
+            CardId(70_017),
+            PlayerId(0),
+            "Library Secret".to_string(),
+            Zone::Library,
+        );
+        let record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            hidden,
+            Some(Zone::Library),
+            Zone::Battlefield,
+        );
+        state.pending_combat_lifelink =
+            Some(Box::new(crate::types::game_state::PendingCombatLifelink {
+                remaining: std::collections::VecDeque::from(vec![
+                    crate::types::game_state::PendingLifelinkGain {
+                        controller: PlayerId(0),
+                        amount: 3,
+                    },
+                ]),
+                batch_events: vec![GameEvent::ZoneChanged {
+                    object_id: hidden,
+                    from: Some(Zone::Library),
+                    to: Zone::Battlefield,
+                    record: Box::new(record),
+                }],
+                damage_to_players: Vec::new(),
+                prevention_tally: Vec::new(),
+                lives_before: vec![20, 20],
+                sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
+            }));
+
+        let authoritative = serde_json::to_string(&state.pending_combat_lifelink)
+            .expect("the authoritative record serializes");
+        assert!(
+            authoritative.contains(&hidden.0.to_string()),
+            "reach guard: the authoritative carrier really does hold the library card's ID"
+        );
+
+        for viewer in [PlayerId(0), PlayerId(1)] {
+            let view = filter_state_for_viewer(&state, viewer);
+            assert!(
+                view.pending_combat_lifelink.is_none(),
+                "viewer {viewer:?} must not receive the parked combat-damage batch"
+            );
+            let wire = serde_json::to_string(&view).expect("the filtered snapshot serializes");
+            assert!(
+                !wire.contains("\"pendingCombatLifelink\":{")
+                    && !wire.contains("\"pending_combat_lifelink\":{"),
+                "viewer {viewer:?}'s snapshot must not serialize the carrier at all"
+            );
+        }
+
+        assert!(
+            state.pending_combat_lifelink.is_some(),
+            "filtering must not alter the authoritative server carrier"
+        );
+    }
+
+    /// CR 605.4a + CR 117.3c (plan Step 6): the triggered-mana continuation and
+    /// the trigger-construction priority recipient are trusted persistence
+    /// authority. They must survive an authoritative round trip exactly, and
+    /// must be absent from **every** viewer projection — including the
+    /// projection of the player who owns the live prompt.
+    ///
+    /// Each carrier gets a distinct sentinel so the two redaction lines are
+    /// independently revert-sensitive: deleting either clearing statement leaves
+    /// its own sentinel (the private description string, or the exact nonactive
+    /// `PlayerId`) reachable in a viewer snapshot while the other row still
+    /// passes.
+    #[test]
+    fn triggered_mana_sidecar_and_construction_recipient_are_erased_from_every_viewer() {
+        let (state, marker) = triggered_mana_projection_fixture();
+
+        // Trusted persistence retains both authorities exactly, and the live
+        // public prompt is unchanged.
+        let trusted = serde_json::to_value(&state).expect("authoritative state serializes");
+        assert!(
+            trusted["pending_triggered_mana_resume"].is_object(),
+            "trusted persistence must retain the triggered-mana continuation"
+        );
+        assert_eq!(
+            trusted["pending_trigger_construction_priority_recipient"], 1,
+            "trusted persistence must retain the exact carried recipient"
+        );
+        let trusted_text = serde_json::to_string(&state).expect("authoritative state serializes");
+        assert!(
+            trusted_text.contains(marker),
+            "test precondition: the private sidecar payload is really present"
+        );
+        let restored: GameState =
+            serde_json::from_value(trusted).expect("the authoritative state round-trips");
+        assert_eq!(
+            restored.pending_triggered_mana_resume, state.pending_triggered_mana_resume,
+            "the sidecar and its rules-execution node must survive serde exactly"
+        );
+        assert_eq!(
+            restored.pending_trigger_construction_priority_recipient,
+            Some(PlayerId(1)),
+            "the carried recipient must survive serde exactly"
+        );
+
+        // The prompt owner is P0; P1 is the carried recipient; P2 is an
+        // unrelated opponent. None of them may receive either carrier.
+        for viewer in [PlayerId(0), PlayerId(1), PlayerId(2)] {
+            let filtered = filter_state_for_viewer(&state, viewer);
+            assert!(
+                filtered.pending_triggered_mana_resume.is_none(),
+                "viewer {viewer:?} must not receive the triggered-mana continuation"
+            );
+            assert!(
+                filtered
+                    .pending_trigger_construction_priority_recipient
+                    .is_none(),
+                "viewer {viewer:?} must not receive the construction priority recipient"
+            );
+            let wire = serde_json::to_string(&filtered).expect("the filtered snapshot serializes");
+            assert!(
+                !wire.contains(marker),
+                "viewer {viewer:?} snapshot leaked the private sidecar payload"
+            );
+            assert!(
+                !wire.contains("pending_triggered_mana_resume")
+                    && !wire.contains("pendingTriggeredManaResume")
+                    && !wire.contains("pending_trigger_construction_priority_recipient")
+                    && !wire.contains("pendingTriggerConstructionPriorityRecipient"),
+                "viewer {viewer:?} snapshot leaked a carrier field name"
+            );
+            assert!(
+                matches!(
+                    filtered.waiting_for,
+                    WaitingFor::OptionalEffectChoice { .. }
+                ),
+                "the public prompt remains the complete viewer-facing surface"
+            );
+        }
+
+        assert!(
+            state.pending_triggered_mana_resume.is_some()
+                && state.pending_trigger_construction_priority_recipient == Some(PlayerId(1)),
+            "filtering must not alter the authoritative carriers"
+        );
+    }
+
+    /// A three-player authoritative state carrying both Step-6 authorities:
+    /// a live `TriggeredManaResume` whose pending context holds a private
+    /// description sentinel and a real `TriggeredMana` rules-execution node plus
+    /// an accepted tail, and a construction recipient naming nonactive P1 while
+    /// P0 owns the live prompt. Returns the private sentinel.
+    fn triggered_mana_projection_fixture() -> (GameState, &'static str) {
+        use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
+        use crate::types::ability::QuantityExpr;
+        use crate::types::game_state::{
+            ManaTriggerFixedPointResume, TriggeredManaResume, TriggeredManaStage,
+        };
+        use crate::types::resolved_commands::{RulesExecutionNodeRef, SettlementNodeOrdinal};
+
+        const MARKER: &str = "SIDECAR-PRIVATE-ORACLE-SENTINEL";
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        state.next_object_id = 70_501;
+        let hidden = create_object(
+            &mut state,
+            CardId(70_501),
+            PlayerId(0),
+            "Hidden Sidecar Source".to_string(),
+            Zone::Battlefield,
+        );
+        let work = |description: &str| {
+            let mut pending = PendingTrigger::ordinary(
+                hidden,
+                PlayerId(0),
+                None,
+                Box::new(ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    Vec::new(),
+                    hidden,
+                    PlayerId(0),
+                )),
+                1,
+            );
+            pending.description = Some(description.to_string());
+            PendingTriggerContext::single(pending)
+        };
+
+        state.pending_triggered_mana_resume = Some(Box::new(TriggeredManaResume {
+            current: Box::new(work(MARKER)),
+            current_override: None,
+            rules_execution_node: RulesExecutionNodeRef::TriggeredMana(SettlementNodeOrdinal(3)),
+            accepted_tail: vec![work("accepted tail")],
+            collected_batches: Vec::new(),
+            outer_resume: ManaTriggerFixedPointResume::Parent,
+            stage: TriggeredManaStage::ResolvingBody,
+        }));
+        state.pending_trigger_construction_priority_recipient = Some(PlayerId(1));
+        state.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: PlayerId(0),
+            source_id: hidden,
+            description: Some("Accepted triggered mana may".to_string()),
+            may_trigger_key: None,
+        };
+        (state, MARKER)
     }
 
     #[test]

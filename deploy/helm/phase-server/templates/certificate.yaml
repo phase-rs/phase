@@ -1,0 +1,35 @@
+{{- if and .Values.scaleOut.enabled .Values.scaleOut.tls.enabled .Values.ingress.enabled }}
+{{- /* The Ingress path lets cert-manager's ingress-shim derive a Certificate
+     from an annotation, but IngressRoute is not an Ingress, so with scaleOut
+     the chart owns the Certificate directly. One certificate covers the entry
+     host and every ordinal host, into the same secret both route kinds use. */}}
+{{- $issuer := "" }}
+{{- $issuerKind := "" }}
+{{- if .Values.ingress.tls.clusterIssuer }}
+{{- $issuer = .Values.ingress.tls.clusterIssuer }}
+{{- $issuerKind = "ClusterIssuer" }}
+{{- else if .Values.ingress.tls.issuer }}
+{{- $issuer = .Values.ingress.tls.issuer }}
+{{- $issuerKind = "Issuer" }}
+{{- else }}
+{{- fail "scaleOut.tls.enabled needs ingress.tls.clusterIssuer or ingress.tls.issuer: IngressRoute has no cert-manager annotation to derive a Certificate from. Set one, or set scaleOut.tls.enabled=false and provide the secret yourself." }}
+{{- end }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "phase-server.fullname" . }}
+  labels:
+    {{- include "phase-server.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "phase-server.tlsSecretName" . }}
+  issuerRef:
+    name: {{ $issuer }}
+    kind: {{ $issuerKind }}
+  dnsNames:
+    {{- if .Values.scaleOut.tls.wildcardDnsName }}
+    - {{ .Values.ingress.host | quote }}
+    - {{ .Values.scaleOut.tls.wildcardDnsName | quote }}
+    {{- else }}
+    {{- include "phase-server.allHosts" . | nindent 4 }}
+    {{- end }}
+{{- end }}

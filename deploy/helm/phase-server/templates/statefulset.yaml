@@ -1,0 +1,61 @@
+{{- if .Values.scaleOut.enabled }}
+{{- if lt (int .Values.scaleOut.replicaMax) 1 }}
+{{- fail (printf "scaleOut.replicaMax must be at least 1; got %v" .Values.scaleOut.replicaMax) }}
+{{- end }}
+{{- if and (not .Values.autoscaling.enabled) (gt (int .Values.scaleOut.replicas) (int .Values.scaleOut.replicaMax)) }}
+{{- fail (printf "scaleOut.replicas (%v) exceeds scaleOut.replicaMax (%v): ordinal Services and IngressRoutes are only templated for 0..replicaMax-1, so the extra pods would hold games nobody can join by ordinal hostname." .Values.scaleOut.replicas .Values.scaleOut.replicaMax) }}
+{{- end }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "phase-server.fullname" . }}
+  labels:
+    {{- include "phase-server.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "phase-server.fullname" . }}-headless
+  {{- /* Helm re-applies spec.replicas on every upgrade, so templating it while
+       an HPA owns the field would reset the autoscaler's decision — including
+       the occupancy floor that keeps a busy top ordinal alive. Leave the field
+       out entirely and let the HPA own it. */}}
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.scaleOut.replicas }}
+  {{- end }}
+  podManagementPolicy: {{ .Values.scaleOut.podManagementPolicy }}
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      {{- include "phase-server.selectorLabels" . | nindent 6 }}
+  {{- with .Values.scaleOut.persistentVolumeClaimRetentionPolicy }}
+  persistentVolumeClaimRetentionPolicy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  template:
+    metadata:
+      labels:
+        {{- include "phase-server.selectorLabels" . | nindent 8 }}
+      {{- with (include "phase-server.podAnnotations" .) }}
+      annotations:
+        {{- . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- include "phase-server.podSpec" . | nindent 6 }}
+  volumeClaimTemplates:
+    {{- /* One claim per ordinal. This is the whole reason for a StatefulSet:
+         two processes sharing one games.db is destructive — the second restores
+         every live game at boot and its reaper later retires the rows the first
+         is still playing. */}}
+    - metadata:
+        name: data
+        labels:
+          {{- include "phase-server.labels" . | nindent 10 }}
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+{{- end }}

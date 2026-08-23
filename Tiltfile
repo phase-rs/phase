@@ -1,7 +1,7 @@
 # phase.rs — local development orchestration
 #
 # Usage:
-#   tilt up                              core dev loop (wasm + frontend)
+#   tilt up                              core dev loop (wasm + frontend + lobby worker)
 #   tilt up -- server                    also start the game server
 #   tilt up -- test lint                 also start test runners and linters
 #   tilt up -- server test lint          full stack
@@ -106,6 +106,27 @@ local_resource('frontend',
     auto_init = 'tauri' not in enabled,
     allow_parallel = True,
     links = ['http://localhost:5173'],
+    labels = ['serve'],
+)
+
+# Deck-import + lobby broker Worker. vite.config.ts proxies /import-deck to
+# :8787 unconditionally, so without this process the "Import from URL" deck
+# flow fails with a Vite-generated 500: a connection refusal wearing the
+# costume of a server bug, with nothing naming the missing service. It
+# therefore starts with the core loop rather than sitting behind an opt-in
+# group, because the feature it backs ships in the default frontend.
+#
+# No `deps`, for the same reason `frontend` above carries none: wrangler
+# watches lobby-worker/src/ and reloads itself, so listing deps here would
+# restart the process out from under its own hot reload. wrangler.toml's
+# [build] runs scripts/build-broker-wasm.sh, which compiles
+# lobby-worker/broker-wasm/ into that crate's own target dir, so it never takes
+# the workspace cargo lock.
+local_resource('lobby-worker',
+    serve_cmd = 'npm run dev',
+    serve_dir = 'lobby-worker',
+    allow_parallel = True,
+    links = ['http://localhost:8787'],
     labels = ['serve'],
 )
 

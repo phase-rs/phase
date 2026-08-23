@@ -49,6 +49,13 @@
     "collapse": "Auflösungsfortschritt einklappen",
     "expand": "Auflösungsfortschritt ausklappen"
   },
+  "resolveAllConsent": {
+    "eyebrow": "Alles auflösen",
+    "title": "Schnelles Auflösen genehmigen?",
+    "subtitle": "Alle Spieler müssen zustimmen, bevor die Engine einen sicheren Stapelpräfix auflöst.",
+    "grant": "Genehmigen",
+    "decline": "Priorität behalten"
+  },
   "debugCreate": {
     "copies": "Kopien",
     "tokenPower": "Power",
@@ -764,10 +771,14 @@
     "tapUntappedCreatures_one": "Tappe {{count}} ungetappte Kreatur",
     "tapUntappedCreatures_other": "Tappe {{count}} ungetappte Kreaturen",
     "chooseTargetOf": "Wähle Ziel {{current}} von {{total}}",
+    "slotProgress": "Ziel {{current}} von {{total}}",
+    "choosePlayerTarget": "Wähle: {{name}}",
+    "expandDescription": "Vollständige Beschreibung anzeigen",
+    "collapseDescription": "Weniger anzeigen",
+    "descriptionDisclosure": "{{action}}: {{description}}",
     "chooseTarget": "Wähle ein Ziel",
     "triggerDamageAmount": "This trigger: {{amount}} damage",
     "noLegalTargets": "Keine legalen Ziele verfügbar",
-    "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "bis zu eine {{target}}",
     "one": "eine {{target}}",
     "nounPlayer": "Spieler",
@@ -1460,7 +1471,12 @@
       "labelReturn": "Zurückgeben ({{selected}}/{{count}})",
       "labelExile": "Ins Exil ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
-      "orderTop": "Oben"
+      "orderTop": "Oben",
+      "orderSecond": "2.",
+      "orderThird": "3.",
+      "orderFourth": "4.",
+      "orderFifth": "5.",
+      "orderPosition": "Position {{position}}"
     },
     "drawnThisTurn": {
       "title": "Diesen Zug gezogen",
@@ -1626,7 +1642,11 @@
     "legend": {
       "title": "Legendenregel",
       "subtitle": "Wähle, welches „{{name}}“ du behältst",
-      "keepAria": "{{name}} behalten ({{status}})",
+      "keepAria": "{{name}} behalten ({{identity}}, {{status}})",
+      "keepAriaUnknown": "{{name}} behalten ({{status}})",
+      "identityOriginal": "Original",
+      "identityCopy": "Kopie",
+      "identityTokenCopy": "Spielsteinkopie",
       "statusJustEntered": "Gerade betreten",
       "statusAlready": "Bereits auf dem Schlachtfeld"
     },
@@ -1758,7 +1778,22 @@
     "emergeEyebrow": "Auftauchen",
     "emergeNormalLabel": "Normal wirken",
     "emergeAltLabel": "Mit Auftauchen wirken",
-    "emergeSubtitle": "Wirke {{name}} normal oder zahle seine Auftauchen-Kosten, indem du eine Kreatur opferst, was die Kosten um den Manawert dieser Kreatur reduziert.",
+    "emergeSubtitle": "Wirke {{name}} normal oder zahle seine Auftauchen-Kosten, indem du {{sacrifice}} opferst, was die Kosten um den Manawert dieser bleibenden Karte reduziert.",
+    "emergeFallbackSacrifice": "eine passende bleibende Karte",
+    "emergeSacrificeQuality": {
+      "artifact": "ein Artefakt",
+      "battle": "eine Schlacht",
+      "card": "eine Karte",
+      "creature": "eine Kreatur",
+      "enchantment": "eine Verzauberung",
+      "instant": "ein Spontanzauber",
+      "kindred": "ein Stammes-Permanent",
+      "land": "ein Land",
+      "permanent": "ein Permanent",
+      "planeswalker": "ein Planeswalker",
+      "sorcery": "eine Hexerei",
+      "subtype": "ein Permanent vom Typ {{subtype}}"
+    },
     "impendingEyebrow": "Drohend",
     "impendingNormalLabel": "Normal wirken",
     "impendingAltLabel": "Mit Drohend wirken",
@@ -1831,7 +1866,8 @@
         "card": "eine Karte",
         "treasure": "einen Schatz",
         "food": "eine Nahrung",
-        "tappedFish": "einen getappten Fisch"
+        "tappedFish": "einen getappten Fisch",
+        "extraTurn": "einen zusätzlichen Zug"
       }
     }
   },

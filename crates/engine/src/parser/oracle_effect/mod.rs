@@ -44,7 +44,7 @@ use lower::{
     extract_put_counter_multi_target, extract_remove_counter_multi_target,
     extract_switch_pt_multi_target, instruction_spine_is_continuation, is_token_creating_effect,
     parse_damage_player_scope, parse_for_each_opponent_target_fanout_clause,
-    rebind_clause_recipients_with, rebind_decline_body_recipient,
+    publishes_chain_created_referent, rebind_clause_recipients_with, rebind_decline_body_recipient,
     rebind_subject_only_body_recipient, scan_until_next_same_source_exile_invalidation,
     split_difference_repeat_suffix, strip_any_number_quantifier, strip_each_player_subject,
     strip_each_scope_who_cant_subject, strip_each_scope_who_didnt_verb_filter_this_way_subject,
@@ -110,15 +110,15 @@ use crate::types::ability::{
     EffectScope, FilterProp, GameRestriction, GuessSubject, IntensityScope, IterationKindBinding,
     KeeperConstraint, LibraryPosition, ManaProduction, ManaSpendPermission, ManaTargetRole,
     MultiTargetSpec, NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint,
-    PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter,
-    PlayerRelation, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PtValue,
-    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, RestrictionExpiry,
-    RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
-    SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
-    StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange,
-    TargetFilter, TargetSelectionMode, ThisWayCause, TrackedAnaphorSource, TriggerCondition,
-    TriggerDefinition, TurnGate, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
-    WheneverEventExpiry, ZoneOwner,
+    PerPlayerScope, PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness,
+    PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
+    ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition,
+    RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition, SkipScope,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
+    SubAbilityLink, TapStateChange, TargetFilter, TargetSelectionMode, ThisWayCause,
+    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate, TypeFilter, TypedFilter,
+    UnlessPayModifier, UntilCondition, WheneverEventExpiry, ZoneOwner,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -661,6 +661,7 @@ fn if_you_do_object_anchor(
     clauses
         .iter()
         .rev()
+        // allow-noncombinator: typed ClauseIr adjacency lookup, not Oracle-text dispatch.
         .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
         .and_then(|clause| match &clause.parsed.effect {
             Effect::GenericEffect {
@@ -722,7 +723,8 @@ fn rewrite_cant_rider_for_non_zone_change_parent(
             if matches!(
                 condition.as_ref(),
                 AbilityCondition::ZoneChangedThisWay {
-                    filter: TargetFilter::Any
+                    filter: TargetFilter::Any,
+                    destination: None,
                 }
             )
     );
@@ -791,9 +793,178 @@ fn rewrite_cost_paid_exiled_reflexive_for_effect_exile_parent(
     if prev_is_effect_exile {
         return Some(AbilityCondition::ZoneChangedThisWay {
             filter: filter.clone(),
+            destination: None,
         });
     }
     condition
+}
+
+/// True for exactly the filter shape the keyword anaphor's context-free lowering
+/// emits: a bare, controller-agnostic, type-agnostic typed filter carrying one
+/// kind-level keyword predicate. Both polarities are in scope on purpose —
+/// `conditions::keyword_presence_kind` lowers "it has <kw>" and "it doesn't have
+/// <kw>" to `HasKeywordKind` / `WithoutKeywordKind` respectively, and both need
+/// the same clause-context re-anchoring. Still narrow: it is the guard that
+/// keeps `rewrite_keyword_anaphor_for_cost_paid_parent` and
+/// `keyword_anaphor_referent_is_unpublished_resolution_pick` off every other
+/// `TargetMatchesFilter` (the "it's a [type]" arm, the anaphoric-status arm, and
+/// any object-level `WithKeyword` gate parsed elsewhere).
+fn filter_is_bare_keyword_kind_predicate(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller: None,
+            properties,
+        }) if type_filters.is_empty()
+            && matches!(
+                properties.as_slice(),
+                [FilterProp::HasKeywordKind { .. } | FilterProp::WithoutKeywordKind { .. }]
+            )
+    )
+}
+
+/// CR 608.2k + CR 608.2c + CR 702.62a: re-anchor a keyword-presence anaphor
+/// ("if it doesn't have suspend") to the COST-PAID object when the
+/// immediately-preceding non-continuation clause binds its own subject through
+/// the ability's cost (Jhoira of the Ghitu: "{2}, Exile a nonland card from your
+/// hand: Put four time counters on the exiled card. If it doesn't have suspend,
+/// it gains suspend.").
+///
+/// CR 608.2k names three sources for an untargeted back-reference — the effect's
+/// own earlier instruction, the ability's COST, and the trigger condition — and
+/// the engine reads each from a DIFFERENT runtime slot:
+///
+///   * effect instruction / declared target → `ResolvedAbility.targets`
+///     (`AbilityCondition::TargetMatchesFilter`)
+///   * ability cost                         → `ResolvedAbility.cost_paid_object`
+///     (`AbilityCondition::CostPaidObjectMatchesFilter`)
+///   * trigger condition                    → `GameState.current_trigger_event`
+///     (`TargetMatchesFilter`'s `TriggeringSource` fallback)
+///
+/// `TargetFilter::CostPaidObject` is resolved at effect-apply time out of the
+/// documented `cost_paid_object → effect_context_object` ladder
+/// (`game::targeting`, CR 608.2k) and is NEVER written into `targets`, so a
+/// cost-paid parent leaves `targets` EMPTY. For an ACTIVATED ability there is
+/// also no `current_trigger_event` (the stack lifts one only for a triggered
+/// ability), so the context-free `TargetMatchesFilter` reading would fail closed
+/// and the grant would never fire.
+///
+/// Only the clause context can disambiguate, exactly as
+/// `rewrite_cost_paid_exiled_reflexive_for_effect_exile_parent` above states for
+/// its own pair. Fire ONLY when the previous non-continuation clause's effect
+/// filter references the cost-paid object. Three of the four other parent shapes
+/// keep the context-free target-scoped reading, which binds correctly for each:
+/// injected target (Kang Prime), declared stack target (Suspend, Delay), and
+/// trigger source (Momentum Rumbler). The fourth — the resolution-time pick
+/// (The Eleventh Doctor, Amy's Home) — binds to NOTHING, and is strict-failed by
+/// `keyword_anaphor_referent_is_unpublished_resolution_pick` below rather than
+/// left to the misleading `TriggeringSource` fallback.
+///
+/// Both readings are LIVE for the keyword-kind props, and deliberately so.
+/// CR 608.2k keeps a cost-introduced reference pointing at its object "even if
+/// the object has changed characteristics" — it does NOT freeze the object's
+/// characteristics at payment time. CR 608.2h then supplies the timing: a
+/// reference to an object still in the public zone it was expected to be in
+/// reads that object's CURRENT information. `CostPaidObjectMatchesFilter` is
+/// evaluated through `filter::matches_target_filter_on_cost_paid_reference`,
+/// which preserves the payment snapshot's look-back facts while reading the
+/// keyword set off the live object, so an off-zone Layer-6 grant applied after
+/// payment (CR 613.1f) is visible to the gate.
+fn rewrite_keyword_anaphor_for_cost_paid_parent(
+    condition: Option<AbilityCondition>,
+    clauses: &[ClauseIr],
+) -> Option<AbilityCondition> {
+    let Some(AbilityCondition::TargetMatchesFilter {
+        filter,
+        use_lki: false,
+        subject_slot: None,
+    }) = &condition
+    else {
+        return condition;
+    };
+    if !filter_is_bare_keyword_kind_predicate(filter) {
+        return condition;
+    }
+    let prev_binds_cost_paid_object = clauses
+        .iter()
+        .rev()
+        .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
+        .and_then(|clause| clause.parsed.effect.target_filter())
+        .is_some_and(TargetFilter::references_cost_paid_object);
+    if prev_binds_cost_paid_object {
+        return Some(AbilityCondition::CostPaidObjectMatchesFilter {
+            filter: filter.clone(),
+        });
+    }
+    condition
+}
+
+/// CR 608.2k + CR 608.2d + CR 115.10a: True when the keyword-presence anaphor
+/// ("if it doesn't have suspend") has NO runtime slot to bind to, because the
+/// preceding clause introduces its subject through a RESOLUTION-TIME PICK
+/// (The Eleventh Doctor: "you may exile a card from your hand …"; Amy's Home).
+///
+/// CR 608.2d makes that pick an untargeted choice made while the ability
+/// resolves, so — unlike a declared target (CR 115.10a) — it is never written
+/// into `ResolvedAbility.targets`, which is what
+/// `AbilityCondition::TargetMatchesFilter` reads. The condition therefore finds
+/// no object target and silently falls through to its `TriggeringSource`
+/// fallback: for a combat-damage trigger that is the ability's own source, i.e.
+/// exactly the always-wrong-guard reading the kind-level lowering exists to
+/// remove. The grant's RECIPIENT still binds (`TargetFilter::ParentTarget` is
+/// resolved at effect-apply time), so the misread is invisible at runtime — a
+/// card that already has the keyword is re-granted and its printed parameters
+/// are clobbered, while coverage reports the card fully supported.
+///
+/// Rather than ship a knowingly-misbinding gate, strict-fail the clause to
+/// `Effect::Unimplemented` so `cargo coverage` reports the gap (the same
+/// discipline `try_parse_exiled_this_way_keyword_grant` applies to the plural
+/// "cards exiled this way that don't have <kw>" form). Repairing it means
+/// publishing the resolution-time pick into the sub-chain's `targets`; this
+/// predicate is where that fix removes the strict failure.
+///
+/// Deliberately narrow, in three independent ways:
+///   * the condition must be the bare keyword-kind anaphor shape
+///     (`filter_is_bare_keyword_kind_predicate`);
+///   * the parent must actually be resolution-timed
+///     (`lower::target_choice_timing_for_clause`);
+///   * the parent's own target filter must be a real player pick, not a
+///     context reference. Delay's "exile it with three time counters" is
+///     `TargetChoiceTiming::Resolution` too (off-battlefield origin, no printed
+///     "target"), but its filter is `TargetFilter::ParentTarget`, which the
+///     resolver binds deterministically from the countered spell — nothing is
+///     picked, and the anaphor binds through the propagated target. `Suspend`
+///     (declared stack target) and Kang Prime / Jhoira of the Ghitu (context
+///     refs) are excluded by the same test.
+fn keyword_anaphor_referent_is_unpublished_resolution_pick(
+    condition: Option<&AbilityCondition>,
+    clauses: &[ClauseIr],
+) -> bool {
+    let Some(AbilityCondition::TargetMatchesFilter {
+        filter,
+        use_lki: false,
+        subject_slot: None,
+    }) = condition
+    else {
+        return false;
+    };
+    if !filter_is_bare_keyword_kind_predicate(filter) {
+        return false;
+    }
+    clauses
+        .iter()
+        .rev()
+        .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
+        .is_some_and(|clause| {
+            lower::target_choice_timing_for_clause(clause)
+                == crate::types::ability::TargetChoiceTiming::Resolution
+                && clause
+                    .parsed
+                    .effect
+                    .target_filter()
+                    .is_some_and(|target| !target.is_context_ref())
+        })
 }
 
 fn merge_clause_conditions(
@@ -1350,6 +1521,56 @@ fn parse_dealt_damage_this_way_dies_trigger(
 /// Delegates to the shared word-boundary scanning primitive in `oracle_nom::primitives`.
 fn scan_contains_phrase(text: &str, phrase: &str) -> bool {
     nom_primitives::scan_contains(text, phrase)
+}
+
+/// CR 115.7 + CR 113.3b / CR 113.3c: locate the stack-object target grammar
+/// anywhere in a retarget phrase.
+///
+/// Delegates WHOLESALE to `oracle_nom::target::parse_stack_object_target` — the
+/// same grammar the counter path uses — via the shared word-boundary scanning
+/// primitive, because the retarget clause puts the phrase after "target " and
+/// possibly after other words, so it is not anchored at position 0.
+///
+/// Delegating the WHOLE grammar (not just the ability-kind axis) is deliberate:
+/// the grammar already composes ability legs with type-restricted spell legs in
+/// any order. Rebuilding a bare `StackAbility` from a kind probe — which is what
+/// this branch used to do — cannot represent a phrase that mixes a spell leg
+/// with an ability-kind leg ("target spell or triggered ability"), and would
+/// silently drop the spell leg.
+///
+/// Returns `None` when the phrase contains no ability leg at all — that is
+/// `parse_stack_object_target`'s documented contract — so a purely-spell phrase
+/// still falls through to the "spell" branch in `try_parse_change_targets`.
+///
+/// NOTE (blast radius — read before adding the next retarget pattern): this is
+/// materially WIDER than the two `scan_contains_phrase` probes it replaced.
+/// Those tested exactly two fixed spellings ("activated or triggered ability",
+/// "activated ability"). This applies the ENTIRE stack-object grammar at every
+/// word boundary: both single-kind spellings, all five combined spellings,
+/// "spell or ability" / "spell and/or ability" / "ability or spell", and the
+/// order-free comma/"or" disjunction of type-restricted spell legs with ability
+/// legs. Any phrase that grammar recognizes ANYWHERE in the retarget clause now
+/// wins this branch ahead of the `"spell"` + `parse_target` fallback below it in
+/// `try_parse_change_targets`. In particular the "ability or spell" spelling,
+/// which the preceding `"spell or ability"` branch does not cover, now lands
+/// here. What still falls through is exactly what the grammar declines: a
+/// purely-spell phrase with no ability leg (its documented contract, above).
+///
+/// NOTE (precision residual): `scan_at_word_boundaries` applies the combinator
+/// at word STARTS only and performs no trailing-boundary check, so the grammar
+/// may match a strict prefix of the remaining text and the remainder is silently
+/// discarded — e.g. "activated ability's controller" matches the bare
+/// "activated ability" leg. That discard is deliberate (it is what lets the
+/// clause carry trailing qualifiers such as "with a single target"), and it is
+/// the same shape of imprecision the replaced `scan_contains_phrase` probes had.
+/// A PLURAL is NOT affected and needs no guard: `tag("triggered ability")`
+/// diverges from "triggered abilities" at the final letter ('y' vs 'i') and
+/// simply fails, as does `tag("activated ability")`.
+fn scan_stack_object_target(text: &str) -> Option<TargetFilter> {
+    nom_primitives::scan_at_word_boundaries(
+        text,
+        super::oracle_nom::target::parse_stack_object_target,
+    )
 }
 
 fn has_unless_clause(text: &str) -> bool {
@@ -9515,7 +9736,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     }
 
     // "it's still a/an [type]" / "that's still a/an [type]" — type-retention clause
-    // CR 205.1a: Retains the original type in addition to new types from animation effects
+    // CR 205.1b: Retains the original type in addition to new types from animation effects
     if let Some(clause) = try_parse_still_a_type(tp) {
         return clause;
     }
@@ -11223,8 +11444,9 @@ fn rebind_controller_to_triggering_source(mut clause: ParsedEffectClause) -> Par
 /// Parse "it's still a/an [type]" and "that's still a/an [type]" type-retention clauses.
 ///
 /// These appear as separate sentences after animation effects (e.g., "This land becomes
-/// a 3/3 creature with vigilance. It's still a land."). The clause ensures the original
-/// type is retained as a permanent continuous effect.
+/// a 3/3 creature with vigilance. It's still a land."). The retained type shares the
+/// governing animation's stated duration; a standalone clause has no governing duration
+/// and therefore lasts indefinitely (CR 611.2a).
 ///
 /// CR 205.1a: An object retains types explicitly stated by the effect.
 /// CR 509.1c: "All creatures able to block [target/~] [this turn] do so."
@@ -11305,28 +11527,36 @@ fn try_parse_mass_forced_block(tp: TextPair, ctx: &mut ParseContext) -> Option<P
     })
 }
 
-fn try_parse_still_a_type(tp: TextPair) -> Option<ParsedEffectClause> {
+fn parse_retained_type_clause(tp: TextPair) -> Option<ParsedRetainedTypeClause> {
     // Match singular "it's still a/an [type]" / "that's still a/an [type]"
-    // or plural "they're still [type]s" — CR 205.1a type retention after
+    // or plural "they're still [type]s" — CR 205.1b type retention after
     // animation. The descriptor is purely additive: a permanent animated into
     // a creature retains its prior types/subtypes (CR 613.1d ordering), so the
     // "still a …" clause is confirmatory and emits the same `AddType`/
     // `AddSubtype` Layer-4 modifications the animation already implies.
-    let (is_plural, descriptor_orig) = nom_on_lower(tp.original, tp.lower, |input| {
-        alt((
-            value(false, tag("it's still ")),
-            value(false, tag("that's still ")),
-            value(true, tag("they're still ")),
-        ))
-        .parse(input)
-    })?;
+    let (is_plural, descriptor_owned) = if let Some((article, descriptor)) =
+        nom_on_lower(tp.original, tp.lower, |input| {
+            let (input, _) = alt((tag("it"), tag("he"), tag("she"), tag("that"))).parse(input)?;
+            let (input, _) = alt((tag("'"), tag("’"))).parse(input)?;
+            let (input, _) = tag("s still ").parse(input)?;
+            let (input, article) =
+                alt((value("an ", tag("an ")), value("a ", tag("a ")))).parse(input)?;
+            Ok((input, article))
+        }) {
+        (false, format!("{article}{descriptor}"))
+    } else {
+        let ((), descriptor) = nom_on_lower(tp.original, tp.lower, |input| {
+            value((), alt((tag("they're still "), tag("they’re still ")))).parse(input)
+        })?;
+        (true, descriptor.to_string())
+    };
 
-    // CR 205.1b + CR 305.7: parse the type descriptor ("a Cave land", "lands",
+    // CR 205.1b: parse the type descriptor ("a Cave land", "lands",
     // "a planeswalker") through the shared animation building block so a subtype
     // *and* core type are both retained ("It's still a Cave land" → AddType{Land}
     // + AddSubtype{Cave}, Cavernous Maw), not just a bare core type. Strip a
     // trailing period so the descriptor parses cleanly.
-    let descriptor = descriptor_orig.trim().trim_end_matches('.');
+    let descriptor = descriptor_owned.trim().trim_end_matches('.');
     let descriptor = if is_plural {
         // allow-noncombinator: structural singularization after nom parsed the plural prefix.
         descriptor.strip_suffix('s').unwrap_or(descriptor)
@@ -11339,24 +11569,104 @@ fn try_parse_still_a_type(tp: TextPair) -> Option<ParsedEffectClause> {
         return None;
     }
 
-    Some(ParsedEffectClause {
-        effect: Effect::GenericEffect {
-            static_abilities: vec![StaticDefinition::continuous()
-                .affected(TargetFilter::SelfRef)
-                .modifications(modifications)
-                .description(tp.original.to_string())],
-            duration: Some(Duration::Permanent),
-            target: None,
-            end_cost: None,
-        },
-        duration: Some(Duration::Permanent),
-        sub_ability: None,
-        distribute: None,
-        multi_target: None,
-        condition: None,
-        optional: false,
-        unless_pay: None,
+    Some(ParsedRetainedTypeClause {
+        modifications,
+        description: tp.original.to_string(),
     })
+}
+
+fn try_parse_still_a_type(tp: TextPair) -> Option<ParsedEffectClause> {
+    parse_retained_type_clause(tp)
+        .map(|clause| clause.lower(RetainedTypeDurationBinding::Standalone))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RetainedTypeDurationBinding {
+    Standalone,
+    GoverningAnimation(Duration),
+}
+
+impl RetainedTypeDurationBinding {
+    fn duration(self) -> Duration {
+        match self {
+            Self::Standalone => Duration::Permanent,
+            Self::GoverningAnimation(duration) => duration,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ParsedRetainedTypeClause {
+    modifications: Vec<ContinuousModification>,
+    description: String,
+}
+
+impl ParsedRetainedTypeClause {
+    fn lower(self, duration_binding: RetainedTypeDurationBinding) -> ParsedEffectClause {
+        let duration = duration_binding.duration();
+        ParsedEffectClause {
+            effect: Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(self.modifications)
+                    .description(self.description)],
+                duration: Some(duration.clone()),
+                target: None,
+                end_cost: None,
+            },
+            duration: Some(duration),
+            sub_ability: None,
+            distribute: None,
+            multi_target: None,
+            condition: None,
+            optional: false,
+            unless_pay: None,
+        }
+    }
+}
+
+/// CR 205.1b + CR 608.2c + CR 611.2a: a separate retained-type sentence
+/// modifies the immediately preceding animation. Bind it to that animation's
+/// duration in the typed clause stream, before lowering constructs sibling
+/// continuous effects. If there is no adjacent type-changing animation, the
+/// retained-type clause is standalone and keeps its indefinite duration.
+fn retained_type_duration_binding(clauses: &[ClauseIr]) -> RetainedTypeDurationBinding {
+    clauses
+        .iter()
+        .rev()
+        .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
+        .and_then(type_changing_clause_duration)
+        .map_or(
+            RetainedTypeDurationBinding::Standalone,
+            RetainedTypeDurationBinding::GoverningAnimation,
+        )
+}
+
+fn type_changing_clause_duration(clause: &ClauseIr) -> Option<Duration> {
+    match &clause.parsed.effect {
+        Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } if static_abilities.iter().any(|definition| {
+            definition.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::SetCardTypes { .. }
+                        | ContinuousModification::AddType { .. }
+                        | ContinuousModification::AddSubtype { .. }
+                )
+            })
+        }) =>
+        {
+            duration
+                .clone()
+                .or_else(|| clause.parsed.duration.clone())
+                .or(Some(Duration::Permanent))
+        }
+        Effect::Animate { .. } => clause.parsed.duration.clone().or(Some(Duration::Permanent)),
+        _ => None,
+    }
 }
 
 /// CR 614.10a: Parse "[subject] skip[s] [their|your] next [step] step[s]" —
@@ -20241,13 +20551,16 @@ fn rebind_source_ref(qty: &mut QuantityRef, target: ObjectScope, rebind: SourceR
     if matches!(rebind, SourceRefRebind::PowerOrToughness)
         && !matches!(
             qty,
-            QuantityRef::Power { .. } | QuantityRef::Toughness { .. }
+            QuantityRef::Power { .. }
+                | QuantityRef::BasePower { .. }
+                | QuantityRef::Toughness { .. }
         )
     {
         return;
     }
     let scope = match qty {
         QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
         | QuantityRef::Toughness { scope }
         | QuantityRef::ObjectManaValue { scope }
         | QuantityRef::ObjectColorCount { scope }
@@ -20749,7 +21062,7 @@ fn chain_prior_referent_is_created_token(clauses: &[ClauseIr]) -> bool {
             .sub_ability
             .as_deref()
             .is_none_or(instruction_spine_is_continuation);
-        if is_token_creating_effect(&prev.parsed.effect) {
+        if publishes_chain_created_referent(&prev.parsed.effect) {
             // CR 603.12: a GATED publisher may create no token, so seeding
             // `LastCreated` from it is safe only when
             // `relink_gated_token_referent_consumers` (lower.rs) will move the
@@ -21041,9 +21354,85 @@ fn lower_subject_predicate_ast(
                 return parsed_clause(Effect::Manifest {
                     target: affected,
                     count,
+                    object_source: None,
                     profile: None,
                     enters_under: None,
                 });
+            }
+            // CR 701.40a + CR 101.4 + CR 608.2c: "<target players> [each]
+            // manifest[s] <N> card[s] from their hand[s]" (Kozilek, the Broken
+            // Reality). Each targeted player picks the cards from their OWN
+            // hidden hand during resolution: a `ChooseFromZone` iterated over
+            // the chosen player targets (`ZoneOwner::Each(PerPlayerScope::TargetedPlayers)`),
+            // each iteration's choice made by that owner
+            // (`Chooser::OwningPlayer`), accumulating the picks into the
+            // chain's tracked set. The `Manifest` sub-ability then manifests
+            // the accumulated set — each card under its chooser's control
+            // (CR 701.40a owner default) — and a trailing "for each card
+            // manifested this way" rider reads `TrackedSetSize`. Gated to the
+            // targeted-player subject; other from-hand subjects stay honest
+            // gaps.
+            if matches!(affected, TargetFilter::Player) {
+                if let Ok((after_verb, _)) =
+                    alt((tag::<_, _, OracleError<'_>>("manifest "), tag("manifests ")))
+                        .parse(pred_lower.as_str())
+                {
+                    if let Ok((after_count, n)) = nom_primitives::parse_number.parse(after_verb) {
+                        let from_their_hand = all_consuming((
+                            alt((tag::<_, _, OracleError<'_>>(" cards"), tag(" card"))),
+                            tag(" from their hand"),
+                            opt(tag("s")),
+                            opt(tag(".")),
+                        ))
+                        .parse(after_count)
+                        .is_ok();
+                        if from_their_hand {
+                            // CR 115.1 + CR 601.2c: the
+                            // `EachTargetedPlayer` choose declares the player
+                            // slots itself (see `Effect::target_filter`) and
+                            // iterates them in APNAP order, accumulating every
+                            // player's picks into ONE chain tracked set that
+                            // the manifest sub-chain then consumes.
+                            let mut clause = parsed_clause(Effect::ChooseFromZone {
+                                count: n,
+                                zone: Zone::Hand,
+                                additional_zones: Vec::new(),
+                                // CR 115.1 + CR 101.4: the shared
+                                // multi-target PLAYER fan-out already
+                                // resolves this chain once per chosen
+                                // player in APNAP order, narrowing
+                                // `targets` to that one player — so the
+                                // per-iteration zone is simply "the
+                                // targeted player's".
+                                zone_owner: crate::types::ability::ZoneOwner::Each(
+                                    PerPlayerScope::TargetedPlayers,
+                                ),
+                                filter: None,
+                                chooser: crate::types::ability::Chooser::OwningPlayer,
+                                up_to: false,
+                                selection: crate::types::ability::CardSelectionMode::Chosen,
+                                constraint: None,
+                            });
+                            clause.sub_ability = Some(Box::new(AbilityDefinition::new(
+                                AbilityKind::Spell,
+                                Effect::Manifest {
+                                    target: affected.clone(),
+                                    count: QuantityExpr::Fixed { value: n as i32 },
+                                    object_source: Some(TargetFilter::TrackedSet {
+                                        id: crate::types::identifiers::TrackedSetId(0),
+                                    }),
+                                    profile: None,
+                                    enters_under: None,
+                                },
+                            )));
+                            // CR 115.1d: the subject phrase's target count
+                            // ("up to two target players") opens both slots.
+                            clause.multi_target = multi_target.clone();
+                            clause.optional = subject.is_optional;
+                            return clause;
+                        }
+                    }
+                }
             }
             // NOTE (issue #6505, review follow-up): the predicate is lowered with
             // NO parse-time relative-scope pin. An earlier revision pinned
@@ -21940,6 +22329,7 @@ pub(super) fn rebind_target_subject_object_scope(expr: &mut QuantityExpr) {
         QuantityExpr::Ref { qty } => {
             let scope = match qty {
                 QuantityRef::Power { scope }
+                | QuantityRef::BasePower { scope }
                 | QuantityRef::Toughness { scope }
                 | QuantityRef::ObjectManaValue { scope }
                 | QuantityRef::ObjectColorCount { scope }
@@ -21981,6 +22371,7 @@ pub(super) fn rebind_target_subject_object_scope(expr: &mut QuantityExpr) {
 fn rebind_anaphoric_ref(qty: &mut QuantityRef, target: ObjectScope) {
     let scope = match qty {
         QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
         | QuantityRef::Toughness { scope }
         | QuantityRef::ObjectManaValue { scope }
         | QuantityRef::ObjectColorCount { scope }
@@ -24724,15 +25115,35 @@ fn attach_mana_retention_to_prior_mana(defs: &mut [AbilityDefinition], expiry: M
     false
 }
 
-/// Swap every `Keyword` inside a `TargetFilter`'s `WithKeyword` properties to
+/// Swap every `Keyword` inside a `TargetFilter`'s keyword-presence properties to
 /// `new_keyword`. Recurses through `Or`/`And` filter trees so a compound
 /// affected filter is handled uniformly.
 fn rewrite_filter_keyword(filter: &mut TargetFilter, new_keyword: &Keyword) {
     match filter {
         TargetFilter::Typed(typed) => {
             for prop in &mut typed.properties {
-                if let FilterProp::WithKeyword { value } = prop {
-                    *value = new_keyword.clone();
+                match prop {
+                    FilterProp::WithKeyword { value } => {
+                        *value = new_keyword.clone();
+                    }
+                    // CR 702.1c: the kind-level siblings carry a `KeywordKind`, so
+                    // a replicated "the same is true for <kw list>" gate swaps to
+                    // the new keyword's kind. Added for the subject-scoped keyword
+                    // anaphor, whose two polarities lower to `WithoutKeywordKind`
+                    // and `HasKeywordKind` (`conditions::keyword_presence_kind`).
+                    //
+                    // `FilterProp::WithoutKeyword` is deliberately NOT handled
+                    // here: no card routes it through this walker today, and
+                    // adding it would change behavior for pre-existing conditions
+                    // reachable via the `ZoneChangeObjectMatchesFilter` arm in
+                    // `rewrite_ability_condition_keyword` — outside this change's
+                    // scope. `rewrite_filter_keyword_leaves_object_level_without_keyword_alone`
+                    // pins the omission so a future widening is a conscious act.
+                    FilterProp::HasKeywordKind { value }
+                    | FilterProp::WithoutKeywordKind { value } => {
+                        *value = new_keyword.kind();
+                    }
+                    _ => {}
                 }
             }
         }
@@ -25030,6 +25441,9 @@ fn attach_perpetual_keyword_grants(
 ///     your graveyard has <keyword>" (Kathril, Aspect Warper).
 ///   - `TargetHasKeywordInstead` / `SourceLacksKeyword` — "if that creature has
 ///     <keyword> and ~ doesn't" (Super-Adaptoid).
+///   - `TargetMatchesFilter` / `CostPaidObjectMatchesFilter` — the subject-scoped
+///     keyword anaphor, "if it doesn't have <keyword>" (Kang Prime, Jhoira of the
+///     Ghitu), whose keyword lives in a typed filter prop.
 ///   - `And`/`Or`/`Not` — recurse into each compound conjunct so the
 ///     Super-Adaptoid conjunction has BOTH the target-has and the source-lacks
 ///     keyword swapped together.
@@ -25048,6 +25462,18 @@ fn rewrite_ability_condition_keyword(condition: &mut AbilityCondition, new_keywo
         // typed filter (`FilterProp::WithKeyword`), swapped via the shared
         // `rewrite_filter_keyword` walker.
         AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. } => {
+            rewrite_filter_keyword(filter, new_keyword);
+        }
+        // CR 702.1c + CR 608.2c: the subject-scoped keyword anaphor gates ("if it
+        // doesn't have <kw>") carry their keyword inside a typed filter — the same
+        // shape the Mutable Pupa `ZoneChangeObjectMatchesFilter` arm above handles.
+        // Both subject seams the anaphor can lower to are covered, so a replicated
+        // "the same is true for <kw list>" continuation swaps the gate regardless
+        // of which seam clause context selected. Without these arms the class would
+        // fall into `_ => {}` — a silent regression from the `SourceLacksKeyword`
+        // handling above, which this change moves the class out of.
+        AbilityCondition::TargetMatchesFilter { filter, .. }
+        | AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
             rewrite_filter_keyword(filter, new_keyword);
         }
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
@@ -25080,7 +25506,63 @@ fn parse_imperative_effect(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     parse_imperative_effect_inner(tp, ctx)
 }
 
+/// CR 610.3 + CR 610.3b: This duration marks a zone-change effect that returns
+/// its object immediately after an opponent becomes the monarch. The
+/// `Duration::UntilOpponentBecomesMonarch` link also prevents the initial move
+/// when that event occurred after the ability triggered but before it resolves.
+fn try_parse_exile_until_opponent_becomes_monarch_clause(
+    tp: TextPair<'_>,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let (_, (body_lower, suffix)) = (
+        take_until::<_, _, OracleError<'_>>(" until "),
+        preceded(tag(" until "), rest),
+    )
+        .parse(tp.lower)
+        .ok()?;
+    let body = tp.slice(0, body_lower.len()).trim_end();
+    let ast = parse_imperative_family_ast(body.original, body.lower, ctx)?;
+    let mut clause = lower_imperative_family_ast(ast);
+    if !matches!(
+        clause.effect,
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            ..
+        }
+    ) {
+        return None;
+    }
+
+    let supported_suffix = all_consuming(tag::<_, _, OracleError<'_>>(
+        "an opponent becomes the monarch",
+    ))
+    .parse(suffix)
+    .is_ok();
+    let monarch_suffix = all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(" becomes the monarch"),
+        tag(" becomes the monarch"),
+    ))
+    .parse(suffix)
+    .is_ok();
+    if !supported_suffix {
+        if monarch_suffix {
+            return Some(parsed_clause(Effect::unimplemented(
+                "unsupported_monarch_bounded_exile",
+                tp.original,
+            )));
+        }
+        return None;
+    }
+
+    clause.duration = Some(Duration::UntilOpponentBecomesMonarch);
+    Some(clause)
+}
+
 fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> ParsedEffectClause {
+    if let Some(clause) = try_parse_exile_until_opponent_becomes_monarch_clause(tp, ctx) {
+        return clause;
+    }
+
     if let Some(ast) = parse_imperative_family_ast(tp.original, tp.lower, ctx) {
         return lower_imperative_family_ast(ast);
     }
@@ -27795,7 +28277,10 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
             | AbilityCondition::SourceMatchesFilter { filter }
             | AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. }
             | AbilityCondition::ControllerControlsMatching { filter }
-            | AbilityCondition::ZoneChangedThisWay { filter }
+            | AbilityCondition::ZoneChangedThisWay {
+                filter,
+                destination: _,
+            }
             | AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
                 rewrite_filter_controller_to_scoped(filter);
             }
@@ -28190,16 +28675,20 @@ pub(crate) fn resolve_difference_anaphor_in_ability(
 }
 
 fn resolve_difference_anaphor_in_effect(effect: &mut Effect, bound: Option<&QuantityExpr>) {
-    // Recurse into the single-`Box<Effect>` wrapper (the draw-replacement
-    // substitute) so a placeholder nested inside it is reached. This is the only
-    // `Effect` variant that wraps a heterogeneous sub-`Effect`; every other
-    // nesting is via `AbilityDefinition` (`sub_ability`/`else_ability`), walked
-    // by the caller.
-    if let Effect::CreateDrawReplacement {
-        replacement_effect: inner,
-    } = effect
-    {
-        resolve_difference_anaphor_in_effect(inner, bound);
+    // Recurse into effect variants that carry a nested ability/effect so a
+    // placeholder inside the deferred body is reached. Ordinary ability-chain
+    // nesting (`sub_ability`/`else_ability`) is walked by the caller.
+    match effect {
+        Effect::CreateDrawReplacement {
+            replacement_effect: inner,
+        } => resolve_difference_anaphor_in_effect(inner, bound),
+        // CR 603.7a: a delayed trigger carries a complete ability definition;
+        // walk that definition so a comparison-derived binding reaches a
+        // deferred "the difference" in its eventual effect body.
+        Effect::CreateDelayedTrigger { effect: inner, .. } => {
+            resolve_difference_anaphor_in_ability(inner, bound)
+        }
+        _ => {}
     }
 
     // Only effects a count parser can emit the deferred placeholder onto ever
@@ -31805,6 +32294,31 @@ pub(crate) fn parse_effect_chain_ir(
             condition,
             builder.clauses(),
         );
+        // CR 608.2k: "if it doesn't have <kw>" after a cost-paid parent reads the
+        // cost-paid object, not the (empty) target slot — see the helper for the
+        // three-slot rationale (Jhoira of the Ghitu). Input shapes are disjoint
+        // from the two rewrites above, so the order within this family is only a
+        // reading convention.
+        let condition = rewrite_keyword_anaphor_for_cost_paid_parent(condition, builder.clauses());
+        // CR 608.2k + CR 608.2d: the same anaphor after a RESOLUTION-TIME PICK
+        // parent has no slot to bind to at all — the pick never reaches
+        // `targets`, so the gate would silently read the trigger source. Runs
+        // after the cost-paid rewrite so a re-anchored (cost-paid) condition is
+        // already out of this shape. Strict-fail to `Unimplemented` instead of
+        // shipping a misbinding gate, so coverage reports the gap (The Eleventh
+        // Doctor, Amy's Home) — see the predicate for the full rationale.
+        if keyword_anaphor_referent_is_unpublished_resolution_pick(
+            condition.as_ref(),
+            builder.clauses(),
+        ) {
+            unimplemented_clause(
+                &mut builder,
+                "keyword_anaphor_resolution_time_pick",
+                normalized_text,
+                chunk.boundary_after,
+            );
+            continue;
+        }
         // CR 608.2c: "[effect] a number of times equal to the difference" — when
         // a leading comparison condition was just stripped, a trailing
         // difference-repeat suffix repeats the effect by the unsigned magnitude
@@ -32081,24 +32595,25 @@ pub(crate) fn parse_effect_chain_ir(
         // target permanent, put another counter of that kind on it or remove one
         // from it" — Dramatist's Puppet, Quarry Hauler), whose target and choice
         // would likewise be dropped by the generic strip.
-        let (repeat_for, text, for_each_reference_target) = if try_parse_proliferate_target(&text)
-            .is_some()
-            || try_parse_for_each_counter_kind_adjust_target(&text).is_some()
-        {
-            (None, text, None)
-        } else if let Some(stripped) = strip_redundant_flip_win_quantifier(&text) {
-            // CR 705.2: "for each flip you won, <effect>" (Mirror March) — the flip
-            // loop (`finish_until_lose`) already runs the win effect once per win,
-            // so the quantifier is redundant. Drop it (no `repeat_for`) so the bare
-            // copy clause reaches `CopyTokenOf` instead of an `Unimplemented` "for"
-            // fallback (#5966).
-            (None, stripped, None)
-        } else {
-            let reference_target = for_each_clause_target_controller_filter(&text);
-            let (repeat_for, text) = super::clause_shell::peel_for_each_prefix(&text);
-            let reference_target = repeat_for.as_ref().and(reference_target);
-            (repeat_for, text, reference_target)
-        };
+        let (repeat_for, text, for_each_reference_target, repeat_for_difference) =
+            if try_parse_proliferate_target(&text).is_some()
+                || try_parse_for_each_counter_kind_adjust_target(&text).is_some()
+            {
+                (None, text, None, None)
+            } else if let Some(stripped) = strip_redundant_flip_win_quantifier(&text) {
+                // CR 705.2: "for each flip you won, <effect>" (Mirror March) — the flip
+                // loop (`finish_until_lose`) already runs the win effect once per win,
+                // so the quantifier is redundant. Drop it (no `repeat_for`) so the bare
+                // copy clause reaches `CopyTokenOf` instead of an `Unimplemented` "for"
+                // fallback (#5966).
+                (None, stripped, None, None)
+            } else {
+                let reference_target = for_each_clause_target_controller_filter(&text);
+                let (repeat_for, difference, text) =
+                    lower::strip_for_each_prefix_with_difference(&text);
+                let reference_target = repeat_for.as_ref().and(reference_target);
+                (repeat_for, text, reference_target, difference)
+            };
         let (text_without_where_x, local_where_x_expression) = {
             let text_where_x_lower = text.to_lowercase();
             let (without_where_x, where_x_expression) =
@@ -32350,7 +32865,10 @@ pub(crate) fn parse_effect_chain_ir(
                 let condition = AbilityCondition::And {
                     conditions: vec![
                         AbilityCondition::Not {
-                            condition: Box::new(AbilityCondition::ZoneChangedThisWay { filter }),
+                            condition: Box::new(AbilityCondition::ZoneChangedThisWay {
+                                filter,
+                                destination: None,
+                            }),
                         },
                         AbilityCondition::ScopedPlayerMatches { filter: scope },
                     ],
@@ -32822,6 +33340,10 @@ pub(crate) fn parse_effect_chain_ir(
 
         let (text_no_temporal, delayed_condition) = strip_temporal_suffix(&text);
         let (text_no_qty, mut multi_target) = strip_any_number_quantifier(text_no_temporal);
+        let retained_type_clause = {
+            let lower = text_no_qty.to_lowercase();
+            parse_retained_type_clause(TextPair::new(&text_no_qty, &lower))
+        };
         // CR 121.1 + CR 608.2c: "draw cards equal to the difference" — anaphoric draw
         // count. When a leading QuantityCheck condition establishes two operands (e.g.
         // "if you have fewer than seven cards in hand"), "the difference" draws the
@@ -32866,7 +33388,10 @@ pub(crate) fn parse_effect_chain_ir(
                 None
             }
         });
-        let (clause, repeat_for) = if let Some(draw) = difference_draw {
+        let (clause, repeat_for) = if let Some(retained_type_clause) = retained_type_clause {
+            let duration_binding = retained_type_duration_binding(builder.clauses());
+            (retained_type_clause.lower(duration_binding), repeat_for)
+        } else if let Some(draw) = difference_draw {
             (draw, repeat_for)
         } else if let Some(lose) = difference_lose {
             (lose, repeat_for)
@@ -33016,7 +33541,10 @@ pub(crate) fn parse_effect_chain_ir(
             // before the trigger seam runs, breaking every difference-counter
             // trigger. A spell's difference operands always ride the same clause
             // (Hit the Mother Lode), so `Some(bound)` is the only case to handle.
-            if let Some(bound) = effective_condition.and_then(conditions::difference_expr) {
+            if let Some(bound) = effective_condition
+                .and_then(conditions::difference_expr)
+                .or(repeat_for_difference)
+            {
                 resolve_difference_anaphor_in_effect(&mut clause.effect, Some(&bound));
                 if let Some(sub) = clause.sub_ability.as_deref_mut() {
                     resolve_difference_anaphor_in_ability(sub, Some(&bound));
@@ -35932,14 +36460,19 @@ fn try_parse_change_targets(lower: &str) -> Option<Effect> {
                 },
             ],
         }
-    } else if scan_contains_phrase(spell_phrase_clean, "activated or triggered ability")
-        || scan_contains_phrase(spell_phrase_clean, "activated ability")
-    {
-        TargetFilter::StackAbility {
-            controller: None,
-            tag: None,
-            kind: None,
-        }
+    } else if let Some(stack_target) = scan_stack_object_target(spell_phrase_clean) {
+        // CR 115.7a + CR 113.3b / CR 113.3c + CR 115.1: a changed target must be
+        // another LEGAL target, so the kind spelling defines which stack
+        // abilities may be retargeted. Reroute ("Change the target of target
+        // activated ability with a single target.") must NOT accept a TRIGGERED
+        // ability. This branch previously kept a private two-spelling probe and
+        // hardcoded `kind: None` — the same defect the copy path had — and could
+        // not represent a mixed spell/ability phrase at all.
+        //
+        // Legs produced here are already stack-scoped (`StackAbility`,
+        // `StackSpell`, or a `Typed` leg carrying `InZone { Stack }`), so no
+        // `constrain_filter_to_stack` pass is needed or wanted.
+        stack_target
     } else if scan_contains_phrase(spell_phrase_clean, "spell") {
         // Parse with parse_target for type-specific spells (e.g. "instant or sorcery spell")
         let (parsed, _) = parse_target(spell_phrase_clean);
@@ -36024,6 +36557,92 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod gendered_still_type_tests {
+    use super::*;
+
+    #[test]
+    fn gideon_gendered_still_type_retains_planeswalker() {
+        for text in ["He's still a planeswalker.", "He’s still a planeswalker."] {
+            let clause = try_parse_still_a_type(TextPair::new(text, &text.to_lowercase()))
+                .expect("gendered still-a clause parses");
+            let Effect::GenericEffect {
+                static_abilities, ..
+            } = clause.effect
+            else {
+                panic!("expected GenericEffect");
+            };
+            assert_eq!(static_abilities[0].affected, Some(TargetFilter::SelfRef));
+            assert!(static_abilities[0]
+                .modifications
+                .iter()
+                .any(|modification| {
+                    matches!(
+                        modification,
+                        ContinuousModification::AddType {
+                            core_type: CoreType::Planeswalker
+                        }
+                    )
+                }));
+            assert!(!static_abilities[0]
+                .modifications
+                .iter()
+                .any(|modification| {
+                    matches!(modification, ContinuousModification::SetCardTypes { .. })
+                }));
+        }
+
+        assert!(try_parse_still_a_type(TextPair::new(
+            "He's still maybe a planeswalker.",
+            "he's still maybe a planeswalker."
+        ))
+        .is_none());
+    }
+
+    #[test]
+    fn gideon_separate_retention_clause_inherits_animation_duration() {
+        let definition = parse_effect_chain(
+            "Until end of turn, Gideon becomes a Human Soldier creature with indestructible. He's still a planeswalker.",
+            AbilityKind::Activated,
+        );
+        assert_eq!(definition.duration, Some(Duration::UntilEndOfTurn));
+        let retained = definition
+            .sub_ability
+            .as_deref()
+            .expect("separate retained-type clause");
+        assert_eq!(retained.duration, Some(Duration::UntilEndOfTurn));
+        assert!(matches!(
+            retained.effect.as_ref(),
+            Effect::GenericEffect {
+                duration: Some(Duration::UntilEndOfTurn),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn standalone_retention_pronoun_siblings_remain_permanent() {
+        for text in [
+            "It's still a land.",
+            "That's still an artifact.",
+            "They're still lands.",
+            "They’re still lands.",
+            "She's still a creature.",
+        ] {
+            let clause = try_parse_still_a_type(TextPair::new(text, &text.to_lowercase()))
+                .expect("standalone retained-type clause parses");
+            assert_eq!(clause.duration, Some(Duration::Permanent), "{text}");
+            assert!(matches!(
+                clause.effect,
+                Effect::GenericEffect {
+                    duration: Some(Duration::Permanent),
+                    ..
+                }
+            ));
+        }
+    }
+}
 
 /// Snapshot tests locking current `parse_effect_chain` behavior before the
 /// IR/lowering split in Phase 48 Plan 02. Per D-05/D-06, these test 4 groups:
@@ -36606,4 +37225,139 @@ fn last_night_together_folds_attacker_restriction_into_additional_phase() {
         saw_additional_phase,
         "the AdditionalPhase clause must be present in the chain"
     );
+}
+
+/// CR 115.7a + CR 113.3b / CR 113.3c: the retarget grammar shares the counter
+/// path's stack-object grammar, so the ability-kind spelling narrows which
+/// stack abilities may be retargeted (Reroute) and mixed spell/ability phrases
+/// keep both legs.
+#[cfg(test)]
+mod change_targets_stack_object_tests {
+    use super::{try_parse_change_targets, TargetFilter};
+    use crate::types::ability::{Effect, FilterProp, StackAbilityKind, TypeFilter};
+    use crate::types::zones::Zone;
+
+    fn change_targets_filter(lower: &str) -> TargetFilter {
+        match try_parse_change_targets(lower)
+            .unwrap_or_else(|| panic!("retarget clause must parse: {lower}"))
+        {
+            Effect::ChangeTargets { target, .. } => target,
+            other => panic!("expected ChangeTargets, got {other:?}"),
+        }
+    }
+
+    fn stack_ability_leg(filter: &TargetFilter) -> Option<Option<StackAbilityKind>> {
+        match filter {
+            TargetFilter::StackAbility { kind, .. } => Some(*kind),
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                filters.iter().find_map(stack_ability_leg)
+            }
+            _ => None,
+        }
+    }
+
+    /// Reroute: "Change the target of target activated ability with a single
+    /// target." CR 115.7a — a changed target can be changed only to another
+    /// LEGAL target, so an "activated ability" phrase must NOT accept a
+    /// TRIGGERED ability. Before the fix this branch hardcoded a kindless
+    /// StackAbility.
+    #[test]
+    fn reroute_narrows_to_activated_and_keeps_single_target_leg() {
+        let filter = change_targets_filter(
+            "change the target of target activated ability with a single target",
+        );
+        let TargetFilter::And { filters } = &filter else {
+            panic!("expected And[StackAbility, Typed HasSingleTarget], got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2, "both legs must survive: {filter:?}");
+        assert_eq!(
+            filters[0],
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None,
+                kind: Some(StackAbilityKind::Activated),
+            },
+            "the ability leg must narrow to Activated (FLIPS to a kindless leg on revert)"
+        );
+        // Reach-guard: the arity axis is still applied, so the kind assertion is
+        // not passing merely because the whole branch changed shape.
+        let TargetFilter::Typed(tf) = &filters[1] else {
+            panic!(
+                "second leg must be the HasSingleTarget Typed leg, got {:?}",
+                filters[1]
+            );
+        };
+        assert_eq!(tf.properties, vec![FilterProp::HasSingleTarget]);
+    }
+
+    /// The ten printed "spell or ability" retarget cards (Bolt Bend, Spellskite,
+    /// Willbender, …) must be unchanged: the literal both-kinds arm still wins
+    /// ahead of the delegated branch, so the ability leg stays kindless.
+    #[test]
+    fn spell_or_ability_retarget_shape_is_unchanged() {
+        let filter = change_targets_filter(
+            "change the target of target spell or ability with a single target",
+        );
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("expected the canonical Or[spell, ability] shape, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        assert_eq!(
+            stack_ability_leg(&filter),
+            Some(None),
+            "a both-kinds phrase must keep a kindless ability leg"
+        );
+    }
+
+    /// The defect the wholesale delegation closes: a phrase mixing a spell leg
+    /// with an ability-kind leg. Rebuilding a bare StackAbility from a kind
+    /// probe (the pre-fix shape, and the shape a kind-axis-only delegation would
+    /// also produce) silently DROPS the spell leg.
+    #[test]
+    fn mixed_spell_and_ability_kind_legs_both_survive() {
+        let filter =
+            change_targets_filter("change the target of target spell or triggered ability");
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("a mixed spell/ability phrase must produce two legs, got {filter:?}");
+        };
+        assert_eq!(
+            filters.len(),
+            2,
+            "the spell leg must not be dropped: {filter:?}"
+        );
+        assert_eq!(
+            stack_ability_leg(&filter),
+            Some(Some(StackAbilityKind::Triggered)),
+            "the ability leg must narrow to Triggered"
+        );
+        // CR 112.1: a spell is a card on the stack — the spell leg stays pinned
+        // to the stack zone.
+        assert!(
+            filters.iter().any(|leg| matches!(
+                leg,
+                TargetFilter::Typed(tf)
+                    if tf.type_filters == vec![TypeFilter::Card]
+                        && tf.properties.contains(&FilterProp::InZone { zone: Zone::Stack })
+            )),
+            "the stack-pinned spell leg must survive: {filter:?}"
+        );
+    }
+
+    /// A combined ability-kind spelling inside a retarget phrase names both
+    /// kinds, so it must NOT be narrowed to the first spelling in the list.
+    #[test]
+    fn combined_ability_kind_spelling_stays_unnarrowed() {
+        let filter = change_targets_filter(
+            "change the target of target activated ability or triggered ability",
+        );
+        assert_eq!(
+            filter,
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None,
+                kind: None,
+            },
+            "a combined spelling must widen to both kinds"
+        );
+    }
 }

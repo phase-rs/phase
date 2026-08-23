@@ -43,7 +43,16 @@ pub fn resolve(
     Ok(())
 }
 
-fn goad_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<ObjectId> {
+/// CR 701.15a: the creatures this effect goads.
+///
+/// SINGLE AUTHORITY: `resolve` marks exactly this list, and
+/// `effects::affected_objects_from_events` publishes exactly this list as the
+/// chain tracked set, so a downstream "those creatures can't block" or "for each
+/// creature goaded this way" binds the creatures actually goaded. Goading emits
+/// no per-object event, so the publish site has nothing to harvest — and
+/// re-enumerating the head filter there would be a second authority rather than
+/// the producer's own.
+pub(crate) fn goad_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<ObjectId> {
     if let Effect::GoadAll { target } = &ability.effect {
         let effective_filter = crate::game::effects::resolved_object_filter(ability, target);
         let ctx = FilterContext::from_ability(ability);

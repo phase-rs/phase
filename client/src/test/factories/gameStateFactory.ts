@@ -1,6 +1,7 @@
 import { Factory } from "fishery";
 
 import type {
+  CopyTargetSlot,
   FormatConfig,
   GameAction,
   GameObject,
@@ -35,6 +36,9 @@ type AssistPaymentWaitingFor = Extract<WaitingFor, { type: "AssistPayment" }>;
 type CastOfferWaitingFor = Extract<WaitingFor, { type: "CastOffer" }>;
 type LoopShortcutWaitingFor = Extract<WaitingFor, { type: "LoopShortcut" }>;
 type RespondToShortcutWaitingFor = Extract<WaitingFor, { type: "RespondToShortcut" }>;
+type CopyRetargetWaitingFor = Extract<WaitingFor, { type: "CopyRetarget" }>;
+type RetargetChoiceWaitingFor = Extract<WaitingFor, { type: "RetargetChoice" }>;
+type ReturnAsAuraTargetWaitingFor = Extract<WaitingFor, { type: "ReturnAsAuraTarget" }>;
 type WaitingForWithData = Extract<WaitingFor, { data: object }>;
 
 /**
@@ -218,6 +222,16 @@ export const buildTargetSelectionSlot = (
   return { ...targetSelectionSlotFactory.build(), ...overrides };
 };
 
+export const copyTargetSlotFactory = Factory.define<CopyTargetSlot>(() => ({
+  legal_alternatives: [],
+}));
+
+export const buildCopyTargetSlot = (
+  overrides: Partial<CopyTargetSlot> = {},
+): CopyTargetSlot => {
+  return { ...copyTargetSlotFactory.build(), ...overrides };
+};
+
 export const targetSelectionProgressFactory =
   Factory.define<TargetSelectionProgress>(() => ({
     current_slot: 0,
@@ -265,6 +279,66 @@ export const buildTriggerTargetSelectionWaitingFor = (
   overrides: Partial<TriggerTargetSelectionWaitingFor> = {},
 ): TriggerTargetSelectionWaitingFor => {
   return triggerTargetSelectionWaitingForFactory.withData(overrides.data ?? {}).build();
+};
+
+export class CopyRetargetWaitingForFactory extends PlayerWaitingForFactory<CopyRetargetWaitingFor> {}
+
+export const copyRetargetWaitingForFactory =
+  CopyRetargetWaitingForFactory.define((): CopyRetargetWaitingFor => ({
+    type: "CopyRetarget",
+    data: {
+      player: 0,
+      copy_id: 1,
+      current_slot: 0,
+      target_slots: [buildCopyTargetSlot()],
+    },
+  }));
+
+export const buildCopyRetargetWaitingFor = (
+  overrides: Partial<CopyRetargetWaitingFor> = {},
+): CopyRetargetWaitingFor => {
+  return copyRetargetWaitingForFactory.withData(overrides.data ?? {}).build();
+};
+
+export class RetargetChoiceWaitingForFactory extends PlayerWaitingForFactory<RetargetChoiceWaitingFor> {}
+
+export const retargetChoiceWaitingForFactory =
+  RetargetChoiceWaitingForFactory.define((): RetargetChoiceWaitingFor => ({
+    type: "RetargetChoice",
+    data: {
+      player: 0,
+      stack_entry_index: 0,
+      scope: { type: "Single" },
+      current_targets: [],
+      legal_new_targets: [],
+    },
+  }));
+
+export const buildRetargetChoiceWaitingFor = (
+  overrides: Partial<RetargetChoiceWaitingFor> = {},
+): RetargetChoiceWaitingFor => {
+  return retargetChoiceWaitingForFactory.withData(overrides.data ?? {}).build();
+};
+
+export class ReturnAsAuraTargetWaitingForFactory
+  extends PlayerWaitingForFactory<ReturnAsAuraTargetWaitingFor> {}
+
+export const returnAsAuraTargetWaitingForFactory =
+  ReturnAsAuraTargetWaitingForFactory.define((): ReturnAsAuraTargetWaitingFor => ({
+    type: "ReturnAsAuraTarget",
+    data: {
+      player: 0,
+      source_id: 1,
+      returned_id: 2,
+      legal_targets: [],
+      pending_effect: null,
+    },
+  }));
+
+export const buildReturnAsAuraTargetWaitingFor = (
+  overrides: Partial<ReturnAsAuraTargetWaitingFor> = {},
+): ReturnAsAuraTargetWaitingFor => {
+  return returnAsAuraTargetWaitingForFactory.withData(overrides.data ?? {}).build();
 };
 
 export class ChooseXValueWaitingForFactory extends PlayerWaitingForFactory<ChooseXValueWaitingFor> {}

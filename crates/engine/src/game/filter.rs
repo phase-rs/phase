@@ -1875,25 +1875,26 @@ pub(crate) fn matches_stack_target_filter(
             tag,
             kind,
         } => {
-            let ability_kind_ok = kind.as_ref().is_none_or(|kind| {
-                matches!(
-                    (kind, &entry.kind),
-                    (
-                        crate::types::ability::StackAbilityKind::Activated,
-                        StackEntryKind::ActivatedAbility { .. }
-                    ) | (
-                        crate::types::ability::StackAbilityKind::Triggered,
-                        StackEntryKind::TriggeredAbility { .. }
-                    )
-                )
-            });
-            matches!(
-                &entry.kind,
-                StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. }
-            ) && ability_kind_ok
+            // CR 113.3b / CR 113.3c + CR 115.1: membership in the stack-ability
+            // set and the optional `kind` narrowing both come from
+            // `StackEntryKind::matches_stack_ability_kind`, the single authority
+            // shared with the CR 601.2c announce-time gate in `game::targeting`.
+            // Sharing it is the fix for a real divergence: this recheck used to
+            // omit `KeywordAction` while the announce gate admitted it, so a
+            // kindless counter (Stifle / Trickbind / Repudiate) could legally
+            // announce a target on an equip/crew/saddle/station entry and then
+            // have that target declared illegal here, fizzling the counter.
+            // CR 702.6a / 702.122a / 702.171a / 702.184a make those keywords
+            // activated abilities, so they also satisfy a `kind: Activated`
+            // filter (Squelch, Interdict, Reroute).
+            entry.kind.matches_stack_ability_kind(kind.as_ref())
                 && stack_entry_controller_matches(state, controller.as_ref(), entry.controller, ctx)
                 // CR 113.7a: keyword-origin tag (e.g. `AbilityTag::Backup`) must
                 // match the ability on the stack when the filter requires one.
+                // A `KeywordAction` entry carries a typed payload rather than a
+                // `ResolvedAbility`, so `entry.ability()` is `None` and it fails
+                // any tag-required filter — correct, since equip/crew/saddle/
+                // station carry no `AbilityTag`.
                 && tag.as_ref().is_none_or(|tag| {
                     entry.ability().and_then(|a| a.context.ability_tag.as_ref()) == Some(tag)
                 })
@@ -2238,6 +2239,16 @@ pub fn context_free_prop_matches_face(face: &CardFace, prop: &FilterProp) -> Opt
         FilterProp::WithKeyword { value } => Some(face.keywords.contains(value)),
         // allow-raw-authority: bare CardFace has no object, so no keyword grant can exist to miss
         FilterProp::WithoutKeyword { value } => Some(!face.keywords.contains(value)),
+        // The kind-level siblings (`HasKeywordKind` / `WithoutKeywordKind`) are
+        // intentionally ABSENT and fall to the `None` arm below. They exist to
+        // consult off-zone Layer-6 grants, which a bare face by definition cannot
+        // have, so a face reading would answer a strictly narrower question than
+        // the prop asks. Every production caller of this function evaluates an
+        // effect target filter or a static's `spell_filter` — never an
+        // `AbilityCondition` filter, which is the only place those props appear
+        // today — so the `None` default is unreachable rather than lossy. A future
+        // caller that needs them must add explicit arms here instead of relying on
+        // the fail-closed default.
         // CR 111.1 + CR 108.2: a bare face is a card definition, never a token.
         FilterProp::Token => Some(false),
         FilterProp::NonToken | FilterProp::RepresentedByCard => Some(true),
@@ -2756,6 +2767,63 @@ pub fn matches_target_filter_on_lki_snapshot(
         is_suspected: lki.is_suspected,
     };
     matches_target_filter_on_zone_change_record(state, &record, filter, ctx)
+}
+
+/// CR 608.2k + CR 608.2h: Evaluate a target filter against an ability's
+/// PERSISTENT untargeted reference — today, its cost-paid object.
+///
+/// This is NOT the same question as [`matches_target_filter_on_lki_snapshot`].
+/// A zone-change subject is gone, so its snapshot IS the answer. A cost-paid
+/// referent is a live reference the ability keeps pointing at (CR 608.2k), and
+/// CR 608.2h says such a reference reads the object's CURRENT information while
+/// it is in the public zone it was expected to be in — only a departed or
+/// hidden-zone object falls back to last known information.
+///
+/// The refresh is deliberately scoped to `keywords`. That is the one field the
+/// payment-time snapshot cannot answer honestly: the kind-level keyword props
+/// exist to consult Layer-6 grants recorded in the off-zone ledger
+/// (CR 613.1f), which by construction are applied to the LIVE object and are
+/// absent from any snapshot. A card discarded to Jhoira of the Ghitu's cost and
+/// then granted (or stripped of) suspend in the graveyard or in exile before the
+/// ability resolves must be read as it is at resolution, or the gate answers a
+/// question about a game state that no longer exists. Every other LKI field stays
+/// on the snapshot: type, name, P/T, colors and controller are look-back facts
+/// about the payment itself. (A filter that pairs a kind-level prop with an
+/// object-level `WithKeyword`/`WithoutKeyword` would see the refreshed list for
+/// both, since they read the same field — no card does that today, and CR 608.2h
+/// makes the live reading the correct one either way.)
+///
+/// Guarded by `TargetFilter::queries_keyword_kind` so the common cost-paid filter
+/// — a plain type/name look-back with no keyword question — costs one recursive
+/// predicate walk and skips both the ledger recomputation
+/// (`effective_off_zone_keywords` collects every applicable continuous effect)
+/// and the snapshot clone.
+pub fn matches_target_filter_on_cost_paid_reference(
+    state: &GameState,
+    object_id: ObjectId,
+    lki: &LKISnapshot,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    let refreshed = filter
+        .queries_keyword_kind()
+        .then(|| state.objects.get(&object_id))
+        .flatten()
+        .filter(|object| object.zone.is_public())
+        .map(|_| {
+            crate::game::off_zone_characteristics::effective_off_zone_keywords(state, object_id)
+        });
+
+    match refreshed {
+        Some(keywords) => {
+            let mut lki = lki.clone();
+            lki.keywords = keywords;
+            matches_target_filter_on_lki_snapshot(state, object_id, &lki, filter, ctx)
+        }
+        // Gone, or moved to a hidden zone: CR 608.2h mandates last known
+        // information, which is exactly what the payment snapshot holds.
+        None => matches_target_filter_on_lki_snapshot(state, object_id, lki, filter, ctx),
+    }
 }
 
 /// CR 400.7 + CR 603.10a: Match an event subject from its captured facts,
@@ -4891,27 +4959,41 @@ struct SourceContext<'a> {
     recipient_id: Option<ObjectId>,
 }
 
-/// CR 508.5 + CR 508.5a: Source-relative "defending player" resolution. Prefer
-/// the triggered source's captured combat facts — an attacking creature's own
-/// attack trigger snapshots its defending player, and that captured fact must
-/// answer even after the source changes zones (a recycled storage id must never
-/// answer a different ability's filter).
+/// CR 508.5 + CR 508.5a: `ControllerRef::DefendingPlayer` door for
+/// `TargetFilter` evaluation.
 ///
-/// But an attachment/anthem source (Equipment, Aura) is NOT itself the attacker:
-/// `capture_combat_status` finds it absent from `combat.attackers` and records
-/// `defending_player: None`. "Whenever equipped creature attacks, ... defending
-/// player controls" (Captain America's Shield, Greatsword of Tyr, and the rest
-/// of that class) must then resolve the defender of the *attacking creature*,
-/// carried by the triggering event. So a captured `None` is "no answer here",
-/// not "no defender" — fall through to `resolve_defending_player`, which reads
-/// the triggering event's attacker. Using `.map().unwrap_or_else()` collapsed
-/// that captured `None` into a spurious `Some(None)` and suppressed the
-/// fallback, silently fizzling the ability (issue #6678).
+/// Identical call, identical arguments, identical rule as the two quantity
+/// doors. The binding decision is NOT made here — see
+/// `combat::defending_player_cr508_5`, which owns it so one anaphor read once
+/// as a `PlayerScope` and once as a `ControllerRef` cannot bind two different
+/// players.
+///
+/// The issue-#6678 distinction still governs the latch and now lives on the
+/// authority's `trigger_source` parameter: an attachment/anthem source
+/// (Equipment, Aura) is not itself the attacker, so `capture_combat_status`
+/// records `defending_player: None`, and that captured `None` means "no answer
+/// here", not "no defender".
+///
+/// When `source.trigger_source` is `None` the authority binds no event, so this
+/// door remains byte-identical to its previous `resolve_defending_player`
+/// behaviour and no unrelated in-flight combat can leak into continuous-effect
+/// filter evaluation.
 fn source_defending_player(state: &GameState, source: &SourceContext<'_>) -> Option<PlayerId> {
-    source
-        .trigger_source
-        .and_then(|context| context.combat_status.defending_player)
-        .or_else(|| crate::game::combat::resolve_defending_player(state, source.id))
+    crate::game::combat::defending_player_cr508_5(state, source.id, source.trigger_source)
+}
+
+/// Drive the production `ControllerRef::DefendingPlayer` door from the
+/// cross-door agreement fixture in `combat.rs`. Mirrors
+/// `quantity::defending_player_for_quantity_context_for_test` so the fixture
+/// compares two PRODUCTION doors rather than two hand-built approximations.
+#[cfg(test)]
+pub(crate) fn source_defending_player_for_test(
+    state: &GameState,
+    source_id: ObjectId,
+    trigger_source: Option<&TriggerSourceContext>,
+) -> Option<PlayerId> {
+    let context = source_context_from_filter(state, source_id, None, None, trigger_source, None);
+    source_defending_player(state, &context)
 }
 
 fn source_enchanted_player(source: &SourceContext<'_>) -> Option<PlayerId> {
@@ -5220,7 +5302,13 @@ fn pt_value_from_pair(stat: PtStat, power: Option<i32>, toughness: Option<i32>) 
 fn object_pt_value(obj: &GameObject, stat: PtStat, scope: PtValueScope) -> i32 {
     match scope {
         PtValueScope::Current => pt_value_from_pair(stat, obj.power, obj.toughness),
-        PtValueScope::Base => pt_value_from_pair(stat, obj.base_power, obj.base_toughness),
+        // CR 208.4b + CR 613.4a-b: base P/T includes characteristic-defining
+        // and setting effects, but excludes layer-7c modifications and counters.
+        PtValueScope::Base => pt_value_from_pair(
+            stat,
+            obj.layer_base_power.or(obj.base_power),
+            obj.layer_base_toughness.or(obj.base_toughness),
+        ),
     }
 }
 
@@ -5813,11 +5901,13 @@ fn matches_filter_prop(
         // legs; the combat-damage-source leg of that authority injects a source
         // constraint rather than a set id and does not apply to a set-membership
         // predicate. Composes with `FilterProp::Not` for "all other <type>".
+        //
+        // The two-rung ladder is `targeting::resolve_tracked_set_id`'s body
+        // verbatim, so it is a CALL rather than a copy — an open-coded duplicate
+        // of a documented single authority is a divergence waiting to happen.
         FilterProp::InTrackedSet { id } => {
             let resolved = if id.0 == 0 {
-                state
-                    .chain_tracked_set_id
-                    .or_else(|| crate::game::targeting::latest_tracked_set_id(state))
+                crate::game::targeting::resolve_tracked_set_id(state)
             } else {
                 Some(*id)
             };
@@ -5970,7 +6060,9 @@ fn matches_filter_prop(
         // CR 208.1 + CR 613.4b: Match creatures whose current (post-layer) power
         // exceeds their base power (layer-7b baseline incl. CDA, before
         // counters/pumps in 7c–7e).
-        FilterProp::PowerExceedsBase => obj.power.unwrap_or(0) > obj.base_power.unwrap_or(0),
+        FilterProp::PowerExceedsBase => {
+            obj.power.unwrap_or(0) > obj.layer_base_power.or(obj.base_power).unwrap_or(0)
+        }
         // Match objects whose name differs from all controlled battlefield objects matching the filter.
         FilterProp::DifferentNameFrom { filter } => {
             let controller = source.controller.unwrap_or(PlayerId(0));
@@ -7759,6 +7851,178 @@ mod tests {
             !matches_stack_target_filter(&state, spell_obj, &ability_leg, &ctx),
             "the StackAbility leg must NOT match the spell stack entry"
         );
+    }
+
+    /// CR 608.2b + CR 113.3b / CR 113.3c: the RESOLUTION-time legality recheck
+    /// gate is separate code from the announce-time gate in `game::targeting`,
+    /// so the narrowed `kind` filters must be proven against it too — not only
+    /// against `find_legal_targets`.
+    ///
+    /// Both gates now classify through the single authority
+    /// `StackEntryKind::matches_stack_ability_kind`, so this test also pins that
+    /// they admit the SAME set of stack-entry kinds. It enumerates all three
+    /// ability-bearing `StackEntryKind` variants, including the
+    /// production-reachable `KeywordAction` arm this gate previously dropped
+    /// (a kindless Stifle/Trickbind could announce on an equip ability and then
+    /// fizzle when the recheck called that same target illegal).
+    ///
+    /// Also the CR 601.2f consumer: `casting::target_ref_matches_cost_filter`
+    /// routes cost-condition filters through this same function.
+    #[test]
+    fn stack_ability_kind_gate_rejects_wrong_kind_on_recheck() {
+        use crate::types::ability::{KeywordAction, StackAbilityKind};
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+
+        /// Every ability-bearing `StackEntryKind` variant, so no arm that real
+        /// equip/crew/saddle/station data reaches is left without a fixture.
+        #[derive(Clone, Copy)]
+        enum Fixture {
+            Activated,
+            Triggered,
+            /// CR 702.6a: equip is an ACTIVATED ability. The engine models it as
+            /// a typed keyword action carrying no `ResolvedAbility`, which is
+            /// exactly why an `ability()`-shaped fixture cannot stand in for it.
+            KeywordEquip,
+        }
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Ability Source".into(),
+            Zone::Battlefield,
+        );
+        let equipped = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Equipped Creature".into(),
+            Zone::Battlefield,
+        );
+
+        let push_ability = |state: &mut GameState, fixture: Fixture| -> ObjectId {
+            let entry_id = ObjectId(state.next_object_id);
+            state.next_object_id += 1;
+            let draw = || {
+                Box::new(ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    Vec::new(),
+                    source,
+                    PlayerId(0),
+                ))
+            };
+            let kind = match fixture {
+                Fixture::Triggered => StackEntryKind::TriggeredAbility {
+                    source_id: source,
+                    ability: draw(),
+                    condition: None,
+                    trigger_event: None,
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+                Fixture::Activated => StackEntryKind::ActivatedAbility {
+                    source_id: source,
+                    ability: draw(),
+                },
+                Fixture::KeywordEquip => StackEntryKind::KeywordAction {
+                    action: KeywordAction::Equip {
+                        equipment_id: source,
+                        target_creature_id: equipped,
+                    },
+                },
+            };
+            state.stack.push_back(StackEntry {
+                id: entry_id,
+                source_id: source,
+                controller: PlayerId(0),
+                kind,
+            });
+            entry_id
+        };
+
+        let activated = push_ability(&mut state, Fixture::Activated);
+        let triggered = push_ability(&mut state, Fixture::Triggered);
+        let equip = push_ability(&mut state, Fixture::KeywordEquip);
+        let ctx = FilterContext::from_source_with_controller(source, PlayerId(0));
+
+        let triggered_filter = TargetFilter::StackAbility {
+            controller: None,
+            tag: None,
+            kind: Some(StackAbilityKind::Triggered),
+        };
+        // Positive reach-guard first: the filter is live against the right kind,
+        // so the negative below cannot pass because the entry lookup failed.
+        assert!(
+            matches_stack_target_filter(&state, triggered, &triggered_filter, &ctx),
+            "a Triggered-narrowed filter must still match a triggered ability entry"
+        );
+        assert!(
+            !matches_stack_target_filter(&state, activated, &triggered_filter, &ctx),
+            "a Triggered-narrowed filter must NOT match an activated ability entry \
+             (CR 608.2b recheck)"
+        );
+        assert!(
+            !matches_stack_target_filter(&state, equip, &triggered_filter, &ctx),
+            "an equip keyword action is an ACTIVATED ability (CR 702.6a), so a \
+             Triggered-narrowed filter must not match it"
+        );
+
+        let activated_filter = TargetFilter::StackAbility {
+            controller: None,
+            tag: None,
+            kind: Some(StackAbilityKind::Activated),
+        };
+        assert!(
+            matches_stack_target_filter(&state, activated, &activated_filter, &ctx),
+            "an Activated-narrowed filter must match an activated ability entry"
+        );
+        assert!(
+            !matches_stack_target_filter(&state, triggered, &activated_filter, &ctx),
+            "an Activated-narrowed filter must NOT match a triggered ability entry"
+        );
+        assert!(
+            matches_stack_target_filter(&state, equip, &activated_filter, &ctx),
+            "CR 702.6a: equip IS an activated ability, so Squelch/Interdict-style \
+             Activated-narrowed filters must match an equip stack entry"
+        );
+
+        // And the kindless filter still accepts ALL THREE — proving the negatives
+        // above are the kind gate firing, not a broken stack-entry lookup.
+        let kindless = TargetFilter::StackAbility {
+            controller: None,
+            tag: None,
+            kind: None,
+        };
+        assert!(matches_stack_target_filter(
+            &state, activated, &kindless, &ctx
+        ));
+        assert!(matches_stack_target_filter(
+            &state, triggered, &kindless, &ctx
+        ));
+        assert!(
+            matches_stack_target_filter(&state, equip, &kindless, &ctx),
+            "CR 608.2b: a kindless counter (Stifle / Trickbind / Repudiate) that \
+             legally announced on an equip entry at CR 601.2c must still see that \
+             target as legal at resolution — this recheck used to say it was not, \
+             fizzling the counter"
+        );
+
+        // CR 113.7a: a tag-required filter still rejects the keyword action —
+        // it carries a typed payload, not a `ResolvedAbility` with an
+        // `AbilityTag`, so widening the kind axis did not widen the tag axis.
+        let tagged = TargetFilter::StackAbility {
+            controller: None,
+            tag: Some(crate::types::ability::AbilityTag::Backup),
+            kind: None,
+        };
+        assert!(!matches_stack_target_filter(&state, equip, &tagged, &ctx));
     }
 
     #[test]
@@ -12686,6 +12950,33 @@ mod tests {
             &record,
             &source_ctx,
         ));
+    }
+
+    /// CR 208.4b + CR 613.4a-c: a live base-toughness read observes the
+    /// layer-7a/7b carrier, not printed toughness and not a later modifier.
+    #[test]
+    fn live_base_scope_uses_layer_base_toughness() {
+        let mut object = crate::game::game_object::GameObject::new(
+            ObjectId(7),
+            CardId(7),
+            PlayerId(0),
+            "Layered Creature".to_string(),
+            Zone::Battlefield,
+        );
+        object.base_toughness = Some(1);
+        object.layer_base_toughness = Some(4);
+        object.toughness = Some(7);
+
+        assert_eq!(
+            object_pt_value(&object, PtStat::Toughness, PtValueScope::Base),
+            4,
+            "base toughness must be the layer-7b value"
+        );
+        assert_eq!(
+            object_pt_value(&object, PtStat::Toughness, PtValueScope::Current),
+            7,
+            "current toughness must retain the later layer-7c value"
+        );
     }
 
     /// CR 208.4b + CR 613.4b + CR 603.10a: End-to-end look-back path. Drives a

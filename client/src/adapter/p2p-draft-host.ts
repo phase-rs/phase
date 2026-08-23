@@ -82,7 +82,7 @@ export type DraftHostEvent =
   | { type: "pairingsGenerated"; round: number; pairings: PairingView[] }
   | { type: "matchStart"; launch: DraftMatchLaunch }
   | { type: "matchResultReceived"; matchId: string; winnerSeat: number | null }
-  | { type: "roundAdvanced"; newRound: number }
+  | { type: "roundAdvanced" }
   | { type: "timerExpired" }
   | {
       type: "bo3SideboardPrompt";
@@ -744,7 +744,7 @@ export class P2PDraftHost {
       const hostView = await this.adapter.getViewForSeat(0);
       if (hostView.seats.every((s) => s.has_submitted_deck || s.is_bot)) {
         this.emit({ type: "allDecksSubmitted" });
-        await this.generatePairings(1);
+        await this.generatePairings();
       }
 
       if (seat === 0) return view;
@@ -996,12 +996,15 @@ export class P2PDraftHost {
   // ── Match coordination ────────────────────────────────────────────────
 
   /**
-   * Generate pairings for a given round and dispatch match start messages.
+   * Generate the next round's pairings and dispatch match start messages.
+   * The engine decides which round that is; we read it back off the view.
    * Called after all decks are submitted or after round advancement.
    */
-  async generatePairings(round: number): Promise<void> {
+  async generatePairings(): Promise<void> {
     try {
-      const view = await this.adapter.generatePairings(round);
+      const view = await this.adapter.generatePairings();
+      // The engine owns the round. Read it back; never compute it here.
+      const round = view.current_round;
       const launchablePairings = view.pairings.filter((pairing) =>
         pairing.round === round &&
         (pairing.status === "Pending" || pairing.status === "InProgress")
@@ -1039,6 +1042,7 @@ export class P2PDraftHost {
       this.emit({ type: "viewUpdated", view: latestView });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      console.error(`[P2PDraftHost] generatePairings failed:`, message);
       this.emit({ type: "error", message: `Failed to generate pairings: ${message}` });
     }
   }
@@ -1343,10 +1347,9 @@ export class P2PDraftHost {
    */
   async advanceRound(): Promise<void> {
     try {
-      const view = await this.adapter.advanceRound();
-      const newRound = view.current_round;
-      this.emit({ type: "roundAdvanced", newRound });
-      await this.generatePairings(newRound);
+      await this.adapter.advanceRound();
+      this.emit({ type: "roundAdvanced" });
+      await this.generatePairings();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.emit({ type: "error", message: `Failed to advance round: ${message}` });
@@ -1963,8 +1966,24 @@ export class P2PDraftHost {
 
       if (view.status === "MatchInProgress") {
         await this.dispatchMatchLaunchesForSeat(view, 0);
-      } else if (view.status === "Pairing" && view.pairings.length === 0) {
-        await this.generatePairings(view.current_round + 1);
+      } else if (view.status === "Pairing") {
+        // Two engine sites write `Pairing`: `apply_submit_deck` opens the
+        // round-0 window once all decks are in, and `apply_advance_round` opens
+        // each later one. Neither has generated the pairings the window exists
+        // to produce — `apply_generate_pairings` is what generates them, and it
+        // immediately leaves for `MatchInProgress`. So `Pairing` always means
+        // "not generated yet".
+        // `view.pairings` still holds the *previous* round's pairings here
+        // (`compute_pairing_views` filters on `current_round`, which
+        // `AdvanceRound` deliberately does not bump), so testing it for
+        // emptiness made this branch dead for every round after the first.
+        //
+        // Widening it cannot generate a round twice: generating sets status to
+        // `MatchInProgress`, so this branch cannot fire again for the same
+        // round; and `AdvanceRound` requires `RoundComplete`, which the final
+        // round never enters (it transitions straight to `Complete`), so there
+        // is no round past the last one for this branch to invent.
+        await this.generatePairings();
         return this.adapter.getViewForSeat(0);
       }
 
@@ -2078,6 +2097,7 @@ export class P2PDraftHost {
       timer_remaining_ms: null,
       standings: [],
       current_round: 0,
+      next_pairing_round: 1,
       tournament_format: "Swiss",
       pod_policy: "Competitive",
       pairings: [],

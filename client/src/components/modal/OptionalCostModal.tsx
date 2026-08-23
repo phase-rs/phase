@@ -23,6 +23,9 @@ function giftKindLabel(
       return t("optionalCost.gift.kind.food");
     case "TappedFish":
       return t("optionalCost.gift.kind.tappedFish");
+    // CR 702.174g: the chosen player takes an extra turn after this one.
+    case "ExtraTurn":
+      return t("optionalCost.gift.kind.extraTurn");
     default:
       return t("optionalCost.gift.kind.card");
   }

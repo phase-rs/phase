@@ -150,7 +150,14 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::SearchLibrary { .. }
         | Effect::Surveil { .. }
         | Effect::Connive { .. }
-        | Effect::BecomeMonarch
+        // CR 725.1 + CR 725.2: the monarch draws an extra card each turn, so
+        // crowning YOURSELF is beneficial. Crowning someone else ("target
+        // opponent becomes the monarch") hands that advantage away and is NOT,
+        // so every other subject scope falls through to the `Contextual`
+        // catch-all rather than inheriting this arm.
+        | Effect::BecomeMonarch {
+            target: TargetFilter::Controller,
+        }
         | Effect::ExtraTurn { .. } => EffectPolarity::Beneficial,
         // CR 701.26a: tapping a single permanent is harmful (denies its use).
         // The mass (`All`) scope is left Contextual via the catch-all, matching
@@ -355,6 +362,12 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::RememberCard { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
+        // CR 725.1: crowning a player OTHER than yourself ("target opponent
+        // becomes the monarch"). Whether handing out the designation helps you
+        // is card-specific — Jared Carthalion wants an opponent crowned so it
+        // can take it back — so it is Contextual, never the `Beneficial` arm
+        // above, which is scoped to `PlayerScope::Controller`.
+        | Effect::BecomeMonarch { .. }
         | Effect::Renown { .. }
         | Effect::ReturnAsAura { .. }
         | Effect::Reveal { .. }

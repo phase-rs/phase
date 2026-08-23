@@ -4315,11 +4315,19 @@ fn finalize_or_disjunction(combined: TargetFilter, shared_props: &[FilterProp]) 
 /// caller and never harvests them off a leg, so there is no origin leg to
 /// relocate away from.
 ///
-/// Call it only through `finalize_or_disjunction`, which guarantees the type
-/// backfills have already run — this function's gate reads `type_filters`, so
-/// invoking it on legs still holding `[TypeFilter::Any]` would consult an
-/// unfinished type set.
-fn distribute_shared_properties(filter: TargetFilter, shared_props: &[FilterProp]) -> TargetFilter {
+/// CALLERS. `finalize_or_disjunction` is the path that guarantees the type
+/// backfills have already run, so a P/T-bearing prop set must arrive through
+/// it — this function's gate reads `type_filters`, and a leg still holding
+/// `[TypeFilter::Any]` would be judged on an unfinished type set. The gate
+/// fails closed, so the consequence of skipping the backfills is a looser leg,
+/// never a wrongly restricted one. `oracle_cost.rs` also calls this directly to
+/// push `FilterProp::Another` onto a cost filter's legs; that prop is not in
+/// the `prop_reads_creature_pt` family, so the CR 208.3 gate is inert on that
+/// path and the absent backfills cannot affect it.
+pub(super) fn distribute_shared_properties(
+    filter: TargetFilter,
+    shared_props: &[FilterProp],
+) -> TargetFilter {
     match filter {
         TargetFilter::Typed(mut typed) => {
             for prop in shared_props {

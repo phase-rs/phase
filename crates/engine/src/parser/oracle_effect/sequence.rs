@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_till, take_until};
 use nom::character::complete::multispace1;
-use nom::combinator::{all_consuming, eof, map, opt, rest, value};
+use nom::combinator::{all_consuming, eof, map, map_opt, opt, rest, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -29,7 +29,7 @@ use crate::types::ability::{
     FaceDownProfile, FilterProp, ForEachCategoryAction, LibraryPosition, ManaSpendRestriction,
     MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter, PtValue, QuantityExpr,
     QuantityRef, RevealUntilDisposition, SpellStackToGraveyardReplacement, StaticDefinition,
-    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    TargetChoiceTiming, TargetFilter, ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -667,7 +667,10 @@ fn condition_uses_chosen_card_predicate(condition: &AbilityCondition) -> bool {
         | AbilityCondition::SourceMatchesFilter { filter }
         | AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. }
         | AbilityCondition::ControllerControlsMatching { filter }
-        | AbilityCondition::ZoneChangedThisWay { filter }
+        | AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: _,
+        }
         | AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
             target_filter_uses_chosen_card_predicate(filter)
         }
@@ -3627,8 +3630,8 @@ fn recognize_counter_spell_zone_redirect(lower: &str) -> Option<SpellStackToGrav
 /// copy the spell makes is retargetable), `false` for the singular "the copy" /
 /// "that copy" forms (Fork/Twincast; the Chain cycle).
 ///
-/// The leading `opt(parse_affirmative_reflexive_connector)` axis accepts the form
-/// where the grant is printed as the CONSEQUENT of a reflexive gate rather than as
+/// The leading optional connector accepts only the typed CR 608.2c `If` class
+/// where the grant is printed as the consequent of a continuation rather than as
 /// its own sentence — Spider-Verse's "you may copy it. IF YOU DO, you may choose new
 /// targets for the copy." (compare Spinerock Tyrant, which prints the same grant as a
 /// standalone sentence). Without it the clause reached the continuation recognizer
@@ -3636,18 +3639,26 @@ fn recognize_counter_spell_zone_redirect(lower: &str) -> Option<SpellStackToGrav
 /// to an honest `orphaned_copy_retarget` residual — the copy was modeled, but its
 /// controller could never retarget it.
 ///
-/// Folding the gate away is sound precisely BECAUSE it is affirmative and the copy it
+/// Folding the `If` gate away is sound precisely because the copy it
 /// rides is itself optional: "if you do" means "if you made the copy", and a retarget
 /// permission on a copy that was never made is unreachable. So the gate carries no
 /// information the `CopySpell`'s own optionality does not already carry, and CR 707.10c
-/// is satisfied without a separate condition node. This reasoning does NOT extend to
-/// the NEGATED connectors, which is exactly why the affirmative half is its own
-/// combinator (see `oracle_nom::condition`) rather than the whole set with the
-/// condition thrown away.
+/// is satisfied without a separate condition node. This reasoning does not extend to
+/// negated connectors or literal `When`, which creates a CR 603.12 reflexive trigger.
+/// The typed predicate below therefore accepts only
+/// `EffectOutcome::OptionalEffectPerformed` and fails closed for every other result.
+fn parse_inline_copy_retarget_connector(input: &str) -> OracleResult<'_, ()> {
+    map_opt(
+        crate::parser::oracle_nom::condition::parse_affirmative_reflexive_connector,
+        |condition| condition.is_optional_effect_performed().then_some(()),
+    )
+    .parse(input)
+}
+
 pub(super) fn parse_copy_retarget_clause(input: &str) -> OracleResult<'_, bool> {
     map(
         (
-            opt(crate::parser::oracle_nom::condition::parse_affirmative_reflexive_connector),
+            opt(parse_inline_copy_retarget_connector),
             opt(alt((tag(", and "), tag("and ")))),
             opt(tag("you ")),
             tag("may choose "),
@@ -4289,6 +4300,7 @@ pub(super) fn apply_clause_continuation(
             enter_tapped,
             enters_attacking,
             reveal_verb,
+            caused_by,
         } => {
             // CR 608.2c: the "from among those cards" continuation patches the
             // earlier "look at the top N" instruction. When a transparent
@@ -4539,7 +4551,7 @@ pub(super) fn apply_clause_continuation(
                                     // selection anaphor over a single-producer
                                     // set — zone-agnostic (every member is in the
                                     // mill destination already).
-                                    caused_by: None,
+                                    caused_by,
                                 },
                                 enters_under,
                                 enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(
@@ -4574,7 +4586,7 @@ pub(super) fn apply_clause_continuation(
                                     filter: Box::new(card_filter),
                                     // Selection anaphor over the single milled
                                     // set — zone-agnostic (see the `All` arm).
-                                    caused_by: None,
+                                    caused_by,
                                 },
                                 owner_library: false,
                                 enter_transformed: false,
@@ -5668,6 +5680,7 @@ pub(super) fn parse_dig_from_among(
             (rest, true, is_reveal)
         } else if let Ok((rest, is_reveal)) = alt((
             value(false, tag::<_, _, OracleError<'_>>("put ")),
+            value(false, tag("puts ")),
             value(true, tag("reveal ")),
             value(false, tag("return ")),
         ))
@@ -5762,6 +5775,7 @@ pub(super) fn parse_dig_from_among(
             enter_tapped,
             enters_attacking,
             reveal_verb,
+            caused_by: Some(ThisWayCause::Milled),
         });
     }
 
@@ -5782,6 +5796,7 @@ pub(super) fn parse_dig_from_among(
             value(false, tag("you may put ")),
             value(false, tag("you may return ")),
             value(false, tag("put ")),
+            value(false, tag("puts ")),
             value(true, tag("reveal ")),
             value(false, tag("return ")),
         ))
@@ -5867,6 +5882,7 @@ pub(super) fn parse_dig_from_among(
             enter_tapped,
             enters_attacking,
             reveal_verb,
+            caused_by: None,
         });
     }
 
@@ -5931,6 +5947,7 @@ pub(super) fn parse_dig_from_among(
                 enter_tapped,
                 enters_attacking,
                 reveal_verb: false,
+                caused_by: None,
             });
         }
     }
@@ -6121,6 +6138,7 @@ pub(super) fn parse_theyre_face_down_profile(lower: &str) -> Option<FaceDownProf
                 extra_core_types,
                 subtypes,
                 ward: None,
+                cause: crate::types::ability::FaceDownCause::Manifest,
             });
         }
         // Extra core type word (Creature excluded — always implicit).
@@ -6261,6 +6279,7 @@ pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile
                     extra_core_types,
                     subtypes,
                     ward: None,
+                    cause: crate::types::ability::FaceDownCause::Manifest,
                 }),
                 // "... land/artifact/enchantment/planeswalker." — non-creature
                 // body whose core type is the terminal noun; no implicit
@@ -6279,6 +6298,7 @@ pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile
                         extra_core_types,
                         subtypes,
                         ward: None,
+                        cause: crate::types::ability::FaceDownCause::Manifest,
                     })
                 }
             };
@@ -6409,7 +6429,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::Investigate
         | Effect::Tribute { .. }
         | Effect::TimeTravel
-        | Effect::BecomeMonarch
+        | Effect::BecomeMonarch { .. }
         | Effect::NoOp
         | Effect::Proliferate
         | Effect::ProliferateTarget { .. }
@@ -7010,6 +7030,7 @@ pub(super) fn parse_followup_continuation_ast(
                 enters_attacking: false,
                 // "put one of those cards onto the battlefield" — a put, not a reveal.
                 reveal_verb: false,
+                caused_by: None,
             })
         }
         // "You may put one of those cards back on top of your library" after
@@ -7033,6 +7054,7 @@ pub(super) fn parse_followup_continuation_ast(
                 enters_attacking: false,
                 // "put one ... back on top" — a put, not a reveal.
                 reveal_verb: false,
+                caused_by: None,
             })
         }
         // "put them back in any order" after Dig means all looked-at cards
@@ -9931,15 +9953,17 @@ mod tests {
             "may choose a new target for the creature"
         ));
 
-        // CR 707.10c + CR 603.12: the grant printed as the CONSEQUENT of an
-        // AFFIRMATIVE reflexive gate rather than as its own sentence (Spider-Verse's
+        // CR 707.10c + CR 608.2c: the grant printed as the consequent of an
+        // affirmative `If` continuation rather than as its own sentence (Spider-Verse's
         // "you may copy it. If you do, you may choose new targets for the copy.").
         // The gate is redundant on an already-optional copy — no copy, nothing to
         // retarget — so it folds into the same continuation.
         assert!(recognize_copy_retarget_clause(
             "if you do, you may choose new targets for the copy."
         ));
-        assert!(recognize_copy_retarget_clause(
+        // CR 603.12: literal `When` creates a reflexive trigger and cannot be
+        // folded into an inline copy-retarget permission.
+        assert!(!recognize_copy_retarget_clause(
             "when you do, you may choose new targets for the copies"
         ));
         assert_eq!(
@@ -10228,6 +10252,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             })
         );
     }
@@ -10254,6 +10279,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             })
         );
     }
@@ -10285,6 +10311,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             })
         );
     }
@@ -10310,6 +10337,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             })
         );
     }
@@ -10335,6 +10363,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             })
         );
     }
@@ -10362,6 +10391,7 @@ mod tests {
                     enter_tapped: false,
                     enters_attacking: false,
                     reveal_verb: false,
+                    caused_by: None,
                 }),
                 "{text}"
             );
@@ -10613,6 +10643,30 @@ mod tests {
     }
 
     #[test]
+    fn conjugated_puts_from_among_preserves_selection_cause() {
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast(
+            "Puts each creature card from among them into your hand.",
+            &dig,
+            &mut ParseContext::default(),
+        );
+        let Some(ContinuationAst::DigFromAmong {
+            quantity,
+            filter,
+            destination,
+            caused_by,
+            ..
+        }) = result
+        else {
+            panic!("expected DigFromAmong continuation, got {result:?}");
+        };
+        assert_eq!(quantity, PutCount::All);
+        assert!(matches!(filter, TargetFilter::Typed(_)), "got {filter:?}");
+        assert_eq!(destination, Some(Zone::Hand));
+        assert_eq!(caused_by, None);
+    }
+
+    #[test]
     fn dig_any_number_from_among_lowers_to_up_to_all_seen_cards() {
         let mut defs = vec![AbilityDefinition::new(
             AbilityKind::Spell,
@@ -10637,6 +10691,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             },
             AbilityKind::Spell,
             &env,
@@ -10911,6 +10966,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             },
             AbilityKind::Spell,
             &env,
@@ -10961,6 +11017,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             },
             AbilityKind::Spell,
             &env,
@@ -11029,6 +11086,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             },
             AbilityKind::Spell,
             &env,
@@ -11391,7 +11449,7 @@ mod tests {
     #[test]
     fn breach_multiverse_assembles_per_player_reanimation_chain() {
         use super::super::parse_effect_chain;
-        use crate::types::ability::ZoneOwner;
+        use crate::types::ability::{PerPlayerScope, ZoneOwner};
 
         let def = parse_effect_chain(
             "Each player mills ten cards. For each player, choose a creature or planeswalker card in that player's graveyard. Put those cards onto the battlefield under your control. Then each creature you control becomes a Phyrexian in addition to its other types.",
@@ -11449,7 +11507,7 @@ mod tests {
         assert_eq!(*zone, Zone::Graveyard);
         assert_eq!(
             *zone_owner,
-            ZoneOwner::EachPlayer,
+            ZoneOwner::Each(PerPlayerScope::AllPlayers),
             "BLOCKER: 'for each player ... in that player's graveyard' must iterate every player"
         );
         assert_eq!(
@@ -12058,6 +12116,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             })
         );
     }

@@ -21,6 +21,7 @@ use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::proposed_event::{
     CopyTokenSpec, EtbTapState, ProposedEvent, TokenCharacteristics,
 };
+use crate::types::resolution::ChildStackDepth;
 use crate::types::resolved_commands::{
     ResolvedCopyBodyModifications, ResolvedTokenBody, ResolvedTokenCreationCommand,
 };
@@ -285,7 +286,7 @@ fn drain_copy_token_resolution(
         if batch.count == 0 {
             continue;
         }
-        let stack_depth_before_batch = state.resolution_stack.len();
+        let stack_depth_before_batch = state.resolution_stack.capture_child_boundary();
         let spec = super::token::copy_probe_spec_for(
             batch.copy.source_id,
             batch.copy.controller,
@@ -357,9 +358,13 @@ fn drain_copy_token_resolution(
 fn park_copy_token_after_current_batch(
     state: &mut GameState,
     pending: PendingCopyTokenResolution,
-    stack_depth_before_batch: usize,
+    stack_depth_before_batch: ChildStackDepth,
 ) {
-    match state.resolution_stack.len().cmp(&stack_depth_before_batch) {
+    match state
+        .resolution_stack
+        .capture_child_boundary()
+        .cmp(&stack_depth_before_batch)
+    {
         std::cmp::Ordering::Less => {
             panic!("copy-token batch removed a parent frame before it could be re-parked")
         }
@@ -1513,12 +1518,14 @@ fn apply_token_modifications(
                 if let Some(token) = state.objects.get_mut(&token_id) {
                     token.base_power = Some(*value);
                     token.power = Some(*value);
+                    token.layer_base_power = Some(*value);
                 }
             }
             ContinuousModification::SetToughness { value } => {
                 if let Some(token) = state.objects.get_mut(&token_id) {
                     token.base_toughness = Some(*value);
                     token.toughness = Some(*value);
+                    token.layer_base_toughness = Some(*value);
                 }
             }
             // CR 707.9b: fixed additive P/T exceptions are baked into the
@@ -1527,12 +1534,14 @@ fn apply_token_modifications(
                 if let Some(token) = state.objects.get_mut(&token_id) {
                     token.base_power = token.base_power.map(|p| p + *value);
                     token.power = token.power.map(|p| p + *value);
+                    token.layer_base_power = token.layer_base_power.map(|p| p + *value);
                 }
             }
             ContinuousModification::AddToughness { value } => {
                 if let Some(token) = state.objects.get_mut(&token_id) {
                     token.base_toughness = token.base_toughness.map(|t| t + *value);
                     token.toughness = token.toughness.map(|t| t + *value);
+                    token.layer_base_toughness = token.layer_base_toughness.map(|t| t + *value);
                 }
             }
             // CR 707.9b: "except its base power and toughness are each equal
@@ -1548,6 +1557,7 @@ fn apply_token_modifications(
                 if let Some(token) = state.objects.get_mut(&token_id) {
                     token.base_power = Some(val);
                     token.power = Some(val);
+                    token.layer_base_power = Some(val);
                 }
             }
             ContinuousModification::SetToughnessDynamic { value } => {
@@ -1560,6 +1570,7 @@ fn apply_token_modifications(
                 if let Some(token) = state.objects.get_mut(&token_id) {
                     token.base_toughness = Some(val);
                     token.toughness = Some(val);
+                    token.layer_base_toughness = Some(val);
                 }
             }
             // CR 707.9b + CR 306.5b/c: Starting-loyalty exceptions are already
@@ -1743,18 +1754,22 @@ pub(crate) fn apply_immediate_copy_token_modifications_to_object(
             ContinuousModification::SetPower { value } => {
                 token.base_power = Some(*value);
                 token.power = Some(*value);
+                token.layer_base_power = Some(*value);
             }
             ContinuousModification::SetToughness { value } => {
                 token.base_toughness = Some(*value);
                 token.toughness = Some(*value);
+                token.layer_base_toughness = Some(*value);
             }
             ContinuousModification::AddPower { value } => {
                 token.base_power = token.base_power.map(|p| p + *value);
                 token.power = token.power.map(|p| p + *value);
+                token.layer_base_power = token.layer_base_power.map(|p| p + *value);
             }
             ContinuousModification::AddToughness { value } => {
                 token.base_toughness = token.base_toughness.map(|t| t + *value);
                 token.toughness = token.toughness.map(|t| t + *value);
+                token.layer_base_toughness = token.layer_base_toughness.map(|t| t + *value);
             }
             ContinuousModification::SetStartingLoyalty { value } => {
                 token.base_loyalty = Some(*value);

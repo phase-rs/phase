@@ -81,10 +81,10 @@ pub use proposed_event::{AppliedReplacementKey, ProposedEvent, ReplacementId};
 pub use replacements::ReplacementEvent;
 pub use replay::{RecordedAction, ReplayHeader, ReplayLog, REPLAY_FORMAT_VERSION};
 pub use resolution::{
-    AbilityContinuationFrame, ChangeZoneFrame, DirectChoiceGate, FrameGate, FrameKind,
-    MultiDrawFrame, OptionalEffectFrame, PerCategoryZoneChoiceFrame, RepeatedOptionalPaymentFrame,
-    ResolutionFrame, ResolutionStack, ResolutionStackError, ResolutionStateWire,
-    RESOLUTION_STATE_WIRE_VERSION,
+    AbilityContinuationFrame, ChangeZoneFrame, ChildStackDepth, DirectChoiceGate, FrameGate,
+    FrameKind, MultiDrawFrame, OptionalEffectFrame, PerCategoryZoneChoiceFrame,
+    RepeatedOptionalPaymentFrame, ResolutionFrame, ResolutionStack, ResolutionStackError,
+    ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION,
 };
 pub use resolved_commands::{
     ManaPaymentRecipient, ProducedManaUnit, ResolvedCommandJournalEntry, ResolvedCommandOrdinal,

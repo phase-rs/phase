@@ -795,9 +795,8 @@ export function GameProvider({
 
         try {
           if (mode === "p2p-host") {
-            const activeHost = useMultiplayerStore.getState().getActiveP2PHost();
-            if (activeHost?.gameId === gameId) {
-              const adapter = activeHost.adapter;
+            const adapter = useMultiplayerStore.getState().takeActiveP2PHost(gameId);
+            if (adapter) {
               p2pAdapter = adapter;
               wireP2PEvents(adapter);
               await resumeP2PHost(gameId, adapter);

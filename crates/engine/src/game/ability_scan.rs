@@ -243,27 +243,37 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         optional_targeting: _,     // bool
         optional: _,               // bool
         optional_player,
-        optional_for: _,          // OpponentMayScope: AnyOpponent/AnyPlayer, no read
-        target_choice_timing: _,  // Stack/Resolution tag
-        description: _,           // display string
-        selected_mode_labels: _,  // display strings, no dynamic read
-        min_x_value: _,           // u32
-        cant_be_copied: _,        // bool
-        copy_count_status: _,     // status tag
-        forward_result: _,        // bool
-        distribution: _,          // concrete pre-assigned (TargetRef, u32) portions
-        chosen_x: _,              // concrete cast-time X
-        cost_paid_object: _,      // concrete captured-object snapshot
-        cost_paid_object_ids: _,  // concrete captured-object ids (issue #4948)
-        effect_context_object: _, // concrete captured-object snapshot
-        amassed_army_object: _,   // concrete captured-object snapshot
-        ability_index: _,         // usize provenance
-        may_trigger_origin: _,    // provenance tag
-        target_selection_mode: _, // Chosen/Random tag
-        chosen_players: _,        // concrete chosen player ids
-        replacement_applied: _,   // replacement provenance set, no dynamic read
-        sub_link: _,              // SubAbilityLink kind tag
-        sibling_condition: _,     // SiblingCondition replication marker, no dynamic read
+        optional_for: _,         // OpponentMayScope: AnyOpponent/AnyPlayer, no read
+        target_choice_timing: _, // Stack/Resolution tag
+        description: _,          // display string
+        selected_mode_labels: _, // display strings, no dynamic read
+        // CR 700.2: mode-root position marker. Read-FREE on every scan axis: it
+        // selects nothing from game state, it only says "a new instruction starts
+        // here". The instructions themselves are `effect`/`sub_ability`, already
+        // scanned above, so the axes of a chain are identical with or without it.
+        modal_instruction_ordinal: _,
+        // CR 608.2c: structural record of what a chain SPLIT detached. Read-FREE:
+        // it selects nothing from game state and gates only whether a producer
+        // may publish its population, which can narrow but never widen.
+        detached_remainder: _,
+        min_x_value: _,                  // u32
+        cant_be_copied: _,               // bool
+        copy_count_status: _,            // status tag
+        forward_result: _,               // bool
+        distribution: _,                 // concrete pre-assigned (TargetRef, u32) portions
+        chosen_x: _,                     // concrete cast-time X
+        cost_paid_object: _,             // concrete captured-object snapshot
+        cost_paid_object_ids: _,         // concrete captured-object ids (issue #4948)
+        effect_context_object: _,        // concrete captured-object snapshot
+        amassed_army_object: _,          // concrete captured-object snapshot
+        ability_index: _,                // usize provenance
+        may_trigger_origin: _,           // provenance tag
+        target_selection_mode: _,        // Chosen/Random tag
+        chosen_players: _,               // concrete chosen player ids
+        replacement_applied: _,          // replacement provenance set, no dynamic read
+        sub_link: _,                     // SubAbilityLink kind tag
+        sibling_condition: _,            // SiblingCondition replication marker, no dynamic read
+        distribute: _, // announcement unit tag/string, no resolution-time dynamic read
         parent_target_missing_reason: _, // seam flag
     } = a;
 
@@ -814,7 +824,10 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         Effect::Investigate => Axes::NONE,
         Effect::Tribute { count: _ } => Axes::NONE,
         Effect::TimeTravel => Axes::NONE,
-        Effect::BecomeMonarch => Axes::NONE,
+        // CR 725.1 + CR 115.1: the designation subject is a target filter,
+        // walked through the same single authority every other targeted effect
+        // uses.
+        Effect::BecomeMonarch { target } => scan_target_filter(target, target_ctx, mode),
         Effect::NoOp => Axes::NONE,
         // Captured at activation time; no resolution-time dynamic read.
         Effect::NoteManaSpent => Axes::NONE,
@@ -1631,12 +1644,16 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         Effect::Manifest {
             target,
             count,
+            object_source,
             enters_under,
             profile: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc = acc.or(scan_quantity_expr(count, mode));
+            if let Some(f) = object_source {
+                acc = acc.or(scan_target_filter(f, target_ctx, mode));
+            }
             if let Some(x) = enters_under {
                 acc = acc.or(scan_controller_ref(x));
             }
@@ -1981,7 +1998,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         // always safe — it only forces an extra re-scan, never a stale read).
         QuantityRef::TargetControllerCounter { kind: _ } => Axes::CONSERVATIVE,
         QuantityRef::Variable { name: _ } => Axes::NONE,
-        QuantityRef::Power { scope, .. } => {
+        QuantityRef::Power { scope, .. } | QuantityRef::BasePower { scope, .. } => {
             let mut acc = Axes {
                 event: false,
                 sibling: true,
@@ -2165,7 +2182,22 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             },
         },
         QuantityRef::ExiledFromHandThisResolution => Axes::NONE,
-        QuantityRef::PreviousEffectAmount { .. } => Axes::NONE,
+        // CR 608.2c + CR 608.2i: every channel and every aggregate reads
+        // resolution-local state — `last_effect_amount` /
+        // `last_effect_excess_amount` / `last_effect_counts_by_player` /
+        // `clause_minimum_snapshot`, the last read FIRST (`game/quantity.rs`,
+        // the `PreviousEffectAmount` arm) as the CR 608.2h frozen value. All are
+        // cleared at depth-0 chain entry (`resolve_ability_chain`); `apply()`
+        // additionally clears `last_effect_count` and the per-player table at
+        // every player action. None is a triggering-event characteristic
+        // (event), a board-scoped mutable aggregate a sibling copy could mutate
+        // (sibling), or a player-level per-turn projected resource (projected).
+        // Destructured without `..` so a future field forces re-classification.
+        QuantityRef::PreviousEffectAmount {
+            channel: _,
+            aggregate: _,
+        } => Axes::NONE,
+        QuantityRef::PreviousEffectCount => Axes::NONE,
         QuantityRef::LifeLostThisTurn { player } => {
             let mut acc = Axes {
                 event: false,
@@ -2860,7 +2892,12 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
             sibling: false,
             projected: true,
         },
-        AbilityCondition::ZoneChangedThisWay { filter } => {
+        // `destination` refines the same event-ledger read (the moved object's
+        // current zone) — no new axis beyond the `event: true` already set.
+        AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: _,
+        } => {
             let mut acc = Axes {
                 event: true,
                 sibling: false,
@@ -3355,7 +3392,11 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
             acc
         }
         TriggerCondition::HasMaxSpeed => Axes::NONE,
-        TriggerCondition::IsMonarch => Axes::NONE,
+        // CR 725.1: the monarch predicate itself reads no axis; its subject
+        // scope is classified per-axis by the shared `PlayerScope` classifier,
+        // mirroring `WasStartingPlayer { controller }`'s delegation to
+        // `scan_controller_ref`.
+        TriggerCondition::IsMonarch { player } => scan_player_scope(player),
         TriggerCondition::IsInitiative => Axes::NONE,
         TriggerCondition::NoMonarch => Axes::NONE,
         TriggerCondition::WasStartingPlayer { controller, .. } => {
@@ -3568,6 +3609,7 @@ fn scan_duration(x: &Duration, mode: ScanMode) -> Axes {
         }
         Duration::UntilHostLeavesPlay => Axes::NONE,
         Duration::UntilSourceExilesAnotherCard => Axes::NONE,
+        Duration::UntilOpponentBecomesMonarch => Axes::NONE,
         Duration::UntilNextStepOf { player, .. } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_player_scope(player));
@@ -3659,7 +3701,9 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
         StaticCondition::SourceIsAttacking => Axes::NONE,
         StaticCondition::SourceIsBlocking => Axes::NONE,
         StaticCondition::SourceIsBlocked => Axes::NONE,
-        StaticCondition::IsMonarch => Axes::NONE,
+        // CR 725.1: see the `TriggerCondition::IsMonarch` arm above — the
+        // subject scope is classified through the shared `PlayerScope` walker.
+        StaticCondition::IsMonarch { player } => scan_player_scope(player),
         StaticCondition::IsInitiative => Axes::NONE,
         StaticCondition::NoMonarch => Axes::NONE,
         StaticCondition::HasCityBlessing => Axes::NONE,
@@ -4118,6 +4162,14 @@ fn scan_replacement_condition(x: &ReplacementCondition, mode: ScanMode) -> Axes 
             }
             acc
         }
+        // CR 702.37b: reads the resolution-local turn-up payment fact ("if
+        // its megamorph cost was paid to turn it face up") — an event-scoped
+        // signal, no board census and no projected resource.
+        ReplacementCondition::TurnUpCostSourcePaid { source: _ } => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
         ReplacementCondition::UnlessControlsSubtype { subtypes: _ } => Axes::NONE,
         ReplacementCondition::UnlessControlsOtherLeq { .. } => Axes::CONSERVATIVE,
         ReplacementCondition::UnlessControlsMatching { filter } => {
@@ -4931,7 +4983,8 @@ fn scan_keyword(kw: &Keyword, mode: ScanMode) -> Axes {
         | Keyword::Echo(_)
         | Keyword::Buyback(_)
         | Keyword::Cycling(_)
-        | Keyword::Flashback(_) => Axes::CONSERVATIVE,
+        | Keyword::Flashback(_)
+        | Keyword::Emerge(_) => Axes::CONSERVATIVE,
         // Every other keyword carries a read-free payload (unit / u32 / String /
         // ManaCost / value tag): it reads nothing on any axis here. Its cost-read,
         // if any, is already captured by `cost_read` above.
@@ -5017,7 +5070,6 @@ fn scan_keyword(kw: &Keyword, mode: ScanMode) -> Axes {
         | Keyword::Madness(_)
         | Keyword::Miracle(_)
         | Keyword::Dash(_)
-        | Keyword::Emerge(_)
         | Keyword::Harmonize(_)
         | Keyword::Foretell(_)
         | Keyword::Mutate(_)
@@ -5505,7 +5557,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::Investigate
         | Effect::Tribute { .. }
         | Effect::TimeTravel
-        | Effect::BecomeMonarch
+        | Effect::BecomeMonarch { .. }
         | Effect::NoOp
         | Effect::NoteManaSpent
         | Effect::Proliferate
@@ -5913,7 +5965,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::Investigate
         | Effect::Tribute { .. }
         | Effect::TimeTravel
-        | Effect::BecomeMonarch
+        | Effect::BecomeMonarch { .. }
         | Effect::NoOp
         | Effect::NoteManaSpent
         | Effect::Proliferate
@@ -6150,7 +6202,7 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::Investigate
         | Effect::Tribute { .. }
         | Effect::TimeTravel
-        | Effect::BecomeMonarch
+        | Effect::BecomeMonarch { .. }
         | Effect::NoOp
         | Effect::NoteManaSpent
         | Effect::Proliferate
@@ -6377,6 +6429,24 @@ mod tests {
             ObjectId(1),
             PlayerId(0),
         )
+    }
+
+    #[test]
+    fn unassigned_distribution_unit_adds_no_dynamic_read_axis() {
+        let base = fixed_drain();
+        let mut divided = base.clone();
+        divided.distribute = Some(crate::types::game_state::DistributionUnit::Life);
+
+        let base_axes = resolved_ability_axes(&base, ScanMode::Conservative);
+        let divided_axes = resolved_ability_axes(&divided, ScanMode::Conservative);
+        assert_eq!(
+            (base_axes.event, base_axes.sibling, base_axes.projected),
+            (
+                divided_axes.event,
+                divided_axes.sibling,
+                divided_axes.projected
+            )
+        );
     }
 
     // ---- P0/P2: the ScanMode split + descending object-growth firewall ----
@@ -7230,7 +7300,7 @@ mod tests {
     ///     helper-enumerator mass reads on existing relaxed variants; raw-iteration mass
     ///     reads rely on the oracle's no-wildcard forcing.
     ///   - BOUNDED raw-iter / O(1) reads are deliberately kept OUT of `CLASSIFIED` (so the
-    ///     set-equality stays over the 14 idiom-matched files — no allowlist pollution):
+    ///     set-equality stays over the 15 idiom-matched files — no allowlist pollution):
     ///     `vote.rs` (`votes_per_session_for` = 1 + count of `GrantsExtraVote` statics,
     ///     snapshotted at session start — bounded single outcome) and `switch_pt.rs`
     ///     (O(1) `state.battlefield.contains()` over the effect's own `ids` — bounded
@@ -7293,6 +7363,14 @@ mod tests {
                 true,
                 "PhaseOut/PhaseIn: targets-empty -> battlefield_phased_in_ids / \
                  state.battlefield mass scan (CR 702.26)",
+            ),
+            (
+                "pump.rs",
+                true,
+                "PumpAll (pump_all_affected_objects): battlefield_phased_in_ids mass pump, \
+                 a read that scales with the board; single Pump path also present in-file. \
+                 Joined the idiom in #7484, when the producer moved off a raw \
+                 state.battlefield scan onto the same enumeration goad.rs uses",
             ),
             (
                 "turn_face_up.rs",
@@ -7392,6 +7470,7 @@ mod tests {
             ("counters.rs", "PutCounterAll"),
             ("goad.rs", "GoadAll"),
             ("phase_out.rs", "PhaseOut"),
+            ("pump.rs", "PumpAll"),
             ("turn_face_up.rs", "TurnFaceUp"),
             ("turn_face_down.rs", "TurnFaceDown"),
         ];
@@ -7632,6 +7711,9 @@ mod tests {
             QuantityRef::Power {
                 scope: ObjectScope::Source,
             },
+            QuantityRef::BasePower {
+                scope: ObjectScope::Source,
+            },
             QuantityRef::CountersOn {
                 scope: ObjectScope::Source,
                 counter_type: None,
@@ -7679,6 +7761,11 @@ mod tests {
         // (1) ObjectScope::EventSource via QuantityRef::Power.
         assert!(ability_uses_event_context(&ability_with_amount(
             QuantityRef::Power {
+                scope: ObjectScope::EventSource,
+            }
+        )));
+        assert!(ability_uses_event_context(&ability_with_amount(
+            QuantityRef::BasePower {
                 scope: ObjectScope::EventSource,
             }
         )));
@@ -7977,6 +8064,11 @@ mod tests {
         // Source power (Orcish Siegemaster class) is a sibling-mutable read.
         assert!(ability_reads_sibling_mutable(&ability_with_amount(
             QuantityRef::Power {
+                scope: ObjectScope::Source
+            }
+        )));
+        assert!(ability_reads_sibling_mutable(&ability_with_amount(
+            QuantityRef::BasePower {
                 scope: ObjectScope::Source
             }
         )));

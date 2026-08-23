@@ -28,7 +28,36 @@ use super::engine_priority;
 use super::mana_abilities;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
+/// CR 605.4a: the sidecar-aware wrapper around the unmodified baseline handler.
+///
+/// The baseline body — including its `park_observer_triggers_if_paused` call,
+/// which fails closed under the typed ownership guard — runs inside the resumed
+/// occurrence's own node/marker/production-override scope. Readiness runs only
+/// after that scope has restored, so combined collection and child discovery see
+/// the ambient authority they would have seen synchronously. With no live
+/// carrier both hooks are exact no-ops and this is baseline byte-for-byte.
 pub(super) fn handle_optional_effect_choice(
+    state: &mut GameState,
+    accept: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let events_before = events.len();
+    let produced = super::triggers::with_accepted_triggered_mana_action_scope(state, |state| {
+        handle_optional_effect_choice_inner(state, accept, events)
+    })?;
+    if let super::triggers::TriggeredManaReadiness::Resumed { wait, .. } =
+        super::triggers::finish_accepted_triggered_mana_action(state, events, events_before)?
+    {
+        // This arm falls through to the reducer's ordinary epilogue, which owns
+        // release for the resumed frame; no settled-Priority convergence here.
+        let wait = *wait;
+        state.waiting_for = wait.clone();
+        return Ok(wait);
+    }
+    Ok(produced)
+}
+
+fn handle_optional_effect_choice_inner(
     state: &mut GameState,
     accept: bool,
     events: &mut Vec<GameEvent>,
@@ -102,22 +131,32 @@ pub(super) fn handle_optional_effect_choice(
             // CR 608.2c + CR 700.2b: Optional triggered modal ("you may choose N") —
             // the decline/accept gate runs before mode selection while the stack
             // entry is still mid-construction.
-            if accept {
+            let produced = if accept {
                 super::engine::clear_pending_trigger_optional(state);
                 if let Some(waiting) = super::engine::begin_pending_trigger_target_selection(state)?
                 {
-                    state.waiting_for = waiting;
+                    waiting
                 } else {
-                    state.waiting_for = WaitingFor::Priority {
+                    WaitingFor::Priority {
                         player: state.active_player,
-                    };
+                    }
                 }
             } else {
                 super::engine::drop_mid_construction_pending_trigger(state);
-                state.waiting_for = WaitingFor::Priority {
+                WaitingFor::Priority {
                     player: state.active_player,
-                };
-            }
+                }
+            };
+            // Round-20 seam 5: the optional-modal branch's assigned wait goes
+            // through the construction finisher BEFORE
+            // `resume_pending_continuation_if_priority` and
+            // `park_observer_triggers_if_paused` run below, so those baseline
+            // calls observe the final wait. With no carried recipient the
+            // finisher returns `produced` byte-for-byte, preserving baseline's
+            // `Priority { player: state.active_player }` fallback exactly — the
+            // active player, not the trigger controller.
+            state.waiting_for =
+                super::triggers::finish_trigger_construction_action(state, events, produced);
         }
     }
 
@@ -155,12 +194,59 @@ pub(super) fn handle_optional_effect_choice_and_remember(
     handle_optional_effect_choice(state, matches!(choice, AutoMayChoice::Accept), events)
 }
 
+/// CR 605.4a: the sidecar-aware wrapper around the unmodified baseline handler,
+/// exactly as [`handle_optional_effect_choice`] above. The inner body keeps every
+/// early return it already had — an intermediate `OpponentMayChoice` re-prompt is
+/// a repeated pause of the same accepted occurrence, and readiness recognizes it
+/// as one.
 pub(super) fn handle_opponent_may_choice(
     state: &mut GameState,
     waiting_for: WaitingFor,
     accept: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<ActionResult, EngineError> {
+    let events_before = events.len();
+    let produced = super::triggers::with_accepted_triggered_mana_action_scope(state, |state| {
+        handle_opponent_may_choice_inner(state, waiting_for, accept, events)
+    })?;
+    if let super::triggers::TriggeredManaReadiness::Resumed {
+        wait,
+        settled_direct_priority_root,
+    } = super::triggers::finish_accepted_triggered_mana_action(state, events, events_before)?
+    {
+        // CR 117.5 + CR 605.4a: this reducer arm returns its `ActionResult`
+        // directly, so the ordinary epilogue never runs. A resumed direct
+        // `Priority` root with no live owner therefore has to converge here or
+        // its own frame's settled batch would sit undrained until some later
+        // action — that is exactly the gap the settled wrapper closes. Every
+        // other owner keeps its queue and returns the frame's wait unchanged.
+        let wait = *wait;
+        let wait = if settled_direct_priority_root {
+            engine_priority::run_post_action_pipeline_from_settled_priority(
+                state,
+                events,
+                events_before,
+                &wait,
+            )?
+        } else {
+            wait
+        };
+        state.waiting_for = wait.clone();
+        return Ok(action_result(events, wait));
+    }
+    Ok(action_result(events, produced))
+}
+
+/// The unmodified baseline body, returning its wait rather than an
+/// `ActionResult`: `action_result` takes the event vector, and the wrapper above
+/// must still read this action's own emitted range afterwards. Every early
+/// return is preserved exactly.
+fn handle_opponent_may_choice_inner(
+    state: &mut GameState,
+    waiting_for: WaitingFor,
+    accept: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     let events_before = events.len();
     let WaitingFor::OpponentMayChoice {
         player: promptee,
@@ -258,7 +344,7 @@ pub(super) fn handle_opponent_may_choice(
                         max_targets: 1,
                         pending_ability: ability,
                     };
-                    return Ok(action_result(events, state.waiting_for.clone()));
+                    return Ok(state.waiting_for.clone());
                 }
 
                 if !remaining.is_empty() {
@@ -274,7 +360,7 @@ pub(super) fn handle_opponent_may_choice(
                         description,
                         remaining: rest,
                     };
-                    return Ok(action_result(events, state.waiting_for.clone()));
+                    return Ok(state.waiting_for.clone());
                 }
 
                 state
@@ -309,7 +395,7 @@ pub(super) fn handle_opponent_may_choice(
             description,
             remaining: rest,
         };
-        return Ok(action_result(events, state.waiting_for.clone()));
+        return Ok(state.waiting_for.clone());
     } else {
         set_active_priority(state);
         if let Some(frame) = state
@@ -322,7 +408,7 @@ pub(super) fn handle_opponent_may_choice(
 
     resume_pending_continuation_if_priority(state, events)?;
     super::triggers::collect_and_drain_observer_triggers_if_settled(state, events, events_before);
-    Ok(action_result(events, state.waiting_for.clone()))
+    Ok(state.waiting_for.clone())
 }
 
 fn resolve_all_declined_opponent_may(
@@ -851,6 +937,15 @@ pub(super) fn handle_unless_payment(
                         crate::game::effects::discard::RandomDiscardOutcome::NeedsReplacementChoice {
                             remaining_eligible,
                             remaining_count,
+                            // Effect-layer field: the parked EFFECT batch stamps
+                            // the paused card's terminal `Discarded`. A cost
+                            // payment publishes no such ledger, so this caller
+                            // has nothing to do with it.
+                            paused_card: _,
+                            // Likewise effect-layer: `discard_at_random` already
+                            // set `waiting_for` from this seat, and this caller
+                            // never re-parks, so it has no prompt to keep in step.
+                            chooser: _,
                         } => {
                             state.pending_cost_move_resume =
                                 Some(PendingCostMoveResume::RandomDiscardUnlessPayment(Box::new(
@@ -1687,6 +1782,13 @@ pub(super) fn handle_unless_payment_activate_ability(
     }
 
     let ability_def = object.abilities[ability_index].clone();
+    // CR 605.3b + CR 118.12: propagate the activation's OWN returned wait. A
+    // colour choice, a hybrid mana-sub-cost choice, or the completed-frame
+    // seam's whitelisted pause is raised by return value, not by writing
+    // `state.waiting_for`; reading the field back therefore silently dropped
+    // those prompts and left the unless payment reprompted with the interactive
+    // step never taken. Every pause that DOES write the field (a replacement
+    // choice) returns the same value it wrote, so this is a strict improvement.
     mana_abilities::activate_mana_ability(
         state,
         source_id,
@@ -1703,8 +1805,7 @@ pub(super) fn handle_unless_payment_activate_ability(
             remaining,
         },
         None,
-    )?;
-    Ok(state.waiting_for.clone())
+    )
 }
 
 pub(super) fn handle_ward_discard_choice(
@@ -2023,6 +2124,9 @@ pub(super) fn resume_random_discard_unless_payment(
             crate::game::effects::discard::RandomDiscardOutcome::NeedsReplacementChoice {
                 remaining_eligible,
                 remaining_count,
+                // Effect-layer fields — see the sibling site above.
+                paused_card: _,
+                chooser: _,
             } => {
                 state.pending_cost_move_resume =
                     Some(PendingCostMoveResume::RandomDiscardUnlessPayment(Box::new(

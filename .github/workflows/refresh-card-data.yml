@@ -56,10 +56,17 @@ jobs:
     # Forks inherit the schedule but not CI_PAT, so a fork run would only fail
     # and spam the owner — keep it on the canonical repo. On a workflow_run
     # trigger, only proceed if the cache clear actually succeeded (a failed or
-    # cancelled clear left the caches as-is, so there is nothing new to fetch).
+    # cancelled clear left the caches as-is, so there is nothing new to fetch)
+    # and it ran in this repo, not a fork — same provenance requirement as
+    # deploy.yml's deploy-gate, since this job holds CI_PAT and `contents:
+    # write`. No head_branch pin here: unlike a deploy, Clear Caches is
+    # workflow_dispatch-only and is legitimately dispatched from any branch.
     if: >-
       github.repository == 'phase-rs/phase' &&
-      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
+      (github.event_name != 'workflow_run' || (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_repository.full_name == github.repository
+      ))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

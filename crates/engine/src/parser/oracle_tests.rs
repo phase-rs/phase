@@ -10,6 +10,7 @@ use crate::types::ability::{
     SpellStackToGraveyardReplacement,
 };
 use crate::types::counter::{CounterMatch, CounterType};
+use crate::types::triggers::AttackTargetFilter;
 
 #[test]
 fn unsupported_ability_ir_lowering_preserves_generic_and_structural_payloads() {
@@ -512,7 +513,11 @@ fn spelunking_etb_put_cave_gains_life_conditionally() {
     }
     let gain = find_gain_life(etb).expect("the ETB chain must contain a GainLife node");
 
-    let Some(AbilityCondition::ZoneChangedThisWay { filter }) = &gain.condition else {
+    let Some(AbilityCondition::ZoneChangedThisWay {
+        filter,
+        destination: Some(Zone::Battlefield),
+    }) = &gain.condition
+    else {
         panic!(
             "GainLife must be gated by ZoneChangedThisWay, got {:?}",
             gain.condition
@@ -13056,8 +13061,13 @@ fn become_the_monarch_imperative() {
     use crate::parser::oracle_effect::parse_effect;
     let effect = parse_effect("become the monarch");
     assert!(
-        matches!(effect, Effect::BecomeMonarch),
-        "expected BecomeMonarch, got {:?}",
+        matches!(
+            effect,
+            Effect::BecomeMonarch {
+                target: TargetFilter::Controller
+            }
+        ),
+        "expected BecomeMonarch{{Controller}}, got {:?}",
         effect,
     );
 }
@@ -13067,8 +13077,13 @@ fn you_become_the_monarch_subject() {
     use crate::parser::oracle_effect::parse_effect;
     let effect = parse_effect("you become the monarch");
     assert!(
-        matches!(effect, Effect::BecomeMonarch),
-        "expected BecomeMonarch, got {:?}",
+        matches!(
+            effect,
+            Effect::BecomeMonarch {
+                target: TargetFilter::Controller
+            }
+        ),
+        "expected BecomeMonarch{{Controller}}, got {:?}",
         effect,
     );
 }
@@ -13168,8 +13183,13 @@ fn heart_shaped_herb_activated_ability_grants_monarch_as_continuation() {
         .as_ref()
         .expect("the 'and you become the monarch' conjunct must be recovered");
     assert!(
-        matches!(*monarch.effect, Effect::BecomeMonarch),
-        "expected BecomeMonarch, got {:?}",
+        matches!(
+            *monarch.effect,
+            Effect::BecomeMonarch {
+                target: TargetFilter::Controller
+            }
+        ),
+        "expected BecomeMonarch{{Controller}}, got {:?}",
         monarch.effect,
     );
     // CR 608.2c: a ContinuationStep under the gated return is skipped when the
@@ -13225,8 +13245,13 @@ fn fall_from_favor_trigger_body_grants_monarch_not_unimplemented() {
         .as_ref()
         .expect("the 'and you become the monarch' conjunct must be recovered");
     assert!(
-        matches!(*monarch.effect, Effect::BecomeMonarch),
-        "expected BecomeMonarch, got {:?}",
+        matches!(
+            *monarch.effect,
+            Effect::BecomeMonarch {
+                target: TargetFilter::Controller
+            }
+        ),
+        "expected BecomeMonarch{{Controller}}, got {:?}",
         monarch.effect,
     );
     assert!(
@@ -13253,8 +13278,13 @@ fn you_become_monarch_sub_link_tracks_boundary_not_verb() {
         .as_ref()
         .expect("sentence-boundary monarch clause must be present");
     assert!(
-        matches!(*monarch.effect, Effect::BecomeMonarch),
-        "expected BecomeMonarch, got {:?}",
+        matches!(
+            *monarch.effect,
+            Effect::BecomeMonarch {
+                target: TargetFilter::Controller
+            }
+        ),
+        "expected BecomeMonarch{{Controller}}, got {:?}",
         monarch.effect,
     );
     assert_eq!(
@@ -20153,6 +20183,418 @@ fn eomer_of_the_riddermark_attack_gate_parses_as_trigger_condition() {
     );
 }
 
+/// M'Baku, Jabari Chieftain — verbatim Scryfall Oracle text.
+const MBAKU_ORACLE: &str = "At the beginning of your end step, if there is no monarch, target opponent becomes the monarch.\nWhenever a creature attacks one of your opponents, if that player is the monarch, that creature gets +1/+1 and gains trample until end of turn.";
+
+fn parse_mbaku() -> ParsedAbilities {
+    parse(
+        MBAKU_ORACLE,
+        "M'Baku, Jabari Chieftain",
+        &[],
+        &["Creature"],
+        &["Human", "Noble", "Warrior"],
+    )
+}
+
+/// CR 603.4 + CR 508.5 + CR 725.1: M'Baku's second trigger must retain its
+/// intervening-if, bound to the ATTACKED player (CR 508.5), not dropped as a
+/// swallowed clause and not left anchored to the attacking player.
+///
+/// Revert-failing three ways: without the parser subject axis the condition is
+/// `None`; without the `PlayerScope` parameterization the bridge cannot carry a
+/// subject at all; without the attack anaphor rebind the condition is
+/// `IsMonarch { ScopedPlayer }`, which resolves to the ATTACKING player.
+#[test]
+fn mbaku_attack_trigger_keeps_monarch_intervening_if_bound_to_defending_player() {
+    let result = parse_mbaku();
+
+    assert!(
+        !parsed_has_unimplemented(&result),
+        "M'Baku must parse with zero Unimplemented effects: {result:#?}"
+    );
+    assert_eq!(result.triggers.len(), 2, "triggers={:?}", result.triggers);
+
+    let end_step = &result.triggers[0];
+    assert_eq!(end_step.mode, TriggerMode::Phase);
+    assert_eq!(end_step.condition, Some(TriggerCondition::NoMonarch));
+
+    let attack = &result.triggers[1];
+    assert_eq!(attack.mode, TriggerMode::Attacks);
+    assert_eq!(
+        attack.condition,
+        Some(TriggerCondition::IsMonarch {
+            player: PlayerScope::DefendingPlayer,
+        }),
+        "intervening-if must bind the attacked player (CR 508.5), got {:?}",
+        attack.condition
+    );
+
+    // The event clause and the effect body must be unchanged by the rebind.
+    assert_eq!(
+        attack.attack_target_filter,
+        Some(AttackTargetFilter::Player)
+    );
+    assert!(attack.valid_card.is_some(), "attacker filter must survive");
+    assert!(
+        attack.valid_target.is_some(),
+        "attacked-player filter must survive"
+    );
+    let execute = attack
+        .execute
+        .as_ref()
+        .expect("attack trigger should have an execute body");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = execute.effect.as_ref()
+    else {
+        panic!(
+            "expected the +1/+1 and trample grant, got {:?}",
+            execute.effect
+        );
+    };
+    let static_def = static_abilities
+        .first()
+        .expect("M'Baku's grant must contain a static ability");
+    assert!(
+        static_def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 1 })
+            && static_def
+                .modifications
+                .contains(&ContinuousModification::AddToughness { value: 1 })
+            && static_def
+                .modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Trample,
+                }),
+        "expected the +1/+1 and trample grant, got {static_def:?}"
+    );
+
+    // CR L4: the Condition_If swallow warning must be cleared.
+    assert!(
+        result.parse_warnings.iter().all(|w| !matches!(
+            w,
+            OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+        )),
+        "unexpected Condition_If SwallowedClause: {:?}",
+        result.parse_warnings
+    );
+}
+
+/// CR 115.1: the `ControllerRef` a player-scoped `TargetFilter` restricts to, if
+/// any. `None` for an unrestricted `TargetFilter::Player`.
+fn player_filter_controller_ref(filter: &TargetFilter) -> Option<&ControllerRef> {
+    match filter {
+        TargetFilter::Typed(TypedFilter { controller, .. }) => controller.as_ref(),
+        _ => None,
+    }
+}
+
+/// CR 115.1 + CR 725.1 + CR 109.5: M'Baku's FIRST trigger must carry the printed
+/// subject of "target opponent becomes the monarch" onto
+/// `Effect::BecomeMonarch`'s `target` axis, with the OPPONENT restriction
+/// intact.
+///
+/// Revert-failing: with the pre-axis unit variant the effect equality below
+/// fails outright; with a bare `TargetFilter::Player` (or `Controller`) the
+/// controller becomes a legal target and the resolver can crown the ability's
+/// own controller — the shipped bug.
+///
+/// Sibling coverage: the same clause on Garland, Royal Kidnapper and Jared
+/// Carthalion, True Heir is asserted by
+/// `targeted_become_monarch_binds_the_opponent_filter_across_the_class`; the
+/// runtime half is `mbaku_end_step_crowns_the_targeted_opponent_not_its_controller_cr_115_1`
+/// in `tests/integration/mbaku_attacked_monarch_intervening_if.rs`.
+#[test]
+fn mbaku_end_step_trigger_binds_target_opponent_onto_become_monarch_cr_115_1() {
+    let result = parse_mbaku();
+    let end_step = &result.triggers[0];
+    let execute = end_step
+        .execute
+        .as_ref()
+        .expect("end-step trigger should have an execute body");
+
+    let Effect::BecomeMonarch { target } = &*execute.effect else {
+        panic!("expected BecomeMonarch, got {:?}", execute.effect);
+    };
+    assert!(
+        target.is_player_scope(),
+        "the subject must be a player filter, got {target:?}"
+    );
+    assert!(
+        !target.is_context_ref(),
+        "`target opponent` is a DECLARED target, not a context ref — a context \
+         ref surfaces no target slot and resolves to the controller: {target:?}"
+    );
+    assert_eq!(
+        player_filter_controller_ref(target),
+        Some(&ControllerRef::Opponent),
+        "CR 115.1: the opponent restriction must survive onto the effect, \
+         got {target:?}"
+    );
+}
+
+/// CR 115.1 + CR 725.1: the same "target opponent becomes the monarch" clause on
+/// every printing that has it. Build-for-the-class guard — the fix is in
+/// `build_become_clause`'s subject mapping, not in anything M'Baku-specific, so
+/// the siblings must lower identically.
+#[test]
+fn targeted_become_monarch_binds_the_opponent_filter_across_the_class() {
+    let cards: [(&str, &str); 2] = [
+        (
+            "Garland, Royal Kidnapper",
+            "When Garland enters, target opponent becomes the monarch.",
+        ),
+        (
+            "Jared Carthalion, True Heir",
+            "When Jared Carthalion enters, target opponent becomes the monarch.",
+        ),
+    ];
+
+    for (name, oracle) in cards {
+        let parsed = parse(oracle, name, &[], &["Creature"], &["Human"]);
+        let trigger = parsed
+            .triggers
+            .first()
+            .unwrap_or_else(|| panic!("{name}: enters trigger must parse"));
+        let execute = trigger
+            .execute
+            .as_ref()
+            .unwrap_or_else(|| panic!("{name}: trigger must have an execute body"));
+        let Effect::BecomeMonarch { target } = &*execute.effect else {
+            panic!("{name}: expected BecomeMonarch, got {:?}", execute.effect);
+        };
+        assert_eq!(
+            player_filter_controller_ref(target),
+            Some(&ControllerRef::Opponent),
+            "{name}: CR 115.1 opponent restriction must survive, got {target:?}"
+        );
+    }
+}
+
+/// CR 109.5: the UNTARGETED form keeps the printed default. Paired with the two
+/// rows above so a fix that binds every subject to a target slot — which would
+/// make "you become the monarch" prompt for a target it never had — fails here.
+#[test]
+fn untargeted_become_monarch_keeps_the_controller_default_cr_109_5() {
+    use crate::parser::oracle_effect::parse_effect;
+
+    for text in ["become the monarch", "you become the monarch"] {
+        assert_eq!(
+            parse_effect(text),
+            Effect::BecomeMonarch {
+                target: TargetFilter::Controller
+            },
+            "{text:?} must keep the printed-default subject"
+        );
+    }
+}
+
+/// CR 508.5: the rebind is gated on the trigger clause naming an attacked
+/// PLAYER. `Planeswalker` / `Battle` attack scopes name no player antecedent
+/// (a battle's anaphor would be its protector, CR 310.8d — a different
+/// reference), so a `ScopedPlayer` anchor must survive unchanged there.
+///
+/// There are two distinct noun sources, and each is asserted in the shape the
+/// PARSER emits: `Player` / `PlayerOrPlaneswalker` carry the named player in
+/// `valid_target`, while `Monarch` (CR 725.1) is the noun on its own and comes
+/// with `valid_target: None`.
+#[test]
+fn attack_anaphor_rebind_gate_covers_only_player_yielding_attack_scopes() {
+    use crate::parser::oracle_trigger::attack_intervening_if_anaphor_is_defending_player;
+
+    let base = |filter: Option<AttackTargetFilter>| {
+        let mut def = TriggerDefinition::new(TriggerMode::Attacks);
+        def.valid_card = Some(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![],
+        }));
+        def.valid_target = Some(TargetFilter::Player);
+        def.attack_target_filter = filter;
+        def
+    };
+
+    let attack_target_scopes = [
+        AttackTargetFilter::Player,
+        AttackTargetFilter::Planeswalker,
+        AttackTargetFilter::PlayerOrPlaneswalker,
+        AttackTargetFilter::Battle,
+        AttackTargetFilter::Owner,
+        AttackTargetFilter::OwnerOrPlaneswalker,
+        AttackTargetFilter::PlayerOrPermanents,
+        AttackTargetFilter::Monarch,
+    ];
+    for scope in attack_target_scopes {
+        let expected_rebind = match scope {
+            AttackTargetFilter::Player
+            | AttackTargetFilter::PlayerOrPlaneswalker
+            | AttackTargetFilter::Monarch => true,
+            AttackTargetFilter::Planeswalker
+            | AttackTargetFilter::Battle
+            | AttackTargetFilter::Owner
+            | AttackTargetFilter::OwnerOrPlaneswalker
+            | AttackTargetFilter::PlayerOrPermanents => false,
+        };
+        assert_eq!(
+            attack_intervening_if_anaphor_is_defending_player(&base(Some(scope.clone()))),
+            expected_rebind,
+            "{scope:?} rebind classification must be exhaustive"
+        );
+    }
+    // No attack-target clause at all (Goblin Guide / Ulamog shape).
+    assert!(!attack_intervening_if_anaphor_is_defending_player(&base(
+        None
+    )));
+
+    // CR 725.1 + CR 508.5: `Monarch` is the one attack scope that names the
+    // attacked player BY ITSELF, and it is the shape the parser actually emits
+    // — "attacks the monarch" lowers to `attack_target_filter: Monarch` with
+    // `valid_target: None` (verified against The Spear of Bashenga's row in
+    // `data/card-data.json`). Asserting it through `base(..)`, which forces
+    // `valid_target: Some(Player)`, tested a combination no card produces and
+    // left the production arm dead.
+    let mut monarch_production_shape = base(Some(AttackTargetFilter::Monarch));
+    monarch_production_shape.valid_target = None;
+    assert!(
+        attack_intervening_if_anaphor_is_defending_player(&monarch_production_shape),
+        "the monarch designation IS the attacked-player noun; requiring \
+         `valid_target` makes this arm unreachable: {monarch_production_shape:?}"
+    );
+    // …and it still rebinds in the redundant belt-and-braces shape.
+    assert!(attack_intervening_if_anaphor_is_defending_player(&base(
+        Some(AttackTargetFilter::Monarch)
+    )));
+
+    // Discrimination guard: `valid_target` is NOT dispensable in general. The
+    // `Player` / `PlayerOrPlaneswalker` scopes say a player may be attacked, not
+    // WHICH one, so without the filter the clause is the bare "Whenever ~
+    // attacks" shape and supplies no antecedent.
+    for scope in [
+        AttackTargetFilter::Player,
+        AttackTargetFilter::PlayerOrPlaneswalker,
+    ] {
+        let mut no_target = base(Some(scope.clone()));
+        no_target.valid_target = None;
+        assert!(
+            !attack_intervening_if_anaphor_is_defending_player(&no_target),
+            "{scope:?} without a named attacked player must not rebind"
+        );
+    }
+
+    // CR 508.3d: an OBJECT filter in `valid_source` is an attacking-CREATURE
+    // noun, not a player noun, and must NOT block the rebind. Discriminates
+    // against a `valid_source.is_none()` proxy.
+    let mut object_source = base(Some(AttackTargetFilter::Player));
+    object_source.valid_source = Some(TargetFilter::Typed(TypedFilter {
+        type_filters: vec![TypeFilter::Creature],
+        controller: None,
+        properties: vec![],
+    }));
+    assert!(
+        attack_intervening_if_anaphor_is_defending_player(&object_source),
+        "an object-shaped valid_source must still rebind"
+    );
+
+    // "Whenever a PLAYER attacks ..." — the attacking player is also a
+    // candidate antecedent, so the rebind must not fire (Suppressor Skyguard).
+    let mut player_source = base(Some(AttackTargetFilter::Player));
+    player_source.valid_source = Some(TargetFilter::Player);
+    assert!(!attack_intervening_if_anaphor_is_defending_player(
+        &player_source
+    ));
+
+    // CR 603.2: a non-attack mode reaches the same anaphor with a different
+    // antecedent (Ghirapur Orrery).
+    let mut phase_mode = base(Some(AttackTargetFilter::Player));
+    phase_mode.mode = TriggerMode::Phase;
+    assert!(!attack_intervening_if_anaphor_is_defending_player(
+        &phase_mode
+    ));
+}
+
+/// CR 603.2: sibling trigger shapes that reach the same "that player" anaphor
+/// must be byte-identical after the rebind. Each assertion is paired with a
+/// positive reach-guard that the condition is `Some(..)`, so a parse regression
+/// cannot make the negative pass vacuously.
+#[test]
+fn attack_anaphor_rebind_leaves_sibling_trigger_shapes_untouched() {
+    use crate::parser::oracle_trigger::attack_intervening_if_anaphor_is_defending_player;
+
+    // "Whenever a PLAYER attacks you" — player-scope `valid_source`, so the
+    // attacking player is also a candidate antecedent.
+    let skyguard = parse(
+        "Flying\nWhenever a player attacks you, if that player has another opponent who isn't being attacked, prevent all combat damage that would be dealt to you this combat.",
+        "Suppressor Skyguard",
+        &[Keyword::Flying],
+        &["Creature"],
+        &["Bird", "Soldier"],
+    );
+    let skyguard_trigger = skyguard
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Attacks)
+        .expect("Suppressor Skyguard must keep its attack trigger");
+    // Reach-guard: the intervening-if is present, so the negative below is not
+    // vacuous.
+    assert!(
+        skyguard_trigger.condition.is_some(),
+        "Suppressor Skyguard must keep its intervening-if"
+    );
+    assert!(
+        !attack_intervening_if_anaphor_is_defending_player(skyguard_trigger),
+        "an attacking-PLAYER clause supplies its own antecedent; the rebind must \
+         not fire: {skyguard_trigger:?}"
+    );
+
+    // `Phase` mode — same anaphor, different antecedent.
+    let orrery = parse(
+        "Each player may play an additional land on each of their turns.\nAt the beginning of each player's upkeep, if that player has no cards in hand, that player draws three cards.",
+        "Ghirapur Orrery",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+    let orrery_trigger = orrery
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Phase)
+        .expect("Ghirapur Orrery must keep its upkeep trigger");
+    assert!(
+        orrery_trigger.condition.is_some(),
+        "Ghirapur Orrery must keep its intervening-if"
+    );
+    assert!(
+        !attack_intervening_if_anaphor_is_defending_player(orrery_trigger),
+        "a non-attack mode must not reach the attack anaphor rebind: {orrery_trigger:?}"
+    );
+
+    // Aerial Surveyor: `Attacks` mode whose defending-player reference is a
+    // `ControllerRef` inside a `TargetFilter`, not a `PlayerScope`. It has no
+    // `valid_target`, so the gate excludes it and its condition is untouched.
+    let surveyor = parse(
+        "Flying\nWhenever this Vehicle attacks, if defending player controls more lands than you, search your library for a basic Plains card, put it onto the battlefield tapped, then shuffle.\nCrew 2",
+        "Aerial Surveyor",
+        &[Keyword::Flying],
+        &["Artifact"],
+        &["Vehicle"],
+    );
+    let surveyor_trigger = surveyor
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Attacks)
+        .expect("Aerial Surveyor must keep its attack trigger");
+    assert!(
+        surveyor_trigger.condition.is_some(),
+        "Aerial Surveyor must keep its intervening-if"
+    );
+    assert!(
+        !attack_intervening_if_anaphor_is_defending_player(surveyor_trigger),
+        "Aerial Surveyor names no attacked player and must not be rebound: \
+         {surveyor_trigger:?}"
+    );
+}
+
 fn assert_controlled_creature_greatest_power_ability_gate(condition: &AbilityCondition) {
     let AbilityCondition::QuantityCheck {
         lhs: QuantityExpr::Ref {
@@ -21591,6 +22033,113 @@ fn city_blessing_activation_restriction_does_not_emit_condition_warning() {
                 condition: Some(ParsedCondition::HasCityBlessing)
             }
         )));
+}
+
+/// CR 702.178a: "Max speed — [Ability]" means "As long as your speed is 4, this
+/// object has '[Ability]'." The ability is ABSENT below max speed, so the prefix
+/// lowers to an activation restriction (CR 602.5) — the same treatment CR 702.186b
+/// already gets for ∞.
+///
+/// Starting Column carries both shapes on one card, so a single parse shows the
+/// gate landing on the right ability: its plain `{T}: Add one mana of any color`
+/// must stay activatable at any speed.
+#[test]
+fn max_speed_prefix_gates_only_the_ability_it_labels() {
+    let oracle = "Start your engines! (If you have no speed, it starts at 1. It increases once on each of your turns when an opponent loses life. Max speed is 4.)\n{T}: Add one mana of any color.\nMax speed — {T}, Sacrifice this artifact: Draw two cards, then discard a card.";
+    let parsed = parse(oracle, "Starting Column", &[], &["Artifact"], &[]);
+
+    let gate = ActivationRestriction::RequiresCondition {
+        condition: Some(ParsedCondition::HasMaxSpeed),
+    };
+
+    let draw_ability = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(*ability.effect, Effect::Draw { .. }))
+        .expect("expected the labeled draw ability");
+    assert!(
+        draw_ability.activation_restrictions.contains(&gate),
+        "the labeled ability must be gated: {:?}",
+        draw_ability.activation_restrictions
+    );
+
+    let mana_ability = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(*ability.effect, Effect::Mana { .. }))
+        .expect("expected the unlabeled mana ability");
+    assert!(
+        !mana_ability.activation_restrictions.contains(&gate),
+        "the UNLABELED ability on the same card must stay ungated: {:?}",
+        mana_ability.activation_restrictions
+    );
+}
+
+/// The gate is not specific to the draw class: Howlsquad Heavy's labeled ability
+/// is a mana ability, which bypasses the stack (CR 605.3a), so an ungated one puts
+/// real mana in the pool with nothing to respond to.
+#[test]
+fn max_speed_prefix_gates_a_labeled_mana_ability() {
+    let oracle = "Start your engines!\nOther Goblins you control have haste.\nAt the beginning of combat on your turn, create a 1/1 red Goblin creature token. That token attacks this combat if able.\nMax speed — {T}: Add {R} for each Goblin you control.";
+    let parsed = parse(
+        oracle,
+        "Howlsquad Heavy",
+        &[],
+        &["Creature"],
+        &["Goblin", "Mercenary"],
+    );
+
+    let mana_ability = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(*ability.effect, Effect::Mana { .. }))
+        .expect("expected the labeled mana ability");
+    assert!(
+        mana_ability
+            .activation_restrictions
+            .contains(&ActivationRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::HasMaxSpeed),
+            }),
+        "{:?}",
+        mana_ability.activation_restrictions
+    );
+}
+
+/// CR 207.2c: an ability WORD "has no rules meaning". The condition it names is
+/// printed in the ability's own text, so the label must contribute no second gate
+/// — otherwise the printed one is applied twice, and a card whose label gates only
+/// the EFFECT would have a legal activation refused.
+///
+/// Mox Opal is the counterpart to the two rows above: same em-dash prefix grammar,
+/// same `strip_ability_word_with_name` path, opposite correct outcome. Exactly one
+/// restriction survives, and it is the printed clause.
+#[test]
+fn an_ability_word_prefix_contributes_no_activation_gate() {
+    let oracle =
+        "Metalcraft — {T}: Add one mana of any color. Activate only if you control three or more artifacts.";
+    let parsed = parse(oracle, "Mox Opal", &[], &["Artifact"], &[]);
+
+    let mana_ability = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(*ability.effect, Effect::Mana { .. }))
+        .expect("expected the mana ability");
+    assert_eq!(
+        mana_ability.activation_restrictions.len(),
+        1,
+        "the label must not add a gate beside the printed clause: {:?}",
+        mana_ability.activation_restrictions
+    );
+    assert!(
+        matches!(
+            mana_ability.activation_restrictions[0],
+            ActivationRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::QuantityComparison { .. })
+            }
+        ),
+        "the surviving gate must be the printed artifact count: {:?}",
+        mana_ability.activation_restrictions
+    );
 }
 
 #[test]

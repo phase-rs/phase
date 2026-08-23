@@ -49,6 +49,13 @@
     "collapse": "Zwiń postęp rozwiązywania",
     "expand": "Rozwiń postęp rozwiązywania"
   },
+  "resolveAllConsent": {
+    "eyebrow": "Rozpatrz wszystko",
+    "title": "Zatwierdzić szybkie rozpatrywanie?",
+    "subtitle": "Wszyscy gracze muszą zatwierdzić, zanim silnik rozpatrzy bezpieczny prefiks stosu.",
+    "grant": "Zatwierdź",
+    "decline": "Zachowaj priorytet"
+  },
   "debugCreate": {
     "copies": "Kopie",
     "tokenPower": "Power",
@@ -766,10 +773,14 @@
     "tapUntappedCreatures_one": "Obróć {{count}} nieobróconego stwora",
     "tapUntappedCreatures_other": "Obróć {{count}} nieobróconych stworów",
     "chooseTargetOf": "Wybierz cel {{current}} z {{total}}",
+    "slotProgress": "Cel {{current}} z {{total}}",
+    "choosePlayerTarget": "Wybierz: {{name}}",
+    "expandDescription": "Pokaż pełny opis",
+    "collapseDescription": "Pokaż mniej",
+    "descriptionDisclosure": "{{action}}: {{description}}",
     "chooseTarget": "Wybierz cel",
     "triggerDamageAmount": "This trigger: {{amount}} damage",
     "noLegalTargets": "Brak dostępnych dozwolonych celów",
-    "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "do jednego {{target}}",
     "one": "{{target}}",
     "nounPlayer": "gracz",
@@ -1460,7 +1471,12 @@
       "labelReturn": "Zwróć ({{selected}}/{{count}})",
       "labelExile": "Wygnaj ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
-      "orderTop": "Wierzch"
+      "orderTop": "Wierzch",
+      "orderSecond": "2.",
+      "orderThird": "3.",
+      "orderFourth": "4.",
+      "orderFifth": "5.",
+      "orderPosition": "Pozycja {{position}}"
     },
     "drawnThisTurn": {
       "title": "Dobrane w tej turze",
@@ -1626,7 +1642,11 @@
     "legend": {
       "title": "Zasada legend",
       "subtitle": "Wybierz, którego „{{name}}” zatrzymać",
-      "keepAria": "Zatrzymaj {{name}} ({{status}})",
+      "keepAria": "Zatrzymaj {{name}} ({{identity}}, {{status}})",
+      "keepAriaUnknown": "Zatrzymaj {{name}} ({{status}})",
+      "identityOriginal": "Oryginał",
+      "identityCopy": "Kopia",
+      "identityTokenCopy": "Kopia żetonu",
       "statusJustEntered": "Właśnie wszedł",
       "statusAlready": "Już na polu bitwy"
     },
@@ -1758,7 +1778,22 @@
     "emergeEyebrow": "Emerge",
     "emergeNormalLabel": "Rzuć normalnie",
     "emergeAltLabel": "Rzuć z Emerge",
-    "emergeSubtitle": "Rzuć {{name}} normalnie lub zapłać jego koszt Emerge, poświęcając stwora, co zmniejsza koszt o wartość many tego stwora.",
+    "emergeSubtitle": "Rzuć {{name}} normalnie lub zapłać jego koszt Emerge, poświęcając {{sacrifice}}, co zmniejsza koszt o wartość many tego permanentu.",
+    "emergeFallbackSacrifice": "pasujący permanent",
+    "emergeSacrificeQuality": {
+      "artifact": "artefakt",
+      "battle": "bitwę",
+      "card": "kartę",
+      "creature": "stwora",
+      "enchantment": "urok",
+      "instant": "sztuczkę",
+      "kindred": "permanent typowy",
+      "land": "ląd",
+      "permanent": "permanent",
+      "planeswalker": "wędrowca",
+      "sorcery": "obrzęd",
+      "subtype": "permanent typu {{subtype}}"
+    },
     "impendingEyebrow": "Impending",
     "impendingNormalLabel": "Rzuć normalnie",
     "impendingAltLabel": "Rzuć z Impending",
@@ -1831,7 +1866,8 @@
         "card": "kartę",
         "treasure": "Skarb",
         "food": "Pożywienie",
-        "tappedFish": "zakręconą Rybę"
+        "tappedFish": "zakręconą Rybę",
+        "extraTurn": "dodatkową turę"
       }
     }
   },

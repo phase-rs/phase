@@ -647,6 +647,9 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
             guard_debug_action_payload(debug_action)?;
         }
         GameAction::PassPriority
+        | GameAction::BeginResolveAll { .. }
+        | GameAction::RespondResolveAllConsent { .. }
+        | GameAction::RevokeResolveAllConsent { .. }
         | GameAction::PlayLand { .. }
         | GameAction::Foretell { .. }
         | GameAction::ActivateAbility { .. }

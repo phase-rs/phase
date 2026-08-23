@@ -8,9 +8,10 @@ import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
+import { faceDownMarkerName, faceDownMarkerRef } from "./faceDownMarker.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { COUNTER_COLORS, computePTDisplay, hasOtherPrintedFace, shouldRenderCardBack, toRoman } from "../../viewmodel/cardProps.ts";
+import { COUNTER_COLORS, computePTDisplay, hasOtherPrintedFace, toRoman } from "../../viewmodel/cardProps.ts";
 import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 import { LoyaltyBadge } from "../ui/LoyaltyBadge.tsx";
 import { CardArtFallback } from "./CardArtFallback.tsx";
@@ -37,18 +38,31 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
   );
 
-  const renderCardBack = shouldRenderCardBack(obj);
-  const cardName = renderCardBack ? t("card.faceDownName") : (obj?.name ?? "");
+  // Same rule as `PermanentCard`: the tile always backs a face-down
+  // permanent (the live face is blanked per CR 708.2a); the controller's peek
+  // is the hover preview (#7547).
+  const renderCardBack = obj?.face_down === true;
+  const cardName = renderCardBack
+    ? (faceDownMarkerName(true, obj?.face_down_cause) ?? t("card.faceDownName"))
+    : (obj?.name ?? "");
   const imageLookup = obj
     ? cardImageLookup(obj)
     : { name: "", faceIndex: 0, oracleId: undefined, faceName: undefined };
   const isToken = obj?.display_source === "Token";
+  // A face-down permanent shows the marker token for the ability that turned it
+  // face down (Morph / Manifest / A Mysterious Creature), the way paper play
+  // does. Without a marker the card back is rendered exactly as before.
+  const faceDownMarker = faceDownMarkerRef(obj?.face_down ?? false, obj?.face_down_cause);
   const { src: cardSrc, isLoading: cardLoading } = useCardImage(renderCardBack ? "" : imageLookup.name, {
     size: "art_crop",
     faceIndex: imageLookup.faceIndex,
-    isToken: renderCardBack ? false : isToken,
+    isToken: renderCardBack ? faceDownMarker !== null : isToken,
     tokenFilters: !renderCardBack && isToken && obj ? tokenFiltersForObject(obj) : undefined,
-    tokenImageRef: !renderCardBack && isToken && obj ? obj.token_image_ref : undefined,
+    tokenImageRef: renderCardBack
+      ? (faceDownMarker ?? undefined)
+      : isToken && obj
+        ? obj.token_image_ref
+        : undefined,
     oracleId: renderCardBack ? undefined : imageLookup.oracleId,
     faceName: renderCardBack ? undefined : imageLookup.faceName,
   });
@@ -74,7 +88,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
 
   if (!obj) return null;
 
-  const src = renderCardBack ? CARD_BACK_URL : cardSrc;
+  const src = renderCardBack ? (cardSrc ?? CARD_BACK_URL) : cardSrc;
   const isLoading = renderCardBack ? false : cardLoading;
   // CR 712 vs CR 710: `back_face != null` is NOT "has a second face" — a
   // Kamigawa flip card stores its alternative half in the same slot and has no
@@ -110,7 +124,13 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     );
   }
 
-  const renderedSrc = renderCardBack ? CARD_BACK_URL : (src ?? "");
+  // The card back is the fallback in BOTH directions: a marker that never
+  // resolves and a marker URL whose `<img>` fails to load both land here. The
+  // artless text tile below is for face-UP cards with no printing; a face-down
+  // permanent always has the card back to fall back to.
+  const renderedSrc = renderCardBack
+    ? (artError ? CARD_BACK_URL : (src ?? CARD_BACK_URL))
+    : (src ?? "");
   const headerHeight = isCompactHeight
     ? "clamp(8px, calc(var(--art-crop-h) * 0.16), 12px)"
     : "clamp(8px, calc(var(--art-crop-h) * 0.18), 20px)";
@@ -185,7 +205,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
                   an artless permanent loses its picture but never its game
                   state. `src` is non-null for face-down cards (CARD_BACK_URL),
                   so those still render the card back here. */}
-              {src && !artError ? (
+              {renderCardBack || (src && !artError) ? (
                 <img
                   src={renderedSrc}
                   alt={cardName}

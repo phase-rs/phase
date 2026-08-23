@@ -49,6 +49,13 @@
     "collapse": "Recolher progresso de resolução",
     "expand": "Expandir progresso de resolução"
   },
+  "resolveAllConsent": {
+    "eyebrow": "Resolver tudo",
+    "title": "Aprovar a resolução rápida?",
+    "subtitle": "Todos os jogadores precisam aprovar antes que o mecanismo resolva um prefixo seguro da pilha.",
+    "grant": "Aprovar",
+    "decline": "Manter prioridade"
+  },
   "debugCreate": {
     "copies": "Cópias",
     "tokenPower": "Power",
@@ -764,10 +771,14 @@
     "tapUntappedCreatures_one": "Vire {{count}} criatura desvirada",
     "tapUntappedCreatures_other": "Vire {{count}} criaturas desviradas",
     "chooseTargetOf": "Escolha o alvo {{current}} de {{total}}",
+    "slotProgress": "Alvo {{current}} de {{total}}",
+    "choosePlayerTarget": "Escolher: {{name}}",
+    "expandDescription": "Mostrar a descrição completa",
+    "collapseDescription": "Mostrar menos",
+    "descriptionDisclosure": "{{action}}: {{description}}",
     "chooseTarget": "Escolha um alvo",
     "triggerDamageAmount": "This trigger: {{amount}} damage",
     "noLegalTargets": "Nenhum alvo válido disponível",
-    "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "até um {{target}}",
     "one": "um {{target}}",
     "nounPlayer": "jogador",
@@ -1460,7 +1471,12 @@
       "labelReturn": "Devolver ({{selected}}/{{count}})",
       "labelExile": "Exilar ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
-      "orderTop": "Topo"
+      "orderTop": "Topo",
+      "orderSecond": "2.º",
+      "orderThird": "3.º",
+      "orderFourth": "4.º",
+      "orderFifth": "5.º",
+      "orderPosition": "Posição {{position}}"
     },
     "drawnThisTurn": {
       "title": "Compradas Neste Turno",
@@ -1626,7 +1642,11 @@
     "legend": {
       "title": "Regra das Lendas",
       "subtitle": "Escolha qual \"{{name}}\" manter",
-      "keepAria": "Manter {{name}} ({{status}})",
+      "keepAria": "Manter {{name}} ({{identity}}, {{status}})",
+      "keepAriaUnknown": "Manter {{name}} ({{status}})",
+      "identityOriginal": "Original",
+      "identityCopy": "Cópia",
+      "identityTokenCopy": "Cópia de ficha",
       "statusJustEntered": "Acabou de entrar",
       "statusAlready": "Já está no campo de batalha"
     },
@@ -1758,7 +1778,22 @@
     "emergeEyebrow": "Emergir",
     "emergeNormalLabel": "Conjurar Normalmente",
     "emergeAltLabel": "Conjurar com Emergir",
-    "emergeSubtitle": "Conjure {{name}} normalmente, ou pague seu custo de Emergir sacrificando uma criatura, reduzindo o custo pelo valor de mana daquela criatura.",
+    "emergeSubtitle": "Conjure {{name}} normalmente, ou pague seu custo de Emergir sacrificando {{sacrifice}}, reduzindo o custo pelo valor de mana daquele permanente.",
+    "emergeFallbackSacrifice": "um permanente correspondente",
+    "emergeSacrificeQuality": {
+      "artifact": "um artefato",
+      "battle": "uma batalha",
+      "card": "uma carta",
+      "creature": "uma criatura",
+      "enchantment": "um encantamento",
+      "instant": "uma mágica instantânea",
+      "kindred": "um tipo tribal",
+      "land": "um terreno",
+      "permanent": "uma permanente",
+      "planeswalker": "um planeswalker",
+      "sorcery": "uma mágica",
+      "subtype": "uma permanente do tipo {{subtype}}"
+    },
     "impendingEyebrow": "Iminente",
     "impendingNormalLabel": "Conjurar Normalmente",
     "impendingAltLabel": "Conjurar com Iminente",
@@ -1831,7 +1866,8 @@
         "card": "um card",
         "treasure": "um Tesouro",
         "food": "um Alimento",
-        "tappedFish": "um Peixe virado"
+        "tappedFish": "um Peixe virado",
+        "extraTurn": "um turno extra"
       }
     }
   },

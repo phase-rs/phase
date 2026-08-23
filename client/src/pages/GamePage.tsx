@@ -100,6 +100,7 @@ import {
   RespondToPrecastCopyShortcutModal,
 } from "../components/modal/PrecastCopyShortcutModal.tsx";
 import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
+import { ResolveAllConsentModal } from "../components/modal/ResolveAllConsentModal.tsx";
 import { TriggerOrderModal } from "../components/modal/TriggerOrderModal.tsx";
 import { PeekTab } from "../components/modal/DialogShell.tsx";
 import { PeekRestoreTab } from "../components/modal/DialogHost.tsx";
@@ -1276,6 +1277,10 @@ function GamePageContent({
   const gamePageStyle = {
     "--game-top-overlay-offset": `${topOverlayOffsetPx}px`,
     "--game-split-safe-top": "0px",
+    // Where the targeting prompt starts, which is the only part of its
+    // placement this page can state: the split layout puts seat panes at the
+    // very top of the board, so the prompt clears them. How TALL the block is
+    // stays the block's own business — see TargetingOverlay.
     "--game-targeting-prompt-top": splitBoardActive
       ? isMobile ? "4.25rem" : "4.75rem"
       : "0.25rem",
@@ -1868,6 +1873,7 @@ function GamePageContent({
           canActForWaitingState && <AssistPaymentUI />}
         {waitingFor?.type === "ReplacementChoice" &&
           canActForWaitingState && <ReplacementModal />}
+        {canActForWaitingState && <ResolveAllConsentModal playerId={playerId} />}
         {waitingFor?.type === "OrderTriggers" &&
           canActForWaitingState && <TriggerOrderModal />}
         <BattleProtectorModal />

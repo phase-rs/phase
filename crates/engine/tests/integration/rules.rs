@@ -16,6 +16,29 @@ pub use engine::types::phase::Phase;
 pub use engine::types::player::PlayerId;
 pub use engine::types::zones::{ExileCostSourceZone, Zone};
 
+/// Shared damage fixture: a non-combat source dealing `amount` to `target`,
+/// controlled by P1 (the opponent of the shield controller in the CR 614.9
+/// redirection fixtures). Shared by `heroic_sacrifice_redirect`,
+/// `pariah_attached_redirect`, and `palisade_giant_redirect`, which previously
+/// each carried a byte-identical private copy.
+pub fn damage_ability(
+    source_id: ObjectId,
+    target: engine::types::ability::TargetRef,
+    amount: i32,
+) -> engine::types::ability::ResolvedAbility {
+    engine::types::ability::ResolvedAbility::new(
+        engine::types::ability::Effect::DealDamage {
+            amount: engine::types::ability::QuantityExpr::Fixed { value: amount },
+            target: engine::types::ability::TargetFilter::Any,
+            damage_source: None,
+            excess: None,
+        },
+        vec![target],
+        source_id,
+        P1,
+    )
+}
+
 /// Shared combat helper: drives the engine from DeclareAttackers through damage resolution.
 ///
 /// Assumes the runner is at a phase where passing priority twice will reach DeclareAttackers

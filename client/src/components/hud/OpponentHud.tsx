@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
-import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
+import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { useTurnStatus } from "../../hooks/useTurnStatus.ts";
 import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
@@ -14,7 +14,13 @@ import { getOpponentDisplayName, useMultiplayerStore } from "../../stores/multip
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { partitionByType } from "../../viewmodel/battlefieldProps.ts";
-import { getOpponentIds, isOneOnOne, resolveFocusedOpponent } from "../../viewmodel/gameStateView.ts";
+import {
+  getOpponentIds,
+  getWaitingForClickTargetRefs,
+  getWaitingForPlayerChoiceIds,
+  isOneOnOne,
+  resolveFocusedOpponent,
+} from "../../viewmodel/gameStateView.ts";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { ScoreBadge } from "../draft/ScoreBadge.tsx";
@@ -159,42 +165,21 @@ export function OpponentHud({
 
   const waitingFor = useGameStore((s) => s.waitingFor);
   const dispatch = useGameStore((s) => s.dispatch);
-  const isHumanTargetSelection =
-    (waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection")
-    && waitingFor.data.player === playerId;
-  const isCopyRetargetForMe = waitingFor?.type === "CopyRetarget" && waitingFor.data.player === playerId;
-  // CR 115.7: A single-target retarget (Bolt Bend) is chosen on the board, so
-  // opponents are legal click targets when they appear in `legal_new_targets`.
-  const isRetargetChoiceForMe = waitingFor?.type === "RetargetChoice"
-    && waitingFor.data.player === playerId
-    && waitingFor.data.scope.type === "Single";
-  // CR 303.4g + CR 115.1: a returned / non-spell Aura that enchants a player
-  // (a Curse) is hosted by a board pick — opponents are legal click hosts when
-  // they appear in `legal_targets`.
-  const isReturnAsAuraForMe = waitingFor?.type === "ReturnAsAuraTarget"
-    && waitingFor.data.player === playerId;
-  const isTargeting = isHumanTargetSelection || isCopyRetargetForMe || isRetargetChoiceForMe || isReturnAsAuraForMe;
-  const currentLegalTargets = useMemo(() => {
-    if (isHumanTargetSelection) {
-      return waitingFor.data.selection?.current_legal_targets ?? [];
-    }
-    if (isCopyRetargetForMe) {
-      const slot = waitingFor.data.target_slots[waitingFor.data.current_slot ?? 0];
-      return slot?.legal_alternatives ?? [];
-    }
-    if (isRetargetChoiceForMe) {
-      return waitingFor.data.legal_new_targets;
-    }
-    if (isReturnAsAuraForMe) {
-      return waitingFor.data.legal_targets;
-    }
-    return [];
-  }, [isHumanTargetSelection, isCopyRetargetForMe, isRetargetChoiceForMe, isReturnAsAuraForMe, waitingFor]);
+  const canActForWaitingState = useCanActForWaitingState();
+  // `null` = the engine is not asking THIS client to click a target; `[]` = it is
+  // asking but nothing is legal yet. `isTargeting` needs that distinction, which
+  // is why the refs authority is read here rather than a length check. Two tab
+  // behaviours ride on it: the peek popover's targeting presentation (legal
+  // targets sorted to the front, cyan ring) and `showIncomingOnHover`, which
+  // decides whether hovering an attacking tab shows threats or the board peek.
+  const clickTargetRefs = useMemo(
+    () => (canActForWaitingState ? getWaitingForClickTargetRefs(waitingFor) : null),
+    [canActForWaitingState, waitingFor],
+  );
+  const isTargeting = clickTargetRefs !== null;
   const validPlayerTargetIds = useMemo(
-    () => currentLegalTargets
-      .filter((tgt): tgt is { Player: number } => "Player" in tgt)
-      .map((tgt) => tgt.Player),
-    [currentLegalTargets],
+    () => (canActForWaitingState ? getWaitingForPlayerChoiceIds(waitingFor) : []),
+    [canActForWaitingState, waitingFor],
   );
   // Object targets grouped by their controller, so each `OpponentTab` can
   // show only that opponent's legal targets in the peek popover. The set
@@ -203,7 +188,7 @@ export function OpponentHud({
   const legalObjectTargetsByController = useMemo(() => {
     const map = new Map<PlayerId, ObjectId[]>();
     if (!objectsMapForTargets) return map;
-    for (const tgt of currentLegalTargets) {
+    for (const tgt of clickTargetRefs ?? []) {
       if (!("Object" in tgt)) continue;
       const obj = objectsMapForTargets[tgt.Object];
       if (!obj) continue;
@@ -212,7 +197,7 @@ export function OpponentHud({
       map.set(obj.controller, list);
     }
     return map;
-  }, [currentLegalTargets, objectsMapForTargets]);
+  }, [clickTargetRefs, objectsMapForTargets]);
 
   const handlePlayerTarget = useCallback(
     (targetPlayerId: number) => {
@@ -643,7 +628,7 @@ function OpponentTab({
   // Hoisted above the early return (rules-of-hooks).
   const designations = usePlayerDesignations(playerId);
 
-  // Player-attached Auras (Curses, Faith's Fetters, Dictate of Kruphix…).
+  // Player-attached Auras (Curses, Paradox Haze — anything with `Enchant player`).
   // Surfaced as a corner badge so it stays visible in both density modes and
   // never competes with the inline `statusCluster` for width on 3-4 player
   // rails. Hover → portaled `AurasHoverPreview`

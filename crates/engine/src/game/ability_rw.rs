@@ -569,6 +569,39 @@ fn is_opaque_forwarded_target(f: &TargetFilter) -> bool {
 // one a population declares, rather than spot-checking fields — an omitted read
 // is fail-open for the CR 603.3b ordering gate, so field-by-field assertions
 // would be the wrong shape of check. Every field type already derives both.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CurrentPtReads(u8);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PtReadScope {
+    Source,
+    Board,
+}
+
+impl CurrentPtReads {
+    const SOURCE: Self = Self(1 << 0);
+    const BOARD: Self = Self(1 << 1);
+
+    fn merge(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    fn add(&mut self, scope: PtReadScope) {
+        self.0 |= match scope {
+            PtReadScope::Source => Self::SOURCE.0,
+            PtReadScope::Board => Self::BOARD.0,
+        };
+    }
+
+    fn contains(self, scope: PtReadScope) -> bool {
+        let bit = match scope {
+            PtReadScope::Source => Self::SOURCE.0,
+            PtReadScope::Board => Self::BOARD.0,
+        };
+        self.0 & bit != 0
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RwProfile {
     /// Source-scoped reads ONLY (live unless the structure freezes them, CR
@@ -602,6 +635,12 @@ pub(crate) struct RwProfile {
     /// single-bit read fact (precedent: `legacy_batch_prompt`); `drop_writes` keeps
     /// it (a read).
     reads_member_bound: bool,
+    /// CR 613.4b-c: the scopes at which the profile reads live power/toughness
+    /// after layer 7c. A `BasePower` read shares the ObjectPt axis for ordinary
+    /// conflicts, but ObjectCounters feed only these live subsets. Keeping the
+    /// scopes separate is essential: a source P/T read must not make an
+    /// unrelated board BasePower read depend on a counter write.
+    current_pt_reads: CurrentPtReads,
     /// Writes scoped to the member's own Source/Recipient object.
     writes_self: KindSet,
     /// Board-/player-/stack-scoped writes (INCLUDES creation, event-object, and
@@ -687,6 +726,7 @@ impl RwProfile {
             reads_event_live: false,
             legacy_batch_prompt: false,
             reads_member_bound: false,
+            current_pt_reads: CurrentPtReads::default(),
             writes_self: KindSet::EMPTY,
             writes_external: KindSet::EMPTY,
             writes_event_object: KindSet::EMPTY,
@@ -730,6 +770,7 @@ impl RwProfile {
         // CR 603.10a: an unclassified subtree may consult a per-member binding ⇒
         // fail-closed (refuses batch-T1).
         p.reads_member_bound = true;
+        p.current_pt_reads = CurrentPtReads::SOURCE.merge(CurrentPtReads::BOARD);
         p
     }
 
@@ -741,6 +782,7 @@ impl RwProfile {
         self.reads_event_live |= o.reads_event_live;
         self.legacy_batch_prompt |= o.legacy_batch_prompt;
         self.reads_member_bound |= o.reads_member_bound;
+        self.current_pt_reads = self.current_pt_reads.merge(o.current_pt_reads);
         self.writes_self = self.writes_self.union(o.writes_self);
         self.writes_external = self.writes_external.union(o.writes_external);
         self.writes_event_object = self.writes_event_object.union(o.writes_event_object);
@@ -909,6 +951,41 @@ struct SpanGate {
     write_mctrl: PlayerSpan,
 }
 
+struct FeedContext<'a> {
+    read_census: &'a Census,
+    write_census: &'a Census,
+    read_zones: &'a ZoneSpan,
+    write_zones: &'a ZoneSpan,
+    pt: PtReadContext,
+    spans: SpanGate,
+}
+
+#[derive(Clone, Copy)]
+struct PtReadContext {
+    reads: CurrentPtReads,
+    scope: PtReadScope,
+}
+
+impl<'a> FeedContext<'a> {
+    fn new(
+        read_census: &'a Census,
+        write_census: &'a Census,
+        read_zones: &'a ZoneSpan,
+        write_zones: &'a ZoneSpan,
+        pt: PtReadContext,
+        spans: SpanGate,
+    ) -> Self {
+        Self {
+            read_census,
+            write_census,
+            read_zones,
+            write_zones,
+            pt,
+            spans,
+        }
+    }
+}
+
 impl SpanGate {
     /// The ungated bundle (src-row call, §4.5): no player-kind reads route to
     /// `reads_src`, so the player/membership rows never fire here — `gate = false`
@@ -931,21 +1008,15 @@ impl SpanGate {
 /// aggregate reads already carry a `SetMembership` tag. `Other` conflicts with
 /// everything. `PlayerLife → SetMembership` is deliberately ABSENT (the CR 800.4a
 /// player-loss cascade is the documented source-actor residual, §1.2).
-fn feeds(
-    reads: KindSet,
-    writes: KindSet,
-    read_census: &Census,
-    write_census: &Census,
-    read_zones: &ZoneSpan,
-    write_zones: &ZoneSpan,
-    spans: SpanGate,
-) -> bool {
+fn feeds(reads: KindSet, writes: KindSet, context: FeedContext<'_>) -> bool {
     // PR-6.75 (CR 102.2/109.5): under `UniformAligned`, a player-keyed read and
     // write of the SAME kind conflict only when their relative-player spans can
     // name a common player. `!gate` ⇒ byte-identical (conjunct is `true`).
-    let player_ok = !spans.gate || player_span_overlap(spans.read_player, spans.write_player);
+    let player_ok = !context.spans.gate
+        || player_span_overlap(context.spans.read_player, context.spans.write_player);
     // PR-6.75 (CR 110.2): same, for the membership same-kind row's controller key.
-    let mctrl_ok = !spans.gate || player_span_overlap(spans.read_mctrl, spans.write_mctrl);
+    let mctrl_ok = !context.spans.gate
+        || player_span_overlap(context.spans.read_mctrl, context.spans.write_mctrl);
     if (writes.other && reads.any()) || (reads.other && writes.any()) {
         return true;
     }
@@ -971,7 +1042,7 @@ fn feeds(
         return true;
     }
     // CR 122.1 + CR 613.4: counters change P/T.
-    if reads.object_pt && writes.object_counters {
+    if context.pt.reads.contains(context.pt.scope) && reads.object_pt && writes.object_counters {
         return true;
     }
     // CR 119.3: a life write feeds a life-change journal read.
@@ -989,8 +1060,8 @@ fn feeds(
     // board count cannot feed a your-cards battlefield entry (Defense of the Heart).
     if reads.set_membership
         && writes.set_membership
-        && census_overlap(read_census, write_census)
-        && zone_overlap(read_zones, write_zones)
+        && census_overlap(context.read_census, context.write_census)
+        && zone_overlap(context.read_zones, context.write_zones)
         && mctrl_ok
     {
         return true;
@@ -1160,13 +1231,19 @@ pub(crate) fn profiles_conflict(p: &RwProfile, s: &GroupStructure) -> bool {
     if feeds(
         live_src_reads,
         src_writes,
-        &p.reads_membership_census,
-        &src_write_census,
-        &p.reads_membership_zones,
-        &src_write_zones,
-        // §4.5: no player-kind read routes to `reads_src`, so the gated rows never
-        // fire here — pass the inert ungated bundle (fail-closed, documented).
-        SpanGate::ungated(),
+        FeedContext::new(
+            &p.reads_membership_census,
+            &src_write_census,
+            &p.reads_membership_zones,
+            &src_write_zones,
+            PtReadContext {
+                reads: p.current_pt_reads,
+                scope: PtReadScope::Source,
+            },
+            // §4.5: no player-kind read routes to `reads_src`, so the gated rows never
+            // fire here — pass the inert ungated bundle (fail-closed, documented).
+            SpanGate::ungated(),
+        ),
     ) {
         return true;
     }
@@ -1222,11 +1299,17 @@ pub(crate) fn profiles_conflict(p: &RwProfile, s: &GroupStructure) -> bool {
     if feeds(
         board_reads,
         board_writes,
-        &p.reads_membership_census,
-        &board_write_census,
-        &p.reads_membership_zones,
-        &board_write_zones,
-        board_spans,
+        FeedContext::new(
+            &p.reads_membership_census,
+            &board_write_census,
+            &p.reads_membership_zones,
+            &board_write_zones,
+            PtReadContext {
+                reads: p.current_pt_reads,
+                scope: PtReadScope::Board,
+            },
+            board_spans,
+        ),
     ) {
         return true;
     }
@@ -1862,7 +1945,10 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         | TriggerCondition::AttackedThisTurn
         | TriggerCondition::FirstCombatPhaseOfTurn
         | TriggerCondition::HasMaxSpeed
-        | TriggerCondition::IsMonarch
+        // CR 725.1: no `legacy_player_scope` classifier exists, and both scopes
+        // the parser can emit (`Controller`, `ScopedPlayer`) have non-legacy
+        // `ControllerRef` analogues, so the monarch subject axis stays here.
+        | TriggerCondition::IsMonarch { .. }
         | TriggerCondition::IsInitiative
         | TriggerCondition::NoMonarch
         | TriggerCondition::HasCityBlessing
@@ -1998,7 +2084,9 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::DayNightIs { .. }
         | StaticCondition::CastVariantPaid { .. }
         | StaticCondition::ClassLevelGE { .. }
-        | StaticCondition::IsMonarch
+        // CR 725.1: no `legacy_player_scope` classifier exists; see the
+        // `legacy_trigger_condition` sibling arm for the same reasoning.
+        | StaticCondition::IsMonarch { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -2027,6 +2115,7 @@ fn legacy_duration(x: &Duration) -> bool {
         | Duration::UntilEndOfCombat
         | Duration::UntilHostLeavesPlay
         | Duration::UntilSourceExilesAnotherCard
+        | Duration::UntilOpponentBecomesMonarch
         | Duration::Permanent
         | Duration::UntilNextTurnOf { .. }
         | Duration::UntilEndOfNextTurnOf { .. }
@@ -2063,6 +2152,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         QuantityRef::CountersOn { scope, .. }
         | QuantityRef::Intensity { scope, .. }
         | QuantityRef::Power { scope, .. }
+        | QuantityRef::BasePower { scope, .. }
         | QuantityRef::Toughness { scope, .. }
         | QuantityRef::ObjectManaValue { scope, .. }
         | QuantityRef::ObjectColorCount { scope, .. }
@@ -2105,6 +2195,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
         | QuantityRef::TurnsTaken
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::ChosenNumber
@@ -2901,6 +2992,8 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::ReassembleContraptionOnSprocket { target, .. }
         | Effect::ApplySticker { target, .. }
         | Effect::RememberCard { target }
+        // CR 725.1 + CR 115.1: "target opponent becomes the monarch".
+        | Effect::BecomeMonarch { target }
         | Effect::GrantCastingPermission { target, .. }
         | Effect::AddTargetReplacement { target, .. }
         | Effect::DiscardCard { target, .. }
@@ -3440,7 +3533,6 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::Investigate
         | Effect::Tribute { .. }
         | Effect::TimeTravel
-        | Effect::BecomeMonarch
         | Effect::NoOp
         | Effect::Proliferate
         | Effect::Populate
@@ -3561,6 +3653,26 @@ fn reads_src_of(k: StateKind) -> RwProfile {
     p.reads_src = KindSet::one(k);
     p
 }
+
+fn current_pt_scope(scope: &ObjectScope) -> CurrentPtReads {
+    match scope {
+        ObjectScope::Source => CurrentPtReads::SOURCE,
+        ObjectScope::Target | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+            CurrentPtReads::BOARD
+        }
+        // CR 120.1 + CR 208.3: a batch-source P/T read is a live board
+        // characteristic read, so counter writes to the batch population feed it.
+        ObjectScope::BatchSource => CurrentPtReads::BOARD,
+        ObjectScope::Recipient
+        | ObjectScope::EventSource
+        | ObjectScope::CostPaidObject
+        | ObjectScope::AmassedArmy
+        | ObjectScope::EventTarget
+        | ObjectScope::OtherRevealedCard
+        | ObjectScope::OwnedLinkedExileCard => CurrentPtReads::default(),
+    }
+}
+
 /// CR 603.10a: a source-referential look-back / cast-time fact — frozen, never
 /// sibling-fed, but marks source-dependence (`source_independent` false).
 fn frozen_source_read() -> RwProfile {
@@ -3764,6 +3876,13 @@ fn characteristic_source_read_bounded(source: &CardTypeSetSource) -> RwProfile {
 /// value kind AND `SetMembership` (a membership write changes the aggregate, §2).
 fn board_value_aggregate_read(filter: &TargetFilter, value: StateKind) -> RwProfile {
     let mut p = board_membership_read(filter);
+    if matches!(value, StateKind::ObjectPt) {
+        if filter_is_self_scoped(filter) {
+            p.current_pt_reads.add(PtReadScope::Source);
+        } else {
+            p.current_pt_reads.add(PtReadScope::Board);
+        }
+    }
     if filter_is_self_scoped(filter) {
         p.reads_src.set(value);
     } else {
@@ -3823,7 +3942,15 @@ fn share_quality_operand_read(f: &TargetFilter) -> RwProfile {
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired => RwProfile::empty(),
         // Fail-closed: any other reference is a live board characteristic read.
-        _ => reads_board_of(StateKind::ObjectPt),
+        _ => {
+            let mut p = reads_board_of(StateKind::ObjectPt);
+            // CR 613.4c: this live board characteristic carrier observes the
+            // post-counter value, so an ObjectCounters write remains a real
+            // dependency. Keep the scope on the board row; frozen and
+            // per-resolution operands above must stay independent.
+            p.current_pt_reads.add(PtReadScope::Board);
+            p
+        }
     }
 }
 
@@ -3904,11 +4031,23 @@ fn walk_ability(
         target_choice_timing: _,
         description: _,
         selected_mode_labels: _, // display snapshots, no game-state read/write
-        min_x_value: _,          // u32, no read
+        // CR 700.2: mode-root position marker — reads and writes NOTHING on any
+        // of the profiler's axes (kind+scope, `reads_member_bound`,
+        // `reads_event_live`, `writes_event_object`). It gates when the chain's
+        // tracked-set identity RESETS, which narrows what a later member-bound
+        // read can see; narrowing never adds a read, and the member-bound axis is
+        // already set by the `TrackedSet`-bearing effects themselves.
+        modal_instruction_ordinal: _,
+        // CR 608.2c: structural record of what a chain SPLIT detached. Read-FREE:
+        // it selects nothing from game state and gates only whether a producer
+        // may publish its population, which can narrow but never widen.
+        detached_remainder: _,
+        min_x_value: _, // u32, no read
         cant_be_copied: _,
         copy_count_status: _,
         forward_result: _,
         distribution: _,
+        distribute: _, // announcement unit, no state read/write axis
         chosen_x: _,
         cost_paid_object: _,
         noted_mana_payment: _, // concrete captured payment snapshot, no read/write effect
@@ -4171,6 +4310,7 @@ fn rw_duration(x: &Duration) -> RwProfile {
         | Duration::UntilEndOfCombat
         | Duration::UntilHostLeavesPlay
         | Duration::UntilSourceExilesAnotherCard
+        | Duration::UntilOpponentBecomesMonarch
         | Duration::Permanent => RwProfile::empty(),
         Duration::UntilNextTurnOf { player, .. }
         | Duration::UntilEndOfNextTurnOf { player, .. }
@@ -4971,6 +5111,7 @@ fn rw_effect(
         Effect::Manifest {
             target: _,
             count,
+            object_source,
             enters_under: _,
             profile: _,
         } => {
@@ -4979,6 +5120,15 @@ fn rw_effect(
             p.writes_membership_external_census.merge(Census::Any);
             p.writes_membership_external_zones.merge(ZoneSpan::Any);
             p.merge(rw_quantity_expr(count));
+            // CR 701.40a: `object_source` (Some) names already-chosen objects
+            // being manifested — a membership WRITE target. The membership
+            // write is already maximal-conservative (Census/Zone Any) above;
+            // flag its D5 / member-bound referents (mirrors the `Cloak` arm
+            // below).
+            if let Some(src) = object_source {
+                flag_legacy_write_target(&mut p, src);
+                flag_member_bound_write_target(&mut p, src);
+            }
             (p, None)
         }
         Effect::ManifestDread => {
@@ -5614,12 +5764,19 @@ fn rw_effect(
             min: _,
             max: _,
         }
-        | Effect::BecomeMonarch
         | Effect::RingTemptsYou
         | Effect::TimeTravel
         | Effect::Planeswalk
         | Effect::VentureIntoDungeon
         | Effect::SolveCase => (ext_write(StateKind::Other), None),
+        // CR 725.1 + CR 725.3: the designation write, plus the chosen-target
+        // write axis — "target opponent becomes the monarch" writes to a player
+        // named by a CR 115.1 target slot, exactly like `Effect::ExtraTurn`.
+        Effect::BecomeMonarch { target } => {
+            let mut p = ext_write(StateKind::Other);
+            flag_legacy_write_target(&mut p, target);
+            (p, None)
+        }
         Effect::ForceAttack {
             target,
             required_defender: _,
@@ -6025,8 +6182,12 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         QuantityRef::CountersOn { scope, .. } | QuantityRef::Intensity { scope, .. } => {
             read_object_scope(scope, StateKind::ObjectCounters)
         }
-        QuantityRef::Power { scope, .. }
-        | QuantityRef::Toughness { scope, .. }
+        QuantityRef::Power { scope, .. } | QuantityRef::Toughness { scope, .. } => {
+            let mut p = read_object_scope(scope, StateKind::ObjectPt);
+            p.current_pt_reads = current_pt_scope(scope);
+            p
+        }
+        QuantityRef::BasePower { scope, .. }
         | QuantityRef::ObjectManaValue { scope, .. }
         | QuantityRef::ObjectColorCount { scope, .. }
         | QuantityRef::ObjectNameWordCount { scope, .. }
@@ -6111,6 +6272,7 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         // (member-invariant under uniformity).
         QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
         | QuantityRef::TurnsTaken
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::AttackedThisTurn { .. }
@@ -6261,7 +6423,9 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
             let mut p = if *use_lki {
                 frozen_source_read()
             } else {
-                reads_board_of(StateKind::ObjectPt)
+                let mut p = reads_board_of(StateKind::ObjectPt);
+                p.current_pt_reads.add(PtReadScope::Board);
+                p
             };
             // CR 608.2c (PR-6.75 c5): Some(n) tests a specific DECLARED chain slot
             // resolved per member instance — the same per-member binding
@@ -6281,13 +6445,22 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         // begin-combat return is gated on controlling a creature with power >= 4 (a
         // P/T-constrained control census) — proving disjointness needs the runtime
         // source P/T the profile cannot see, so its control read stays fail-closed.
-        AbilityCondition::SourceMatchesFilter { filter: _ } => reads_src_of(StateKind::ObjectPt),
+        AbilityCondition::SourceMatchesFilter { filter: _ } => {
+            let mut p = reads_src_of(StateKind::ObjectPt);
+            p.current_pt_reads.add(PtReadScope::Source);
+            p
+        }
         AbilityCondition::SourceIsTapped => reads_src_of(StateKind::TapState),
         AbilityCondition::ControllerControlsMatching { filter } => board_membership_read(filter),
         AbilityCondition::ScopedPlayerMatches { filter } => rw_player_filter(filter),
         AbilityCondition::TriggeringSpellTargetsFilter { filter: _ }
         | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
-        | AbilityCondition::ZoneChangedThisWay { filter: _ }
+        // `destination` reads the moved object's CURRENT zone — the same
+        // event-live read bucket as the ledger lookup itself.
+        | AbilityCondition::ZoneChangedThisWay {
+            filter: _,
+            destination: _,
+        }
         // CR 615.5: reads the prevented event's live damage-source object.
         | AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter: _ }
         | AbilityCondition::CostPaidObjectMatchesFilter { filter: _ } => reads_event_live(),
@@ -6373,6 +6546,10 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
 
 fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
     match x {
+        // CR 725.1: the monarch designation itself is global state with no
+        // member/event binding; the read profile is entirely determined by the
+        // subject scope, classified through the shared `PlayerScope` walker.
+        TriggerCondition::IsMonarch { player } => rw_player_scope(player),
         TriggerCondition::GainedLife { minimum: _ }
         | TriggerCondition::LostLife
         | TriggerCondition::LostLifeLastTurn => reads_player_of(StateKind::JournalLife),
@@ -6415,7 +6592,11 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
             reads_board_of(StateKind::ObjectCounters)
         }
         TriggerCondition::SourceIsTapped => reads_src_of(StateKind::TapState),
-        TriggerCondition::SourceMatchesFilter { filter: _ } => reads_src_of(StateKind::ObjectPt),
+        TriggerCondition::SourceMatchesFilter { filter: _ } => {
+            let mut p = reads_src_of(StateKind::ObjectPt);
+            p.current_pt_reads.add(PtReadScope::Source);
+            p
+        }
         TriggerCondition::NoSpellsCastLastTurn
         | TriggerCondition::TwoOrMoreSpellsCastLastTurn
         | TriggerCondition::CastSpellThisTurn { .. }
@@ -6473,7 +6654,6 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         | TriggerCondition::AttackedThisTurn
         | TriggerCondition::FirstCombatPhaseOfTurn
         | TriggerCondition::HasMaxSpeed
-        | TriggerCondition::IsMonarch
         | TriggerCondition::IsInitiative
         | TriggerCondition::NoMonarch
         | TriggerCondition::HasCityBlessing
@@ -6495,6 +6675,9 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
 
 fn rw_static_condition(x: &StaticCondition) -> RwProfile {
     match x {
+        // CR 725.1: see the `rw_trigger_condition` sibling — the read profile is
+        // entirely determined by the monarch subject scope.
+        StaticCondition::IsMonarch { player } => rw_player_scope(player),
         StaticCondition::DevotionGE { .. }
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents => reads_zone_membership(),
         StaticCondition::IsPresent { filter } => match filter {
@@ -6528,7 +6711,11 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         StaticCondition::AnyPlayerAttackedYouLastTurn => {
             reads_player_of(StateKind::TurnStructure)
         }
-        StaticCondition::SourceMatchesFilter { filter: _ } => reads_src_of(StateKind::ObjectPt),
+        StaticCondition::SourceMatchesFilter { filter: _ } => {
+            let mut p = reads_src_of(StateKind::ObjectPt);
+            p.current_pt_reads.add(PtReadScope::Source);
+            p
+        }
         // CR 401/402: reads the controller's library top card (contents + order).
         // A draw/scry/surveil/mill/shuffle writes `HandLibrary`, so marking this
         // gate as reading `HandLibrary` invalidates it whenever the library top
@@ -6574,7 +6761,6 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         | StaticCondition::DayNightIs { .. }
         | StaticCondition::CastVariantPaid { .. }
         | StaticCondition::ClassLevelGE { .. }
-        | StaticCondition::IsMonarch
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -7054,6 +7240,18 @@ mod tests {
     fn ra(effect: Effect) -> ResolvedAbility {
         ResolvedAbility::new(effect, vec![], ObjectId(1), PlayerId(0))
     }
+
+    #[test]
+    fn unassigned_distribution_unit_is_rw_inert() {
+        let base = ra(Effect::NoOp);
+        let mut divided = base.clone();
+        divided.distribute = Some(crate::types::game_state::DistributionUnit::Damage);
+
+        assert_eq!(
+            format!("{:?}", ability_rw_profile(&base)),
+            format!("{:?}", ability_rw_profile(&divided))
+        );
+    }
     fn cond(mut a: ResolvedAbility, c: AbilityCondition) -> ResolvedAbility {
         a.condition = Some(c);
         a
@@ -7072,6 +7270,16 @@ mod tests {
     }
     fn power_src() -> QuantityRef {
         QuantityRef::Power {
+            scope: ObjectScope::Source,
+        }
+    }
+    fn base_power_target() -> QuantityRef {
+        QuantityRef::BasePower {
+            scope: ObjectScope::Target,
+        }
+    }
+    fn base_power_src() -> QuantityRef {
+        QuantityRef::BasePower {
             scope: ObjectScope::Source,
         }
     }
@@ -7549,6 +7757,18 @@ mod tests {
             qcheck(power_src(), 6),
         );
         assert!(conflicts(&a, &se()));
+    }
+
+    #[test]
+    fn base_power_read_does_not_feed_from_counter_write() {
+        // CR 208.4b + CR 613.4b: counters modify current P/T in layer 7c,
+        // but a base-power read observes the layer-7b carrier and must not
+        // create a false dependency on the counter writer.
+        let a = cond(
+            ra(put_counter_all(qfix(1), creature())),
+            qcheck(base_power_src(), 4),
+        );
+        assert!(!conflicts(&a, &se()));
     }
 
     #[test]
@@ -8483,6 +8703,25 @@ mod tests {
         );
     }
 
+    /// CR 613.4b-c: a BasePower read observes the layer-7b base value, not the
+    /// layer-7c counter-modified value. It therefore shares the ObjectPt axis
+    /// with base-setting writes but does not receive the ObjectCounters → live
+    /// P/T feed that a Power/Toughness read receives.
+    #[test]
+    fn base_power_read_does_not_depend_on_counter_write() {
+        let reader = cond(
+            ra(put_counter_all(qfix(1), creature())),
+            qcheck(base_power_target(), 1),
+        );
+        let profile = ability_rw_profile(&reader);
+        assert!(!profile.current_pt_reads.contains(PtReadScope::Board));
+        assert!(
+            !conflicts(&reader, &batch()),
+            "BasePower target read must not conflict with an unrelated counter write"
+        );
+        assert!(profile.writes_external.object_counters);
+    }
+
     /// The new `StateKind::TurnStructure` kind: `KindSet` add/union/subtract behave,
     /// and the `feeds` matrix isolates it — a sequencing read × sequencing write
     /// conflicts, but it neither feeds nor is fed by `ObjectPt`.
@@ -8501,16 +8740,58 @@ mod tests {
         let (nc, nz) = (Census::None, ZoneSpan::None);
         let sg = SpanGate::ungated();
         assert!(
-            feeds(ts, ts, &nc, &nc, &nz, &nz, sg),
+            feeds(
+                ts,
+                ts,
+                FeedContext::new(
+                    &nc,
+                    &nc,
+                    &nz,
+                    &nz,
+                    PtReadContext {
+                        reads: CurrentPtReads::default(),
+                        scope: PtReadScope::Board,
+                    },
+                    sg,
+                ),
+            ),
             "TurnStructure read × write ⇒ self-conflict"
         );
         let pt = KindSet::one(StateKind::ObjectPt);
         assert!(
-            !feeds(pt, ts, &nc, &nc, &nz, &nz, sg),
+            !feeds(
+                pt,
+                ts,
+                FeedContext::new(
+                    &nc,
+                    &nc,
+                    &nz,
+                    &nz,
+                    PtReadContext {
+                        reads: CurrentPtReads::default(),
+                        scope: PtReadScope::Board,
+                    },
+                    sg,
+                ),
+            ),
             "TurnStructure write does not feed ObjectPt"
         );
         assert!(
-            !feeds(ts, pt, &nc, &nc, &nz, &nz, sg),
+            !feeds(
+                ts,
+                pt,
+                FeedContext::new(
+                    &nc,
+                    &nc,
+                    &nz,
+                    &nz,
+                    PtReadContext {
+                        reads: CurrentPtReads::default(),
+                        scope: PtReadScope::Board,
+                    },
+                    sg,
+                ),
+            ),
             "ObjectPt write does not feed TurnStructure"
         );
     }

@@ -11,6 +11,7 @@ use crate::game::mana_sources;
 use crate::types::ability::{ChoiceType, CounterCostSelection, TargetRef};
 use crate::types::actions::{
     CastChoice, GameAction, LearnOption, MulliganChoice, OutsideGameSelection,
+    ResolveAllConsentDecision,
 };
 use crate::types::card::LayoutKind;
 use crate::types::card_type::CoreType;
@@ -18,7 +19,8 @@ use crate::types::counter::CounterMatch;
 use crate::types::game_state::{
     CastOfferKind, CastPaymentMode, CastingVariant, CompanionDeclaration, ConvokeMode, CostResume,
     CounterCostChoice, CounterMoveChoice, CounterRemoveChoice, GameState, MulliganDecisionPhase,
-    PayCostKind, PayableResource, PendingMulliganAction, TargetSelectionSlot, WaitingFor,
+    PayCostKind, PayableResource, PendingMulliganAction, RetargetScope, TargetSelectionSlot,
+    WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::interaction::MAX_INTERACTION_LIST_LEN;
@@ -380,6 +382,36 @@ fn permute_into(
 /// constructing `GameAction::Concede { player_id }` directly.
 pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
     match &state.waiting_for {
+        WaitingFor::ResolveAllConsent {
+            epoch,
+            representative,
+        } => {
+            let mut actions = vec![
+                candidate(
+                    GameAction::RespondResolveAllConsent {
+                        epoch: *epoch,
+                        decision: ResolveAllConsentDecision::Grant,
+                    },
+                    TacticalClass::Selection,
+                    Some(*representative),
+                ),
+                candidate(
+                    GameAction::RespondResolveAllConsent {
+                        epoch: *epoch,
+                        decision: ResolveAllConsentDecision::Decline,
+                    },
+                    TacticalClass::Selection,
+                    Some(*representative),
+                ),
+            ];
+            append_resolve_all_revocations(state, *epoch, &mut actions);
+            actions
+        }
+        WaitingFor::ResolveAllReady { epoch } => {
+            let mut actions = Vec::new();
+            append_resolve_all_revocations(state, *epoch, &mut actions);
+            actions
+        }
         WaitingFor::MeldPairChoice { player, choices } => choices
             .iter()
             .map(|choice| {
@@ -847,6 +879,35 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
     }
 }
 
+fn append_resolve_all_revocations(
+    state: &GameState,
+    epoch: u64,
+    actions: &mut Vec<CandidateAction>,
+) {
+    let Some(run) = state
+        .resolve_all_consent_run
+        .as_ref()
+        .filter(|run| run.epoch == epoch)
+    else {
+        return;
+    };
+    actions.extend(
+        run.participants
+            .iter()
+            .filter(|participant| participant.granted)
+            .map(|participant| {
+                candidate(
+                    GameAction::RevokeResolveAllConsent {
+                        epoch,
+                        representative: participant.representative,
+                    },
+                    TacticalClass::Selection,
+                    Some(participant.representative),
+                )
+            }),
+    );
+}
+
 pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
     candidate_actions_broad_with_probe(state, None)
 }
@@ -856,7 +917,9 @@ pub fn candidate_actions_broad_with_probe(
     probe: Option<&casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
     let actions = match &state.waiting_for {
-        WaitingFor::MeldPairChoice { .. }
+        WaitingFor::ResolveAllConsent { .. }
+        | WaitingFor::ResolveAllReady { .. }
+        | WaitingFor::MeldPairChoice { .. }
         | WaitingFor::MeldAttackTargetChoice { .. }
         | WaitingFor::EntryAttackTargetChoice { .. } => candidate_actions_exact(state),
         WaitingFor::Priority { player } => priority_actions_with_probe(state, *player, probe),
@@ -3039,20 +3102,26 @@ pub fn candidate_actions_broad_with_probe(
                 )]
             }
         }
-        // CR 115.7: Retarget — keep current targets as default.
+        // CR 115.7a: propose every legal alternative. The previous arm proposed
+        // ONLY `current_targets`, which `apply_retarget` rejects whenever the
+        // current target is not in `legal_new_targets` — three rejections in a
+        // row halt the AI controller and freeze the game.
         WaitingFor::RetargetChoice {
             player,
+            stack_entry_index,
+            scope,
             current_targets,
-            ..
-        } => {
-            vec![candidate(
-                GameAction::RetargetSpell {
-                    new_targets: current_targets.clone(),
-                },
-                TacticalClass::Selection,
-                Some(*player),
-            )]
-        }
+            legal_new_targets,
+        } => retarget_actions(
+            state,
+            *stack_entry_index,
+            scope,
+            current_targets,
+            legal_new_targets,
+        )
+        .into_iter()
+        .map(|action| candidate(action, TacticalClass::Selection, Some(*player)))
+        .collect(),
         // CR 701.62a: AI selects one card to manifest — one action per card option
         WaitingFor::ManifestDreadChoice { player, cards, .. } => {
             if cards.is_empty() {
@@ -3505,7 +3574,16 @@ fn semantic_candidate_actions_with_probe(
     probe: Option<&casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
     let mut actions = candidate_actions_exact(state);
-    actions.extend(candidate_actions_broad_with_probe(state, probe));
+    // Resolve All consent is wholly represented by its finite exact domain.
+    // The broad enumerator delegates these same states to `candidate_actions_exact`
+    // for broad-only callers, so composing both here would expose every
+    // Grant, Decline, and Revoke choice twice.
+    if !matches!(
+        state.waiting_for,
+        WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
+    ) {
+        actions.extend(candidate_actions_broad_with_probe(state, probe));
+    }
 
     let has_pending_cast = state.waiting_for.has_pending_cast()
         || (matches!(state.waiting_for, WaitingFor::DistributeAmong { .. })
@@ -3531,9 +3609,184 @@ fn semantic_candidate_actions_with_probe(
 
 fn authorize_candidate_actors(state: &GameState, actions: &mut [CandidateAction]) {
     for action in actions {
-        action.metadata.actor = action.metadata.actor.map(|player| {
-            crate::game::turn_control::authorized_submitter_for_player(state, player)
-        });
+        action.metadata.actor = match &action.action {
+            GameAction::RespondResolveAllConsent { epoch, .. } => match &state.waiting_for {
+                WaitingFor::ResolveAllConsent {
+                    epoch: active_epoch,
+                    representative,
+                } if *epoch == *active_epoch => state
+                    .resolve_all_consent_run
+                    .as_ref()
+                    .filter(|run| run.epoch == *active_epoch)
+                    .and_then(|run| run.authorized_submitter_for(*representative)),
+                _ => None,
+            },
+            GameAction::RevokeResolveAllConsent {
+                epoch,
+                representative,
+            } => crate::game::turn_control::resolve_all_granted_submitter(
+                state,
+                *epoch,
+                *representative,
+            ),
+            _ => action.metadata.actor.map(|player| {
+                crate::game::turn_control::authorized_submitter_for_player(state, player)
+            }),
+        };
+    }
+}
+
+/// CR 115.7: Submissions `apply_retarget` will accept for a parked
+/// `RetargetChoice`, derived from the prompt's own payload and filtered through
+/// the same per-slot authority the reducer consults. Sound by construction, and
+/// complete for `Single`; the `All` arm bounds its enumeration deliberately —
+/// see ENUMERATION BOUND below. Not a legality oracle: a submission absent from
+/// this set is not thereby illegal.
+///
+/// Shared by the engine's candidate generator and `phase-ai`'s fallback so the
+/// two cannot disagree about what a legal retarget is — they previously agreed
+/// only in being wrong the same way.
+pub fn retarget_actions(
+    state: &GameState,
+    stack_entry_index: usize,
+    scope: &RetargetScope,
+    current_targets: &[TargetRef],
+    legal_new_targets: &[TargetRef],
+) -> Vec<GameAction> {
+    // CR 115.7a: the pool is FLAT for a multi-role mana node — it `flat_map`s
+    // every surfaced role filter together, so it is a per-slot SUPERSET
+    // (`change_targets.rs`, multi-role branch). `apply_retarget` re-checks each
+    // changed submission positionally via `retarget_slot_violation`, so a
+    // proposal built from a pool member legal only for another slot would be
+    // rejected. Consult the same authority here rather than re-deriving
+    // legality, so every proposed action is accepted by construction —
+    // including CR 115.7d's unchanged submissions, which that authority exempts.
+    let slot_legal = |new_targets: &[TargetRef]| {
+        state
+            .stack
+            .get(stack_entry_index)
+            .and_then(|entry| entry.ability())
+            .is_none_or(|ability| {
+                crate::game::ability_utils::retarget_slot_violation(
+                    state,
+                    ability,
+                    current_targets,
+                    new_targets,
+                )
+                .is_none()
+            })
+    };
+
+    match scope {
+        // CR 115.7a: "each target can be changed only to another legal target."
+        // One proposal per member of the pool `apply_retarget` validates
+        // against. That pool normally still contains the current target — that
+        // member IS CR 115.7a's "the original target is unchanged" fallback, so
+        // it is offered rather than filtered out. An empty pool yields no
+        // proposals; after Unit 1 `change_targets::resolve` no longer parks that
+        // state.
+        //
+        // KNOWN GAP, carried deliberately. Each proposal is a ONE-element list,
+        // because `apply_retarget`'s `Single` arm hard-requires exactly one
+        // target. When the parked entry's `current_targets` has MORE than one
+        // element, applying such a proposal assigns `ability.targets` that
+        // one-element list and TRUNCATES the remaining slots — contrary to BOTH
+        // subrules that reach this arm (CR 115.7a / CR 115.7b), neither of which
+        // permits an undisturbed slot to be dropped.
+        // `change_targets::forced_retarget_targets` already implements that slot
+        // preservation on the FORCED path; the interactive path has no
+        // equivalent, and cannot have one while the reducer's arm rejects any
+        // length but 1.
+        //
+        // TWO TEMPLATES, TWO REMEDIES. `try_parse_change_targets`
+        // (parser/oracle_effect/mod.rs) maps two oracle wordings governed by
+        // DIFFERENT subrules onto this one `RetargetScope::Single` variant, so
+        // the deferred fix must DISPATCH ON THE TEMPLATE rather than apply CR
+        // 115.7b's remedy uniformly:
+        //   - "change a target of " → CR 115.7b: "the process described in rule
+        //     115.7a is followed, except that only one of those targets may be
+        //     changed (rather than all of them or none of them)". Remedy: one
+        //     slot changes, every other declared target stays in place.
+        //   - "change the target of " → CR 115.7a, which ends: "If all the
+        //     targets aren't changed to other legal targets, none of them are
+        //     changed." Remedy for a multi-target entry: ALL-OR-NONE, not
+        //     one-changes-rest-stay. This is Bolt Bend's wording. Bolt Bend
+        //     supplies the WORDING only: it reads "with a single target". Of the
+        //     22 printed cards matching `o:"change the target of"`, the six that
+        //     omit that literal phrase (I'm Rubber You're Glue, Muck Drubb,
+        //     Rebound, Ricochet, Silver Wyvern, Torchling) each restrict to one
+        //     target by the equivalent "targets ONLY <x>" / "a single <x>"
+        //     construction instead. So no printed card on this template can
+        //     present a multi-target entry — the gap below is reachable today
+        //     only by synthetic stack entries, which is why its fixture is
+        //     labelled synthetic rather than card-driven.
+        //
+        //   DEFERRED(out-of-run): interactive Single-scope retarget collapses
+        //   multi-target lists (CR 115.7a / CR 115.7b) — upstream cause filter.rs
+        //   FilterProp::HasSingleTarget is permissive with no resolution-time
+        //   validation; fix needs filter.rs + interaction.rs, both outside phase
+        //   1's frozen scope.
+        //
+        // Behavioural delta this phase knowingly takes: at base the AI FROZE on
+        // this class (its sole proposal was rejected, so nothing could discharge
+        // the prompt); now it PROGRESSES and TRUNCATES. Pinned by
+        // `retarget_prompt_softlock.rs` row 2e and `phase-ai`'s
+        // `retarget_fallback_action.rs` row 2f, whose SCOPE notes record the
+        // acceptance as observed behaviour and explicitly not as CR-115.7a /
+        // CR-115.7b legality.
+        RetargetScope::Single => legal_new_targets
+            .iter()
+            .map(|target| vec![target.clone()])
+            .filter(|new_targets| slot_legal(new_targets))
+            .map(|new_targets| GameAction::RetargetSpell { new_targets })
+            .collect(),
+        // CR 115.7d: "the player may leave any number of the targets unchanged,
+        // even if those targets would be illegal." Leaving every target
+        // unchanged anchors the list; each single-slot substitution to another
+        // legal target is offered on top of it. The anchor goes through the same
+        // `slot_legal` filter as every other proposal and passes unconditionally,
+        // because `retarget_slot_violation` exempts unchanged positions — no
+        // carve-out is needed, and none is made.
+        //
+        // ENUMERATION BOUND, stated rather than left silent: this emits the
+        // unchanged anchor plus every SINGLE-slot substitution. CR 115.7d permits
+        // changing several targets at once ("any number of the targets
+        // unchanged"), and those simultaneous multi-slot proposals are NOT
+        // enumerated — the set would be the product of the per-slot pools, and
+        // bounding the AI's branching factor is worth more than the extra
+        // proposals. This is a search-space bound, not a legality claim: the
+        // reducer accepts a multi-slot change if some other agent submits one,
+        // because `retarget_slot_violation` validates each changed position
+        // independently and never requires that only one position moved.
+        RetargetScope::All => {
+            let mut actions = Vec::new();
+            let anchor = current_targets.to_vec();
+            if slot_legal(&anchor) {
+                actions.push(GameAction::RetargetSpell {
+                    new_targets: anchor,
+                });
+            }
+            for slot in 0..current_targets.len() {
+                for target in legal_new_targets {
+                    if current_targets[slot] == *target {
+                        continue;
+                    }
+                    let mut new_targets = current_targets.to_vec();
+                    new_targets[slot] = target.clone();
+                    if slot_legal(&new_targets) {
+                        actions.push(GameAction::RetargetSpell { new_targets });
+                    }
+                }
+            }
+            actions
+        }
+        // A forced retarget is applied by `change_targets::resolve` without a
+        // prompt, so this scope never reaches an interactive `RetargetChoice`;
+        // `apply_retarget` rejects it unconditionally (`engine.rs`, the
+        // `RetargetScope::ForcedTo(_)` arm) and the parser emits only
+        // `Single`/`All` (`parser/oracle_effect/mod.rs`, the retarget-scope
+        // combinator). There is no legal submission to propose.
+        RetargetScope::ForcedTo(_) => Vec::new(),
     }
 }
 
@@ -3970,6 +4223,45 @@ pub(crate) fn priority_actions_with_probe(
                     }
                 }
             }
+        }
+    }
+
+    // CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b: turning a face-down
+    // permanent face up is a special action available ANY time its controller
+    // has priority — no timing gate, no stack, either player's turn.
+    //
+    // Offered from the same admission authority the Priority preflight uses
+    // (`morph::turn_face_up_offer`), so the engine's progress gate and the list
+    // the client renders cannot disagree. They did until now: the reducer
+    // accepted `GameAction::TurnFaceUp` and the preflight counted it as
+    // progress, but this list never emitted it, so no client could ever send it
+    // and the whole morph / megamorph / disguise / manifest / cloak class was
+    // unturnable in play (#6732, #4381).
+    //
+    // Split second does NOT stop it: CR 702.61b prohibits casting spells and
+    // activating abilities, and a special action is neither (CR 116.1).
+    for &object_id in &state.battlefield {
+        let Some(object) = state.objects.get(&object_id) else {
+            continue;
+        };
+        if !object.face_down || object.controller != player {
+            continue;
+        }
+        match crate::game::morph::turn_face_up_offer(state, player, object_id) {
+            Some(crate::game::morph::TurnFaceUpOffer::Ready) => {
+                actions.push(candidate(
+                    GameAction::TurnFaceUp { object_id, x: 0 },
+                    TacticalClass::Ability,
+                    Some(player),
+                ));
+            }
+            // CR 107.3d: the player chooses X immediately before paying, so a
+            // flat action list has no value to offer. Announcing one here would
+            // be the engine choosing for them. Stated rather than silently
+            // dropped: Warbreak Trumpeter, Bane of the Living and Aurelia's
+            // Vindicator stay unofferable until the client can announce an X for
+            // a special action.
+            Some(crate::game::morph::TurnFaceUpOffer::RequiresChosenX) | None => {}
         }
     }
 
@@ -7296,6 +7588,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
         let baseline = candidate_actions_broad(&state);
@@ -7321,6 +7614,7 @@ mod tests {
             constraint: SearchSelectionConstraint::DistinctQualities {
                 qualities: vec![SharedQuality::Name],
             },
+            ordering_hint: Default::default(),
             split: None,
         };
         let filtered = candidate_actions_broad(&state);
@@ -7383,6 +7677,7 @@ mod tests {
             constraint: SearchSelectionConstraint::DistinctQualities {
                 qualities: vec![SharedQuality::Name],
             },
+            ordering_hint: Default::default(),
             split: None,
         };
         let actions = candidate_actions_broad(&state);
@@ -7435,6 +7730,7 @@ mod tests {
                 up_to,
                 allows_partial_find: false,
                 constraint: SearchSelectionConstraint::None,
+                ordering_hint: Default::default(),
                 split: None,
             };
             candidate_actions_broad(&state).len()
@@ -7482,6 +7778,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
         (state, ids)
@@ -7574,6 +7871,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
         assert!(

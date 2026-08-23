@@ -14,8 +14,8 @@ use engine::ai_support::{
 use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
 use engine::database::{CardDatabase, CardSearchQuery};
 use engine::game::engine::{
-    apply, apply_for_simulation, resolve_all_fast_forward, ResolveAllCallbackDecision,
-    ResolveAllFastForwardResult as BatchResolveResult,
+    apply, apply_for_simulation, recover_orphaned_resolve_all, resolve_all_ready_access,
+    resolve_all_ready_prefix, ResolveAllReadyAccess,
 };
 use engine::game::interaction::{bind_interaction_authority, submit_interaction};
 use engine::game::preview::{compute_preview_diff, preview_auto_payment_sources};
@@ -2175,8 +2175,8 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
 
 /// The natively-callable body of [`restore_game_state`].
 ///
-/// Split for the same reason — and in the same shape — as `resolve_all_inner`
-/// and `scored_candidates_inner`: the `#[wasm_bindgen]` shell may only run on
+/// Split for the same reason — and in the same shape — as `scored_candidates_inner`:
+/// the `#[wasm_bindgen]` shell may only run on
 /// wasm32. Off-target, `JsValue::from_str` panics inside a function that cannot
 /// unwind, so a shell that merely RETURNS an error aborts the whole process with
 /// SIGABRT instead of failing the test. A native test that calls the shell is
@@ -2198,6 +2198,10 @@ fn restore_game_state_inner(json_str: &str) -> Result<(), String> {
     backfill_legacy_debug_permissions(&mut state, restored.debug_permitted_was_serialized, false);
     finalize_public_state(&mut state);
     bind_interaction_session(&mut state);
+    // A snapshot written while a Resolve All latch was outstanding restores
+    // with no acting seat; the consumer that would have advanced it lived in
+    // the worker that produced the snapshot.
+    recover_orphaned_resolve_all(&mut state);
     GAME_STATE.with(|cell| cell.set(Some(state)));
     // Restoring (undo, or resuming a save from a fresh worker that never saw
     // `initialize_game`) invalidates any in-progress recording — the restored
@@ -2269,6 +2273,10 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
 
     finalize_public_state(&mut state);
     bind_interaction_session(&mut state);
+    // Mirrors `server-core::GameSession::from_persisted`: a host that reloaded
+    // while a Resolve All latch was outstanding would otherwise resume into a
+    // state no seat can advance, with returning guests bound to a dead prompt.
+    recover_orphaned_resolve_all(&mut state);
 
     GAME_STATE.with(|cell| cell.set(Some(state)));
     MULTIPLAYER_MODE.with(|cell| cell.set(true));
@@ -2801,7 +2809,7 @@ pub fn get_ai_tactical_action_proposal_with_diagnostics(
 /// Split out of [`get_ai_scored_candidates`] so native tests can drive the real
 /// scoring path: the `#[wasm_bindgen]` shell returns through `to_js`, which calls
 /// the real `JSON.parse` binding and panics outside a wasm32 runtime (same reason
-/// `resolve_all_inner` exists).
+/// `scored_candidates_inner` exists).
 fn scored_candidates_inner(
     state: &mut GameState,
     difficulty: AiDifficulty,
@@ -3027,75 +3035,38 @@ pub fn submit_ai_action_proposal(token: &str, actor: u8, action: JsValue) -> JsV
 /// events, so the WASM boundary intentionally returns empty event/log arrays
 /// instead of serializing thousands of records for pathological stacks.
 ///
-/// Stop conditions (all CR-compliant):
-/// - Stack empties
-/// - Stack grows beyond the chunk-origin depth
-/// - An interactive `WaitingFor` appears (target selection, scry, etc.)
-/// - An unknown/non-requester human actor receives priority
-/// - AI has no action for its priority decision
-/// - Game ends
-/// - Safety cap reached (prevents infinite loops from cascading triggers)
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AiSeatConfig {
-    player_id: u8,
-    difficulty: String,
-}
-
-fn resolve_all_inner(
-    state: &mut GameState,
-    requester: PlayerId,
-    ai_seats: &[AiSeatConfig],
-    max_resolutions: u32,
-    rng: &mut impl Rng,
-) -> BatchResolveResult {
-    // The first AI decision in the fast-forward loop can run before any
-    // `apply()` (which would flush internally); flush up front so it sees
-    // precise derived state + presence index. No-op when layers are clean.
-    engine::game::layers::flush_layers(state);
-    let session = ai_session_for(state);
-    resolve_all_fast_forward(state, requester, max_resolutions, |state, actor| {
-        if let Some(seat) = ai_seats
-            .iter()
-            .find(|seat| PlayerId(seat.player_id) == actor)
-        {
-            let ai_difficulty = AiDifficulty::from_label(&seat.difficulty);
-            let config =
-                create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
-            let Some(semantic_owner) = state
-                .waiting_for
-                .acting_player()
-                .or_else(|| state.waiting_for.acting_players().first().copied())
-            else {
-                return ResolveAllCallbackDecision::Stop;
-            };
-            let contract = AiDecisionContract::issue(state, semantic_owner);
-            match choose_action_with_session(state, semantic_owner, &config, rng, &session) {
-                Some(action) if contract.permits(state, actor, &action) => {
-                    ResolveAllCallbackDecision::Proposal { contract, action }
-                }
-                Some(_) | None => ResolveAllCallbackDecision::Stop,
-            }
-        } else {
-            ResolveAllCallbackDecision::Stop
-        }
-    })
-}
-
 #[wasm_bindgen]
 pub fn resolve_all(
     requester: u8,
     ai_seats_json: &str,
     max_resolutions: u32,
 ) -> Result<JsValue, JsValue> {
-    let ai_seats: Vec<AiSeatConfig> = serde_json::from_str(ai_seats_json)
+    let _: serde_json::Value = serde_json::from_str(ai_seats_json)
         .map_err(|e| JsValue::from_str(&format!("Failed to deserialize AI seats: {e}")))?;
 
     let requester = PlayerId(requester);
 
     with_state_mut(|state| {
-        let mut rng = rand::rng();
-        let mut result = resolve_all_inner(state, requester, &ai_seats, max_resolutions, &mut rng);
+        // Phase 2 consumes only the already-issued, unanimous consent run.
+        // AI consent is answered through ordinary engine candidates before this
+        // call; Resolve All must never ask an AI about a speculative future
+        // priority window. Keep the legacy payload parse as a wire-compatible
+        // boundary while the consent action owns the authoritative cap.
+        let _ = max_resolutions;
+        // Reject only an unentitled caller. A latch whose frozen run has gone
+        // stale is still routed into the resolver, whose fail-closed
+        // invalidation restores ordinary priority — rejecting it here instead
+        // would leave the game parked with no acting player and, in practice,
+        // nothing any client offers the player to press.
+        // Exhaustive rather than an equality test: a future variant must be
+        // classified here instead of silently defaulting to allowed.
+        match resolve_all_ready_access(state, requester) {
+            ResolveAllReadyAccess::Refused => {
+                return Err(JsValue::from_str("Resolve All consent is not ready"));
+            }
+            ResolveAllReadyAccess::Admitted => {}
+        }
+        let mut result = resolve_all_ready_prefix(state, requester);
         // A Resolve All burst applies real actions directly via
         // `apply_action_boundary_with_stack_limit` (bypassing `submit_action`,
         // which is the only other place REPLAY_LOG is appended to) — without
@@ -3256,69 +3227,13 @@ mod bracket_estimate_tests {
     }
 }
 
-#[cfg(test)]
-mod resolve_all_tests {
-    use super::*;
-    use engine::types::ability::{Effect, ResolvedAbility};
-    use engine::types::game_state::{StackEntry, StackEntryKind, WaitingFor};
-    use engine::types::identifiers::ObjectId;
-
-    fn no_op_entry(id: u64, controller: PlayerId) -> StackEntry {
-        let object_id = ObjectId(id);
-        StackEntry {
-            id: object_id,
-            source_id: object_id,
-            controller,
-            kind: StackEntryKind::ActivatedAbility {
-                source_id: object_id,
-                ability: Box::new(ResolvedAbility::new(
-                    Effect::NoOp,
-                    vec![],
-                    object_id,
-                    controller,
-                )),
-            },
-        }
-    }
-
-    fn priority_state(semantic_seat: PlayerId, stack: Vec<StackEntry>) -> GameState {
-        let mut state = GameState::new_two_player(7);
-        state.waiting_for = WaitingFor::Priority {
-            player: semantic_seat,
-        };
-        state.priority_player = semantic_seat;
-        state.stack = stack.into_iter().collect();
-        state
-    }
-
-    #[test]
-    fn resolve_all_tls_production_path_substitute_routes_controlled_priority() {
-        let mut state = priority_state(PlayerId(1), vec![no_op_entry(1, PlayerId(1))]);
-        state.active_player = PlayerId(1);
-        state.turn_decision_controller = Some(PlayerId(0));
-        state.priority_player = PlayerId(0);
-        state.priority_passes.insert(PlayerId(0));
-        GAME_STATE.with(|cell| cell.set(Some(state)));
-
-        let ai_seats: Vec<AiSeatConfig> = serde_json::from_str("[]").unwrap();
-        let result = with_state_mut(|state| {
-            let mut rng = ChaCha20Rng::seed_from_u64(13);
-            resolve_all_inner(state, PlayerId(0), &ai_seats, 0, &mut rng)
-        })
-        .unwrap();
-
-        assert_eq!(result.items_resolved, 1);
-        with_state(|state| assert!(state.stack.is_empty())).unwrap();
-        clear_game_state();
-    }
-}
-
 #[cfg(all(test, target_arch = "wasm32"))]
 mod tests {
     use super::*;
     use std::sync::Arc;
 
     use engine::game::deck_loading::create_object_from_card_face;
+    use engine::game::engine::ResolveAllFastForwardResult as BatchResolveResult;
     use engine::game::scenario::{GameScenario, P0, P1};
     use engine::game::zones::create_object;
     use engine::types::ability::{
@@ -3326,6 +3241,7 @@ mod tests {
         ContinuousModification, Duration, Effect, QuantityExpr, QuantityRef, ResolvedAbility,
         TargetFilter, TargetRef,
     };
+    use engine::types::actions::ResolveAllConsentDecision;
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
     use engine::types::counter::{CounterMatch, CounterType};
@@ -4171,6 +4087,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: Default::default(),
+            ordering_hint: Default::default(),
             split: None,
         };
         assert!(matches!(
@@ -4581,9 +4498,55 @@ mod tests {
         state.active_player = PlayerId(1);
         state.turn_decision_controller = Some(PlayerId(0));
         state.priority_player = PlayerId(0);
-        state.priority_passes.insert(PlayerId(0));
         state.stack.push_back(no_op_stack_entry(1, PlayerId(1)));
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::BeginResolveAll { max_resolutions: 0 },
+        )
+        .expect("the controlled priority holder begins Resolve All consent");
+        let epoch = match state.waiting_for {
+            WaitingFor::ResolveAllConsent { epoch, .. } => epoch,
+            ref other => {
+                panic!("Resolve All must prompt the remaining representative, got {other:?}")
+            }
+        };
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::RespondResolveAllConsent {
+                epoch,
+                decision: engine::types::actions::ResolveAllConsentDecision::Grant,
+            },
+        )
+        .expect("the controlled representative grants Resolve All consent");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ResolveAllReady { epoch: ready_epoch } if ready_epoch == epoch
+        ));
         GAME_STATE.with(|cell| cell.set(Some(state)));
+
+        with_state_mut(|state| {
+            apply(
+                state,
+                PlayerId(0),
+                GameAction::BeginResolveAll { max_resolutions: 0 },
+            )
+            .expect("turn controller may begin the consent run");
+            let WaitingFor::ResolveAllConsent { epoch, .. } = &state.waiting_for else {
+                panic!("controlled priority should queue Resolve All consent");
+            };
+            apply(
+                state,
+                PlayerId(0),
+                GameAction::RespondResolveAllConsent {
+                    epoch: *epoch,
+                    decision: ResolveAllConsentDecision::Grant,
+                },
+            )
+            .expect("frozen turn controller may grant for the queued representative");
+        })
+        .expect("test state remains installed");
 
         let value = resolve_all(0, "[]", 0).unwrap();
         let result: BatchResolveResult = serde_wasm_bindgen::from_value(value).unwrap();

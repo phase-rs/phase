@@ -35,7 +35,9 @@ impl AiDecisionContract {
     pub fn issue(state: &GameState, semantic_owner: PlayerId) -> Self {
         Self {
             semantic_owner,
-            authorized_actor: turn_control::authorized_submitter_for_player(state, semantic_owner),
+            authorized_actor: resolve_all_frozen_actor(state, semantic_owner).unwrap_or_else(
+                || turn_control::authorized_submitter_for_player(state, semantic_owner),
+            ),
             state_revision: state.state_revision,
             // The engine's candidate enumerator is the authoritative finite
             // domain for this prompt. Combat and search continuations remain
@@ -60,13 +62,29 @@ impl AiDecisionContract {
     /// opaque proposal token (WASM/server), because a restored state resets its
     /// serialized revision.
     pub fn permits(&self, state: &GameState, actor: PlayerId, action: &GameAction) -> bool {
+        let semantic_owner_is_active = state
+            .waiting_for
+            .acting_players()
+            .contains(&self.semantic_owner)
+            || matches!(
+                action,
+                GameAction::RevokeResolveAllConsent { representative, .. }
+                    if *representative == self.semantic_owner
+            );
+        let authorized_actor = match action {
+            GameAction::RevokeResolveAllConsent {
+                epoch,
+                representative,
+            } => turn_control::resolve_all_granted_submitter(state, *epoch, *representative),
+            _ => Some(turn_control::authorized_submitter_for_player(
+                state,
+                self.semantic_owner,
+            )),
+        };
         self.state_revision == state.state_revision
-            && state
-                .waiting_for
-                .acting_players()
-                .contains(&self.semantic_owner)
+            && semantic_owner_is_active
             && self.authorized_actor == actor
-            && turn_control::authorized_submitter_for_player(state, self.semantic_owner) == actor
+            && authorized_actor == Some(actor)
             && self.contains_action(state, action)
     }
 
@@ -100,6 +118,22 @@ impl AiDecisionContract {
                 .any(|candidate| candidate_action_matches(&candidate.action, action)),
         }
     }
+}
+
+fn resolve_all_frozen_actor(state: &GameState, representative: PlayerId) -> Option<PlayerId> {
+    let epoch = match &state.waiting_for {
+        WaitingFor::ResolveAllConsent { epoch, .. } | WaitingFor::ResolveAllReady { epoch } => {
+            *epoch
+        }
+        _ => return None,
+    };
+    turn_control::resolve_all_granted_submitter(state, epoch, representative).or_else(|| {
+        state
+            .resolve_all_consent_run
+            .as_ref()
+            .filter(|run| run.epoch == epoch)
+            .and_then(|run| run.authorized_submitter_for(representative))
+    })
 }
 
 pub(crate) fn target_selection_requires_reducer_validation(state: &GameState) -> bool {

@@ -23,6 +23,7 @@ use crate::parser::oracle_ir::effect_chain::{
 };
 use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     CastFromZoneDriver, CastingPermission, ChoiceType, Comparator, ControllerRef, DamageChannel,
@@ -79,9 +80,10 @@ use super::{
     parse_spells_cast_this_way_graveyard_replacement_rider,
     publishes_aggregate_set_from_resolution, publishes_exiled_cause_at_resolution,
     publishes_tracked_set_from_resolution, rebind_tracked_aggregate_to_chain_set,
-    retarget_counter_additional_cost_to_target, rewrite_grant_parent_to_filter,
-    rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
-    stamp_delayed_returns, try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
+    resolve_difference_anaphor_in_ability, retarget_counter_additional_cost_to_target,
+    rewrite_grant_parent_to_filter, rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode,
+    rewrite_that_type_mana_instead, stamp_delayed_returns, try_fold_token_repeat_into_count,
+    wire_optional_cast_decline_fallback,
 };
 
 /// CR 601.2c: True when the assembled head chose one or more players at
@@ -1330,6 +1332,31 @@ fn damage_amount_reads_event_context(effect: &Effect) -> bool {
     reads
 }
 
+/// CR 615.5 + CR 609.7a + CR 609.7b: true when the chain's most recent
+/// `PreventDamage` is the one-shot TARGET-SOURCE shape — a
+/// `damage_source_filter` matching the shared
+/// `crate::types::ability::is_oneshot_target_source_prevent_shape` predicate
+/// (the single authority, also consumed by the resolver discriminator in
+/// `prevent_damage::resolve`). The bare "prevented this way" rider folds into
+/// the shield only for this root; other prevention roots (Reverse Damage's
+/// `ChosenDamageSource`, Comeuppance's color-axis source filter, ...) keep
+/// their bare rider as an independent `SequentialSibling`.
+fn is_oneshot_target_source_prevent_chain(defs: &[AbilityDefinition]) -> bool {
+    defs.iter()
+        .rfind(|d| matches!(&*d.effect, Effect::PreventDamage { .. }))
+        .is_some_and(|d| {
+            matches!(
+                &*d.effect,
+                Effect::PreventDamage {
+                    damage_source_filter: Some(source_filter),
+                    ..
+                } if crate::types::ability::is_oneshot_target_source_prevent_shape(
+                    source_filter
+                )
+            )
+        })
+}
+
 /// The recipient of a single-recipient scalar instruction — the position a
 /// "… to them" / "… they lose" player anaphor occupies. Paired with
 /// [`scalar_amount_mut`], which reads the "that much" position of the same
@@ -1565,6 +1592,19 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             let d = &mut defs[bound_index];
                             {
                                 let mut else_def = else_def.clone();
+                                // CR 608.2c: both branches of a conditional inherit
+                                // comparison-derived "the difference" from the same
+                                // antecedent condition. The else chain is parsed
+                                // independently, so bind its deferred placeholder
+                                // before attaching it to the conditional definition.
+                                let resolution = d
+                                    .condition
+                                    .as_ref()
+                                    .and_then(super::conditions::difference_expr);
+                                resolve_difference_anaphor_in_ability(
+                                    &mut else_def,
+                                    resolution.as_ref(),
+                                );
                                 // CR 608.2c: when the gated clause acts on the
                                 // source (`SelfRef`), the else clause's "it" anaphor
                                 // is the same source — rebind its `ParentTarget`
@@ -2216,6 +2256,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 if let Effect::DamageEachPlayer { amount, .. } = def.effect.as_mut() {
                     amount.rebind_event_context_amount(&QuantityRef::PreviousEffectAmount {
                         channel: DamageChannel::Total,
+                        aggregate: AggregateFunction::Sum,
                     });
                 }
             }
@@ -2227,13 +2268,35 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // prevention — `any` covers Comeuppance's TWO riders, whose second rider's
         // immediate predecessor is the first rider, not the PreventDamage) so the
         // clause is folded into the prevention rather than dropped as a sibling.
+        //
+        // CR 615.5: AWE STRIKE — "You gain life equal to the damage prevented
+        // this way." is a BARE rider (no when/whenever/if prelude; the "this
+        // way" binds to the preceding prevention sentence). It folds into the
+        // shield ONLY when the chain root's prevention is the one-shot
+        // target-source shape (`And { [ParentTargetSlot, Typed(creature)] }`
+        // damage_source_filter) — that is the Awe Strike class. Reverse Damage's
+        // chain root (`ChosenDamageSource`) must NOT fold: its bare rider stays a
+        // `SequentialSibling` (its "equal to the damage prevented this way"
+        // quantity still resolves via `last_effect_count`).
         let prevented_this_way_gate = if defs
             .iter()
             .any(|d| matches!(&*d.effect, Effect::PreventDamage { .. }))
         {
-            crate::parser::oracle_replacement::prevented_this_way_rider_source_gate(
-                clause_ir.source.fragment().unwrap_or_default(),
-            )
+            let fragment = clause_ir.source.fragment().unwrap_or_default();
+            let gate =
+                crate::parser::oracle_replacement::prevented_this_way_rider_source_gate(fragment);
+            // Bare-rider arm (no when/whenever/if): recognized only for the
+            // one-shot target-source prevention chain root. The gate's explicit
+            // when/whenever/if forms are unchanged and shape-unrestricted.
+            if gate.is_none() && is_oneshot_target_source_prevent_chain(&defs) {
+                nom_primitives::scan_at_word_boundaries(
+                    fragment,
+                    tag::<_, _, OracleError<'_>>("prevented this way"),
+                )
+                .map(|_| None)
+            } else {
+                gate
+            }
         } else {
             None
         };

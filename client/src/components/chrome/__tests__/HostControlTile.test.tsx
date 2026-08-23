@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 
 import { HostControlTile } from "../HostControlTile";
@@ -81,5 +81,62 @@ describe("HostControlTile", () => {
 
     expect(screen.queryByText("Team 1")).not.toBeInTheDocument();
     expect(screen.queryByText("Team 2")).not.toBeInTheDocument();
+  });
+
+  describe("join-link copy", () => {
+    const realClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+
+    function renderWithJoinLink(showToast: (message: string) => void) {
+      useMultiplayerStore.setState({
+        hostGameCode: "ABCD1",
+        hostingStatus: "waiting",
+        hostSession: {
+          formatConfig: FORMAT_DEFAULTS.Standard,
+          timerSeconds: null,
+          matchType: "Bo1",
+        },
+        playerSlots: [],
+        serverInfo: {
+          version: "0.60.0",
+          buildCommit: "abc1234",
+          protocolVersion: 33,
+          mode: "Full",
+          publicUrl: "https://play.example.com",
+        },
+        showToast,
+      });
+      render(
+        <MemoryRouter initialEntries={["/multiplayer"]}>
+          <HostControlTile />
+        </MemoryRouter>,
+      );
+      return screen.getByTitle(/ABCD1@play\.example\.com/);
+    }
+
+    afterEach(() => {
+      if (realClipboard) Object.defineProperty(navigator, "clipboard", realClipboard);
+      Reflect.deleteProperty(document, "execCommand");
+    });
+
+    it("confirms only when the clipboard actually took the link", async () => {
+      Object.defineProperty(navigator, "clipboard", {
+        value: { writeText: () => Promise.resolve() },
+        configurable: true,
+      });
+      const showToast = vi.fn();
+
+      fireEvent.click(renderWithJoinLink(showToast));
+      await vi.waitFor(() => expect(showToast).toHaveBeenCalledWith("Join link copied"));
+
+      cleanup();
+      // Same click, a webview that cannot write: no confirmation may appear.
+      Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+      Object.defineProperty(document, "execCommand", { value: () => false, configurable: true });
+      const silentToast = vi.fn();
+
+      fireEvent.click(renderWithJoinLink(silentToast));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(silentToast).not.toHaveBeenCalled();
+    });
   });
 });

@@ -13,6 +13,10 @@ pub fn resolve(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let player = ability.controller;
+    // CR 608.2c: this instruction owns the chain's referent slot from here on,
+    // including the arm below where the library is empty and it produces
+    // nothing.
+    crate::game::morph::begin_face_down_referent_production(state);
 
     let player_state = state
         .players

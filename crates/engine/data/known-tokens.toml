@@ -149795,6 +149795,11 @@ scryfall_oracle_id = "d46c3fb6-f1c7-4a96-ae42-5bce17fc7c1d"
 scryfall_id = "68cce7e2-8c4b-4c76-a38b-0fee85da3151"
 
 [[token.source_card_refs]]
+card_name = "Big Score"
+scryfall_oracle_id = "a5cbd257-c836-493e-bb1a-76242619dea2"
+scryfall_id = "f5db8199-22d8-4721-b62b-245ec5e2907a"
+
+[[token.source_card_refs]]
 card_name = "Reckoner Bankbuster // Reckoner Bankbuster"
 face_name = "Reckoner Bankbuster"
 scryfall_oracle_id = "b6be94dc-7162-4887-b959-3bda709724eb"

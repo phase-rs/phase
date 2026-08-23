@@ -49,6 +49,13 @@
     "collapse": "Réduire la progression de résolution",
     "expand": "Développer la progression de résolution"
   },
+  "resolveAllConsent": {
+    "eyebrow": "Tout résoudre",
+    "title": "Approuver la résolution rapide ?",
+    "subtitle": "Tous les joueurs doivent approuver avant que le moteur ne résolve un préfixe sûr de la pile.",
+    "grant": "Approuver",
+    "decline": "Garder la priorité"
+  },
   "debugCreate": {
     "copies": "Copies",
     "tokenPower": "Power",
@@ -764,10 +771,14 @@
     "tapUntappedCreatures_one": "Engagez {{count}} créature dégagée",
     "tapUntappedCreatures_other": "Engagez {{count}} créatures dégagées",
     "chooseTargetOf": "Choisissez la cible {{current}} sur {{total}}",
+    "slotProgress": "Cible {{current}} sur {{total}}",
+    "choosePlayerTarget": "Choisir : {{name}}",
+    "expandDescription": "Afficher la description complète",
+    "collapseDescription": "Afficher moins",
+    "descriptionDisclosure": "{{action}} : {{description}}",
     "chooseTarget": "Choisissez une cible",
     "triggerDamageAmount": "This trigger: {{amount}} damage",
     "noLegalTargets": "Aucune cible légale disponible",
-    "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "jusqu'à un(e) {{target}}",
     "one": "un(e) {{target}}",
     "nounPlayer": "joueur",
@@ -1460,7 +1471,12 @@
       "labelReturn": "Renvoyer ({{selected}}/{{count}})",
       "labelExile": "Exiler ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
-      "orderTop": "Dessus"
+      "orderTop": "Dessus",
+      "orderSecond": "2e",
+      "orderThird": "3e",
+      "orderFourth": "4e",
+      "orderFifth": "5e",
+      "orderPosition": "Position {{position}}"
     },
     "drawnThisTurn": {
       "title": "Piochées ce tour-ci",
@@ -1626,7 +1642,11 @@
     "legend": {
       "title": "Règle de la légende",
       "subtitle": "Choisissez quel(le) « {{name}} » garder",
-      "keepAria": "Garder {{name}} ({{status}})",
+      "keepAria": "Garder {{name}} ({{identity}}, {{status}})",
+      "keepAriaUnknown": "Garder {{name}} ({{status}})",
+      "identityOriginal": "Original",
+      "identityCopy": "Copie",
+      "identityTokenCopy": "Copie de jeton",
       "statusJustEntered": "Vient d'arriver",
       "statusAlready": "Déjà sur le champ de bataille"
     },
@@ -1758,7 +1778,22 @@
     "emergeEyebrow": "Émergence",
     "emergeNormalLabel": "Lancer normalement",
     "emergeAltLabel": "Lancer avec Émergence",
-    "emergeSubtitle": "Lancez {{name}} normalement, ou payez son coût d'Émergence en sacrifiant une créature, ce qui réduit le coût de la valeur de mana de cette créature.",
+    "emergeSubtitle": "Lancez {{name}} normalement, ou payez son coût d'Émergence en sacrifiant {{sacrifice}}, ce qui réduit le coût de la valeur de mana de ce permanent.",
+    "emergeFallbackSacrifice": "un permanent correspondant",
+    "emergeSacrificeQuality": {
+      "artifact": "un artefact",
+      "battle": "une bataille",
+      "card": "une carte",
+      "creature": "une créature",
+      "enchantment": "un enchantement",
+      "instant": "un éphémère",
+      "kindred": "un tribal",
+      "land": "un terrain",
+      "permanent": "un permanent",
+      "planeswalker": "un planeswalker",
+      "sorcery": "un rituel",
+      "subtype": "un permanent du type {{subtype}}"
+    },
     "impendingEyebrow": "Imminence",
     "impendingNormalLabel": "Lancer normalement",
     "impendingAltLabel": "Lancer avec Imminence",
@@ -1831,7 +1866,8 @@
         "card": "une carte",
         "treasure": "un Trésor",
         "food": "un Aliment",
-        "tappedFish": "un Poisson engagé"
+        "tappedFish": "un Poisson engagé",
+        "extraTurn": "un tour supplémentaire"
       }
     }
   },

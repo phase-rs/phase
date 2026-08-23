@@ -1,5 +1,5 @@
 import { act } from "react";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameState, TargetRef, WaitingFor } from "../../../adapter/types.ts";
@@ -11,6 +11,7 @@ import { useUiStore } from "../../../stores/uiStore.ts";
 import {
   buildGameObject,
   buildObjectMap,
+  gameObjectFactory,
 } from "../../../test/factories/gameObjectFactory.ts";
 import {
   buildCommanderFormatConfig,
@@ -22,6 +23,7 @@ import {
   buildTargetSelectionProgress,
   buildTargetSelectionSlot,
   buildTargetSelectionWaitingFor,
+  targetSelectionWaitingForFactory,
 } from "../../../test/factories/gameStateFactory.ts";
 
 function setViewportWidth(width: number) {
@@ -54,10 +56,14 @@ describe("OpponentHud", () => {
   beforeEach(() => {
     setViewportWidth(1024);
     localStorage.clear();
-    useMultiplayerStore.setState({ activePlayerId: 0 });
-    usePreferencesStore.setState({ followActiveOpponent: false });
+    // `useCanActForWaitingState` short-circuits on EITHER `gameMode === "spectate"`
+    // OR `isSpectator`, and the two live in different module-singleton stores that
+    // persist across tests in this file. Both are reset here, not only in
+    // `afterEach`, so one spectator row cannot make every later seated row inert.
+    useMultiplayerStore.setState({ activePlayerId: 0, isSpectator: false });
+    usePreferencesStore.setState({ followActiveOpponent: false, battlefieldPeekOnHover: false });
     useUiStore.setState({ focusedOpponent: 1 });
-    useGameStore.setState({ gameState: createGameState() });
+    useGameStore.setState({ gameState: createGameState(), gameMode: null, waitingFor: null });
   });
 
   afterEach(() => {
@@ -535,5 +541,283 @@ describe("OpponentHud", () => {
     expect(document.querySelector('[data-player-hud="3"]')).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Opp 2/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /OUT/i })).toBeNull();
+  });
+
+  // ── The player axis reads one authority behind one actor gate ─────────────
+  //
+  // `OpponentHud` now derives `clickTargetRefs` (the raw `TargetRef[] | null`)
+  // and `validPlayerTargetIds` (its player projection) from
+  // `getWaitingForClickTargetRefs` / `getWaitingForPlayerChoiceIds`, both gated
+  // on `useCanActForWaitingState()`.
+
+  /** A `TargetSelection` addressed to the local seat with the given legal set. */
+  function targetingLocalSeat(legal: TargetRef[]): WaitingFor {
+    return targetSelectionWaitingForFactory
+      .withData({
+        selection: buildTargetSelectionProgress({ current_legal_targets: legal }),
+        target_slots: [buildTargetSelectionSlot({ legal_targets: legal })],
+        pending_cast: buildPendingCast(),
+      })
+      .forPlayer(0)
+      .build();
+  }
+
+  // V8 row 2 — the multiplayer tab. `OpponentHud` exposes the `Target <name>`
+  // accessible name only on an ALREADY-FOCUSED tab (the two-click FFA model), so
+  // seat 1 is pre-focused in `beforeEach`; without that the assertion would pass
+  // with or without the fix. The four seated FFA-disambiguation tests above are
+  // this row's reach guards.
+  it("offers no target commit on a multiplayer tab to a spectating client", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const wf = targetingLocalSeat([{ Player: 1 }]);
+    act(() => {
+      useMultiplayerStore.setState({ isSpectator: true });
+      useUiStore.setState({ focusedOpponent: 1 });
+      useGameStore.setState({
+        dispatch,
+        gameMode: "spectate",
+        gameState: createGameState({ waiting_for: wf }),
+        waitingFor: wf,
+      });
+    });
+
+    render(<OpponentHud />);
+
+    expect(screen.queryByRole("button", { name: "Target Opp 2" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Opp 2/ }));
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  // V8 row 3 — the 1v1 pill, the fourth seat surface. `HudPlate` renders a
+  // `<button>` when it has an `onClick` and a `<div>` otherwise, so
+  // `[data-hud-plate]`'s tagName reads `isValidTarget` directly. Two live seats
+  // means `isMultiplayer` is false and exactly one plate renders.
+  describe("1v1 opponent pill", () => {
+    function mountOneOnOne(waitingFor: WaitingFor) {
+      const dispatch = vi.fn().mockResolvedValue([]);
+      act(() => {
+        useGameStore.setState({
+          dispatch,
+          gameState: createGameState({
+            players: buildPlayers([
+              { id: 0, life: 20 },
+              { id: 1, life: 20 },
+            ]),
+            seat_order: [0, 1],
+            format_config: buildFormatConfig(),
+            waiting_for: waitingFor,
+          }),
+          waitingFor,
+        });
+      });
+      render(<OpponentHud />);
+      return { dispatch };
+    }
+
+    it("offers the opponent pill to the seated player", () => {
+      const { dispatch } = mountOneOnOne(targetingLocalSeat([{ Player: 1 }]));
+
+      const plates = document.querySelectorAll("[data-hud-plate]");
+      expect(plates).toHaveLength(1);
+      expect(plates[0].tagName).toBe("BUTTON");
+
+      fireEvent.click(plates[0]);
+      expect(dispatch).toHaveBeenCalledWith({
+        type: "ChooseTarget",
+        data: { target: { Player: 1 } },
+      });
+    });
+
+    it("offers no pill affordance to a spectating client", () => {
+      act(() => {
+        useMultiplayerStore.setState({ isSpectator: true });
+        useGameStore.setState({ gameMode: "spectate" });
+      });
+      const { dispatch } = mountOneOnOne(targetingLocalSeat([{ Player: 1 }]));
+
+      const plates = document.querySelectorAll("[data-hud-plate]");
+      expect(plates).toHaveLength(1);
+      expect(plates[0].tagName).toBe("DIV");
+
+      fireEvent.click(plates[0]);
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+  });
+
+  // V9 / V10 / V13 — the two OTHER consumers of the rewritten derivation, both
+  // inside `OpponentTab`: `legalObjectTargetsByController` (which now iterates
+  // `clickTargetRefs ?? []`) and `isTargeting` (now `clickTargetRefs !== null`).
+  //
+  // MANDATORY `await`: `PortaledPopover` holds `pos === null` until a
+  // `requestAnimationFrame` callback fires and returns `null` until then, so on
+  // the tick `fireEvent.mouseEnter` returns NEITHER popover is in the DOM. A
+  // synchronous read is a uniform false that makes the positives fail and the
+  // negatives pass vacuously. Every assertion below — negatives included — comes
+  // after an `await screen.findByText(...)` for the popover the row expects.
+  describe("opponent tab hover popovers", () => {
+    // Seat 1 is focused by `beforeEach`, so seat 2 is the non-focused tab these
+    // rows hover. Distinct names keep the three cards individually addressable.
+    const ALPHA = 401;
+    const BETA = 402;
+    const GAMMA = 403;
+
+    function boardOfSeatTwo() {
+      return {
+        battlefield: [ALPHA, BETA, GAMMA],
+        objects: buildObjectMap(
+          gameObjectFactory.creature(1, 1).onBattlefield().ownedBy(2)
+            .withId(ALPHA).named("Alpha Bear").build(),
+          gameObjectFactory.creature(2, 2).onBattlefield().ownedBy(2)
+            .withId(BETA).named("Beta Bear").build(),
+          gameObjectFactory.creature(3, 3).onBattlefield().ownedBy(2)
+            .withId(GAMMA).named("Gamma Bear").build(),
+        ),
+      };
+    }
+
+    function mountBoard(waitingFor: WaitingFor, overrides: Partial<GameState> = {}) {
+      act(() => {
+        usePreferencesStore.setState({ battlefieldPeekOnHover: true });
+        useGameStore.setState({
+          gameState: createGameState({
+            ...boardOfSeatTwo(),
+            waiting_for: waitingFor,
+            ...overrides,
+          }),
+          waitingFor,
+        });
+      });
+      render(<OpponentHud />);
+    }
+
+    const hoverSeatTwoTab = () =>
+      fireEvent.mouseEnter(screen.getByRole("button", { name: /Opp 3/ }));
+
+    /**
+     * The peeked cards in render order, read through the P/T tile the popover
+     * itself renders from `objects[group.ids[0]]`.
+     *
+     * Deliberately NOT read through `CardImage`'s "Loading {{name}}" aria-label:
+     * `useCardImage` resolves asynchronously and caches by name across tests in
+     * the same file, so which `CardImage` branch is mounted (loading placeholder
+     * vs `<img alt>` vs artless text tile) depends on test ORDER. [measured] the
+     * label-based read passed in isolation and failed third-in-file. The P/T
+     * tile is owned by the popover and is unaffected by art resolution, so the
+     * three Bears carry distinct P/T (Alpha 1/1, Beta 2/2, Gamma 3/3) purely to
+     * make group order legible here.
+     */
+    const peekedPT = (popover: HTMLElement) =>
+      within(popover).getAllByText(/^\d+\/\d+$/).map((el) => el.textContent);
+
+    const openPeek = async () => {
+      hoverSeatTwoTab();
+      // MANDATORY await: PortaledPopover returns null until a rAF sets position.
+      const heading = await screen.findByText("Opp 3's board");
+      return heading.parentElement as HTMLElement;
+    };
+
+    const ALPHA_PT = "1/1";
+    const BETA_PT = "2/2";
+    const GAMMA_PT = "3/3";
+
+    // V9 — `legalObjectTargetsByController` still reaches the popover and still
+    // reorders it. This is the only reachable observable that reads
+    // `legalTargetIds`: the " (not targetable)" legend needs > 12 permanents.
+    it("sorts a legal object target to the front of the peek popover", async () => {
+      mountBoard(targetingLocalSeat([{ Object: GAMMA }]));
+
+      expect(peekedPT(await openPeek())).toEqual([GAMMA_PT, ALPHA_PT, BETA_PT]);
+    });
+
+    // Second positive: a different legal id gives a different order, so the sort
+    // tracks the specific id rather than applying a fixed permutation.
+    it("sorts whichever object the engine made legal to the front", async () => {
+      mountBoard(targetingLocalSeat([{ Object: BETA }]));
+
+      expect(peekedPT(await openPeek())).toEqual([BETA_PT, ALPHA_PT, GAMMA_PT]);
+    });
+
+    // Reach guard: with no targeting in progress the popover keeps battlefield
+    // order, proving the reordering above is caused by the targeting state and
+    // not by the fixture.
+    it("keeps battlefield order when no targeting is in progress", async () => {
+      mountBoard(buildPriorityWaitingFor({ data: { player: 2 } }));
+
+      expect(peekedPT(await openPeek())).toEqual([ALPHA_PT, BETA_PT, GAMMA_PT]);
+    });
+
+    // ── V10 / V13: `isTargeting` picks which popover opens ──────────────────
+    // `showIncomingOnHover` is `hasIncoming && !isFocused && !isTargeting`, so
+    // with an attacker on the hovered tab it is `isTargeting` alone that decides.
+    function withIncomingAttacker(): Partial<GameState> {
+      return {
+        combat: {
+          attackers: [
+            { object_id: ALPHA, defending_player: 0, attack_target: { type: "Player", data: 0 } },
+          ],
+          blocker_assignments: {},
+          blocker_to_attacker: {},
+          blockers_declared_by: [],
+          pending_blocker_declaration_events: [],
+          damage_assignments: {},
+          first_strike_done: false,
+          damage_step_index: null,
+          pending_damage: [],
+          regular_damage_done: false,
+        },
+      };
+    }
+
+    // V10 — the row that justifies the `TargetRef[] | null` return type. The
+    // legal set is EMPTY, so a `(clickTargetRefs ?? []).length > 0` reading of
+    // `isTargeting` would open the incoming popover instead.
+    it("treats a live prompt with an empty legal set as targeting", async () => {
+      mountBoard(targetingLocalSeat([]), withIncomingAttacker());
+
+      hoverSeatTwoTab();
+      await screen.findByText("Opp 3's board");
+
+      expect(screen.queryAllByText(/incoming from/)).toHaveLength(0);
+    });
+
+    // Reach guard for V10: the same fixture with no prompt opens the incoming
+    // popover, so the row above is about the gate rather than about a fixture
+    // that renders nothing. Queried by `/incoming from/`, not `⚔×`: the
+    // always-present attacker badge carries the same `⚔×` prefix.
+    it("opens the incoming-attackers popover when no prompt is live", async () => {
+      mountBoard(buildPriorityWaitingFor({ data: { player: 2 } }), withIncomingAttacker());
+
+      hoverSeatTwoTab();
+      await screen.findByText(/incoming from/);
+
+      expect(screen.queryByText("Opp 3's board")).toBeNull();
+    });
+
+    // V13 — the spectator-only relaxation `showIncomingOnHover` inherits from the
+    // new gate. A spectator is not targeting, so the threat-surfacing overlay
+    // should no longer be suppressed on their screen. Row (a) below is the
+    // seated reach guard, proving the fixture really does produce `hasIncoming`
+    // on a hoverable non-focused tab.
+    it("suppresses the incoming popover for the seated player who is targeting", async () => {
+      mountBoard(targetingLocalSeat([{ Player: 2 }]), withIncomingAttacker());
+
+      hoverSeatTwoTab();
+      await screen.findByText("Opp 3's board");
+
+      expect(screen.queryAllByText(/incoming from/)).toHaveLength(0);
+    });
+
+    it("shows the incoming popover to a spectator during the same prompt", async () => {
+      act(() => {
+        useMultiplayerStore.setState({ isSpectator: true });
+        useGameStore.setState({ gameMode: "spectate" });
+      });
+      mountBoard(targetingLocalSeat([{ Player: 2 }]), withIncomingAttacker());
+
+      hoverSeatTwoTab();
+      await screen.findByText(/incoming from/);
+
+      expect(screen.queryByText("Opp 3's board")).toBeNull();
+    });
   });
 });

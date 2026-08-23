@@ -11,6 +11,7 @@ import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { getPlayerId, useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useDragToCast } from "../../hooks/useDragToCast.ts";
+import { cardImageLookup } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import {
@@ -20,6 +21,7 @@ import {
 } from "../../viewmodel/cardActionChoice.ts";
 import { CASTABLE_AFFORDANCE_ACTIVE } from "../../viewmodel/castableAffordance.ts";
 import { commandZoneLeaders } from "../../viewmodel/commanderColumn.ts";
+import { CardArtFallback } from "../card/CardArtFallback.tsx";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 
 interface CommanderCardZoneProps {
@@ -76,7 +78,20 @@ function CommanderCard({
   );
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
-  const { src } = useCardImage(commander.name, { size: "normal" });
+  // Canonical art path (services/cardImageLookup): resolve by the engine's
+  // `printed_ref.oracle_id` + face name, exactly as every other object surface
+  // (PermanentCard, StackEntry, GraveyardPile, CardPreview) does. The bare
+  // `commander.name` lookup this replaced is documented as the legacy fallback
+  // for objects carrying no `printed_ref` — command-zone leaders always carry
+  // one — and it indexes faces numerically, so a leader whose active face is
+  // not Scryfall's front resolved to the wrong face's art.
+  const imageLookup = cardImageLookup(commander);
+  const { src, isLoading } = useCardImage(imageLookup.name, {
+    size: "normal",
+    faceIndex: imageLookup.faceIndex,
+    oracleId: imageLookup.oracleId,
+    faceName: imageLookup.faceName,
+  });
   const { handlers: hoverHandlers, firedRef } = useCardHover(commander.id);
   const tax = commander.commander_tax ?? 0;
 
@@ -235,7 +250,15 @@ function CommanderCard({
     >
       {/* Card image */}
       <div className="relative h-full w-full overflow-hidden rounded-lg border border-amber-400/60 shadow-md">
-        {src ? (
+        {/* Three-state art contract, mirroring StackEntry: a pulsing skeleton
+            while resolution is in flight, the shared name tile only once we know
+            there is no art, then the image. Collapsing the first two — the bare
+            name tile stood in for BOTH — made the multi-second
+            `scryfall-data.json` fetch look like permanently broken commander
+            art, which is how it got reported. */}
+        {isLoading ? (
+          <div className="h-full w-full animate-pulse bg-gray-700" />
+        ) : src ? (
           <img
             src={src}
             alt={commander.name}
@@ -243,9 +266,9 @@ function CommanderCard({
             draggable={false}
           />
         ) : (
-          <div className="flex h-full w-full items-center justify-center bg-gray-700 text-[10px] text-gray-400">
-            {commander.name}
-          </div>
+          /* `artCrop` centres and wraps the name; `fullCard` top-aligns and
+             truncates it, which this tile is too narrow to read. */
+          <CardArtFallback name={commander.name} variant="artCrop" className="h-full w-full" />
         )}
 
         {/* Translucent overlay — amber tint, lighter when actionable (castable

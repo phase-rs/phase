@@ -276,6 +276,11 @@ fn visit_characteristic_leaf<'s>(
         // equals the bound cause; drawn members are unstamped and excluded.
         // `None` admits every member. Mirrors `FilteredTrackedSetSize`'s set
         // selection (highest set id) and cause filter.
+        // CR 700.2 + CR 608.2c: "highest id" == "the set the currently-resolving
+        // instruction published" — the ordering argument is written once, on
+        // `effects::publish_tracked_set`. Deliberately not routed through
+        // `targeting::resolve_tracked_set_id`: that authority SKIPS empty sets, and
+        // under mode scoping not skipping is the correct semantics here.
         CardTypeSetSource::TrackedSet { caused_by } => {
             if let Some((set_id, ids)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
             {
@@ -377,14 +382,43 @@ fn source_controller_for_context(state: &GameState, ctx: &QuantityContext) -> Op
     source_lki_for_context(state, ctx).map(|lki| lki.controller)
 }
 
+/// CR 508.5: `ControllerRef::DefendingPlayer` door, quantity-context flavour.
+///
+/// Identical call, identical arguments, identical rule as the
+/// `PlayerScope::DefendingPlayer` door and the `filter.rs` door. Previously
+/// this answered `None` outright whenever the trigger source's combat latch was
+/// empty (an Equipment/Aura source is never in `combat.attackers`), silently
+/// making every comparison against it false; the shared authority supplies the
+/// event and live-combat fallbacks the other doors already had.
 fn source_defending_player_for_context(
     state: &GameState,
     ctx: &QuantityContext,
 ) -> Option<PlayerId> {
-    match ctx.trigger_source.as_ref() {
-        Some(source) => source.combat_status.defending_player,
-        None => crate::game::combat::resolve_defending_player(state, ctx.source),
-    }
+    crate::game::combat::defending_player_cr508_5(state, ctx.source, ctx.trigger_source.as_ref())
+}
+
+/// Drive the production `ControllerRef::DefendingPlayer` quantity-context door
+/// (the `attachment-controller` and `damage-source-controller` comparisons) from
+/// the cross-door fixtures in `combat.rs`. This door had the largest behaviour
+/// delta in the CR 508.5 consolidation — before it, a trigger source with an
+/// empty combat latch answered `None` unconditionally.
+#[cfg(test)]
+pub(crate) fn source_defending_player_for_context_for_test(
+    state: &GameState,
+    source: ObjectId,
+    trigger_source: Option<&TriggerSourceContext>,
+) -> Option<PlayerId> {
+    source_defending_player_for_context(
+        state,
+        &QuantityContext {
+            entering: None,
+            source,
+            trigger_source: trigger_source.cloned(),
+            recipient: None,
+            scoped_player: None,
+            damage_source: None,
+        },
+    )
 }
 
 fn source_enchanted_player_for_context(
@@ -524,6 +558,9 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
             | QuantityRef::Power {
                 scope: ObjectScope::Recipient,
             }
+            | QuantityRef::BasePower {
+                scope: ObjectScope::Recipient,
+            }
             | QuantityRef::Toughness {
                 scope: ObjectScope::Recipient,
             }
@@ -543,6 +580,9 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
                 ..
             } => true,
             QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            }
+            | QuantityRef::BasePower {
                 scope: ObjectScope::CostPaidObject,
             }
             | QuantityRef::Toughness {
@@ -617,6 +657,7 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
         QuantityExpr::Fixed { .. } => false,
         QuantityExpr::Ref { qty } => match qty {
             QuantityRef::Power { scope }
+            | QuantityRef::BasePower { scope }
             | QuantityRef::Toughness { scope }
             | QuantityRef::ObjectManaValue { scope }
             | QuantityRef::ObjectColorCount { scope }
@@ -657,6 +698,7 @@ pub(crate) fn quantity_expr_contains_scope(expr: &QuantityExpr, scope: ObjectSco
     fn ref_contains_scope(qty: &QuantityRef, scope: ObjectScope) -> bool {
         match qty {
             QuantityRef::Power { scope: s }
+            | QuantityRef::BasePower { scope: s }
             | QuantityRef::Toughness { scope: s }
             | QuantityRef::ObjectManaValue { scope: s }
             | QuantityRef::ObjectColorCount { scope: s }
@@ -802,6 +844,7 @@ pub(crate) fn quantity_expr_missing_resolution_only_referent(
         QuantityExpr::Fixed { .. } => false,
         QuantityExpr::Ref { qty } => match qty {
             QuantityRef::Power { scope }
+            | QuantityRef::BasePower { scope }
             | QuantityRef::Toughness { scope }
             | QuantityRef::ObjectManaValue { scope }
             | QuantityRef::ObjectColorCount { scope }
@@ -919,6 +962,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::TargetControllerCounter { .. }
         | QuantityRef::Variable { .. }
         | QuantityRef::Power { .. }
+        | QuantityRef::BasePower { .. }
         | QuantityRef::Intensity { .. }
         | QuantityRef::Toughness { .. }
         | QuantityRef::ObjectManaValue { .. }
@@ -943,6 +987,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
         | QuantityRef::LifeLostThisTurn { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::Speed { .. }
@@ -1111,7 +1156,7 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::SourceIsAttacking
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
-        | StaticCondition::IsMonarch
+        | StaticCondition::IsMonarch { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -1254,6 +1299,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::TargetControllerCounter { .. }
         | QuantityRef::Variable { .. }
         | QuantityRef::Power { .. }
+        | QuantityRef::BasePower { .. }
         | QuantityRef::Intensity { .. }
         | QuantityRef::Toughness { .. }
         | QuantityRef::ObjectManaValue { .. }
@@ -1272,6 +1318,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
         | QuantityRef::LifeLostThisTurn { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
@@ -1512,10 +1559,16 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         }
 
         // ---- Single-object characteristic reads. ----
-        // CR 208.1 / CR 209.1.
-        QuantityRef::Power { .. } | QuantityRef::Toughness { .. } => {
+        // CR 208.1 / CR 209.1: power and toughness are single-object
+        // characteristic reads.
+        QuantityRef::Power { .. }
+        | QuantityRef::Toughness { .. } => {
             CharacteristicKinds::POWER_TOUGHNESS
         }
+        // CR 208.4b + CR 613.4b: BasePower reads the current base value after
+        // characteristic-defining and setting effects, before layer-7c
+        // modifications and counters.
+        QuantityRef::BasePower { .. } => CharacteristicKinds::POWER_TOUGHNESS,
         // CR 607.2b: power of a card in exile, read the same way.
         QuantityRef::ExiledCardPower { .. } => CharacteristicKinds::POWER_TOUGHNESS,
         // CR 202.3 / CR 107.4a.
@@ -1567,6 +1620,7 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         | QuantityRef::TrackedSetSize
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
         | QuantityRef::LifeLostThisTurn { .. }
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::Speed { .. }
@@ -1813,6 +1867,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::TargetControllerCounter { .. }
         | QuantityRef::Variable { .. }
         | QuantityRef::Power { .. }
+        | QuantityRef::BasePower { .. }
         | QuantityRef::Intensity { .. }
         | QuantityRef::Toughness { .. }
         | QuantityRef::ObjectManaValue { .. }
@@ -1831,6 +1886,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
         | QuantityRef::LifeLostThisTurn { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
@@ -2060,11 +2116,103 @@ pub(crate) fn resolve_quantity_for_trigger_check(
     resolve_quantity_with_ctx(state, expr, controller, ctx)
 }
 
+/// CR 109.4 + CR 603.4: Resolve a `PlayerScope` in TRIGGER-CONDITION context.
+///
+/// The player-axis sibling of [`resolve_quantity_for_trigger_check`]: it builds
+/// the identical `QuantityContext` from the same four inputs and delegates to
+/// `resolve_single_player_scope`, the existing single authority for
+/// `PlayerScope` → `PlayerId`. No per-scope logic is re-implemented here, and
+/// `PlayerScope::DefendingPlayer` therefore reaches
+/// `combat::defending_player_cr508_5` on the same path as every other door.
+///
+/// Trigger conditions are checked before targets exist at fire time (CR 603.4),
+/// so `targets` is empty and `ability` is `None`; scopes that need either
+/// (`Target`, `ParentObjectTargetController`) resolve to `None` and the entry
+/// boundary rejects the condition rather than substituting the controller.
+///
+/// Duration-timing-only scopes are rejected BEFORE delegating: because
+/// `IsMonarch { player }` is serde-constructible from `card-data.json`, so
+/// `PlayerScope::AnyTurn` / `SpecificPlayer` can reach this
+/// function from a malformed row, and `resolve_single_player_scope` answers
+/// those with `unreachable!()`. Returning `None` here makes a bad row fail
+/// closed instead of panicking the engine inside a trigger check. (Validating
+/// at the serde boundary was considered and rejected: it would need a custom
+/// deserializer on every variant that carries a `PlayerScope`.)
+///
+/// [`PlayerScope::ScopedPlayer`] is rejected the same way when the triggering
+/// event names no player. `resolve_single_player_scope` answers that scope with
+/// `ctx.scoped_player.unwrap_or(controller)` — always `Some`. That fallback is
+/// right in a VALUE context (an unanchored "that player's life total" degrading
+/// to the controller's is a wrong number, not a wrong control-flow decision),
+/// but it fails OPEN here: this function is the anchor authority for the
+/// designation boundary gates in `game::triggers` / `game::layers`, whose whole
+/// contract is that an unresolvable anchor is UNANSWERABLE rather than false.
+/// Inheriting the controller instead answers a "that player is the monarch"
+/// intervening-if about the ABILITY CONTROLLER — silently the wrong player, and
+/// with no gate rejection to catch it. This is reachable for any
+/// `ScopedPlayer` anchor the parser's attack-trigger rebind does not convert to
+/// [`PlayerScope::DefendingPlayer`] (a non-`Attacks` mode, or an `Attacks`
+/// trigger whose attacked noun is not a player).
+pub(crate) fn resolve_player_scope_for_trigger_check(
+    state: &GameState,
+    scope: &PlayerScope,
+    controller: PlayerId,
+    source_context: Option<&TriggerSourceContext>,
+    event: Option<&crate::types::events::GameEvent>,
+) -> Option<PlayerId> {
+    if scope.duration_timing_only() {
+        return None;
+    }
+
+    // CR 603.4: the explicit `event` wins over `current_trigger_event`, which
+    // may still hold a stale event from an unrelated in-flight resolution in
+    // the same step (issue #1323). Same precedence as the `scoped_player`
+    // derivation in `resolve_quantity_for_trigger_check`.
+    let resolution_event = event.or(state.current_trigger_event.as_ref());
+    let scoped_player =
+        resolution_event.and_then(|e| crate::game::targeting::extract_player_from_event(e, state));
+
+    // CR 603.4 + CR 109.4: "that player" is an ANAPHOR — it denotes nobody when
+    // the triggering event names nobody. Fail closed here rather than let
+    // `resolve_single_player_scope`'s value-context `unwrap_or(controller)`
+    // fallback hand the boundary gate the ability controller. See the doc
+    // comment above for why the two contexts want opposite answers.
+    if matches!(scope, PlayerScope::ScopedPlayer) && scoped_player.is_none() {
+        return None;
+    }
+
+    let ctx = QuantityContext {
+        entering: None,
+        source: source_context
+            .map(|source| source.identity.reference.object_id)
+            .unwrap_or(ObjectId(0)),
+        trigger_source: source_context.cloned(),
+        recipient: None,
+        scoped_player,
+        damage_source: None,
+    };
+
+    match event {
+        // CR 603.4: make the triggering event visible to the CR 508.5 anchor
+        // authority for detection-time checks, exactly as the quantity sibling
+        // does for `ObjectCount`.
+        Some(event) => with_detection_trigger_event(event, || {
+            resolve_single_player_scope(state, scope, controller, ctx.clone(), &[], None)
+        }),
+        None => resolve_single_player_scope(state, scope, controller, ctx, &[], None),
+    }
+}
+
 std::thread_local! {
-    /// Detection-time trigger event override. Populated only inside
-    /// `resolve_quantity_for_trigger_check` when `state.current_trigger_event`
-    /// is `None`. Consumed by `ObjectCount` evaluation (see `resolve_ref`) to
-    /// implement `FilterProp::OtherThanTriggerObject` semantics.
+    /// Detection-time trigger event override. Populated by
+    /// `resolve_quantity_for_trigger_check` whenever an EXPLICIT `event` is
+    /// supplied — including when `state.current_trigger_event` is also set, in
+    /// which case the explicit event is authoritative (CR 603.4; see the
+    /// `event.is_none() && …` fast-path guard at the top of that function, and
+    /// the same precedence applied to `scoped_player` just above it).
+    /// Consumed by `ObjectCount` evaluation (see `resolve_ref`) to implement
+    /// `FilterProp::OtherThanTriggerObject` semantics, and by
+    /// `combat::defending_player_cr508_5` for the CR 508.5 anchor binding.
     static DETECTION_TRIGGER_EVENT: std::cell::RefCell<Option<crate::types::events::GameEvent>>
         = const { std::cell::RefCell::new(None) };
 }
@@ -3463,6 +3611,17 @@ fn resolve_ref(
             |obj| obj.power,
             |lki| lki.power,
         ),
+        // CR 208.4b + CR 613.4a-b: base power is the current layer-7a/7b
+        // value, before counters and other power-modifying effects in layer 7c.
+        QuantityRef::BasePower { scope } => resolve_object_pt(
+            state,
+            *scope,
+            ctx,
+            targets,
+            ability,
+            |obj| obj.layer_base_power.or(obj.base_power),
+            |lki| lki.base_power,
+        ),
         // Digital-only Alchemy: read the object's current intensity. The reader
         // is the source itself (a spell on the stack or a permanent reading its
         // own intensity), so the live object carries it; LKI does not track
@@ -3852,24 +4011,87 @@ fn resolve_ref(
             }
             count
         }
-        // CR 608.2c: Numeric result from the preceding effect in a sub_ability chain.
-        // The resolver stamps this from the parent effect's semantic event class.
-        //
-        // CR 120.6 / CR 120.10: `channel` picks WHICH tally the preceding effect
-        // left behind. Both are stamped by the damage effects and cleared at
-        // depth-0, so the two channels are read from the same resolution scope —
-        // this arm only chooses between them. Mirrors the condition peer
-        // `AbilityCondition::PreviousEffectAmount`, which already reads both.
-        QuantityRef::PreviousEffectAmount { channel } => match channel {
-            // CR 120.6: the total amount dealt/lost/removed.
-            DamageChannel::Total => state.last_effect_amount.unwrap_or(0),
-            // CR 120.10: only the damage dealt BEYOND lethal — "the amount of
-            // excess damage dealt to that creature this way" (Goblin
-            // Negotiation, Hell to Pay, Lacerate Flesh), "that excess damage"
-            // (Contest of Claws). 0 when the preceding effect dealt no excess.
-            DamageChannel::Excess => state.last_effect_excess_amount.unwrap_or(0),
-        },
+        // CR 608.2c + CR 608.2i: a "this way" look-back at the numeric result of
+        // the preceding instruction in this resolution. `channel` selects WHICH
+        // tally that instruction left behind; `aggregate` selects how the
+        // per-player table is reduced to the one number this reference reads.
+        QuantityRef::PreviousEffectAmount { channel, aggregate } => {
+            // CR 608.2h + CR 608.2e: if this clause's `player_scope` link
+            // captured a snapshot, the answer was determined ONCE when the
+            // effect was applied (608.2h) and the whole fan-out is one action
+            // processed simultaneously (608.2e) — so every player in the
+            // fan-out must read that frozen value, not the scalar their own
+            // completed action re-stamped. CR 121.2c: the serialization of the
+            // multiplayer draw is itself correct; only the leaked count is not.
+            // Mirrors the snapshot-first shape of the `HandSize { AllPlayers }`
+            // and `ControlledByEachPlayer` arms. Placed before the channel
+            // match because the snapshot is keyed on the WHOLE `QuantityRef`
+            // (`ClauseMinimumSnapshot::get`), so it is channel- and
+            // aggregate-correct by key.
+            if let Some(v) = state
+                .clause_minimum_snapshot
+                .as_ref()
+                .and_then(|s| s.get(qty))
+            {
+                return v;
+            }
+            match channel {
+                DamageChannel::Total => {
+                    let total = state.last_effect_amount.unwrap_or(0);
+                    let per_player = state.last_effect_counts_by_player.values().copied();
+                    match aggregate {
+                        AggregateFunction::Sum => total,
+                        // An absent table means the producer published NO per-player
+                        // breakdown: only `Effect::Discard | DiscardCard |
+                        // ChangeZoneAll` populate it; every other producer takes the
+                        // `None` arm in `install_previous_effect_counts_by_player`,
+                        // which clears it. For a SINGLE-subject producer the scalar
+                        // IS the extremum, so the fallback is exact. For a
+                        // MULTI-subject non-count producer — `Effect::DamageEachPlayer`,
+                        // `Effect::DamageAll`, `Effect::LoseLife` under `player_scope`
+                        // — the scalar is a cross-player SUM and a Max read would
+                        // over-report. Unreachable today, measured: the Scryfall
+                        // census (2026-08-15) returns exactly 3 cards in the Max
+                        // class and all 3 follow an `Effect::Discard`, a count
+                        // producer. The real-zero case is also safe: the discard
+                        // fan-out zero-fills an empty producer table with one entry
+                        // per matching player, so a discard-of-nothing yields a
+                        // non-empty all-zero table (Max = 0), never the fallback.
+                        //
+                        // The mirror-image hazard is a STALE PRESERVED table, not
+                        // an absent one: `install_previous_effect_counts_by_player`
+                        // KEEPS the prior table on its `None` arm when
+                        // `preserve_counts_for_current_consumer` (`player_scope.is_none()
+                        // && effect_consumes_event_context_amount`). In a chain
+                        // A(count producer) -> B(EventContextAmount consumer, no
+                        // player_scope) -> C(PreviousEffectAmount{Max}), C would
+                        // fold A's table while `Sum` reads B's re-stamped scalar.
+                        // Unreachable for the closed Max/Min class, measured: all 3
+                        // class cards are `Discard{All} -> Draw{PEA}` with the
+                        // consumer in the IMMEDIATELY following link, so no B can
+                        // interpose; and `Sum` is unaffected either way because it
+                        // reads `last_effect_amount`, exactly as before this change.
+                        AggregateFunction::Max => per_player.max().unwrap_or(total),
+                        AggregateFunction::Min => per_player.min().unwrap_or(total),
+                    }
+                }
+                // CR 120.10: only the damage dealt BEYOND lethal — "the amount of
+                // excess damage dealt to that creature this way" (Goblin
+                // Negotiation, Hell to Pay, Lacerate Flesh), "that excess damage"
+                // (Contest of Claws). A scalar channel with no per-player table,
+                // so every aggregate reduces to it. 0 when no excess was dealt.
+                DamageChannel::Excess => state.last_effect_excess_amount.unwrap_or(0),
+            }
+        }
+        // Read the preceding continuation-local effect count directly.
+        // An unavailable count resolves to zero.
+        QuantityRef::PreviousEffectCount => state.last_effect_count.unwrap_or(0),
         // CR 608.2c: "for each [thing] this way" — read the most recent tracked set size.
+        // CR 700.2 + CR 608.2c: "highest id" == "the set the currently-resolving
+        // instruction published" — the ordering argument is written once, on
+        // `effects::publish_tracked_set`. Deliberately not routed through
+        // `targeting::resolve_tracked_set_id`: that authority SKIPS empty sets, and
+        // under mode scoping not skipping is the correct semantics here.
         QuantityRef::TrackedSetSize => state
             .tracked_object_sets
             .iter()
@@ -3880,6 +4102,11 @@ fn resolve_ref(
         // set that also satisfy the inner filter. Used for "for each nontoken
         // creature you controlled that was destroyed this way" — the tracked set
         // holds all destroyed creatures; the filter narrows to controlled nontokens.
+        // CR 700.2 + CR 608.2c: "highest id" == "the set the currently-resolving
+        // instruction published" — the ordering argument is written once, on
+        // `effects::publish_tracked_set`. Deliberately not routed through
+        // `targeting::resolve_tracked_set_id`: that authority SKIPS empty sets, and
+        // under mode scoping not skipping is the correct semantics here.
         QuantityRef::FilteredTrackedSetSize { filter, caused_by } => {
             let Some((set_id, ids)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
             else {
@@ -3947,6 +4174,11 @@ fn resolve_ref(
             let ids: Vec<ObjectId> = match source {
                 // Chain-published tracked set ("those exiled cards"): the set the
                 // immediately-preceding chain effect published (highest id).
+                // CR 700.2 + CR 608.2c: "highest id" == "the set the currently-resolving
+                // instruction published" — the ordering argument is written once, on
+                // `effects::publish_tracked_set`. Deliberately not routed through
+                // `targeting::resolve_tracked_set_id`: that authority SKIPS empty sets, and
+                // under mode scoping not skipping is the correct semantics here.
                 TrackedAnaphorSource::ChainSet => state
                     .tracked_object_sets
                     .iter()
@@ -6766,60 +6998,39 @@ where
     }
 }
 
+/// CR 508.5: `PlayerScope::DefendingPlayer` door.
+///
+/// The single authority `combat::defending_player_cr508_5` owns BOTH the
+/// binding rule and the precedence. Do NOT read `state.current_trigger_event`,
+/// the detection TLS, or `combat_status.defending_player` here — one anaphor
+/// must not be able to bind two different players across doors.
 fn defending_player_for_quantity_context(
     state: &GameState,
     ctx: QuantityContext,
 ) -> Option<PlayerId> {
-    // CR 508.5: prefer the single authority, which resolves the defending player of
-    // the source's own attack or — for an Equipment/Aura whose source is not the
-    // attacker — the attacker carried by the triggering event (CR 508.5a, per-attacker).
-    if let Some(source) = ctx.trigger_source.as_ref() {
-        let source_id = source.identity.reference.object_id;
-        return source
-            .combat_status
-            .defending_player
-            // Event-global read: the event's attacker/defender relation, keyed
-            // by the exact source identity, is authoritative for this trigger.
-            .or_else(|| {
-                defending_player_from_event(state.current_trigger_event.as_ref(), source_id)
-            })
-            .or_else(|| {
-                defending_player_from_event(detection_trigger_event().as_ref(), source_id)
-            });
-    }
-    crate::game::combat::resolve_defending_player(state, ctx.source)
-        // CR 508.5a 1v1 fallback: a batched multi-attacker trigger event has no single
-        // attacking object to resolve individually, so use the event's defending player.
-        .or_else(|| defending_player_from_event(state.current_trigger_event.as_ref(), ctx.source))
-        .or_else(|| defending_player_from_event(detection_trigger_event().as_ref(), ctx.source))
+    crate::game::combat::defending_player_cr508_5(state, ctx.source, ctx.trigger_source.as_ref())
 }
 
-fn defending_player_from_event(
-    event: Option<&crate::types::events::GameEvent>,
-    source_id: ObjectId,
+/// Drive the production `PlayerScope::DefendingPlayer` door from the cross-door
+/// agreement fixture in `combat.rs` without reconstructing a `QuantityContext`
+/// by hand (which would let the two doors diverge in the test itself).
+#[cfg(test)]
+pub(crate) fn defending_player_for_quantity_context_for_test(
+    state: &GameState,
+    source: ObjectId,
+    trigger_source: Option<&TriggerSourceContext>,
 ) -> Option<PlayerId> {
-    let crate::types::events::GameEvent::AttackersDeclared {
-        defending_player,
-        attacks,
-        ..
-    } = event?
-    else {
-        return None;
-    };
-    attacks
-        .iter()
-        .find_map(|(attacker_id, target)| {
-            if *attacker_id == source_id {
-                match target {
-                    crate::game::combat::AttackTarget::Player(pid) => Some(*pid),
-                    crate::game::combat::AttackTarget::Planeswalker(_)
-                    | crate::game::combat::AttackTarget::Battle(_) => None,
-                }
-            } else {
-                None
-            }
-        })
-        .or(Some(*defending_player))
+    defending_player_for_quantity_context(
+        state,
+        QuantityContext {
+            entering: None,
+            source,
+            trigger_source: trigger_source.cloned(),
+            recipient: None,
+            scoped_player: None,
+            damage_source: None,
+        },
+    )
 }
 
 /// CR 810.9a + CR 810.9d: Resolve an aggregate (multi-player) `LifeTotal`
@@ -7065,6 +7276,11 @@ pub(crate) fn possessed_tracked_set_member(
     controller: PlayerId,
     source_id: ObjectId,
 ) -> bool {
+    // CR 700.2 + CR 608.2c: "highest id" == "the set the currently-resolving
+    // instruction published" — the ordering argument is written once, on
+    // `effects::publish_tracked_set`. Deliberately not routed through
+    // `targeting::resolve_tracked_set_id`: that authority SKIPS empty sets, and
+    // under mode scoping not skipping is the correct semantics here.
     let Some((set_id, ids)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0) else {
         return false;
     };
@@ -17390,6 +17606,110 @@ mod tests {
         state.clause_minimum_snapshot = Some(snap);
         let qty = QuantityExpr::Ref { qty: qref };
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 5);
+    }
+
+    #[test]
+    fn previous_effect_amount_prefers_clause_snapshot() {
+        // CR 608.2h: the third class admitted to the clause freeze. The live
+        // tally is deliberately set to a DIFFERENT value than the frozen one, so
+        // the assertion fails if the snapshot read is removed or ordered after
+        // the channel match. This is the unit-level peer of the integration
+        // test `windfall_short_library_does_not_shrink_later_players_draws`,
+        // where the live value is what a completed draw re-stamped.
+        let mut state = GameState::new_two_player(42);
+        let qref = QuantityRef::PreviousEffectAmount {
+            channel: DamageChannel::Total,
+            aggregate: AggregateFunction::Max,
+        };
+        let mut snap = crate::types::game_state::ClauseMinimumSnapshot::default();
+        snap.insert(qref.clone(), 8);
+        state.clause_minimum_snapshot = Some(snap);
+        // Live state says 5 — the post-fan-out value the freeze must override.
+        state.last_effect_amount = Some(5);
+        state.last_effect_counts_by_player.insert(PlayerId(0), 5);
+        let qty = QuantityExpr::Ref { qty: qref };
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 8);
+    }
+
+    #[test]
+    fn previous_effect_amount_live_when_no_snapshot() {
+        // The fallback arm: with no clause snapshot the ref reads live state, so
+        // `Max` over the per-player table {P0:8, P1:3} is 8. Pairs with the test
+        // above — together they show the snapshot is PREFERRED, not the only
+        // path, so a fix that always returned the snapshot would fail here.
+        let mut state = GameState::new_two_player(42);
+        state.last_effect_amount = Some(11);
+        state.last_effect_counts_by_player.insert(PlayerId(0), 8);
+        state.last_effect_counts_by_player.insert(PlayerId(1), 3);
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::PreviousEffectAmount {
+                channel: DamageChannel::Total,
+                aggregate: AggregateFunction::Max,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 8);
+    }
+
+    /// All three reductions of ONE table must be mutually distinguishable, or a
+    /// test that pins any of them proves nothing about the others. Table
+    /// {8,7,3} with `last_effect_amount` 18: Sum 18 / Max 8 / Min 3 — three
+    /// distinct values, so each assertion below fails if its arm is swapped for
+    /// either sibling.
+    #[test]
+    fn previous_effect_amount_aggregates_are_mutually_distinct() {
+        let mut state = GameState::new_two_player(42);
+        state.last_effect_amount = Some(18);
+        for (p, n) in [(0, 8), (1, 7), (2, 3)] {
+            state.last_effect_counts_by_player.insert(PlayerId(p), n);
+        }
+        let read = |agg| {
+            resolve_quantity(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: DamageChannel::Total,
+                        aggregate: agg,
+                    },
+                },
+                PlayerId(0),
+                ObjectId(0),
+            )
+        };
+        assert_eq!(read(AggregateFunction::Sum), 18, "Sum reads the total");
+        assert_eq!(read(AggregateFunction::Max), 8, "Max reads the greatest");
+        assert_eq!(read(AggregateFunction::Min), 3, "Min reads the least");
+    }
+
+    /// CR 608.2c: a player the clause applied to who contributed NOTHING still
+    /// contributed zero *this way*, so the table must carry them.
+    ///
+    /// This is the resolver half of the producer fix: given a table that
+    /// includes the zero-contributor, `Min` must be 0. The producer half — that
+    /// the table actually gets that entry — is
+    /// `windfall_empty_hand_player_is_in_the_per_player_table`.
+    ///
+    /// Board 8/7/3/**0**. Before the producer fix the table omitted the
+    /// zero-contributor and published {8,7,3}, so `Min` answered 3. `Max` is
+    /// immune to the omission (zeros cannot raise a maximum) and `Sum` reads
+    /// `last_effect_amount`, which is why the shipped Max class never saw it.
+    #[test]
+    fn previous_effect_amount_min_counts_the_zero_contributor() {
+        let mut state = GameState::new_two_player(42);
+        state.last_effect_amount = Some(18);
+        for (p, n) in [(0, 8), (1, 7), (2, 3), (3, 0)] {
+            state.last_effect_counts_by_player.insert(PlayerId(p), n);
+        }
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::PreviousEffectAmount {
+                channel: DamageChannel::Total,
+                aggregate: AggregateFunction::Min,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)),
+            0,
+            "the empty-handed player discarded 0 this way; the minimum is 0, not 3"
+        );
     }
 
     #[test]

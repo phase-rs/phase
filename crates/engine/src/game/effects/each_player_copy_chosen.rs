@@ -34,6 +34,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+use crate::types::resolution::ChildStackDepth;
 
 /// Effect parameters threaded through the whole APNAP walk. Bundled so the
 /// resolver, the `SelectTargets` continuation, and the replacement-resume drain
@@ -263,7 +264,7 @@ pub(crate) fn drive_from_copy(
     );
     // Depth 1: skip the depth-0 chain prelude so per-resolution ledgers
     // (`last_created_token_ids`) are not reset.
-    let stack_depth_before_copy = state.resolution_stack.len();
+    let stack_depth_before_copy = state.resolution_stack.capture_child_boundary();
     super::resolve_ability_chain(state, &copy_ability, events, 1)?;
 
     // CR 616.1: The copy parked a replacement-ordering choice. Do NOT read
@@ -326,7 +327,7 @@ pub(crate) fn perform_counter_step_then_advance(
                     params.source_id,
                     player,
                 );
-                let stack_depth_before_counter = state.resolution_stack.len();
+                let stack_depth_before_counter = state.resolution_stack.capture_child_boundary();
                 super::resolve_ability_chain(state, &counter_ability, events, 1)?;
                 // CR 616.1: the counter placement paused for a replacement
                 // ordering — park an `AwaitingCounters` continuation.
@@ -398,9 +399,13 @@ pub(crate) fn drain_pending(state: &mut GameState, events: &mut Vec<GameEvent>) 
 fn park_each_player_copy_chosen_after_current_step(
     state: &mut GameState,
     pending: PendingEachPlayerCopyChosen,
-    stack_depth_before_step: usize,
+    stack_depth_before_step: ChildStackDepth,
 ) {
-    match state.resolution_stack.len().cmp(&stack_depth_before_step) {
+    match state
+        .resolution_stack
+        .capture_child_boundary()
+        .cmp(&stack_depth_before_step)
+    {
         std::cmp::Ordering::Less => {
             panic!("each-player-copy-chosen step removed a parent before it could be re-parked")
         }

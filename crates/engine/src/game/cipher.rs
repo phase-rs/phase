@@ -127,12 +127,24 @@ pub(crate) fn finish_encode(
 }
 
 /// CR 702.99a: Begin the on-resolution encode offer for a Cipher spell. Returns
-/// `true` when resolution paused for the choice (the caller must stop finalizing
-/// the spell and return, leaving the card held off the stack like a mutating
-/// spell), or `false` when there is no encode to offer — the spell isn't an
-/// encodable cipher card, or the controller has no creature to host it — so the
-/// caller routes the card normally (to its owner's graveyard).
-pub fn begin_encode_choice(state: &mut GameState, card_id: ObjectId, controller: PlayerId) -> bool {
+/// `true` when this hook has taken the card off the caller's hands — normally
+/// because resolution paused for the choice (the caller stops finalizing the
+/// spell and returns, leaving the card held off the stack like a mutating
+/// spell), and in the one degenerate case below because the offer already
+/// completed as a decline and routed the card itself. Returns `false` when there
+/// is no encode to offer at all — the spell isn't an encodable cipher card, or
+/// the controller has no creature to host it — so the caller routes the card
+/// normally (to its owner's graveyard).
+///
+/// Both `true` arms leave the caller with nothing to route, which is what makes
+/// them one answer: the distinction that matters to a caller is whether the card
+/// is still its responsibility.
+pub fn begin_encode_choice(
+    state: &mut GameState,
+    card_id: ObjectId,
+    controller: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
     if !spell_can_encode(state, card_id) {
         return false;
     }
@@ -140,12 +152,124 @@ pub fn begin_encode_choice(state: &mut GameState, card_id: ObjectId, controller:
     if creatures.is_empty() {
         return false;
     }
+    let pending = crate::types::resolution::PendingCipherEncode {
+        stage: crate::types::resolution::CipherEncodeStage::Parked,
+        card_id,
+        controller,
+        creatures,
+    };
+
+    // CR 702.99a: the encode is the spell's LAST instruction. When the spell's
+    // own effects are still paused on a player answer, this offer must not
+    // overwrite that live prompt (issue #7470) — it is parked BELOW the frame
+    // that owns the prompt and armed by `resume_resolution_frames` once that
+    // owner is consumed. Either way the caller's contract is the same: the
+    // resolution owes an answer, so the card is held off the stack.
+    park_encode_offer(state, pending, events);
+    true
+}
+
+/// Park the encode offer, arming it immediately only when nothing else owns the
+/// current prompt.
+///
+/// The offer always leaves this function accounted for: armed as the live
+/// prompt, parked as a frame that will arm later, or — if the stack refuses a
+/// prompt-less frame at all — completed as a decline. It is never dropped.
+fn park_encode_offer(
+    state: &mut GameState,
+    pending: crate::types::resolution::PendingCipherEncode,
+    events: &mut Vec<GameEvent>,
+) {
+    // The question is not what SHAPE the top frame has — it is whether the
+    // resolution is currently asking the player anything at all. Keying this to
+    // `FrameGate::DirectChoice` missed the discard pause (Mental Vapors), whose
+    // frame owns a prompt without being a direct-choice owner. `waiting_for`
+    // is the engine's single answer to "is a question open", so ask it.
+    let resolution_paused = !matches!(state.waiting_for, WaitingFor::Priority { .. });
+    if !resolution_paused {
+        let (player, card_id, creatures) = (
+            pending.controller,
+            pending.card_id,
+            pending.creatures.clone(),
+        );
+        // The frame and the prompt it may consume are installed as one step:
+        // a direct-choice owner that is visible with an unrelated `WaitingFor`
+        // is the very state #7470 left behind, and this authority makes the two
+        // unable to disagree.
+        let armed = crate::types::resolution::ResolutionFrame::CipherEncode(
+            crate::types::resolution::PendingCipherEncode {
+                stage: crate::types::resolution::CipherEncodeStage::Armed,
+                ..pending
+            },
+        );
+        if state
+            .install_direct_choice_frame(
+                armed,
+                WaitingFor::CipherEncodeChoice {
+                    player,
+                    card_id,
+                    creatures,
+                },
+            )
+            .is_err()
+        {
+            // Same reasoning as the parked branch below: a refusal means the
+            // stack was already invalid, and the card still has to leave
+            // resolution by a legal route, so the offer completes as a decline
+            // (CR 608.2n) rather than being dropped.
+            handle_encode_choice(state, card_id, None, events);
+        }
+        return;
+    }
+    // Where a prompt-less frame may sit is a property of the stack's shape, not
+    // a guess this caller gets to make: an empty stack (a discard prompt owns no
+    // frame), the ordinary position below the active child, or outside a paused
+    // post-replacement/draw pair whose adjacency `validate` protects. The stack
+    // answers that itself, so no legal shape can refuse the offer.
+    let card_id = pending.card_id;
+    if state
+        .park_cipher_encode_beneath_live_prompt(pending)
+        .is_err()
+    {
+        // The stack rejected a frame that owns no prompt, which means it was
+        // already invalid before this offer existed. The card must still leave
+        // resolution by one of its two legal routes, so complete the offer the
+        // way a declined one completes (CR 608.2n: the card goes to its owner's
+        // graveyard) instead of dropping it and stranding the card off the
+        // stack. The live prompt is untouched either way — a decline moves a
+        // card, it does not ask a question.
+        handle_encode_choice(state, card_id, None, events);
+    }
+}
+
+/// CR 702.99a: Arm a parked encode offer once it reaches the stack top, i.e.
+/// after the spell's own effects have finished. Called from the exhaustive
+/// frame-resume dispatch, which is what guarantees a parked offer is never
+/// forgotten.
+pub(crate) fn arm_parked_encode_offer(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    let Some(pending) = state.resolution_stack.active_cipher_encode() else {
+        return;
+    };
+    // CR 702.99a: re-read legal hosts — the spell's own effects ran since the
+    // offer was parked and may have changed the board.
+    let creatures = legal_encode_creatures(state, pending.controller);
+    let (player, card_id) = (pending.controller, pending.card_id);
+    if creatures.is_empty() {
+        // No legal host left: consume the frame and route the card the way a
+        // declined offer does (CR 608.2n).
+        let _ = state.take_active_cipher_encode_frame();
+        handle_encode_choice(state, card_id, None, events);
+        return;
+    }
+    if let Some(frame) = state.resolution_stack.active_cipher_encode_mut() {
+        frame.stage = crate::types::resolution::CipherEncodeStage::Armed;
+        frame.creatures = creatures.clone();
+    }
     state.waiting_for = WaitingFor::CipherEncodeChoice {
-        player: controller,
+        player,
         card_id,
         creatures,
     };
-    true
 }
 
 /// CR 702.99a–b: Resolve the encode choice. `creature = Some(id)` encodes the

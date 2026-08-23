@@ -96,8 +96,9 @@ use super::oracle_modal::{
 };
 use super::oracle_replacement::{
     find_copy_verb_present, lower_as_enters_becomes_choice_modal,
-    lower_as_enters_or_face_up_counters, lower_replacement_ir, parse_replacement_line,
-    parse_replacement_line_ir, parse_whenever_you_cast_enters_with_trigger,
+    lower_as_enters_or_face_up_counters, lower_replacement_ir,
+    parse_bidirectional_damage_prevention, parse_replacement_line, parse_replacement_line_ir,
+    parse_whenever_you_cast_enters_with_trigger,
 };
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
@@ -2909,6 +2910,48 @@ fn ability_word_to_condition(word: &str) -> Option<crate::types::ability::Static
     }
 }
 
+/// CR 207.2c vs. CR 702: which em-dash prefix on an ACTIVATED ability gates it.
+///
+/// Both kinds of prefix reach `ability_word_to_condition` through the same
+/// `strip_ability_word_with_name` path, but they mean opposite things:
+///
+/// - An **ability word** (CR 207.2c — threshold, metalcraft, delirium, spell
+///   mastery, revolt, ferocious) "has no rules meaning". The condition it names
+///   is printed in the ability's own text ("Activate only as long as you control
+///   three or more artifacts" — Mox Opal), where `strip_activated_constraints`
+///   already lowers it. Adding a second gate from the label would apply the
+///   printed one twice, and on the cards whose label gates only the EFFECT it
+///   would refuse an activation the card allows. So: `None`.
+/// - A **keyword ability** prefix carries the whole gate and the text prints no
+///   other one. CR 702.186b: ∞ — "As long as this permanent is harnessed, it has
+///   [ability]". CR 702.178a: Max speed — "As long as your speed is 4, this
+///   object has '[Ability]'." In both, the ability is ABSENT while the gate is
+///   unmet, which is an activation restriction (CR 602.5) and NOT an
+///   intervening-if `condition` (CR 608.2c + the Shelldock Isle ruling, which the
+///   engine deliberately does not use for activation legality).
+///
+/// The `_ => None` arm is the CR 207.2c class: `ability_word_to_condition`'s
+/// remaining entries are ability words, every one of which lowers to a
+/// `QuantityComparison` its own ability text also states.
+fn keyword_prefix_activation_restriction(
+    condition: Option<&StaticCondition>,
+) -> Option<ActivationRestriction> {
+    match condition? {
+        StaticCondition::SourceIsHarnessed => Some(ActivationRestriction::SourceIsHarnessed),
+        // CR 702.178a's glossary line names whose speed: "that permanent's
+        // controller (or that card's owner, if it isn't on the battlefield)".
+        // `ParsedCondition::HasMaxSpeed` resolves that from the SOURCE rather
+        // than from the activating player, who CR 602.2 allows to be a
+        // different person: "Only an object's controller ... can activate its
+        // activated ability unless the object specifically says otherwise"
+        // ("Any player may activate this ability" is that otherwise).
+        StaticCondition::HasMaxSpeed => Some(ActivationRestriction::RequiresCondition {
+            condition: Some(ParsedCondition::HasMaxSpeed),
+        }),
+        _ => None,
+    }
+}
+
 /// Convert an ability-word `StaticCondition` to an `AbilityCondition` for spell effects.
 /// CR 608.2c: Bridge an ability-word / "instead if" `StaticCondition` to its
 /// effect-resolution `AbilityCondition` form. Delegates to the single
@@ -4556,6 +4599,7 @@ pub(crate) fn parse_oracle_ir(
         // Must run before keyword extraction so "Spree" header + follow-on `+` lines
         // are consumed as a modal block, not swallowed as a keyword-only line.
         if let Some((block, next_i)) = parse_oracle_block(&lines, i) {
+            let mut next_i = next_i;
             match lower_oracle_block_ir(block, card_name, ctx.host_self_reference.clone(), &mut ctx)
             {
                 OracleBlockIr::Activated(ability) => {
@@ -4571,7 +4615,12 @@ pub(crate) fn parse_oracle_ir(
                     }
                     emitter.modal_at(item_line, choice);
                 }
-                OracleBlockIr::Triggered(triggers) => {
+                OracleBlockIr::Triggered(mut triggers) => {
+                    // CR 706.3b: a triggered modal consumes its bullet modes
+                    // before this boundary, so table rows follow `next_i`, not
+                    // the trigger header. Retain them on the trigger IR until
+                    // lowering can attach them to the chain that owns the roll.
+                    next_i = attach_trigger_die_result_branches(&mut triggers, &lines, next_i);
                     for trigger in triggers {
                         emitter.trigger_ir_at(item_line, TriggerNodeIr::Parsed(Box::new(trigger)));
                     }
@@ -5154,18 +5203,14 @@ pub(crate) fn parse_oracle_ir(
                 Some(PrintedAbilityIndex::placeholder()),
                 &mut ctx,
             );
-            // CR 702.186b: ∞ ("As long as harnessed, it has [ability]") gates an
-            // activated ability's legality (the ability is absent while
-            // unharnessed) — an activation restriction, NOT an intervening-if
-            // `condition` (a resolution-time gate, CR 608.2c + Shelldock Isle
-            // ruling, which the engine deliberately does not use for activation
-            // legality). Applied AFTER the call because
+            // A KEYWORD prefix ("as long as [gate], this object has [ability]")
+            // gates the ability's very presence, so it lowers to an activation
+            // restriction. Applied AFTER the call because
             // `parse_activated_ability_ir` captures the cost-text constraints in
             // the activation shell before this outer router stamp is applied.
-            if matches!(aw_condition, Some(StaticCondition::SourceIsHarnessed)) {
-                ir.shell
-                    .activation_restrictions
-                    .push(ActivationRestriction::SourceIsHarnessed);
+            if let Some(restriction) = keyword_prefix_activation_restriction(aw_condition.as_ref())
+            {
+                ir.shell.activation_restrictions.push(restriction);
             }
             if ability_cant_be_copied {
                 ir.shell.cant_be_copied = true;
@@ -6007,6 +6052,34 @@ pub(crate) fn parse_oracle_ir(
             if let Some(replacement_irs) = lower_as_enters_or_face_up_counters(&line) {
                 for replacement_ir in replacement_irs {
                     emitter.replacement_ir_at(item_line, replacement_ir);
+                }
+                i += 1;
+                continue;
+            }
+            // CR 614.1a + CR 616.1: "Prevent all [combat] damage that would
+            // be dealt to and dealt by <subject>" is an English ellipsis that
+            // needs TWO independent `ReplacementDefinition`s (recipient half +
+            // source half) from one physical sentence — the same "one line ->
+            // Vec<ReplacementIr>" multi-emit shape `lower_as_enters_or_face_up_counters`
+            // uses above, so it runs at the same tier, right after it. Must
+            // also run BEFORE `parse_replacement_sentence_sequence_ir` below,
+            // not just before the generic single-definition
+            // `parse_replacement_line_ir`: if a future card ever puts this
+            // ellipsis sentence on the same physical line as a second
+            // period-terminated replacement sentence, the sequence parser
+            // would otherwise treat the ellipsis sentence as one more ordinary
+            // sentence and hand it to `parse_replacement_line_ir` per-sentence
+            // (via its own internal loop), which can only ever populate one of
+            // the two scoping fields — silently reintroducing this PR's bug
+            // for that shape. No card in the current corpus combines the two,
+            // so this was a latent gap (review-impl finding on PR #7615), not
+            // an active misparse.
+            if let Some(definitions) = parse_bidirectional_damage_prevention(&lower, &line) {
+                for definition in definitions {
+                    emitter.replacement_ir_at(
+                        item_line,
+                        ReplacementIr::from_definition(&line, definition),
+                    );
                 }
                 i += 1;
                 continue;

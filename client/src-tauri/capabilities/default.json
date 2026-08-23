@@ -3,7 +3,12 @@
     "identifier": "default",
     "description": "Local permissions for the bundled bootstrap page",
     "windows": ["main"],
-    "permissions": ["core:default", "core:window:allow-set-fullscreen", "allow-stash-legacy-storage"]
+    "permissions": [
+      "core:default",
+      "core:window:allow-set-fullscreen",
+      "allow-stash-legacy-storage",
+      "allow-audio-boot-health"
+    ]
   },
   {
     "identifier": "remote-shell",
@@ -33,7 +38,8 @@
       "allow-stop-native-engine",
       "allow-connect-native-engine",
       "allow-native-engine-bridge-send",
-      "allow-native-engine-bridge-close"
+      "allow-native-engine-bridge-close",
+      "allow-audio-boot-health"
     ]
   }
 ]

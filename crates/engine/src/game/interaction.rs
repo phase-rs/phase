@@ -245,6 +245,11 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         WaitingFor::OutsideGameChoice { .. } => HumanResponseModel::OutsideSelection,
         WaitingFor::NamedChoice { .. } => HumanResponseModel::TextChoice,
         WaitingFor::RespondToShortcut { .. } => HumanResponseModel::ShortcutReply,
+        // Resolve All consent has a finite, engine-authored Grant/Decline or
+        // Revoke domain. It is not a CR 732 shortcut-reply protocol.
+        WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. } => {
+            HumanResponseModel::ExactCandidates(AuditedExactCandidates)
+        }
         WaitingFor::PrecastCopyShortcutOffer { .. }
         | WaitingFor::RespondToPrecastCopyShortcut { .. }
         | WaitingFor::CommanderZoneChoice { .. }
@@ -431,7 +436,14 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
             None,
             Some(InteractionSlotKind::Single),
         ),
-        WaitingFor::LoopShortcut { .. } | WaitingFor::RespondToShortcut { .. } => (
+        WaitingFor::ResolveAllConsent { .. } => (
+            InteractionWaitingForCode::Shortcut,
+            Some(SimultaneousDecisionKind::ResolveAllConsent),
+            Some(InteractionSlotKind::Single),
+        ),
+        WaitingFor::LoopShortcut { .. }
+        | WaitingFor::RespondToShortcut { .. }
+        | WaitingFor::ResolveAllReady { .. } => (
             InteractionWaitingForCode::Shortcut,
             None,
             Some(InteractionSlotKind::Single),
@@ -571,16 +583,70 @@ fn waiting_for_kind(waiting_for: &WaitingFor) -> InteractionWaitingForKind {
     }
 }
 
-fn semantic_slots(waiting_for: &WaitingFor) -> Vec<(PlayerId, InteractionSlotKind)> {
-    let classification = classify_waiting_for(waiting_for);
+fn semantic_slots(state: &GameState) -> Vec<(PlayerId, InteractionSlotKind)> {
+    let classification = classify_waiting_for(&state.waiting_for);
     let Some(slot_kind) = classification.slot_kind else {
         return Vec::new();
     };
-    waiting_for
-        .acting_players()
-        .into_iter()
-        .map(|player| (player, slot_kind))
-        .collect()
+    match &state.waiting_for {
+        WaitingFor::ResolveAllConsent {
+            epoch,
+            representative,
+        } => state
+            .resolve_all_consent_run
+            .as_ref()
+            .filter(|run| run.epoch == *epoch)
+            .map(|run| {
+                run.participants
+                    .iter()
+                    .filter(|participant| {
+                        participant.granted && participant.representative != *representative
+                    })
+                    .map(|participant| (participant.representative, slot_kind))
+                    .chain(std::iter::once((*representative, slot_kind)))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        WaitingFor::ResolveAllReady { epoch } => state
+            .resolve_all_consent_run
+            .as_ref()
+            .filter(|run| run.epoch == *epoch)
+            .map(|run| {
+                run.participants
+                    .iter()
+                    .filter(|participant| participant.granted)
+                    .map(|participant| (participant.representative, slot_kind))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => state
+            .waiting_for
+            .acting_players()
+            .into_iter()
+            .map(|player| (player, slot_kind))
+            .collect(),
+    }
+}
+
+fn interaction_submitter_for_owner(state: &GameState, semantic_owner: PlayerId) -> PlayerId {
+    let frozen = match &state.waiting_for {
+        WaitingFor::ResolveAllConsent { epoch, .. } | WaitingFor::ResolveAllReady { epoch } => {
+            turn_control::resolve_all_granted_submitter(state, *epoch, semantic_owner)
+        }
+        _ => None,
+    };
+    frozen.unwrap_or_else(|| turn_control::authorized_submitter_for_player(state, semantic_owner))
+}
+
+fn interaction_authorized_submitters(state: &GameState) -> Vec<PlayerId> {
+    let mut submitters = Vec::new();
+    for (owner, _) in semantic_slots(state) {
+        let submitter = interaction_submitter_for_owner(state, owner);
+        if !submitters.contains(&submitter) {
+            submitters.push(submitter);
+        }
+    }
+    submitters
 }
 
 fn interaction_serial_is_valid(value: &str) -> bool {
@@ -651,7 +717,7 @@ fn allocate_interaction_ids(
 }
 
 fn bind_all_current_slots(state: &mut GameState) -> bool {
-    let semantic = semantic_slots(&state.waiting_for);
+    let semantic = semantic_slots(state);
     let Some((ids, generation, serial)) = allocate_interaction_ids(state, semantic.len()) else {
         return false;
     };
@@ -741,7 +807,7 @@ pub(crate) fn ensure_interaction_authority(state: &mut GameState) {
         state.active_interaction_slots.clear();
         return;
     }
-    let expected = semantic_slots(&state.waiting_for);
+    let expected = semantic_slots(state);
     let matches = expected.len() == state.active_interaction_slots.len()
         && expected.iter().all(|(owner, kind)| {
             state
@@ -757,16 +823,10 @@ pub(crate) fn ensure_interaction_authority(state: &mut GameState) {
 }
 
 pub(crate) fn semantic_owner_for_actor(state: &GameState, actor: PlayerId) -> Option<PlayerId> {
-    let acting = state.waiting_for.acting_players();
-    acting
-        .iter()
-        .copied()
-        .find(|owner| *owner == actor)
-        .or_else(|| {
-            acting
-                .into_iter()
-                .find(|owner| turn_control::authorized_submitter_for_player(state, *owner) == actor)
-        })
+    semantic_slots(state)
+        .into_iter()
+        .map(|(owner, _)| owner)
+        .find(|owner| interaction_submitter_for_owner(state, *owner) == actor)
 }
 
 pub(crate) fn action_preserves_interaction(action: &GameAction) -> bool {
@@ -804,7 +864,7 @@ pub(crate) fn rebind_interaction_slots_after_action(
         });
     }
     let prior = classify_waiting_for(previous_waiting);
-    let next = semantic_slots(&state.waiting_for);
+    let next = semantic_slots(state);
     let preserve_other_simultaneous = prior.simultaneous.is_some();
     let mut rebound = Vec::with_capacity(next.len());
     let mut needs_id = Vec::new();
@@ -859,7 +919,7 @@ pub(crate) fn debug_assert_interaction_consistency(state: &GameState) {
         if !interaction_serial_is_valid(&state.next_interaction_serial) {
             return;
         }
-        let expected = semantic_slots(&state.waiting_for);
+        let expected = semantic_slots(state);
         debug_assert_eq!(expected.len(), state.active_interaction_slots.len());
         let mut ids = HashSet::new();
         for (owner, kind) in expected {
@@ -3029,6 +3089,7 @@ fn selection_projection(
     }
 
     Ok(match waiting_for {
+        WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. } => None,
         WaitingFor::OpeningHandBottomCards { pending, .. } => pending
             .iter()
             .find(|entry| entry.player == semantic_owner)
@@ -5102,6 +5163,27 @@ fn project_action_payload(
             };
             surfaces.push(InteractionPresentationSurface::ShortcutResponse { response });
         }
+        GameAction::BeginResolveAll { .. } => {
+            surfaces.push(InteractionPresentationSurface::ShortcutResponse {
+                response: InteractionShortcutResponseCode::Propose,
+            });
+        }
+        GameAction::RespondResolveAllConsent { decision, .. } => {
+            let response = match decision {
+                crate::types::actions::ResolveAllConsentDecision::Grant => {
+                    InteractionShortcutResponseCode::Accept
+                }
+                crate::types::actions::ResolveAllConsentDecision::Decline => {
+                    InteractionShortcutResponseCode::Decline
+                }
+            };
+            surfaces.push(InteractionPresentationSurface::ShortcutResponse { response });
+        }
+        GameAction::RevokeResolveAllConsent { .. } => {
+            surfaces.push(InteractionPresentationSurface::ShortcutResponse {
+                response: InteractionShortcutResponseCode::Decline,
+            });
+        }
         // CR 116.2c: two live pay-to-end permissions are two distinct
         // candidates, so the group key must reach the surface list or they
         // project identically. The permanent whose resolution installed the
@@ -5341,6 +5423,9 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
         GameAction::RespondToShortcut { .. } => InteractionActionCode::RespondToShortcut,
         GameAction::DeclineShortcut => InteractionActionCode::DeclineShortcut,
         GameAction::PrecastCopyShortcut { .. } => InteractionActionCode::PrecastCopyShortcut,
+        GameAction::BeginResolveAll { .. } => InteractionActionCode::DeclareShortcut,
+        GameAction::RespondResolveAllConsent { .. } => InteractionActionCode::RespondToShortcut,
+        GameAction::RevokeResolveAllConsent { .. } => InteractionActionCode::DeclineShortcut,
         GameAction::Debug(_) => InteractionActionCode::Debug,
     }
 }
@@ -7425,7 +7510,7 @@ pub fn derive_viewer_interaction(
     // is a value here, not a silently emptied map: the finalizer is the only
     // place allowed to decide what an unbounded projection becomes.
     let attachment_views = attachment_views_for_viewer(filtered_state);
-    let authorized_submitters = turn_control::authorized_submitters(authoritative_state);
+    let authorized_submitters = interaction_authorized_submitters(authoritative_state);
     let can_submit = authorized_submitters.contains(&viewer);
     let kind = waiting_for_kind(&authoritative_state.waiting_for);
     if kind.terminal {
@@ -7512,10 +7597,8 @@ pub fn derive_viewer_interaction(
         .active_interaction_slots
         .iter()
         .filter(|slot| {
-            turn_control::authorized_submitter_for_player(
-                authoritative_state,
-                PlayerId(slot.semantic_owner),
-            ) == viewer
+            interaction_submitter_for_owner(authoritative_state, PlayerId(slot.semantic_owner))
+                == viewer
         })
         .collect();
     if slots.len() > MAX_INTERACTION_LIST_LEN {
@@ -8372,8 +8455,7 @@ fn slot_for_submission<'a>(
         .iter()
         .find(|slot| slot.interaction_id == *interaction_id)
         .ok_or(InteractionReasonCode::StaleInteraction)?;
-    let authorized =
-        turn_control::authorized_submitter_for_player(state, PlayerId(slot.semantic_owner));
+    let authorized = interaction_submitter_for_owner(state, PlayerId(slot.semantic_owner));
     if authorized != actor {
         return Err(InteractionReasonCode::NotAuthorized);
     }

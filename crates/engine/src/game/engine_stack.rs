@@ -194,8 +194,13 @@ pub(super) fn handle_trigger_target_selection_select_targets(
         .take()
         .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
 
-    Ok(finalize_trigger_target_selection(
-        state, trigger, ability, events,
+    let produced = finalize_trigger_target_selection(state, trigger, ability, events);
+    // Round-20 seam 3: wrapping at the action seam — not per return inside
+    // `finalize_trigger_target_selection` — covers all five of its returns
+    // uniformly and keeps the `engine_modes` delegation, which runs inside
+    // trigger dispatch, from consuming the recipient.
+    Ok(triggers::finish_trigger_construction_action(
+        state, events, produced,
     ))
 }
 
@@ -351,8 +356,10 @@ pub(super) fn handle_trigger_target_selection_choose_target(
                 .take()
                 .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
 
-            Ok(finalize_trigger_target_selection(
-                state, trigger, ability, events,
+            let produced = finalize_trigger_target_selection(state, trigger, ability, events);
+            // Round-20 seam 3, step-by-step walk completion.
+            Ok(triggers::finish_trigger_construction_action(
+                state, events, produced,
             ))
         }
     }

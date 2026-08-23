@@ -1912,11 +1912,24 @@ fn park_cost_payment_triggers_if_paused(
         return;
     }
 
-    let cost_events: Vec<GameEvent> = events[cost_event_start..cost_event_end]
-        .iter()
+    // CR 603.2c + CR 603.3b: `finish_pending_cost_or_cast`'s announcement drain
+    // can already have collected this span, claiming its occurrences in
+    // `consumed_before_priority_trigger_events`. Route the span through the
+    // already-collected authority so those exact occurrences are not parked a
+    // second time, rather than re-collecting the span wholesale.
+    let cost_events: Vec<GameEvent> =
+        crate::game::triggers::filter_already_collected_trigger_events_from(
+            state,
+            &events[..cost_event_end],
+            cost_event_start,
+            &state.consumed_before_priority_trigger_events,
+        )
+        .into_iter()
         .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
-        .cloned()
         .collect();
+    if cost_events.is_empty() {
+        return;
+    }
     if let Some(mut collection) = state.take_pending_activation_trigger_collection() {
         // CR 602.2b + CR 603.3b: A target-first activation owns cost-trigger
         // collection until its stack entry exists, even when a later payment
@@ -2610,10 +2623,18 @@ fn park_deferred_cost_triggers_if_paused(
     let Some((start, end)) = cost_event_range else {
         return;
     };
-    let cost_events: Vec<GameEvent> = events[start..end]
-        .iter()
+    // CR 603.2c + CR 603.3b: same authority as `park_cost_payment_triggers_if_paused`
+    // — a deferred sacrifice span whose occurrences an earlier collector already
+    // claimed must not be parked again.
+    let cost_events: Vec<GameEvent> =
+        crate::game::triggers::filter_already_collected_trigger_events_from(
+            state,
+            &events[..end],
+            start,
+            &state.consumed_before_priority_trigger_events,
+        )
+        .into_iter()
         .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
-        .cloned()
         .collect();
     crate::game::triggers::collect_triggers_into_deferred(state, &cost_events);
 }
@@ -2693,40 +2714,76 @@ fn pause_sacrifice_for_cost(
 fn settle_sacrifice_for_cost_events(
     state: &mut GameState,
     pending: &mut PendingCast,
-    mut deferred_cost_events: Vec<GameEvent>,
+    deferred_cost_events: Vec<GameEvent>,
     events: &[GameEvent],
     current_start: usize,
     current_end: usize,
 ) {
     if let Some(collection) = pending.activation_trigger_collection.as_mut() {
+        // Earlier action fragments carry no ordinal in THIS buffer, so the
+        // consumed journal — whose ordinals are absolute within the current
+        // action — must not be applied to them. The queued-context witness is
+        // occurrence-exact independently of any buffer; `turn_zone_change_index`
+        // separates distinct occurrences within a turn.
+        let unclaimed_cost_events =
+            crate::game::triggers::filter_already_collected_trigger_events_from(
+                state,
+                &deferred_cost_events,
+                0,
+                &[],
+            );
         // CR 602.2b + CR 603.2: an announced target-bearing activation owns
         // replacement-paused cost events until its stack commit. Earlier action
         // fragments are not present in this action's event buffer, while the
         // current fragment is collected once by the eventual stack boundary (or
         // the next pending-action staging pass).
-        if !deferred_cost_events.is_empty() {
-            collection.collect(state, &deferred_cost_events);
+        if !unclaimed_cost_events.is_empty() {
+            collection.collect(state, &unclaimed_cost_events);
         }
         return;
     }
 
-    deferred_cost_events.extend_from_slice(&events[current_start..current_end]);
+    // Two occurrence bases, filtered separately and never rebased into each
+    // other: the carried fragments against the buffer-independent queued-context
+    // witness, the current fragment against this action's buffer with its
+    // absolute `current_start` offset — the basis `filter_consumed_trigger_events_from`
+    // requires, and the same one the journal below records.
+    let carried_cost_events = crate::game::triggers::filter_already_collected_trigger_events_from(
+        state,
+        &deferred_cost_events,
+        0,
+        &[],
+    );
+    let current_cost_events = crate::game::triggers::filter_already_collected_trigger_events_from(
+        state,
+        &events[..current_end],
+        current_start,
+        &state.consumed_before_priority_trigger_events,
+    );
+    let deferred_cost_events: Vec<GameEvent> = carried_cost_events
+        .into_iter()
+        .chain(current_cost_events)
+        .collect();
     if !deferred_cost_events.is_empty() {
         crate::game::triggers::collect_triggers_into_deferred(state, &deferred_cost_events);
+        crate::game::triggers::collect_delayed_triggers_into_deferred(state, &deferred_cost_events);
     }
+    // The journal claims the whole current fragment, not just what survived the
+    // filter: an occurrence the filter dropped is one an earlier collector
+    // already took, so the Priority pipeline must not reach it either.
     let occurrences = events[current_start..current_end]
         .iter()
         .enumerate()
-        .map(|(offset, event)| {
-            let index = current_start + offset;
-            crate::game::triggers::ConsumedTriggerEventOccurrence {
+        .map(
+            |(offset, event)| crate::game::triggers::ConsumedTriggerEventOccurrence {
                 event: event.clone(),
-                occurrence: events[..index]
-                    .iter()
-                    .filter(|prior| *prior == event)
-                    .count(),
-            }
-        })
+                occurrence: crate::game::triggers::trigger_event_occurrence(
+                    events,
+                    current_start + offset,
+                ),
+                scope: crate::game::triggers::ConsumedTriggerEventScope::AllCollectors,
+            },
+        )
         .collect();
     crate::game::triggers::resolve_and_apply_trigger_collection(
         state,
@@ -2906,7 +2963,7 @@ pub(crate) fn handle_sacrifice_for_cost(
         {
             Some(SpellCostSource::Offering)
         } else if payment.source == SpellCostSource::Emerge
-            && is_emerge_sacrifice_cost(payment.cost)
+            && is_emerge_sacrifice_cost(state, player, pending.object_id, payment.cost)
         {
             Some(SpellCostSource::Emerge)
         } else {
@@ -5548,6 +5605,7 @@ pub(super) fn push_ability_entry(
                 crate::game::triggers::ConsumedTriggerEventOccurrence {
                     event: event.clone(),
                     occurrence: crate::game::triggers::trigger_event_occurrence(events, index),
+                    scope: crate::game::triggers::ConsumedTriggerEventScope::AllCollectors,
                 }
             }));
     }
@@ -7786,52 +7844,58 @@ fn is_offering_sacrifice_cost(
     )
 }
 
-fn emerge_sacrifice_filter() -> TargetFilter {
-    TargetFilter::Typed(TypedFilter::creature())
-}
-
-fn is_emerge_sacrifice_cost(cost: &AbilityCost) -> bool {
+fn is_emerge_sacrifice_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: &AbilityCost,
+) -> bool {
+    let Some(sacrifice_filter) = super::casting::effective_spell_keywords(state, player, object_id)
+        .into_iter()
+        .find_map(|keyword| match keyword {
+            crate::types::keywords::Keyword::Emerge(cost) => Some(cost.sacrifice_filter),
+            _ => None,
+        })
+    else {
+        return false;
+    };
     matches!(
         cost,
         AbilityCost::Sacrifice(cost)
             if cost.requirement == SacrificeRequirement::count(1)
-                && cost.target == emerge_sacrifice_filter()
+                && cost.target == sacrifice_filter
     )
 }
 
-/// CR 702.119a-c: Build the required sacrifice component of Emerge's
-/// alternative cost. The sacrificed creature's mana value is applied as a cost
-/// reduction by `handle_sacrifice_for_cost` while the creature is still on the
+/// CR 702.119a-b: Build Emerge's required sacrifice component from its printed
+/// permanent-quality filter. The sacrificed permanent's mana value is applied
+/// as a cost reduction by `handle_sacrifice_for_cost` while it remains on the
 /// battlefield.
-pub(super) fn emerge_sacrifice_cost() -> AbilityCost {
-    AbilityCost::Sacrifice(SacrificeCost::count(emerge_sacrifice_filter(), 1))
+pub(super) fn emerge_sacrifice_cost(sacrifice_filter: TargetFilter) -> AbilityCost {
+    AbilityCost::Sacrifice(SacrificeCost::count(sacrifice_filter, 1))
 }
 
-/// CR 702.119a-c: Emerge can be paid only if a legal creature can be
+/// CR 702.119a-b: Emerge can be paid only if a matching permanent can be
 /// sacrificed and the resulting reduced emerge mana cost can be paid.
 pub(super) fn can_pay_emerge_cost(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
     emerge_cost: &ManaCost,
+    sacrifice_filter: &TargetFilter,
 ) -> bool {
-    super::casting::find_eligible_sacrifice_targets(
-        state,
-        player,
-        object_id,
-        &emerge_sacrifice_filter(),
-    )
-    .into_iter()
-    .any(|creature| {
-        let mut reduced = emerge_cost.clone();
-        apply_emerge_cost_reduction(state, creature, &mut reduced);
-        // CR 601.2f + CR 702.119a: Affordability probes must include the
-        // final Trinisphere-class floor after Emerge's sacrifice reduction.
-        if !cost_has_x(&reduced) {
-            super::casting::apply_cost_floor(state, player, object_id, &mut reduced);
-        }
-        super::casting::can_pay_cost_after_auto_tap(state, player, object_id, &reduced)
-    })
+    super::casting::find_eligible_sacrifice_targets(state, player, object_id, sacrifice_filter)
+        .into_iter()
+        .any(|permanent| {
+            let mut reduced = emerge_cost.clone();
+            apply_emerge_cost_reduction(state, permanent, &mut reduced);
+            // CR 601.2f + CR 702.119a: Affordability probes must include the
+            // final Trinisphere-class floor after Emerge's sacrifice reduction.
+            if !cost_has_x(&reduced) {
+                super::casting::apply_cost_floor(state, player, object_id, &mut reduced);
+            }
+            super::casting::can_pay_cost_after_auto_tap(state, player, object_id, &reduced)
+        })
 }
 
 fn additional_cost_x_max(
@@ -8477,8 +8541,8 @@ pub(super) fn apply_offering_cost_reduction(
     *spell_generic = spell_generic.saturating_sub(sac_generic);
 }
 
-/// CR 702.119a: Reduce the Emerge cost by generic mana equal to the sacrificed
-/// creature's mana value. Colored pips in the Emerge cost are never reduced.
+/// CR 702.119a-b: Reduce the Emerge cost by generic mana equal to the sacrificed
+/// permanent's mana value. Colored pips in the Emerge cost are never reduced.
 pub(super) fn apply_emerge_cost_reduction(
     state: &GameState,
     sacrifice_id: ObjectId,

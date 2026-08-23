@@ -1,0 +1,21 @@
+{{- if and .Values.persistence.enabled (not .Values.persistence.existingClaim) (not .Values.scaleOut.enabled) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "phase-server.fullname" . }}-data
+  labels:
+    {{- include "phase-server.labels" . | nindent 4 }}
+  annotations:
+    # Switching to scaleOut stops rendering this claim. Without `keep`, Helm
+    # would delete it on that upgrade and take games.db with it.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- with .Values.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}
+{{- end }}

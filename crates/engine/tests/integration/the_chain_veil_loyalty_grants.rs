@@ -143,6 +143,7 @@ fn install_competing_counter_addition_replacements(state: &mut GameState) {
 
 fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility {
     ResolvedAbility {
+        detached_remainder: engine::types::ability::DetachedRemainder::NoProducer,
         effect: Effect::GrantExtraLoyaltyActivations {
             amount: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Controller,
@@ -175,6 +176,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         target_choice_timing: engine::types::ability::TargetChoiceTiming::Stack,
         description: None,
         selected_mode_labels: Vec::new(),
+        modal_instruction_ordinal: None,
         player_scope: None,
         starting_with: None,
         chosen_x: None,
@@ -193,6 +195,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         forward_result: false,
         unless_pay: None,
         distribution: None,
+        distribute: None,
         target_selection_mode: TargetSelectionMode::Chosen,
         chosen_players: Vec::new(),
         repeat_until: None,

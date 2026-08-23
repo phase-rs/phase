@@ -49,6 +49,13 @@
     "collapse": "Comprimi avanzamento risoluzione",
     "expand": "Espandi avanzamento risoluzione"
   },
+  "resolveAllConsent": {
+    "eyebrow": "Risolvi tutto",
+    "title": "Approvare la risoluzione rapida?",
+    "subtitle": "Tutti i giocatori devono approvare prima che il motore risolva un prefisso sicuro della pila.",
+    "grant": "Approva",
+    "decline": "Mantieni priorità"
+  },
   "debugCreate": {
     "copies": "Copie",
     "tokenPower": "Power",
@@ -764,10 +771,14 @@
     "tapUntappedCreatures_one": "TAPpa {{count}} creatura STAPpata",
     "tapUntappedCreatures_other": "TAPpa {{count}} creature STAPpate",
     "chooseTargetOf": "Scegli il bersaglio {{current}} di {{total}}",
+    "slotProgress": "Bersaglio {{current}} di {{total}}",
+    "choosePlayerTarget": "Scegli: {{name}}",
+    "expandDescription": "Mostra la descrizione completa",
+    "collapseDescription": "Mostra meno",
+    "descriptionDisclosure": "{{action}}: {{description}}",
     "chooseTarget": "Scegli un bersaglio",
     "triggerDamageAmount": "This trigger: {{amount}} damage",
     "noLegalTargets": "Nessun bersaglio legale disponibile",
-    "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "fino a un {{target}}",
     "one": "un {{target}}",
     "nounPlayer": "giocatore",
@@ -1460,7 +1471,12 @@
       "labelReturn": "Restituisci ({{selected}}/{{count}})",
       "labelExile": "Esilia ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
-      "orderTop": "Cima"
+      "orderTop": "Cima",
+      "orderSecond": "2º",
+      "orderThird": "3º",
+      "orderFourth": "4º",
+      "orderFifth": "5º",
+      "orderPosition": "Posizione {{position}}"
     },
     "drawnThisTurn": {
       "title": "Pescate questo turno",
@@ -1626,7 +1642,11 @@
     "legend": {
       "title": "Regola delle leggende",
       "subtitle": "Scegli quale \"{{name}}\" tenere",
-      "keepAria": "Tieni {{name}} ({{status}})",
+      "keepAria": "Tieni {{name}} ({{identity}}, {{status}})",
+      "keepAriaUnknown": "Tieni {{name}} ({{status}})",
+      "identityOriginal": "Originale",
+      "identityCopy": "Copia",
+      "identityTokenCopy": "Copia pedina",
       "statusJustEntered": "Appena entrata",
       "statusAlready": "Già sul campo di battaglia"
     },
@@ -1758,7 +1778,22 @@
     "emergeEyebrow": "Emergere",
     "emergeNormalLabel": "Lancia normalmente",
     "emergeAltLabel": "Lancia con Emergere",
-    "emergeSubtitle": "Lancia {{name}} normalmente, o paga il suo costo di Emergere sacrificando una creatura, riducendo il costo del valore di mana di quella creatura.",
+    "emergeSubtitle": "Lancia {{name}} normalmente, o paga il suo costo di Emergere sacrificando {{sacrifice}}, riducendo il costo del valore di mana di quel permanente.",
+    "emergeFallbackSacrifice": "un permanente corrispondente",
+    "emergeSacrificeQuality": {
+      "artifact": "un artefatto",
+      "battle": "una battaglia",
+      "card": "una carta",
+      "creature": "una creatura",
+      "enchantment": "un incantesimo",
+      "instant": "un istantaneo",
+      "kindred": "un tribale",
+      "land": "una terra",
+      "permanent": "un permanente",
+      "planeswalker": "un planeswalker",
+      "sorcery": "una stregoneria",
+      "subtype": "un permanente di tipo {{subtype}}"
+    },
     "impendingEyebrow": "Incombere",
     "impendingNormalLabel": "Lancia normalmente",
     "impendingAltLabel": "Lancia con Incombere",
@@ -1831,7 +1866,8 @@
         "card": "una carta",
         "treasure": "un Tesoro",
         "food": "un Cibo",
-        "tappedFish": "un Pesce TAPpato"
+        "tappedFish": "un Pesce TAPpato",
+        "extraTurn": "un turno extra"
       }
     }
   },

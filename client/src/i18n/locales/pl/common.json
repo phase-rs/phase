@@ -96,6 +96,7 @@
     "cardDataTitle": "Dane kart: {{date}}"
   },
   "volume": {
+    "deviceBlocked": "Dźwięk niedostępny — serwer audio systemu nie odpowiada. Uruchom aplikację ponownie, aby spróbować jeszcze raz.",
     "mute": "Wycisz",
     "unmute": "Wyłącz wyciszenie",
     "volume": "Głośność"

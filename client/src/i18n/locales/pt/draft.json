@@ -119,6 +119,11 @@
       "planeswalker": "Planeswalker",
       "land": "Terreno",
       "other": "Outro",
+      "mythic": "Mítica",
+      "rare": "Rara",
+      "uncommon": "Incomum",
+      "common": "Comum",
+      "rarityOther": "Outras raridades",
       "manaValue0": "0 CMC",
       "manaValue1": "1 CMC",
       "manaValue2": "2 CMC",
@@ -139,7 +144,10 @@
   },
   "limitedDeck": {
     "poolHeading": "Pool ({{count}})",
+    "searchPool": "Buscar no pool...",
     "allAdded": "Todas as cartas foram adicionadas ao deck.",
+    "noFilterMatches": "Nenhum card corresponde aos filtros",
+    "filterUnavailable": "Os filtros estão indisponíveis no momento — mostrando todos os cards.",
     "mainDeck": "Deck Principal",
     "emptyDeckHint": "Clique nas cartas do pool para adicioná-las ao seu deck.",
     "addableCards": "Cartas Adicionáveis",
@@ -365,7 +373,11 @@
     "sideboardGame": "Sideboard — Jogo {{number}}",
     "sideboardHint": "Faça as alterações no sideboard e depois envie. Seu pool está disponível abaixo.",
     "submitSideboard": "Enviar Sideboard",
-    "preparingNext": "Preparando o próximo jogo..."
+    "preparingNext": "Preparando o próximo jogo...",
+    "hideOverlay": "Ocultar esta tela",
+    "showOverlay": "Mostrar esta tela",
+    "hiddenNotice": "O sideboard ainda está aberto para este jogo.",
+    "hiddenNoticePlayDraw": "Ainda há uma escolha de jogar ou comprar pendente para este jogo."
   },
   "podComplete": {
     "title": "Draft Concluído",

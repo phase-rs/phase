@@ -1647,6 +1647,11 @@ fn rebind_source_scope_to_recipient(
         } => QuantityRef::Power {
             scope: ObjectScope::Recipient,
         },
+        QuantityRef::BasePower {
+            scope: ObjectScope::Source,
+        } => QuantityRef::BasePower {
+            scope: ObjectScope::Recipient,
+        },
         QuantityRef::Toughness {
             scope: ObjectScope::Source,
         } => QuantityRef::Toughness {

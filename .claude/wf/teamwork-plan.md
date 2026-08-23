@@ -309,7 +309,7 @@ One coherent change set; nothing half-wired:
 13. (If Quantum Reduction flash shipped) `types/ability.rs` `ParsedCondition::AdditionalCostPaid` + its flash-timing evaluation.
 14. Integration tests per §11; snapshot updates if any card's parsed abilities change (`cargo coverage` to confirm the 17 cards drop their unsupported markers).
 
-**Verification cadence (Tilt-first):** `cargo fmt --all` (direct, always) → if Tilt up, `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else direct `cargo clippy --all-targets -- -D warnings` + `cargo test -p engine`. `cargo coverage` (direct one-shot) to confirm the 17 cards. `pnpm type-check`/`pnpm lint` for the FE diff. Do NOT touch `mtgish/`, `crates/mtgish-import/`, or `data/mtgish-*` (dormant — out of scope).
+**Verification cadence (Tilt-first):** `cargo fmt --all` (direct, always) → if Tilt up, `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else direct `cargo clippy --all-targets -- -D warnings` + `cargo test -p engine`. `cargo coverage` (direct one-shot) to confirm the 17 cards. `pnpm type-check`/`pnpm lint` for the FE diff.
 
 ---
 

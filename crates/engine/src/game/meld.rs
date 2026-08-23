@@ -208,10 +208,7 @@ pub fn is_canonical_physical_meld_pair(state: &GameState, context: &MeldSelectio
 /// CR 400.2: graveyard, battlefield, stack, exile, and command are public
 /// zones. Hand and library remain hidden even when their cards are revealed.
 fn is_public_zone(zone: Zone) -> bool {
-    match zone {
-        Zone::Battlefield | Zone::Graveyard | Zone::Stack | Zone::Exile | Zone::Command => true,
-        Zone::Library | Zone::Hand => false,
-    }
+    zone.is_public()
 }
 
 /// Commit the projected result entry, then atomically make the second card a

@@ -11,8 +11,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 
-import { P2PGuestAdapter, P2PHostAdapter, playerSlotsFromSeatView } from "../p2p-adapter";
-import { AdapterError, AdapterErrorCode, supportsAiDecisionDiagnostics, supportsMatchConcede, type FormatConfig, type GameAction, type GameEvent, type GameLogEntry, type GameState } from "../types";
+import { P2PGuestAdapter, P2PHostAdapter, playerSlotsFromSeatView, type P2PAdapterEvent } from "../p2p-adapter";
+import { AdapterError, AdapterErrorCode, supportsAiDecisionDiagnostics, supportsMatchConcede, type EngineSnapshot, type FormatConfig, type GameAction, type GameEvent, type GameLogEntry, type GameState } from "../types";
+import type { WsAdapterEvent } from "../ws-adapter";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
 import { WIRE_PROTOCOL_VERSION } from "../../network/protocol";
 import { p2pFinalStateCommitment } from "../../services/p2pTerminalResult";
@@ -181,8 +182,16 @@ const nativeWebSocketMocks = vi.hoisted(() => ({
 
 vi.mock("../ws-adapter", () => ({
   WebSocketAdapter: vi.fn().mockImplementation(function () {
+    let playerId: number | null = null;
     return {
-      initializePregame: nativeWebSocketMocks.initializePregame,
+      get playerId() {
+        return playerId;
+      },
+      initializePregame: async () => {
+        const attachment = await nativeWebSocketMocks.initializePregame();
+        playerId = attachment.playerId;
+        return attachment;
+      },
       waitForPlayerSlots: nativeWebSocketMocks.waitForPlayerSlots,
       onEvent: nativeWebSocketMocks.onEvent,
       sendAbandonGame: nativeWebSocketMocks.sendAbandonGame,
@@ -1337,6 +1346,175 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(mockSubmitAction).not.toHaveBeenCalled();
   });
 
+  it("replays a native AI driver fault after reconnecting guest's snapshot", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+
+    const setup = (await guest.getSentMessages()).find(
+      (message): message is { type: "game_setup"; playerToken: string } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type: string }).type === "game_setup",
+    );
+    expect(setup).toBeDefined();
+    guest.simulateClose();
+
+    const fault: { id: number; revision: number; message: string } = {
+      id: 7,
+      revision: 3,
+      message: "Native AI driver stopped",
+    };
+    const host = adapter as unknown as {
+      authoritativeRevision: number;
+      handleNativeAiDriverFault: (driverFault: typeof fault) => Promise<void>;
+    };
+    host.authoritativeRevision = fault.revision;
+    await host.handleNativeAiDriverFault(fault);
+
+    const reconnectedGuest = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: setup!.playerToken,
+    });
+    await flushPromises();
+
+    const messages = await reconnectedGuest.getSentMessages();
+    expect(messages.map((message) => (message as { type: string }).type)).toEqual([
+      "reconnect_ack",
+      "ai_driver_fault",
+    ]);
+    expect(messages[1]).toMatchObject({ type: "ai_driver_fault", ...fault });
+  });
+
+  it("waits for a resumed native fault's final revision before replaying it to a reconnecting guest", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+
+    const setup = (await guest.getSentMessages()).find(
+      (message): message is { type: "game_setup"; playerToken: string } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type: string }).type === "game_setup",
+    );
+    expect(setup).toBeDefined();
+    guest.simulateClose();
+
+    const host = adapter as unknown as {
+      nativeAiDriverFault: { id: number; revision: number; message: string } | null;
+      deliveredNativeAiDriverFault: { id: number; revision: number; message: string } | null;
+    };
+    host.nativeAiDriverFault = { id: 7, revision: 3, message: "Native AI driver stopped" };
+    host.deliveredNativeAiDriverFault = null;
+
+    const reconnectedGuest = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: setup!.playerToken,
+    });
+    await flushPromises();
+
+    const messageTypes = (await reconnectedGuest.getSentMessages()).map(
+      (message) => (message as { type: string }).type,
+    );
+    expect(messageTypes).toContain("reconnect_ack");
+    expect(messageTypes).not.toContain("ai_driver_fault");
+  });
+
+  it("renders a persisted native AI driver fault once when the host resumes", async () => {
+    const { peer, onGuestConnected } = createFakePeer();
+    const fault = { id: 7, revision: 3, message: "Native AI driver stopped" };
+    const adapter = new P2PHostAdapter(
+      {
+        player: { main_deck: ["Mountain"], sideboard: [] },
+        opponent: { main_deck: ["Forest"], sideboard: [] },
+        ai_decks: [],
+      },
+      peer as unknown as Peer,
+      onGuestConnected,
+      2,
+      commanderConfig(),
+      undefined,
+      5_000,
+      undefined,
+      true,
+      undefined,
+      {
+        gameId: "native-resume-fault",
+        roomCode: "ABCDE",
+        resumeData: {
+          session: {
+            gameId: "native-resume-fault",
+            roomCode: "ABCDE",
+            sessionKey: "native-resume-fault-session",
+            useBroker: false,
+            playerTokens: {},
+            guestDecks: {},
+            kickedTokens: [],
+            eliminatedSeats: [],
+            playerCount: 2,
+            hostDeckData: {
+              player: { main_deck: ["Mountain"], sideboard: [] },
+              opponent: { main_deck: ["Forest"], sideboard: [] },
+              ai_decks: [],
+            },
+            gameStarted: true,
+            nativeAiDriverFault: fault,
+            nativeSession: {
+              gameCode: "native-game",
+              fullKey: { game_code: "native-game", generation: 1 },
+              playerTokens: { 0: "native-host-token" },
+            },
+          },
+        },
+      },
+      {},
+    );
+    nativeWebSocketMocks.initializePregame.mockResolvedValue(NATIVE_HOST_ATTACHMENT);
+
+    const events: P2PAdapterEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.initialize();
+
+    const onNativeEvent = nativeWebSocketMocks.onEvent.mock.calls[0]?.[0] as
+      | ((event: WsAdapterEvent) => void)
+      | undefined;
+    if (!onNativeEvent) throw new Error("Native bridge did not register a WebSocket event listener");
+
+    const finalSnapshot: EngineSnapshot = {
+      state: remoteState("native AI final state"),
+      legalResult: { actions: [], autoPassRecommended: false },
+      seq: 3,
+    };
+    onNativeEvent({
+      type: "stateChanged",
+      snapshot: finalSnapshot,
+      events: [],
+      serverRevision: fault.revision,
+    });
+    await flushPromises();
+    const host = adapter as unknown as {
+      handleNativeAiDriverFault: (driverFault: typeof fault) => Promise<void>;
+    };
+    await host.handleNativeAiDriverFault(fault);
+    await host.handleNativeAiDriverFault(fault);
+    await host.handleNativeAiDriverFault({ ...fault, id: fault.id + 1 });
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "stateChanged",
+      snapshot: finalSnapshot,
+      events: [],
+    }));
+    expect(events).toContainEqual({ type: "error", message: fault.message });
+  });
+
   it("kick adds token to denylist; subsequent reconnect with same token is rejected", async () => {
     const { adapter, emitConnection } = makeHost(3, 5_000);
     await adapter.initialize();
@@ -1555,7 +1733,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
   });
 
   // Regression guard: the wire must carry legalActionsByObject, spellCosts,
-  // and engine-authored mana-payment shortcut actions
+  // engine-authored mana-payment shortcut actions, and derived copy views
   // across game_setup, state_update, and reconnect_ack. Dropping these fields
   // — even though the flat `legalActions` array still arrives — leaves guests
   // unable to click cards in their hand, because the frontend card-click
@@ -1578,6 +1756,11 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       "42": { generic: 1, colored: { R: 1 } },
     };
     const manaPaymentShortcutActions: GameAction[] = [{ type: "PassPriority" }];
+    const copiedPermanents = [42];
+    const legendCandidateIdentities = {
+      "42": "TokenCopy" as const,
+      "43": "Unknown" as const,
+    };
     // Cast via `unknown` because the hoisted mock's default return is inferred
     // as `{ actions: never[]; autoPassRecommended: boolean }`, which would
     // reject our richer payload. The adapter consumes the full
@@ -1590,7 +1773,14 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     (mocks.getViewerSnapshot as unknown as {
       mockImplementation: (fn: (pid: number) => Promise<unknown>) => void;
     }).mockImplementation(async (pid: number) => ({
-      state: { filteredFor: pid, players: [] },
+      state: {
+        filteredFor: pid,
+        players: [],
+        derived: {
+          copied_permanents: copiedPermanents,
+          legend_candidate_identities: legendCandidateIdentities,
+        },
+      },
       actions: [
         { type: "CastSpell", data: { object_id: 42, targets: [] } },
         { type: "PlayLand", data: { object_id: 43 } },
@@ -1619,6 +1809,12 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         legalActionsByObject?: Record<string, unknown>;
         spellCosts?: Record<string, unknown>;
         manaPaymentShortcutActions?: GameAction[];
+        state: {
+          derived?: {
+            copied_permanents?: number[];
+            legend_candidate_identities?: Record<string, string>;
+          };
+        };
       } =>
         typeof m === "object" && m !== null && (m as { type: string }).type === "game_setup",
     );
@@ -1626,6 +1822,8 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(setup!.legalActionsByObject).toEqual(legalActionsByObject);
     expect(setup!.spellCosts).toEqual(spellCosts);
     expect(setup!.manaPaymentShortcutActions).toEqual(manaPaymentShortcutActions);
+    expect(setup!.state.derived?.copied_permanents).toEqual(copiedPermanents);
+    expect(setup!.state.derived?.legend_candidate_identities).toEqual(legendCandidateIdentities);
     const playerToken = setup!.playerToken;
 
     // ── state_update ───────────────────────────────────────────────────────
@@ -1638,6 +1836,12 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         legalActionsByObject?: Record<string, unknown>;
         spellCosts?: Record<string, unknown>;
         manaPaymentShortcutActions?: GameAction[];
+        state: {
+          derived?: {
+            copied_permanents?: number[];
+            legend_candidate_identities?: Record<string, string>;
+          };
+        };
       } =>
         typeof m === "object" && m !== null && (m as { type: string }).type === "state_update",
     );
@@ -1645,6 +1849,8 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(stateUpdate!.legalActionsByObject).toEqual(legalActionsByObject);
     expect(stateUpdate!.spellCosts).toEqual(spellCosts);
     expect(stateUpdate!.manaPaymentShortcutActions).toEqual(manaPaymentShortcutActions);
+    expect(stateUpdate!.state.derived?.copied_permanents).toEqual(copiedPermanents);
+    expect(stateUpdate!.state.derived?.legend_candidate_identities).toEqual(legendCandidateIdentities);
 
     // ── reconnect_ack ──────────────────────────────────────────────────────
     g1.simulateClose();
@@ -1663,6 +1869,12 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         legalActionsByObject?: Record<string, unknown>;
         spellCosts?: Record<string, unknown>;
         manaPaymentShortcutActions?: GameAction[];
+        state: {
+          derived?: {
+            copied_permanents?: number[];
+            legend_candidate_identities?: Record<string, string>;
+          };
+        };
       } =>
         typeof m === "object" && m !== null && (m as { type: string }).type === "reconnect_ack",
     );
@@ -1670,6 +1882,8 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(ack!.legalActionsByObject).toEqual(legalActionsByObject);
     expect(ack!.spellCosts).toEqual(spellCosts);
     expect(ack!.manaPaymentShortcutActions).toEqual(manaPaymentShortcutActions);
+    expect(ack!.state.derived?.copied_permanents).toEqual(copiedPermanents);
+    expect(ack!.state.derived?.legend_candidate_identities).toEqual(legendCandidateIdentities);
   });
 
   it("keeps turn-controller auto-pass recommendations viewer-scoped on setup, update, and reconnect", async () => {

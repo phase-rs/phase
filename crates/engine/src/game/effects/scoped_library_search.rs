@@ -582,6 +582,7 @@ fn prepare_scoped_group(
                 up_to: prepared.up_to,
                 allows_partial_find: prepared.allows_partial_find,
                 constraint: prepared.constraint,
+                ordering_hint: prepared.ordering_hint,
             },
         );
         if auto_completed {
@@ -674,6 +675,7 @@ fn advance_selection(
         up_to: choice.up_to,
         allows_partial_find: choice.allows_partial_find,
         constraint: choice.constraint,
+        ordering_hint: choice.ordering_hint,
         split: None,
     };
     state.priority_player = choice.player;

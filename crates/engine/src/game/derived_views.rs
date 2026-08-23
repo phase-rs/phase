@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::analysis::resource::ResourceAxis;
 use crate::game::ability_utils::flatten_targets_in_chain;
 use crate::game::filter::{matches_target_filter, FilterContext};
-use crate::game::game_object::AttachTarget;
+use crate::game::game_object::{AttachTarget, DisplaySource};
 use crate::game::stack::{effective_stack_ability, stack_display_groups, StackDisplayGroup};
 use crate::types::ability::{
     ContinuousModification, Duration, GameRestriction, KeywordAction, ProhibitedActivity,
@@ -32,7 +32,7 @@ use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
     CastingVariant, GameState, StackEntry, StackEntryKind, StackPaidSnapshot,
-    SyntheticTriggerProvenance,
+    SyntheticTriggerProvenance, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -505,6 +505,63 @@ pub struct DebugLibraryCardView {
     pub name: String,
 }
 
+/// Engine-authored identity for a candidate in a legend-rule choice.
+///
+/// The frontend renders this value without inspecting token, copy-effect, or
+/// face-down state. `TokenCopy` takes precedence when a copied permanent spell
+/// resolved as a token; `Copy` is a live Layer 1a copy effect; `Original` is
+/// every other face-up candidate; `Unknown` withholds affirmative identity for
+/// a face-down candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegendCandidateIdentity {
+    Original,
+    Copy,
+    TokenCopy,
+    Unknown,
+}
+
+/// CR 115.1: "The targets are object(s) and/or player(s) the spell or ability
+/// will affect." What the live target announcement is asking the announcing
+/// player to choose from, classified over that exact and/or axis — so a mixed
+/// offer is a representable value rather than a case that falls through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+// Adjacently tagged, matching every other payload-carrying tagged enum in this
+// module (`StackPaidFactView`, `PlayerConditionKind`, `FamilyCollapseState`)
+// and the hand-written client mirrors that already read `data` for them. The
+// mirror for this enum is hand-written too, with no generated binding to force
+// agreement, so the representation a reader would assume from its neighbours
+// has to be the representation that is true.
+#[serde(tag = "type", content = "data")]
+pub enum TargetChoiceKind {
+    /// CR 102.1: every offered choice is a player.
+    Players,
+    /// CR 109.1: every offered choice is an object, of `category`.
+    Objects { category: TargetObjectCategory },
+    /// CR 115.1 + CR 115.4: the offer mixes objects of `category` with players
+    /// — the "any target" shape.
+    ObjectsAndPlayers { category: TargetObjectCategory },
+}
+
+/// CR 109.1 + CR 205.2a: the narrowest category of the CR object taxonomy that
+/// is true of EVERY object in one announcement's offered choice set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TargetObjectCategory {
+    /// CR 112.1: a spell — a card on the stack.
+    Spell,
+    /// CR 110.4: creature is one of the six permanent types.
+    Creature,
+    /// CR 110.4: planeswalker is one of the six permanent types.
+    Planeswalker,
+    /// CR 110.4: permanents, none of which is a land.
+    NonlandPermanent,
+    /// CR 110.1: a permanent, with no narrower category true of all of them.
+    Permanent,
+    /// CR 109.1 + CR 115.2: an object with no narrower true category — a card in
+    /// a graveyard/exile/library/hand, an ability on the stack (CR 113.7a), a
+    /// mixed-zone offer, or an object this projection cannot resolve.
+    Object,
+}
+
 /// Engine-authored projections used by the display layer. Keep this struct
 /// small — every field becomes mandatory payload on every state snapshot
 /// the client receives. Add a new field only when the frontend would
@@ -569,6 +626,40 @@ pub struct DerivedViews {
     /// Sorted for stable serialization; absent when nothing is a copy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub copied_permanents: Vec<ObjectId>,
+
+    /// The engine-classified identity for every current legend-rule candidate.
+    /// This is intentionally scoped to the active choice so the client can
+    /// label each option without deriving copy status from raw object fields.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub legend_candidate_identities: BTreeMap<ObjectId, LegendCandidateIdentity>,
+
+    /// CR 115.1 + CR 601.2c: what the LIVE target announcement is offering the
+    /// announcing player to choose from, classified over CR 115.1's
+    /// object/player axis. Derived from
+    /// `TargetSelectionProgress::current_legal_targets` — the same array the
+    /// client turns into clickable controls, so the sentence naming the choice
+    /// and the controls answering it cannot name different populations.
+    ///
+    /// Deliberately the OFFERED set, not the slot's declared `legal_targets`
+    /// and not its declared `TargetFilter`. `legal_targets_for_slot` narrows
+    /// the declared set by cross-slot constraint validation (CR 115.3) and by
+    /// completion feasibility, so the declared set is a SUPERSET of what is on
+    /// screen; naming it would let the sentence and the controls describe
+    /// different populations.
+    ///
+    /// Consolidation note: `game::interaction::target_sequence_projection`
+    /// reads the same array and is the natural long-term home for this. It is
+    /// not folded there only because `TargetingOverlay` does not consume
+    /// `viewerInteraction`. If that changes, move this onto
+    /// `TargetSequenceProjection` and delete this field rather than keeping
+    /// two authorities for one classification.
+    ///
+    /// Absent unless a `TargetSelection` or `TriggerTargetSelection` prompt is
+    /// live. Where a viewer's characteristics are redacted (CR 400.2) the
+    /// classifier degrades to `Object` deliberately, rather than answering
+    /// confidently from the subset of the offer it can still resolve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_target_kind: Option<TargetChoiceKind>,
 
     /// Commander damage grouped by the attacking commander's current
     /// controller. Each inner entry preserves per-commander identity so
@@ -819,6 +910,11 @@ fn client_state_wire_value(
     root.remove("stack_trigger_firings");
     root.remove("resolving_trigger_firing");
     root.remove("resolved_rules_journal");
+    // CR 605.4a + CR 117.3c: Defense in depth for direct `ClientGameStateRef`
+    // callers that did not first run `visibility::filter_state_for_viewer`.
+    // Both are trusted persistence authorities, never client schema.
+    root.remove("pending_triggered_mana_resume");
+    root.remove("pending_trigger_construction_priority_recipient");
 
     redact_private_trigger_firing(&mut value);
 
@@ -963,6 +1059,153 @@ fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<Mana
     ))
 }
 
+/// CR 115.1 + CR 601.2c: classify what the LIVE target announcement is offering
+/// the announcing player, so the client can name the choice instead of
+/// re-deriving it from raw object fields.
+///
+/// `None` whenever no target announcement is live. Both gated variants carry
+/// `selection: TargetSelectionProgress`, so one combined arm covers the whole
+/// class: `TargetSelection` is the `PendingCast`-carrying path (spell casts,
+/// activated abilities, loyalty abilities) and `TriggerTargetSelection` is the
+/// trigger path.
+fn current_target_kind(state: &GameState) -> Option<TargetChoiceKind> {
+    let selection = match &state.waiting_for {
+        WaitingFor::TargetSelection { selection, .. }
+        | WaitingFor::TriggerTargetSelection { selection, .. } => selection,
+        _ => return None,
+    };
+    // The LIVE, NARROWED offer. Not `target_slots[..].legal_targets`:
+    // `legal_targets_for_slot` filters the slot's declared set by cross-slot
+    // constraint validation (CR 115.3) and completion feasibility, and it is
+    // the narrowed array the client turns into clickable controls.
+    target_choice_kind(state, &selection.current_legal_targets)
+}
+
+/// CR 115.1: fold one announcement's offered choice set onto the object/player
+/// axis the rule names.
+///
+/// `TargetRef` has exactly two variants, so the fold is total and the match
+/// over `(no objects, any player)` needs no wildcard arm.
+fn target_choice_kind(state: &GameState, targets: &[TargetRef]) -> Option<TargetChoiceKind> {
+    let mut object_ids: Vec<ObjectId> = Vec::new();
+    let mut has_player = false;
+    for target in targets {
+        match target {
+            TargetRef::Object(object_id) => object_ids.push(*object_id),
+            TargetRef::Player(_) => has_player = true,
+        }
+    }
+
+    match (object_ids.is_empty(), has_player) {
+        (true, true) => Some(TargetChoiceKind::Players),
+        // NO OFFER WAS MADE AT ALL: the announcement is live, but its current
+        // slot offers nothing to choose. This is adjacent to, not identical
+        // with, CR 115.6 ("A spell or ability that requires targets may allow
+        // zero targets to be chosen") — that rule licenses an optional slot
+        // taking no target, whereas here no choice was presented in the first
+        // place. The absence of an offer is not a kind of choice, so the
+        // projection is omitted rather than invented.
+        //
+        // This arm is reached, not merely total: the completion guard that the
+        // incremental `choose_target` path applies has no counterpart on
+        // `begin_target_selection`, so an all-optional announcement that
+        // auto-skips to completion installs a progress whose
+        // `current_legal_targets` is empty.
+        (true, false) => None,
+        (false, false) => Some(TargetChoiceKind::Objects {
+            category: target_object_category(state, &object_ids),
+        }),
+        (false, true) => Some(TargetChoiceKind::ObjectsAndPlayers {
+            category: target_object_category(state, &object_ids),
+        }),
+    }
+}
+
+/// CR 109.1 + CR 205.2a: the narrowest object category true of EVERY offered
+/// object.
+///
+/// Only ever called with a non-empty `ids` — the empty case is the caller's
+/// player-only and no-offer arms — so each `all` below is a real
+/// quantification rather than a vacuous truth.
+fn target_object_category(state: &GameState, ids: &[ObjectId]) -> TargetObjectCategory {
+    // CR 400.2: library and hand are hidden zones, so a viewer-filtered state
+    // can legitimately not contain an offered object. Degrade the whole answer
+    // instead of classifying from the resolvable subset — a partial set could
+    // confidently name a category that is false of the real offer.
+    let Some(objects) = ids
+        .iter()
+        .map(|object_id| state.objects.get(object_id))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return TargetObjectCategory::Object;
+    };
+
+    // CR 112.1: a spell is a card on the stack. CR 113.7a: an activated or
+    // triggered ability exists on the stack independently of its source and is
+    // not a spell, so stack residency alone does not answer this — the stack
+    // entry's own kind does.
+    if objects.iter().all(|object| object.zone == Zone::Stack) {
+        return if objects
+            .iter()
+            .all(|object| stack_entry_is_spell(state, object.id))
+        {
+            TargetObjectCategory::Spell
+        } else {
+            TargetObjectCategory::Object
+        };
+    }
+
+    // CR 110.1 + CR 115.2: only a card or token ON THE BATTLEFIELD is a
+    // permanent, and an object in another zone can still be a legal target.
+    // This zone gate is what keeps a graveyard card from being called one.
+    if objects
+        .iter()
+        .all(|object| object.zone == Zone::Battlefield)
+    {
+        let all_are = |core_type: CoreType| {
+            objects
+                .iter()
+                .all(|object| object.card_types.core_types.contains(&core_type))
+        };
+        // CR 110.4 + CR 205.1b: Creature is tested BEFORE Planeswalker. An
+        // effect can make a permanent a creature while it is "still a
+        // planeswalker", and on such an object both guards hold; creature is
+        // the narrower noun for the player answering the prompt.
+        if all_are(CoreType::Creature) {
+            return TargetObjectCategory::Creature;
+        }
+        if all_are(CoreType::Planeswalker) {
+            return TargetObjectCategory::Planeswalker;
+        }
+        // CR 110.4: land is one of the six permanent types; a land in the
+        // offer widens the answer to the bare permanent category.
+        if objects
+            .iter()
+            .all(|object| !object.card_types.core_types.contains(&CoreType::Land))
+        {
+            return TargetObjectCategory::NonlandPermanent;
+        }
+        return TargetObjectCategory::Permanent;
+    }
+
+    // CR 109.1: an object, with no narrower category true of all of them — a
+    // mixed-zone offer, or an offer wholly inside a zone that has no permanent
+    // or spell category of its own.
+    TargetObjectCategory::Object
+}
+
+/// CR 112.1 vs CR 113.7a: true only when `id` is on the stack AS A SPELL, not
+/// as an activated or triggered ability.
+///
+/// `StackEntry.id` is the `ObjectId` of the stack object itself, which is what
+/// makes comparing it against an offered `TargetRef::Object` sound.
+fn stack_entry_is_spell(state: &GameState, id: ObjectId) -> bool {
+    state
+        .stack
+        .iter()
+        .any(|entry| entry.id == id && matches!(entry.kind, StackEntryKind::Spell { .. }))
+}
+
 /// CR 613.2a + CR 707.2: true when a live copy effect is currently supplying
 /// `object_id`'s copiable values.
 ///
@@ -1065,6 +1308,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         unique_authorized_submitter: unique_authorized_submitter(state),
         blocker_assignment_pairs: blocker_assignment_pairs(state),
         debug_library_cards: debug_library_cards(state, viewer),
+        current_target_kind: current_target_kind(state),
         ..DerivedViews::default()
     };
 
@@ -1134,6 +1378,28 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // answer.
     views.copied_permanents.sort_unstable();
     views.cant_be_blocked.sort_unstable();
+
+    if let crate::types::game_state::WaitingFor::ChooseLegend { candidates, .. } =
+        &state.waiting_for
+    {
+        for &candidate_id in candidates {
+            let Some(candidate) = state.objects.get(&candidate_id) else {
+                continue;
+            };
+            let identity = if candidate.face_down {
+                LegendCandidateIdentity::Unknown
+            } else if candidate.is_token && candidate.display_source != DisplaySource::Token {
+                LegendCandidateIdentity::TokenCopy
+            } else if object_has_copy_effect(state, candidate_id) {
+                LegendCandidateIdentity::Copy
+            } else {
+                LegendCandidateIdentity::Original
+            };
+            views
+                .legend_candidate_identities
+                .insert(candidate_id, identity);
+        }
+    }
 
     // CR 702.40a: viewer-scoped prospective Storm copy counts (own hand only → leak-proof).
     if let Some(viewer) = viewer {
@@ -2510,18 +2776,18 @@ fn zone_label(zone: Option<Zone>) -> &'static str {
 mod tests {
     use super::*;
     use crate::game::combat::CombatState;
-    use crate::game::game_object::DisplaySource;
     use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        DelayedTriggerCondition, Duration, Effect, ModalChoice, ResolvedAbility, RestrictionExpiry,
-        StaticCondition, TargetFilter, TargetRef,
+        DelayedTriggerCondition, Duration, Effect, EffectKind, ModalChoice, ResolvedAbility,
+        RestrictionExpiry, StaticCondition, TargetFilter, TargetRef,
     };
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
         CommanderDamageEntry, DelayedTrigger, PendingCast, StackEntry, StackEntryKind,
-        StackPaidSnapshot, TriggerOrderGroup, WaitingFor, ZoneChangeRecord,
+        StackPaidSnapshot, TargetEffectDetail, TargetSelectionProgress, TargetSelectionSlot,
+        TriggerOrderGroup, WaitingFor, ZoneChangeRecord,
     };
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, TriggerFiring,
@@ -3165,6 +3431,26 @@ mod tests {
             "Phantasmal Image".into(),
             Zone::Battlefield,
         );
+        let token_copy = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Reveillark".into(),
+            Zone::Battlefield,
+        );
+        let hidden_copy = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Reveillark".into(),
+            Zone::Battlefield,
+        );
+        {
+            let token = state.objects.get_mut(&token_copy).unwrap();
+            token.is_token = true;
+            token.display_source = DisplaySource::Card;
+            state.objects.get_mut(&hidden_copy).unwrap().face_down = true;
+        }
 
         let values = crate::game::printed_cards::intrinsic_copiable_values(
             state.objects.get(&original).unwrap(),
@@ -3175,6 +3461,19 @@ mod tests {
             Duration::Permanent,
             TargetFilter::SpecificObject { id: clone },
             vec![ContinuousModification::CopyValues {
+                values: Box::new(values.clone()),
+                display_source: DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            }],
+            None,
+        );
+        state.add_transient_continuous_effect(
+            hidden_copy,
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: hidden_copy },
+            vec![ContinuousModification::CopyValues {
                 values: Box::new(values),
                 display_source: DisplaySource::Card,
                 printed_ref: None,
@@ -3182,6 +3481,11 @@ mod tests {
             }],
             None,
         );
+        state.waiting_for = crate::types::game_state::WaitingFor::ChooseLegend {
+            player: PlayerId(0),
+            legend_name: "Reveillark".into(),
+            candidates: vec![original, clone, token_copy, hidden_copy],
+        };
 
         let views = derive_views(&state, None);
 
@@ -3190,6 +3494,16 @@ mod tests {
             vec![clone],
             "only the permanent the copy effect applies to is a copy; the \
              original it copied is not"
+        );
+        assert_eq!(
+            views.legend_candidate_identities,
+            BTreeMap::from([
+                (original, LegendCandidateIdentity::Original),
+                (clone, LegendCandidateIdentity::Copy),
+                (token_copy, LegendCandidateIdentity::TokenCopy),
+                (hidden_copy, LegendCandidateIdentity::Unknown),
+            ]),
+            "face-down candidates receive no affirmative public identity"
         );
     }
 
@@ -5096,6 +5410,8 @@ mod tests {
             trigger_definitions: std::sync::Arc::default(),
             replacement_definitions: std::sync::Arc::default(),
             static_definitions: std::sync::Arc::default(),
+            room_halves: None,
+            name_origin: Default::default(),
         })
     }
 
@@ -5699,6 +6015,7 @@ mod tests {
             up_to: true,
             allows_partial_find: true,
             constraint: SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
         state
@@ -5739,6 +6056,7 @@ mod tests {
             up_to: true,
             allows_partial_find: true,
             constraint: SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
         state.active_library_searches.insert(
@@ -6173,6 +6491,870 @@ mod tests {
             }),
             "the rows are exactly what a client rebuilds from the filtered object's counters, its \
              loyalty, the battlefield set and the `∞` store — zero new information"
+        );
+    }
+
+    /// CR 605.4a + CR 117.3c (plan Step 6, boundary 2): `client_state_wire_value`
+    /// is the defence-in-depth boundary for direct `ClientGameStateRef::wrap`
+    /// callers that never ran `visibility::filter_state_for_viewer`.
+    ///
+    /// All four projections — direct `wrap` for the prompt owner and for an
+    /// opponent, and `wrap_filtered` over both filtered states — must omit both
+    /// root keys and every private sentinel, while the public prompt survives.
+    /// The structural half fails if either field is renamed without updating
+    /// `client_state_wire_value`: the trusted root must contain exactly the
+    /// snake-case key, the client root must not.
+    #[test]
+    fn triggered_mana_sidecar_and_construction_recipient_never_reach_the_client_envelope() {
+        use crate::types::ability::QuantityExpr;
+        use crate::types::game_state::{
+            ManaTriggerFixedPointResume, TriggeredManaResume, TriggeredManaStage,
+        };
+        use crate::types::resolved_commands::{RulesExecutionNodeRef, SettlementNodeOrdinal};
+
+        const MARKER: &str = "WIRE-PRIVATE-ORACLE-SENTINEL";
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let hidden = create_object(
+            &mut state,
+            CardId(70_601),
+            PlayerId(0),
+            "Hidden Wire Source".to_string(),
+            Zone::Battlefield,
+        );
+        let mut pending = PendingTrigger::ordinary(
+            hidden,
+            PlayerId(0),
+            None,
+            Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                hidden,
+                PlayerId(0),
+            )),
+            1,
+        );
+        pending.description = Some(MARKER.to_string());
+        state.pending_triggered_mana_resume = Some(Box::new(TriggeredManaResume {
+            current: Box::new(PendingTriggerContext::single(pending)),
+            current_override: None,
+            rules_execution_node: RulesExecutionNodeRef::TriggeredMana(SettlementNodeOrdinal(5)),
+            accepted_tail: Vec::new(),
+            collected_batches: Vec::new(),
+            outer_resume: ManaTriggerFixedPointResume::Parent,
+            stage: TriggeredManaStage::ChoosingModes,
+        }));
+        state.pending_trigger_construction_priority_recipient = Some(PlayerId(1));
+        state.waiting_for = WaitingFor::AbilityModeChoice {
+            player: PlayerId(2),
+            modal: ModalChoice {
+                min_choices: 1,
+                max_choices: 1,
+                mode_count: 2,
+                ..Default::default()
+            },
+            source_id: hidden,
+            mode_abilities: Vec::new(),
+            is_activated: false,
+            ability_index: None,
+            ability_cost: None,
+            unavailable_modes: Vec::new(),
+        };
+
+        let trusted = serde_json::to_value(&state).expect("serialize trusted state");
+        let trusted_root = trusted.as_object().expect("trusted root object");
+        assert!(
+            trusted_root.contains_key("pending_triggered_mana_resume")
+                && trusted_root.contains_key("pending_trigger_construction_priority_recipient"),
+            "test precondition: trusted persistence keeps both authorities under their exact \
+             snake-case keys"
+        );
+
+        let owner_view = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(2));
+        let opponent_view = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
+        let projections = [
+            serde_json::to_value(ClientGameStateRef::wrap(&state, Some(PlayerId(2))))
+                .expect("direct owner wrap serializes"),
+            serde_json::to_value(ClientGameStateRef::wrap(&state, Some(PlayerId(1))))
+                .expect("direct opponent wrap serializes"),
+            serde_json::to_value(ClientGameStateRef::wrap_filtered(
+                &state,
+                &owner_view,
+                Some(PlayerId(2)),
+            ))
+            .expect("filtered owner wrap serializes"),
+            serde_json::to_value(ClientGameStateRef::wrap_filtered(
+                &state,
+                &opponent_view,
+                Some(PlayerId(1)),
+            ))
+            .expect("filtered opponent wrap serializes"),
+        ];
+
+        for (index, projection) in projections.iter().enumerate() {
+            let client_state = &projection["state"];
+            assert!(
+                client_state.get("pending_triggered_mana_resume").is_none(),
+                "projection {index} leaked the triggered-mana continuation key"
+            );
+            assert!(
+                client_state
+                    .get("pending_trigger_construction_priority_recipient")
+                    .is_none(),
+                "projection {index} leaked the construction recipient key"
+            );
+            let text = serde_json::to_string(projection).expect("projection serializes");
+            assert!(
+                !text.contains(MARKER),
+                "projection {index} leaked the private sidecar payload"
+            );
+            assert!(
+                client_state["waiting_for"] != serde_json::Value::Null,
+                "projection {index} must retain the public prompt"
+            );
+        }
+
+        assert!(
+            state.pending_triggered_mana_resume.is_some()
+                && state.pending_trigger_construction_priority_recipient == Some(PlayerId(1)),
+            "projection must not alter the authoritative carriers"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // `current_target_kind` — the engine-classified target announcement.
+    //
+    // Every test below asserts through `derive_views` / `derive_filtered_views`,
+    // never through the private classifier, so each one also covers the
+    // projection wiring: no test here can pass while the field is left
+    // unpopulated.
+    // ---------------------------------------------------------------------
+
+    fn two_player_state() -> GameState {
+        GameState::new(FormatConfig::standard(), 2, 42)
+    }
+
+    /// An object in `zone` whose post-layer type line is exactly `core_types`.
+    fn offered_object(
+        state: &mut GameState,
+        name: &str,
+        zone: Zone,
+        core_types: Vec<CoreType>,
+    ) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        let id = create_object(state, card_id, PlayerId(0), name.to_string(), zone);
+        state
+            .objects
+            .get_mut(&id)
+            .expect("the object was just created")
+            .card_types
+            .core_types = core_types;
+        id
+    }
+
+    /// `TargetSelectionSlot` has no `Default`, so every field is spelled out.
+    /// The classifier reads neither `effect_kind` nor `effect_detail`, so both
+    /// carry the same inert filler in every fixture and a reader should not
+    /// look for meaning in them.
+    fn target_slot(legal_targets: Vec<TargetRef>) -> TargetSelectionSlot {
+        TargetSelectionSlot {
+            legal_targets,
+            optional: false,
+            chooser: None,
+            effect_kind: EffectKind::DealDamage,
+            effect_detail: TargetEffectDetail::None,
+        }
+    }
+
+    /// A live `TriggerTargetSelection`. All ten fields are written out because
+    /// this is a struct literal, not a deserialization — the variant's
+    /// `serde(default)` attributes do not apply here.
+    fn trigger_prompt(
+        target_slots: Vec<TargetSelectionSlot>,
+        selection: TargetSelectionProgress,
+    ) -> WaitingFor {
+        WaitingFor::TriggerTargetSelection {
+            player: PlayerId(0),
+            trigger_controller: None,
+            trigger_event: None,
+            trigger_events: Vec::new(),
+            target_slots,
+            mode_labels: Vec::new(),
+            target_constraints: Vec::new(),
+            selection,
+            source_id: None,
+            description: None,
+        }
+    }
+
+    /// The common fixture: a live trigger announcement whose current slot
+    /// offers `offer`.
+    fn offering(offer: Vec<TargetRef>) -> WaitingFor {
+        trigger_prompt(
+            Vec::new(),
+            TargetSelectionProgress {
+                current_legal_targets: offer,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn kind_of(state: &GameState) -> Option<TargetChoiceKind> {
+        derive_views(state, Some(PlayerId(0))).current_target_kind
+    }
+
+    /// Row 1 — the originating #7692 defect. CR 115.1's targets are "object(s)
+    /// and/or player(s)"; an offer holding both must name both halves rather
+    /// than collapsing to whichever half the client happens to inspect.
+    #[test]
+    fn a_mixed_offer_names_both_objects_and_players() {
+        let mut state = two_player_state();
+        let bear = offered_object(
+            &mut state,
+            "Bear",
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+        );
+        state.waiting_for = offering(vec![
+            TargetRef::Object(bear),
+            TargetRef::Player(PlayerId(1)),
+        ]);
+
+        let views = derive_views(&state, Some(PlayerId(0)));
+        assert_eq!(
+            views.current_target_kind,
+            Some(TargetChoiceKind::ObjectsAndPlayers {
+                category: TargetObjectCategory::Creature
+            }),
+            "a mixed offer must name BOTH halves; naming only the object half is #7692 itself"
+        );
+
+        // THE WIRE CONTRACT for a payload-carrying variant. Unlike row 2's
+        // payload-free pin, this one IS sensitive to the tagging mode: dropping
+        // `content = "data"` flattens the category alongside the tag and reds
+        // here. The client mirror is hand-written with no generated binding to
+        // force agreement, so this assertion is the only thing holding the two
+        // hand-written sides of the contract together.
+        assert_eq!(
+            serde_json::to_value(&views).expect("the derived views serialize")
+                ["current_target_kind"],
+            serde_json::json!({
+                "type": "ObjectsAndPlayers",
+                "data": { "category": "Creature" }
+            }),
+            "the mixed variant's wire shape is what phase 2 renders the noun from"
+        );
+    }
+
+    /// Row 2 — the mixed arm must not swallow the pure-player case.
+    #[test]
+    fn an_all_player_offer_names_players() {
+        let mut state = two_player_state();
+        state.waiting_for = offering(vec![
+            TargetRef::Player(PlayerId(0)),
+            TargetRef::Player(PlayerId(1)),
+        ]);
+
+        let views = derive_views(&state, Some(PlayerId(0)));
+        assert_eq!(
+            views.current_target_kind,
+            Some(TargetChoiceKind::Players),
+            "an offer of players only is `Players`, not the mixed kind"
+        );
+
+        // The WIRE form of the payload-free variant — a different claim from
+        // the classification above: that one pins the classifier, this one pins
+        // what a player-only offer (#7692's own reported case) actually reaches
+        // the client as.
+        //
+        // WHAT THIS DOES NOT PIN, stated so nobody reads a guarantee into it:
+        // `Players` carries no payload, so `content = "data"` has nothing to
+        // wrap and its encoding is IDENTICAL under adjacent and internal
+        // tagging. This assertion therefore cannot detect a change of tagging
+        // mode. The variants that can are the payload-carrying ones, and rows 1
+        // and 3 pin those.
+        assert_eq!(
+            serde_json::to_value(&views).expect("the derived views serialize")
+                ["current_target_kind"],
+            serde_json::json!({ "type": "Players" }),
+            "a payload-free variant reaches the wire as a bare tagged object, with no content key"
+        );
+    }
+
+    /// Row 3 — CR 109.1 + CR 110.4: the narrowest true category wins, so a
+    /// creature-only offer is a creature and not merely a nonland permanent.
+    #[test]
+    fn a_creature_offer_is_narrowed_past_nonland_permanent() {
+        let mut state = two_player_state();
+        let bear = offered_object(
+            &mut state,
+            "Bear",
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+        );
+        let elf = offered_object(
+            &mut state,
+            "Elf",
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+        );
+        state.waiting_for = offering(vec![TargetRef::Object(bear), TargetRef::Object(elf)]);
+
+        let views = derive_views(&state, Some(PlayerId(0)));
+        assert_eq!(
+            views.current_target_kind,
+            Some(TargetChoiceKind::Objects {
+                category: TargetObjectCategory::Creature
+            }),
+            "an all-creature offer narrows to Creature; stopping at NonlandPermanent means the \
+             land test ran before the creature test"
+        );
+
+        // The SECOND tagging-sensitive encoding, pinned so neither payload-
+        // carrying variant can move unobserved. Placed after the narrowing
+        // claim above deliberately: a serialization failure must not fire first
+        // and leave the row's primary claim unprobed.
+        assert_eq!(
+            serde_json::to_value(&views).expect("the derived views serialize")
+                ["current_target_kind"],
+            serde_json::json!({
+                "type": "Objects",
+                "data": { "category": "Creature" }
+            }),
+            "the object-only variant's wire shape"
+        );
+    }
+
+    /// Row 4 — the same narrowing for CR 110.4's planeswalker permanent type.
+    #[test]
+    fn a_planeswalker_offer_is_narrowed_past_nonland_permanent() {
+        let mut state = two_player_state();
+        let jace = offered_object(
+            &mut state,
+            "Jace",
+            Zone::Battlefield,
+            vec![CoreType::Planeswalker],
+        );
+        state.waiting_for = offering(vec![TargetRef::Object(jace)]);
+
+        assert_eq!(
+            kind_of(&state),
+            Some(TargetChoiceKind::Objects {
+                category: TargetObjectCategory::Planeswalker
+            }),
+            "an all-planeswalker offer narrows to Planeswalker"
+        );
+    }
+
+    /// Row 5 — narrowing did not eat the NonlandPermanent arm: a permanent
+    /// that is neither creature nor planeswalker still reaches it.
+    #[test]
+    fn a_nonland_noncreature_permanent_offer_stays_nonland_permanent() {
+        let mut state = two_player_state();
+        let signet = offered_object(
+            &mut state,
+            "Signet",
+            Zone::Battlefield,
+            vec![CoreType::Artifact],
+        );
+        state.waiting_for = offering(vec![TargetRef::Object(signet)]);
+
+        assert_eq!(
+            kind_of(&state),
+            Some(TargetChoiceKind::Objects {
+                category: TargetObjectCategory::NonlandPermanent
+            }),
+            "a lone battlefield artifact is a nonland permanent — deleting that arm reds here"
+        );
+    }
+
+    /// Row 6 — CR 110.4: a land in the offer widens the answer to the bare
+    /// permanent category, because "nonland permanent" is then false of it.
+    #[test]
+    fn a_land_and_creature_offer_widens_to_permanent() {
+        let mut state = two_player_state();
+        let forest = offered_object(
+            &mut state,
+            "Forest",
+            Zone::Battlefield,
+            vec![CoreType::Land],
+        );
+        let bear = offered_object(
+            &mut state,
+            "Bear",
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+        );
+        state.waiting_for = offering(vec![TargetRef::Object(forest), TargetRef::Object(bear)]);
+
+        assert_eq!(
+            kind_of(&state),
+            Some(TargetChoiceKind::Objects {
+                category: TargetObjectCategory::Permanent
+            }),
+            "a Land beside a Creature widens to Permanent; dropping the land test would call this \
+             offer a nonland permanent, which is false of the Forest"
+        );
+    }
+
+    /// Row 7 — the mandated hostile fixture: a Land Planeswalker (the Wrenn
+    /// and One shape, `core_types = [Land, Planeswalker]`) beside an ordinary
+    /// creature must widen to Permanent rather than break the lattice.
+    #[test]
+    fn a_land_planeswalker_beside_a_creature_widens_to_permanent() {
+        let mut state = two_player_state();
+        let wrenn = offered_object(
+            &mut state,
+            "Wrenn and One",
+            Zone::Battlefield,
+            vec![CoreType::Land, CoreType::Planeswalker],
+        );
+        let bear = offered_object(
+            &mut state,
+            "Bear",
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+        );
+        state.waiting_for = offering(vec![TargetRef::Object(wrenn), TargetRef::Object(bear)]);
+
+        assert_eq!(
+            kind_of(&state),
+            Some(TargetChoiceKind::Objects {
+                category: TargetObjectCategory::Permanent
+            }),
+            "a Land Planeswalker beside a Creature is neither all-creature nor all-planeswalker \
+             nor land-free, so the honest answer is the bare permanent category"
+        );
+    }
+
+    /// Row 8 — the same card offered ALONE narrows back to Planeswalker. Paired
+    /// with row 7: together they prove the lattice moves in both directions
+    /// rather than defaulting one way.
+    #[test]
+    fn a_land_planeswalker_alone_is_named_a_planeswalker() {
+        let mut state = two_player_state();
+        let wrenn = offered_object(
+            &mut state,
+            "Wrenn and One",
+            Zone::Battlefield,
+            vec![CoreType::Land, CoreType::Planeswalker],
+        );
+        state.waiting_for = offering(vec![TargetRef::Object(wrenn)]);
+
+        assert_eq!(
+            kind_of(&state),
+            Some(TargetChoiceKind::Objects {
+                category: TargetObjectCategory::Planeswalker
+            }),
+            "offered alone it IS all-planeswalker; moving the land guard above the planeswalker \
+             guard would answer Permanent here"
+        );
+    }
+
+    /// Row 9 — CR 110.1 + CR 115.2: a permanent is a card on the battlefield,
+    /// and an off-battlefield object can still be a legal target. A creature
+    /// card in a graveyard must not be called a permanent.
+    #[test]
+    fn a_graveyard_card_offer_is_not_called_a_permanent() {
+        let mut state = two_player_state();
+        let corpse = offered_object(
+            &mut state,
+            "Dead Bear",
+            Zone::Graveyard,
+            vec![CoreType::Creature],
+        );
+        state.waiting_for = offering(vec![TargetRef::Object(corpse)]);
+
+        assert_eq!(
+            kind_of(&state),
+            Some(TargetChoiceKind::Objects {
+                category: TargetObjectCategory::Object
+            }),
+            "a creature CARD in a graveyard is an object, not a permanent — dropping the zone \
+             gate would call it a creature permanent"
+        );
+    }
+
+    /// Row 10 — CR 112.1: a spell is a card on the stack. The paired positive
+    /// for row 11, so that row's negative cannot pass on a dead predicate.
+    #[test]
+    fn a_spell_offer_names_a_spell() {
+        let mut state = two_player_state();
+        let bolt = offered_object(
+            &mut state,
+            "Lightning Bolt",
+            Zone::Stack,
+            vec![CoreType::Instant],
+        );
+        state.stack.push_back(StackEntry {
+            id: bolt,
+            source_id: bolt,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 1,
+            },
+        });
+        state.waiting_for = offering(vec![TargetRef::Object(bolt)]);
+
+        assert_eq!(
+            kind_of(&state),
+            Some(TargetChoiceKind::Objects {
+                category: TargetObjectCategory::Spell
+            }),
+            "a stack object whose stack entry is a Spell is a spell"
+        );
+    }
+
+    /// Row 11 — CR 113.7a: an activated ability exists on the stack
+    /// independently of its source and is NOT a spell (CR 112.1). Stack
+    /// residency alone must not answer this.
+    #[test]
+    fn an_ability_on_the_stack_is_not_called_a_spell() {
+        let mut state = two_player_state();
+        let source = offered_object(
+            &mut state,
+            "Prodigal Sorcerer",
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+        );
+        let ability_object = offered_object(&mut state, "Pinger Ability", Zone::Stack, vec![]);
+        let ability = ResolvedAbility::new(
+            Effect::unimplemented("ping", "inert fixture effect"),
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        state.stack.push_back(StackEntry {
+            id: ability_object,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(ability),
+            },
+        });
+        state.waiting_for = offering(vec![TargetRef::Object(ability_object)]);
+
+        assert_eq!(
+            kind_of(&state),
+            Some(TargetChoiceKind::Objects {
+                category: TargetObjectCategory::Object
+            }),
+            "an ability on the stack is an object but not a spell; answering Spell for any \
+             Zone::Stack object reds here while row 10 still passes"
+        );
+    }
+
+    /// Row 12 — CR 400.2: an offered object the projection cannot resolve
+    /// degrades the WHOLE answer, rather than being dropped so the remainder
+    /// can be classified confidently. The fixture deliberately mixes a
+    /// resolvable creature with an unresolvable id: a `filter_map` drop would
+    /// answer Creature here, which is false of the real offer.
+    #[test]
+    fn an_unresolvable_offered_object_degrades_to_object() {
+        let mut state = two_player_state();
+        let bear = offered_object(
+            &mut state,
+            "Bear",
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+        );
+        let missing = ObjectId(9_999);
+        assert!(
+            !state.objects.contains_key(&missing),
+            "reach-guard: the fixture id must really be absent from `state.objects`, or this test \
+             is measuring an ordinary two-creature offer"
+        );
+        state.waiting_for = offering(vec![TargetRef::Object(bear), TargetRef::Object(missing)]);
+
+        assert_eq!(
+            kind_of(&state),
+            Some(TargetChoiceKind::Objects {
+                category: TargetObjectCategory::Object
+            }),
+            "one unresolvable member degrades the whole classification; swapping the \
+             all-or-nothing collect for a filter-map drop answers Creature and reds here"
+        );
+    }
+
+    /// Row 13 — an empty offer on a LIVE prompt yields no kind. The absence of
+    /// an offer is not a kind of choice. This state is reached, not merely
+    /// total: an all-optional announcement can auto-skip to completion and
+    /// install a progress whose `current_legal_targets` is empty.
+    #[test]
+    fn an_empty_offer_on_a_live_prompt_emits_no_kind() {
+        let mut state = two_player_state();
+        let bear = offered_object(
+            &mut state,
+            "Bear",
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+        );
+
+        state.waiting_for = offering(vec![]);
+        assert!(
+            matches!(state.waiting_for, WaitingFor::TriggerTargetSelection { .. }),
+            "reach-guard: the prompt must be LIVE, or this test merely repeats the no-prompt case"
+        );
+        assert_eq!(
+            kind_of(&state),
+            None,
+            "an empty offer on a live prompt publishes no kind"
+        );
+
+        // PAIRED POSITIVE, same prompt shape: proves the `None` above is caused
+        // by the empty offer and not by a fixture that failed to install a
+        // classifiable prompt at all.
+        state.waiting_for = offering(vec![TargetRef::Object(bear)]);
+        assert_eq!(
+            kind_of(&state),
+            Some(TargetChoiceKind::Objects {
+                category: TargetObjectCategory::Creature
+            }),
+            "the identical prompt shape with a non-empty offer DOES classify"
+        );
+    }
+
+    /// Row 14 — no prompt means no wire key, AND the key is genuinely present
+    /// when a prompt is live. Both halves live in one test on purpose: without
+    /// the positive half, the negative passes even if the field is never
+    /// populated at all. This is also the scope matrix's negative test — every
+    /// `WaitingFor` variant outside the two gated ones reaches the same arm.
+    #[test]
+    fn no_targeting_prompt_emits_no_kind() {
+        let mut state = two_player_state();
+        let bear = offered_object(
+            &mut state,
+            "Bear",
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+        );
+
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let views = derive_views(&state, Some(PlayerId(0)));
+        assert_eq!(
+            views.current_target_kind, None,
+            "a non-targeting prompt publishes no kind"
+        );
+        let wire = serde_json::to_value(&views).expect("the derived views serialize");
+        assert!(
+            wire.get("current_target_kind").is_none(),
+            "the key must be absent from the wire at Priority, got {wire}"
+        );
+
+        state.waiting_for = offering(vec![TargetRef::Object(bear)]);
+        let views = derive_views(&state, Some(PlayerId(0)));
+        assert_eq!(
+            views.current_target_kind,
+            Some(TargetChoiceKind::Objects {
+                category: TargetObjectCategory::Creature
+            }),
+            "the paired positive: a live prompt DOES populate the field"
+        );
+        let wire = serde_json::to_value(&views).expect("the derived views serialize");
+        assert!(
+            wire.get("current_target_kind").is_some(),
+            "the key must reach the wire under a live prompt, got {wire}"
+        );
+    }
+
+    /// Row 15 — the filtered projection agrees on a public offer. It must do so
+    /// by delegating to `derive_views(filtered_state, ..)`, not by re-sourcing
+    /// from authoritative state: re-sourcing would characterize an object the
+    /// viewer is not entitled to characterize (CR 400.2).
+    #[test]
+    fn the_filtered_projection_agrees_on_a_public_offer() {
+        let mut state = two_player_state();
+        let bear = offered_object(
+            &mut state,
+            "Bear",
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+        );
+        state.waiting_for = offering(vec![
+            TargetRef::Object(bear),
+            TargetRef::Player(PlayerId(0)),
+        ]);
+
+        let viewer = PlayerId(1);
+        let filtered = crate::game::visibility::filter_state_for_viewer(&state, viewer);
+        assert!(
+            matches!(
+                filtered.waiting_for,
+                WaitingFor::TriggerTargetSelection { .. }
+            ),
+            "reach-guard: filtering must retain the public prompt, or the assertion below is \
+             about a state with nothing to classify"
+        );
+
+        assert_eq!(
+            derive_filtered_views(&state, &filtered, Some(viewer)).current_target_kind,
+            Some(TargetChoiceKind::ObjectsAndPlayers {
+                category: TargetObjectCategory::Creature
+            }),
+            "a public battlefield offer classifies identically through the filtered path"
+        );
+    }
+
+    /// Row 16 — provenance axis 1: the kind binds to the LIVE slot, not slot 0.
+    /// The two slots classify differently on purpose, so reading
+    /// `target_slots[0]` answers Permanent and reds.
+    #[test]
+    fn the_kind_binds_to_the_live_slot_not_the_first_slot() {
+        let mut state = two_player_state();
+        let forest = offered_object(
+            &mut state,
+            "Forest",
+            Zone::Battlefield,
+            vec![CoreType::Land],
+        );
+        let bear = offered_object(
+            &mut state,
+            "Bear",
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+        );
+
+        state.waiting_for = trigger_prompt(
+            vec![
+                target_slot(vec![TargetRef::Object(forest)]),
+                target_slot(vec![TargetRef::Object(bear)]),
+            ],
+            TargetSelectionProgress {
+                current_slot: 1,
+                selected_slots: vec![Some(TargetRef::Object(forest))],
+                current_legal_targets: vec![TargetRef::Object(bear)],
+            },
+        );
+
+        assert_eq!(
+            kind_of(&state),
+            Some(TargetChoiceKind::Objects {
+                category: TargetObjectCategory::Creature
+            }),
+            "slot 1 is live and offers a creature; reading slot 0's Land answers Permanent"
+        );
+    }
+
+    /// Row 18 — BOTH gated variants are classified. Every other unit test here
+    /// drives `TriggerTargetSelection`; dropping `TargetSelection` from the
+    /// combined arm would leave every ordinary spell cast, activated ability
+    /// and loyalty activation publishing nothing, with all of them still green.
+    #[test]
+    fn a_pending_cast_target_selection_is_classified_too() {
+        let mut state = two_player_state();
+        let spell = offered_object(&mut state, "Shock", Zone::Stack, vec![CoreType::Instant]);
+        let bear = offered_object(
+            &mut state,
+            "Bear",
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+        );
+        let ability = ResolvedAbility::new(
+            Effect::unimplemented("damage", "inert fixture effect"),
+            vec![],
+            spell,
+            PlayerId(0),
+        );
+
+        state.waiting_for = WaitingFor::TargetSelection {
+            player: PlayerId(0),
+            pending_cast: Box::new(PendingCast::new(
+                spell,
+                CardId(1),
+                ability,
+                ManaCost::NoCost,
+            )),
+            target_slots: vec![target_slot(vec![TargetRef::Object(bear)])],
+            mode_labels: Vec::new(),
+            selection: TargetSelectionProgress {
+                current_legal_targets: vec![TargetRef::Object(bear)],
+                ..Default::default()
+            },
+        };
+
+        assert_eq!(
+            kind_of(&state),
+            Some(TargetChoiceKind::Objects {
+                category: TargetObjectCategory::Creature
+            }),
+            "the PendingCast-carrying variant is classified by the same combined arm"
+        );
+    }
+
+    /// Row 19 — CR 205.1b: an effect can make a permanent a creature while it
+    /// is "still a planeswalker", so both guards are true of this object. It is
+    /// the ONLY input on which the guard ORDER is observable, and therefore the
+    /// only fixture here that reds a swapped Creature/Planeswalker order — the
+    /// Land Planeswalker of rows 7 and 8 never makes both guards true.
+    #[test]
+    fn an_animated_planeswalker_is_named_a_creature_not_a_planeswalker() {
+        let mut state = two_player_state();
+        let gideon = offered_object(
+            &mut state,
+            "Gideon Blackblade",
+            Zone::Battlefield,
+            vec![CoreType::Planeswalker, CoreType::Creature],
+        );
+        state.waiting_for = offering(vec![TargetRef::Object(gideon)]);
+
+        assert_eq!(
+            kind_of(&state),
+            Some(TargetChoiceKind::Objects {
+                category: TargetObjectCategory::Creature
+            }),
+            "both guards hold on an animated planeswalker; Creature is tested first, so swapping \
+             the two guards answers Planeswalker and reds exactly here"
+        );
+    }
+
+    /// Row 20 — provenance axis 2: the kind reads the NARROWED offer, not the
+    /// slot's declared set. Only one slot exists, so `current_slot` is 0 and
+    /// row 16 cannot catch this revert; reading
+    /// `target_slots[current_slot].legal_targets` answers Permanent.
+    #[test]
+    fn the_kind_reads_the_narrowed_offer_not_the_slots_declared_set() {
+        let mut state = two_player_state();
+        let forest = offered_object(
+            &mut state,
+            "Forest",
+            Zone::Battlefield,
+            vec![CoreType::Land],
+        );
+        let bear = offered_object(
+            &mut state,
+            "Bear",
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+        );
+
+        state.waiting_for = trigger_prompt(
+            vec![target_slot(vec![
+                TargetRef::Object(forest),
+                TargetRef::Object(bear),
+            ])],
+            TargetSelectionProgress {
+                current_slot: 0,
+                selected_slots: Vec::new(),
+                current_legal_targets: vec![TargetRef::Object(bear)],
+            },
+        );
+
+        assert_eq!(
+            kind_of(&state),
+            Some(TargetChoiceKind::Objects {
+                category: TargetObjectCategory::Creature
+            }),
+            "the declared set holds a Land and would classify Permanent; the narrowed offer the \
+             client actually renders holds only the creature"
         );
     }
 }
