@@ -147,69 +147,80 @@ Read `deck_validation.rs` copy-limit + restricted paths in full.
 - **Finding:** reuse `restricted_copy_violations` (the enforcement path), NOT
   `DeckCopyLimit::UpTo`. Correct the task's framing accordingly.
 
-## 5. Mana burn — SMALL; hook point identified (REVISED — maintainer review round 2)
+## 5. Mana burn — hook point identified (REVISED TWICE — maintainer review rounds 2 and 3)
 
-The first pass of this section got two things wrong, both flagged by
-maintainer review and both re-verified directly this session:
+The first pass got two things wrong (round 2 fixed both in the *description*
+but not fully in the *mechanism*); round 2's fix itself was then found
+incomplete (round 3). Both rounds' findings, current state only:
 
-- **It's life loss, not damage.** Modern CR: **mana burn is obsolete.**
-  `docs/MagicCompRules.txt:8277-8278` glossary "Mana Burn (Obsolete)": "Older
-  versions of the rules stated that unspent mana caused a player to **lose
-  life**… That rule no longer exists." (Removed by the 2010 "M10" rules
-  update.) Life loss and damage are behaviorally distinct in this engine
-  (damage can be prevented/redirected and fires "dealt damage" triggers; life
-  loss does neither) — the original "deal that many damage" framing below was
-  wrong, not just imprecisely worded.
-- **It's per real MTG phase, not per engine `Phase` transition.** The
-  engine's `Phase` enum (`types/phase.rs`) is a flat 11-variant list that
-  represents BOTH MTG's 5 real phases and their internal steps as siblings
-  (e.g. `DeclareAttackers`, `DeclareBlockers`, `CombatDamage` are three
-  separate `Phase` variants, all inside the single real "Combat" phase).
-  Modern CR 500.5 empties the mana pool at every one of these transitions —
-  correct for the modern rule — but mana burn (verified directly: it applies
-  at end of **phase**, not at every step within one) must fire only when
-  actually crossing from one real MTG phase into another.
+- **It's life loss, not damage** (round 2, still correct). Modern CR: **mana
+  burn is obsolete.** `docs/MagicCompRules.txt:8277-8278` glossary "Mana Burn
+  (Obsolete)": "Older versions of the rules stated that unspent mana caused a
+  player to **lose life**… That rule no longer exists." (Removed by the 2010
+  "M10" rules update.) Life loss and damage are behaviorally distinct in this
+  engine (damage can be prevented/redirected and fires "dealt damage"
+  triggers; life loss does neither).
+- **It's per real MTG phase, not per engine `Phase` transition — and this
+  requires the mana POOL to persist across intra-phase-group steps, not just
+  the burn CHECK to skip them (round 2 only did the latter; round 3 caught
+  that this is insufficient).** The engine's `Phase` enum (`types/phase.rs`)
+  is a flat 11-variant list representing BOTH MTG's 5 real phases and their
+  internal steps as siblings (e.g. `DeclareAttackers`, `DeclareBlockers`,
+  `CombatDamage` are three separate `Phase` variants, all inside the single
+  real "Combat" phase). Modern CR 500.5 empties the mana pool at **every**
+  one of these transitions unconditionally — round 2 left this unconditional
+  draining untouched and only gated the life-loss side-effect to phase-group
+  boundaries, which means by the time a phase-group boundary was reached the
+  pool had already been silently emptied at the prior intra-phase-group step,
+  with nothing left to burn.
 
-Corrected findings:
+**Corrected mechanism (round 3) — reuses an existing pattern instead of
+gating a side-effect on an unconditionally-firing event:**
 
-- The engine already fully models unspent-mana emptying at every `Phase`
-  transition: `turns.rs:264` "CR 500.5: Mana pools empty between
-  phases/steps", routed through `enter_phase` →
-  `drain_pending_phase_transition_progress` (`turns.rs:295`) → a
-  `ProposedEvent::EmptyManaPool` replacement pipeline (`turns.rs:379`) →
-  `apply_empty_mana_pool_decisions` (`types/mana.rs:1692`) →
-  `apply_empty_mana_pool_event` (`turns.rs`), whose own doc comment already
-  says "CR 106.4 + CR 703.4q: Apply the final replacement-ordered mana
-  dispositions as the step or phase ends, then apply one aggregate
-  Yurlok-class life-loss event."
-- **The engine already has a generic life-loss mechanism for exactly this
-  shape**, not previously connected to this design:
-  `player_unspent_mana_loss_causes_life_loss` (`static_abilities.rs:1237`,
-  backed by `StaticMode::UnspentManaLossCausesLifeLoss`) is checked inside
-  `apply_empty_mana_pool_event` on every `Phase` transition. This is correct
-  for the card-granted (Yurlok-class) version of this ability, which fires
-  every time ANY mana pool empties, at full modern CR 500.5 granularity. It
-  is the wrong granularity for a format-level `mana_burn` flag, which must
-  gate on real-phase boundaries only.
-- **The exact hook point for the format-level flag**: the same
-  `apply_empty_mana_pool_event` call site, gated additionally on a new
-  `fn phase_group(p: Phase) -> PhaseGroup` mapping (5 variants: Beginning,
-  PrecombatMain, Combat, PostcombatMain, Ending — grouping the 11 `Phase`
-  variants by which real MTG phase they belong to; generalizes the ad-hoc
-  `in_combat` bool `turns.rs` already computes inline for combat-duration
-  tracking). When `LegacyRuleSet.mana_burn` is set and `phase_group(current)
-  != phase_group(next)`, apply a second, independent life-loss contribution
-  for that player's dropped mana units (same `UnitDisposition::Drop` arm,
-  `types/mana.rs:1707-1716`, already counts units post-replacement) —
-  alongside, not merged into, the existing Yurlok-class check, since a format
-  flag and a card-granted static ability are different triggers that could
-  both legitimately apply to the same event.
-- **Size: still small.** One new grouping helper, one new gated life-loss
-  contribution at an existing call site, a distinguishable
-  `GameEvent::ManaBurn { player_id, amount }` for the format-level
-  contribution. No new state machine. The infra (per-unit disposition, APNAP
-  drain, replacement pipeline, the Yurlok-class life-loss event shape) already
-  exists — this reuses it rather than inventing a parallel damage path.
+- The engine already has a generic mana-persistence mechanism for exactly
+  this shape: `ManaExpiry` (`types/mana.rs:1509`) has `EndOfTurn` and
+  `EndOfCombat` variants. `EndOfCombat`'s own doc comment: "Mana persists
+  through combat steps but drains at EndCombat → PostCombatMain," used by
+  Firebending — i.e. "persist through this phase's internal steps, drain at
+  the real phase-group boundary," already built and tested, just
+  special-cased to the Combat phase-group. Units carrying an active expiry
+  are excluded from the `Drop` disposition entirely
+  (`turns.rs`, the `u.expiry.is_none()` filter feeding
+  `UnitDecision` construction) — they never reach the empty-pool pipeline
+  while their duration is live.
+- **The fix generalizes this**, rather than gating the life-loss check on an
+  event that already ran unconditionally: add `ManaExpiry::EndOfPhaseGroup`
+  (one new variant, not five per-phase-group ones — it resolves contextually
+  against whichever phase-group is active, exactly as `EndOfCombat`/
+  `EndOfTurn` already do without parameterizing which combat/turn). Mana
+  added while `LegacyRuleSet.mana_burn` is set is tagged with this expiry
+  instead of `None` at construction. The existing expiry-clearing logic
+  (`turns.rs`'s generalization of
+  `clear_expired_end_of_combat_retention_markers`, which already runs where
+  the pre-transition phase is still available — `state.phase = next` doesn't
+  overwrite it until later in `enter_phase`) converts these units to
+  ordinary (`None`-expiry) units only when a real phase-group crossing is
+  detected, at which point they flow into that SAME transition's
+  already-firing `EmptyManaPool` event as `Drop` decisions.
+- Because units never reach `Drop` except at a real phase-group crossing (by
+  construction, mirroring exactly how live `EndOfCombat` units are excluded
+  mid-combat today), the drop count at any transition where a `mana_burn`
+  player's units DO drop *is* the burn amount — apply it as life loss at the
+  same aggregation point `apply_empty_mana_pool_event` already uses for the
+  existing `player_unspent_mana_loss_causes_life_loss` (Yurlok-class,
+  `static_abilities.rs:1237`, `StaticMode::UnspentManaLossCausesLifeLoss`)
+  check, independent of it (a format flag and a card-granted static ability
+  are different triggers that could both apply to the same event), and after
+  any pause the drain takes for a player choice (Kruphix/Horizon Stone `Keep`
+  dispositions) — reusing the pipeline's existing pause/resume point rather
+  than computing before the choice is known.
+- **Size: still small, slightly larger than round 2's estimate.** One new
+  `ManaExpiry` variant, its construction-site tagging, and its
+  clearing-logic wiring — plus the life-loss application at the existing
+  aggregation point, distinguishable via `GameEvent::ManaBurn { player_id,
+  amount }`. No new state machine; reuses the per-unit disposition, APNAP
+  drain, and replacement-pipeline infra that already exists for
+  `EndOfCombat`/`EndOfTurn` and the Yurlok-class check.
 
 ## 6. "Damage uses the stack" — LARGE / deep; honest assessment
 

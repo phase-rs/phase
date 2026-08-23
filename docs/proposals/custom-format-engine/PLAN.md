@@ -132,10 +132,19 @@ CustomFormatRules {                     // the resolved ruleset payload
 // fields. Full accounting against the real struct:
 //   - Included below: every FIELD that is independently meaningful and not
 //     derivable from something else already in this struct.
-//   - `uses_commander: bool` — NOT included as a stored field. It is derived
-//     as `commander_damage_threshold.is_some()` at read time, mirroring how
-//     it already mirrors `GameFormat` for built-in formats. Storing it
-//     separately would let it drift out of sync with the threshold.
+//   - `uses_commander: bool` — NOT a stored field here. REVISED per
+//     maintainer review round 3 (CONTEXT.md point 4): `GameFormat::
+//     uses_commander()` (`format.rs:365-380`) is a hardcoded per-variant
+//     match with no access to `FormatConfig`, but its doc comment states
+//     the real invariant it encodes — true for every format whose
+//     `FormatConfig` has BOTH `command_zone: true` AND a non-`None`
+//     `commander_damage_threshold` (round 2 wrongly used the threshold
+//     alone). `FormatConfig.uses_commander` for `GameFormat::Custom` is
+//     computed at construction time (`from_lobby_config` / preset
+//     constructors) as `structural.command_zone &&
+//     structural.commander_damage_threshold.is_some()` — both conditions,
+//     matching the stated invariant exactly. Never stored redundantly on
+//     `StructuralRules` itself.
 //   - `supplies_fixed_deck: bool` — NOT included. Always `false` for
 //     `GameFormat::Custom`; no custom-format use case for an engine-supplied
 //     fixed deck exists today. Flagged, not silently dropped, if that need
@@ -145,11 +154,25 @@ CustomFormatRules {                     // the resolved ruleset payload
 //     comment states it is "orthogonal to format" — a session capability
 //     flag, not format identity. Belongs on `FormatConfig` directly, set
 //     independently of which format (built-in or custom) is chosen.
-//   - `sideboard_policy` — NEW finding: this is NOT a `FormatConfig` field.
-//     It's a `GameFormat` method (`format.rs:270`,
+//   - `archenemy_player: Option<PlayerId>` — REMOVED per maintainer review
+//     round 3 (CONTEXT.md point 3). It is a per-GAME seat index derived from
+//     `topology()` and validated against THAT game's player count
+//     (`FormatConfig::archenemy_player()` + `validate_for_player_count`,
+//     `format.rs:658-670`) — persisting it in a reusable saved format could
+//     reference a seat that doesn't exist, or a different player, next time
+//     it's loaded. Axis A does not support the Archenemy one-vs-many
+//     topology at all (a different `FormatTopology` shape, not a config knob
+//     on top of `IndividualSeats`) — explicit scope exclusion, not a silent
+//     drop; a topology-aware design is its own future project.
+//   - `sideboard_policy` — this is NOT a `FormatConfig` field. It's a
+//     `GameFormat` method (`format.rs:270`,
 //     `fn sideboard_policy(self) -> SideboardPolicy`), computed from the
-//     enum variant for built-in formats. `GameFormat::Custom` has no such
-//     derivation source, so `StructuralRules` must carry it explicitly.
+//     enum variant for built-in formats, with no `FormatConfig` access to
+//     check anything for `Custom`. `StructuralRules` carries it explicitly;
+//     see the new `FormatConfig::sideboard_policy()` accessor and consumer
+//     migration below (maintainer review round 3, CONTEXT.md point 2) —
+//     round 2 added this field but never specified how anything would
+//     actually READ it for a Custom format, which was itself a gap.
 StructuralRules {
     starting_life: i32,
     min_players: u8,
@@ -160,9 +183,39 @@ StructuralRules {
     commander_damage_threshold: Option<u8>,
     range_of_influence: Option<Box<RangeOfInfluenceConfig>>,  // mirrors FormatConfig's field exactly
     team_based: bool,
-    archenemy_player: Option<PlayerId>,
-    sideboard_policy: SideboardPolicy,  // new — no derivation source for Custom, see note above
+    sideboard_policy: SideboardPolicy,  // no derivation source for Custom, see note above
 }
+
+// --- sideboard_policy accessor and consumer migration (new — maintainer
+// review round 3, CONTEXT.md point 2) ---
+//
+// `GameFormat::sideboard_policy(self) -> SideboardPolicy` (`format.rs:270`)
+// is an exhaustive match over the built-in variants with NO access to
+// `FormatConfig` — a `Custom(_)` arm there can only be
+// `unreachable!("call FormatConfig::sideboard_policy() instead")`, since the
+// real answer lives in `custom_rules`, which this method cannot see. The
+// correct authority is one level up:
+//
+// impl FormatConfig {
+//     pub fn sideboard_policy(&self) -> SideboardPolicy {
+//         match self.format {
+//             GameFormat::Custom(_) => self.custom_rules.as_ref()
+//                 .expect("Custom format must carry custom_rules")
+//                 .structural.sideboard_policy,
+//             other => other.sideboard_policy(),
+//         }
+//     }
+// }
+//
+// Every current call site of `state.format_config.format.sideboard_policy()`
+// — confirmed this session at `game/deck_loading.rs:681` and
+// `game/match_flow.rs:357`; a repo-wide grep for the same pattern at
+// implementation time catches any others — migrates to
+// `state.format_config.sideboard_policy()`. Round 2 added the field to
+// `StructuralRules` but never specified this accessor or the migration,
+// which is why a saved format's sideboard policy would have been silently
+// ignored (both existing consumers would keep reading a meaningless
+// built-in-format answer for `GameFormat::Custom`).
 
 // Axis B — legality/era-rules. Genuinely new data; no existing UI surface.
 // This is what makes the four EC formats rules-correct; kept exactly as
@@ -371,8 +424,12 @@ the frontend labels/short-labels/descriptions just like `FormatMetadata`.)
 ## 2. Parameterizing the formats as data (not N blocks)
 
 **Phase 1 preset — `swedish_old_school()` (see CONTEXT.md's "Further narrowing
-Axis B's MVP").** This is the first Axis B preset to actually ship, chosen
-because it needs zero `LegacyRuleSet` engine wiring:
+Axis B's MVP").** This is the first Axis B preset targeted, chosen because it
+needs zero `LegacyRuleSet` engine wiring. **Registration is currently blocked
+by the preset-readiness gate (§7)** — its `ReprintPolicy` is unenforced by §3
+and its specific value is unconfirmed (CONTEXT.md Open item 6) — so the
+engine/schema work below can and should land in phase 1, but this preset does
+not appear as a selectable format until those two items resolve:
 
 - `swedish_old_school()` — sets = `Some([LEA, LEB, 2ED, ARN, ATQ, LEG, DRK,
   SUM])` (verify MTGJSON codes at implementation time, same caveat as below —
@@ -438,9 +495,25 @@ This reuses four existing helpers verbatim and adds only the set-membership +
 name-set sourcing. `GameFormat::Custom` gets one arm in
 `format_compatibility_check` routing to `evaluate_custom_format`.
 
+**Honest gap, flagged by maintainer review round 3 (CONTEXT.md point 5):**
+`rules.reprint_policy` is declared on `LegalityRules` but **not consumed by
+any step above** — a card passes step 2 based on legal-set membership alone,
+regardless of which `ReprintPolicy` the preset declares. This is the same gap
+as the already-flagged Open item 2 (printing/frame-data gap): real
+enforcement needs the engine-vs-frontend printing cross-reference that item
+already describes, not new work invented here. Per the new preset-readiness
+rule (CONTEXT.md point 5, §7): no preset may be registered as selectable
+while declaring a `ReprintPolicy` this algorithm doesn't enforce — this
+blocks `swedish_old_school()` specifically until Open items 2 and 6 resolve
+(see §7).
+
 `legality_format()` returns `None` for `Custom` (no `LegalityFormat` mapping —
-custom formats don't use the external legality table). `sideboard_policy`,
-`label`, `for_format`, etc. each get a `Custom` arm reading the resolved def.
+custom formats don't use the external legality table). `label`, `for_format`,
+etc. each get a `Custom` arm reading the resolved def. `sideboard_policy` is
+the one exception to "add a `Custom` arm on the `GameFormat` method" — see the
+dedicated accessor design in §1: the correct arm lives on `FormatConfig::
+sideboard_policy()`, not on `GameFormat::sideboard_policy()` itself, since the
+latter has no access to `custom_rules`.
 
 ## 4. Legacy rules wiring — Phase 2 (not needed for the Swedish Old School preset)
 
@@ -450,50 +523,85 @@ Swedish ruleset makes no mention of any of these rules and uses fully modern
 defaults. This section is unchanged from the original design and remains the
 correct plan for phase 2's four EC-format presets.
 
-- **Mana burn** (`LegacyRuleSet.mana_burn`) — **REWRITTEN per maintainer review
-  round 2** (CONTEXT.md point 4); the original "deal damage at the step-end
-  drop site" framing was wrong on two independent axes, both verified this
-  session:
-  - **Life loss, not damage.** `docs/MagicCompRules.txt:8278` (obsolete-rules
-    glossary): "unspent mana caused a player to **lose life**." Damage and
-    life loss are behaviorally different in this engine (damage can be
-    prevented/redirected and triggers "dealt damage" abilities; life loss
-    does neither) — this is not a cosmetic wording choice.
-  - **Phase-boundary, not every `Phase` enum transition.** The engine's own
-    `Phase` enum (`types/phase.rs`) flattens all of MTG's steps AND phases
-    into one 11-variant list (e.g. `DeclareAttackers`, `DeclareBlockers`,
-    `CombatDamage` are three separate `Phase` variants, all within the single
-    real MTG "Combat" phase). Modern CR 500.5 empties the mana pool at every
-    one of these transitions, and the engine's existing
-    `apply_empty_mana_pool_event` (`turns.rs`) already fires on every one via
-    `player_unspent_mana_loss_causes_life_loss`
-    (`static_abilities.rs:1237`, backed by `StaticMode::UnspentManaLossCausesLifeLoss`
-    — an existing, generic "Yurlok-class" mechanism for a card-granted
-    version of this same shape). That per-transition granularity is correct
-    for the existing card-granted static ability, but old-school mana burn
-    must fire only when actually **leaving one of the 5 real MTG phases**
-    (Beginning, Precombat Main, Combat, Postcombat Main, Ending) — not on
-    every step within one.
+- **Mana burn** (`LegacyRuleSet.mana_burn`) — **REWRITTEN AGAIN per
+  maintainer review round 3** (CONTEXT.md point 1). Round 2 fixed the
+  life-loss-not-damage half but got the mechanism wrong: it gated only the
+  LIFE-LOSS check to phase-group boundaries while leaving the pool-emptying
+  itself firing on every `Phase` transition — so by the time a phase-group
+  boundary was reached, the pool had already been silently drained at the
+  prior intra-phase-group step, with nothing left to burn. Two things
+  verified directly this session that the round-2 fix missed:
+  - **Life loss, not damage** (unchanged from round 2, still correct):
+    `docs/MagicCompRules.txt:8278` (obsolete-rules glossary): "unspent mana
+    caused a player to **lose life**." Damage and life loss are behaviorally
+    different in this engine (damage can be prevented/redirected and
+    triggers "dealt damage" abilities; life loss does neither).
+  - **The pool itself must persist across intra-phase-group steps, not just
+    skip the burn check.** The engine's `Phase` enum (`types/phase.rs`)
+    flattens MTG's steps AND phases into one 11-variant list (e.g.
+    `DeclareAttackers`/`DeclareBlockers`/`CombatDamage` are three separate
+    `Phase` variants inside the single real "Combat" phase); modern CR 500.5
+    empties the pool at every one of them, and `turns.rs`'s `enter_phase`
+    sets `state.phase = next` near the top of the function — so anything
+    checking "current vs. next" phase after that line sees the destination
+    on both sides unless it captured the pre-transition value first.
 
-  **Design**: add a small `fn phase_group(p: Phase) -> PhaseGroup` mapping
-  (a 5-variant enum grouping the 11 `Phase` variants by their real MTG
-  phase — mirrors the ad-hoc `in_combat` bool `turns.rs` already computes
-  inline for combat-duration tracking, generalized to all 5 groups). At the
-  same `apply_empty_mana_pool_event` call site, when `LegacyRuleSet.mana_burn`
-  is set AND `phase_group(current) != phase_group(next)` (a genuine
-  phase-group boundary, not an intra-phase step transition), apply a
-  **second, independent** life-loss contribution for that player's dropped
-  mana units — alongside, not merged into, the existing
-  `player_unspent_mana_loss_causes_life_loss` check, since the two have
-  different triggers (a format-level flag vs. a card-granted static ability)
-  and could theoretically both apply to the same event. Emit a
-  `GameEvent::ManaBurn { player_id, amount }` for the format-level
-  contribution specifically, so it stays distinguishable from a Yurlok-class
-  event in tests and in any future "why did I lose life" UI surface.
+  **Design — reuses an existing mechanism instead of inventing pool
+  suppression.** The engine already has exactly this shape:
+  `ManaExpiry` (`types/mana.rs:1509`) has `EndOfTurn` and `EndOfCombat`
+  variants; `EndOfCombat`'s own doc comment reads "Mana persists through
+  combat steps but drains at EndCombat → PostCombatMain," used by
+  Firebending — literally "persist through this phase's internal steps,
+  drain at the real phase-group boundary," already built, tested, and
+  working, just special-cased to the Combat phase-group. The fix
+  generalizes it:
+  1. Add `ManaExpiry::EndOfPhaseGroup` — a **third** variant, not five new
+     per-phase-group variants (`EndOfBeginning`, `EndOfPrecombatMain`, …).
+     Like `EndOfCombat` and `EndOfTurn`, it does not parameterize which
+     phase-group; it resolves contextually against whichever one is active
+     when checked, via the same `fn phase_group(p: Phase) -> PhaseGroup`
+     mapping round 2 introduced (5 variants: Beginning, PrecombatMain,
+     Combat, PostcombatMain, Ending — generalizing the ad-hoc `in_combat`
+     bool `turns.rs` already computes inline).
+  2. Where mana units are constructed (`types/mana.rs`, the `ManaUnit`
+     construction sites currently setting `expiry: None`), when the active
+     format's `LegacyRuleSet.mana_burn` is set, construct with
+     `expiry: Some(ManaExpiry::EndOfPhaseGroup)` instead.
+  3. Extend the existing expiry-clearing logic (the generalization of
+     `clear_expired_end_of_combat_retention_markers`, called from
+     `enter_phase` where the pre-transition phase is still available before
+     `state.phase = next` overwrites it) to detect a real phase-group
+     crossing and convert those units to ordinary (`None`-expiry) units —
+     exactly mirroring how `EndOfCombat` units convert at `EndCombat` →
+     `PostCombatMain` today. Converted units flow into that SAME
+     transition's already-firing `EmptyManaPool` event as `Drop`
+     decisions — no new event, no suppressed event, the existing
+     unconditional per-transition drain does the work once the units are no
+     longer expiry-protected.
+  4. Because units tagged `EndOfPhaseGroup` never enter the Drop path except
+     at a real phase-group crossing (by construction — an intra-phase-group
+     transition's `clear_expired_...` pass leaves them untouched, mirroring
+     exactly how live `EndOfCombat` units are excluded from Drop mid-combat
+     today), the drop count a `mana_burn` player has at ANY transition where
+     drops occur *is* the burn amount — no separate "was this a boundary"
+     branch needed at the life-loss application point itself. Apply that
+     count as **life loss** (`GameEvent::ManaBurn { player_id, amount }`,
+     distinguishable from a Yurlok-class event), computed at the SAME
+     aggregation point `apply_empty_mana_pool_event` already uses for the
+     existing `player_unspent_mana_loss_causes_life_loss` (Yurlok-class)
+     check — independent of it, since a format flag and a card-granted
+     static ability are different triggers that could theoretically both
+     apply to the same event — and AFTER any player choice the drain pauses
+     for (Kruphix/Horizon Stone `Keep` dispositions), reusing the pipeline's
+     existing pause/resume continuation rather than adding a second,
+     unsynchronized computation point (this resolves the "life loss can
+     defer through replacement handling" concern directly).
   Annotate as a pre-M10 rule removed by the M10 update (cite the
-  obsolete-glossary entry `MagicCompRules.txt:8277-8278`). Still small — one
-  new grouping helper, one new gated life-loss contribution at an existing
-  call site, no new state machine.
+  obsolete-glossary entry `MagicCompRules.txt:8277-8278`). Slightly larger
+  than round 2's estimate (a new `ManaExpiry` variant + its construction-site
+  and clearing-logic wiring, not just a life-loss check at an existing call
+  site) but still small and, critically, reuses a proven pattern rather than
+  adding a new one.
 - **Pre-M10 Wish exile access** (`pre_m10_wish_reaches_exile`): fully traced in
   RESEARCH §9. This is a REAL functional difference (not wording-only): pre-M10,
   the "removed from the game" zone counted as *outside the game*, so a Wish could
@@ -556,25 +664,51 @@ legality logic on the client.
   its source ruleset; each preset's stated list *count* in a doc comment
   matches `.len()` of the actual list (guards against the round-2 23-vs-25 /
   37-vs-44 class of mislabeling recurring silently).
-- **Mana burn phase-boundary gating** (revised — maintainer review round 2,
-  CONTEXT.md point 4): with `LegacyRuleSet.mana_burn` set, unspent mana at a
-  transition WITHIN one MTG phase (e.g. `DeclareAttackers` → `DeclareBlockers`,
-  same `PhaseGroup::Combat`) must NOT cause life loss; unspent mana at a
-  transition CROSSING a phase-group boundary (e.g. `EndCombat` →
-  `PostCombatMain`) must cause life loss equal to the unspent amount. Assert
-  life loss specifically (not damage — no `GameEvent::DamageDealt`, no
-  prevention-shield interaction). With the flag off, neither transition
-  causes any loss. Tests the flag + phase-group hook generically, not a
-  specific card.
+- **Mana burn — pool persistence AND life loss** (revised again — maintainer
+  review round 3, CONTEXT.md point 1; round 2's version only tested the
+  life-loss gate and would have passed against the wrong mechanism):
+  - With `LegacyRuleSet.mana_burn` set, unspent mana added during
+    `DeclareAttackers` must still be present (not dropped, no life loss) at
+    `DeclareBlockers` (a transition WITHIN `PhaseGroup::Combat`) — asserts
+    the pool itself persists via `ManaExpiry::EndOfPhaseGroup`, not just that
+    a life-loss check was skipped.
+  - That same unspent mana, carried untouched through every step of Combat,
+    must be dropped AND cause life loss equal to the full accumulated amount
+    at the `EndCombat` → `PostCombatMain` transition (crossing a phase-group
+    boundary) — a single discriminating test proving both the persistence
+    and the eventual burn, not two independently-passable halves.
+  - Assert life loss specifically (no `GameEvent::DamageDealt`, no
+    prevention-shield interaction).
+  - With the flag off, mana empties at every transition exactly as today
+    (regression guard against changing default behavior).
+  - A pause case: unspent mana at a real phase-group boundary where a
+    `Keep`-disposition replacement effect (Kruphix/Horizon Stone-shaped
+    synthetic def) also applies — burn amount reflects only the units
+    actually dropped after that choice resolves, proving the life-loss
+    application reuses the pipeline's existing pause/resume point rather
+    than computing before the choice is known.
+- **`FormatConfig::sideboard_policy()` accessor** (new — maintainer review
+  round 3, CONTEXT.md point 2): a `Custom`-format `FormatConfig` with
+  `structural.sideboard_policy: Forbidden` must make `deck_loading.rs`'s
+  sideboard-dropping behavior and `match_flow.rs`'s max-sideboard-size
+  computation both observe `Forbidden` via the new accessor — a regression
+  test pinned to the two migrated call sites specifically, not just the
+  accessor's return value in isolation, so a future revert of the migration
+  (reverting to `.format.sideboard_policy()`) fails visibly.
+- **`uses_commander` requires both conditions** (new — maintainer review
+  round 3, CONTEXT.md point 4): `command_zone: true` alone (no threshold) and
+  `commander_damage_threshold: Some(_)` alone (no command zone) both derive
+  `uses_commander: false`; only both together derive `true` — the exact
+  mismatched-combination cases the review asked for.
 - Serde round-trip of `FormatConfig` with `Some(custom_rules)` and `None`.
 - `CustomFormatDef::from_lobby_config`: a `FormatConfig` with non-default
   `starting_life`/`max_players`/`deck_size`/`range_of_influence`/`team_based`/
-  `command_zone`/`commander_damage_threshold`/`archenemy_player`/
-  `sideboard_policy` round-trips into a `CustomFormatRules.structural` that
-  matches field-for-field, with `legality` at its defaults (`legal_sets:
-  None`) — the general Axis-A save mechanism, not a specific saved format's
-  values. Include a case with `commander_damage_threshold: Some(_)` asserting
-  the derived `uses_commander` reads `true` without being stored separately.
+  `command_zone`/`commander_damage_threshold`/`sideboard_policy` round-trips
+  into a `CustomFormatRules.structural` that matches field-for-field, with
+  `legality` at its defaults (`legal_sets: None`) — the general Axis-A save
+  mechanism, not a specific saved format's values. Does NOT include
+  `archenemy_player` (removed per round 3, CONTEXT.md point 3 — not part of
+  `StructuralRules` at all).
 
 ## 7. Delivery surface — RESOLVED via maintainer input, see CONTEXT.md "Maintainer input"
 
@@ -619,6 +753,23 @@ legacy rules) is unaffected in scope or design — this only changes what ships
 *first* and *how a player reaches Axis A*, not what Axis B needs to be
 correct.
 
+**Preset-readiness gate (new — maintainer review round 3, CONTEXT.md point
+5).** A preset (Axis B typed constructor OR an Axis A lobby save that sets
+non-default `legality`) must not be registered/exposed as a selectable format
+until every legality/legacy field it declares is BOTH fully specified AND
+actually consumed by the evaluator/engine at an authoritative seam — not
+merely present as a struct field. This is a general rule, not a one-off:
+- `swedish_old_school()` (phase 1) is currently BLOCKED from registration by
+  this rule: it declares a `ReprintPolicy`, which §3 confirms is not yet
+  enforced, and CONTEXT.md's Open item 6 confirms the specific policy value
+  is itself unconfirmed against the primary source. Both must resolve before
+  this preset ships as selectable, even though the engine-level schema and
+  evaluator work (§1, §3) can and should land first.
+- No phase-2 EC preset may declare `LegendRuleScope::PreM14AnyController`
+  until the historical conflation flagged in CONTEXT.md/RESEARCH.md resolves.
+  Moot today (all four EC presets default this to `Modern`), but binding on
+  any future preset.
+
 ## 8. Sequencing
 
 **Phase 1 — general engine + the smallest end-to-end slice.** Deliberately
@@ -638,11 +789,15 @@ first.
    Validates the schema's Axis A end from a real UI.
 3. **`swedish_old_school()` preset (Axis B, phase 1)** — the one Axis B
    preset that needs zero legacy-rules wiring (§2). Validates the engine's
-   Axis B end (legal-set membership, empty banned list, the 23-name
+   Axis B end (legal-set membership, empty banned list, the 25-name
    restricted list) without touching §4 at all. Resolve CONTEXT.md items 5–6
    (ante-card handling, reprint policy) before finalizing this preset's
-   constructor. Can proceed in parallel with step 2 — disjoint fields of the
-   same schema.
+   constructor. **Registration as a selectable format is gated separately
+   (§7's preset-readiness gate)** on `ReprintPolicy` enforcement landing in
+   §3 — the constructor and its tests can land in this step, but do not wire
+   it into the format-selection UI/registry as choosable until that gate
+   clears. Can proceed in parallel with step 2 — disjoint fields of the same
+   schema.
 
 **Phase 2 — the four EC formats + the legacy-rules engine work they need.**
 Ships once phase 1 has proven the schema and both axes end-to-end.
