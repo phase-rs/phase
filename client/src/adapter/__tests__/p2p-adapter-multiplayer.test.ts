@@ -1364,7 +1364,11 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(setup).toBeDefined();
     guest.simulateClose();
 
-    const fault = { id: 7, revision: 3, message: "Native AI driver stopped" };
+    const fault: { id: number; revision: number; message: string } = {
+      id: 7,
+      revision: 3,
+      message: "Native AI driver stopped",
+    };
     const host = adapter as unknown as {
       authoritativeRevision: number;
       handleNativeAiDriverFault: (fault: typeof fault) => Promise<void>;
