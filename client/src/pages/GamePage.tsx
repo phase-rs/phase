@@ -1277,6 +1277,10 @@ function GamePageContent({
   const gamePageStyle = {
     "--game-top-overlay-offset": `${topOverlayOffsetPx}px`,
     "--game-split-safe-top": "0px",
+    // Where the targeting prompt starts, which is the only part of its
+    // placement this page can state: the split layout puts seat panes at the
+    // very top of the board, so the prompt clears them. How TALL the block is
+    // stays the block's own business — see TargetingOverlay.
     "--game-targeting-prompt-top": splitBoardActive
       ? isMobile ? "4.25rem" : "4.75rem"
       : "0.25rem",
