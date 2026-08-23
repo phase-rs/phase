@@ -532,13 +532,16 @@ const initialState: MultiplayerDraftState = {
  * fails and succeeds while `phase` is already `matchInProgress`. Dismissal
  * (`clearError`) remains the clearing path for that case.
  *
- * Also not covered: `betweenGames` has no `DraftPlayerView.status` of its own
- * (`phaseForDraftViewStatus` never returns it — the phase is written only by
- * the bo3 prompt arms), so any `viewUpdated` broadcast during a Bo3 intergame
- * window flips the phase to `matchInProgress` and retires the error with it.
- * A seat dropping mid-window is enough. The intergame screen is lost in that
- * interleaving either way, which is pre-existing, so this narrows where those
- * two emitters are visible rather than restoring the old latch.
+ * Also not covered: `betweenGames` has no `DraftPlayerView.status` of its own.
+ * `phaseForDraftViewStatus` never returns it; the phase is reached through the
+ * bo3 sideboard-prompt paths — `handleBetweenGamesPrompt` and the two
+ * `bo3SideboardPrompt` arms. So any `viewUpdated` broadcast during a Bo3
+ * intergame window flips the phase to `matchInProgress` and retires the error
+ * with it; a seat dropping mid-window is enough. The intergame screen is lost
+ * in that interleaving either way, which is pre-existing, so this narrows where
+ * the intergame errors ("Sideboard timer expired without a registered deck",
+ * "Intergame timeout lacks launch authority") are visible rather than restoring
+ * the old latch.
  *
  * Scope: this wraps the *initializer's* setter, so it covers every write made
  * inside this module. It is not zustand middleware and does not rebind
