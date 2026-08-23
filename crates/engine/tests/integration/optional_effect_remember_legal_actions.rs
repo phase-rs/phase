@@ -85,11 +85,8 @@ fn keyed_optional_effect_exposes_and_resolves_remember_choices() {
 
     apply_as_current(&mut state, accept).expect("remembered accept must be legal");
     assert_eq!(state.players[0].life, 21);
-    assert!(state
-        .may_trigger_auto_choices
-        .iter()
-        .any(|record| {
-            record.selector == MayTriggerAutoChoiceSelector::exact(key)
-                && record.choice == AutoMayChoice::Accept
-        }));
+    assert!(state.may_trigger_auto_choices.iter().any(|record| {
+        record.selector == MayTriggerAutoChoiceSelector::exact(key)
+            && record.choice == AutoMayChoice::Accept
+    }));
 }
