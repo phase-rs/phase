@@ -438,6 +438,13 @@ mod tests {
             host.replacement_definitions[0].shield_kind,
             ShieldKind::DamageReplacementOneShot
         ));
+        // CR 614.5 + CR 514.2: the one-shot window is carried by `expiry`, which is
+        // the only thing `turns::execute_cleanup` reads. Revert guard for
+        // `ReplacementDefinition::damage_replacement_oneshot_shield`'s stamp.
+        assert_eq!(
+            host.replacement_definitions[0].expiry,
+            Some(crate::types::ability::RestrictionExpiry::EndOfTurn)
+        );
 
         // First damage: 3 → doubled to 6 (opponent 20 → 14).
         let ctx = deal_damage::DamageContext::from_source(&state, source).unwrap();
@@ -596,6 +603,14 @@ mod tests {
             }
         ));
         assert_eq!(shield.valid_card, Some(TargetFilter::SelfRef));
+        // CR 614.9 + CR 611.2a + CR 514.2: the redirection shield's turn window
+        // lives in `expiry` — `lifetime` above decides CONSUMPTION only, and
+        // `turns::execute_cleanup` reads `expiry` alone. Revert guard for
+        // `ReplacementDefinition::redirection_shield`'s stamp.
+        assert_eq!(
+            shield.expiry,
+            Some(crate::types::ability::RestrictionExpiry::EndOfTurn)
+        );
         assert_eq!(
             shield.redirect_target,
             Some(TargetFilter::SpecificObject { id: chosen }),

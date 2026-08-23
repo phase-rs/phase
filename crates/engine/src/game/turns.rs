@@ -2251,19 +2251,54 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
         .unwrap_or_default();
     state.attacked_defenders_last_turn.insert(ending, this_turn);
 
-    // CR 701.19b: Regeneration shields expire at cleanup.
-    // CR 615: Prevention effects also expire.
-    // CR 514.2: Resolution-time replacements with `expiry: EndOfTurn` (e.g.,
-    // the "if [target] would die this turn, exile it instead" rider on
-    // damage spells) also expire here regardless of whether they fired.
-    // Also prune any consumed shields from earlier this turn.
+    // CR 514.2: "all “until end of turn” and “this turn” effects end." The typed
+    // `expiry` is the SINGLE authority for that window — the same authority the
+    // sibling prunes read (`complete_end_combat_teardown` for EndOfCombat, the
+    // untap-step prune for UntilPlayerNextTurn, the battlefield-exit prune in
+    // `layers.rs` for UntilHostLeavesPlay).
+    //
+    // CR 604.2 + CR 611.3b: a prevention or replacement effect created by a
+    // permanent's STATIC ability is active for as long as that permanent remains
+    // in the appropriate zone — it has no turn window and MUST survive this step.
+    // Those definitions carry `expiry: None`; keying this prune on `shield_kind`
+    // instead deleted every printed prevention card's shield at the first cleanup
+    // (Solitary Confinement, Nine Lives, Fog Bank, Pariah, ...).
+    //
+    // CR 611.2a + CR 608.2: a continuous effect created by the RESOLUTION of a
+    // spell or ability lasts as long as that spell or ability stated. Its creator
+    // stamps that window (see `ReplacementDefinition::with_resolution_shield_expiry`,
+    // whose EndOfTurn fallback is an engine default, NOT a CR rule — CR 611.2a's
+    // own no-duration case is "until the end of the game"; see that helper's doc).
+    //
+    // CR 500.1 + CR 511.3: the combat phase is a phase OF a turn, so an
+    // `EndOfCombat` window can never outlive the turn. `complete_end_combat_teardown`
+    // prunes `EndOfCombat` from the live and pending surfaces only — never from
+    // `base_replacement_definitions` — so this arm is the sole base-side catcher.
+    //
+    // CR 615.3 ("until they're used up or their duration has expired") is
+    // deliberately NOT read here, and `shield_kind` is not read by this closure at
+    // all. A consumed shield is ALREADY INERT without any prune: the object-side
+    // candidate gate early-returns on `is_consumed` and the pending-registry scan
+    // skips it (`game/replacement.rs`).
+    //
+    // CR 701.19a: a regeneration shield from a resolving spell or ability is
+    // stamped `EndOfTurn` at construction (`ReplacementDefinition::regeneration_shield`)
+    // and is caught by the first arm. (The annotation here previously cited
+    // CR 701.19b, which is STATIC-ability regeneration — no shield, no turn
+    // bound. Corrected in passing.)
     let expires_at_eot = |r: &ReplacementDefinition| {
-        r.shield_kind.is_shield() || matches!(r.expiry, Some(RestrictionExpiry::EndOfTurn))
+        matches!(
+            r.expiry,
+            Some(RestrictionExpiry::EndOfTurn | RestrictionExpiry::EndOfCombat)
+        )
     };
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
         obj.replacement_definitions.retain(|r| !expires_at_eot(r));
         // CR 514.2: Clean up turn-bound replacement definitions from the base
-        // definitions during the cleanup step so they do not persist.
+        // definitions during the cleanup step so they do not persist. Turn-bound
+        // riders (the die-exile rider) are base-installed by
+        // `effects/add_target_replacement.rs`, so the base surface needs the same
+        // `expiry`-keyed prune; printed statics carry `expiry: None` and survive.
         std::sync::Arc::make_mut(&mut obj.base_replacement_definitions)
             .retain(|r| !expires_at_eot(r));
     }
@@ -8335,6 +8370,19 @@ mod tests {
         let normal = ReplacementDefinition::new(ReplacementEvent::Moved)
             .description("Normal repl".to_string());
 
+        // CR 701.19a: a regeneration shield from a RESOLVING spell or ability is
+        // "the next time [permanent] would be destroyed this turn", so the builder
+        // stamps its own CR 514.2 window. `execute_cleanup` reads `expiry` alone —
+        // delete the stamp in `ReplacementDefinition::regeneration_shield` and both
+        // shields below become immortal. CR 701.19b's static-ability regeneration
+        // creates no shield at all and is not what this test covers.
+        assert_eq!(consumed.expiry, Some(RestrictionExpiry::EndOfTurn));
+        assert_eq!(active.expiry, Some(RestrictionExpiry::EndOfTurn));
+        assert_eq!(
+            normal.expiry, None,
+            "the surviving non-shield rider must carry no turn window"
+        );
+
         {
             let obj = state.objects.get_mut(&id).unwrap();
             let mut c = consumed;
@@ -8357,6 +8405,65 @@ mod tests {
         assert!(
             !obj.replacement_definitions[0].shield_kind.is_shield(),
             "Surviving replacement should not be a shield"
+        );
+    }
+
+    /// CR 500.1 + CR 511.3: the combat phase is a phase OF a turn, so an
+    /// `EndOfCombat` window can never outlive its turn. `complete_end_combat_teardown`
+    /// prunes `EndOfCombat` from the live and pending surfaces only — never from
+    /// `base_replacement_definitions` — so the cleanup step is the sole base-side
+    /// catcher and must keep this arm.
+    ///
+    /// Negative sibling in the same test: a CR 604.2 printed-static-shaped
+    /// definition (`expiry: None`) on the same object must SURVIVE, proving the arm
+    /// is expiry-keyed and not a blanket over `shield_kind`.
+    #[test]
+    fn cleanup_expires_end_of_combat_prevention_shield() {
+        use crate::types::ability::{PreventionAmount, ReplacementDefinition, TargetFilter};
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PostCombatMain;
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+
+        let combat_bound = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .valid_card(TargetFilter::SelfRef)
+            .prevention_shield(PreventionAmount::All)
+            .expiry(RestrictionExpiry::EndOfCombat);
+        let durable = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .valid_card(TargetFilter::SelfRef)
+            .prevention_shield(PreventionAmount::All);
+        assert_eq!(
+            durable.expiry, None,
+            "CR 604.2: a printed static shield carries no expiry"
+        );
+
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.replacement_definitions.push(combat_bound);
+            obj.replacement_definitions.push(durable);
+            // Reach-guard: both definitions really are installed before cleanup.
+            assert_eq!(obj.replacement_definitions.len(), 2);
+        }
+
+        let mut events = Vec::new();
+        execute_cleanup(&mut state, &mut events);
+
+        let obj = state.objects.get(&id).unwrap();
+        assert_eq!(
+            obj.replacement_definitions.len(),
+            1,
+            "the EndOfCombat shield must be pruned and the durable one kept"
+        );
+        assert_eq!(
+            obj.replacement_definitions[0].expiry, None,
+            "CR 604.2: the surviving definition is the printed-static-shaped one"
         );
     }
 

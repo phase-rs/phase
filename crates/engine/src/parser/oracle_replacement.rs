@@ -7150,8 +7150,11 @@ fn parse_continuous_redirect_recipient(input: &str) -> OracleResult<'_, DamageRe
 /// rather than a CR 614.5 one-opportunity shield: "all damage that would be dealt
 /// …" for a stated window applies to EVERY matching damage event in that window,
 /// unlike "the next time …"/"the next N damage …", which are spent by their first
-/// event. The window itself is end-of-turn cleanup (CR 514.2), which
-/// `ShieldKind::is_shield()` already enforces — the two spellings the corpus uses
+/// event. The window itself is end-of-turn cleanup (CR 611.2a + CR 514.2),
+/// stamped as `RestrictionExpiry::EndOfTurn` by
+/// `ReplacementDefinition::redirection_shield` at install and read by
+/// `turns::execute_cleanup`; `ShieldKind` classifies the effect and carries no
+/// lifetime meaning of its own — the two spellings the corpus uses
 /// are Heroic Sacrifice's leading "Until end of turn," (lifted to the ability's
 /// own `duration` by the chunker before this parser sees the clause) and Gideon's
 /// Sacrifice / Saving Grace's inline "this turn".

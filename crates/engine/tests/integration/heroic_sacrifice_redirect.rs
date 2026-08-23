@@ -132,9 +132,13 @@ fn heroic_sacrifice_redirects_every_event_to_the_chosen_creature_until_end_of_tu
 /// turn. A continuous redirection that outlived its window would silently
 /// protect its controller forever.
 ///
-/// Revert guard: if the shield stopped being a `ShieldKind` (and so stopped
-/// being pruned at cleanup), the next-turn event would still redirect and the
-/// life total would be untouched.
+/// Revert guard: `turns::execute_cleanup` prunes on the typed `expiry` field
+/// alone — `shield_kind` classifies what a replacement does and carries no
+/// lifetime meaning (CR 604.2 makes a printed static's shield durable while
+/// holding the same `ShieldKind` value). This shield's `expiry ==
+/// Some(RestrictionExpiry::EndOfTurn)` is stamped by
+/// `ReplacementDefinition::redirection_shield`; drop that stamp and the
+/// next-turn event would still redirect and the life total would be untouched.
 #[test]
 fn heroic_sacrifice_redirect_expires_at_end_of_turn() {
     let mut scenario = GameScenario::new();
