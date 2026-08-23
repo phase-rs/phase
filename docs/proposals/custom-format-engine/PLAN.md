@@ -546,6 +546,13 @@ the frontend labels/short-labels/descriptions just like `FormatMetadata`.)
 
 ## 2. Parameterizing the formats as data (not N blocks)
 
+**Every card list, count, and rule below is sourced, not invented — see
+RESEARCH.md §1 for the full per-format citation, repeated here inline so this
+section stands on its own for anyone auditing the actual preset data without
+cross-referencing another file:**
+- Swedish Old School: `http://oldschool-mtg.blogspot.com/p/banrestriction.html` (RESEARCH.md §1, "Swedish Old School 93/94" subsection).
+- The four EC formats: `raw.githubusercontent.com/northern-information/lordsofthepit.com/main/src/pages/formats.md` (RESEARCH.md §1, EC ruleset header).
+
 **Phase 1 preset — `swedish_old_school()` (see CONTEXT.md's "Further narrowing
 Axis B's MVP").** This is the first Axis B preset targeted, chosen because it
 needs zero `LegacyRuleSet` engine wiring. **Registration is currently blocked

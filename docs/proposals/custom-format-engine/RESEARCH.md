@@ -21,6 +21,7 @@ Summon the Pack restricted to 1) plus errata allowing tutoring from packs opened
 during the match.
 
 ### Old School 93-94
+- **Source:** `raw.githubusercontent.com/northern-information/lordsofthepit.com/main/src/pages/formats.md`, fetched 2026-07-07 (same fetch as the section header above — repeated here so this format's data is independently checkable without scrolling to a shared citation).
 - **Legal sets:** Alpha, Beta, Unlimited, Collector's Edition, International
   Collector's Edition, Arabian Nights, Antiquities, Revised, Legends, The Dark,
   Fallen Empires.
@@ -36,6 +37,8 @@ during the match.
   and a "no draws" 50-minute Chaos-Orb tiebreaker — tournament-ops, not engine.)
 
 ### Old School 95
+- **Source:** same fetch as Old School 93-94, above — 95 is published on the
+  same page as an incremental extension of 93-94's own lists.
 - **Legal sets:** all of 93-94 **plus** Fourth Edition, Ice Age, Chronicles,
   Renaissance, Homelands.
 - **Restricted:** 93-94's list **plus** Demonic Consultation, Mana Crypt.
@@ -43,6 +46,7 @@ during the match.
 - **Legacy rules:** mana burn only.
 
 ### Middle School
+- **Source:** same fetch as Old School 93-94, above.
 - **Legal sets:** Fourth Edition through Scourge (1995–2003).
 - **Restricted:** NONE. Instead, 25 cards fully **banned:** Amulet of Quoz,
   Balance, Brainstorm, Bronze Tablet, Channel, Dark Ritual, Demonic
@@ -56,6 +60,7 @@ during the match.
   templating (all three).
 
 ### Classic Magic
+- **Source:** same fetch as Old School 93-94, above.
 - **Legal sets:** Alpha through Scourge (1993–2003) — the full pre-Mirrodin pool.
 - **Restricted (44 — corrected this round; the prior "(37)" label
   disagreed with the enumerated list below, flagged by maintainer review
@@ -83,6 +88,61 @@ Built on 93-94 base; adds Booster Tutor ×4, Opening Ceremony ×4, Summon the Pa
 ×1; errata to tutor from packs opened during the match; sideboard = packs;
 one new pack cracked between games; all pack cards removed after match; optional
 per-match "Gentleman's Agreement" banlist.
+
+### Swedish Old School 93/94 (the phase-1 target preset — see CONTEXT.md)
+
+**A different, real ruleset from the four EC formats above — not the same
+source, not a duplicate.** Given its own section here, matching the EC
+formats' treatment, because it's the actual first preset this proposal ships
+(§2/§8) and deserves the same direct, checkable citation.
+
+- **Source:** `http://oldschool-mtg.blogspot.com/p/banrestriction.html`,
+  fetched directly this session (2026-07-15) via `WebFetch`, not from
+  memory or a secondary summary. Distinct from the EC ruleset above — Sweden
+  is the historical origin community for "Old School 93/94" as a movement,
+  and its published rules differ from EC's in real, substantive ways (see
+  below), not just presentation.
+- **Legal sets:** Alpha, Beta, Unlimited, Arabian Nights, Antiquities,
+  Legends, The Dark, "Summer Magic" (a distinct, small 1994 print run — its
+  MTGJSON set code is unconfirmed pending implementation-time verification,
+  same caveat PLAN.md §2 already carries for every set code in this
+  proposal).
+  - Also stated by this source: **"Only English versions are allowed in
+    Oldschool"** — a language restriction with no current engine
+    representation; not modeled by this proposal (out of scope, same as the
+    already-noted physical-tournament logistics in the Classic
+    Legacy/"Lost Legacy" section below).
+- **Banned:** NONE — the source states no card is fully banned under the
+  Swedish ruleset, a genuinely empty list (distinct from EC's 93-94, which
+  bans 7 named cards).
+- **Restricted (25, one-copy maximum):** Ancestral Recall, Balance, Black
+  Lotus, Braingeyser, Channel, Chaos Orb, Contract from Below, Darkpact,
+  Demonic Tutor, Library of Alexandria, Mana Drain, Mind Twist, Mishra's
+  Workshop, Mox Emerald, Mox Jet, Mox Pearl, Mox Ruby, Mox Sapphire,
+  Regrowth, Sol Ring, Strip Mine, Tempest Efreet, Time Walk, Timetwister,
+  Wheel of Fortune — a **different 25-name list from EC's 93-94's 22-name
+  list above** (compare directly: EC includes Recall and Time Vault, absent
+  here; Swedish includes Contract from Below, Darkpact, Demonic Tutor,
+  Library of Alexandria, and Mishra's Workshop, absent from EC's list) —
+  confirms this is a genuinely independent ruleset, not a re-presentation of
+  EC's.
+- **Ante cards** (a THIRD list-shaped rule, distinct from banned/restricted —
+  see CONTEXT.md Open item 5): "must be removed before play unless the
+  tournament is specifically played for ante" — Bronze Tablet, Contract
+  from Below, Darkpact, Demonic Attorney, Jeweled Bird, Rebirth, Tempest
+  Efreet.
+- **Reprint policy:** NOT stated by this source beyond "Only English
+  versions are allowed" — see CONTEXT.md Open item 6. A secondary source
+  (`mtgoldframe.com`) claims no Revised-or-later reprints are allowed, but
+  that claim was not independently verified against this primary source and
+  must not be encoded without doing so.
+- **Legacy rules:** NO mention of mana burn, damage-on-the-stack, old Wish
+  templating, or a modified legend rule anywhere in this source — the plain
+  reading is fully modern rules on a restricted-era card pool, confirmed by
+  the ABSENCE of any of the legacy-rule language the EC sections above all
+  state explicitly for their own formats. This is why `swedish_old_school()`
+  (PLAN.md §2) sets every `LegacyRuleSet` axis to its `Modern` default and
+  needs none of §4's engine wiring.
 
 ## 2. Legality-pipeline gap — CONFIRMED absent
 
