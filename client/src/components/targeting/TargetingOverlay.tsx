@@ -41,9 +41,18 @@ type TargetNounKey =
   | "targeting.nounTarget";
 
 /**
- * CR 109.1: every engine object category gets a noun. TOTAL by construction —
- * a `Record` over the mirror union, so adding a category engine-side without a
- * client noun is a type error at `pnpm run type-check`, not a runtime fallback.
+ * CR 109.1: every engine object category gets a noun. TOTAL over the mirror
+ * union — a `Record`, so widening the union without adding a noun here is a
+ * type error at `pnpm run type-check`, not a runtime fallback.
+ *
+ * That totality stops at the language boundary, and this comment used to claim
+ * otherwise. The union above is hand-written: `derived_views.rs` carries no
+ * `ts_rs` binding (the crate does have one, on `types/interaction.rs` —
+ * `DerivedViews` deliberately does not use it), so adding a
+ * `TargetObjectCategory` variant engine-side compiles, leaves the union
+ * untouched, keeps this `Record` total, and ships green while the engine emits
+ * a category no key covers. Widening the enum means widening the union in the
+ * same change; nothing mechanical will remind you.
  *
  * The VALUE type is `TargetNounKey`, not `string`: `t()` accepts a plain
  * `string` in this repo, so a mistyped key would otherwise ship green and
