@@ -581,6 +581,43 @@ Two new, narrower points remained:
    keep/reduce `ReprintPolicy` to non-selectable/deferred metadata" branch
    review round 5 explicitly offered as acceptable. See PLAN.md §3 and §7.
 
+## Maintainer review round 6 — CHANGES_REQUESTED, addressed
+
+matthewevans re-reviewed round 5's fix (commit `21a0a03b`) and confirmed the
+singleton fix landed correctly — "now correctly use the existing
+parameterized copy-limit helper" — with one remaining architecture
+contract flagged as ambiguous, correctly:
+
+1. **`ReprintPolicy` was left in an internally contradictory state (real,
+   confirmed — round 5's fix was itself the bug this round found).** Round
+   5 resolved `reprint_policy` to "documentation metadata, never consumed"
+   but left the FIELD sitting inside `LegalityRules` (part of
+   `CustomFormatRules`, the resolved payload that travels in
+   `FormatConfig.custom_rules` and gets enforced) while a nearby comment
+   from round 1 still said it "gates LEGALITY." Those are two incompatible
+   claims about the same field's contract in the same document — a
+   struct's shape is itself a claim ("this travels with and is part of the
+   enforced ruleset"), and no amount of comment-level disclaiming changes
+   what the type says. Resolved structurally, not documentarily: moved
+   `reprint_policy` out of `CustomFormatRules`/`LegalityRules` entirely,
+   onto a newly-sketched `CustomFormatDef` struct (previously only
+   described in prose as "display metadata + CustomFormatRules," which is
+   exactly the ambiguity that let this happen — round 6 gives it an actual
+   type), alongside `label`/`short_label`/`description`. This is one of the
+   two resolutions matthewevans offered ("move the declared intent to
+   preset/document metadata outside `CustomFormatRules`/`LegalityRules`"),
+   chosen over the other (building real engine-owned printing enforcement
+   and gating registration on it) for the same reason round 5 already
+   established: this document's own original research (RESEARCH.md §3)
+   already showed the field's actual behavior is fully absorbed by
+   `legal_sets` curation, so building separate enforcement would duplicate
+   logic that already exists elsewhere. Every preset sketch, the
+   preset-readiness gate's scope description, and the registry-gate
+   reasoning were updated to reflect the field's new home — the gate no
+   longer needs to "exempt" `reprint_policy`, since it isn't on the
+   resolved-rules struct for the gate to see at all. See PLAN.md §1, §2,
+   §3, and §7.
+
 ## Open (needs a human decision — do NOT resolve unilaterally)
 
 1. ~~**Delivery surface**~~ — **RESOLVED**, see "Maintainer input" section

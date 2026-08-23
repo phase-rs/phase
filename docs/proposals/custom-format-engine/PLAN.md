@@ -319,9 +319,19 @@ StructuralRules {
 // `None` = unrestricted (every card passes the pool check), `Some(list)` =
 // restricted to `list`. This is the same `Option<T>`-over-ambiguous-sentinel
 // pattern CLAUDE.md already prescribes elsewhere in this codebase.
+// REVISED per maintainer review round 6: `reprint_policy` is REMOVED from
+// this struct entirely (not just documented-as-inert-in-place, which round
+// 5 tried and round 6 correctly rejected as an unresolved contradiction —
+// a field can't sit inside `CustomRules`/`LegalityRules`, structurally
+// implying it's part of the resolved, engine-consumed ruleset, while a
+// comment beside it insists it's inert metadata nobody reads. Those are
+// incompatible claims about the same field's contract, not a documented
+// nuance). It moves to `CustomFormatDef`'s metadata side, below — the
+// resolved `CustomFormatRules` payload (this struct, embedded in
+// `FormatConfig.custom_rules`, is what actually travels over the wire and
+// gets enforced) now contains ONLY genuinely behavior-bearing fields.
 LegalityRules {
     legal_sets: Option<Vec<SetCode>>,   // None = unrestricted; Some(list) = pool membership
-    reprint_policy: ReprintPolicy,
     banned: Vec<CardName>,              // fully illegal
     restricted: Vec<CardName>,          // legal, max 1 (CR 100.2b path)
     legacy: LegacyRuleSet,
@@ -405,24 +415,29 @@ LegalityRules {
 // every other breaking wire change — not a new, custom-format-specific
 // negotiation layer.
 
-// REVISED per maintainer review round 5 (§3/§7 have the full reasoning):
-// this enum is documentation metadata, NOT consumed by `evaluate_custom_format`
-// at all. Its intended behavior is already fully absorbed by `legal_sets`
-// curation (a reprint outside `legal_sets` is already excluded by plain
-// set-membership); the one thing it can't capture — frame/art-level
-// fidelity — is Open item 2's gap, not this enum's job to close. Kept as a
-// typed enum (not deleted) purely so a preset's authored intent is
-// machine-readable for whoever eventually builds Open item 2, not because
-// anything reads it today.
-ReprintPolicy {
-    OriginalPrintingsOnly,              // 93-94 / Classic intent (see limitation)
-    AllowSpecialReprintSets,            // CE/ICE/world-champ/proof set codes included in legal_sets
-    AllowAnyPrinting,                   // Middle School "begrudgingly"
-}
+// `ReprintPolicy` — round 5 resolved this to "documentation metadata, not
+// consumed by the evaluator" but round 6 correctly caught that leaving the
+// FIELD inside `LegalityRules` while saying so in a comment is an
+// unresolved contradiction: the struct's own shape says "this is part of
+// the resolved, engine-consumed ruleset," and the prose says the opposite.
+// Round 6 picks the first of matthewevans's two offered resolutions
+// (rather than the alternative — building real engine-owned printing
+// enforcement and gating registration on it): the field MOVES to
+// `CustomFormatDef` (display/authoring metadata), fully OUT of
+// `CustomFormatRules`/`LegalityRules` (the resolved, wire-traveling,
+// engine-consumed payload). See the `CustomFormatDef` struct later in this
+// section for where it lives now. Its behavior is still fully absorbed by
+// `legal_sets` curation (a reprint outside `legal_sets` is already excluded
+// by plain set-membership) — the one thing it can't capture, frame/art-level
+// fidelity, is Open item 2's gap, not this enum's job to close. Kept as a
+// typed enum (not deleted, not a bool) purely so a preset's authored intent
+// stays machine-readable for whoever eventually builds Open item 2.
 
 // NOT YET DESIGNED — flagged, not resolved, per CONTEXT.md open item #2.
-// `ReprintPolicy` above gates LEGALITY (which printings are legal to play).
-// A user follow-up asks for a sibling, independent axis: DISPLAY DEFAULT
+// `ReprintPolicy` (now on `CustomFormatDef`, not `LegalityRules`) documents
+// a preset's REPRINT INTENT for a human reading it; it does not gate
+// legality — legal-set membership alone does that (§3). A user follow-up
+// asks for a sibling, independent axis: DISPLAY DEFAULT
 // (which specific legal printing's frame/art renders by default when a card
 // is added to a deck under this format) — e.g. an old-rules format should
 // default old-frame Alpha/Beta art over a modern reprint's, without forcing
@@ -590,8 +605,38 @@ and the same `GameFormat::Custom(CustomFormatId)` variant — there is exactly
 one runtime representation of "a custom format," authored two different ways.
 See §7 for where each one is surfaced to a player.
 
-(`CustomFormatDef` = display metadata + `CustomFormatRules`; the registry hands
-the frontend labels/short-labels/descriptions just like `FormatMetadata`.)
+**`CustomFormatDef` — given an actual struct sketch this round (round 6);
+previously only described in prose as "display metadata + CustomFormatRules,"
+which is exactly the ambiguity that let `reprint_policy` end up in the wrong
+place):**
+
+```text
+CustomFormatDef {
+    rules: CustomFormatRules,           // the resolved, engine-consumed, wire-traveling payload
+                                        // (§1 above) — genuinely behavior-bearing fields ONLY
+    label: String,                      // "Swedish Old School 93/94", parallel to FormatMetadata
+    short_label: String,
+    description: String,
+    reprint_policy: ReprintPolicy,      // MOVED HERE per round 6 — authoring
+                                        // intent/documentation for a human,
+                                        // never read by evaluate_custom_format
+                                        // or anything else engine-side. Lives
+                                        // beside label/description because
+                                        // it belongs to the same "describes
+                                        // the preset for a reader" category
+                                        // as they do, not beside legal_sets/
+                                        // banned/restricted/legacy, which
+                                        // ARE all genuinely enforced.
+}
+```
+
+The registry (`custom_format_registry() -> Vec<CustomFormatDef>`) hands the
+frontend labels/short-labels/descriptions just like `FormatMetadata` already
+does for built-in formats — unchanged from the original design. What changed
+is only where `reprint_policy` sits: previously a field on `LegalityRules`
+(implying it travels with and is enforced by the resolved ruleset); now a
+field on `CustomFormatDef` alongside the other purely-descriptive fields,
+never serialized into `FormatConfig.custom_rules` at all.
 
 ## 2. Parameterizing the formats as data (not N blocks)
 
@@ -631,27 +676,31 @@ now explicitly sequenced after phase 1 (§8) since they need the
 The four formats form an incremental chain. Express it with builder-style reuse,
 mirroring how `FormatConfig::pioneer()` spreads `..Self::standard()`:
 
-- `old_school_93_94()` — base: sets = [LEA, LEB, 2ED, CED, CEI, ARN, ATQ, 3ED,
-  LEG, DRK, FEM]; restricted = [22 names]; banned = [7 names]; legacy =
+- `old_school_93_94()` — `rules`: sets = [LEA, LEB, 2ED, CED, CEI, ARN, ATQ,
+  3ED, LEG, DRK, FEM]; restricted = [22 names]; banned = [7 names]; legacy =
   `{ mana_burn: ManaBurnPolicy::Obsolete, ..default }` (damage timing and
   Wish scope stay `Modern`/`PostM10SideboardOnly` — EC's 93-94 lists mana
-  burn as its only legacy exception).
+  burn as its only legacy exception). `reprint_policy` (on `CustomFormatDef`):
+  `AllowSpecialReprintSets` — RESEARCH.md's §1 subsection for this format
+  explicitly includes CE/ICE as legal reprint sources within `legal_sets`.
 - `old_school_95()` — `let mut d = old_school_93_94(); d.legal_sets.extend([4ED,
   ICE, CHR, REN, HML]); d.restricted.extend([Demonic Consultation, Mana Crypt]);
   d.banned.extend([Amulet of Quoz, Timmerian Fiends]; legacy unchanged`.
-- `middle_school()` — sets = Fourth Edition..Scourge; restricted = []; banned =
-  [25 names]; reprint = AllowAnyPrinting; legacy = `{ mana_burn:
-  ManaBurnPolicy::Obsolete, damage_timing: CombatDamageTiming::OnStack,
-  wish_scope: WishOutsideGameScope::PreM10ReachesExile }`. **Per the
+- `middle_school()` — `rules`: sets = Fourth Edition..Scourge; restricted =
+  []; banned = [25 names]; legacy = `{ mana_burn: ManaBurnPolicy::Obsolete,
+  damage_timing: CombatDamageTiming::OnStack, wish_scope:
+  WishOutsideGameScope::PreM10ReachesExile }`. `reprint_policy` (on the
+  `CustomFormatDef`, not `rules` — round 6): `AllowAnyPrinting`. **Per the
   preset-readiness gate (§7, tightened this round): this preset may not be
   registered until `CombatDamageTiming::OnStack` (§4/§6, LARGE) is fully
   implemented — no partial/caveated exposure.**
-- `classic_magic()` — sets = Alpha..Scourge; restricted = [**44** names —
-  corrected this round from a "37" mislabel; recounted directly against
-  RESEARCH.md's verbatim list]; banned = [11 names]; reprint =
-  OriginalPrintingsOnly; legacy = `{ mana_burn: ManaBurnPolicy::Obsolete,
-  damage_timing: CombatDamageTiming::OnStack, wish_scope:
-  WishOutsideGameScope::PreM10ReachesExile }`. **Same registration block as
+- `classic_magic()` — `rules`: sets = Alpha..Scourge; restricted = [**44**
+  names — corrected this round from a "37" mislabel; recounted directly
+  against RESEARCH.md's verbatim list]; banned = [11 names]; legacy =
+  `{ mana_burn: ManaBurnPolicy::Obsolete, damage_timing:
+  CombatDamageTiming::OnStack, wish_scope:
+  WishOutsideGameScope::PreM10ReachesExile }`. `reprint_policy` (on the
+  `CustomFormatDef`): `OriginalPrintingsOnly`. **Same registration block as
   Middle School** — not selectable until `CombatDamageTiming::OnStack` lands.
 
 Set codes must be verified against the engine's `set_catalog` (MTGJSON codes)
@@ -709,32 +758,41 @@ Option<GameFormat>` (§1's audit) cannot supply `deck_size`/`singleton` any
 more than it could supply `legal_sets`/`banned`/`restricted` — the same
 signature-widening fix from §1 covers this too, not a separate mechanism.
 
-**`ReprintPolicy` is deliberately NON-behavior-bearing metadata, not a
-registration-blocking gap (RESOLVED — maintainer review round 5; supersedes
-rounds 3/4's framing of this as an unenforced gate).** Round 5 correctly
-caught that the round-4 registry gate (`IMPLEMENTED_LEGACY_AXES`, §7) covers
-only `LegacyRuleSet`'s four axes and was never extended to `ReprintPolicy` —
-a preset could still register while declaring a policy this algorithm
-doesn't enforce. Rather than broadening the gate to a field that was never
-designed to be independently enforceable, this document's OWN original
-research already answered this (RESEARCH.md §3, written before any of the
-four review rounds): "model reprint policy as *which set codes are in the
-legal list*, and flag frame/art-level fidelity as a known limitation."
-That is: `ReprintPolicy`'s actual behavior is already fully absorbed into
-`legal_sets` curation (a modern reprint of an old card lives in a set code
-simply not present in `legal_sets`, so it's excluded by step 2 alone,
-requiring no separate enforcement) — the ONLY thing `ReprintPolicy` cannot
-capture is the finer frame/art-level distinction (e.g. "old-bordered
-original only" vs. "any printing from a legal set"), which is the SAME gap
-Open item 2 already tracks. Accordingly: `reprint_policy` is documentation
-metadata for a human auditing a preset's intent, deliberately not consumed
-by `evaluate_custom_format`, and NOT part of the preset-readiness gate's
-enforcement surface — the gate only needs to cover fields that are actually
-behavior-bearing, which `LegacyRuleSet`'s four axes are and
-`reprint_policy` is not. `swedish_old_school()` is still gated on CONTEXT.md
-Open item 6 (getting the metadata VALUE right, since an inaccurate label
-could mislead a future maintainer who builds real enforcement later), but
-that is a documentation-accuracy blocker, not a missing-enforcement one.
+**`ReprintPolicy` is metadata on `CustomFormatDef`, not a field on
+`CustomFormatRules`/`LegalityRules` at all (RESOLVED — maintainer review
+round 6; supersedes round 5's "leave it in place, document it as inert"
+attempt, which round 6 correctly rejected as an internal contradiction — a
+field can't structurally sit inside the resolved, engine-consumed ruleset
+while a comment insists nothing consumes it).**
+
+History: round 4's registry gate (`IMPLEMENTED_LEGACY_AXES`, §7) covered only
+`LegacyRuleSet`'s four axes and was never extended to `ReprintPolicy`; round
+5 tried to resolve this by declaring `reprint_policy` non-behavior-bearing
+via a comment while leaving the field inside `LegalityRules` — round 6
+correctly caught that this is two incompatible claims about the same field
+(its position says "resolved ruleset," its comment says "never read"). The
+actual fix is structural, not documentary: `reprint_policy` MOVED to
+`CustomFormatDef` (§1's struct sketch) — the display/authoring-metadata side
+that already exists for `label`/`short_label`/`description` — fully out of
+`CustomFormatRules`, which now contains only genuinely behavior-bearing
+fields. This is one of the two resolutions matthewevans offered (move it to
+metadata outside `CustomFormatRules`/`LegalityRules`) rather than the other
+(build real engine-owned printing enforcement and gate registration on it).
+
+This document's OWN original research already explains why the metadata-only
+answer is correct, not just convenient (RESEARCH.md §3, written before any
+review round): "model reprint policy as *which set codes are in the legal
+list*, and flag frame/art-level fidelity as a known limitation." That is:
+`ReprintPolicy`'s actual behavior is already fully absorbed into `legal_sets`
+curation (a modern reprint of an old card lives in a set code simply not
+present in `legal_sets`, so it's excluded by step 2 alone) — the ONLY thing
+it can't capture is the finer frame/art-level distinction, which is Open
+item 2's gap, not this field's job. `swedish_old_school()` is still gated on
+CONTEXT.md Open item 6 (getting the metadata VALUE right, since an
+inaccurate label could mislead a future maintainer), but that's now cleanly
+a documentation-accuracy blocker on a metadata field — not a
+missing-enforcement gap on a rules field, which is exactly the contradiction
+round 6 caught.
 
 `legality_format()` returns `None` for `Custom` (no `LegalityFormat` mapping —
 custom formats don't use the external legality table). `label`, `for_format`,
@@ -888,6 +946,16 @@ legality logic on the client.
 
 ## 6. Testing (building-block level, per CLAUDE.md)
 
+- **`reprint_policy` has no effect on evaluation** (new — maintainer review
+  round 6): two synthetic `CustomFormatDef` values with identical `rules`
+  (`CustomFormatRules`) but different `reprint_policy` metadata must produce
+  IDENTICAL `evaluate_custom_format` results — proving the field is truly
+  inert for legality purposes, not just absent from the struct by
+  convention. Since `reprint_policy` isn't a field on `CustomFormatRules` at
+  all after the round-6 move, this is also implicitly a compile-time
+  guarantee (`evaluate_custom_format` takes `&CustomFormatRules`, which has
+  no such field to accidentally read) — the runtime test exists to catch a
+  future regression that reintroduces the field in the wrong place.
 - Set-membership legality: assert cards from in-pool and out-of-pool sets pass /
   fail — for arbitrary set lists, not just the four presets.
 - **`legal_sets: None` accepts every card** (new — maintainer review round 2,
@@ -1063,19 +1131,25 @@ failure, not a silently-ignored doc-comment warning. This is the concrete
 mechanism §6's "actually enforced, not just documented" test targets.
 
 **Gate scope, precisely (maintainer review round 5 caught that this wasn't
-stated precisely enough): `IMPLEMENTED_LEGACY_AXES` covers exactly
-`LegacyRuleSet`'s four axes — `mana_burn`, `damage_timing`, `wish_scope`,
-`legend_rule_scope` — because those are the only fields on
-`CustomFormatRules` today that are BOTH independently declarable AND
-intended to be behavior-bearing.** It does NOT cover `reprint_policy` (§3
-resolves why: deliberately non-behavior-bearing metadata, not an
-unenforced axis) and there is no ante-card field to cover yet (CONTEXT.md
-Open item 5 — no schema slot exists). If a future field is ever added with
-real behavior attached (an enforced `ReprintPolicy`, an ante-list), it must
-be added to this gate in the SAME change that adds the field — the gate's
-job is to cover every behavior-bearing field that exists, and it is a
-review-time checklist item whenever `CustomFormatRules`/`LegacyRuleSet`
-gains a member, not a one-time list to write and forget.
+stated precisely enough; round 6's `reprint_policy` relocation, §1/§3, makes
+it precise by construction rather than by exemption): `IMPLEMENTED_LEGACY_AXES`
+covers exactly `LegacyRuleSet`'s four axes — `mana_burn`, `damage_timing`,
+`wish_scope`, `legend_rule_scope` — because those are now the ONLY fields on
+`CustomFormatRules` that are independently declarable AND behavior-bearing.**
+`reprint_policy` doesn't need an exemption from this gate anymore — it isn't
+on `CustomFormatRules` at all after round 6's move to `CustomFormatDef`, so
+there's nothing there for the gate to either cover or exempt. There is no
+ante-card field to cover yet either (CONTEXT.md Open item 5 — no schema slot
+exists). If a future field is ever added to `CustomFormatRules` with real
+behavior attached (an ante-list, say), it must be added to this gate in the
+SAME change — the gate's job is to cover every behavior-bearing field on the
+RESOLVED RULES struct, and it is a review-time checklist item whenever
+`CustomFormatRules`/`LegacyRuleSet` gains a member, not a one-time list to
+write and forget. A field that's purely descriptive (like `reprint_policy`
+now) belongs on `CustomFormatDef` instead, outside this gate's scope by
+construction — round 6's actual lesson: when a field doesn't cleanly belong
+in the gate's coverage, that's a signal it may be in the wrong struct, not
+just missing from the gate.
 - `swedish_old_school()` (phase 1) is BLOCKED from registration by
   CONTEXT.md Open item 6 alone — the reprint-policy metadata VALUE needs
   confirming against the primary source before shipping, so a future
@@ -1101,11 +1175,12 @@ excludes all `LegacyRuleSet` engine wiring; ships something real and testable
 first.
 
 1. **General engine** — `CustomFormatId`, `CustomFormatRules` (with
-   `StructuralRules` + `LegalityRules` sub-structs, §1), `ReprintPolicy`,
-   `LegacyRuleSet` (present in the schema, unused by anything phase 1 ships),
-   `GameFormat::Custom` variant + all match arms, `FormatConfig.custom_rules`,
-   `evaluate_custom_format` reusing existing enforcers, registry export.
-   (Compiler-guided, mirrors phase 53.)
+   `StructuralRules` + `LegalityRules` sub-structs, §1) plus `LegacyRuleSet`
+   (present in the schema, unused by anything phase 1 ships),
+   `CustomFormatDef` (with `ReprintPolicy` as its metadata field, §1 —
+   NOT part of `CustomFormatRules`), `GameFormat::Custom` variant + all
+   match arms, `FormatConfig.custom_rules`, `evaluate_custom_format` reusing
+   existing enforcers, registry export. (Compiler-guided, mirrors phase 53.)
 2. **Axis A lobby save** — `CustomFormatDef::from_lobby_config`, a "save as
    custom format" action on `HostSetup.tsx`, and a load path so a saved
    `CustomFormatDef` appears as a selectable format on return visits. Small
