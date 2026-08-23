@@ -628,7 +628,7 @@ function OpponentTab({
   // Hoisted above the early return (rules-of-hooks).
   const designations = usePlayerDesignations(playerId);
 
-  // Player-attached Auras (Curses, Faith's Fetters, Dictate of Kruphix…).
+  // Player-attached Auras (Curses, Paradox Haze — anything with `Enchant player`).
   // Surfaced as a corner badge so it stays visible in both density modes and
   // never competes with the inline `statusCluster` for width on 3-4 player
   // rails. Hover → portaled `AurasHoverPreview`

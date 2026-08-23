@@ -1029,9 +1029,10 @@ export interface GameObject {
   damage_marked: number;
   dealt_deathtouch_damage: boolean;
   /** Mirrors engine `Option<AttachTarget>`: null when unattached, otherwise
-   *  a tagged-union pointing at either an Object host (Equipment/most Auras)
-   *  or a Player host (Curse cycle, Faith's Fetters-class). FE consumers must
-   *  inspect `.type` before reading `.data`; do not treat as a bare ObjectId. */
+   *  a tagged-union pointing at either an Object host (Equipment, Faith's
+   *  Fetters, most Auras) or a Player host (Curse cycle, Paradox Haze — the
+   *  `Enchant player` class). FE consumers must inspect `.type` before
+   *  reading `.data`; do not treat as a bare ObjectId. */
   attached_to: AttachTarget | null;
   attachments: ObjectId[];
   paired_with?: ObjectId | null;

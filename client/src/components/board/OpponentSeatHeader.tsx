@@ -159,8 +159,8 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
               tooltips fire — except while targeting, where the target button
               must win. Mirrors the avatar's pointer-events gating above. */}
           <div className={`flex min-w-0 max-w-[9rem] shrink items-center justify-end gap-0.5 overflow-hidden ${badgeScale} [&>*]:origin-right ${isValidPlayerTarget ? "pointer-events-none" : "pointer-events-auto"}`}>
-            {/* Player-attached Auras (Curse cycle, Faith's Fetters, Dictate of
-                Kruphix…). Reads the engine's `auras_attached_to_player`
+            {/* Player-attached Auras (Curse cycle, Paradox Haze — anything
+                with `Enchant player`). Reads the engine's `auras_attached_to_player`
                 projection; brings the split seat header to parity with the
                 legacy 1v1/tab HUDs, which already surface curses. */}
             <EnchantmentsBadge playerId={playerId} />
