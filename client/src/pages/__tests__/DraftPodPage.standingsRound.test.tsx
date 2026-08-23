@@ -9,6 +9,7 @@ const { draftState } = vi.hoisted(() => ({
   draftState: {
     phase: "matchInProgress",
     sideboardPrompt: null,
+    playDrawPrompt: null,
     currentRound: 2,
     nextPairingRound: 3,
     // `game_wins`/`game_losses` are not decoration: `formatGwp` sums them, and

@@ -10,6 +10,7 @@ const { draftState } = vi.hoisted(() => ({
   draftState: {
     phase: "pairing",
     sideboardPrompt: null,
+    playDrawPrompt: null,
     error: null as string | null,
     clearError: vi.fn(),
     currentRound: 2,

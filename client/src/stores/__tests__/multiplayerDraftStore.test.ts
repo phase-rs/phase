@@ -773,9 +773,14 @@ describe("multiplayerDraftStore", () => {
       expect(useMultiplayerDraftStore.getState().sideboardPrompt).not.toBeNull();
       expect(draftPodScreen(useMultiplayerDraftStore.getState())).toBe("betweenGames");
 
-      // REVERT-FAILING (at the rule assertion): restore `"betweenGames"` to
-      // `MultiplayerDraftPhase` and write it at the host enter site, and each of
-      // the three writes below destroys the overlay again.
+      // The rule these rows pin — "a status write cannot clobber the overlay" —
+      // is enforced by `tsc`, not by a runtime line, so restoring the BASE
+      // clobber leaves S1 and S2 GREEN: the assertion is on the SCREEN, which
+      // `draftPodScreen` re-derives from the still-live `sideboardPrompt`
+      // regardless of what the clobber did to `phase`. (Measured.)
+      // REVERT-FAILING, unique to S1+S2: add `sideboardPrompt: null` to both
+      // `bo3ChoosePlayDraw` arms — that breaks the nesting invariant asserted
+      // just above, which is what licenses keying the screen on one field.
       capturedHostEventHandler!({ type: "viewUpdated", view: mockView("MatchInProgress") });
       expect(useMultiplayerDraftStore.getState().phase).toBe("matchInProgress");
       expect(draftPodScreen(useMultiplayerDraftStore.getState())).toBe("betweenGames");
@@ -791,6 +796,8 @@ describe("multiplayerDraftStore", () => {
 
     // S2 — the same statement on the guest handler, which is a physically
     // separate switch a per-site guard would have had to be remembered in twice.
+    // Shares S1's killer (see the annotation there); the guest `bo3ChoosePlayDraw`
+    // arm is the half of it this row covers.
     it("holds the overlay across every guest status write", async () => {
       await enterOverlay("guest");
 
