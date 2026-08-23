@@ -373,7 +373,11 @@
     "sideboardGame": "Sideboard — Partita {{number}}",
     "sideboardHint": "Apporta modifiche alla sideboard, poi invia. Il tuo pool è disponibile qui sotto.",
     "submitSideboard": "Invia sideboard",
-    "preparingNext": "Preparazione della prossima partita..."
+    "preparingNext": "Preparazione della prossima partita...",
+    "hideOverlay": "Nascondi questa schermata",
+    "showOverlay": "Mostra questa schermata",
+    "hiddenNotice": "La sideboard è ancora aperta per questa partita.",
+    "hiddenNoticePlayDraw": "La scelta se giocare o pescare è ancora in sospeso per questa partita."
   },
   "podComplete": {
     "title": "Draft completato",

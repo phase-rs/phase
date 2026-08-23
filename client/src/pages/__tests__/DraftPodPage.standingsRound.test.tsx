@@ -8,6 +8,7 @@ import { DraftPodPage } from "../DraftPodPage";
 const { draftState } = vi.hoisted(() => ({
   draftState: {
     phase: "matchInProgress",
+    sideboardPrompt: null,
     currentRound: 2,
     nextPairingRound: 3,
     // `game_wins`/`game_losses` are not decoration: `formatGwp` sums them, and
@@ -31,7 +32,8 @@ const { draftState } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("../../stores/multiplayerDraftStore", () => ({
+vi.mock("../../stores/multiplayerDraftStore", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../stores/multiplayerDraftStore")>()),
   useMultiplayerDraftStore: (selector: (state: typeof draftState) => unknown) => selector(draftState),
 }));
 

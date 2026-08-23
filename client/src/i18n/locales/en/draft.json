@@ -373,7 +373,11 @@
     "sideboardGame": "Sideboard — Game {{number}}",
     "sideboardHint": "Make sideboard changes, then submit. Your pool is available below.",
     "submitSideboard": "Submit Sideboard",
-    "preparingNext": "Preparing next game..."
+    "preparingNext": "Preparing next game...",
+    "hideOverlay": "Hide this screen",
+    "showOverlay": "Show this screen",
+    "hiddenNotice": "Sideboarding is still open for this game.",
+    "hiddenNoticePlayDraw": "A play or draw choice is still open for this game."
   },
   "podComplete": {
     "title": "Draft Complete",

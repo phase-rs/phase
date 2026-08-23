@@ -373,7 +373,11 @@
     "sideboardGame": "Sideboard — Spiel {{number}}",
     "sideboardHint": "Nimm Sideboard-Änderungen vor und reiche dann ein. Dein Pool ist unten verfügbar.",
     "submitSideboard": "Sideboard einreichen",
-    "preparingNext": "Nächstes Spiel wird vorbereitet..."
+    "preparingNext": "Nächstes Spiel wird vorbereitet...",
+    "hideOverlay": "Diesen Bildschirm ausblenden",
+    "showOverlay": "Diesen Bildschirm anzeigen",
+    "hiddenNotice": "Das Sideboarding ist für dieses Spiel weiterhin offen.",
+    "hiddenNoticePlayDraw": "Für dieses Spiel steht die Wahl zwischen Spielen und Ziehen noch aus."
   },
   "podComplete": {
     "title": "Draft abgeschlossen",

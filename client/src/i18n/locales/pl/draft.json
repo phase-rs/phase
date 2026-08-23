@@ -373,7 +373,11 @@
     "sideboardGame": "Karty boczne — Gra {{number}}",
     "sideboardHint": "Wprowadź zmiany w kartach bocznych, a potem zatwierdź. Twoja pula jest dostępna poniżej.",
     "submitSideboard": "Zatwierdź karty boczne",
-    "preparingNext": "Przygotowywanie następnej gry..."
+    "preparingNext": "Przygotowywanie następnej gry...",
+    "hideOverlay": "Ukryj ten ekran",
+    "showOverlay": "Pokaż ten ekran",
+    "hiddenNotice": "Wymiana kart bocznych jest wciąż otwarta w tej grze.",
+    "hiddenNoticePlayDraw": "W tej grze wciąż trzeba wybrać: zagrywasz czy dobierasz."
   },
   "podComplete": {
     "title": "Draft zakończony",

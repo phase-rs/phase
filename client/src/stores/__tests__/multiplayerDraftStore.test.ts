@@ -7,7 +7,11 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useMultiplayerDraftStore } from "../multiplayerDraftStore";
+import {
+  draftPodScreen,
+  useMultiplayerDraftStore,
+  type DraftPodScreen,
+} from "../multiplayerDraftStore";
 import type { DraftPlayerView } from "../../adapter/draft-adapter";
 import { DraftPauseReason } from "../../network/draftProtocol";
 
@@ -694,6 +698,302 @@ describe("multiplayerDraftStore", () => {
       expect(state.role).toBeNull();
       expect(state.phase).toBe("idle");
       expect(state.roomCode).toBeNull();
+    });
+  });
+
+  // ── Bo3 intergame overlay lifetime ───────────────────────────────────
+  //
+  // The overlay is no longer a `MultiplayerDraftPhase` member. `draftPodScreen`
+  // derives it from two live store fields, so a status writer cannot clobber it
+  // (conjunct 1 stays true) and a prompt clear releases it (conjunct 2).
+  //
+  // Production precondition, reproduced by every fixture below: the phase is
+  // ALREADY `matchInProgress` when a prompt arrives — the host writes it in
+  // `startMatch` before the match adapter that emits the prompt exists, and the
+  // guest writes it on `matchStart`. That is why the three enter sites write no
+  // `phase` at all.
+  describe("intergame overlay lifetime", () => {
+    const SIDEBOARD_PROMPT = {
+      type: "bo3SideboardPrompt",
+      matchId: "bo3-1",
+      gameNumber: 2,
+      score: { p0_wins: 1, p1_wins: 0, draws: 0 },
+      loserSeat: 1,
+      timerMs: 60_000,
+    };
+
+    async function hostInMatch(): Promise<void> {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        kind: "Traditional",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      capturedHostEventHandler!({ type: "statusChanged", status: "matchInProgress" });
+    }
+
+    async function guestInMatch(): Promise<void> {
+      await useMultiplayerDraftStore.getState().joinDraft({
+        roomCode: "ABCDE",
+        displayName: "Alice",
+      });
+      capturedGuestEventHandler!({ type: "statusChanged", status: "matchInProgress" });
+    }
+
+    async function enterOverlay(role: "host" | "guest"): Promise<void> {
+      if (role === "host") {
+        await hostInMatch();
+        capturedHostEventHandler!(SIDEBOARD_PROMPT);
+      } else {
+        await guestInMatch();
+        capturedGuestEventHandler!(SIDEBOARD_PROMPT);
+      }
+    }
+
+    // S1 — the five status writers cannot clobber the overlay (host arms).
+    it("holds the overlay across every host status write", async () => {
+      await enterOverlay("host");
+
+      // Reach-guard: the fixture really is in the intergame window.
+      expect(useMultiplayerDraftStore.getState().sideboardPrompt).not.toBeNull();
+      expect(draftPodScreen(useMultiplayerDraftStore.getState())).toBe("betweenGames");
+
+      // The nesting that licenses keying the screen on `sideboardPrompt` alone:
+      // `bo3ChoosePlayDraw` sets `playDrawPrompt` and leaves `sideboardPrompt`
+      // set, so a `playDrawPrompt` disjunct would be unreachable.
+      capturedHostEventHandler!({
+        type: "bo3ChoosePlayDraw",
+        matchId: "bo3-1",
+        gameNumber: 2,
+        score: { p0_wins: 1, p1_wins: 0, draws: 0 },
+        timerMs: 10_000,
+      });
+      expect(useMultiplayerDraftStore.getState().sideboardPrompt).not.toBeNull();
+      expect(draftPodScreen(useMultiplayerDraftStore.getState())).toBe("betweenGames");
+
+      // REVERT-FAILING (at the rule assertion): restore `"betweenGames"` to
+      // `MultiplayerDraftPhase` and write it at the host enter site, and each of
+      // the three writes below destroys the overlay again.
+      capturedHostEventHandler!({ type: "viewUpdated", view: mockView("MatchInProgress") });
+      expect(useMultiplayerDraftStore.getState().phase).toBe("matchInProgress");
+      expect(draftPodScreen(useMultiplayerDraftStore.getState())).toBe("betweenGames");
+
+      capturedHostEventHandler!({ type: "statusChanged", status: "matchInProgress" });
+      expect(useMultiplayerDraftStore.getState().phase).toBe("matchInProgress");
+      expect(draftPodScreen(useMultiplayerDraftStore.getState())).toBe("betweenGames");
+
+      capturedHostEventHandler!({ type: "draftStarted", view: mockView("MatchInProgress") });
+      expect(useMultiplayerDraftStore.getState().phase).toBe("matchInProgress");
+      expect(draftPodScreen(useMultiplayerDraftStore.getState())).toBe("betweenGames");
+    });
+
+    // S2 — the same statement on the guest handler, which is a physically
+    // separate switch a per-site guard would have had to be remembered in twice.
+    it("holds the overlay across every guest status write", async () => {
+      await enterOverlay("guest");
+
+      expect(useMultiplayerDraftStore.getState().sideboardPrompt).not.toBeNull();
+      expect(draftPodScreen(useMultiplayerDraftStore.getState())).toBe("betweenGames");
+
+      capturedGuestEventHandler!({
+        type: "bo3ChoosePlayDraw",
+        matchId: "bo3-1",
+        gameNumber: 2,
+        score: { p0_wins: 1, p1_wins: 0, draws: 0 },
+        timerMs: 10_000,
+      });
+      expect(useMultiplayerDraftStore.getState().sideboardPrompt).not.toBeNull();
+      expect(draftPodScreen(useMultiplayerDraftStore.getState())).toBe("betweenGames");
+
+      capturedGuestEventHandler!({ type: "viewUpdated", view: mockView("MatchInProgress") });
+      expect(useMultiplayerDraftStore.getState().phase).toBe("matchInProgress");
+      expect(draftPodScreen(useMultiplayerDraftStore.getState())).toBe("betweenGames");
+
+      capturedGuestEventHandler!({ type: "statusChanged", status: "matchInProgress" });
+      expect(useMultiplayerDraftStore.getState().phase).toBe("matchInProgress");
+      expect(draftPodScreen(useMultiplayerDraftStore.getState())).toBe("betweenGames");
+    });
+
+    // S3 — the multi-authority hostile fixture: a live prompt (authority 2 says
+    // "overlay") against a session that has moved on (authority 1 says
+    // "tournament over" / "kicked" / "host left" / "abandoned"). Conjunct 1 wins,
+    // and the prompt is asserted STILL set so the release is attributable to it.
+    it.each<[string, "host" | "guest", () => void, DraftPodScreen]>([
+      [
+        "host viewUpdated(Complete)",
+        "host",
+        () => capturedHostEventHandler!({ type: "viewUpdated", view: mockView("Complete") }),
+        "complete",
+      ],
+      [
+        "host viewUpdated(Abandoned)",
+        "host",
+        () => capturedHostEventHandler!({ type: "viewUpdated", view: mockView("Abandoned") }),
+        "error",
+      ],
+      [
+        "guest kicked",
+        "guest",
+        () => capturedGuestEventHandler!({ type: "kicked", reason: "AFK" }),
+        "kicked",
+      ],
+      [
+        "guest hostLeft",
+        "guest",
+        () => capturedGuestEventHandler!({ type: "hostLeft", reason: "Host left the draft" }),
+        "hostLeft",
+      ],
+    ])("releases the overlay when the pod session moves on: %s", async (_name, role, deliver, expected) => {
+      await enterOverlay(role);
+      expect(draftPodScreen(useMultiplayerDraftStore.getState())).toBe("betweenGames");
+
+      deliver();
+
+      const state = useMultiplayerDraftStore.getState();
+      // REVERT-FAILING: delete `state.phase === "matchInProgress" &&` from
+      // `draftPodScreen` and this row answers `"betweenGames"` instead.
+      expect(state.sideboardPrompt).not.toBeNull();
+      expect(draftPodScreen(state)).toBe(expected);
+    });
+
+    // S4 — conjunct 2: the next Bo3 game releases the overlay, and does so
+    // WITHOUT a phase move (asserted), so the release is the prompt clear.
+    it.each<[string, "host" | "guest", () => void]>([
+      [
+        "host bo3GameStarted",
+        "host",
+        () => capturedHostEventHandler!({ type: "bo3GameStarted", matchId: "bo3-1", gameNumber: 2 }),
+      ],
+      [
+        "host bo3GameStart",
+        "host",
+        () =>
+          capturedHostEventHandler!({
+            type: "bo3GameStart",
+            matchId: "bo3-1",
+            gameNumber: 2,
+            firstPlayerSeat: 0,
+          }),
+      ],
+      [
+        "guest bo3GameStart",
+        "guest",
+        () =>
+          capturedGuestEventHandler!({
+            type: "bo3GameStart",
+            matchId: "bo3-1",
+            gameNumber: 2,
+            firstPlayerSeat: 0,
+          }),
+      ],
+    ])("releases the overlay when the next Bo3 game starts: %s", async (_name, role, deliver) => {
+      await enterOverlay(role);
+      expect(draftPodScreen(useMultiplayerDraftStore.getState())).toBe("betweenGames");
+
+      deliver();
+
+      const state = useMultiplayerDraftStore.getState();
+      // REVERT-FAILING: drop this arm's `sideboardPrompt: null` write and the
+      // screen stays `"betweenGames"` forever.
+      expect(state.sideboardPrompt).toBeNull();
+      expect(state.playDrawPrompt).toBeNull();
+      expect(state.phase).toBe("matchInProgress");
+      expect(draftPodScreen(state)).toBe("matchInProgress");
+    });
+
+    // S5 — the pre-existing `roundComplete` stranding is released for free.
+    // `disposeMatchAdapter` clears both prompts and writes no `phase`, so at BASE
+    // the overlay's phase survived its own data.
+    it("releases the overlay when roundComplete disposes the match adapter", async () => {
+      await enterOverlay("host");
+      useMultiplayerDraftStore.setState({ matchAdapter: { dispose() {} } });
+
+      // Reach-guard: `disposeMatchAdapter`'s clearing `set` is inside
+      // `if (state.matchAdapter)`, so without an adapter this row would measure
+      // the early return instead.
+      expect(useMultiplayerDraftStore.getState().matchAdapter).not.toBeNull();
+      expect(draftPodScreen(useMultiplayerDraftStore.getState())).toBe("betweenGames");
+
+      capturedHostEventHandler!({ type: "roundComplete" });
+
+      const state = useMultiplayerDraftStore.getState();
+      // REVERT-FAILING: drop `sideboardPrompt: null` from `disposeMatchAdapter`.
+      expect(state.sideboardPrompt).toBeNull();
+      expect(state.playDrawPrompt).toBeNull();
+      expect(state.phase).toBe("matchInProgress");
+      expect(draftPodScreen(state)).toBe("matchInProgress");
+    });
+
+    // S6 — error lifetime at the overlay ENTER. Entering is not a phase
+    // transition any more, so an unread error survives it; a real boundary still
+    // retires it.
+    it("keeps an unread error across the overlay enter and retires it at the real boundary", async () => {
+      await hostInMatch();
+      capturedHostEventHandler!({ type: "error", message: "boom" });
+
+      // Reach-guard: the error is live and the phase is settled BEFORE the enter.
+      expect(useMultiplayerDraftStore.getState().error).toBe("boom");
+      expect(useMultiplayerDraftStore.getState().phase).toBe("matchInProgress");
+
+      capturedHostEventHandler!(SIDEBOARD_PROMPT);
+
+      // (i) REVERT-FAILING: re-add `phase: "betweenGames"` at the host enter site
+      // and this clears — the enter was counted as a phase change at BASE.
+      expect(useMultiplayerDraftStore.getState().error).toBe("boom");
+      expect(draftPodScreen(useMultiplayerDraftStore.getState())).toBe("betweenGames");
+
+      // (ii) The paired positive: `clearErrorOnPhaseChange` still fires at a real
+      // phase boundary. Note `sideboardPrompt` is still set here, so this row also
+      // reddens if conjunct 1 is deleted from `draftPodScreen`.
+      capturedHostEventHandler!({ type: "viewUpdated", view: mockView("RoundComplete") });
+      expect(draftPodScreen(useMultiplayerDraftStore.getState())).toBe("roundComplete");
+      expect(useMultiplayerDraftStore.getState().error).toBeNull();
+    });
+
+    // S7 — accepted delta, pinned: the Bo3 game BOUNDARY no longer retires an
+    // unread error, because `bo3GameStarted` writes a phase equal to the current
+    // one. At BASE this was a `betweenGames → matchInProgress` transition.
+    it("keeps an unread error across the Bo3 game boundary", async () => {
+      await hostInMatch();
+      capturedHostEventHandler!({ type: "error", message: "boom" });
+      capturedHostEventHandler!(SIDEBOARD_PROMPT);
+
+      // Reach-guards.
+      expect(useMultiplayerDraftStore.getState().error).toBe("boom");
+      expect(draftPodScreen(useMultiplayerDraftStore.getState())).toBe("betweenGames");
+
+      capturedHostEventHandler!({ type: "bo3GameStarted", matchId: "bo3-1", gameNumber: 2 });
+
+      // PINNING: an equal-phase write must not retire an unread error. Drop the
+      // `next.phase === state.phase` disjunct in `clearErrorOnPhaseChange` and
+      // this goes red.
+      expect(useMultiplayerDraftStore.getState().error).toBe("boom");
+      expect(useMultiplayerDraftStore.getState().phase).toBe("matchInProgress");
+    });
+
+    // S8 — the same proposition at the entry point #7705's doc block names: a
+    // `viewUpdated` broadcast DURING the window (a seat dropping mid-window is
+    // enough). At BASE the broadcast flipped the phase off `betweenGames` and
+    // took the banner with it.
+    it("keeps an unread error across a status broadcast during the window", async () => {
+      await hostInMatch();
+      capturedHostEventHandler!(SIDEBOARD_PROMPT);
+      capturedHostEventHandler!({ type: "error", message: "boom" });
+
+      // Reach-guards.
+      expect(useMultiplayerDraftStore.getState().error).toBe("boom");
+      expect(draftPodScreen(useMultiplayerDraftStore.getState())).toBe("betweenGames");
+
+      capturedHostEventHandler!({ type: "viewUpdated", view: mockView("MatchInProgress") });
+
+      const state = useMultiplayerDraftStore.getState();
+      // PINNING, and the overlay is asserted intact so the row cannot pass by
+      // having destroyed it.
+      expect(state.error).toBe("boom");
+      expect(state.phase).toBe("matchInProgress");
+      expect(draftPodScreen(state)).toBe("betweenGames");
     });
   });
 });

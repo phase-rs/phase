@@ -9,6 +9,7 @@ import { DraftPodPage } from "../DraftPodPage";
 const { draftState } = vi.hoisted(() => ({
   draftState: {
     phase: "pairing",
+    sideboardPrompt: null,
     error: null as string | null,
     clearError: vi.fn(),
     currentRound: 2,
@@ -29,7 +30,8 @@ const { draftState } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("../../stores/multiplayerDraftStore", () => ({
+vi.mock("../../stores/multiplayerDraftStore", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../stores/multiplayerDraftStore")>()),
   useMultiplayerDraftStore: (selector: (state: typeof draftState) => unknown) => selector(draftState),
 }));
 
