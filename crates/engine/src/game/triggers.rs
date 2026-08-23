@@ -11001,21 +11001,23 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         // resolution-scoped leaf, so these compose with the existing quantity
         // classifier instead of being assumed constant.
         FilterProp::Counters { count, .. } => quantity_expr_binding_diverges(count),
-        FilterProp::Cmc { value, .. } | FilterProp::PtComparison { value, .. } => {
-            quantity_expr_binding_diverges(value)
+        FilterProp::Cmc { value, .. } => quantity_expr_binding_diverges(value),
+        // CR 208.1 + CR 613.4b: the operand can be resolution-scoped, and the
+        // `scope` picks current vs base P/T. Both sub-axes are adjudicated;
+        // `stat` and `comparator` are discarded deliberately — see the
+        // BINDING-FREE PAYLOADS note at the end of this match.
+        FilterProp::PtComparison { scope, value, .. } => {
+            pt_value_scope_binding_diverges(scope) || quantity_expr_binding_diverges(value)
         }
         // CR 202.3d: parity taken from the resolution-published
         // `state.last_named_choice` diverges; a printed parity does not.
-        FilterProp::ManaValueParity { parity } => {
-            matches!(parity, crate::types::ability::ParitySource::LastNamedChoice)
-        }
+        FilterProp::ManaValueParity { parity } => parity_source_binding_diverges(parity),
         // CR 115.1 + CR 400.7: the combat relation can be scoped to the parent
         // target (`ability.targets`, empty at fire time) or to the source, which
         // the `TriggerSourceContext` carries on both legs.
-        FilterProp::CombatRelation { subject, .. } => matches!(
-            subject,
-            crate::types::ability::CombatRelationSubject::ParentTarget
-        ),
+        FilterProp::CombatRelation { subject, .. } => {
+            combat_relation_subject_binding_diverges(subject)
+        }
 
         // ---- ABILITY-BOUND: reads the resolving ability. ----
         //
@@ -11146,6 +11148,29 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         | FilterProp::AttackedOrBlockedThisTurn
         // An unrecognized parser escape hatch matches nothing on either leg.
         | FilterProp::Other { .. } => false,
+
+        // ---- BINDING-FREE PAYLOADS: why some fields stay discarded. ----
+        //
+        // Several arms above take only part of their payload. The rule is that
+        // a sub-axis needs its own exhaustive classifier when it names a
+        // REFERENT — a player, an object scope, or a subject whose identity the
+        // fire-time context might not be able to bind. Those all have one:
+        // `ControllerRef`, `PlayerFilter`, `CountScope`, `ParitySource`,
+        // `CombatRelationSubject`, `PtValueScope`, `PlayerRelation`,
+        // `AttackSubject`, plus `TargetFilter` / `QuantityExpr` themselves.
+        //
+        // The fields still discarded through `..` name no referent and cannot
+        // acquire one without changing what the field MEANS, at which point the
+        // arm has to be revisited anyway:
+        //
+        //   * selectors over a characteristic — `PtStat`, `SharedQuality`,
+        //     `CounterMatch`, `AttachmentKind`, `DamageKindFilter`, `Zone`;
+        //   * polarity flags — `SharedQualityRelation`, `SourceExclusion`;
+        //   * comparison data — `Comparator` and the integer bounds beside it;
+        //   * time windows — `AttackScope`. A window is not a binding: BOTH
+        //     legs read the same window, and the fact that game state can move
+        //     between them is what CR 603.4's two checks are FOR, not a
+        //     divergence in the sense this module screens.
     }
 }
 
@@ -11200,15 +11225,38 @@ fn player_filter_binding_diverges(player: &PlayerFilter) -> bool {
         | PlayerFilter::OpponentOtherThanTriggering
         | PlayerFilter::OpponentOfTriggeringPlayer
         | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => true,
-        // CR 109.4: nested populations and value operands decide the rest.
-        PlayerFilter::ControlsCount { filter, count, .. } => {
-            filter_binding_diverges(filter) || quantity_expr_binding_diverges(count)
+        // CR 109.4: the player relation, the nested population and the value
+        // operands each decide the rest, one classifier per axis.
+        PlayerFilter::ControlsCount {
+            relation,
+            filter,
+            count,
+            ..
+        } => {
+            player_relation_binding_diverges(relation)
+                || filter_binding_diverges(filter)
+                || quantity_expr_binding_diverges(count)
         }
-        PlayerFilter::PlayerAttribute { attr, value, .. } => {
-            quantity_ref_binding_diverges(attr) || quantity_expr_binding_diverges(value)
+        PlayerFilter::PlayerAttribute {
+            relation,
+            attr,
+            value,
+            ..
+        } => {
+            player_relation_binding_diverges(relation)
+                || quantity_ref_binding_diverges(attr)
+                || quantity_expr_binding_diverges(value)
         }
-        PlayerFilter::OpponentDealtDamage { source, .. } => {
-            source.as_ref().is_some_and(|source| filter_binding_diverges(source))
+        // CR 120.1: the optional damage-source population is the only
+        // re-scopable part; `kind` and `min_sources` are binding-free.
+        PlayerFilter::OpponentDealtDamage { source, .. } => source
+            .as_ref()
+            .is_some_and(|source| filter_binding_diverges(source)),
+        // CR 508.1: the attack-history subject is a referent (`you` vs the
+        // CR 400.7 source), so it is adjudicated; `scope` only picks the time
+        // window and is binding-free.
+        PlayerFilter::OpponentAttacked { subject, .. } => {
+            attack_subject_binding_diverges(subject)
         }
         // CR 109.5 + CR 102.3 + CR 508.5: controller-derived seats, global player
         // state, and per-turn history the fire-time leg reads the same way.
@@ -11220,8 +11268,81 @@ fn player_filter_binding_diverges(player: &PlayerFilter) -> bool {
         | PlayerFilter::HighestSpeed
         | PlayerFilter::OpponentLostLife
         | PlayerFilter::OpponentGainedLife
-        | PlayerFilter::OpponentAttacked { .. }
         | PlayerFilter::OpponentAttackingEnchantedPlayer => false,
+    }
+}
+
+/// CR 202.3d + CR 603.4: the `ParitySource` axis of
+/// [`filter_prop_binding_diverges`].
+///
+/// Exhaustive rather than a `matches!`, for the reason the whole module exists:
+/// `matches!` IS a wildcard. It compiles a two-variant enum into "the one I
+/// named, else safe", so a future resolution-scoped variant would answer `false`
+/// and permit the hoist with no compile error — the exact tail this change set
+/// removes one and two levels up. Every axis helper below follows the same rule.
+fn parity_source_binding_diverges(parity: &crate::types::ability::ParitySource) -> bool {
+    use crate::types::ability::ParitySource;
+    match parity {
+        // CR 608.2c: `state.last_named_choice` is published BY the resolution
+        // that ran the naming choice; at fire time it holds an unrelated
+        // resolution's value, or none.
+        ParitySource::LastNamedChoice => true,
+        // A printed parity is a literal — nothing to bind.
+        ParitySource::Fixed { .. } => false,
+    }
+}
+
+/// CR 115.1 + CR 400.7: the `CombatRelationSubject` axis of
+/// [`filter_prop_binding_diverges`]. Exhaustive for the reason given on
+/// [`parity_source_binding_diverges`].
+fn combat_relation_subject_binding_diverges(
+    subject: &crate::types::ability::CombatRelationSubject,
+) -> bool {
+    use crate::types::ability::CombatRelationSubject;
+    match subject {
+        // CR 115.1: reads `ability.targets`, empty at fire time.
+        CombatRelationSubject::ParentTarget => true,
+        // CR 400.7: the source object, carried by the `TriggerSourceContext` on
+        // both legs — the same authority `ObjectScope::Source` is adjudicated
+        // non-divergent under.
+        CombatRelationSubject::Source => false,
+    }
+}
+
+/// CR 208.1 + CR 613.4b: the `PtValueScope` axis of
+/// [`filter_prop_binding_diverges`]. Exhaustive for the reason given on
+/// [`parity_source_binding_diverges`].
+fn pt_value_scope_binding_diverges(scope: &crate::types::ability::PtValueScope) -> bool {
+    use crate::types::ability::PtValueScope;
+    match scope {
+        // Both scopes read a characteristic of the MATCHED object — the layered
+        // value (CR 613.4c) or the base value beneath it (CR 613.4b). Neither
+        // names a referent the fire-time context has to bind, so the operand is
+        // the only re-scopable part of a `PtComparison`.
+        PtValueScope::Current | PtValueScope::Base => false,
+    }
+}
+
+/// CR 109.4 + CR 102.3: the `PlayerRelation` axis of
+/// [`player_filter_binding_diverges`]. Exhaustive for the reason given on
+/// [`parity_source_binding_diverges`].
+fn player_relation_binding_diverges(relation: &crate::types::ability::PlayerRelation) -> bool {
+    use crate::types::ability::PlayerRelation;
+    match relation {
+        // CR 109.5 + CR 102.3 + CR 102.1: every relation is derived from the
+        // delayed ability's own controller, which the fire-time leg is handed.
+        PlayerRelation::Controller | PlayerRelation::Opponent | PlayerRelation::All => false,
+    }
+}
+
+/// CR 508.1: the `AttackSubject` axis of [`player_filter_binding_diverges`].
+/// Exhaustive for the reason given on [`parity_source_binding_diverges`].
+fn attack_subject_binding_diverges(subject: &crate::types::ability::AttackSubject) -> bool {
+    use crate::types::ability::AttackSubject;
+    match subject {
+        // CR 109.5 + CR 400.7: the controller and the source object, both
+        // carried by the fire-time context.
+        AttackSubject::You | AttackSubject::Source => false,
     }
 }
 
@@ -22642,6 +22763,73 @@ pub mod tests {
                  the CR 400.7 source — all of which the fire-time context carries"
             );
         }
+
+        // Axis-classifier pins. Each of these sub-axes is a two- or
+        // three-variant enum today, so a `matches!` would pass every assertion
+        // below while still defaulting a FUTURE resolution-scoped variant to
+        // "safe". These pin the split that exists; the exhaustive `match` in
+        // each helper is what pins the contract for variants not yet written.
+        assert!(
+            parity_source_binding_diverges(&crate::types::ability::ParitySource::LastNamedChoice),
+            "CR 608.2c: `last_named_choice` is published BY a resolution"
+        );
+        assert!(
+            combat_relation_subject_binding_diverges(
+                &crate::types::ability::CombatRelationSubject::ParentTarget
+            ),
+            "CR 115.1: the parent target is read from `ability.targets`"
+        );
+        assert!(
+            !combat_relation_subject_binding_diverges(
+                &crate::types::ability::CombatRelationSubject::Source
+            ),
+            "CR 400.7: the source is carried by the `TriggerSourceContext`"
+        );
+        for scope in [
+            crate::types::ability::PtValueScope::Current,
+            crate::types::ability::PtValueScope::Base,
+        ] {
+            assert!(
+                !pt_value_scope_binding_diverges(&scope),
+                "CR 613.4b: {scope:?} reads a characteristic of the MATCHED object, not a \
+                 referent the fire-time context must bind"
+            );
+        }
+        for relation in [
+            crate::types::ability::PlayerRelation::Controller,
+            crate::types::ability::PlayerRelation::Opponent,
+            crate::types::ability::PlayerRelation::All,
+        ] {
+            assert!(
+                !player_relation_binding_diverges(&relation),
+                "CR 109.5: {relation:?} is derived from the delayed ability's own controller"
+            );
+        }
+        for subject in [
+            crate::types::ability::AttackSubject::You,
+            crate::types::ability::AttackSubject::Source,
+        ] {
+            assert!(
+                !attack_subject_binding_diverges(&subject),
+                "CR 109.5 + CR 400.7: {subject:?} is the controller or the source, both \
+                 carried by the fire-time context"
+            );
+        }
+        // The two composite arms those axes feed, end to end.
+        assert!(
+            filter_prop_binding_diverges(&FilterProp::ManaValueParity {
+                parity: crate::types::ability::ParitySource::LastNamedChoice,
+            }),
+            "CR 202.3d: a parity read off the resolution-published choice diverges"
+        );
+        assert!(
+            !filter_prop_binding_diverges(&FilterProp::ManaValueParity {
+                parity: crate::types::ability::ParitySource::Fixed(
+                    crate::types::ability::Parity::Even
+                ),
+            }),
+            "CR 202.3d: a printed parity is a literal"
+        );
 
         /// Three identically-named creatures; the delayed ability targets one of
         /// them. At RESOLUTION `SameNameAsParentTarget` matches all three; at
