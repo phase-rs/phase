@@ -2535,6 +2535,41 @@ fn collect_matching_triggers_inner(
                 .into_iter()
                 .map(|trigger_event| vec![trigger_event])
                 .collect()
+            } else if matches!(trig_def.mode, TriggerMode::YouAttack)
+                && super::trigger_matchers::you_attack_binds_attacked_player(trig_def)
+            {
+                // CR 508.3e: "Whenever you attack a player" triggers once for
+                // EACH attacked player, each firing bound to its own attacked
+                // player. The printed rulings on Echoing Assault, Soaring
+                // Lightbringer, and Horizon Explorer all state this outright —
+                // and Horizon Explorer has no "that player" anaphor at all,
+                // which is what proves the cardinality belongs to the trigger
+                // CONDITION rather than to the ability's body.
+                //
+                // Ordered against the two arms it sits between, both of which
+                // are MORE specific and must keep winning:
+                //
+                // - `trig_def.batched` (above): a batched trigger's events must
+                //   keep flowing through `matching_batched_trigger_events`,
+                //   which is where static trigger suppression and the
+                //   per-candidate intervening-if are applied.
+                // - the event-source force-block arm (immediately above): its
+                //   attacker demonstrative ("that creature") has no referent in
+                //   a plural event, so it needs one event per ATTACKER. This
+                //   arm groups per attacked PLAYER, which can carry several
+                //   attackers, and would strand that demonstrative.
+                //
+                // No card currently reaches this arm and either of those, so
+                // both are precedence guarantees rather than live tiebreaks.
+                super::trigger_matchers::matching_you_attack_events_by_attacked_player(
+                    event,
+                    trig_def,
+                    &source_context,
+                    state,
+                )
+                .into_iter()
+                .map(|trigger_event| vec![trigger_event])
+                .collect()
             } else if matches!(trig_def.mode, TriggerMode::Blocks) {
                 super::trigger_matchers::matching_block_events(
                     event,

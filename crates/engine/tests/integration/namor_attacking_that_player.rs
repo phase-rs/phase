@@ -33,10 +33,27 @@
 //! from the stack. Those rows deliberately use a TWO-attacker board, because a
 //! single-attacker board passes without the fix.
 //!
+//! **Defect C — the sibling class bound the WRONG player in multiplayer.**
+//! "Whenever you attack a player" is CR 508.3e, not CR 508.3a: the trigger
+//! source need not be attacking (Echoing Assault is an Enchantment and never
+//! can be), so CR 508.5 — which speaks only to "an ability of an attacking
+//! creature" — cannot supply "that player". The declaration used to collapse
+//! into ONE firing bound to the batch-global defender, so on a two-defender
+//! board one attacked player's firing went missing entirely and the surviving
+//! firing answered for the wrong lane. Row
+//! `ordruun_mentor_binds_each_firing_to_its_own_attacked_player` discriminates
+//! it, and reverting the parser's attacked-player object collapses it back to a
+//! single firing.
+//!
 //! CR references:
+//!   - CR 508.3e: "Whenever [a player] attacks [another player]" triggers for
+//!     each attacked player, and does not trigger on planeswalker/battle
+//!     attacks. Confirmed by the printed Echoing Assault ruling ("triggers once
+//!     for each player you attacked").
 //!   - CR 508.5 / CR 508.5a: an ability of an attacking creature that refers to
 //!     a defending player means the player THAT creature is attacking, and in
-//!     multiplayer that player is determined individually per attacker.
+//!     multiplayer that player is determined individually per attacker. This is
+//!     Namor's and Owlbear Cub's binding rule — NOT the CR 508.3e siblings'.
 //!   - CR 603.2: a trigger event (including a relative clause inside it) is
 //!     checked once, when the event occurs.
 //!   - CR 603.3d: a triggered ability with no legal choice for a required
@@ -475,19 +492,31 @@ fn ordruun_mentor_offers_exactly_the_attackers_of_the_attacked_player_cr_603_3d(
     );
 }
 
-/// TRIPWIRE — the two-defender measurement the plan refused to guess.
+/// CR 508.3e — the two-defender discrimination: each firing is bound to ITS
+/// OWN attacked player.
 ///
-/// With `trigger_source` now bound, `defending_player_cr508_5` finds no attack
-/// entry for a NON-attacking Ordruun Mentor and declines its sole-attacker tier
-/// on a two-attacker batch, so it falls to the batch-global defender. This row
-/// records what the engine actually offers rather than asserting a hoped-for
-/// answer — but it may NEVER accept an empty set, because empty means the
-/// enumeration-door fix did not take effect.
+/// "Whenever you attack a player" is CR 508.3e ("Whenever [a player] attacks
+/// [another player]"), so attacking P1 and P2 in one declaration fires the
+/// ability TWICE, once per attacked player. The printed ruling on Echoing
+/// Assault — the other card on this arm — states it outright: "If you attack
+/// multiple players in the same declare attackers step, Echoing Assault's last
+/// ability triggers once for each player you attacked."
 ///
-/// A future change that fires `YouAttack` once per attacked player (carrying a
-/// per-firing defender) must update this row deliberately.
+/// The binding this row pins cannot come from CR 508.5: that rule supplies a
+/// defending player to *an ability of an attacking creature*, and Ordruun
+/// Mentor is not attacking here (its sibling on this arm, Echoing Assault, is
+/// an Enchantment and can never attack at all). The referent comes from the CR
+/// 508.3e trigger event itself, which
+/// `trigger_matchers::matching_you_attack_events_by_attacked_player` splits
+/// into one synthesized `AttackersDeclared` per attacked player.
+///
+/// This row is the discriminating one: before the split, both firings collapsed
+/// into a single trigger bound to the batch-global defender, which offered BOTH
+/// lanes to one target slot. It fails if the split regresses (one firing, or a
+/// firing that can reach across defenders) and it fails if the enumeration door
+/// regresses (an empty slot → CR 603.3d removal).
 #[test]
-fn ordruun_mentor_two_defender_board_offers_a_non_empty_measured_set() {
+fn ordruun_mentor_binds_each_firing_to_its_own_attacked_player() {
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
     {
@@ -512,27 +541,84 @@ fn ordruun_mentor_two_defender_board_offers_a_non_empty_measured_set() {
         ])
         .expect("DeclareAttackers should succeed");
 
-    let offered = first_trigger_target_slot(&runner);
-    assert!(
-        !offered.is_empty(),
-        "an empty set here means `filter_needs_trigger_source` did not take \
-         effect — CR 603.3d would silently remove the trigger. offered={offered:?}"
+    // CR 508.3e: one firing per attacked player. Each has exactly one legal
+    // target (the single creature attacking THAT player), so the engine binds
+    // both without prompting and both sit on the stack with pinned targets.
+    let firings = pinned_trigger_targets_per_firing(&runner);
+    assert_eq!(
+        firings.len(),
+        2,
+        "attacking two players must fire the CR 508.3e trigger twice, once per \
+         attacked player; got {firings:?}"
     );
-    // TRIPWIRE: coarse batch-global binding on a multi-defender `YouAttack`
-    // board. Both lanes being offered is the MEASURED behaviour, not an
-    // endorsement; narrowing it requires per-attacked-player trigger
-    // cardinality, which changes how many times the ability fires.
-    let got: Vec<ObjectId> = offered
+    assert!(
+        firings.iter().all(|targets| targets.len() == 1),
+        "each firing sees exactly one creature attacking its own bound player; \
+         got {firings:?}"
+    );
+
+    let mut bound: Vec<ObjectId> = firings
         .iter()
-        .filter_map(|t| match t {
-            TargetRef::Object(id) => Some(*id),
+        .filter_map(|targets| match targets.first() {
+            Some(TargetRef::Object(id)) => Some(*id),
             _ => None,
         })
         .collect();
-    assert!(
-        got.contains(&lane_p1) || got.contains(&lane_p2),
-        "at least one declared attacker must be offered; got {got:?}"
+    bound.sort();
+    let mut want = vec![lane_p1, lane_p2];
+    want.sort();
+    assert_eq!(
+        bound, want,
+        "the two firings must bind the P1 lane and the P2 lane separately — \
+         neither may reach across to the other defender's attacker"
     );
+
+    // The cross-binding this row exists to forbid: no single firing may offer
+    // both lanes. Before the CR 508.3e split, exactly that happened.
+    assert!(
+        firings.iter().all(|targets| {
+            let ids: Vec<ObjectId> = targets
+                .iter()
+                .filter_map(|t| match t {
+                    TargetRef::Object(id) => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            !(ids.contains(&lane_p1) && ids.contains(&lane_p2))
+        }),
+        "a firing bound to one attacked player must never offer the other \
+         player's attacker; got {firings:?}"
+    );
+}
+
+/// One entry per triggered ability on the stack, holding that firing's own
+/// pinned targets.
+///
+/// `first_trigger_target_slot` deliberately FLATTENS every stack entry into one
+/// set, which answers "what got enumerated anywhere". CR 508.3e needs the
+/// opposite question — *which firing bound which target* — so a cross-defender
+/// leak cannot hide inside a flattened union. Kept separate rather than
+/// replacing the flattening helper, because the single-defender rows genuinely
+/// want the union.
+fn pinned_trigger_targets_per_firing(runner: &GameRunner) -> Vec<Vec<TargetRef>> {
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "expected every firing to auto-bind its single legal target; a prompt \
+         means some slot enumerated two or more candidates. waiting_for={:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .state()
+        .stack
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility { ability, .. } => Some(ability.targets.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The set of objects the trigger's target slot actually admitted.

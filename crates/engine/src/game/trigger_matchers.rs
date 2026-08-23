@@ -4279,6 +4279,79 @@ pub(super) fn matching_you_attack_pairs(
         .collect()
 }
 
+/// CR 508.3e: true when a `YouAttack` trigger names `[another player]` — the
+/// "Whenever [a player] attacks [another player], . . ." form — and therefore
+/// binds ONE attacked player per firing rather than the whole declaration.
+///
+/// The player-typed `attack_target_filter` variants are exactly the CR 508.3e
+/// slot. `Planeswalker` / `Battle` / `PlayerOrPlaneswalker` are deliberately
+/// excluded: CR 508.3e names a player and explicitly does not trigger on
+/// planeswalker or battle attacks, so a mixed or permanent-directed object is a
+/// different grammar whose per-firing referent is a permanent, not a player.
+pub(super) fn you_attack_binds_attacked_player(trig_def: &TriggerDefinition) -> bool {
+    matches!(
+        trig_def.attack_target_filter,
+        Some(
+            crate::types::triggers::AttackTargetFilter::Player
+                | crate::types::triggers::AttackTargetFilter::Monarch
+        )
+    )
+}
+
+/// CR 508.3e + CR 508.5a: split one attack declaration into a synthesized
+/// `AttackersDeclared` per DISTINCT attacked player, each carrying only that
+/// player's attackers and naming that player as the event's `defending_player`.
+///
+/// This is the per-firing binding channel for "Whenever you attack a player".
+/// It is the same mechanism `matching_attack_events` already uses for the CR
+/// 508.3a / 508.3b / 508.3d attack families — a narrowed event per firing —
+/// rather than a new binding concept, so every downstream reader of the
+/// resolution context (target enumeration, the "attacking that player" anaphor,
+/// token entry) sees one unambiguous attacked player without any of them
+/// needing to know which trigger family produced it.
+///
+/// Grouping (not one event per attacker) is what CR 508.3e requires: the
+/// trigger fires once per attacked PLAYER no matter how many creatures attacked
+/// that player, so each firing must still see that player's whole attacker set
+/// for "creatures you control attacking that player" to enumerate correctly.
+/// First-seen order is preserved so firing order follows declaration order.
+pub(super) fn matching_you_attack_events_by_attacked_player(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_context: &TriggerSourceContext,
+    state: &GameState,
+) -> Vec<GameEvent> {
+    let GameEvent::AttackersDeclared {
+        defending_player, ..
+    } = event
+    else {
+        return Vec::new();
+    };
+
+    let mut groups: Vec<(PlayerId, Vec<(ObjectId, crate::game::combat::AttackTarget)>)> =
+        Vec::new();
+    for (attacker, target) in matching_you_attack_pairs(event, trigger, source_context, state) {
+        // CR 508.5a + CR 310.8d: resolve the attacked object to the one player
+        // it answers for (planeswalker → controller, battle → protector) so a
+        // mixed declaration still groups by player identity.
+        let attacked =
+            crate::game::combat::defending_player_for_target_or(state, target, *defending_player);
+        match groups.iter_mut().find(|(player, _)| *player == attacked) {
+            Some((_, attacks)) => attacks.push((attacker, target)),
+            None => groups.push((attacked, vec![(attacker, target)])),
+        }
+    }
+
+    groups
+        .into_iter()
+        .map(|(attacked, attacks)| GameEvent::AttackersDeclared {
+            attacker_ids: attacks.iter().map(|(id, _)| *id).collect(),
+            defending_player: attacked,
+            attacks,
+        })
+        .collect()
+}
+
 /// CR 725.1: Matches when a player becomes the monarch.
 /// Fires for "when you become the monarch" / "whenever a player becomes the monarch".
 pub(super) fn match_become_monarch(

@@ -5035,12 +5035,34 @@ fn parse_attacking_alone_suffix_status(input: &str) -> OracleResult<'_, FilterPr
     Ok((input, FilterProp::AttackingAlone))
 }
 
-/// CR 508.5 + CR 608.2c: "attacking that player" — the defending-player ANAPHOR
-/// in an object-filter position ("other creatures you control attacking that
-/// player", "target creature that's attacking that player"). Inside a trigger
-/// body, "that player" is the player the trigger source is attacking (CR 508.5a:
-/// one specific defending player in multiplayer), resolved at runtime through
-/// `combat::defending_player_cr508_5` via `ControllerRef::DefendingPlayer`.
+/// CR 608.2c: "attacking that player" — the attacked-player ANAPHOR in an
+/// object-filter position ("other creatures you control attacking that player",
+/// "target creature that's attacking that player"). Lowers to
+/// `ControllerRef::DefendingPlayer` and resolves at runtime through
+/// `combat::defending_player_cr508_5`.
+///
+/// # Which rule supplies the referent depends on the enclosing trigger
+///
+/// The anaphor is ONE grammar, but its antecedent is bound by two different
+/// rules, and the runtime authority answers both because each supplies its
+/// answer through a different tier of the same lookup:
+///
+/// - **CR 508.5 / CR 508.5a — the source is the attacking creature.** Namor and
+///   Owlbear Cub are CR 508.3a triggers ("Whenever [this creature] attacks a
+///   player"), so "that player" is the player THAT creature is attacking, taken
+///   from the source's own entry in the bound attack event.
+/// - **CR 508.3e — the source need not be attacking at all.** Ordruun Mentor
+///   and Echoing Assault are "Whenever you attack a player" triggers; CR 508.5
+///   cannot supply their referent, because it speaks only to "an ability of an
+///   attacking creature" and Echoing Assault is an Enchantment that can never
+///   attack. Their antecedent is the attacked player the CR 508.3e trigger
+///   fired for, carried on the firing's own synthesized event by
+///   `trigger_matchers::matching_you_attack_events_by_attacked_player` and read
+///   back as that event's `defending_player`.
+///
+/// So a CR 508.5-shaped name on the runtime helper does not mean CR 508.5 binds
+/// every caller — for the CR 508.3e lane it is the per-firing event, not the
+/// asker's combat status, that decides the answer.
 ///
 /// NOT `ControllerRef::TriggeringPlayer`: for `GameEvent::AttackersDeclared`,
 /// `targeting::extract_player_from_event` returns the ATTACKING player, which is

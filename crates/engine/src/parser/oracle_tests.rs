@@ -26224,7 +26224,7 @@ fn attacking_that_player_target_filters_carry_the_defending_player_anaphor() {
         "Ordruun Mentor",
         &[Keyword::Mentor],
         &["Creature"],
-        &["Human", "Soldier"],
+        &["Minotaur", "Soldier"],
     );
     assert!(
         ordruun
@@ -26736,4 +26736,123 @@ fn loot_dispute_initiative_predicate_is_unchanged() {
         assert_eq!(trigger.attack_target_filter, None);
         assert_eq!(trigger.valid_target, None);
     }
+}
+
+/// CR 508.3e vs CR 508.3d — the attacked-player OBJECT of a "you attack"
+/// trigger is what separates the two rules, and it must land on
+/// `attack_target_filter` for the whole class rather than for one card.
+///
+/// Two independent things ride on this one field, so the row asserts the field
+/// rather than any single card's downstream behaviour:
+///
+/// 1. **Restriction (CR 508.3e).** "It won't trigger ... if a creature attacks
+///    a planeswalker or a battle." With `None`, a planeswalker-only declaration
+///    fires the trigger.
+/// 2. **Per-firing binding (CR 508.3e).** The engine splits the declaration
+///    into one firing per attacked player only when this field names a player;
+///    that is what makes "that player" resolve per firing instead of collapsing
+///    to the batch-global defender.
+///
+/// The bare "you attack" row is the discriminating negative: CR 508.3d fires
+/// once for the whole declaration against any defender, so a change that set
+/// the filter unconditionally would both over-restrict it and silently multiply
+/// how many times it fires.
+#[test]
+fn you_attack_trigger_binds_its_attacked_player_object() {
+    use crate::types::triggers::AttackTargetFilter;
+
+    // Every printed "Whenever you attack a player" card, verbatim trigger line.
+    // One card would prove nothing about the arm; the class is the unit.
+    let attacks_a_player: &[(&str, &str, &[&str])] = &[
+        (
+            "Ordruun Mentor",
+            "Whenever you attack a player, target creature that's attacking that player gains first strike until end of turn.",
+            &["Creature"],
+        ),
+        (
+            "Echoing Assault",
+            "Whenever you attack a player, choose target nontoken creature that's attacking that player. Create a token that's a copy of that creature, except it's 1/1.",
+            &["Enchantment"],
+        ),
+        (
+            "Horizon Explorer",
+            "Whenever you attack a player, create a Lander token.",
+            &["Creature"],
+        ),
+        (
+            "Soaring Lightbringer",
+            "Whenever you attack a player, create a 1/1 white Glimmer enchantment creature token that's tapped and attacking that player.",
+            &["Creature"],
+        ),
+        (
+            "Karazikar, the Eye Tyrant",
+            "Whenever you attack a player, tap target creature that player controls and goad it.",
+            &["Creature"],
+        ),
+        (
+            "Seifer, Balamb Rival",
+            "Whenever you attack a player, goad target creature that player controls.",
+            &["Creature"],
+        ),
+        (
+            "Long-Range Sensor",
+            "Whenever you attack a player, put a charge counter on this artifact.",
+            &["Artifact"],
+        ),
+    ];
+    for (name, text, types) in attacks_a_player {
+        let parsed = parse(text, name, &[], types, &[]);
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| t.mode == TriggerMode::YouAttack)
+            .unwrap_or_else(|| panic!("{name} keeps its YouAttack trigger: {parsed:#?}"));
+        assert_eq!(
+            trigger.attack_target_filter,
+            Some(AttackTargetFilter::Player),
+            "{name}: CR 508.3e names [another player], so the attacked-player \
+             object must bind — without it the trigger fires on a \
+             planeswalker-only attack and cannot split per attacked player"
+        );
+    }
+
+    // CR 508.3d: a bare "you attack" names no object — any defender, one firing.
+    let bare = parse(
+        "Whenever you attack, draw a card.",
+        "BareYouAttack",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    let bare_trigger = bare
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::YouAttack)
+        .expect("bare \"you attack\" stays a YouAttack trigger");
+    assert_eq!(
+        bare_trigger.attack_target_filter, None,
+        "CR 508.3d: a bare \"you attack\" must NOT gain an attacked-player \
+         object — that would both restrict it to player attacks and multiply \
+         its firings per attacked player"
+    );
+
+    // A trailing qualifier is a different, unmodelled grammar. Declining leaves
+    // the pre-existing shape rather than claiming the CR 508.3e restriction
+    // while dropping the qualifier's meaning.
+    let qualified = parse(
+        "Whenever you attack a player with one or more equipped creatures, draw a card.",
+        "Akiri, Fearless Voyager",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    assert!(
+        qualified
+            .triggers
+            .iter()
+            .filter(|t| t.mode == TriggerMode::YouAttack)
+            .all(|t| t.attack_target_filter.is_none()),
+        "a qualified attacked-player phrase must not be read as the bare \
+         CR 508.3e object: {qualified:#?}"
+    );
 }

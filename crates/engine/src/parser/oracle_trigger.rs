@@ -975,6 +975,51 @@ fn parse_referenced_player_phrase(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// CR 508.3e: the attacked-player OBJECT of a bare "you attack …" trigger
+/// condition, i.e. the `[another player]` slot in "Whenever [a player] attacks
+/// [another player], . . .".
+///
+/// Returning `Some` does two independent jobs, both owned by
+/// `attack_target_filter`:
+///
+/// 1. **Restriction.** CR 508.3e: "It won't trigger if a creature is put onto
+///    the battlefield attacking or if a creature attacks a planeswalker or a
+///    battle." Without the filter the trigger fires on a planeswalker-only
+///    declaration.
+/// 2. **Per-firing binding.** CR 508.3e binds one attacked player per firing,
+///    which `triggers::trigger_event_batches` turns into one synthesized
+///    `AttackersDeclared` per attacked player. Confirmed by the printed
+///    rulings on Echoing Assault ("triggers once for each player you
+///    attacked"), Soaring Lightbringer, and Horizon Explorer — the last of
+///    which has no "that player" anaphor at all, proving the cardinality is a
+///    property of the trigger CONDITION, not of the ability's body.
+///
+/// `None` (a bare "you attack") keeps CR 508.3d: fires once per declaration,
+/// any defender. A trailing qualifier ("a player WITH one or more equipped
+/// creatures", Akiri) also declines: that clause narrows the trigger further
+/// and is not modelled on this arm, so claiming the CR 508.3e restriction
+/// while dropping the qualifier would be worse than leaving the shape alone.
+fn parse_you_attack_player_object(rest: &str) -> Option<AttackTargetFilter> {
+    let (remainder, filter) = alt((
+        value(
+            AttackTargetFilter::Player,
+            tag::<_, _, OracleError<'_>>(" a player"),
+        ),
+        // CR 725.1: exactly one player holds the monarch designation, so the
+        // per-attacked-player split is degenerate here — but binding it still
+        // beats the batch-global defender when the monarch is attacked
+        // alongside another player.
+        value(AttackTargetFilter::Monarch, tag(" the monarch")),
+    ))
+    .parse(rest)
+    .ok()?;
+    remainder
+        .trim_start_matches(',')
+        .trim()
+        .is_empty()
+        .then_some(filter)
+}
+
 fn condition_introduces_defending_player(cond_lower: &str) -> bool {
     // Walk word boundaries — the actor/verb pair may be preceded by "whenever",
     // "when", or quantifiers like "one or more creatures you control".
@@ -16164,6 +16209,15 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         {
             let mut def = make_base();
             def.mode = TriggerMode::YouAttack;
+            // CR 508.3d vs CR 508.3e: a bare "you attack" names no attacked
+            // object and fires once per declaration (CR 508.3d); "you attack a
+            // player" / "you attack the monarch" names [another player], which
+            // both RESTRICTS the trigger to player-directed attacks (CR 508.3e:
+            // "It won't trigger ... if a creature attacks a planeswalker or a
+            // battle") and makes the attacked player a per-firing binding. Both
+            // halves live on `attack_target_filter`; `None` keeps the CR 508.3d
+            // any-defender semantics exactly as before.
+            def.attack_target_filter = parse_you_attack_player_object(rest);
             return Some((TriggerMode::YouAttack, def));
         }
     }
