@@ -223,7 +223,7 @@ describe("multiplayerDraftStore", () => {
       expect(state.view).toBe(view);
     });
 
-    it("pairingsGenerated advances currentRound, leaves nextPairingRound to viewUpdated, and supersedes the error", async () => {
+    it("pairingsGenerated advances currentRound, leaves nextPairingRound to viewUpdated, and the phase change retires the error", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
         poolInput: { type: "Set", data: { set_pool_json: "{}" } },
         kind: "Premier",
@@ -233,10 +233,12 @@ describe("multiplayerDraftStore", () => {
         podPolicy: "Competitive",
       });
 
-      // The host's real round boundary: the engine view for round 2 arrives
-      // first, then pairing generation commits round 3.
+      // The host's real round boundary, in the order the adapter emits it: the
+      // round-2 view lands on the round-complete screen, the failed attempt
+      // raises the banner, and the retry's `roundAdvanced` opens the pairing
+      // window before pairing generation commits round 3.
       const view = {
-        ...mockView("MatchInProgress"),
+        ...mockView("RoundComplete"),
         current_round: 2,
         next_pairing_round: 3,
       };
@@ -250,6 +252,10 @@ describe("multiplayerDraftStore", () => {
       expect(useMultiplayerDraftStore.getState().error).toBe(
         "Failed to advance round",
       );
+      // The retry. `roundAdvanced` is what moves the phase off `roundComplete`,
+      // and that transition is what retires the banner — one step before
+      // `pairingsGenerated`, and for guests as well as the host.
+      capturedHostEventHandler!({ type: "roundAdvanced" });
       capturedHostEventHandler!({ type: "pairingsGenerated", round: 3, pairings: [] });
 
       const state = useMultiplayerDraftStore.getState();
@@ -263,10 +269,9 @@ describe("multiplayerDraftStore", () => {
       // inlined `nextPairingRound: event.round + 1` to that handler — the
       // TypeScript re-derivation this work exists to abolish — yields 4 here.
       expect(state.nextPairingRound).toBe(3);
-      // REVERT-FAILING: drop `error: null` from the `pairingsGenerated` handler
-      // and this goes red. A successful round boundary supersedes the banner the
-      // failed attempt raised — without it the retry that WORKED still shows
-      // "Failed to advance round".
+      // REVERT-FAILING: remove the `clearErrorOnPhaseChange` wrap and this goes
+      // red with "Failed to advance round" — the retry that WORKED would still
+      // show the failed attempt's banner.
       expect(state.error).toBeNull();
     });
 
@@ -475,6 +480,97 @@ describe("multiplayerDraftStore", () => {
       const state = useMultiplayerDraftStore.getState();
       expect(state.phase).toBe("kicked");
       expect(state.error).toBe("AFK");
+    });
+
+    it("retires a guest error when the phase changes, and only then", async () => {
+      await useMultiplayerDraftStore.getState().joinDraft({
+        roomCode: "ABCDE",
+        displayName: "Alice",
+      });
+
+      capturedGuestEventHandler!({
+        type: "viewUpdated",
+        view: mockView("MatchInProgress"),
+      });
+      capturedGuestEventHandler!({
+        type: "error",
+        message: "Failed to start match",
+      });
+      // Reach-guard: the error is live before any of the three steps below, so
+      // a null at the end cannot mean "it was never set".
+      expect(useMultiplayerDraftStore.getState().error).toBe(
+        "Failed to start match",
+      );
+
+      // (i) A same-phase broadcast must NOT clear. `viewUpdated` fires on every
+      // pick, seat change and timer sync; clearing on the mere presence of a
+      // `phase` key would erase an error the user has not read.
+      capturedGuestEventHandler!({
+        type: "viewUpdated",
+        view: mockView("MatchInProgress"),
+      });
+      expect(useMultiplayerDraftStore.getState().phase).toBe("matchInProgress");
+      expect(useMultiplayerDraftStore.getState().error).toBe(
+        "Failed to start match",
+      );
+
+      // (ii) A payload that names no phase at all must NOT clear.
+      capturedGuestEventHandler!({
+        type: "lobbyUpdate",
+        seats: [],
+        joined: 2,
+        total: 8,
+      });
+      expect(useMultiplayerDraftStore.getState().joined).toBe(2);
+      expect(useMultiplayerDraftStore.getState().error).toBe(
+        "Failed to start match",
+      );
+
+      // (iii) A real phase change retires it.
+      capturedGuestEventHandler!({
+        type: "viewUpdated",
+        view: mockView("RoundComplete"),
+      });
+
+      const state = useMultiplayerDraftStore.getState();
+      // Reach-guard: the clearing event was delivered and applied.
+      expect(state.phase).toBe("roundComplete");
+      // REVERT-FAILING: remove the `clearErrorOnPhaseChange` wrap and this goes
+      // red — a guest error raised in one phase would ride along into the next.
+      expect(state.error).toBeNull();
+    });
+
+    it("clears a stale message when the guest enters a message-less error phase, but not one that follows the flip", async () => {
+      await useMultiplayerDraftStore.getState().joinDraft({
+        roomCode: "ABCDE",
+        displayName: "Alice",
+      });
+
+      capturedGuestEventHandler!({ type: "error", message: "gone" });
+      // Reach-guard, as above.
+      expect(useMultiplayerDraftStore.getState().error).toBe("gone");
+
+      // `reconnectFailed`'s shape: the adapter flips status to `error` and the
+      // event that follows carries no message, so nothing replaces the stale
+      // string. Attributing an unrelated earlier failure to a failed reconnect
+      // is worse than the page's own generic copy — accepted, and pinned here.
+      capturedGuestEventHandler!({ type: "statusChanged", status: "error" });
+
+      expect(useMultiplayerDraftStore.getState().phase).toBe("error");
+      // REVERT-FAILING: remove the wrap and "gone" survives into the error screen.
+      expect(useMultiplayerDraftStore.getState().error).toBeNull();
+
+      // The sibling ordering both `initialize()` catches use — status flip
+      // first, message second — must leave the message intact.
+      capturedGuestEventHandler!({
+        type: "statusChanged",
+        status: "matchInProgress",
+      });
+      capturedGuestEventHandler!({ type: "error", message: "boom" });
+
+      const state = useMultiplayerDraftStore.getState();
+      expect(state.phase).toBe("matchInProgress");
+      expect(state.error).toBe("boom");
     });
   });
 

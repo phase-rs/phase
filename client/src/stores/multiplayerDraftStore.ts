@@ -12,7 +12,7 @@
  * projects their events into reactive Zustand state for the React UI.
  */
 
-import { create } from "zustand";
+import { create, type StateCreator } from "zustand";
 
 import type {
   DraftCardInstance,
@@ -510,11 +510,64 @@ const initialState: MultiplayerDraftState = {
   sideboardSubmitted: false,
 };
 
+/**
+ * Single authority for how long a pod error lives.
+ *
+ * An error belongs to the phase it was raised in; a *change* of phase retires
+ * it. Wrapping the store's setter — rather than writing `error: null` into each
+ * success arm — gives one rule for both roles: guests write `phase` from many
+ * arms of `handleGuestEvent` and cleared it at none, while the host had a
+ * single ad-hoc supersession on `pairingsGenerated`.
+ *
+ * Two properties are load-bearing and neither is incidental:
+ *
+ * - It fires only when `phase` actually *changes*. `viewUpdated` writes `phase`
+ *   on every broadcast — a pick, a seat connecting, a timer sync — so clearing
+ *   on the mere presence of the key would erase an error the user has not read.
+ *   That form was considered and rejected when this banner was introduced.
+ * - The incoming payload wins. `kicked` and `hostLeft` write `phase` and `error`
+ *   in one `set()`; spreading the payload last preserves the reason they carry.
+ *
+ * Not covered, deliberately: a retry that does not change phase — `startMatch`
+ * fails and succeeds while `phase` is already `matchInProgress`. Dismissal
+ * (`clearError`) remains the clearing path for that case.
+ *
+ * Scope: this wraps the *initializer's* setter, so it covers every write made
+ * inside this module. It is not zustand middleware and does not rebind
+ * `api.setState`, so `useMultiplayerDraftStore.setState(…)` bypasses the rule.
+ * That is fine today — production has no such call site (only tests do) — but a
+ * future production write through `setState` would not be phase-scoped.
+ */
+function clearErrorOnPhaseChange(set: SetFn): SetFn {
+  return (partial) =>
+    set((state) => {
+      const next = typeof partial === "function" ? partial(state) : partial;
+      return next.phase === undefined || next.phase === state.phase
+        ? next
+        : { error: null, ...next };
+    });
+}
+
+/** Applies {@link clearErrorOnPhaseChange} to the store's setter.
+ *
+ * Borrows the `create<T>()(middleware(initializer))` *shape* from `gameStore`,
+ * but it is not zustand middleware: it wraps only the initializer's `set`, so
+ * external `useMultiplayerDraftStore.setState(…)` calls are not phase-scoped.
+ * No production code does that (tests do); see `clearErrorOnPhaseChange`. */
+function phaseScopedError(
+  initializer: (
+    set: SetFn,
+    get: () => MultiplayerDraftState & MultiplayerDraftActions,
+  ) => MultiplayerDraftState & MultiplayerDraftActions,
+): StateCreator<MultiplayerDraftState & MultiplayerDraftActions> {
+  return (set, get) => initializer(clearErrorOnPhaseChange(set), get);
+}
+
 // ── Store ──────────────────────────────────────────────────────────────
 
 export const useMultiplayerDraftStore = create<
   MultiplayerDraftState & MultiplayerDraftActions
->()((set, get) => ({
+>()(phaseScopedError((set, get) => ({
   ...initialState,
 
   hostDraft: async (config) => {
@@ -1016,7 +1069,7 @@ export const useMultiplayerDraftStore = create<
     disposeMatchAdapter(set);
     set(initialState);
   },
-}));
+})));
 
 // ── Event handlers ─────────────────────────────────────────────────────
 
@@ -1130,18 +1183,14 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       set({ paused: false, pauseReason: null });
       break;
     case "pairingsGenerated":
-      // Host-only supersession: `advanceRound()` emits its own failure as
-      // `error`, so a successful retry of that exact operation clears the
-      // banner. This clears *any* live error, not just that one — accepted,
-      // because `pairingsGenerated` fires once per round boundary, so anything
-      // it erases has already had a full round on screen. Guests have no
-      // `pairingsGenerated` handler, so for them `clearError` (the banner's
-      // dismiss control) is the only clearing path.
+      // No `error: null` here. `clearErrorOnPhaseChange` retires the banner one
+      // step earlier, when `roundAdvanced` / `statusChanged("pairing")` moves the
+      // phase off `roundComplete` — and it does the same for guests, which this
+      // host-only arm never could.
       set({
         phase: "matchInProgress",
         currentRound: event.round,
         pairings: event.pairings,
-        error: null,
       });
       saveDraftPodProgress("matchInProgress");
       break;

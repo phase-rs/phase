@@ -586,7 +586,7 @@ fn apply_advance_round(session: &mut DraftSession) -> Result<Vec<DraftDelta>, Dr
         });
     }
 
-    let new_round = session.current_round + 1;
+    let new_round = session.next_pairing_round();
     session.status = DraftStatus::Pairing;
 
     Ok(vec![DraftDelta::RoundAdvanced { new_round }])

@@ -12,15 +12,13 @@ import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
  * same store field — the pause banner's `role="status"` is the wrong precedent,
  * because a paused draft is a status and a failed action is not.
  *
- * `store.error` is write-once: nothing clears it on a phase transition, so an
- * error raised in `betweenGames` (which has no banner of its own) surfaces on
- * the *next* pod screen and rides along until the host's next
- * `pairingsGenerated` supersedes it or the user dismisses it. Deliberate — the
- * alternative is the BASE behaviour, where those errors were invisible
- * everywhere. A scoped phase-transition clearing rule is the real fix; until
- * then, note that `role="alert"` re-announces a latched error at every pod
- * phase change, because each phase view mounts its own instance of this
- * component.
+ * `store.error` is scoped to the phase it was raised in:
+ * `clearErrorOnPhaseChange` in `multiplayerDraftStore` retires it when the pod
+ * changes phase, for both roles. So this banner never outlives its own screen,
+ * and the `role="alert"` remount that each phase view performs cannot
+ * re-announce a stale error — after a transition there is nothing to announce.
+ * Within a phase the error persists across unrelated `viewUpdated` broadcasts;
+ * dismissal is the clearing path there.
  */
 export function PodErrorBanner() {
   const { t } = useTranslation("common");
@@ -33,14 +31,14 @@ export function PodErrorBanner() {
     <div
       role="alert"
       data-testid="pod-error-banner"
-      className="flex items-start gap-3 rounded-lg border border-red-400/20 bg-red-400/5 px-4 py-3 text-sm text-red-300"
+      className="flex w-full items-start gap-3 rounded-lg border border-red-400/20 bg-red-400/5 px-4 py-3 text-sm text-red-300"
     >
       <span className="min-w-0 flex-1">{error}</span>
       <button
         type="button"
         onClick={clearError}
         aria-label={t("actions.close")}
-        className="shrink-0 text-lg leading-none text-red-300/70 transition-colors hover:text-red-200"
+        className="min-h-11 min-w-11 shrink-0 text-lg leading-none text-red-300/70 transition-colors hover:text-red-200"
       >
         &times;
       </button>

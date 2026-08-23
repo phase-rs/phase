@@ -545,6 +545,7 @@ function BetweenGamesView() {
     const timerSec = timerRemainingMs != null ? Math.ceil(timerRemainingMs / 1000) : null;
     return (
       <div className="mx-auto flex w-full max-w-md flex-col items-center gap-6 py-8">
+        <PodErrorBanner />
         <h2 className="text-xl font-medium text-white">{t("betweenGames.game", { number: playDrawPrompt.gameNumber })}</h2>
         <ScoreBadge score={playDrawPrompt.score} player={seatIndex === 0 ? 0 : 1} size="md" />
         <p className="text-sm text-white/60">{t("betweenGames.lostPreviousGame")}</p>
@@ -573,6 +574,7 @@ function BetweenGamesView() {
   if (sideboardSubmitted) {
     return (
       <div className="mx-auto flex w-full max-w-md flex-col items-center gap-6 py-8">
+        <PodErrorBanner />
         <h2 className="text-xl font-medium text-white">{t("betweenGames.sideboarding")}</h2>
         {sideboardPrompt && (
           <ScoreBadge score={sideboardPrompt.score} player={seatIndex === 0 ? 0 : 1} size="md" />
@@ -597,6 +599,7 @@ function BetweenGamesView() {
 
     return (
       <div className="mx-auto flex w-full max-w-4xl flex-col gap-4 py-8">
+        <PodErrorBanner />
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <h2 className="text-xl font-medium text-white">
@@ -629,6 +632,7 @@ function BetweenGamesView() {
   // Fallback — should not reach here
   return (
     <div className="mx-auto flex w-full max-w-md flex-col items-center gap-6 py-8">
+      <PodErrorBanner />
       <p className="text-sm text-white/60">{t("betweenGames.preparingNext")}</p>
     </div>
   );
