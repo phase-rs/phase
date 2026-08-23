@@ -835,6 +835,7 @@
     "nounPlaneswalker": "planeswalker",
     "nounTargetPermanent": "target permanent",
     "nounTarget": "target",
+    "nounOrPlayer": "{{noun}} or player",
     "confirmTap": "Confirm Tap ({{selected}}/{{count}})",
     "confirmSacrifice": "Sacrifice ({{selected}}/{{count}})",
     "skipSacrifice": "Skip Sacrifice",

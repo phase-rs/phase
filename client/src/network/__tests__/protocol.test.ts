@@ -36,8 +36,8 @@ const viewerInteractionWithProducedMana = {
 } as never;
 
 describe("encodeWireMessage / decodeWireMessage", () => {
-  it("pins the P2P wire protocol to v25", () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(25);
+  it("pins the P2P wire protocol to v26", () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(26);
   });
 
   it("defaults shortcut actions for a legacy payload created before the additive field", () => {
@@ -260,15 +260,15 @@ describe("encodeWireMessage / decodeWireMessage", () => {
   // and nothing about the version. Both halves here stamp LITERALS — a frame
   // built from WIRE_PROTOCOL_VERSION cannot tell a bumped client from an
   // unbumped one, which is why every other handshake fixture in the suite is
-  // useless as an instrument for a bump. Revert 25 → 24 and BOTH halves red:
-  // the v24 frame stops being refused, and the v25 frame stops being admitted.
-  // The admitting half is the reach-guard: without it "refuses v23" is also
+  // useless as an instrument for a bump. Revert 26 → 25 and BOTH halves red:
+  // the v25 frame stops being refused, and the v26 frame stops being admitted.
+  // The admitting half is the reach-guard: without it "refuses v25" is also
   // satisfied by a client that refuses everything.
-  it("refuses the previous wire protocol (v24) and admits its own (v25)", () => {
-    expect(() => validateMessage(setupFrameAt(24))).toThrow(/Wire protocol mismatch/);
-    expect(validateMessage(setupFrameAt(25))).toMatchObject({
+  it("refuses the previous wire protocol (v25) and admits its own (v26)", () => {
+    expect(() => validateMessage(setupFrameAt(25))).toThrow(/Wire protocol mismatch/);
+    expect(validateMessage(setupFrameAt(26))).toMatchObject({
       type: "game_setup",
-      wireProtocolVersion: 25,
+      wireProtocolVersion: 26,
     });
   });
 

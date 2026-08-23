@@ -790,6 +790,7 @@
     "nounPlaneswalker": "wędrowiec",
     "nounTargetPermanent": "docelowy trwały",
     "nounTarget": "cel",
+    "nounOrPlayer": "{{noun}} lub gracz",
     "confirmTap": "Potwierdź obrócenie ({{selected}}/{{count}})",
     "keepCurrentTargets": "Zachowaj bieżące cele",
     "skip": "Pomiń",

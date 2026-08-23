@@ -788,6 +788,7 @@
     "nounPlaneswalker": "Planeswalker",
     "nounTargetPermanent": "bleibende Karte als Ziel",
     "nounTarget": "Ziel",
+    "nounOrPlayer": "{{noun}} oder Spieler",
     "confirmTap": "Tappen bestätigen ({{selected}}/{{count}})",
     "keepCurrentTargets": "Aktuelle Ziele behalten",
     "skip": "Überspringen",

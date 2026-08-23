@@ -788,6 +788,7 @@
     "nounPlaneswalker": "planeswalker",
     "nounTargetPermanent": "permanent ciblé",
     "nounTarget": "cible",
+    "nounOrPlayer": "{{noun}} ou joueur",
     "confirmTap": "Confirmer l'engagement ({{selected}}/{{count}})",
     "keepCurrentTargets": "Conserver les cibles actuelles",
     "skip": "Ignorer",

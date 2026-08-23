@@ -43,6 +43,12 @@ pub enum ServerErrorCode {
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
 ///
+/// 35 — `DerivedViews::current_target_kind` publishes the engine's CR 115.1
+///      classification of the live target announcement. A CAPABILITY bump like
+///      24 and 32, not a parse bump: the field is `Option` +
+///      `skip_serializing_if`, but the client deleted `inferTargetNoun`, so a
+///      v34 server that omits it would leave a new client naming no target at
+///      all — silently, with no parse error to catch it.
 /// 33 — `LegendCandidateIdentity::Unknown` prevents face-down legend candidates
 ///      from publishing an affirmative original/copy identity.
 /// 32 — `DerivedViews::legend_candidate_identities` publishes the engine-authored
@@ -101,7 +107,7 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 34;
+pub const PROTOCOL_VERSION: u32 = 35;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -509,12 +515,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 34);
+        assert_eq!(PROTOCOL_VERSION, 35);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which is what refuses an older full-game peer whose GameState cannot
         // understand a success acknowledgment the submitting client awaits.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 33);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 34);
     }
 
     #[test]

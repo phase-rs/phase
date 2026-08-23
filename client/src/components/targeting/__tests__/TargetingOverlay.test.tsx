@@ -12,7 +12,8 @@ import {
   buildTargetSelectionWaitingFor,
   buildTriggerTargetSelectionWaitingFor,
 } from "../../../test/factories/gameStateFactory.ts";
-import { TargetingOverlay } from "../TargetingOverlay.tsx";
+import { TARGET_NOUN_KEY, TargetingOverlay } from "../TargetingOverlay.tsx";
+import enGame from "../../../i18n/locales/en/game.json";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
@@ -28,6 +29,11 @@ function createGameState(overrides: Partial<GameState> = {}): GameState {
         }),
       },
     }),
+    // The overlay names the offer from the engine's CR 115.1 classification and
+    // infers nothing, so every fixture must supply one. This default matches the
+    // player-only offer above; `...overrides` is a SHALLOW spread, so a test
+    // passing its own `derived` replaces this wholly.
+    derived: { current_target_kind: { type: "Players" } },
     ...overrides,
   });
 }
@@ -388,6 +394,9 @@ describe("TargetingOverlay", () => {
           selection: buildTargetSelectionProgress({ current_legal_targets: [{ Object: 8 }] }),
         },
       }),
+      // CR 112.1: a card on the stack is a spell, not a permanent. The engine
+      // classifies it; the overlay only names what it was told.
+      derived: { current_target_kind: { type: "Objects", data: { category: "Spell" } } },
     });
 
     act(() => {
@@ -426,6 +435,10 @@ describe("TargetingOverlay", () => {
           source_id: 9,
         },
       }),
+      // "up to one" comes from the slot being optional, not from the kind.
+      derived: {
+        current_target_kind: { type: "Objects", data: { category: "NonlandPermanent" } },
+      },
     });
 
     act(() => {
@@ -811,6 +824,12 @@ describe("TargetingOverlay", () => {
           source_id: 9,
         },
       },
+      // CR 115.4: the offer is three creatures AND a player — the "any target"
+      // shape. The engine classifies it as mixed; the overlay must name both
+      // halves rather than dropping the player.
+      derived: {
+        current_target_kind: { type: "ObjectsAndPlayers", data: { category: "Creature" } },
+      },
     });
 
     act(() => {
@@ -823,9 +842,13 @@ describe("TargetingOverlay", () => {
 
     render(<TargetingOverlay />);
 
-    expect(screen.getByText("a nonland permanent")).toBeInTheDocument();
+    expect(screen.getByText("a creature or player")).toBeInTheDocument();
     expect(screen.getByText("Target 1 of 3")).toBeInTheDocument();
-    expect(screen.queryByText("a creature")).toBeNull();
+    // Re-pointed from "a creature", which after the fix is null either way and
+    // so had stopped discriminating: RTL matches the full normalized text, and
+    // "a creature or player" is not the string "a creature". "a nonland
+    // permanent" is exactly what a revert to the client-side inference renders.
+    expect(screen.queryByText("a nonland permanent")).toBeNull();
   });
 
   // The active slot accepts only players, so the prompt has to say so. Before
@@ -938,6 +961,10 @@ describe("TargetingOverlay", () => {
           selection: { current_slot: 1, current_legal_targets: legal },
         },
       },
+      // CR 115.4: two creatures AND a player in the live offer — the mixed shape.
+      derived: {
+        current_target_kind: { type: "ObjectsAndPlayers", data: { category: "Creature" } },
+      },
     });
 
     act(() => {
@@ -950,18 +977,183 @@ describe("TargetingOverlay", () => {
 
     render(<TargetingOverlay />);
 
-    // KNOWN DEFERRED DEFECT, pinned deliberately (issue #7692): the slot's
-    // legal targets are two creatures AND a player, but `inferTargetNoun` drops
-    // the player from a mixed slot, so the prompt names a kind that excludes a
-    // legal target while the same render puts a "Choose: Opp 2" button on screen
-    // from the identical `current_legal_targets`. Fixing the inference is out of
-    // scope here. The NOUN on the next line is what has to change when it is
-    // fixed — do not read it as the intended wording, and do not close the
-    // follow-up against it.
-    expect(screen.getByText("a nonland permanent")).toBeInTheDocument();
+    // FIXED (issue #7692). The slot's legal targets are two creatures AND a
+    // player, and the prompt now names both halves per CR 115.4. The noun is
+    // supplied by `DerivedViews.current_target_kind` — the engine classifies the
+    // offer and the overlay renders that classification, so the prompt can no
+    // longer name a kind that excludes a legal target the same render offers.
+    expect(screen.getByText("a creature or player")).toBeInTheDocument();
     // Not part of that defect. The slot progress is correct; it is asserted on
     // its own only because it lives on the caption line now rather than inside
     // the instruction string.
     expect(screen.getByText("Target 2 of 3")).toBeInTheDocument();
+  });
+
+  // T1 — THE LOAD-BEARING TEST OF THE PHASE. Two authorities are constructed to
+  // DISAGREE: the objects map holds Lands, the engine's kind says Creature. Only
+  // the engine's answer may win. Every other test in this suite would still pass
+  // if a client-side inference were reinstated that happened to agree with the
+  // engine; this one reds, because agreement is impossible by construction.
+  it("renders the engine's category even when the objects contradict it", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const legal = [{ Object: 7 }, { Object: 8 }];
+
+    const gameState = createGameState({
+      objects: buildObjectMap(
+        buildGameObjectWithCoreTypes(["Land"], { id: 7, name: "Forest" }),
+        buildGameObjectWithCoreTypes(["Land"], { id: 8, name: "Island" }),
+      ),
+      waiting_for: buildTriggerTargetSelectionWaitingFor({
+        data: {
+          player: 0,
+          target_slots: [buildTargetSelectionSlot({ legal_targets: legal })],
+          selection: buildTargetSelectionProgress({ current_legal_targets: legal }),
+        },
+      }),
+      derived: {
+        current_target_kind: { type: "Objects", data: { category: "Creature" } },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({ gameState, waitingFor: gameState.waiting_for, dispatch });
+    });
+
+    render(<TargetingOverlay />);
+
+    // `getByText` throws on absence, so this is its own reach-guard.
+    expect(screen.getByText("a creature")).toBeInTheDocument();
+  });
+
+  // T2 — CR 115.4: the "any target" shape names both halves. A dedicated minimal
+  // fixture, as opposed to T1's contradiction fixture and the two multi-slot pins
+  // which carry other concerns as well.
+  it("names both halves of a mixed offer", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const legal = [{ Object: 7 }, { Player: 1 }];
+
+    const gameState = createGameState({
+      objects: buildObjectMap(
+        buildGameObjectWithCoreTypes(["Creature"], { id: 7, name: "Bear" }),
+      ),
+      waiting_for: buildTriggerTargetSelectionWaitingFor({
+        data: {
+          player: 0,
+          target_slots: [buildTargetSelectionSlot({ legal_targets: legal })],
+          selection: buildTargetSelectionProgress({ current_legal_targets: legal }),
+        },
+      }),
+      derived: {
+        current_target_kind: { type: "ObjectsAndPlayers", data: { category: "Creature" } },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({ gameState, waitingFor: gameState.waiting_for, dispatch });
+    });
+
+    render(<TargetingOverlay />);
+
+    expect(screen.getByText("a creature or player")).toBeInTheDocument();
+    // Meaningful, not vacuous: it proves the mixed arm did not silently degrade
+    // to the objects-only noun, which is a string this render could have shown.
+    expect(screen.queryByText("a creature")).toBeNull();
+  });
+
+  // T3 — an absent kind falls back to the generic caption rather than re-inferring.
+  // The engine omits the field when no announcement is live (Option +
+  // skip_serializing_if), so the client must treat absence as ordinary.
+  it("falls back to the generic prompt when the engine supplied no kind", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const legal = [{ Object: 7 }, { Object: 8 }, { Player: 1 }];
+
+    const gameState = createGameState({
+      objects: buildObjectMap(
+        buildGameObjectWithCoreTypes(["Creature"], { id: 7, name: "Bear" }),
+        buildGameObjectWithCoreTypes(["Creature"], { id: 8, name: "Elf" }),
+      ),
+      waiting_for: buildTriggerTargetSelectionWaitingFor({
+        data: {
+          player: 0,
+          target_slots: [
+            buildTargetSelectionSlot({ legal_targets: legal }),
+            buildTargetSelectionSlot({ legal_targets: legal, optional: true }),
+            buildTargetSelectionSlot({ legal_targets: legal, optional: true }),
+          ],
+          selection: buildTargetSelectionProgress({ current_legal_targets: legal }),
+        },
+      }),
+      // Set explicitly. Omitting `derived` would leave createGameState's
+      // `{ type: "Players" }` default in place — the spread is shallow.
+      derived: { current_target_kind: undefined },
+    });
+
+    act(() => {
+      useGameStore.setState({ gameState, waitingFor: gameState.waiting_for, dispatch });
+    });
+
+    render(<TargetingOverlay />);
+
+    // MANDATORY POSITIVE REACH-GUARD, asserted first: without it, the two
+    // negatives below are also satisfied by a component that crashed or
+    // rendered nothing at all.
+    expect(screen.getByText("Choose target 1 of 3")).toBeInTheDocument();
+    expect(screen.queryByText("a creature")).toBeNull();
+    expect(screen.queryByText("a nonland permanent")).toBeNull();
+  });
+
+  // A slot that offers nothing is a STATUS message, not a prompt — so the
+  // `!targetKind` guard must sit BELOW the empty-arm. Placed above, it silently
+  // replaces a specific, useful message with a generic caption.
+  //
+  // The fixture is hand-seeded and this is the state where BOTH guards are live.
+  // An engine-produced progress cannot present it: an empty narrowed offer also
+  // puts `current_slot` past the end of `target_slots`, so the `!activeSlot`
+  // guard above both fires instead. The production-reachable neighbour is a slot
+  // whose DECLARED set is empty while the kind is present, which renders this
+  // same message through this same arm. What this test pins is the GUARD ORDER,
+  // and that is a client-side contract.
+  it("keeps the no-legal-targets message when the engine published no kind", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      waiting_for: buildTriggerTargetSelectionWaitingFor({
+        data: {
+          player: 0,
+          target_slots: [buildTargetSelectionSlot()],        // legal_targets: []
+          selection: buildTargetSelectionProgress(),         // current_slot 0, narrowed []
+        },
+      }),
+      derived: { current_target_kind: undefined },
+    });
+
+    act(() => {
+      useGameStore.setState({ gameState, waitingFor: gameState.waiting_for, dispatch });
+    });
+
+    render(<TargetingOverlay />);
+
+    expect(screen.getByText("No legal targets available")).toBeInTheDocument();
+  });
+});
+
+// `TargetNounKey` is a hand-written union, so it is checked against ITSELF — a
+// typo duplicated into both the union and TARGET_NOUN_KEY compiles, and `t()`
+// accepts a plain `string` here, so it would render a raw i18n key to the user
+// where a noun belongs. That is the same class of defect #7692 was filed about.
+// This is the only gate that reds on it, BECAUSE IT IS DRIVEN BY THE SHIPPED MAP
+// rather than by a hand-written list of key names: a third list would agree with
+// the catalog while the map disagreed with both.
+describe("TARGET_NOUN_KEY", () => {
+  it("names only keys the en catalog carries", () => {
+    // Reach-guard: an empty map would satisfy the loop below vacuously. The
+    // Record is total over TargetObjectCategory so tsc already forbids that, but
+    // a loop with no iterations is exactly the shape this gate exists to catch.
+    expect(Object.keys(TARGET_NOUN_KEY).length).toBeGreaterThan(0);
+
+    for (const key of Object.values(TARGET_NOUN_KEY)) {
+      // `toHaveProperty` reads a dotted string as a key PATH, so the map's
+      // "targeting.nounSpell" resolves against the catalog without string surgery.
+      expect(enGame).toHaveProperty(key, expect.any(String));
+    }
   });
 });
