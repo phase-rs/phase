@@ -19,6 +19,31 @@ use crate::session::AiSession;
 /// Typical AI sequences (mulligans + full turn) are 30–50 actions.
 const MAX_AI_ACTIONS_PER_SEQUENCE: usize = 200;
 
+/// Identifies whether a batch bound belongs to the caller or to the module's
+/// infinite-loop safety cap. A caller requesting exactly the cap remains a
+/// caller budget; only a larger request is truncated by the safety cap.
+#[derive(Clone, Copy)]
+enum ActionLimit {
+    SafetyCap,
+    CallerBudget { requested: usize },
+}
+
+impl ActionLimit {
+    fn effective(self) -> usize {
+        match self {
+            Self::SafetyCap => MAX_AI_ACTIONS_PER_SEQUENCE,
+            Self::CallerBudget { requested } => requested.min(MAX_AI_ACTIONS_PER_SEQUENCE),
+        }
+    }
+
+    fn is_safety_cap(self) -> bool {
+        match self {
+            Self::SafetyCap => true,
+            Self::CallerBudget { requested } => requested > MAX_AI_ACTIONS_PER_SEQUENCE,
+        }
+    }
+}
+
 /// Result of a single AI action: the action taken and the resulting events.
 pub struct AiActionResult {
     pub action: GameAction,
@@ -149,13 +174,13 @@ pub fn run_ai_actions(
 ) -> AiActionsRun {
     // Thin delegate: existing callers get the full safety-cap budget and
     // exactly the prior semantics.
-    run_ai_actions_bounded(
+    run_ai_actions_with_limit(
         state,
         ai_players,
         ai_configs,
         rng,
         session,
-        MAX_AI_ACTIONS_PER_SEQUENCE,
+        ActionLimit::SafetyCap,
     )
 }
 
@@ -183,8 +208,28 @@ pub fn run_ai_actions_bounded(
     session: &Arc<AiSession>,
     max_actions: usize,
 ) -> AiActionsRun {
+    run_ai_actions_with_limit(
+        state,
+        ai_players,
+        ai_configs,
+        rng,
+        session,
+        ActionLimit::CallerBudget {
+            requested: max_actions,
+        },
+    )
+}
+
+fn run_ai_actions_with_limit(
+    state: &mut GameState,
+    ai_players: &HashSet<PlayerId>,
+    ai_configs: &HashMap<PlayerId, AiConfig>,
+    rng: &mut impl Rng,
+    session: &Arc<AiSession>,
+    action_limit: ActionLimit,
+) -> AiActionsRun {
     let mut results = Vec::new();
-    let limit = max_actions.min(MAX_AI_ACTIONS_PER_SEQUENCE);
+    let limit = action_limit.effective();
 
     if limit == 0 {
         return AiActionsRun {
@@ -275,7 +320,7 @@ pub fn run_ai_actions_bounded(
         }
     }
 
-    if limit == MAX_AI_ACTIONS_PER_SEQUENCE {
+    if action_limit.is_safety_cap() {
         tracing::warn!(
             count = limit,
             "AI action loop hit safety cap — possible infinite loop"
@@ -286,7 +331,7 @@ pub fn run_ai_actions_bounded(
         results,
         stop: if eligible_ai_decision(state, ai_players).is_none() {
             AiActionsStop::NoEligibleAiActor
-        } else if limit == MAX_AI_ACTIONS_PER_SEQUENCE {
+        } else if action_limit.is_safety_cap() {
             AiActionsStop::ActionSafetyCapReached { limit }
         } else {
             AiActionsStop::ActionBudgetReached { limit }
@@ -494,5 +539,14 @@ mod tests {
             run.stop,
             AiActionsStop::ActionBudgetReached { limit: 0 }
         ));
+    }
+
+    #[test]
+    fn exact_cap_caller_budget_is_not_a_safety_cap() {
+        assert!(!ActionLimit::CallerBudget {
+            requested: MAX_AI_ACTIONS_PER_SEQUENCE,
+        }
+        .is_safety_cap());
+        assert!(ActionLimit::SafetyCap.is_safety_cap());
     }
 }

@@ -1860,6 +1860,12 @@ export class WebSocketAdapter implements EngineAdapter {
           fault: { id: number; after_state_revision: number; cause: unknown };
         };
         const message = "Native AI driver stopped; this game can no longer advance.";
+        if (this.pendingReject) {
+          this.emit({ type: "actionPendingChanged", pending: false });
+          this.pendingReject(new AdapterError("WS_ERROR", message, false));
+          this.pendingResolve = null;
+          this.pendingReject = null;
+        }
         this.emit({
           type: "aiDriverFault",
           id: data.fault.id,
