@@ -715,6 +715,10 @@ export class P2PHostAdapter implements EngineAdapter {
   /** Native AI faults are terminal and must also be replayed to a guest that
    * reconnects after the live PeerJS fan-out completed. */
   private nativeAiDriverFault: NativeAiDriverFault | null = null;
+  /** The local host must render a restored native fault once the bridge has
+   * delivered its fenced final snapshot. Keep this separate from the durable
+   * fault itself: rehydration sets the latter before the bridge replays it. */
+  private deliveredNativeAiDriverFault: NativeAiDriverFault | null = null;
   readonly supportsMatchConcede: true | undefined;
   private matchConcedeSent = false;
 
@@ -1994,8 +1998,29 @@ export class P2PHostAdapter implements EngineAdapter {
   private async handleNativeAiDriverFault(
     fault: { id: number; revision: number; message: string },
   ): Promise<void> {
-    if (!this.ownsAuthority() || this.gameRunState === "terminal") return;
+    if (!this.ownsAuthority()) return;
+
+    if (this.nativeAiDriverFault !== null) {
+      // A resumed adapter is already terminal because its durable fault was
+      // rehydrated before the native bridge reconnects. Accept only that exact
+      // replay; a duplicate or a different terminal record must not create a
+      // second host error or overwrite the persisted cause.
+      if (
+        this.nativeAiDriverFault.id !== fault.id
+        || this.nativeAiDriverFault.revision !== fault.revision
+        || this.nativeAiDriverFault.message !== fault.message
+        || this.deliveredNativeAiDriverFault !== null
+      ) {
+        return;
+      }
+      this.deliveredNativeAiDriverFault = fault;
+      this.emit({ type: "error", message: fault.message });
+      return;
+    }
+
+    if (this.gameRunState === "terminal") return;
     this.nativeAiDriverFault = fault;
+    this.deliveredNativeAiDriverFault = fault;
     this.gameRunState = "terminal";
     this.saveSession();
     await Promise.all([...this.guestSessions].map(async ([playerId, session]) => {

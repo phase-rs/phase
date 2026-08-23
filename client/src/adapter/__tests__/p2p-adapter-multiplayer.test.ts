@@ -1377,6 +1377,73 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(messages[1]).toMatchObject({ type: "ai_driver_fault", ...fault });
   });
 
+  it("renders a persisted native AI driver fault once when the host resumes", async () => {
+    const { peer, onGuestConnected } = createFakePeer();
+    const fault = { id: 7, revision: 3, message: "Native AI driver stopped" };
+    const adapter = new P2PHostAdapter(
+      {
+        player: { main_deck: ["Mountain"], sideboard: [] },
+        opponent: { main_deck: ["Forest"], sideboard: [] },
+        ai_decks: [],
+      },
+      peer as unknown as Peer,
+      onGuestConnected,
+      2,
+      commanderConfig(),
+      undefined,
+      5_000,
+      undefined,
+      true,
+      undefined,
+      {
+        gameId: "native-resume-fault",
+        roomCode: "ABCDE",
+        resumeData: {
+          session: {
+            gameId: "native-resume-fault",
+            roomCode: "ABCDE",
+            sessionKey: "native-resume-fault-session",
+            useBroker: false,
+            playerTokens: {},
+            guestDecks: {},
+            kickedTokens: [],
+            eliminatedSeats: [],
+            playerCount: 2,
+            hostDeckData: {
+              player: { main_deck: ["Mountain"], sideboard: [] },
+              opponent: { main_deck: ["Forest"], sideboard: [] },
+              ai_decks: [],
+            },
+            gameStarted: true,
+            nativeAiDriverFault: fault,
+            nativeSession: {
+              gameCode: "native-game",
+              fullKey: { game_code: "native-game", generation: 1 },
+              playerTokens: { 0: "native-host-token" },
+            },
+          },
+        },
+      },
+      {},
+    );
+    nativeWebSocketMocks.initializePregame.mockResolvedValue(NATIVE_HOST_ATTACHMENT);
+
+    const events: Array<{ type: string; message?: string }> = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.initialize();
+
+    const host = adapter as unknown as {
+      handleNativeAiDriverFault: (incoming: typeof fault) => Promise<void>;
+    };
+    await host.handleNativeAiDriverFault(fault);
+    await host.handleNativeAiDriverFault(fault);
+    await host.handleNativeAiDriverFault({ ...fault, id: fault.id + 1 });
+
+    expect(events.filter((event) => event.type === "error")).toEqual([
+      { type: "error", message: fault.message },
+    ]);
+  });
+
   it("kick adds token to denylist; subsequent reconnect with same token is rejected", async () => {
     const { adapter, emitConnection } = makeHost(3, 5_000);
     await adapter.initialize();
