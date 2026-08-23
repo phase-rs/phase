@@ -476,7 +476,7 @@ direct access to it.
 
 ```text
 if source_pool.includes_face_up_exile()
-    || state.format_config.custom_rules's legacy.pre_m10_wish_reaches_exile flag is set
+    || state.format_config.custom_rules's legacy.wish_scope == WishOutsideGameScope::PreM10ReachesExile
 {
     choices.extend(collect_face_up_exile_candidates(state, ability, filter));
 }
@@ -501,13 +501,20 @@ the M10 change* — cite CR 400.11 / 400.11a (the modern boundary being relaxed)
 and CR 701.23j, exactly as mana burn cites the obsolete-glossary entry. The flag
 does **not** implement current CR; it deliberately re-enables removed behavior.
 
-**Naming history (resolved — canonical name is `pre_m10_wish_reaches_exile`
-everywhere in this proposal, including the pseudocode above).** The
-first-pass placeholder name, `pre_m10_wish_templating`, mislabeled a
-*functional pool-scope* toggle as a *wording* one. Flagged by maintainer
-review as a stale reference still appearing in this file when it was
-already reconciled in PLAN.md — fixed here to match. This is not a no-op /
-wording-only flag; it is a real, testable pool-widening.
+**Naming history (resolved — canonical field is `wish_scope:
+WishOutsideGameScope`, its `PreM10ReachesExile` variant is what this section
+means throughout, including the pseudocode above).** Two renames, both
+tracked here so a reader hitting an old name in a stray comment isn't
+confused: the first-pass placeholder `pre_m10_wish_templating` (a bool)
+mislabeled a *functional pool-scope* toggle as a *wording* one, so it became
+`pre_m10_wish_reaches_exile` (still a bool) during round 1. That name was
+itself superseded during the round-4 typed-enum conversion (CONTEXT.md
+"Maintainer review round 4," point 3) — the field is `wish_scope` and the
+type is `WishOutsideGameScope` now. An intermediate maintainer-review pass
+fixed this section's references to the ROUND-1 rename but missed that the
+ROUND-4 rename needed the same reconciliation — caught by an automated
+review pass on the following commit and fixed here in the same pass. This is
+not a no-op / wording-only flag; it is a real, testable pool-widening.
 
 ## 10. Legend rule — historical scope change is REAL; engine hardcodes modern; flag is SMALL
 

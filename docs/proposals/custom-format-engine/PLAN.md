@@ -241,6 +241,28 @@ StructuralRules {
 //    the boundary — never constructed, never sent, never silently accepted
 //    — so nothing downstream needs to guard against it, and no consumer
 //    needs `.expect()`/`.unwrap()` on `custom_rules`.
+//
+//    **Widened this round (caught by an automated review pass, and a real
+//    finding, not overreach — see below): `sideboard_policy` and
+//    `uses_commander` are PLAIN serialized fields on `FormatConfig` today
+//    (confirmed: `#[serde(default)]` on `supplies_fixed_deck`, no field has
+//    `#[serde(skip)]`), meaning a hand-crafted or corrupted wire payload
+//    could already set `format: GameFormat::Commander` with
+//    `uses_commander: false` and nothing validates the two agree — for
+//    BUILT-IN formats, today, before this proposal touches anything. Adding
+//    a Custom-only consistency check would leave that pre-existing gap
+//    exactly as wide as it already is, just alongside a narrower one for
+//    Custom. Since this validation function is the natural place to close
+//    it, `validate_custom_rules_consistency` checks derived-field agreement
+//    for EVERY format, not only `Custom`: `sideboard_policy ==
+//    (match format { Custom(_) => custom_rules.structural.sideboard_policy,
+//    other => other.sideboard_policy() })`, and the equivalent for
+//    `uses_commander` and `supplies_fixed_deck`. This is a small, genuine
+//    improvement to existing behavior that falls out of building the
+//    Custom-format check correctly, not scope creep invented for its own
+//    sake — flag it to whoever reviews the implementation as a
+//    pre-existing-gap fix bundled with new work, in case that combination
+//    needs its own sign-off.
 // 2. `sideboard_policy` becomes a STORED FIELD on `FormatConfig`
 //    (`pub sideboard_policy: SideboardPolicy`), computed once at
 //    construction — this MATCHES the existing pattern `uses_commander` and
@@ -253,16 +275,23 @@ StructuralRules {
 //    as how `uses_commander`/`supplies_fixed_deck` are already populated.
 // 3. Every call site above migrates from calling `.sideboard_policy()` /
 //    `.uses_commander()` on a bare `GameFormat` to reading the STORED FIELD
-//    on the `FormatConfig` (or `DeckCompatibilityRequest`) it already has —
-//    or, where the current signature only carries a bare `GameFormat`
-//    (`companion_offers`, `companion_starting_deck`,
-//    `DeckCompatibilityRequest.selected_format`), the signature widens to
-//    carry the resolved fields (either the whole `&FormatConfig`, or a
-//    small `ResolvedFormatFacts { uses_commander: bool, sideboard_policy:
-//    SideboardPolicy }` copy-type, whichever is less invasive at each call
-//    site — a per-site judgment call for implementation, not resolved here,
-//    but the fields themselves are already validated and computed by step 1
-//    regardless of which shape carries them).
+//    on the `FormatConfig` it already has. Two shapes, not a free per-site
+//    choice (tightened this round — a real distinction, not overreach):
+//    - `companion_offers` / `companion_starting_deck` genuinely only need
+//      the two derived facts (`uses_commander`, `sideboard_policy`), not the
+//      full ruleset — a small `ResolvedFormatFacts { uses_commander: bool,
+//      sideboard_policy: SideboardPolicy }` copy-type is the right, minimal
+//      widening for these two.
+//    - `DeckCompatibilityRequest.selected_format` is DIFFERENT: its own
+//      dispatch `match` routes to `evaluate_custom_format` (§3) for
+//      `Custom`, which needs `legal_sets`/`banned`/`restricted` — the FULL
+//      `CustomFormatRules`, not just two derived booleans. A facts-only
+//      struct would leave this call site unable to actually evaluate
+//      Custom-format deck legality at all. This request struct needs either
+//      the whole `&FormatConfig` or an explicit
+//      `custom_rules: Option<CustomFormatRules>` field alongside
+//      `selected_format`, resolved via a validated registry/config lookup
+//      before Custom dispatch — not the lighter facts struct.
 // 4. This list is the one confirmed by direct grep this session — treat it
 //    as the discovered floor, not a ceiling. Before implementation, run the
 //    same audit this repo's `add-engine-variant` skill already prescribes
@@ -352,21 +381,29 @@ LegalityRules {
 //
 // This reuses EXISTING infrastructure rather than inventing a new
 // negotiation protocol: `server-core/src/protocol.rs` already defines
-// `PROTOCOL_VERSION` / `MIN_SUPPORTED_PROTOCOL` / `LOBBY_PROTOCOL_VERSION`
-// (currently `PROTOCOL_VERSION = 33`), checked at connection establishment
-// with its own doc comment stating it "refuses to proceed on mismatch" —
-// confirmed this session, not assumed. The fix: bump `PROTOCOL_VERSION` in
-// the same release that ships `GameFormat::Custom`. A client below the new
-// `MIN_SUPPORTED_PROTOCOL` is rejected at THIS EXISTING handshake gate,
-// before it ever attempts to deserialize a `FormatConfig` carrying a variant
-// it doesn't know — the same mechanism that already protects every other
-// protocol-breaking change, not a custom-format-specific negotiation layer.
-// This is deliberately narrower than "negotiate custom-format support as an
-// independent capability": it ties custom-format support to the same
-// coarse-grained protocol version every other breaking wire change already
-// uses, which is consistent with how this codebase handles compatibility
-// today rather than introducing a new, finer-grained capability-negotiation
-// concept alongside it.
+// `PROTOCOL_VERSION` / `MIN_SUPPORTED_PROTOCOL` (currently
+// `PROTOCOL_VERSION = 33`) AND a SEPARATE `LOBBY_PROTOCOL_VERSION` /
+// `MIN_SUPPORTED_LOBBY_PROTOCOL` pair — its own doc comment states this is
+// "the wire version of the lobby message set, independent of
+// `PROTOCOL_VERSION`" (confirmed this session, not assumed). Both are
+// checked at their respective handshakes with a "refuses to proceed on
+// mismatch" doc comment.
+//
+// **Bump BOTH, not just `PROTOCOL_VERSION`** (caught by an automated review
+// pass — a real refinement, not just style): format selection itself
+// happens during LOBBY setup, before a game's `FormatConfig` ever crosses
+// the general game-state wire, so `LOBBY_PROTOCOL_VERSION` /
+// `MIN_SUPPORTED_LOBBY_PROTOCOL` is the handshake that actually needs to
+// reject an incompatible client — an old broker/client could otherwise get
+// past the lobby handshake and only fail later, at general `FormatConfig`
+// deserialization, with a worse failure mode than a clean upfront rejection.
+// Bump `PROTOCOL_VERSION` too, since a custom format's resolved
+// `CustomFormatRules` payload does cross the general game-state wire once
+// the game itself starts. The fix: bump both constants in the same release
+// that ships `GameFormat::Custom`, using the existing lobby-handshake and
+// general-handshake validation symbols exactly as they already work for
+// every other breaking wire change — not a new, custom-format-specific
+// negotiation layer.
 
 ReprintPolicy {                         // enum — enforceable today only at set-code granularity
     OriginalPrintingsOnly,              // 93-94 / Classic intent (see limitation)
@@ -443,11 +480,14 @@ ManaBurnPolicy {                        // RESEARCH §5
 CombatDamageTiming {                    // RESEARCH §6
     Modern,                             // CR 510.2: simultaneous, does not use
                                         // the stack. DEFAULT.
-    OnStack,                            // pre-modern: combat damage was a
-                                        // triggered ability that used the
-                                        // stack, giving players a priority
-                                        // window between assignment and
-                                        // dealing. LARGE — see §4 and §8.
+    OnStack,                            // pre-modern (pre-6th-edition): assigned
+                                        // combat damage was itself placed ON
+                                        // THE STACK as a stack object — NOT a
+                                        // triggered ability — giving players a
+                                        // priority window between assignment
+                                        // and dealing before it resolved. A
+                                        // reversal of CR 510.2's control flow.
+                                        // LARGE — see §4 and §8.
 }
 
 WishOutsideGameScope {                  // RESEARCH §9
@@ -944,6 +984,21 @@ or it does not appear as a selectable format at all. This directly overrides
 this document's own earlier "Middle School / Classic Magic are
 playable-with-caveat until damage-on-stack lands" framing (§4, §8) — that
 framing is retracted, not merely superseded.
+
+**This must be a technical gate, not a documented convention (sharpened by
+an automated review pass — correct to push on, since "don't register it, per
+this doc" is not itself an enforcement mechanism a future author is bound
+by).** `custom_format_registry()` — the function `custom_format_registry() ->
+Vec<CustomFormatDef>` already named in §1 — validates every preset it would
+return against a small static capability table (e.g. `const
+IMPLEMENTED_LEGACY_AXES: &[...]`, populated as each axis in §4 actually
+lands) BEFORE including it in the returned list. A preset declaring an axis
+not yet in that table is dropped from the registry (or the registry
+construction fails a debug assertion / startup check, implementation's
+choice) — a future author who adds `middle_school()` before
+`CombatDamageTiming::OnStack` lands gets a build-time or startup-time
+failure, not a silently-ignored doc-comment warning. This is the concrete
+mechanism §6's "actually enforced, not just documented" test targets.
 - `swedish_old_school()` (phase 1) is currently BLOCKED from registration by
   this rule on TWO independent grounds: it declares a `ReprintPolicy`, which
   §3 confirms is not yet enforced by the evaluator at all, and CONTEXT.md's
