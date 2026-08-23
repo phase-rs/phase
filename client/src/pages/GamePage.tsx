@@ -1943,7 +1943,7 @@ function GamePageContent({
         {/* Ability choice picker (planeswalkers, multi-ability permanents) */}
         <AbilityChoiceModal />
 
-        {/* Player-attached Aura viewer (Curse cycle, Faith's Fetters, etc.).
+        {/* Player-attached Aura viewer (Curse cycle, Paradox Haze, etc.).
             Mounted here — not from inside HudPlate where the badge lives —
             so the dialog's `fixed inset-0` shell anchors to the viewport
             instead of HudPlate's transform-CB bounding box. */}

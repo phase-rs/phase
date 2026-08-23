@@ -93,7 +93,7 @@ export function TargetingOverlay() {
   // CHOICE (not a target), but the action shape mirrors ExploreChoice
   // (`GameAction::ChooseTarget` with the chosen ObjectId).
   const isReturnAsAuraTarget = waitingFor?.type === "ReturnAsAuraTarget";
-  // CR 115.7: Single-target retargets (Bolt Bend, Redirect) are picked on the
+  // CR 115.7: Single-target retargets (Bolt Bend, Misdirection) are picked on the
   // board through this overlay; multi-target retargets keep the dialog.
   const isRetargetChoice = waitingFor?.type === "RetargetChoice" && waitingFor.data.scope.type === "Single";
   // CR 115.7: Name the spell/ability being retargeted (the entry the redirect
