@@ -284,8 +284,8 @@ fn uncrewed_vehicle_leg_is_targetable_but_small_creature_is_not() {
     outcome.assert_zone(&[vehicle], Zone::Graveyard);
 }
 
-/// Row 17: the EXCLUSION-ONLY leg shape. CR 205.4b: "nonartifact permanent"
-/// scopes the disjunct by exclusion, producing `[Permanent, Non(Artifact)]` —
+/// Row 17: the EXCLUSION-ONLY leg shape. "nonartifact permanent" scopes the
+/// disjunct by exclusion, producing `[Permanent, Non(Artifact)]` —
 /// no creature noun anywhere in it. An enchantment satisfies that leg and CR
 /// 208.3 gives it no power, so distributing "with power 4 or greater" there
 /// makes `pt_value_from_pair`'s `power.unwrap_or(0)` reject every noncreature
@@ -345,7 +345,7 @@ fn exclusion_only_leg_admits_a_powerless_enchantment_but_still_excludes_artifact
     // inheriting the creature leg's power restriction.
     assert!(
         legal.contains(&TargetRef::Object(enchantment)),
-        "CR 205.4b + CR 208.3: a nonartifact permanent with no power must be \
+        "CR 208.3: a nonartifact permanent with no power must be \
          legal through the unrestricted exclusion leg: {legal:?}"
     );
     // Reach-guard: the filter is not simply matching everything.

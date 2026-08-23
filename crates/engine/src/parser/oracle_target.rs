@@ -4800,8 +4800,8 @@ fn type_filter_anchors_creature(tf: &TypeFilter) -> bool {
         TypeFilter::AnyOf(inner) => {
             !inner.is_empty() && inner.iter().all(type_filter_anchors_creature)
         }
-        // CR 205.4b: a negation scopes by exclusion, which is not a creature
-        // noun — see EXCLUSION IS NOT AN ANCHOR above. CR 308.1: `Kindred`
+        // A negation scopes by exclusion, which is not a creature noun — see
+        // EXCLUSION IS NOT AN ANCHOR above. CR 308.1: `Kindred`
         // alone names no creature either, since each kindred card has another
         // card type. The remaining card types are noncreature, and
         // `Permanent`/`Card`/`Any` are type-open quantifiers.
@@ -15608,7 +15608,7 @@ mod tests {
                 TypeFilter::Creature,
                 TypeFilter::Subtype("Vehicle".to_string()),
             ])],
-            // CR 205.4b + CR 208.3: exclusion-only legs. `Non(Artifact)` is
+            // CR 208.3: exclusion-only legs. `Non(Artifact)` is
             // satisfied by a powerless enchantment.
             vec![
                 TypeFilter::Any,
