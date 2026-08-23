@@ -120,27 +120,65 @@ CustomFormatRules {                     // the resolved ruleset payload
 
 // Axis A — "FFA that's super flexible" (maintainer framing, see CONTEXT.md
 // "Maintainer input"). Every field here already exists on `FormatConfig`
-// (`types/format.rs:174-202`) and several are already host-adjustable today in
+// (`types/format.rs:174-212` — the full struct, re-read directly for this
+// revision, not from memory) and several are already host-adjustable today in
 // `client/src/components/lobby/HostSetup.tsx` for a chosen built-in
 // `GameFormat` — this struct is a NAMED, SAVEABLE snapshot of that same
 // knob set, not new game-rule surface. This is the axis the lobby "save as
 // custom format" action captures.
+//
+// REVISED per maintainer review round 2 (CONTEXT.md point 2): the first-pass
+// version of this struct dropped several behavior-bearing `FormatConfig`
+// fields. Full accounting against the real struct:
+//   - Included below: every FIELD that is independently meaningful and not
+//     derivable from something else already in this struct.
+//   - `uses_commander: bool` — NOT included as a stored field. It is derived
+//     as `commander_damage_threshold.is_some()` at read time, mirroring how
+//     it already mirrors `GameFormat` for built-in formats. Storing it
+//     separately would let it drift out of sync with the threshold.
+//   - `supplies_fixed_deck: bool` — NOT included. Always `false` for
+//     `GameFormat::Custom`; no custom-format use case for an engine-supplied
+//     fixed deck exists today. Flagged, not silently dropped, if that need
+//     ever arises (it would need its own design, analogous to Momir's
+//     Madness).
+//   - `allow_debug_actions: bool` — deliberately EXCLUDED. Its own doc
+//     comment states it is "orthogonal to format" — a session capability
+//     flag, not format identity. Belongs on `FormatConfig` directly, set
+//     independently of which format (built-in or custom) is chosen.
+//   - `sideboard_policy` — NEW finding: this is NOT a `FormatConfig` field.
+//     It's a `GameFormat` method (`format.rs:270`,
+//     `fn sideboard_policy(self) -> SideboardPolicy`), computed from the
+//     enum variant for built-in formats. `GameFormat::Custom` has no such
+//     derivation source, so `StructuralRules` must carry it explicitly.
 StructuralRules {
     starting_life: i32,
     min_players: u8,
     max_players: u8,
     deck_size: u16,
     singleton: bool,
+    command_zone: bool,
+    commander_damage_threshold: Option<u8>,
     range_of_influence: Option<Box<RangeOfInfluenceConfig>>,  // mirrors FormatConfig's field exactly
     team_based: bool,
+    archenemy_player: Option<PlayerId>,
+    sideboard_policy: SideboardPolicy,  // new — no derivation source for Custom, see note above
 }
 
 // Axis B — legality/era-rules. Genuinely new data; no existing UI surface.
 // This is what makes the four EC formats rules-correct; kept exactly as
 // originally designed, just now named as its own struct rather than sharing
 // `CustomFormatRules`'s top level with Axis A undifferentiated.
+//
+// REVISED per maintainer review round 2 (CONTEXT.md point 1): `legal_sets`
+// was a bare `Vec<SetCode>`, which cannot distinguish "no set restriction"
+// (Axis A's default) from "restricted to the empty set" (which would reject
+// every card) — the evaluator (§3) checked membership unconditionally, so an
+// empty Vec silently rejected everything. `Option<Vec<SetCode>>` fixes this:
+// `None` = unrestricted (every card passes the pool check), `Some(list)` =
+// restricted to `list`. This is the same `Option<T>`-over-ambiguous-sentinel
+// pattern CLAUDE.md already prescribes elsewhere in this codebase.
 LegalityRules {
-    legal_sets: Vec<SetCode>,           // set codes; membership = pool legality
+    legal_sets: Option<Vec<SetCode>>,   // None = unrestricted; Some(list) = pool membership
     reprint_policy: ReprintPolicy,
     banned: Vec<CardName>,              // fully illegal
     restricted: Vec<CardName>,          // legal, max 1 (CR 100.2b path)
@@ -149,12 +187,61 @@ LegalityRules {
 
 // A format saved from the lobby ("FFA, but I bumped starting life to 30 and
 // capped it at 4 players") sets `structural` and leaves `legality` at
-// defaults (no set restriction, no legacy rules) — a fully valid
-// `CustomFormatRules` value. The four EC formats set `legality` to real data
-// and `structural` to sane multiplayer/duel defaults. Neither axis requires
-// the other to be present; this is the orthogonality Block Constructed
-// already proved for `LegacyRuleSet` (§ below), now proved a second time
-// between Axis A and Axis B.
+// defaults (`legal_sets: None`, no legacy rules) — a fully valid
+// `CustomFormatRules` value that legitimately places no restriction on the
+// card pool. The four EC formats set `legality` to real data (`legal_sets:
+// Some([...])`) and `structural` to sane multiplayer/duel defaults. Neither
+// axis requires the other to be present; this is the orthogonality Block
+// Constructed already proved for `LegacyRuleSet` (§ below), now proved a
+// second time between Axis A and Axis B — and the `Option` fix above is what
+// makes Axis A's "no restriction" case a real, correctly-representable value
+// rather than an accidental illegal state.
+
+// --- Identity, persistence, and transport (new — maintainer review round 2,
+// CONTEXT.md point 3) ---
+//
+// The original design conflated two different identity concerns under one
+// `CustomFormatId`. Separating them:
+//
+//   (a) AGREEMENT WITHIN ONE GAME — already solved. `FormatConfig.custom_rules`
+//       (below) carries the full resolved `CustomFormatRules` VALUE, not a
+//       lookup key. A peer receiving a host's `FormatConfig` gets the entire
+//       ruleset directly — no registry lookup, no need to "already know" a
+//       custom format by ID. This was already correct; it just wasn't stated
+//       explicitly enough to distinguish from (b).
+//   (b) A PLAYER'S REUSABLE SAVED FORMAT — was never designed. This is a
+//       CLIENT-SIDE-ONLY concern:
+//
+// SavedCustomFormat {                 // client-local only — NOT an engine or WASM type
+//     local_id: Uuid,                 // or any locally-unique key; never sent over the wire
+//     name: String,                   // player-chosen display name
+//     rules: CustomFormatRules,       // the exact payload a game-start packages into FormatConfig
+// }
+//
+// A player's "my saved formats" list lives in local storage / a user
+// profile, entirely outside the engine. The engine never learns about
+// "saved format #3" — it only ever receives a fully-resolved
+// `CustomFormatRules` value at game-start time, exactly as it already does
+// for the four EC/Swedish presets. `CustomFormatId` therefore stays what it
+// was always designed to be: a lightweight, `Copy`, per-`GameState`
+// transport tag. Well-known, stable IDs matter only for the registry-backed
+// presets (so both peers' registries can label the same preset the same
+// way); an ad-hoc lobby-saved format can use a single reserved sentinel ID,
+// since the ID itself carries no meaning once the full payload travels with
+// it.
+//
+// VERSION SKEW (flagged, not fully resolved here): an older client that has
+// never heard of the `GameFormat::Custom` enum variant at all cannot be
+// rescued by `#[serde(default)]` on `custom_rules` — the failure happens at
+// the enum-variant level during deserialization of `format: GameFormat`
+// itself, before any field-level default ever applies. This is the same
+// class of risk any new `GameFormat` variant already carries, but custom
+// formats make it far more frequent in practice (a new custom format can be
+// created at any time, not just at a client release). The lobby-join flow
+// needs an explicit compatibility check — reject with a clear "this game
+// needs a custom-format-capable client" message — rather than relying on
+// deserialization to fail gracefully. Not designed in depth here; flagged as
+// a real requirement for whoever implements the lobby-join handshake.
 
 ReprintPolicy {                         // enum — enforceable today only at set-code granularity
     OriginalPrintingsOnly,              // 93-94 / Classic intent (see limitation)
@@ -257,11 +344,21 @@ custom_format_registry() -> Vec<CustomFormatDef>   // parallel to GameFormat::re
 
 **Lobby saves (Axis A)** produce the identical `CustomFormatDef` shape from a
 different origin — a name plus the live `FormatConfig` a host just finished
-tuning, with `legality` left at defaults:
+tuning, with `legality` left at defaults (`legal_sets: None`, empty
+banned/restricted, default `LegacyRuleSet`):
 
 ```text
 CustomFormatDef::from_lobby_config(name: String, config: &FormatConfig) -> CustomFormatDef
 ```
+
+Per maintainer review round 2 (CONTEXT.md point 2): this conversion must
+capture every `StructuralRules` field from the live `FormatConfig` — full
+fidelity, not a partial snapshot. If a future caller ever invokes this from a
+`FormatConfig` state this conversion cannot faithfully represent (there is
+none identified today, since `StructuralRules` now mirrors every
+independently-meaningful `FormatConfig` field), it must reject explicitly
+rather than silently drop data. The `CustomFormatId` this constructor
+allocates is the ad-hoc sentinel described above, not a registry-stable ID.
 
 Both paths converge on the same `custom_rules: Option<CustomFormatRules>` field
 and the same `GameFormat::Custom(CustomFormatId)` variant — there is exactly
@@ -277,10 +374,15 @@ the frontend labels/short-labels/descriptions just like `FormatMetadata`.)
 Axis B's MVP").** This is the first Axis B preset to actually ship, chosen
 because it needs zero `LegacyRuleSet` engine wiring:
 
-- `swedish_old_school()` — sets = [LEA, LEB, 2ED, ARN, ATQ, LEG, DRK] (verify
-  MTGJSON codes at implementation time, same caveat as below); banned = [] (a
-  genuinely empty list — the schema must support this, not assume non-empty);
-  restricted = [23 names, verbatim in CONTEXT.md]; legacy = default (all
+- `swedish_old_school()` — sets = `Some([LEA, LEB, 2ED, ARN, ATQ, LEG, DRK,
+  SUM])` (verify MTGJSON codes at implementation time, same caveat as below —
+  `SUM` for "Summer Magic" is a placeholder pending that verification; fixed
+  this round to include Summer Magic, which CONTEXT.md's legal-sets list
+  already named but this preset sketch had dropped); banned = `[]` (a
+  genuinely empty list — the schema must support this, not assume non-empty,
+  and `legal_sets: Some(...)` here — never `None` — since this preset DOES
+  restrict the pool); restricted = [**25** names, verbatim in CONTEXT.md —
+  corrected this round from a "23" miscount]; legacy = default (all
   `false`/`Modern` — no mana burn, no damage-on-stack, no Wish/legend-rule
   reversion). Ante-card handling and reprint policy are open per CONTEXT.md
   items 5–6; do not encode either without resolving those first.
@@ -300,7 +402,9 @@ mirroring how `FormatConfig::pioneer()` spreads `..Self::standard()`:
 - `middle_school()` — sets = Fourth Edition..Scourge; restricted = []; banned =
   [25 names]; reprint = AllowAnyPrinting; legacy = {mana_burn, damage_uses_stack,
   pre_m10_wish_reaches_exile}.
-- `classic_magic()` — sets = Alpha..Scourge; restricted = [37 names]; banned =
+- `classic_magic()` — sets = Alpha..Scourge; restricted = [**44** names —
+  corrected this round from a "37" mislabel; recounted directly against
+  RESEARCH.md's verbatim list]; banned =
   [11 names]; reprint = OriginalPrintingsOnly; legacy = {mana_burn,
   damage_uses_stack, pre_m10_wish_reaches_exile}.
 
@@ -315,9 +419,15 @@ time by a unit test that asserts every banned/restricted name resolves in the
 `evaluate_custom_format(db, request, rules) -> CompatibilityCheck`:
 
 1. Structural checks (deck size, sideboard) via existing `FormatConfig` fields.
-2. Pool legality: for each card, `db.printings_for(name)`; legal iff any
-   printing's set code ∈ `rules.legal_sets`. Else → illegal ("not legal in
-   <format>"), reusing the existing `illegal_cards` accumulation shape.
+2. Pool legality: `match &rules.legal_sets { None => every card passes this
+   check (no set restriction — Axis A's default), Some(sets) => for each
+   card, db.printings_for(name); legal iff any printing's set code ∈ sets,
+   else → illegal ("not legal in <format>"), reusing the existing
+   `illegal_cards` accumulation shape }`. **Fixed per maintainer review round
+   2** (CONTEXT.md point 1): the prior version checked membership
+   unconditionally against a bare `Vec`, so an empty Vec (Axis A's actual
+   default) rejected every card instead of none. The `None` arm is the
+   correctness-critical addition — test both arms independently (§6).
 3. Banned: name ∈ `rules.banned` → illegal (distinct "banned" label).
 4. Restricted: name ∈ `rules.restricted` → insert into `restricted_canonical`,
    then call the **existing** `restricted_copy_violations` (CR 100.2b, `<= 1`).
@@ -340,12 +450,50 @@ Swedish ruleset makes no mention of any of these rules and uses fully modern
 defaults. This section is unchanged from the original design and remains the
 correct plan for phase 2's four EC-format presets.
 
-- **Mana burn** (`LegacyRuleSet.mana_burn`): at the step-end drop site
-  (`types/mana.rs:1707`), tally dropped units per player; after the drain, if
-  the flag is set, deal that many damage to the owner and emit a new
-  `GameEvent::ManaBurn { player_id, amount }`. Annotate as a pre-M10 rule
-  removed by the M10 update (cite the obsolete-glossary entry
-  `MagicCompRules.txt:8277`). ~Small; no new state machine.
+- **Mana burn** (`LegacyRuleSet.mana_burn`) — **REWRITTEN per maintainer review
+  round 2** (CONTEXT.md point 4); the original "deal damage at the step-end
+  drop site" framing was wrong on two independent axes, both verified this
+  session:
+  - **Life loss, not damage.** `docs/MagicCompRules.txt:8278` (obsolete-rules
+    glossary): "unspent mana caused a player to **lose life**." Damage and
+    life loss are behaviorally different in this engine (damage can be
+    prevented/redirected and triggers "dealt damage" abilities; life loss
+    does neither) — this is not a cosmetic wording choice.
+  - **Phase-boundary, not every `Phase` enum transition.** The engine's own
+    `Phase` enum (`types/phase.rs`) flattens all of MTG's steps AND phases
+    into one 11-variant list (e.g. `DeclareAttackers`, `DeclareBlockers`,
+    `CombatDamage` are three separate `Phase` variants, all within the single
+    real MTG "Combat" phase). Modern CR 500.5 empties the mana pool at every
+    one of these transitions, and the engine's existing
+    `apply_empty_mana_pool_event` (`turns.rs`) already fires on every one via
+    `player_unspent_mana_loss_causes_life_loss`
+    (`static_abilities.rs:1237`, backed by `StaticMode::UnspentManaLossCausesLifeLoss`
+    — an existing, generic "Yurlok-class" mechanism for a card-granted
+    version of this same shape). That per-transition granularity is correct
+    for the existing card-granted static ability, but old-school mana burn
+    must fire only when actually **leaving one of the 5 real MTG phases**
+    (Beginning, Precombat Main, Combat, Postcombat Main, Ending) — not on
+    every step within one.
+
+  **Design**: add a small `fn phase_group(p: Phase) -> PhaseGroup` mapping
+  (a 5-variant enum grouping the 11 `Phase` variants by their real MTG
+  phase — mirrors the ad-hoc `in_combat` bool `turns.rs` already computes
+  inline for combat-duration tracking, generalized to all 5 groups). At the
+  same `apply_empty_mana_pool_event` call site, when `LegacyRuleSet.mana_burn`
+  is set AND `phase_group(current) != phase_group(next)` (a genuine
+  phase-group boundary, not an intra-phase step transition), apply a
+  **second, independent** life-loss contribution for that player's dropped
+  mana units — alongside, not merged into, the existing
+  `player_unspent_mana_loss_causes_life_loss` check, since the two have
+  different triggers (a format-level flag vs. a card-granted static ability)
+  and could theoretically both apply to the same event. Emit a
+  `GameEvent::ManaBurn { player_id, amount }` for the format-level
+  contribution specifically, so it stays distinguishable from a Yurlok-class
+  event in tests and in any future "why did I lose life" UI surface.
+  Annotate as a pre-M10 rule removed by the M10 update (cite the
+  obsolete-glossary entry `MagicCompRules.txt:8277-8278`). Still small — one
+  new grouping helper, one new gated life-loss contribution at an existing
+  call site, no new state machine.
 - **Pre-M10 Wish exile access** (`pre_m10_wish_reaches_exile`): fully traced in
   RESEARCH §9. This is a REAL functional difference (not wording-only): pre-M10,
   the "removed from the game" zone counted as *outside the game*, so a Wish could
@@ -394,18 +542,39 @@ legality logic on the client.
 
 - Set-membership legality: assert cards from in-pool and out-of-pool sets pass /
   fail — for arbitrary set lists, not just the four presets.
+- **`legal_sets: None` accepts every card** (new — maintainer review round 2,
+  CONTEXT.md point 1): a synthetic `CustomFormatRules` with `legal_sets: None`
+  must legalize a card from an arbitrary, otherwise-never-configured set —
+  the discriminating case that catches the empty-`Vec`-rejects-everything
+  regression directly. Paired with the existing `Some(list)` restricted case
+  above so both arms of the `Option` are independently covered, not just the
+  restricted one.
 - Restricted path: 2 copies of a restricted-list name flags; 1 copy passes —
   driven by a synthetic def, proving the general mechanism.
-- Preset integrity: every banned/restricted name in all four presets resolves in
-  the DB; each preset's `legacy` matches the EC spec.
-- Mana burn: unspent N mana at step end deals N with flag on, 0 with flag off —
-  tests the flag+hook, not a specific card.
+- Preset integrity: every banned/restricted name in all four EC presets plus
+  `swedish_old_school()` resolves in the DB; each preset's `legacy` matches
+  its source ruleset; each preset's stated list *count* in a doc comment
+  matches `.len()` of the actual list (guards against the round-2 23-vs-25 /
+  37-vs-44 class of mislabeling recurring silently).
+- **Mana burn phase-boundary gating** (revised — maintainer review round 2,
+  CONTEXT.md point 4): with `LegacyRuleSet.mana_burn` set, unspent mana at a
+  transition WITHIN one MTG phase (e.g. `DeclareAttackers` → `DeclareBlockers`,
+  same `PhaseGroup::Combat`) must NOT cause life loss; unspent mana at a
+  transition CROSSING a phase-group boundary (e.g. `EndCombat` →
+  `PostCombatMain`) must cause life loss equal to the unspent amount. Assert
+  life loss specifically (not damage — no `GameEvent::DamageDealt`, no
+  prevention-shield interaction). With the flag off, neither transition
+  causes any loss. Tests the flag + phase-group hook generically, not a
+  specific card.
 - Serde round-trip of `FormatConfig` with `Some(custom_rules)` and `None`.
 - `CustomFormatDef::from_lobby_config`: a `FormatConfig` with non-default
-  `starting_life`/`max_players`/`deck_size`/`range_of_influence`/`team_based`
-  round-trips into a `CustomFormatRules.structural` that matches field-for-
-  field, with `legality` at its defaults — the general Axis-A save mechanism,
-  not a specific saved format's values.
+  `starting_life`/`max_players`/`deck_size`/`range_of_influence`/`team_based`/
+  `command_zone`/`commander_damage_threshold`/`archenemy_player`/
+  `sideboard_policy` round-trips into a `CustomFormatRules.structural` that
+  matches field-for-field, with `legality` at its defaults (`legal_sets:
+  None`) — the general Axis-A save mechanism, not a specific saved format's
+  values. Include a case with `commander_damage_threshold: Some(_)` asserting
+  the derived `uses_commander` reads `true` without being stored separately.
 
 ## 7. Delivery surface — RESOLVED via maintainer input, see CONTEXT.md "Maintainer input"
 

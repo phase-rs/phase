@@ -57,7 +57,10 @@ during the match.
 
 ### Classic Magic
 - **Legal sets:** Alpha through Scourge (1993–2003) — the full pre-Mirrodin pool.
-- **Restricted (37):** Ancestral Recall, Balance, Black Lotus, Black Vise,
+- **Restricted (44 — corrected this round; the prior "(37)" label
+  disagreed with the enumerated list below, flagged by maintainer review
+  round 2 and recounted directly against this list):** Ancestral Recall,
+  Balance, Black Lotus, Black Vise,
   Braingeyser, Burning Wish, Channel, Demonic Consultation, Demonic Tutor, Fact
   or Fiction, Fastbond, Flash, Gush, Imperial Seal, Library of Alexandria,
   Lion's Eye Diamond, Lotus Petal, Mana Crypt, Mana Vault, Memory Jar, Maze of
@@ -65,7 +68,8 @@ during the match.
   Pearl, Mox Ruby, Mox Sapphire, Mystical Tutor, Necropotence, Regrowth,
   Shahrazad, Sol Ring, Strip Mine, Stroke of Genius, Time Walk, Timetwister,
   Tolarian Academy, Vampiric Tutor, Wheel of Fortune, Windfall, Yawgmoth's
-  Bargain, Yawgmoth's Will. (List as published; count the entries as canonical.)
+  Bargain, Yawgmoth's Will (44 names — the stated count and the enumerated
+  list must agree; see PLAN.md §6's new preset-integrity test requiring this).
 - **Banned:** Amulet of Quoz, Bronze Tablet, Chaos Orb, Contract from Below,
   Darkpact, Demonic Attorney, Falling Star, Jeweled Bird, Rebirth, Tempest
   Efreet, Timmerian Fiends.
@@ -143,32 +147,69 @@ Read `deck_validation.rs` copy-limit + restricted paths in full.
 - **Finding:** reuse `restricted_copy_violations` (the enforcement path), NOT
   `DeckCopyLimit::UpTo`. Correct the task's framing accordingly.
 
-## 5. Mana burn — SMALL; hook point identified
+## 5. Mana burn — SMALL; hook point identified (REVISED — maintainer review round 2)
 
-- Modern CR: **mana burn is obsolete.** `docs/MagicCompRules.txt:8277-8278`
-  glossary "Mana Burn (Obsolete)": "Older versions of the rules stated that
-  unspent mana caused a player to lose life… That rule no longer exists."
-  (Removed by the 2010 "M10" rules update.) So implementing it is adding an
-  *optional legacy rule* absent from current CR — annotate as pre-M10/removed,
-  citing the obsolete-glossary entry.
-- The engine already fully models unspent-mana emptying at step/phase
-  boundaries: `turns.rs:264` "CR 500.5: Mana pools empty between phases/steps",
-  routed through `enter_phase` → `drain_pending_phase_transition_progress`
-  (`turns.rs:295`) → a `ProposedEvent::EmptyManaPool` replacement pipeline
-  (`turns.rs:379`) → `apply_empty_mana_pool_decisions` (`types/mana.rs:1692`).
-- **The exact hook point** is the `UnitDisposition::Drop` arm
-  (`types/mana.rs:1707-1716`): each dropped unit is `player.mana_pool.mana
-  .remove(...)` and emits `GameEvent::ManaPoolEmptied`. Mana burn = count the
-  units actually dropped for a player during a step-end empty and, when the
-  active `LegacyRuleSet.mana_burn` flag is set, deal that many damage to that
-  player's owner at that same point.
-- **Size: small.** One flag check + a damage application at (or just after) the
-  drop site, plus a `GameEvent` for the burn. No new state machine. The infra
-  (per-unit disposition, APNAP drain, replacement pipeline) already exists.
-  Care needed: burn is per *point of unspent mana*, counted after replacement
-  effects (Kruphix/Horizon Stone `Keep` dispositions) have run — the Drop-arm
-  count already reflects that, which is why the drop site (not the pre-pipeline
-  pool) is the correct hook.
+The first pass of this section got two things wrong, both flagged by
+maintainer review and both re-verified directly this session:
+
+- **It's life loss, not damage.** Modern CR: **mana burn is obsolete.**
+  `docs/MagicCompRules.txt:8277-8278` glossary "Mana Burn (Obsolete)": "Older
+  versions of the rules stated that unspent mana caused a player to **lose
+  life**… That rule no longer exists." (Removed by the 2010 "M10" rules
+  update.) Life loss and damage are behaviorally distinct in this engine
+  (damage can be prevented/redirected and fires "dealt damage" triggers; life
+  loss does neither) — the original "deal that many damage" framing below was
+  wrong, not just imprecisely worded.
+- **It's per real MTG phase, not per engine `Phase` transition.** The
+  engine's `Phase` enum (`types/phase.rs`) is a flat 11-variant list that
+  represents BOTH MTG's 5 real phases and their internal steps as siblings
+  (e.g. `DeclareAttackers`, `DeclareBlockers`, `CombatDamage` are three
+  separate `Phase` variants, all inside the single real "Combat" phase).
+  Modern CR 500.5 empties the mana pool at every one of these transitions —
+  correct for the modern rule — but mana burn (verified directly: it applies
+  at end of **phase**, not at every step within one) must fire only when
+  actually crossing from one real MTG phase into another.
+
+Corrected findings:
+
+- The engine already fully models unspent-mana emptying at every `Phase`
+  transition: `turns.rs:264` "CR 500.5: Mana pools empty between
+  phases/steps", routed through `enter_phase` →
+  `drain_pending_phase_transition_progress` (`turns.rs:295`) → a
+  `ProposedEvent::EmptyManaPool` replacement pipeline (`turns.rs:379`) →
+  `apply_empty_mana_pool_decisions` (`types/mana.rs:1692`) →
+  `apply_empty_mana_pool_event` (`turns.rs`), whose own doc comment already
+  says "CR 106.4 + CR 703.4q: Apply the final replacement-ordered mana
+  dispositions as the step or phase ends, then apply one aggregate
+  Yurlok-class life-loss event."
+- **The engine already has a generic life-loss mechanism for exactly this
+  shape**, not previously connected to this design:
+  `player_unspent_mana_loss_causes_life_loss` (`static_abilities.rs:1237`,
+  backed by `StaticMode::UnspentManaLossCausesLifeLoss`) is checked inside
+  `apply_empty_mana_pool_event` on every `Phase` transition. This is correct
+  for the card-granted (Yurlok-class) version of this ability, which fires
+  every time ANY mana pool empties, at full modern CR 500.5 granularity. It
+  is the wrong granularity for a format-level `mana_burn` flag, which must
+  gate on real-phase boundaries only.
+- **The exact hook point for the format-level flag**: the same
+  `apply_empty_mana_pool_event` call site, gated additionally on a new
+  `fn phase_group(p: Phase) -> PhaseGroup` mapping (5 variants: Beginning,
+  PrecombatMain, Combat, PostcombatMain, Ending — grouping the 11 `Phase`
+  variants by which real MTG phase they belong to; generalizes the ad-hoc
+  `in_combat` bool `turns.rs` already computes inline for combat-duration
+  tracking). When `LegacyRuleSet.mana_burn` is set and `phase_group(current)
+  != phase_group(next)`, apply a second, independent life-loss contribution
+  for that player's dropped mana units (same `UnitDisposition::Drop` arm,
+  `types/mana.rs:1707-1716`, already counts units post-replacement) —
+  alongside, not merged into, the existing Yurlok-class check, since a format
+  flag and a card-granted static ability are different triggers that could
+  both legitimately apply to the same event.
+- **Size: still small.** One new grouping helper, one new gated life-loss
+  contribution at an existing call site, a distinguishable
+  `GameEvent::ManaBurn { player_id, amount }` for the format-level
+  contribution. No new state machine. The infra (per-unit disposition, APNAP
+  drain, replacement pipeline, the Yurlok-class life-loss event shape) already
+  exists — this reuses it rather than inventing a parallel damage path.
 
 ## 6. "Damage uses the stack" — LARGE / deep; honest assessment
 

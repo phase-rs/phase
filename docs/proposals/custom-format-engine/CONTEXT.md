@@ -100,7 +100,9 @@ first slice to something with **zero new legacy-rule engine work**:
   - **Legal sets**: Alpha, Beta, Unlimited, Arabian Nights, Antiquities,
     Legends, The Dark, "Summer Magic" — the same era pool EC's 93-94 uses.
   - **Banned list**: empty — no card is fully banned under Swedish rules.
-  - **Restricted list** (verbatim, 23 cards, one-copy maximum): Ancestral
+  - **Restricted list** (verbatim, 25 cards, one-copy maximum — corrected
+    from an initial miscount of 23 flagged by review; recounted directly
+    against the enumerated names below): Ancestral
     Recall, Balance, Black Lotus, Braingeyser, Channel, Chaos Orb, Contract
     from Below, Darkpact, Demonic Tutor, Library of Alexandria, Mana Drain,
     Mind Twist, Mishra's Workshop, Mox Emerald, Mox Jet, Mox Pearl, Mox Ruby,
@@ -144,6 +146,95 @@ wiring those require. This is a re-sequencing, not a scope cut — all four EC
 formats and the full legacy-rules axis remain the target; they simply move to
 a phase 2 that ships once the schema and Axis A/Axis B mechanics are already
 proven end-to-end by something smaller and testable.
+
+## Maintainer review round 2 — CHANGES_REQUESTED, addressed
+
+matthewevans reviewed the previous head and requested changes on five
+design-correctness grounds. All five are addressed in this revision; see the
+cited PLAN.md sections for the actual schema/wiring changes.
+
+1. **Axis-A unrestricted-legality bug (real, confirmed).** The evaluator design
+   (PLAN.md §3) checked "legal iff a printing's set ∈ `legal_sets`" — an empty
+   `Vec` (Axis A's default, since a lobby-saved format sets no restriction)
+   makes every card fail, not none. Fixed: `legal_sets` is now
+   `Option<Vec<SetCode>>` — `None` means unrestricted (every card passes the
+   pool check), `Some(list)` means restricted to that list, matching this
+   repo's own convention of using `Option<T>` over an ambiguous sentinel
+   value (CLAUDE.md's `Option<ControllerRef>` example). See PLAN.md §1 and §3.
+2. **`StructuralRules` was missing behavior-bearing `FormatConfig` fields
+   (real, confirmed).** Re-read `FormatConfig`'s full field list
+   (`types/format.rs:174-212`) directly rather than from memory. Fixed:
+   `StructuralRules` now includes `command_zone`, `commander_damage_threshold`,
+   and `archenemy_player` (all independently meaningful, not derived).
+   `uses_commander` is derived as `commander_damage_threshold.is_some()`
+   rather than stored redundantly. `supplies_fixed_deck` is always `false`
+   for `Custom` (no custom-format use case for an auto-supplied deck exists;
+   flagged, not silently dropped, if that need ever arises).
+   `allow_debug_actions` is correctly excluded — its own doc comment says
+   it is "orthogonal to format," a session capability flag, not format
+   identity. **New finding**: `sideboard_policy` is not a `FormatConfig`
+   field at all — it's a `GameFormat` *method*
+   (`format.rs:270`, `fn sideboard_policy(self) -> SideboardPolicy`), so
+   `GameFormat::Custom` has no derivation source for it the way built-in
+   formats do. `StructuralRules` gains an explicit `sideboard_policy` field
+   to fill that gap. See PLAN.md §1.
+3. **No identity/persistence/transport contract for a lobby-saved format
+   (real, confirmed — the largest gap).** The original design conflated two
+   different identity concerns: (a) how a resolved ruleset is agreed on by
+   both peers *in one active game*, and (b) how a *named, reusable* saved
+   format persists for one player across many future games. (a) was already
+   solved — `FormatConfig.custom_rules` carries the full resolved
+   `CustomFormatRules` payload, not a lookup key, so a peer never needs to
+   already know a format by ID to play it. (b) was never designed. Resolved
+   by explicitly separating them: the engine's `CustomFormatId` stays a
+   lightweight, `Copy`, per-`GameState` transport tag (stable/well-known only
+   for the registry-backed EC/Swedish presets; an ad-hoc lobby save can use a
+   fixed sentinel value, since the full payload — not the ID — is what
+   travels and is interpreted). A player's "my saved formats" library is a
+   **client-side-only** concern (local storage / profile-scoped, its own
+   name+identity, never an engine or WASM type) that packages a
+   `CustomFormatRules` value at game-start time. This also resolves the
+   version-skew question: an older client that doesn't know the
+   `GameFormat::Custom` enum variant at all can't be rescued by
+   `serde(default)` on the payload (the failure is at the enum-variant level,
+   not the payload level) — flagged as a real, explicit compatibility check
+   the lobby-join flow needs (reject with a clear message, don't crash on
+   deserialization), not something this schema revision can silently fix.
+   See PLAN.md §1 (new subsection) and §7.
+4. **Mana-burn behavioral/timing error (real, confirmed against this engine's
+   own code and CR text, and against direct correction: mana burn keys off
+   crossing a real MTG *phase* boundary, not the engine's finer-grained
+   `Phase` enum, which flattens MTG's steps and phases into one 11-variant
+   list — e.g. `DeclareAttackers` → `DeclareBlockers` is a step transition
+   within the Combat phase, not a phase-end, even though the engine's own
+   `Phase` enum treats every one of those as a variant transition).**
+   Verified two things directly this session, not from memory:
+   - `docs/MagicCompRules.txt:8278` (the obsolete-rules glossary): "unspent
+     mana caused a player to **lose life**" — life loss, not damage. The
+     original PLAN.md/RESEARCH.md draft's "deal that many damage" framing
+     was wrong.
+   - The engine already has a generic, existing mechanism for exactly this
+     shape: `player_unspent_mana_loss_causes_life_loss`
+     (`static_abilities.rs:1237`, backed by `StaticMode::UnspentManaLossCausesLifeLoss`)
+     is checked inside `apply_empty_mana_pool_event` (`turns.rs`, doc comment:
+     "CR 106.4 + CR 703.4q: Apply the final replacement-ordered mana
+     dispositions as the step or phase ends, then apply one aggregate
+     Yurlok-class life-loss event") — this fires on **every** `Phase` enum
+     transition (both true steps and true phases, per modern CR 500.5),
+     which is correct for the existing Yurlok-class static ability but too
+     fine-grained for old-school mana burn, which must fire only when
+     actually leaving one of the 5 real MTG phases (Beginning, Precombat
+     Main, Combat, Postcombat Main, Ending) — not on every step within one.
+   See PLAN.md §4 for the corrected wiring: a phase-group boundary check
+   gating a *second*, independent contribution to the same life-loss event
+   mechanism, alongside (not merged into) the existing Yurlok-class check.
+5. **Preset data inconsistencies (real, confirmed and fixed).** Swedish Old
+   School's restricted list was mislabeled "23 cards" when 25 are actually
+   enumerated (fixed above); PLAN.md's `swedish_old_school()` sketch had
+   dropped "Summer Magic" from the legal-sets list that this document already
+   stated (fixed in PLAN.md §2). Classic Magic's restricted list was labeled
+   "(37)" but enumerates 44 names in RESEARCH.md — recounted directly against
+   the verbatim list and fixed to "(44)" in both RESEARCH.md and PLAN.md §2.
 
 ## Confirmed (verified against source this session)
 
