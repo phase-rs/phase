@@ -405,7 +405,16 @@ LegalityRules {
 // every other breaking wire change — not a new, custom-format-specific
 // negotiation layer.
 
-ReprintPolicy {                         // enum — enforceable today only at set-code granularity
+// REVISED per maintainer review round 5 (§3/§7 have the full reasoning):
+// this enum is documentation metadata, NOT consumed by `evaluate_custom_format`
+// at all. Its intended behavior is already fully absorbed by `legal_sets`
+// curation (a reprint outside `legal_sets` is already excluded by plain
+// set-membership); the one thing it can't capture — frame/art-level
+// fidelity — is Open item 2's gap, not this enum's job to close. Kept as a
+// typed enum (not deleted) purely so a preset's authored intent is
+// machine-readable for whoever eventually builds Open item 2, not because
+// anything reads it today.
+ReprintPolicy {
     OriginalPrintingsOnly,              // 93-94 / Classic intent (see limitation)
     AllowSpecialReprintSets,            // CE/ICE/world-champ/proof set codes included in legal_sets
     AllowAnyPrinting,                   // Middle School "begrudgingly"
@@ -596,10 +605,11 @@ cross-referencing another file:**
 **Phase 1 preset — `swedish_old_school()` (see CONTEXT.md's "Further narrowing
 Axis B's MVP").** This is the first Axis B preset targeted, chosen because it
 needs zero `LegacyRuleSet` engine wiring. **Registration is currently blocked
-by the preset-readiness gate (§7)** — its `ReprintPolicy` is unenforced by §3
-and its specific value is unconfirmed (CONTEXT.md Open item 6) — so the
+by CONTEXT.md Open item 6** — its `ReprintPolicy` metadata VALUE is
+unconfirmed against the primary source (not an enforcement gap — see §3's
+resolution: `ReprintPolicy` is documentation, not a gated axis) — so the
 engine/schema work below can and should land in phase 1, but this preset does
-not appear as a selectable format until those two items resolve:
+not appear as a selectable format until that item resolves:
 
 - `swedish_old_school()` — sets = `Some([LEA, LEB, 2ED, ARN, ATQ, LEG, DRK,
   SUM])` (verify MTGJSON codes at implementation time, same caveat as below —
@@ -654,7 +664,9 @@ time by a unit test that asserts every banned/restricted name resolves in the
 
 `evaluate_custom_format(db, request, rules) -> CompatibilityCheck`:
 
-1. Structural checks (deck size, sideboard) via existing `FormatConfig` fields.
+1. Structural checks (deck size, sideboard) via existing `FormatConfig` fields
+   — parameterized by `rules.structural.deck_size` (not a hardcoded 60, per
+   maintainer review round 5's finding below).
 2. Pool legality: `match &rules.legal_sets { None => every card passes this
    check (no set restriction — Axis A's default), Some(sets) => for each
    card, db.printings_for(name); legal iff any printing's set code ∈ sets,
@@ -667,26 +679,62 @@ time by a unit test that asserts every banned/restricted name resolves in the
 3. Banned: name ∈ `rules.banned` → illegal (distinct "banned" label).
 4. Restricted: name ∈ `rules.restricted` → insert into `restricted_canonical`,
    then call the **existing** `restricted_copy_violations` (CR 100.2b, `<= 1`).
-5. Default 4-copy limit + card-intrinsic overrides via the **existing**
-   `copy_limit_violations`.
+5. Copy limit: `copy_limit_violations(db, &counts, if rules.structural.singleton
+   { 1 } else { 4 })` — **FIXED per maintainer review round 5** (see below);
+   the field existed on `StructuralRules` since round 2 but step 5 never read
+   it, always calling the helper with a hardcoded `4`. `copy_limit_violations`
+   ALREADY takes this exact parameter — every built-in singleton format
+   (Commander, Brawl, etc.) already calls it with `1`
+   (`deck_validation.rs:929,1096,1335,1668,2215`, confirmed this round, not
+   assumed) and every non-singleton format with `4`
+   (`:447,535,643,2054`) — this is parameterizing an existing call, not new
+   logic. Card-intrinsic overrides (`DeckCopyLimit::UpTo(n)`, "any number"
+   cards like Relentless Rats/Nazgûl) are already handled generically inside
+   `copy_limit_violations` regardless of the format-level limit passed in —
+   confirmed via its own existing tests
+   (`deck_validation.rs:3916-3941`, e.g. `Nazgûl` with limit `1` still passes
+   at 9 copies) — no new "preserve overrides" logic needed, the helper
+   already composes correctly.
 
 This reuses four existing helpers verbatim and adds only the set-membership +
-name-set sourcing. `GameFormat::Custom` gets one arm in
+name-set sourcing, now correctly parameterized by every `StructuralRules`
+field the algorithm needs (`deck_size`, `singleton`) rather than assuming
+built-in-format defaults. `GameFormat::Custom` gets one arm in
 `format_compatibility_check` routing to `evaluate_custom_format`.
 
-**Honest gap, flagged by maintainer review rounds 3 and 4 (CONTEXT.md point
-5; round 4 demanded a concrete resolution, not just a flag):**
-`rules.reprint_policy` is declared on `LegalityRules` but **not consumed by
-any step above** — a card passes step 2 based on legal-set membership alone,
-regardless of which `ReprintPolicy` the preset declares. Per the tightened
-preset-readiness gate (§7), no preset may register while declaring a
-`ReprintPolicy` this algorithm doesn't enforce. Two independent resolution
-paths, either sufficient (§7 has the full reasoning): the general
-engine-vs-frontend printing cross-reference (Open item 2) landing, or a
-one-preset verification pass confirming no problematic reprints exist within
-that specific preset's `legal_sets` window. This blocks `swedish_old_school()`
-specifically until one of those two paths completes, plus Open item 6
-(reprint-policy value itself unconfirmed).
+**Maintainer review round 5 finding, addressed above**: this whole algorithm
+requires the VALIDATED `FormatConfig`/resolved `CustomFormatRules` as input —
+confirmed again that `DeckCompatibilityRequest.selected_format:
+Option<GameFormat>` (§1's audit) cannot supply `deck_size`/`singleton` any
+more than it could supply `legal_sets`/`banned`/`restricted` — the same
+signature-widening fix from §1 covers this too, not a separate mechanism.
+
+**`ReprintPolicy` is deliberately NON-behavior-bearing metadata, not a
+registration-blocking gap (RESOLVED — maintainer review round 5; supersedes
+rounds 3/4's framing of this as an unenforced gate).** Round 5 correctly
+caught that the round-4 registry gate (`IMPLEMENTED_LEGACY_AXES`, §7) covers
+only `LegacyRuleSet`'s four axes and was never extended to `ReprintPolicy` —
+a preset could still register while declaring a policy this algorithm
+doesn't enforce. Rather than broadening the gate to a field that was never
+designed to be independently enforceable, this document's OWN original
+research already answered this (RESEARCH.md §3, written before any of the
+four review rounds): "model reprint policy as *which set codes are in the
+legal list*, and flag frame/art-level fidelity as a known limitation."
+That is: `ReprintPolicy`'s actual behavior is already fully absorbed into
+`legal_sets` curation (a modern reprint of an old card lives in a set code
+simply not present in `legal_sets`, so it's excluded by step 2 alone,
+requiring no separate enforcement) — the ONLY thing `ReprintPolicy` cannot
+capture is the finer frame/art-level distinction (e.g. "old-bordered
+original only" vs. "any printing from a legal set"), which is the SAME gap
+Open item 2 already tracks. Accordingly: `reprint_policy` is documentation
+metadata for a human auditing a preset's intent, deliberately not consumed
+by `evaluate_custom_format`, and NOT part of the preset-readiness gate's
+enforcement surface — the gate only needs to cover fields that are actually
+behavior-bearing, which `LegacyRuleSet`'s four axes are and
+`reprint_policy` is not. `swedish_old_school()` is still gated on CONTEXT.md
+Open item 6 (getting the metadata VALUE right, since an inaccurate label
+could mislead a future maintainer who builds real enforcement later), but
+that is a documentation-accuracy blocker, not a missing-enforcement one.
 
 `legality_format()` returns `None` for `Custom` (no `LegalityFormat` mapping —
 custom formats don't use the external legality table). `label`, `for_format`,
@@ -851,6 +899,20 @@ legality logic on the client.
   restricted one.
 - Restricted path: 2 copies of a restricted-list name flags; 1 copy passes —
   driven by a synthetic def, proving the general mechanism.
+- **Singleton copy limit is actually parameterized, not defaulted** (new —
+  maintainer review round 5): a synthetic `CustomFormatRules` with
+  `structural.singleton: true` flags 2 copies of an arbitrary non-basic,
+  non-"any number" card and accepts 1 — proving step 5 reads
+  `structural.singleton` rather than always calling
+  `copy_limit_violations(..., 4)`. Paired with a `singleton: false` case
+  accepting up to 4, so both branches of the parameter are covered, not just
+  the new one. A third case reuses an existing card-intrinsic override
+  (Relentless Rats-shaped "any number" card, or a `DeckCopyLimit::UpTo(n)`
+  card) under `singleton: true` and confirms the override still applies —
+  proving `copy_limit_violations` composes the format limit and the
+  card-intrinsic override correctly for Custom exactly as it already does
+  for built-in singleton formats (Commander etc.), not a new interaction to
+  design.
 - Preset integrity: every banned/restricted name in all four EC presets plus
   `swedish_old_school()` resolves in the DB; each preset's `legacy` matches
   its source ruleset; each preset's stated list *count* in a doc comment
@@ -999,24 +1061,34 @@ choice) — a future author who adds `middle_school()` before
 `CombatDamageTiming::OnStack` lands gets a build-time or startup-time
 failure, not a silently-ignored doc-comment warning. This is the concrete
 mechanism §6's "actually enforced, not just documented" test targets.
-- `swedish_old_school()` (phase 1) is currently BLOCKED from registration by
-  this rule on TWO independent grounds: it declares a `ReprintPolicy`, which
-  §3 confirms is not yet enforced by the evaluator at all, and CONTEXT.md's
-  Open item 6 confirms the specific policy value is itself unconfirmed
-  against the primary source. **Resolution path — either is sufficient**:
-  (a) Open item 2's general engine-vs-frontend printing cross-reference
-  lands, making `ReprintPolicy` enforcement real for every preset at once; or
-  (b) a preset-specific verification pass confirms Swedish Old School's
-  particular restricted-list cards have no problematic reprints *within its
-  own `legal_sets` window* that plain legal-set membership wouldn't already
-  exclude — a materially smaller, one-preset check that could unblock this
-  specific preset without waiting on the general system. Neither path is
-  assumed to succeed without doing it; this document does not assert the
-  gap is moot for Swedish specifically without that verification.
+
+**Gate scope, precisely (maintainer review round 5 caught that this wasn't
+stated precisely enough): `IMPLEMENTED_LEGACY_AXES` covers exactly
+`LegacyRuleSet`'s four axes — `mana_burn`, `damage_timing`, `wish_scope`,
+`legend_rule_scope` — because those are the only fields on
+`CustomFormatRules` today that are BOTH independently declarable AND
+intended to be behavior-bearing.** It does NOT cover `reprint_policy` (§3
+resolves why: deliberately non-behavior-bearing metadata, not an
+unenforced axis) and there is no ante-card field to cover yet (CONTEXT.md
+Open item 5 — no schema slot exists). If a future field is ever added with
+real behavior attached (an enforced `ReprintPolicy`, an ante-list), it must
+be added to this gate in the SAME change that adds the field — the gate's
+job is to cover every behavior-bearing field that exists, and it is a
+review-time checklist item whenever `CustomFormatRules`/`LegacyRuleSet`
+gains a member, not a one-time list to write and forget.
+- `swedish_old_school()` (phase 1) is BLOCKED from registration by
+  CONTEXT.md Open item 6 alone — the reprint-policy metadata VALUE needs
+  confirming against the primary source before shipping, so a future
+  maintainer doesn't inherit an inaccurate label. This is a documentation-
+  accuracy blocker, not a missing-enforcement one (see §3's resolution) —
+  it does not require `IMPLEMENTED_LEGACY_AXES` coverage, since
+  `reprint_policy` was never meant to be in that gate's scope.
 - `middle_school()` and `classic_magic()` (phase 2) are BLOCKED from
   registration until `CombatDamageTiming::OnStack` (§4, LARGE) is fully
   implemented — both declare it, and per the no-caveated-exposure rule
-  neither may register while any declared axis is unimplemented.
+  neither may register while any declared axis is unimplemented. This one
+  DOES require `IMPLEMENTED_LEGACY_AXES` coverage, since `damage_timing` is
+  a real `LegacyRuleSet` axis.
 - No phase-2 EC preset may declare `LegendRuleScope::PreM14AnyController`
   until the historical conflation flagged in CONTEXT.md/RESEARCH.md resolves.
   Moot today (all four EC presets default this to `Modern`), but binding on
@@ -1043,13 +1115,14 @@ first.
    preset that needs zero legacy-rules wiring (§2). Validates the engine's
    Axis B end (legal-set membership, empty banned list, the 25-name
    restricted list) without touching §4 at all. Resolve CONTEXT.md items 5–6
-   (ante-card handling, reprint policy) before finalizing this preset's
-   constructor. **Registration as a selectable format is gated separately
-   (§7's preset-readiness gate)** on `ReprintPolicy` enforcement landing in
-   §3 — the constructor and its tests can land in this step, but do not wire
-   it into the format-selection UI/registry as choosable until that gate
-   clears. Can proceed in parallel with step 2 — disjoint fields of the same
-   schema.
+   (ante-card handling, reprint policy VALUE) before finalizing this
+   preset's constructor. **Registration as a selectable format is gated on
+   Open item 6 alone** (the metadata value, per §3/§7 — `ReprintPolicy` is
+   not part of `IMPLEMENTED_LEGACY_AXES` since it isn't behavior-bearing) —
+   the constructor and its tests can land in this step, but don't wire it
+   into the format-selection UI/registry as choosable until that item
+   resolves. Can proceed in parallel with step 2 — disjoint fields of the
+   same schema.
 
 **Phase 2 — the four EC formats + the legacy-rules engine work they need.**
 Ships once phase 1 has proven the schema and both axes end-to-end.

@@ -514,6 +514,73 @@ additional real gap (`deck_validation.rs`'s `DeckCompatibilityRequest
      throughout — a pure terminology-reconciliation miss, now consistent
      everywhere.
 
+## Automated review pass (CodeRabbit) on the round-4 commit, addressed
+
+Between round 4 and round 5, CodeRabbit (automated, not matthewevans) found
+5 things on the round-4 commit, at least 3 real: (1) round 4's own rename to
+`wish_scope: WishOutsideGameScope` didn't propagate to the
+`search_outside_game` pseudocode, which still read the round-1
+`pre_m10_wish_reaches_exile` bool name — a mistake introduced in the very
+same round-4 commit that fixed the OTHER stale reference; (2)
+`sideboard_policy`/`uses_commander` are plain serialized `FormatConfig`
+fields that could diverge from `custom_rules` on a malformed payload — real
+for built-in formats today too, not just Custom, so the fallible-validation
+check was widened to cover both; (3) `DeckCompatibilityRequest` needs the
+FULL `CustomFormatRules` at its Custom-dispatch call site, not the lighter
+facts-only struct sufficient for `companion.rs`; (4) only `PROTOCOL_VERSION`
+was bumped, not the separate `LOBBY_PROTOCOL_VERSION` that actually gates
+the lobby handshake where format selection happens; (5)
+`CombatDamageTiming::OnStack`'s doc comment mischaracterized historical
+combat damage as a triggered ability rather than damage-as-a-stack-object
+(RESEARCH.md §6 already had this right). Also strengthened the
+preset-readiness gate from a documented convention into an actual
+`custom_format_registry()`-level technical check, addressing a stricter
+CodeRabbit reading without fully adopting its more extreme "remove
+`ReprintPolicy`" suggestion, which went beyond what matthewevans himself had
+asked for. See PLAN.md for the actual fixes.
+
+## Maintainer review round 5 — CHANGES_REQUESTED, addressed
+
+matthewevans re-reviewed the commit that included both round-4's fixes and
+the CodeRabbit-finding fixes above (head `4ce7df01e`) and opened with: "The
+proposal now resolves the previously-requested custom-context, typed-policy,
+compatibility, and no-caveated-preset concerns" — confirming round 4 in full.
+Two new, narrower points remained:
+
+1. **`StructuralRules.singleton` was declared but never enforced (real,
+   confirmed).** The field existed since round 2's full-fidelity fix, but
+   §3's deck-legality algorithm always called `copy_limit_violations(db,
+   &counts, 4)` — never reading `singleton` at all — and there was no test
+   for it. Fixed: `copy_limit_violations(db, &counts, if
+   rules.structural.singleton { 1 } else { 4 })`. This is parameterizing an
+   EXISTING call, not new logic — confirmed this round that every built-in
+   singleton format already calls this same helper with `1`
+   (`deck_validation.rs:929,1096,1335,1668,2215`) and the helper's own
+   existing tests already prove card-intrinsic overrides (Relentless
+   Rats/Nazgûl-shaped "any number" cards) compose correctly under a `1`
+   limit — no new override-preservation logic needed, just reading the
+   field. See PLAN.md §3 and §6.
+2. **The registry gate covered only `LegacyRuleSet`'s four axes, not
+   `ReprintPolicy` (real, confirmed — but the fix is a reframing, not a
+   broadening).** Round 4's `IMPLEMENTED_LEGACY_AXES` mechanism was scoped
+   to `LegacyRuleSet` only, so a preset could still register while declaring
+   an unenforced `ReprintPolicy`. Rather than extending the gate to a field
+   never designed to be independently enforceable, re-read this document's
+   own original research (RESEARCH.md §3, written before any review round):
+   it already concluded `ReprintPolicy`'s actual behavior is fully absorbed
+   into `legal_sets` curation (a reprint in a non-legal set is already
+   excluded by plain set-membership) and flagged only the finer frame/art
+   distinction as a real, separate gap — which Open item 2 already tracks.
+   Resolution: `reprint_policy` is documentation metadata, deliberately not
+   consumed by the evaluator and deliberately NOT part of the
+   registration-gate's enforcement surface, which only needs to cover
+   fields that are actually behavior-bearing. `swedish_old_school()` is
+   still gated on Open item 6 (getting the metadata value right so it
+   doesn't mislead a future maintainer), but that's a documentation-accuracy
+   blocker now, not a missing-enforcement one. This satisfies the "or
+   keep/reduce `ReprintPolicy` to non-selectable/deferred metadata" branch
+   review round 5 explicitly offered as acceptable. See PLAN.md §3 and §7.
+
 ## Open (needs a human decision — do NOT resolve unilaterally)
 
 1. ~~**Delivery surface**~~ — **RESOLVED**, see "Maintainer input" section
