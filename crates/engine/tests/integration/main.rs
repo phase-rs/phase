@@ -32,6 +32,7 @@ mod another_round_repeat;
 mod anya_merciless_angel_5920;
 mod april_oneil_card_types_among_spells_cast;
 mod arashin_sovereign_self_tuck;
+mod archdruids_charm_search_destination;
 mod archmage_ascension_gated_draw_replacement;
 mod archnemesis_you_attack_enchanted_player;
 mod arcum_weathervane_supertype_removal;

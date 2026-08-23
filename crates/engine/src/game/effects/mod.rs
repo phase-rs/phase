@@ -3600,14 +3600,16 @@ fn condition_reads_filter_population(
 /// selection result object* — the found/revealed card that a `SearchLibrary`
 /// injects as the continuation target only after the player responds
 /// (`engine_resolution_choices.rs`, `cont.chain.targets = continuation_targets`).
-/// A `TargetMatchesFilter` gate on "that card" ("the revealed card is the chosen
-/// type") cannot be evaluated until then, so it must be deferred WITH its
-/// condition rather than eagerly read against absent targets. Recurses And/Or/Not
-/// like the sibling `condition_depends_on_effect_performed` predicate. Predicate
-/// helper, not rule-implementing code — the CR annotation lives at the gate.
+/// A `TargetMatchesFilter` or `RevealedHasCardType` gate on "that card" ("the
+/// revealed card is the chosen type" / "if it's a land card") cannot be evaluated
+/// until then, so it must be deferred WITH its condition rather than eagerly read
+/// against an absent result. Recurses And/Or/Not like the sibling
+/// `condition_depends_on_effect_performed` predicate. Predicate helper, not
+/// rule-implementing code — the CR annotation lives at the gate.
 fn condition_depends_on_result_object(condition: &AbilityCondition) -> bool {
     match condition {
-        AbilityCondition::TargetMatchesFilter { .. } => true,
+        AbilityCondition::TargetMatchesFilter { .. }
+        | AbilityCondition::RevealedHasCardType { .. } => true,
         AbilityCondition::Not { condition } => condition_depends_on_result_object(condition),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
             conditions.iter().any(condition_depends_on_result_object)
