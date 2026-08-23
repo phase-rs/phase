@@ -138,18 +138,32 @@ describe("OpponentHud designations (single-opponent path)", () => {
     expect(screen.getByLabelText("7 energy counters")).toBeInTheDocument();
   });
 
-  it("renders the dungeon badge when the opponent is venturing", () => {
+  // CR 309.4b-c: the room's name and printed effect come from the engine
+  // projection `derived.dungeon_rooms`; the FE never derives them.
+  it("renders the dungeon badge naming the room the opponent's marker is on", () => {
     act(() => {
       useGameStore.setState({
         gameState: createTwoPlayerState({
           dungeon_progress: {
             "1": { current_dungeon: "TombOfAnnihilation", current_room: 0, completed: [] },
           },
+          derived: {
+            dungeon_rooms: {
+              "1": {
+                dungeon: "TombOfAnnihilation",
+                dungeon_name: "Tomb of Annihilation",
+                room: { index: 0, name: "Trapped Entry", text: "Each player loses 1 life." },
+                room_count: 5,
+              },
+            },
+          },
         }),
       });
     });
     render(<OpponentHud />);
-    expect(screen.getByLabelText("Venturing in Tomb, room 1")).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("Venturing in Tomb of Annihilation, Trapped Entry, room 1 of 5"),
+    ).toBeInTheDocument();
   });
 
   it("does not render the dungeon badge when the opponent has only completed dungeons", () => {

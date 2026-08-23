@@ -31,6 +31,38 @@ export type DungeonId =
   | "Undercity"
   | "BaldursGateWilderness";
 
+// Mirrors `engine::game::dungeon::RoomPreview`. The engine is the single
+// authority for room names (CR 309.4b) and room-ability text (CR 309.4c) — the
+// client renders these strings and never carries its own room table.
+export interface RoomPreview {
+  /** Index within the dungeon; the value `ChooseDungeonRoom` carries. */
+  index: number;
+  name: string;
+  /** The room ability's printed effect, e.g. "Create a Treasure token." */
+  text: string;
+}
+
+// Mirrors `engine::game::dungeon::DungeonPreview`. `entry_room` is the topmost
+// room (CR 309.4a) — the room the venturing player enters immediately on
+// choosing this dungeon.
+export interface DungeonPreview {
+  dungeon: DungeonId;
+  name: string;
+  entry_room: RoomPreview;
+}
+
+// Mirrors `engine::game::derived_views::DungeonRoomView` — where one player's
+// venture marker currently sits, named. Delivered on
+// `GameState.derived.dungeon_rooms`, not on `dungeon_progress`, which carries
+// only the raw room index.
+export interface DungeonRoomView {
+  dungeon: DungeonId;
+  dungeon_name: string;
+  room: RoomPreview;
+  /** Total rooms on the dungeon card, for "room 3 of 7". */
+  room_count: number;
+}
+
 // ── Game Format ─────────────────────────────────────────────────────────
 
 export type GameFormat =
@@ -1953,8 +1985,8 @@ export type WaitingFor =
       // (index into this array) instead of `ChooseOption`.
       candidate_objects: ObjectId[];
     } }
-  | { type: "ChooseDungeon"; data: { player: PlayerId; options: DungeonId[] } }
-  | { type: "ChooseDungeonRoom"; data: { player: PlayerId; dungeon: DungeonId; options: number[]; option_names: string[] } }
+  | { type: "ChooseDungeon"; data: { player: PlayerId; options: DungeonPreview[] } }
+  | { type: "ChooseDungeonRoom"; data: { player: PlayerId; dungeon: DungeonId; dungeon_name: string; options: RoomPreview[] } }
   | { type: "SpecializeColor"; data: { player: PlayerId; object_id: ObjectId; options: ManaColor[] } }
   // CR 709.5f-g: Resolving lock/unlock-door effect needs the player to choose
   // which door (half) of the targeted Room to act on. `options` is the engine's
@@ -3101,6 +3133,15 @@ export interface DerivedViews {
   current_target_kind?: TargetChoiceKind;
   /** Keyed by attacking commander's current controller (PlayerId as string). */
   commander_damage_by_attacker?: Record<string, CommanderDamageView[]>;
+  /**
+   * CR 309.4a-c: the named room each venturing player's marker sits on, keyed
+   * by PlayerId-as-string. `dungeon_progress` carries only the room index; the
+   * room's printed name and effect live in the engine's dungeon definitions,
+   * so this is the FE's only legitimate channel for them. Omitted when nobody
+   * is venturing. Mirrors
+   * `engine::game::derived_views::DerivedViews::dungeon_rooms`.
+   */
+  dungeon_rooms?: Record<string, DungeonRoomView>;
   /**
    * Engine-authored coalesced view of the stack. Empty (and omitted from
    * the wire payload) when the stack is empty. StackDisplay consumes this

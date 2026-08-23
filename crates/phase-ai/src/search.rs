@@ -1815,12 +1815,16 @@ pub fn fallback_action(
         }
 
         // Dungeon choices: pick first option.
-        WaitingFor::ChooseDungeon { options, .. } => options
-            .first()
-            .map(|&dungeon| GameAction::ChooseDungeon { dungeon }),
-        WaitingFor::ChooseDungeonRoom { options, .. } => options
-            .first()
-            .map(|&room_index| GameAction::ChooseDungeonRoom { room_index }),
+        WaitingFor::ChooseDungeon { options, .. } => {
+            options.first().map(|option| GameAction::ChooseDungeon {
+                dungeon: option.dungeon,
+            })
+        }
+        WaitingFor::ChooseDungeonRoom { options, .. } => {
+            options.first().map(|option| GameAction::ChooseDungeonRoom {
+                room_index: option.index,
+            })
+        }
         WaitingFor::SpecializeColor { options, .. } => options
             .first()
             .copied()

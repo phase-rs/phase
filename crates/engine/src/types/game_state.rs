@@ -12515,16 +12515,20 @@ pub enum WaitingFor {
         )>,
     },
     /// CR 701.49a: Player chooses which dungeon to venture into (no active dungeon).
+    /// Each option carries its topmost room (CR 309.4a) so the prompt can show
+    /// what choosing that dungeon immediately does.
     ChooseDungeon {
         player: PlayerId,
-        options: Vec<crate::game::dungeon::DungeonId>,
+        options: Vec<crate::game::dungeon::DungeonPreview>,
     },
     /// CR 309.5a: Player at a branching room chooses which room to advance to.
+    /// Each option carries the room's printed name and effect (CR 309.4b-c).
     ChooseDungeonRoom {
         player: PlayerId,
         dungeon: crate::game::dungeon::DungeonId,
-        options: Vec<u8>,
-        option_names: Vec<String>,
+        /// The dungeon's printed name, so the prompt never has to map the id.
+        dungeon_name: String,
+        options: Vec<crate::game::dungeon::RoomPreview>,
     },
     /// Digital-only Specialize: choose which color specialization to apply.
     SpecializeColor {

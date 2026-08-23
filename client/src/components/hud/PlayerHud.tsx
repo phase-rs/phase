@@ -94,8 +94,8 @@ export function PlayerHud() {
             {designations.hasInitiative ? <InitiativeBadge /> : null}
             {designations.hasCityBlessing ? <CityBlessingBadge /> : null}
             {designations.hasEnduringStory ? <EnduringStoryBadge /> : null}
-            {designations.activeDungeon ? (
-              <DungeonBadge dungeonName={designations.activeDungeon} roomIndex={designations.currentRoom} />
+            {designations.dungeonRoom ? (
+              <DungeonBadge room={designations.dungeonRoom} />
             ) : null}
             {isPhasedOut ? <StatusBadge label={t("player.phasedOut")} tone="neutral" /> : null}
             {designations.ringLevel > 0 ? (

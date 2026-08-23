@@ -168,11 +168,8 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
             {designations.hasInitiative ? <InitiativeBadge /> : null}
             {designations.hasCityBlessing ? <CityBlessingBadge /> : null}
             {designations.hasEnduringStory ? <EnduringStoryBadge /> : null}
-            {designations.activeDungeon ? (
-              <DungeonBadge
-                dungeonName={designations.activeDungeon}
-                roomIndex={designations.currentRoom}
-              />
+            {designations.dungeonRoom ? (
+              <DungeonBadge room={designations.dungeonRoom} />
             ) : null}
             {designations.ringLevel > 0 ? (
               <CounterBadge

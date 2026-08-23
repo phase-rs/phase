@@ -2714,9 +2714,11 @@ pub fn candidate_actions_broad_with_probe(
         // CR 701.49a: Choose which dungeon to venture into.
         WaitingFor::ChooseDungeon { player, options } => options
             .iter()
-            .map(|&dungeon| {
+            .map(|option| {
                 candidate(
-                    GameAction::ChooseDungeon { dungeon },
+                    GameAction::ChooseDungeon {
+                        dungeon: option.dungeon,
+                    },
                     TacticalClass::Selection,
                     Some(*player),
                 )
@@ -2727,9 +2729,11 @@ pub fn candidate_actions_broad_with_probe(
             player, options, ..
         } => options
             .iter()
-            .map(|&room_index| {
+            .map(|option| {
                 candidate(
-                    GameAction::ChooseDungeonRoom { room_index },
+                    GameAction::ChooseDungeonRoom {
+                        room_index: option.index,
+                    },
                     TacticalClass::Selection,
                     Some(*player),
                 )
