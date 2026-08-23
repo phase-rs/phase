@@ -26180,8 +26180,8 @@ pub enum ContinuousModification {
     /// CR 205.4 + CR 707.9d: Add a supertype to the affected object's
     /// supertypes (e.g., Sarkhan, Soul Aflame: "it's legendary in addition
     /// to its other types"). Idempotent: pushing an already-present supertype
-    /// is a no-op. Applied at Layer 4 (CR 613.1d) because supertypes are
-    /// types per CR 205.4b.
+    /// is a no-op. Applied at Layer 4 (CR 613.1d), which covers card type,
+    /// subtype, and supertype changes alike.
     AddSupertype {
         supertype: Supertype,
     },
