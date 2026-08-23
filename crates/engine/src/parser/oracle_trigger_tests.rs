@@ -27250,7 +27250,7 @@ fn assert_reanimator_chain(oracle: &str, card_name: &str, expect_tapped: bool) {
         "{card_name}: enter_tapped state ({enter_tapped:?})",
     );
 
-    // Node 2: GenericEffect keyword swap referencing OriginalSource, no duration.
+    // Node 2: GenericEffect keyword swap referencing OriginalSource, stamped to Duration::Permanent (CR 611.2a).
     let generic = root
         .sub_ability
         .as_deref()
@@ -27267,8 +27267,9 @@ fn assert_reanimator_chain(oracle: &str, card_name: &str, expect_tapped: bool) {
         );
     };
     assert_eq!(
-        *duration, None,
-        "{card_name}: keyword-swap grant has no stated duration"
+        *duration,
+        Some(Duration::Permanent),
+        "{card_name}: keyword-swap grant is stamped to Duration::Permanent (CR 611.2a)"
     );
     assert_eq!(
         static_abilities.len(),
@@ -27469,7 +27470,7 @@ fn necromancy_etb_lowers_to_reanimator_grant_chain_640() {
     );
 
     // Node 2: GenericEffect grants (not swaps) — AddSubtype{Aura} + AddKeyword,
-    // referencing OriginalSource, no duration.
+    // referencing OriginalSource, stamped to Duration::Permanent (CR 611.2a).
     let generic = root
         .sub_ability
         .as_deref()
@@ -27485,7 +27486,11 @@ fn necromancy_etb_lowers_to_reanimator_grant_chain_640() {
             generic.effect
         );
     };
-    assert_eq!(*duration, None, "Necromancy: grant has no stated duration");
+    assert_eq!(
+        *duration,
+        Some(Duration::Permanent),
+        "Necromancy: grant is stamped to Duration::Permanent (CR 611.2a)"
+    );
     assert_eq!(static_abilities.len(), 1, "Necromancy: one grant static");
     let sd = &static_abilities[0];
     assert_eq!(
