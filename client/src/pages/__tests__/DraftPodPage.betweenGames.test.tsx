@@ -4,26 +4,28 @@ import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { MatchScore } from "../../adapter/types";
 import { DraftPodPage } from "../DraftPodPage";
 
-// The store declares these shapes inline and anonymously
-// (`multiplayerDraftStore.ts`), so there is no named type to import and the
-// harness declares its own. Without the annotations TypeScript infers
-// `playDrawPrompt: null` and a non-nullable `sideboardPrompt`, and branch
-// selection needs the opposite of both. Type aliases are erased, so declaring
-// them above `vi.hoisted` does not disturb the hoist.
-type Score = { p0_wins: number; p1_wins: number; draws: number };
+// The store declares the two prompt objects inline and anonymously
+// (`multiplayerDraftStore.ts`), and `MultiplayerDraftState` is not exported, so
+// indexed access is unavailable and the harness declares its own. Their `score`
+// field is the exported `MatchScore` — imported rather than re-declared, so the
+// fixture cannot drift from the type it stands in for. Without the annotations
+// TypeScript infers `playDrawPrompt: null` and a non-nullable `sideboardPrompt`,
+// and branch selection needs the opposite of both. Type aliases are erased, so
+// declaring them above `vi.hoisted` does not disturb the hoist.
 type SideboardPrompt = {
   matchId: string;
   gameNumber: number;
-  score: Score;
+  score: MatchScore;
   loserSeat: number | null;
   timerMs: number;
 } | null;
 type PlayDrawPrompt = {
   matchId: string;
   gameNumber: number;
-  score: Score;
+  score: MatchScore;
   timerMs: number;
 } | null;
 

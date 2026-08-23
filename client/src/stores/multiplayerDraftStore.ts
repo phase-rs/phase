@@ -522,7 +522,7 @@ const initialState: MultiplayerDraftState = {
  * Two properties are load-bearing and neither is incidental:
  *
  * - It fires only when `phase` actually *changes*. `viewUpdated` writes `phase`
- *   on every broadcast — a pick, a seat connecting, a timer sync — so clearing
+ *   on every broadcast — a pick, a seat connecting, a seat dropping — so clearing
  *   on the mere presence of the key would erase an error the user has not read.
  *   That form was considered and rejected when this banner was introduced.
  * - The incoming payload wins. `kicked` and `hostLeft` write `phase` and `error`
@@ -531,6 +531,14 @@ const initialState: MultiplayerDraftState = {
  * Not covered, deliberately: a retry that does not change phase — `startMatch`
  * fails and succeeds while `phase` is already `matchInProgress`. Dismissal
  * (`clearError`) remains the clearing path for that case.
+ *
+ * Also not covered: `betweenGames` has no `DraftPlayerView.status` of its own
+ * (`phaseForDraftViewStatus` never returns it — the phase is written only by
+ * the bo3 prompt arms), so any `viewUpdated` broadcast during a Bo3 intergame
+ * window flips the phase to `matchInProgress` and retires the error with it.
+ * A seat dropping mid-window is enough. The intergame screen is lost in that
+ * interleaving either way, which is pre-existing, so this narrows where those
+ * two emitters are visible rather than restoring the old latch.
  *
  * Scope: this wraps the *initializer's* setter, so it covers every write made
  * inside this module. It is not zustand middleware and does not rebind
@@ -1185,7 +1193,8 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
     case "pairingsGenerated":
       // No `error: null` here. `clearErrorOnPhaseChange` retires the banner one
       // step earlier, when `roundAdvanced` / `statusChanged("pairing")` moves the
-      // phase off `roundComplete` — and it does the same for guests, which this
+      // phase into `pairing` — off `roundComplete` at a round boundary, off
+      // `deckbuilding` at round 0 — and it does the same for guests, which this
       // host-only arm never could.
       set({
         phase: "matchInProgress",

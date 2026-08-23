@@ -14,7 +14,7 @@ import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
  *
  * `store.error` is scoped to the phase it was raised in:
  * `clearErrorOnPhaseChange` in `multiplayerDraftStore` retires it when the pod
- * changes phase, for both roles. So this banner never outlives its own screen,
+ * changes phase, for both roles. So this banner never outlives its own phase,
  * and the `role="alert"` remount that each phase view performs cannot
  * re-announce a stale error — after a transition there is nothing to announce.
  * Within a phase the error persists across unrelated `viewUpdated` broadcasts;
