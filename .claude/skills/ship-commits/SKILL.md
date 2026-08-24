@@ -48,15 +48,60 @@ A worktree based on `origin/main` gives a clean branch we cherry-pick into, isol
 
 The safe, squash-aware test is content-based: a 3-way merge of local `main` into `origin/main` that yields `origin/main`'s *exact tree* means local `main` contributes no new content, so every ahead-commit is already shipped and resetting loses nothing.
 
+`git merge-tree --write-tree` needs **git ≥ 2.38**. On an older git it exits non-zero
+with `fatal: unknown rev --write-tree`, which is indistinguishable from "the merge
+conflicted" unless you check — so define the containment test once, as a helper that
+answers `contained` / `adds` / `unknown` and NEVER lets an unsupported-git failure
+masquerade as an answer. Both this step and the prune loop below use it.
+
+```bash
+# Echoes: contained | adds | unknown   (never resets on its own)
+branch_content_in_origin_main() {
+  ref=$1
+  origin_tree=$(git rev-parse 'origin/main^{tree}') || return 1
+
+  # Authoritative when available: a real 3-way merge, so BOTH answers are definitive.
+  if merged=$(git merge-tree --write-tree origin/main "$ref" 2>/dev/null); then
+    [ "$merged" = "$origin_tree" ] && echo contained || echo adds
+    return 0
+  fi
+  # Non-zero above is ambiguous: a genuine conflict, or a git that has no
+  # --write-tree at all. This probe cannot conflict with itself, so it separates
+  # the two — WITHOUT which a stale git silently reads as "these commits diverged".
+  if git merge-tree --write-tree origin/main origin/main >/dev/null 2>&1; then
+    echo unknown; return 0    # supported, so the call above genuinely conflicted
+  fi
+
+  # --- Old git (< 2.38). Only DEFINITIVE answers are trustworthy here. ---
+  # Identical trees, or an ordinary already-merged branch: exact, portable, cheap.
+  [ "$(git rev-parse "$ref^{tree}")" = "$origin_tree" ] && { echo contained; return 0; }
+  git merge-base --is-ancestor "$ref" origin/main && { echo contained; return 0; }
+  # Strictly ahead of origin/main with a different tree — it adds content, exactly.
+  # This is the just-enqueued case Step 7 re-runs into, so it must not read as
+  # "undecidable" on an old git.
+  git merge-base --is-ancestor origin/main "$ref" && { echo adds; return 0; }
+  # Trivial (per-blob) 3-way. Proves containment after a squash merge; a
+  # non-trivial merge leaves unmerged entries and write-tree fails, which is
+  # "I could not tell", NOT "it adds content".
+  base=$(git merge-base origin/main "$ref") || { echo unknown; return 0; }
+  idx=$(mktemp -u)
+  if GIT_INDEX_FILE="$idx" git read-tree -m "$base" origin/main "$ref" 2>/dev/null \
+     && merged=$(GIT_INDEX_FILE="$idx" git write-tree 2>/dev/null) \
+     && [ "$merged" = "$origin_tree" ]; then
+    rm -f "$idx"; echo contained; return 0
+  fi
+  rm -f "$idx"; echo unknown
+}
+```
+
 ```bash
 git fetch origin main
 ahead=$(git rev-list --count origin/main..main)
 if [ "$ahead" -eq 0 ]; then
   echo "local main not ahead of origin/main — nothing to reconcile"
 else
-  merged_tree=$(git merge-tree --write-tree origin/main main 2>/dev/null); mt_exit=$?
-  origin_tree=$(git rev-parse 'origin/main^{tree}')
-  if [ "$mt_exit" -eq 0 ] && [ "$merged_tree" = "$origin_tree" ]; then
+  case "$(branch_content_in_origin_main main)" in
+  contained)
     # Every ahead-commit's content is already in origin/main (incl. via squash).
     # Multi-agent guard: never discard another agent's uncommitted tracked work.
     # (reset --hard preserves untracked files; it only drops tracked modifications.)
@@ -67,19 +112,26 @@ else
       echo "WARNING: $ahead ahead-commit(s) are already shipped, but the working tree has"
       echo "uncommitted tracked changes — NOT resetting. Resolve those first, then re-run."
     fi
-  else
-    # merge-tree conflicted, OR local main adds content origin/main lacks.
-    echo "local main has $ahead ahead-commit(s) NOT fully contained in origin/main:"
+    ;;
+  adds)
+    echo "local main has $ahead ahead-commit(s) NOT contained in origin/main:"
     git --no-pager log --oneline origin/main..main
-    echo "(genuine unshipped work, or a PR that diverged from local main during review.)"
-  fi
+    echo "(genuine unshipped work — ship it.)"
+    ;;
+  unknown)
+    echo "CANNOT DETERMINE whether these $ahead ahead-commit(s) are already shipped:"
+    git --no-pager log --oneline origin/main..main
+    echo "(divergent merge, or git $(git --version | awk '{print $3}') predates"
+    echo " 'merge-tree --write-tree', which needs 2.38+. NOT resetting.)"
+    ;;
+  esac
 fi
 ```
 
 Outcomes:
 - **Reset happened** → re-evaluate what (if anything) is actually left to ship before continuing.
-- **Left alone, clean (`mt_exit` 0 but tree differs)** → there is genuine unshipped work; proceed to Step 1 to ship it.
-- **Left alone, divergent (`mt_exit` non-zero)** → the ahead-commits look shipped but the merged PR diverged from local `main` (e.g., a fix was added during review, as happens when a cherry-pick onto a newer `origin/main` needed a follow-up). The clean fix is still `git reset --hard origin/main` once nothing local is worth keeping — **surface this to the user and let them decide; do not silently discard.**
+- **`adds`** → there is genuine unshipped work; proceed to Step 1 to ship it.
+- **`unknown`** → do NOT treat this as "unshipped". It means one of two things, and they need different responses: the ahead-commits may look shipped while the merged PR diverged from local `main` (e.g., a cherry-pick onto a newer `origin/main` needed a follow-up fix during review) — the clean fix is still `git reset --hard origin/main` once nothing local is worth keeping, but **surface it to the user and let them decide; do not silently discard**. Or this git simply cannot answer, in which case say so plainly and leave `main` alone rather than reporting a capability gap as a finding about their commits. This is the same discipline as the Tilt exit codes in CLAUDE.md: `1` means "your code is broken", `3` means "I could not find out", and reporting a `3` as a `1` is its own defect.
 
 **Then prune ship worktrees whose PR has merged.** Each ship leaves a `../forge.rs-ship-*` worktree on a `ship/<topic>` branch (Step 8). After the PR squash-merges, that worktree is dead weight and its build artifacts (`target/`, `node_modules/`) pile up on disk. Remove the ones whose branch is now fully contained in `origin/main`:
 
@@ -88,8 +140,9 @@ git worktree list --porcelain | awk '/^worktree /{wt=$2} /^branch /{print wt"\t"
 | while IFS=$'\t' read -r wt ref; do
     case "$ref" in refs/heads/ship/*) ;; *) continue ;; esac        # only OUR ship/* worktrees — never another agent's
     br=${ref#refs/heads/}
-    merged=$(git merge-tree --write-tree origin/main "$br" 2>/dev/null)
-    [ "$merged" = "$(git rev-parse 'origin/main^{tree}')" ] || continue   # not yet merged (PR still in queue) — keep
+    # Same helper, same reason: on a git that cannot answer this must skip the
+    # worktree, not delete it. Only an explicit `contained` prunes.
+    [ "$(branch_content_in_origin_main "$br")" = contained ] || continue   # not yet merged (PR still in queue), or undecidable — keep
     if git -C "$wt" diff --quiet && git -C "$wt" diff --cached --quiet; then
       # merged + no tracked changes → only gitignored build output remains, so --force is safe
       git worktree remove --force "$wt" && git branch -D "$br" \
@@ -215,7 +268,7 @@ Never retry blindly.
 
 ### 7. Reconcile local main (post-ship)
 
-Re-run the **Step 0 reconciliation** (`cd -` back to the main working dir first). Immediately after enqueue the PR hasn't merged, so `origin/main` hasn't advanced and the merge-tree test shows `main` still ahead — it correctly **no-ops**, leaving the just-shipped commits in place until the queue lands them. The durable cleanup then happens automatically on the *next* ship-commits run (Step 0), once the PR has squash-merged.
+Re-run the **Step 0 reconciliation** (`cd -` back to the main working dir first). Immediately after enqueue the PR hasn't merged, so `origin/main` hasn't advanced and the containment test answers `adds` — it correctly **no-ops**, leaving the just-shipped commits in place until the queue lands them. The durable cleanup then happens automatically on the *next* ship-commits run (Step 0), once the PR has squash-merged.
 
 Do **not** reintroduce a SHA-equality reset here. A squash-merge changes the SHA, so `git rev-list origin/main..main == $SHAS` never matches after merge and the commits accumulate forever — that is the exact bug Step 0's content-based test fixes.
 
