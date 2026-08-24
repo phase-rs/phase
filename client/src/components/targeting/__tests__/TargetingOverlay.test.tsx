@@ -12,7 +12,7 @@ import {
   buildTargetSelectionWaitingFor,
   buildTriggerTargetSelectionWaitingFor,
 } from "../../../test/factories/gameStateFactory.ts";
-import { TARGET_NOUN_KEY, TargetingOverlay } from "../TargetingOverlay.tsx";
+import { TARGET_NOUN_SLUG, TargetingOverlay } from "../TargetingOverlay.tsx";
 import enGame from "../../../i18n/locales/en/game.json";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
@@ -1136,24 +1136,56 @@ describe("TargetingOverlay", () => {
   });
 });
 
-// `TargetNounKey` is a hand-written union, so it is checked against ITSELF — a
-// typo duplicated into both the union and TARGET_NOUN_KEY compiles, and `t()`
+// `TargetNounSlug` is a hand-written union, so it is checked against ITSELF — a
+// typo duplicated into both the union and TARGET_NOUN_SLUG compiles, and `t()`
 // accepts a plain `string` here, so it would render a raw i18n key to the user
-// where a noun belongs. That is the same class of defect #7692 was filed about.
-// This is the only gate that reds on it, BECAUSE IT IS DRIVEN BY THE SHIPPED MAP
-// rather than by a hand-written list of key names: a third list would agree with
-// the catalog while the map disagreed with both.
-describe("TARGET_NOUN_KEY", () => {
-  it("names only keys the en catalog carries", () => {
-    // Reach-guard: an empty map would satisfy the loop below vacuously. The
-    // Record is total over TargetObjectCategory so tsc already forbids that, but
-    // a loop with no iterations is exactly the shape this gate exists to catch.
-    expect(Object.keys(TARGET_NOUN_KEY).length).toBeGreaterThan(0);
+// where a phrase belongs. That is the same class of defect #7692 was filed
+// about. This is the only gate that reds on it, BECAUSE IT IS DRIVEN BY THE
+// SHIPPED MAP rather than by a hand-written list of key names: a third list
+// would agree with the catalog while the map disagreed with both.
+//
+// Whole-phrase keys made the product two-dimensional: 2 frames x 8 slugs = 16
+// keys, where the pre-change design had 6. Twelve of the sixteen are derived
+// from the map. The other four cannot be: `TargetChoiceKind::Players` carries
+// no category, so `player` is named by `targetPhrase` directly, and `orPlayer`
+// is a conjunction rather than a noun. Those four are the ONLY hand-written
+// rows here — writing a third list covering all sixteen is exactly what the
+// paragraph above says not to do.
+const TARGET_FRAMES = ["one", "upToOne"] as const;
 
-    for (const key of Object.values(TARGET_NOUN_KEY)) {
-      // `toHaveProperty` reads a dotted string as a key PATH, so the map's
-      // "targeting.nounSpell" resolves against the catalog without string surgery.
-      expect(enGame).toHaveProperty(key, expect.any(String));
+describe("TARGET_NOUN_SLUG", () => {
+  it("names only phrase keys the en catalog carries, in both frames", () => {
+    // Reach-guards: an empty map or a single frame would satisfy the loops
+    // below vacuously. The Record is total over TargetObjectCategory so tsc
+    // already forbids the first, but a loop with no iterations is exactly the
+    // shape this gate exists to catch.
+    expect(Object.keys(TARGET_NOUN_SLUG).length).toBeGreaterThan(0);
+    expect(TARGET_FRAMES).toHaveLength(2);
+
+    const slugs = [...new Set<string>([...Object.values(TARGET_NOUN_SLUG), "player", "orPlayer"])];
+    expect(slugs).toHaveLength(8);
+
+    const checked = new Set<string>();
+    for (const frame of TARGET_FRAMES) {
+      for (const slug of slugs) {
+        const key = `targeting.${frame}.${slug}`;
+        // `toHaveProperty` reads a dotted string as a key PATH, so
+        // "targeting.one.spell" resolves against the catalog without string
+        // surgery.
+        expect(enGame).toHaveProperty(key, expect.any(String));
+        checked.add(key);
+      }
     }
+    // Redundant with the two length guards above: 2 frames x 8 slugs is 16 by
+    // construction, so this cannot fail while those hold. Kept as a shape
+    // assertion, because 16 is the count every comment in this change cites and
+    // it is worth stating at the gate that produces it.
+    //
+    // It does NOT catch a slug collision standing in for a missing key, which
+    // this comment previously claimed. Collapsing two map rows (Permanent ->
+    // "target") leaves `slugs` 7 long and reds at `toHaveLength(8)` above —
+    // verified by mutation, which failed at that line and never reached this
+    // one.
+    expect(checked.size).toBe(16);
   });
 });

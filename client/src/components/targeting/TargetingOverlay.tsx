@@ -26,23 +26,52 @@ import { flattenRichLabel, RichLabel } from "../mana/RichLabel.tsx";
 const DESCRIPTION_PANEL_ID = "targeting-description-panel";
 
 /**
- * The six `targeting.noun*` keys TARGET_NOUN_KEY may name. Defined as a literal
+ * The two frames the prompt renders in, selected by whether the slot is a
+ * single optional pick. A frame is NOT a wrapper around a noun: each phrase is
+ * authored whole, per locale, per frame, because the "up to one" marker
+ * REPLACES the article in en, replaces it AND re-inflects the noun in pl, and
+ * precedes a RETAINED article in de/es/fr/it/pt. There is no prefix rule.
+ */
+type TargetFrame = "one" | "upToOne";
+
+/**
+ * The seven noun slugs a targeting phrase key may end in. Defined as a literal
  * union so a typo in ANY row of the map is a compile error at the map literal.
  * It cannot be caught at the `t()` call: `t()` accepts a plain `string` here
  * (see PermanentCard.tsx's shipped `Record<AbilityBlockKind, string>` ->
  * `t(MAP[k])`), so a mistyped key would otherwise render a raw i18n key.
+ *
+ * Six of the seven come from the map below. `player` is the exception, because
+ * `TargetChoiceKind::Players` carries no category to key on — `targetPhrase`
+ * names it directly, and it is one of the rows the catalog gate hand-writes.
  */
-type TargetNounKey =
-  | "targeting.nounSpell"
-  | "targeting.nounCreature"
-  | "targeting.nounPlaneswalker"
-  | "targeting.nounNonlandPermanent"
-  | "targeting.nounTargetPermanent"
-  | "targeting.nounTarget";
+type TargetNounSlug =
+  | "player"
+  | "spell"
+  | "creature"
+  | "planeswalker"
+  | "nonlandPermanent"
+  | "targetPermanent"
+  | "target";
+
+/**
+ * The two key unions `targetPhrase` builds — 14 noun phrases plus the 2
+ * conjunctions below, which is the whole 16-key catalog product. Typing each
+ * key as a template literal rather than a bare `string` is what makes drift in
+ * EITHER half — frame or slug — a compile error at the construction site,
+ * since `t()` would accept any `string` and render it raw.
+ *
+ * `orPlayer` gets its OWN union rather than a row in `TargetNounSlug`, because
+ * it is a conjunction template carrying a `{{noun}}` placeholder, not a noun.
+ * Folding it in would make `phrase("orPlayer")` type-check as though it named
+ * one, and that call passes no `noun`, so the placeholder would render raw.
+ */
+type TargetPhraseKey = `targeting.${TargetFrame}.${TargetNounSlug}`;
+type TargetOrPlayerKey = `targeting.${TargetFrame}.orPlayer`;
 
 /**
  * CR 109.1: every engine object category gets a noun. TOTAL over the mirror
- * union — a `Record`, so widening the union without adding a noun here is a
+ * union — a `Record`, so widening the union without adding a slug here is a
  * type error at `pnpm run type-check`, not a runtime fallback.
  *
  * That totality stops at the language boundary, and this comment used to claim
@@ -54,28 +83,34 @@ type TargetNounKey =
  * a category no key covers. Widening the enum means widening the union in the
  * same change; nothing mechanical will remind you.
  *
- * The VALUE type is `TargetNounKey`, not `string`: `t()` accepts a plain
- * `string` in this repo, so a mistyped key would otherwise ship green and
+ * The VALUE type is `TargetNounSlug`, not `string`: `t()` accepts a plain
+ * `string` in this repo, so a mistyped slug would otherwise ship green and
  * render a raw i18n key to the user. The union catches it at THIS literal.
  *
- * `Object` maps to the generic `nounTarget` ON PURPOSE: `targeting.one` is
- * `"a {{target}}"` with a hard-coded ungendered article, and every en noun is
- * consonant-initial so it never renders "a object". Do not add a vowel-initial
- * noun here without making the article agree first — neither locale gate
- * compares VALUES, so it would ship green.
+ * `Object` maps to the generic `target` slug ON PURPOSE: it is the offer the
+ * engine declined to classify further, so the phrase must not name a card type.
+ * The article hazard this note used to carry is GONE — the article is no longer
+ * hard-coded in a frame template, it is part of each authored phrase — so a
+ * vowel-initial noun is now the translator's problem, not a silent en defect.
+ *
+ * What a new category still costs: 14 authored strings, two per locale, and one
+ * grammatical hazard no type can catch. Polish `upToOne.*` opens with "do
+ * jednego", whose form agrees with the noun's gender, and all seven current
+ * Polish nouns are masculine. A FEMININE category needs "do jednej", and
+ * nothing here or in the locale gates compares values, so it would ship green.
  *
  * EXPORTED for the catalog gate in TargetingOverlay.test.tsx. The union above
  * is hand-written and so is checked against itself; only a test that iterates
  * THIS object can catch a typo duplicated into both. Exporting is what makes
  * the list under test the list that ships.
  */
-export const TARGET_NOUN_KEY: Record<TargetObjectCategory, TargetNounKey> = {
-  Spell: "targeting.nounSpell",
-  Creature: "targeting.nounCreature",
-  Planeswalker: "targeting.nounPlaneswalker",
-  NonlandPermanent: "targeting.nounNonlandPermanent",
-  Permanent: "targeting.nounTargetPermanent",
-  Object: "targeting.nounTarget",
+export const TARGET_NOUN_SLUG: Record<TargetObjectCategory, TargetNounSlug> = {
+  Spell: "spell",
+  Creature: "creature",
+  Planeswalker: "planeswalker",
+  NonlandPermanent: "nonlandPermanent",
+  Permanent: "targetPermanent",
+  Object: "target",
 };
 
 export function TargetingOverlay() {
@@ -396,26 +431,40 @@ export function TargetingOverlay() {
             cause: mode labels are full engine sentences, so while one shared
             this line every modal prompt measured 83.50px at every width, in
             every locale. The counter was the smaller one, and English cannot
-            see it — measured with each locale's real strings, `targeting.one`
-            + longest noun + counter wraps at 390px and 360px in de, es and pt
-            and fits at both without it, while en stays on one line at every
-            width. Note the second line is worth removing on a phone even where
-            it collides with nothing: 84px instead of 59px eats a quarter more
-            of a small screen and pushes the board down, which is the thing the
-            original report was actually about.
+            see it — measured with each locale's real strings, the longest
+            `targeting.one.*` phrase plus the counter wraps at 390px and 360px
+            in de, es and pt and fits at both without it, while en stays on one
+            line at every width. Note the second line is worth removing on a
+            phone even where it collides with nothing: 84px instead of 59px eats
+            a quarter more of a small screen and pushes the board down, which is
+            the thing the original report was actually about.
 
-            What is left is the noun alone, and it measures ONE line for all
+            What is left is the phrase alone, and it measures ONE line for all
             seven locales at every viewport 844px wide and up. Below that it
-            depends on the composition. Multi-slot (`targeting.one`): one line
+            depends on the frame. Multi-slot (`targeting.one.*`): one line
             at 390 and 360 in all seven, wrapping only at 320 (de, es, pt).
-            Single-slot optional (`targeting.upToOne`) is the wider case and is
-            NOT improved by any of this, because it never carried a counter to
-            begin with — it requires exactly one slot and the counter requires
-            more than one, so the two can never co-occur, and reading one as
-            evidence about the other is how this comment previously came to
-            claim the counter was not what decides the wrap. Measured, it wraps
-            at 390px in es, at 360px in de/es/pt, and at 320px in every locale
-            but en and it. A wrapped instruction is 83.50/84.00px again.
+            Single-slot optional (`targeting.upToOne.*`) is the wider case and
+            is NOT improved by any of this, because it never carried a counter
+            to begin with — it requires exactly one slot and the counter
+            requires more than one, so the two can never co-occur, and reading
+            one as evidence about the other is how this comment previously came
+            to claim the counter was not what decides the wrap. Measured, it
+            wraps at 390px in es, at 360px in de/es/pt, and at 320px in every
+            locale but en and it. A wrapped instruction is 83.50/84.00px again.
+
+            THOSE WIDTHS WERE MEASURED AGAINST THE PRE-WHOLE-PHRASE STRINGS,
+            when an article was interpolated onto a bare noun. Authoring each
+            phrase whole changed the values, so say plainly which figures bind.
+            Longest rendered phrase per locale, `one` / `upToOne`, before ->
+            after: en 29/37 and fr 37/45 and it 38/45 UNCHANGED; de 45->44 and
+            52->51; es 47->44 and 53->50; pt 51->43 and 55->47; pl 33->34 and
+            44->49. For six locales the string is identical or SHORTER. That is
+            only a statement about DIRECTION — character length is not pixel
+            width, so a shorter string can still be the wider one and none of
+            the widths above survives as a bound on that basis. Polish is the one
+            exception, in BOTH frames: it grew, so no figure above is a bound
+            for pl and only a browser re-measure can replace them. There is no
+            automated check behind any of this; jsdom has no layout engine.
 
             The split layout offsets `--game-targeting-prompt-top` to
             4.25rem/4.75rem, so these are the focused layout's figures.
@@ -704,36 +753,61 @@ function buildTargetPrompt({
   // announcement to name. Fall back to the generic caption rather than
   // re-inferring — re-inference is the defect #7692 removed.
   if (!targetKind) return null;
-  const targetWord = targetNoun(targetKind, t);
-  const useUpToOne = selection && targetSlots.length === 1 && activeSlot.optional;
+  const frame: TargetFrame = selection && targetSlots.length === 1 && activeSlot.optional ? "upToOne" : "one";
 
-  // The noun alone: it is the only part that says WHAT the player has to pick,
+  // The phrase alone: it is the only part that says WHAT the player has to pick,
   // and it is the whole of this line. Nothing else joins it — not the mode
   // label, not the slot counter — because both pushed the longest localized
-  // nouns onto a second line, and a second line is both what put the block over
-  // the opponent-HUD rail and what makes it eat a quarter more of a phone
+  // phrases onto a second line, and a second line is both what put the block
+  // over the opponent-HUD rail and what makes it eat a quarter more of a phone
   // screen. Both qualify from the caption line instead. The bar's comment
   // carries the measurements.
-  return useUpToOne
-    ? t("targeting.upToOne", { target: targetWord })
-    : t("targeting.one", { target: targetWord });
+  return targetPhrase(targetKind, frame, t);
 }
 
 /**
- * CR 115.1 + CR 115.4: render the noun the ENGINE classified. This function
- * inspects no game object — it maps a discriminant to an i18n key. All
+ * CR 115.1 + CR 115.4: render the phrase the ENGINE classified, in the frame
+ * the slot's optionality selects. This function inspects no game object and
+ * reasons about no grammar — it maps a discriminant and a frame to an i18n key,
+ * and the catalog holds the article, the gender and the case. All
  * classification lives in `engine::game::derived_views::target_choice_kind`.
  */
-function targetNoun(kind: TargetChoiceKind, t: TFunction<"game">): string {
+function targetPhrase(kind: TargetChoiceKind, frame: TargetFrame, t: TFunction<"game">): string {
+  const phrase = (slug: TargetNounSlug): string => {
+    const key: TargetPhraseKey = `targeting.${frame}.${slug}`;
+    return t(key);
+  };
+
   switch (kind.type) {
     case "Players":
-      return t("targeting.nounPlayer");
+      return phrase("player");
     case "Objects":
-      return t(TARGET_NOUN_KEY[kind.data.category]);
-    case "ObjectsAndPlayers":
-      return t("targeting.nounOrPlayer", {
-        noun: t(TARGET_NOUN_KEY[kind.data.category]),
+      return phrase(TARGET_NOUN_SLUG[kind.data.category]);
+    // ONE `orPlayer` key per frame, not one per noun: the second conjunct
+    // depends only on "player"'s gender and the case the frame governs, and
+    // both are fixed once the frame is. i18next interpolates; nothing here
+    // concatenates.
+    //
+    // Polish gets away with a single "{{noun}} lub gracza" across BOTH frames
+    // only because `gracz` is SYNCRETIC — its genitive and its animate
+    // accusative are both `gracza`. One string is carrying two cases by
+    // coincidence, and it breaks the moment the second conjunct is any noun
+    // but `gracz`.
+    //
+    // The `upToOne` x `orPlayer` cell — 14 authored strings — is exercised by
+    // no test because no printed card appears to reach it: searching the
+    // `oracle_text` of all 35,798 cards in data/card-data.json case-folded,
+    // /up to one target (\w+ ){0,3}or player/ matches 0 cards and /up to one
+    // any target/ matches 0, against live positive controls of 916 cards for
+    // /any target/ and 651 for /up to one target/ in that same search — which
+    // makes the gap a corpus observation about today's printings rather than
+    // an oversight, and NOT a guarantee that the cell is unreachable.
+    case "ObjectsAndPlayers": {
+      const key: TargetOrPlayerKey = `targeting.${frame}.orPlayer`;
+      return t(key, {
+        noun: phrase(TARGET_NOUN_SLUG[kind.data.category]),
       });
+    }
   }
 }
 
