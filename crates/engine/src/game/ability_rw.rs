@@ -2274,14 +2274,25 @@ fn legacy_object_scope(s: &ObjectScope) -> bool {
 fn legacy_player_filter(x: &PlayerFilter) -> bool {
     match x {
         PlayerFilter::TriggeringPlayer => true,
-        PlayerFilter::ControlsCount { count, .. } => legacy_quantity_expr(count),
+        // CR 109.4: the nested population is part of this filter's graph — a
+        // legacy ref inside "a player who controls <filter>" is still a legacy
+        // ref. `ability_scan::scan_player_filter` is the reference traversal.
+        PlayerFilter::ControlsCount { filter, count, .. } => {
+            legacy_target_filter(filter) || legacy_quantity_expr(count)
+        }
         PlayerFilter::PlayerAttribute { attr, value, .. } => {
             legacy_quantity_ref(attr) || legacy_quantity_expr(value)
         }
         PlayerFilter::AllExcept { exclude } => legacy_player_filter(exclude),
+        // CR 120.1: the damage-source narrowing is a nested object population.
+        PlayerFilter::OpponentDealtDamage { source, .. } => {
+            source.as_deref().is_some_and(legacy_target_filter)
+        }
+        // CR 603.3b: the per-member narrowing is a nested object population;
+        // the membership ledger itself stays non-legacy (see the group below).
+        PlayerFilter::TrackedSetPossessor { filter, .. } => legacy_target_filter(filter),
         PlayerFilter::OpponentLostLife
         | PlayerFilter::OpponentGainedLife
-        | PlayerFilter::OpponentDealtDamage { .. }
         | PlayerFilter::OpponentOtherThanTriggering
         | PlayerFilter::OpponentOfTriggeringPlayer
         | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
@@ -2299,9 +2310,6 @@ fn legacy_player_filter(x: &PlayerFilter) -> bool {
         | PlayerFilter::PerformedActionThisWay { .. }
         | PlayerFilter::OwnersOfCardsExiledBySource
         | PlayerFilter::VotedFor { .. }
-        // Per-resolution chain ledger read, like `ZoneChangedThisWay` and the
-        // `TrackedSetSize` quantity refs — not one of the retained legacy refs.
-        | PlayerFilter::TrackedSetPossessor { .. }
         | PlayerFilter::ChosenPlayer { .. } => false,
     }
 }
@@ -6911,11 +6919,22 @@ fn rw_player_filter(x: &PlayerFilter) -> RwProfile {
         PlayerFilter::OpponentLostLife | PlayerFilter::OpponentGainedLife => {
             reads_player_of(StateKind::JournalLife)
         }
+        // CR 120.1: the life-journal read is this filter's own axis, but the
+        // optional damage-SOURCE narrowing is a nested object population that
+        // carries its own reads — fold it in rather than dropping it, matching
+        // how `ControlsCount` / `TrackedSetPossessor` fold their nested filters
+        // below and how `ability_scan::scan_player_filter` recurses.
         PlayerFilter::OpponentDealtDamage {
-            source: _,
+            source,
             kind: _,
             min_sources: _,
-        } => reads_player_of(StateKind::JournalLife),
+        } => {
+            let mut p = reads_player_of(StateKind::JournalLife);
+            if let Some(source) = source.as_deref() {
+                p.merge(rw_target_filter(source));
+            }
+            p
+        }
         // D5 carrier.
         PlayerFilter::TriggeringPlayer => legacy_ref(),
         PlayerFilter::OpponentOtherThanTriggering

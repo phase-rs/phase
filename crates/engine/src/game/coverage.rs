@@ -1941,14 +1941,21 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
             relation,
             comparator,
             count,
-            ..
+            filter,
         } => {
             let who = match relation {
                 PlayerRelation::Controller => "you",
                 PlayerRelation::Opponent => "each opponent",
                 PlayerRelation::All => "each player",
             };
-            return format!("{who} who controls {comparator:?} {count:?} matching permanents");
+            // Render the nested population. Dropping it made "a player who
+            // controls eight or more LANDS" (Owlbear Cub) and "... artifacts"
+            // render identically as "matching permanents", so a real parse
+            // change between them showed as NO diff in the coverage receipt.
+            return format!(
+                "{who} who controls {comparator:?} {count:?} {}",
+                fmt_target(filter)
+            );
         }
         // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class] whose [scalar
         // attr] [comparator] [value]"
