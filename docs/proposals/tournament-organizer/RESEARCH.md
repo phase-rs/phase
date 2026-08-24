@@ -517,20 +517,33 @@ they are.
 ## 13. Commander/multiplayer pod tournaments — the Multiplayer Addendum to the MTR ("MSTR"), and production practice
 
 Per direct instruction: the design must cover Commander/multiplayer pod
-tournaments, not head-to-head only (CONTEXT.md finding #9). Magic's own
-tournament-rules body publishes a dedicated addendum for exactly this case
-— checked directly this session (WebSearch + WebFetch), not assumed from
-1v1 MTR text scaled up.
+tournaments, not head-to-head only (CONTEXT.md finding #9). A widely-used
+convention document fills exactly this gap the official MTR itself doesn't
+cover — checked directly this session (WebSearch + WebFetch), not assumed
+from 1v1 MTR text scaled up.
 
-**Source and cross-verification.** Fetched the Multiplayer Addendum to the
-Magic Tournament Rules via [juizes-mtg-portugal.github.io/multiplayer-addendum-mtr](https://juizes-mtg-portugal.github.io/multiplayer-addendum-mtr)
-(a judge-community mirror of the official text). Cross-referenced its
-existence and content against two independent sources found in the same
-search pass — [benelux-cedh-rules.eu/multiplayer-addendum-mtr](https://benelux-cedh-rules.eu/multiplayer-addendum-mtr)
-(another regional judge-community mirror) and [topdeck.gg/mtr-ipg-addendum](https://topdeck.gg/mtr-ipg-addendum)
-(a production tournament platform's own reference copy) — not a single
-unverified source. All three exist and describe the same ruleset; only the
-first was WebFetched in full for exact figures.
+**Source and cross-verification — CORRECTED, maintainer review: this is
+NOT an official Wizards of the Coast document, and the original framing
+here was wrong to imply otherwise.** Fetched the "Multiplayer Addendum to
+the Magic Tournament Rules" via
+[juizes-mtg-portugal.github.io/multiplayer-addendum-mtr](https://juizes-mtg-portugal.github.io/multiplayer-addendum-mtr)
+— re-checked directly this round: the page's own opening disclaimer states
+"This is an unofficial rules document written by independent judges. This
+is not official Wizards of the Coast documentation," maintained by the
+Portuguese Magic judge community. **This document is an external,
+community-authored convention this proposal deliberately adopts to fill a
+real gap** — the official MTR has no multiplayer-scoring/pairing section
+of its own — not a mirror of anything Wizards published. Cross-referenced
+its existence and content against two further sources found in the same
+search pass, both also independent/community-authored, not Wizards:
+[benelux-cedh-rules.eu/multiplayer-addendum-mtr](https://benelux-cedh-rules.eu/multiplayer-addendum-mtr)
+(a regional cEDH community's own copy) and
+[topdeck.gg/mtr-ipg-addendum](https://topdeck.gg/mtr-ipg-addendum) (a
+production tournament platform's reference copy). All three describe the
+same convention; only the first was WebFetched in full for exact figures.
+Cited throughout this document as "the Multiplayer Addendum" or "MSTR" —
+an external convention this proposal adopts, never as Wizards-published
+policy.
 
 **Match-point scoring — a general formula, not a separate convention.**
 Per-win points are `2n - 1` for a pod of `n` players: 7 match points for a
@@ -584,9 +597,9 @@ description** — it's a greedy top-down pass plus a swap-based repair step,
 the same algorithmic *shape* `draft-core`'s existing 1v1 Swiss pairing
 already uses (§11 above: greedy-within-bracket + carry-one-down, no
 backtracking). Finding #8 recommended that shape for 1v1 pairing as a way
-to sidestep #4615's backtracking bug; this section confirms the official
-body governing *multiplayer* pairing independently arrived at the same
-non-backtracking shape for pods. One generalized algorithm (top-to-bottom +
+to sidestep #4615's backtracking bug; this section confirms the
+independent judge community that authored the multiplayer convention this
+proposal adopts arrived at the same non-backtracking shape for pods. One generalized algorithm (top-to-bottom +
 swap, parameterized by `arity`) now covers both cases described in PLAN.md
 §2, rather than needing a 1v1-specific fix and a separate pod-specific
 design.

@@ -29,8 +29,10 @@ tiebreaker logic across two near-identical code paths that differ only in
 one number. Instead, `MatchArity` (§2) is threaded through pairing,
 `ScoringPolicy`, and tiebreak order as a single parameter — `arity = 2`
 *is* today's design, not a special case of a new one. Full grounding in the
-official Multiplayer Addendum to the Magic Tournament Rules (MSTR) and
-TopDeck.gg's production Commander-pairing practice is in RESEARCH.md §13.
+Multiplayer Addendum to the Magic Tournament Rules ("MSTR" — an unofficial,
+independent-judge-authored convention this proposal deliberately adopts,
+NOT a Wizards of the Coast document; see RESEARCH.md §13) and TopDeck.gg's
+production Commander-pairing practice is in RESEARCH.md §13.
 
 ### Building Blocks — reused, not reinvented
 
@@ -147,10 +149,12 @@ immediately for the tiebreaker floor too: MTR's 1v1 floor is a hardcoded
 0.33, MSTR's 4-player-pod floor is a hardcoded ~0.14 — both are the *same*
 formula, `1.0 / scoring.win_points as f64` (1/3 ≈ 0.33, 1/7 ≈ 0.14), so the
 floor needs no arity branch at all. Tiebreaker *order itself* is
-arity-selected, not TO-configurable (§2 below) — MTR and MSTR use genuinely
-different tiebreak axes, not just different numbers plugged into the same
-axes, so this can't be unified the way the floor was; ship both fixed to
-their respective official values, revisit only if a real request surfaces.
+arity-selected, not TO-configurable (§2 below) — MTR (official) and MSTR
+(the unofficial convention this proposal adopts for multiplayer, RESEARCH.md
+§13) use genuinely different tiebreak axes, not just different numbers
+plugged into the same axes, so this can't be unified the way the floor was;
+ship both fixed to their respective cited values, revisit only if a real
+request surfaces.
 
 `MatchArity` and `ScoringPolicy` are supplied once at `CreateTournament`
 time and stored on the `TournamentMeta`, immutable for the tournament's
@@ -217,15 +221,18 @@ incomplete relative to the MTR table it cites as its own round-count source.
 This applies at `arity = HEAD_TO_HEAD` only, gated to the existing fixed
 8-seat case (RESEARCH.md §11).
 
-**Pod-based single elimination (`arity > HEAD_TO_HEAD`) is explicitly OUT OF
-SCOPE for v1 — maintainer review correctly rejected this section's earlier
-"in-scope, not designed further" framing.** Bracket/advancement semantics
-for a pod (does a 4-player bracket match have one winner and three
-eliminated, or does it need its own seeding/advancement rules distinct from
-adjacent-pair 1v1 SE?) are genuinely undesigned, and per CONTEXT.md open
-question #4 this is a live, unresolved product question, not a mechanical
-extension of the 1v1 gate. `v1` ships `BracketShape::SingleElimination`
-for `arity = HEAD_TO_HEAD` only; `CreateTournament` must reject
+**Pod-based single elimination (`arity > HEAD_TO_HEAD`) is excluded from v1
+— DECIDED, not a live question.** Maintainer review correctly rejected
+this section's earlier "in-scope, not designed further" framing: bracket/
+advancement semantics for a pod (does a 4-player bracket match have one
+winner and three eliminated, or does it need its own seeding/advancement
+rules distinct from adjacent-pair 1v1 SE?) were genuinely undesigned, which
+is exactly why exclusion — not silent scope creep — is the resolution.
+**The scope decision itself (excluded from v1) is final; only the
+*underlying design question* (what pod-SE would look like if someone
+builds it later) remains open, tracked as future work, not as a blocker on
+this proposal.** `v1` ships `BracketShape::SingleElimination` for
+`arity = HEAD_TO_HEAD` only; `CreateTournament` must reject
 `SingleElimination` paired with `arity != HEAD_TO_HEAD` at construction
 time (the same "reject explicitly rather than silently drop data" posture
 the sibling custom-format-engine proposal uses for its own unsupported
@@ -235,8 +242,10 @@ combinations). Commander/multiplayer pods get Swiss only in v1 — see §5.
 generalized over `arity` (supersedes this doc's earlier backtracking
 design).** This session's earlier draft proposed fixing #4615's backtracking
 bug in place (a one-line base-case fix). Generalizing to N-player pods
-makes that moot: the official MSTR algorithm (RESEARCH.md §13) is itself
-non-backtracking, and it's the same *shape* CONTEXT.md finding #8 already
+makes that moot: the MSTR convention's own algorithm (an unofficial,
+community-authored document this proposal adopts, RESEARCH.md §13) is
+itself non-backtracking, and it's the same *shape* CONTEXT.md finding #8
+already
 recommended adopting from `draft-core`'s existing 1v1 pairing (greedy
 top-down assignment + carry/swap repair, no recursive search) — one
 generalized algorithm now satisfies both the odd-bracket-bug fix and the
@@ -255,15 +264,41 @@ Commander-pod requirement, rather than needing two:
    standings — MSTR's own repair step, not a novel design. A player moved
    into a pod above their standing is "paired up"; moved below is "paired
    down" (recorded for organizer visibility only, not scored differently).
-4. **Pod-size fallback, `arity > 2` only**: prefer as many full `arity`-size
-   pods as possible; when the active-player count doesn't divide evenly,
-   form one *short pod* of `arity.0 - 1` rather than issuing more than one
-   bye (MSTR: "pods may consist of a minimum of 3 players to avoid multiple
-   byes" for 4-player events). Prefer assigning the short pod to a player
-   who hasn't already had one (`had_short_pod`), mirroring bye fairness —
-   a player should not be shorted twice before every other player has been
-   shorted once, same fairness rule as `had_bye`. At `arity = 2` there is no
-   short-pod case (`arity.0 - 1 == 1`, which is just the existing bye path).
+4. **Pod-size fallback, `arity > 2` only — REVISED, maintainer review: the
+   original "form one short pod" text was a real math error, not a
+   simplification.** A single `arity - 1` short pod cannot seat every
+   non-divisible player count: at `arity = 4`, 9 players need THREE short
+   pods (`3+3+3` — a single 4-pod-plus-one-short-pod only accounts for 7),
+   and 10 players need TWO (`4+3+3`, not `4+4+`-with-one-short). Capping at
+   "at most one short pod" was simply wrong, not a deliberate scope
+   decision.
+
+   **General partition algorithm** (works for any `arity`, not just 4):
+   given `n` active players and pod size `arity.0`, find the smallest
+   `b ≥ 0` such that `n - b * (arity.0 - 1)` is a non-negative multiple of
+   `arity.0`; that `b` is the number of short (`arity.0 - 1`-player) pods,
+   and `(n - b * (arity.0 - 1)) / arity.0` is the number of full pods. This
+   always finds a solution with `b` in `0..arity.0` when one exists, because
+   `arity.0` and `arity.0 - 1` are always coprime (consecutive integers) —
+   by the same reasoning the Chicken McNugget/Frobenius bound gives for any
+   two coprime pod sizes, the only counts with NO all-`{arity-1,arity}`
+   partition are the small ones below `(arity.0 - 1) * (arity.0 - 2)` that
+   the formula fails to solve (for `arity = 4`: `n ∈ {1, 2, 5}` — these
+   degenerate cases fall through to bye assignment below, same as today,
+   not a new mechanism). Minimizing `b` first (trying `b = 0, 1, 2, ...`
+   in order and taking the first fit) is what makes 9 players resolve to
+   `3+3+3` (`b=3`, the minimum that works — `b=0,1,2` all fail divisibility)
+   and 10 players resolve to `4+3+3` (`b=2`) rather than an arbitrarily
+   larger number of short pods.
+
+   Fairness now spreads across however many short pods a round actually
+   needs (potentially more than one), not just one: when selecting which
+   `b * (arity.0 - 1)` players go into short pods this round, prefer players
+   who haven't already had one (`had_short_pod`) across the full selection,
+   the same fairness rule as `had_bye`, generalized from "pick one player"
+   to "pick the `b`-pod-worth of players." At `arity = 2` there is no
+   short-pod case (`arity.0 - 1 == 1`, which is just the existing bye
+   path) — this fallback is `arity > 2` only, unchanged.
 5. Bye assignment (any `arity`, and the only path at `arity = 2`) prefers a
    player who hasn't already had one (`had_bye` flag) among any players
    still unassignable after pod-size fallback.
@@ -391,10 +426,12 @@ order are all designed as functions of it from day one.
   rematch-prone pairing — this is the exact case #4615's 90 passing tests
   missed.
 - A dedicated test for `COMMANDER_POD` arity with a player count that
-  doesn't divide evenly by 4 (e.g. 9, 10, 11 players), asserting a single
-  short pod (not multiple byes) forms, and that `had_short_pod` fairness
-  prevents the same player being shorted twice before every player has been
-  shorted once.
+  doesn't divide evenly by 4 — including 9 players (must resolve to three
+  short pods, `3+3+3`, not one) and 10 players (must resolve to `4+3+3`) —
+  asserting §2's partition algorithm produces the correct minimum-short-pod
+  count for each, no bye is issued when a short-pod-only partition exists,
+  and `had_short_pod` fairness spreads correctly across however many
+  players a round actually shorts (not just tracking a single player).
 - A dedicated test asserting `validate_match_result` rejects a
   `HEAD_TO_HEAD` report where game-win counts differ but `winner` names the
   side with fewer game wins, AND a test confirming a `COMMANDER_POD`
@@ -488,12 +525,13 @@ entry. **Acceptance criteria beyond "renders":**
   match, RESEARCH.md §13); `PodOutcome` deliberately has no room for it.
   Revisit only if a real request surfaces, same as the other MSTR/MTR
   fixed-value decisions above.
-- Variable pod size *within* a single round beyond the one-short-pod
-  fallback (e.g. deliberately mixing 3- and 4-player pods for reasons other
-  than an indivisible player count) — v1 always prefers full `arity`-size
-  pods and falls back to at most one short pod per round, per MSTR's own
-  stated preference; anything more elaborate is unneeded product scope for
-  a first cut.
+- Variable pod size *within* a single round beyond what §2's partition
+  algorithm requires (e.g. deliberately mixing 3- and 4-player pods for
+  reasons other than seating an indivisible player count — an organizer
+  preference lever, not a seating-math necessity) — v1 always uses the
+  minimum number of short pods the partition algorithm computes, never an
+  arbitrary organizer-chosen mix; anything more elaborate is unneeded
+  product scope for a first cut.
 - **Pod-based single elimination (`arity > HEAD_TO_HEAD`, §2) — maintainer
   review correctly rejected an earlier "in-scope, not designed further"
   framing for this.** Bracket/advancement semantics for a multi-player pod

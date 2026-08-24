@@ -261,13 +261,25 @@ file:line evidence.
      the same shape is an implementation-time call PR 1 should make
      explicitly, not leave implicit.
 
-9. **NEW — Commander/multiplayer pod tournaments are governed by a separate,
-   official ruleset (the Multiplayer Addendum to the MTR, referred to here
-   as "MSTR") with different scoring, tiebreak, and pairing conventions than
-   1v1 — not just a bigger pod on the same math.** Fetched directly this
-   session (juizes-mtg-portugal.github.io's mirror, cross-referenced against
-   BeNeLux cEDH's mirror and TopDeck.gg's own addendum page — full citations
-   in RESEARCH.md §13), not paraphrased from memory:
+9. **NEW — Commander/multiplayer pod tournaments are governed by a separate
+   convention (the "Multiplayer Addendum to the MTR," referred to here as
+   "MSTR") with different scoring, tiebreak, and pairing rules than 1v1 —
+   not just a bigger pod on the same math. CORRECTED, maintainer review:
+   this is an unofficial, independent-judge-authored document, NOT a
+   Wizards of the Coast publication — the source page's own disclaimer
+   says so explicitly, and this proposal's earlier framing ("official
+   ruleset," "mirror of the official text") was wrong to imply Wizards
+   authorship.** It fills a real gap (the official MTR has no multiplayer
+   section of its own) as a widely-adopted community convention this
+   proposal deliberately chooses to follow, not an official rule this
+   proposal is merely restating. Fetched directly this session
+   (juizes-mtg-portugal.github.io — Portuguese judge community — its own
+   page states "This is an unofficial rules document written by
+   independent judges. This is not official Wizards of the Coast
+   documentation"), cross-referenced against BeNeLux cEDH's own community
+   copy and TopDeck.gg's reference copy — full citations in RESEARCH.md
+   §13 — not paraphrased from memory, and not claimed as anything more
+   authoritative than what it actually is:
    - **Scoring generalizes cleanly, not by coincidence**: MSTR's win-point
      formula is `2n - 1` for pod size `n` — 7 points for a 4-player pod's
      win. At `n = 2` this is exactly `3`, the MTR §2.1 value #5312 already
@@ -282,8 +294,9 @@ file:line evidence.
      *same* formula, `1 / win_points`, evaluated at each ruleset's own
      `win_points` — another clean unification, unlike the tiebreak order
      itself.
-   - **Pairing is officially non-backtracking, independently confirming
-     finding #8's recommendation.** MSTR's own algorithm is top-to-bottom
+   - **Pairing is non-backtracking in MSTR's own convention too,
+     independently confirming finding #8's recommendation.** MSTR's own
+     algorithm is top-to-bottom
      assignment by current standing, with an iterative *swap* repair step
      for players who can't be placed without a rematch — no recursive
      search, no base case to get wrong. This is the same algorithmic
