@@ -5846,17 +5846,16 @@ fn damage_any_target_legal_targets(
     )
 }
 
-/// CR 603.12: Check if a sub-ability represents a reflexive trigger whose targeting
-/// should be deferred to resolution time. Reflexive trigger conditions (WhenYouDo,
-/// QuantityCheck on CountersOnSelf) indicate the sub-ability fires as a separate
-/// triggered ability during resolution — targets are chosen then, not at stack time.
+/// CR 603.12 + CR 608.2d: Whether a chained sub-ability chooses its targets while
+/// resolving rather than as its parent goes on the stack. Ordinary conditional and
+/// additional-cost-paid clauses retain their announced targets (CR 601.2c / CR 603.3d).
 fn defers_conditional_target_selection(sub: &ResolvedAbility) -> bool {
     matches!(
         &sub.condition,
         Some(AbilityCondition::WhenYouDo)
-            | Some(AbilityCondition::QuantityCheck { .. })
-            | Some(AbilityCondition::PreviousEffectAmount { .. })
-            | Some(AbilityCondition::AdditionalCostPaidInstead)
+    ) || matches!(
+        &sub.condition,
+        Some(AbilityCondition::AdditionalCostPaidInstead) if !sub.context.additional_cost_paid
     ) || sub.target_choice_timing == TargetChoiceTiming::Resolution
         // CR 608.2d + CR 601.2c: "You may" sub-instructions (Nahiri, the
         // Lithomancer +2 attach) choose whether to perform the action at
@@ -7634,10 +7633,9 @@ pub fn retarget_slot_violation(
 }
 
 fn minimum_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> usize {
-    // CR 601.2c + CR 603.3d: only targets announced while this ability is put on
-    // the stack reserve slots from an earlier multi-target sibling. A conditional
-    // continuation is announced, if at all, during resolution, so counting its
-    // targets here would let it steal the earlier sibling's selected slots.
+    // CR 601.2c + CR 603.3d: only resolution-time choices avoid reserving slots
+    // from an earlier multi-target sibling. Ordinary conditional and paid-cost
+    // continuations still announce their targets while the ability is stacked.
     if defers_conditional_target_selection(ability) {
         return 0;
     }
