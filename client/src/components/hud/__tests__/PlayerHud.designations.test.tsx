@@ -182,6 +182,7 @@ describe("PlayerHud designations", () => {
       expect(
         screen.getByLabelText("Venturing in Lost Mine of Phandelver, Goblin Lair, room 2 of 7"),
       ).toBeInTheDocument();
+      expect(screen.getByText("Lost Mine of Phandelver")).toBeInTheDocument();
       // CR 309.4b-c: the tooltip names the room and repeats what it did.
       expect(screen.getByText("Goblin Lair — room 2 of 7")).toBeInTheDocument();
       expect(screen.getByText("Create a 1/1 red Goblin creature token.")).toBeInTheDocument();
