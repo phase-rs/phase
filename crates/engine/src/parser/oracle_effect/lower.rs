@@ -1737,10 +1737,14 @@ pub(super) fn change_zone_target_choice_timing(
 }
 
 pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
-    if matches!(
-        clause_ir.parsed.effect,
-        Effect::Attach { .. } | Effect::CastFromZone { .. }
-    ) {
+    let has_untargeted_resolution_choice = match &clause_ir.parsed.effect {
+        // Equip's attachment is always `SelfRef`, so it remains a stack-time
+        // target even though the keyword's reminder text isn't in this fragment.
+        Effect::Attach { attachment, .. } => !attachment.is_context_ref(),
+        Effect::CastFromZone { .. } => true,
+        _ => false,
+    };
+    if has_untargeted_resolution_choice {
         let lower = clause_ir
             .source
             .fragment()
