@@ -2442,7 +2442,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(connect).not.toHaveBeenCalled();
   });
 
-  it("stops guest reconnect attempts after a terminal host message", async () => {
+  it("stops an unauthenticated guest reconnecting after host_left", async () => {
     const { peer } = createFakePeer();
     const connect = vi.fn();
     const reconnectPeer = { ...peer, connect };
@@ -2453,21 +2453,13 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       "host-peer",
       conn as unknown as DataConnection,
     );
+    const emitted = vi.fn();
+    adapter.onEvent(emitted);
     await adapter.initialize();
-    await conn.simulateData({
-      type: "game_setup",
-      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
-      assignedPlayerId: 1,
-      playerToken: "seat-token",
-      state: remoteState("setup"),
-      events: [],
-      legalActions: [],
-      autoPassRecommended: false,
-      manaPaymentShortcutActions: [],
-    });
 
     await conn.simulateData({ type: "host_left", reason: "Host left" });
     expect(conn.open).toBe(false);
+    expect(emitted).toHaveBeenCalledWith({ type: "gameOver", winner: null, reason: "Host left" });
     adapter.sendConcede();
     const sentAfterTerminal = await conn.getSentMessages();
     expect(sentAfterTerminal.some((message) =>

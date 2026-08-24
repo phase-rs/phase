@@ -3211,6 +3211,10 @@ export class P2PGuestAdapter implements EngineAdapter {
       && msg.type !== "reconnect_ack"
       && msg.type !== "reconnect_rejected"
       && msg.type !== "kick"
+      // The host broadcasts this to both joined and still-lobbying guests
+      // before it closes their sessions, so it must stop reconnecting even
+      // before this connection has delivered its setup handshake.
+      && msg.type !== "host_left"
     ) {
       return;
     }
