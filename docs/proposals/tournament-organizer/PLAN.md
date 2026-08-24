@@ -214,12 +214,22 @@ pub enum PodOutcome {
 as a sibling bracket shape on the *same* manager, not a separate feature —
 per "build for the class," a tournament tool that only does Swiss is
 incomplete relative to the MTR table it cites as its own round-count source.
-Single elimination for `arity > 2` (Commander bracket play) composes the
-same way: each bracket "match" is a pod of `arity` players advancing its one
-winner, rather than the adjacent-pair advancement 1v1 SE uses — noted here
-as in-scope, not designed further, since v1's SE path is already gated to a
-fixed 8-seat case (RESEARCH.md §11) and the pod generalization is a
-natural, not novel, extension of that same gate.
+This applies at `arity = HEAD_TO_HEAD` only, gated to the existing fixed
+8-seat case (RESEARCH.md §11).
+
+**Pod-based single elimination (`arity > HEAD_TO_HEAD`) is explicitly OUT OF
+SCOPE for v1 — maintainer review correctly rejected this section's earlier
+"in-scope, not designed further" framing.** Bracket/advancement semantics
+for a pod (does a 4-player bracket match have one winner and three
+eliminated, or does it need its own seeding/advancement rules distinct from
+adjacent-pair 1v1 SE?) are genuinely undesigned, and per CONTEXT.md open
+question #4 this is a live, unresolved product question, not a mechanical
+extension of the 1v1 gate. `v1` ships `BracketShape::SingleElimination`
+for `arity = HEAD_TO_HEAD` only; `CreateTournament` must reject
+`SingleElimination` paired with `arity != HEAD_TO_HEAD` at construction
+time (the same "reject explicitly rather than silently drop data" posture
+the sibling custom-format-engine proposal uses for its own unsupported
+combinations). Commander/multiplayer pods get Swiss only in v1 — see §5.
 
 **Pairing algorithm — top-to-bottom pod assignment with swap-based repair,
 generalized over `arity` (supersedes this doc's earlier backtracking
@@ -405,9 +415,21 @@ types (`TournamentView`, `TournamentSummary`, `TournamentStanding`,
 `PairingView` — `PairingView.players: Vec<PlayerSummary>`, not a fixed
 `player_a`/`player_b` pair, so the wire shape itself doesn't bake in
 head-to-head), `CreateTournament`'s payload carries `arity: MatchArity`
-alongside `scoring`/`bracket`, protocol version bump — **from 13 to 14** (confirmed current
-value is 13, not 12 — see CONTEXT.md finding #4; do not copy #4615's stale
-"v12" framing). `broker.rs` gains the `tournaments: TournamentManager` field
+alongside `scoring`/`bracket`. **Protocol version bump — REVISED, maintainer
+review: this text previously said "from 13 to 14," which was stale even
+against this document's OWN CONTEXT.md finding #4 (which had already
+retracted that framing) and is stale again against current `main` regardless
+— `PROTOCOL_VERSION`/`LOBBY_PROTOCOL_VERSION` are fast-moving constants that
+will have moved again by the time anyone implements this.** The durable
+instruction, independent of whatever the numbers are on any given day:
+bump `LOBBY_PROTOCOL_VERSION` (`crates/lobby-broker/src/protocol.rs`) by
+one from its value at implementation time — re-read the constant then, do
+not trust a number cited in this document — because `TournamentManager`'s
+new message variants are lobby-scoped. Do NOT bump the general
+`PROTOCOL_VERSION`, which is for `GameState`/`GameAction` wire changes this
+proposal doesn't make (see CONTEXT.md finding #4 for the full architectural
+reasoning, which remains correct even as the specific numbers churn).
+`broker.rs` gains the `tournaments: TournamentManager` field
 and the `ConnState` organizer/joined-tournament fields **as tokens** (§3
 above, not bare identifiers). Native server dispatch arms in
 `phase-server/src/main.rs`. Reaper keyed off `last_activity_at`, restricted
@@ -472,6 +494,13 @@ entry. **Acceptance criteria beyond "renders":**
   pods and falls back to at most one short pod per round, per MSTR's own
   stated preference; anything more elaborate is unneeded product scope for
   a first cut.
+- **Pod-based single elimination (`arity > HEAD_TO_HEAD`, §2) — maintainer
+  review correctly rejected an earlier "in-scope, not designed further"
+  framing for this.** Bracket/advancement semantics for a multi-player pod
+  bracket are a real, unresolved design question (CONTEXT.md open question
+  #4), not a mechanical extension of 1v1 SE's existing 8-seat gate.
+  `CreateTournament` rejects `SingleElimination` + `arity != HEAD_TO_HEAD`
+  at construction time. Commander/multiplayer pods get Swiss only in v1.
 
 ## 6. Testing
 
@@ -489,3 +518,10 @@ tests didn't cover the arity-2 cases, and nothing existed yet to cover
 arity > 2 at all; any building block introduced here needs a test that
 would have caught each of the seven review findings plus the Commander-pod
 gap, not just tests for the successful head-to-head path.
+
+**NEW — maintainer review**: a dedicated test asserting `CreateTournament`
+rejects `BracketShape::SingleElimination` paired with any
+`arity != MatchArity::HEAD_TO_HEAD` at construction time (§2/§5) — the
+concrete regression test proving pod-based SE's exclusion from v1 is an
+enforced construction-time rejection, not just a documentation note that a
+future implementer could silently miss.

@@ -127,6 +127,21 @@ file:line evidence.
    `LOBBY_PROTOCOL_VERSION`, currently 1, not the unrelated
    `PROTOCOL_VERSION`, currently 33."
 
+   **Re-verified again — maintainer review caught that PLAN.md's PR 2 text
+   was never actually updated to match this finding's own retraction above,
+   and that current `main` has moved further still.** As of commit
+   `d9c2a7874` (checked directly this pass): `PROTOCOL_VERSION = 35`
+   (`protocol.rs:110`), `LOBBY_PROTOCOL_VERSION = 1`, unchanged since #1880
+   (`protocol.rs:139`) — both numbers already stale relative to what this
+   finding cited above (33/1), confirming these are fast-moving constants
+   that will have moved again by whenever this proposal is actually
+   implemented. **The durable takeaway is the architectural rule, not any
+   specific number**: bump `LOBBY_PROTOCOL_VERSION` by one from its
+   then-current value at implementation time, never `PROTOCOL_VERSION`.
+   PLAN.md §4's PR 2 description is corrected to state the rule this way
+   rather than citing a number that will be wrong again by the time anyone
+   reads it.
+
 5. **The Cloudflare Worker `is_empty()` predicate genuinely only checks lobby
    games today — bug #4 in the discussion is real and reproducible against
    current `main`.** `lobby-worker/broker-wasm/src/lib.rs:168-170`:
@@ -355,15 +370,17 @@ verification pass — nothing found this session resolves them unilaterally:
    pairing), with full-mode integration as an explicit fast-follow. Confirmed
    this matches #4612's original framing exactly, and nothing found this
    session suggests otherwise. Recommend confirming as stated.
-4. **NEW — does v1 need Commander single-elimination bracket play, or only
-   Commander Swiss?** MSTR's own round-count table only calls for Swiss +
-   Top-4/7/10/13/16 single-elimination cuts once the Swiss rounds finish
-   (finding #9) — it doesn't describe a *pure* SE bracket built from 4-player
-   pods the way 1v1's existing adjacent-pair SE path works. This session's
-   recommendation (PLAN.md §2): treat pod-based SE as a natural but
-   unimplemented-in-v1-detail extension of the existing arity-gated SE path,
-   not block Commander Swiss support on designing it fully now — but this is
-   a product-scope call for the maintainer, not decided unilaterally here.
+4. ~~**Does v1 need Commander single-elimination bracket play, or only
+   Commander Swiss?**~~ — **RESOLVED, maintainer review: excluded from v1.**
+   This session's earlier recommendation (treat pod-based SE as a natural,
+   undesigned-in-detail extension of the existing arity-gated SE path) was
+   correctly rejected — "in-scope but undesigned" isn't a real resolution
+   of a genuine open design question (bracket/advancement semantics for a
+   multi-player pod bracket are not a mechanical extension of 1v1's
+   adjacent-pair SE). Final: `BracketShape::SingleElimination` ships for
+   `arity = HEAD_TO_HEAD` only in v1; `CreateTournament` rejects
+   `SingleElimination` + `arity != HEAD_TO_HEAD` at construction time.
+   Commander/multiplayer pods get Swiss only. See PLAN.md §2 and §5.
 
 ## Relationship to adjacent work — scope boundaries
 
