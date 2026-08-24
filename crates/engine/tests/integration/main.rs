@@ -171,6 +171,7 @@ mod curse_of_the_restless_dead_land_enters_trigger;
 mod curse_spell_cast_triggers;
 mod curse_static_effects;
 mod curse_upkeep_triggers;
+mod custom_format_schema;
 mod cut_a_deal_draw_this_way_count;
 mod cybership_combat_damage_manifest;
 mod dalkovan_encampment_attack_trigger;

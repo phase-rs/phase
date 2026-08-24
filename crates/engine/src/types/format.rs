@@ -1,8 +1,10 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::database::legality::LegalityFormat;
+use crate::types::custom_format::{custom_format_registry, CustomFormatId, CustomFormatRules};
 use crate::types::player::PlayerId;
 
 /// Broad grouping used by the UI to visually cluster related formats
@@ -34,7 +36,7 @@ pub struct FormatMetadata {
 }
 
 /// Supported game formats.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GameFormat {
     Standard,
     Limited,
@@ -66,6 +68,121 @@ pub enum GameFormat {
     /// Create a token that's a copy of a creature card with mana value X chosen
     /// at random."
     Momir,
+    /// An engine-validated custom format. Resolves via
+    /// `FormatConfig.custom_rules` (see `types::custom_format`) — a bare
+    /// `GameFormat::Custom(id)` alone cannot fully answer several of this
+    /// enum's methods; see each method's doc comment for how it handles
+    /// `Custom`.
+    Custom(CustomFormatId),
+}
+
+/// Parse error for `GameFormat::from_str` — `GameFormat` has no catch-all
+/// variant (unlike `Keyword`), so this is genuinely fallible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GameFormatParseError(pub String);
+
+impl std::fmt::Display for GameFormatParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for GameFormatParseError {}
+
+impl std::str::FromStr for GameFormat {
+    type Err = GameFormatParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some(rest) = s.strip_prefix("Custom:") {
+            return rest
+                .parse::<u16>()
+                .map(|n| GameFormat::Custom(CustomFormatId(n)))
+                .map_err(|_| GameFormatParseError(format!("invalid Custom format id: {rest:?}")));
+        }
+        match s {
+            "Standard" => Ok(GameFormat::Standard),
+            "Limited" => Ok(GameFormat::Limited),
+            "Commander" => Ok(GameFormat::Commander),
+            "Pioneer" => Ok(GameFormat::Pioneer),
+            "Modern" => Ok(GameFormat::Modern),
+            "Premodern" => Ok(GameFormat::Premodern),
+            "Legacy" => Ok(GameFormat::Legacy),
+            "Vintage" => Ok(GameFormat::Vintage),
+            "Historic" => Ok(GameFormat::Historic),
+            "Timeless" => Ok(GameFormat::Timeless),
+            "Pauper" => Ok(GameFormat::Pauper),
+            "PauperCommander" => Ok(GameFormat::PauperCommander),
+            "DuelCommander" => Ok(GameFormat::DuelCommander),
+            "TinyLeaders" => Ok(GameFormat::TinyLeaders),
+            "Oathbreaker" => Ok(GameFormat::Oathbreaker),
+            "Brawl" => Ok(GameFormat::Brawl),
+            "HistoricBrawl" => Ok(GameFormat::HistoricBrawl),
+            "FreeForAll" => Ok(GameFormat::FreeForAll),
+            "TwoHeadedGiant" => Ok(GameFormat::TwoHeadedGiant),
+            "Archenemy" => Ok(GameFormat::Archenemy),
+            "Planechase" => Ok(GameFormat::Planechase),
+            "Momir" => Ok(GameFormat::Momir),
+            other => Err(GameFormatParseError(format!(
+                "unknown GameFormat: {other:?}"
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for GameFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GameFormat::Custom(id) => write!(f, "Custom:{}", id.0),
+            GameFormat::Standard => write!(f, "Standard"),
+            GameFormat::Limited => write!(f, "Limited"),
+            GameFormat::Commander => write!(f, "Commander"),
+            GameFormat::Pioneer => write!(f, "Pioneer"),
+            GameFormat::Modern => write!(f, "Modern"),
+            GameFormat::Premodern => write!(f, "Premodern"),
+            GameFormat::Legacy => write!(f, "Legacy"),
+            GameFormat::Vintage => write!(f, "Vintage"),
+            GameFormat::Historic => write!(f, "Historic"),
+            GameFormat::Timeless => write!(f, "Timeless"),
+            GameFormat::Pauper => write!(f, "Pauper"),
+            GameFormat::PauperCommander => write!(f, "PauperCommander"),
+            GameFormat::DuelCommander => write!(f, "DuelCommander"),
+            GameFormat::TinyLeaders => write!(f, "TinyLeaders"),
+            GameFormat::Oathbreaker => write!(f, "Oathbreaker"),
+            GameFormat::Brawl => write!(f, "Brawl"),
+            GameFormat::HistoricBrawl => write!(f, "HistoricBrawl"),
+            GameFormat::FreeForAll => write!(f, "FreeForAll"),
+            GameFormat::TwoHeadedGiant => write!(f, "TwoHeadedGiant"),
+            GameFormat::Archenemy => write!(f, "Archenemy"),
+            GameFormat::Planechase => write!(f, "Planechase"),
+            GameFormat::Momir => write!(f, "Momir"),
+        }
+    }
+}
+
+impl Serialize for GameFormat {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for GameFormat {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::String(s) => {
+                s.parse::<GameFormat>().map_err(serde::de::Error::custom)
+            }
+            other => Err(serde::de::Error::custom(format!(
+                "expected a string for GameFormat, got {other:?}"
+            ))),
+        }
+    }
 }
 
 /// CR 100.4 / CR 100.4a: Per-format sideboard rules.
@@ -195,7 +312,7 @@ pub struct FormatConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archenemy_player: Option<PlayerId>,
     /// Engine-derived predicate: true when the format uses a commander card
-    /// and the commander-damage state-based action (CR 903.10a / CR 704.5u).
+    /// and the commander-damage state-based action (CR 903.10a).
     /// Covers Commander, Duel Commander, Pauper Commander, Brawl, and
     /// Historic Brawl. The frontend consumes this directly — it must never
     /// re-list commander-style formats client-side.
@@ -214,6 +331,12 @@ pub struct FormatConfig {
     /// Immutable for the life of the session.
     #[serde(default)]
     pub allow_debug_actions: bool,
+    /// Present only when `format == GameFormat::Custom(id)` (and then `id`
+    /// must equal `custom_rules.id` — see
+    /// `custom_format::validate_custom_rules_consistency`). `None` for every
+    /// built-in format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_rules: Option<CustomFormatRules>,
 }
 
 impl FormatTopology {
@@ -259,6 +382,10 @@ impl GameFormat {
             // Momir's pool is the entire creature corpus — no legality restriction.
             | GameFormat::Momir
             | GameFormat::Limited => None,
+            // A custom format's legality is entirely governed by its own
+            // `LegalityRules` (legal_sets/banned/restricted), never by the
+            // built-in `LegalityFormat` table.
+            GameFormat::Custom(_) => None,
         }
     }
 
@@ -292,6 +419,14 @@ impl GameFormat {
             | GameFormat::Archenemy
             | GameFormat::Planechase
             | GameFormat::Limited => SideboardPolicy::Unlimited,
+            // Phase 1a: disclosed, temporary, bare-GameFormat-context
+            // fallback — not this custom format's real declared policy
+            // (that lives on the resolved FormatConfig/CustomFormatRules,
+            // which this method has no access to). Forbidden is the
+            // fail-closed answer: understating a sideboard allowance is
+            // safer than overstating one. Phase 1b migrates real callers to
+            // read FormatConfig's resolved field instead of this method.
+            GameFormat::Custom(_) => SideboardPolicy::Forbidden,
         }
     }
 
@@ -340,6 +475,14 @@ impl GameFormat {
             | GameFormat::FreeForAll
             | GameFormat::TwoHeadedGiant
             | GameFormat::Momir => DeckCopyLimit::Unlimited,
+            // Phase 1a: disclosed, temporary, bare-GameFormat-context
+            // fallback — not this custom format's real declared limit.
+            // UpTo(1) (the same value already used for command-zone
+            // singleton formats) is the fail-closed answer: it under-permits
+            // rather than silently over-permitting a format whose real
+            // rules were never consulted. Phase 1b migrates real callers to
+            // read FormatConfig's resolved field instead of this method.
+            GameFormat::Custom(_) => DeckCopyLimit::UpTo(1),
         }
     }
 
@@ -363,21 +506,40 @@ impl GameFormat {
     }
 
     /// Whether this format uses a commander card and the commander-damage
-    /// state-based action (CR 903.10a / CR 704.5u). True for Commander, Duel
+    /// state-based action (CR 903.10a). True for Commander, Duel
     /// Commander, Pauper Commander, Brawl, and Historic Brawl — every format
     /// whose `FormatConfig` has both `command_zone: true` and a non-`None`
     /// `commander_damage_threshold`. The frontend consumes the derived
     /// `FormatConfig::uses_commander` field rather than re-listing the
     /// commander-style variants client-side.
     pub fn uses_commander(self) -> bool {
-        matches!(
-            self,
+        match self {
             GameFormat::Commander
-                | GameFormat::DuelCommander
-                | GameFormat::PauperCommander
-                | GameFormat::Brawl
-                | GameFormat::HistoricBrawl,
-        )
+            | GameFormat::DuelCommander
+            | GameFormat::PauperCommander
+            | GameFormat::Brawl
+            | GameFormat::HistoricBrawl => true,
+            GameFormat::Standard
+            | GameFormat::Limited
+            | GameFormat::Pioneer
+            | GameFormat::Modern
+            | GameFormat::Premodern
+            | GameFormat::Legacy
+            | GameFormat::Vintage
+            | GameFormat::Historic
+            | GameFormat::Timeless
+            | GameFormat::Pauper
+            | GameFormat::TinyLeaders
+            | GameFormat::Oathbreaker
+            | GameFormat::FreeForAll
+            | GameFormat::TwoHeadedGiant
+            | GameFormat::Archenemy
+            | GameFormat::Planechase
+            | GameFormat::Momir => false,
+            GameFormat::Custom(_) => unreachable!(
+                "uses_commander: read FormatConfig.uses_commander instead — GameFormat alone cannot resolve this for Custom"
+            ),
+        }
     }
 
     /// Whether this format's deck is fixed by the format rules and supplied
@@ -388,34 +550,73 @@ impl GameFormat {
     /// `FormatConfig::supplies_fixed_deck` field to bypass deck-selection gates,
     /// and must never re-list fixed-deck formats client-side.
     pub fn supplies_fixed_deck(self) -> bool {
-        matches!(self, GameFormat::Momir)
+        match self {
+            GameFormat::Momir => true,
+            GameFormat::Standard
+            | GameFormat::Limited
+            | GameFormat::Commander
+            | GameFormat::Pioneer
+            | GameFormat::Modern
+            | GameFormat::Premodern
+            | GameFormat::Legacy
+            | GameFormat::Vintage
+            | GameFormat::Historic
+            | GameFormat::Timeless
+            | GameFormat::Pauper
+            | GameFormat::PauperCommander
+            | GameFormat::DuelCommander
+            | GameFormat::TinyLeaders
+            | GameFormat::Oathbreaker
+            | GameFormat::Brawl
+            | GameFormat::HistoricBrawl
+            | GameFormat::FreeForAll
+            | GameFormat::TwoHeadedGiant
+            | GameFormat::Archenemy
+            | GameFormat::Planechase => false,
+            // No custom-format use case for an engine-supplied fixed deck
+            // exists today — a real one would need its own design, analogous
+            // to Momir's Madness.
+            GameFormat::Custom(_) => false,
+        }
     }
 
     /// Display label for validation error messages (e.g., "Not Pioneer legal").
-    pub fn label(self) -> &'static str {
+    ///
+    /// Built-in variants return a static string. `Custom(id)` looks the id up
+    /// in `custom_format_registry()`: a hit returns that preset's real label;
+    /// a miss returns the fixed fallback `"Custom Format"`. A miss is the
+    /// normal case for an ad-hoc lobby-saved format — its player-chosen name
+    /// is client-local only and never travels to the engine, so the engine
+    /// has no name of its own to report.
+    pub fn label(self) -> Cow<'static, str> {
         match self {
-            GameFormat::Standard => "Standard",
-            GameFormat::Limited => "Limited",
-            GameFormat::Commander => "Commander",
-            GameFormat::Pioneer => "Pioneer",
-            GameFormat::Modern => "Modern",
-            GameFormat::Premodern => "Premodern",
-            GameFormat::Legacy => "Legacy",
-            GameFormat::Vintage => "Vintage",
-            GameFormat::Historic => "Historic",
-            GameFormat::Timeless => "Timeless",
-            GameFormat::Pauper => "Pauper",
-            GameFormat::PauperCommander => "Pauper Commander",
-            GameFormat::DuelCommander => "Duel Commander",
-            GameFormat::TinyLeaders => "Tiny Leaders: Reborn",
-            GameFormat::Oathbreaker => "Oathbreaker",
-            GameFormat::Brawl => "Brawl",
-            GameFormat::HistoricBrawl => "Historic Brawl",
-            GameFormat::FreeForAll => "Free-for-All",
-            GameFormat::TwoHeadedGiant => "Two-Headed Giant",
-            GameFormat::Archenemy => "Archenemy",
-            GameFormat::Planechase => "Planechase",
-            GameFormat::Momir => "Momir's Madness",
+            GameFormat::Standard => Cow::Borrowed("Standard"),
+            GameFormat::Limited => Cow::Borrowed("Limited"),
+            GameFormat::Commander => Cow::Borrowed("Commander"),
+            GameFormat::Pioneer => Cow::Borrowed("Pioneer"),
+            GameFormat::Modern => Cow::Borrowed("Modern"),
+            GameFormat::Premodern => Cow::Borrowed("Premodern"),
+            GameFormat::Legacy => Cow::Borrowed("Legacy"),
+            GameFormat::Vintage => Cow::Borrowed("Vintage"),
+            GameFormat::Historic => Cow::Borrowed("Historic"),
+            GameFormat::Timeless => Cow::Borrowed("Timeless"),
+            GameFormat::Pauper => Cow::Borrowed("Pauper"),
+            GameFormat::PauperCommander => Cow::Borrowed("Pauper Commander"),
+            GameFormat::DuelCommander => Cow::Borrowed("Duel Commander"),
+            GameFormat::TinyLeaders => Cow::Borrowed("Tiny Leaders: Reborn"),
+            GameFormat::Oathbreaker => Cow::Borrowed("Oathbreaker"),
+            GameFormat::Brawl => Cow::Borrowed("Brawl"),
+            GameFormat::HistoricBrawl => Cow::Borrowed("Historic Brawl"),
+            GameFormat::FreeForAll => Cow::Borrowed("Free-for-All"),
+            GameFormat::TwoHeadedGiant => Cow::Borrowed("Two-Headed Giant"),
+            GameFormat::Archenemy => Cow::Borrowed("Archenemy"),
+            GameFormat::Planechase => Cow::Borrowed("Planechase"),
+            GameFormat::Momir => Cow::Borrowed("Momir's Madness"),
+            GameFormat::Custom(id) => custom_format_registry()
+                .into_iter()
+                .find(|def| def.rules.id == id)
+                .map(|def| Cow::Owned(def.label))
+                .unwrap_or(Cow::Borrowed("Custom Format")),
         }
     }
 
@@ -729,6 +930,7 @@ impl FormatConfig {
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            custom_rules: None,
         }
     }
 
@@ -748,6 +950,7 @@ impl FormatConfig {
             uses_commander: true,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            custom_rules: None,
         }
     }
 
@@ -839,6 +1042,7 @@ impl FormatConfig {
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            custom_rules: None,
         }
     }
 
@@ -862,6 +1066,7 @@ impl FormatConfig {
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            custom_rules: None,
         }
     }
 
@@ -898,6 +1103,7 @@ impl FormatConfig {
             uses_commander: true,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            custom_rules: None,
         }
     }
 
@@ -928,6 +1134,7 @@ impl FormatConfig {
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            custom_rules: None,
         }
     }
 
@@ -949,6 +1156,7 @@ impl FormatConfig {
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            custom_rules: None,
         }
     }
 
@@ -973,6 +1181,7 @@ impl FormatConfig {
             uses_commander: false,
             supplies_fixed_deck: true,
             allow_debug_actions: false,
+            custom_rules: None,
         }
     }
 
@@ -992,6 +1201,7 @@ impl FormatConfig {
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            custom_rules: None,
         }
     }
 
@@ -1014,6 +1224,7 @@ impl FormatConfig {
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            custom_rules: None,
         }
     }
 
@@ -1035,6 +1246,7 @@ impl FormatConfig {
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            custom_rules: None,
         }
     }
 
@@ -1077,6 +1289,9 @@ impl FormatConfig {
             GameFormat::Archenemy => Self::archenemy(),
             GameFormat::Planechase => Self::planechase(),
             GameFormat::Momir => Self::momir(),
+            GameFormat::Custom(_) => unreachable!(
+                "for_format cannot resolve an ad-hoc Custom format's structural rules — read custom_rules from the resolved FormatConfig/CustomFormatRules instead"
+            ),
         }
     }
 }
