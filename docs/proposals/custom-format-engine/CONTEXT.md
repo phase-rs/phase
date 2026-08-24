@@ -715,16 +715,52 @@ different, deeper-history finding:
    axis at all, even though CONTEXT.md's own item 2 (above) already flagged
    it as a live, unresolved "needs a human decision" item. The plan and the
    open-items list had drifted out of sync with each other.
-   **Resolved directly this round, in discussion, not left open**: see item
-   2 above (now resolved) and PLAN.md §1's "RESOLVED — round 10" note.
-   Legality enforcement is not extended (no engine data exists to enforce
-   foil/frame against, and that's permanent, not a placeholder); the source
-   rules' spirit is instead honored by making `ArtChainEntry`'s existing
-   `{type: "oldest"}` per-player preference `legal_sets`-aware — general to
-   every format, zero engine change, not gated on `ReprintPolicy`. The
-   registration gate for Old School 93-94/95 is unchanged from §8 (mana
-   burn only) since printing fidelity is now explicitly a display concern,
-   not a legality one.
+   **Resolved this round as follows — SUPERSEDED by round 11 below, kept
+   here as the accurate historical record, not deleted:** legality
+   enforcement not extended; the source rules' spirit honored instead by
+   making `ArtChainEntry`'s existing `{type: "oldest"}` preference
+   `legal_sets`-aware. Round 11 correctly rejected this — a display
+   preference isn't a legality resolution — so this specific fix does not
+   ship as part of resolving item 2; see round 11 below for what actually
+   resolved it.
+
+## Maintainer review round 11 — CHANGES_REQUESTED, addressed
+
+matthewevans re-reviewed round 10's fix (commit `673e22366`) and rejected
+its resolution directly:
+
+1. **A display default cannot resolve a legality claim (real, confirmed —
+   round 10's fix was itself the gap this round found).** "[T]he proposal
+   replaces a source legality requirement with an optional display
+   preference, so the EC Old School presets remain eligible for selection
+   without rules-faithful printing enforcement... do not treat an optional
+   rendering preference as a legality resolution." Correct: making
+   `ArtChainEntry` legal-set-aware is a genuine, worthwhile improvement, but
+   it's cosmetic — nothing stops a player from submitting a deck with a
+   wrong-printing card regardless of what the client renders.
+   **Resolved directly in discussion, not by picking one of the two options
+   matthewevans offered (gate on future enforcement, or explicitly downgrade
+   the claim) — a third answer grounded in existing precedent:** confirmed
+   this round that `GameFormat::Premodern`'s legality
+   (`LegalityFormat::Premodern`, `format.rs:243`) is oracle-card-level
+   only — no built-in format in this engine has EVER checked printing,
+   frame, border, or foil, and `PrintedCardRef` (the actual runtime card
+   identity, `card.rs:89-92`) has no set-code field for any format. So
+   `legal_sets` membership isn't an old-school-specific approximation
+   needing a gate or a caveat — it's this engine's one existing legality
+   model, applied identically to a new format the same way it's already
+   applied to every format that shipped before this proposal. The
+   registration gate for Old School 93-94/95 reverts to §8's pre-round-10
+   state (mana burn only). The round-10 `ArtChainEntry` display fix is
+   retracted from this proposal (a real idea, but belongs in its own
+   proposal, not used to paper over a legality question that no longer
+   needs it). Genuine per-card printing selection (briefly surveyed, not
+   designed: the deck-builder already has `PrintingPickerModal.tsx` and a
+   `DeckEntry.sourcePrinting` field that's currently discarded before
+   reaching the engine, `client/src/services/deckParser.ts:5-9,45-73`) is
+   confirmed as a real, moderate-lift, but separate future feature, general
+   to every format — also not designed here. See PLAN.md §1's "RESOLVED —
+   round 11" note for the full argument and §6 for the test this adds.
 
 ## Open (needs a human decision — do NOT resolve unilaterally)
 
@@ -732,26 +768,34 @@ different, deeper-history finding:
    above: (c), entered via Axis A (structural config) through the existing
    lobby first, Axis B (legality/legacy-rules) as audited presets validating
    the same schema. PLAN.md §1 and §7 updated accordingly.
-2. ~~**Reprint-policy fidelity**~~ — **RESOLVED, round 10** (maintainer
-   review flagged the rollout registering Old School 93-94/95 with no gate
-   tied to this gap; resolved directly, not left open): legality stays
-   `legal_sets`-membership-only, permanently, not pending further work —
-   foil/frame data doesn't exist anywhere in the engine's card database to
-   enforce against. The source rules' printing-fidelity intent is instead
-   honored by a DISPLAY fix, general to every format: `ArtChainEntry`'s
-   existing `{type: "oldest"}` per-player preference mode becomes
-   `legal_sets`-aware (restricts candidate printings to the active format's
-   legal set list before picking the oldest, when one is declared), fixing
-   a real gap where "oldest printing" could mean a promo/non-tournament
-   printing the format doesn't even recognize (e.g. Chronicles' City of
-   Brass reprint is fine, its Junior Super Series promo printing is not).
-   Zero engine change, zero new `ArtChainEntry` variant, not gated on
-   `ReprintPolicy` — see PLAN.md §1's "RESOLVED — round 10" note for the
-   full design and why (a) new engine-owned printing-derived state was not
-   chosen over (b) extending the existing frontend preference system. The
-   original framing below ("no frame/art metadata per printing, full stop")
-   was too pessimistic and is kept for its still-accurate research, not as
-   a live open question:
+2. ~~**Reprint-policy fidelity**~~ — **RESOLVED, round 11** (round 10's
+   attempt to resolve this via a display fix was directly rejected by
+   round 11's review — a cosmetic default isn't a legality resolution; see
+   round 10/11 log entries above for the full back-and-forth). **Final
+   resolution: `legal_sets` membership is not an approximation of Old
+   School 93-94/95's legality — it's the exact same oracle-card-level
+   legality model every format in this engine already uses.** Confirmed
+   directly: `GameFormat::Premodern`'s legality check
+   (`LegalityFormat::Premodern`, `crates/engine/src/types/format.rs:243`)
+   and every other built-in format's are ALL oracle-card-level only; no
+   format anywhere in this engine has ever checked printing, frame, or
+   foil, and the runtime card identity (`PrintedCardRef`, `card.rs:89-92`)
+   has no set-code field for any of them. There is no inconsistency to gate
+   Old School 93-94/95 against, because no format in this engine does more
+   than what `legal_sets` already gives them. Registration reverts to §8's
+   original gate (mana burn only, no new blocking axis). Two real ideas
+   surfaced along the way are explicitly deferred as separate, future,
+   general (not old-school-specific) proposals, not designed further here:
+   (a) a legal-set-aware `ArtChainEntry` display default (round 10's fix,
+   retracted from THIS proposal but not abandoned as an idea), and (b)
+   genuine per-card printing selection in the deck builder — briefly
+   surveyed, confirmed as a moderate plumbing lift reusing existing
+   components (`PrintingPickerModal.tsx`, `DeckEntry.sourcePrinting`), not
+   a from-scratch feature, but out of scope here. See PLAN.md §1's
+   "RESOLVED — round 11" note for the full argument. The original framing
+   below ("no frame/art metadata per printing, full stop") was too
+   pessimistic and is kept for its still-accurate research, not as a live
+   open question:
    - **Engine/MTGJSON side** (`CardDatabase::printings_for`,
      `crates/engine/src/database/card_db.rs:227`): a bare `Vec<String>` of set
      codes, sourced from MTGJSON `AtomicCards.json`
@@ -794,15 +838,16 @@ different, deeper-history finding:
      filter). So an "oldest legal printing" ordering is a **wiring problem**,
      not a new-data-acquisition problem — cheaper than true frame-level
      enforcement.
-   - **Decided, round 10**: the legal-set-membership approximation is
-     permanent for LEGALITY (no engine-owned frame/foil enforcement will be
-     built — there's no data to enforce against), paired with a real,
-     general DISPLAY fix (Scryfall's already-existing frame/`released_at`
-     data, cross-referenced against the active format's `legal_sets`, via
-     the frontend's existing `ArtChainEntry` preference system rather than
-     new engine-owned derived state) — see PLAN.md §1's "RESOLVED — round
-     10" note for the full design. This is no longer an open product
-     decision.
+   - **Decided, round 11 (supersedes round 10's framing on this line):**
+     `legal_sets` membership is not an approximation at all — it's the
+     identical oracle-card-level legality model `Premodern` and every other
+     format in this engine already uses (`LegalityFormat::Premodern`,
+     `format.rs:243`; no format anywhere checks printing/frame/foil). No
+     further engine work is gated on or expected for this dimension. The
+     display fix and real printing-selection ideas above are both real and
+     worth pursuing, but as their own separate, general proposals — not as
+     part of resolving this item. See PLAN.md §1's "RESOLVED — round 11"
+     note. This is no longer an open product decision.
 3. **Classic Magic B&R cadence.** EC updates Classic's banlist twice yearly
    (Jan 1 / Jul 1). Bundled-preset data is version-controlled, so updates are
    ordinary edits — but whether we want a dated/versioned banlist history is
