@@ -28,8 +28,8 @@
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    CombatDamageScope, PreventionAmount, ReplacementDefinition, RestrictionExpiry, ShieldKind,
-    TargetFilter,
+    AbilityKind, CombatDamageScope, PreventionAmount, ReplacementDefinition, RestrictionExpiry,
+    ShieldKind, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
@@ -911,5 +911,151 @@ fn ability_duration_prevention_shield_survives_to_controllers_next_turn() {
     assert!(
         runner.state().pending_damage_replacements.is_empty(),
         "the UntilPlayerNextTurn prune must fire — the shield is not immortal"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T9 — the complement of T1: a PRINTED def that carries `expiry: None` today
+// but whose own clause states a turn window.
+// ---------------------------------------------------------------------------
+
+/// Verbatim Urza's Science Fair Project (MTGJSON `text`). A `{2}` activated die
+/// roll whose six results are printed as an em-dash results table; row 2 states
+/// its own turn window and is the corpus's only turn-windowed printed shield
+/// hosted on a PERMANENT.
+const URZAS_SCIENCE_FAIR_PROJECT_TEXT: &str = "{2}: Roll a six-sided die. This creature gets the indicated result.\n1 \u{2014} It gets -2/-2 until end of turn.\n2 \u{2014} Prevent all combat damage it would deal this turn.\n3 \u{2014} It gains vigilance until end of turn.\n4 \u{2014} It gains first strike until end of turn.\n5 \u{2014} It gains flying until end of turn.\n6 \u{2014} It gets +2/+2 until end of turn.";
+
+/// **T9.** CR 611.2a + CR 514.2, and the counterpart hazard to T1: making
+/// `expiry` the single lifetime authority is only safe if every definition that
+/// reaches the battlefield with `expiry: None` is genuinely a CR 604.2 printed
+/// static that states no window. This card is the corpus's one counterexample.
+///
+/// Its row "Prevent all combat damage it would deal this turn." lowers to a
+/// printed `DamageDone` shield on the permanent itself, UNSCOPED in both
+/// directions (`valid_card: None`, `damage_target_filter: None`). Under the old
+/// `is_shield()` blanket the mis-lowering self-limited to one turn; keyed on
+/// `expiry` alone and left unstamped it would be immortal — a game-wide "no
+/// combat damage is ever dealt, by or to anyone" lock. The parser now records
+/// the window the clause states, via the positional `strip_trailing_duration`
+/// authority, so cleanup catches it on the very evidence the clause provides.
+///
+/// Reverting `parse_damage_prevention_replacement`'s `stated_clause_expiry`
+/// stamp flips BOTH the structural assertion (`expiry` becomes `None`, and the
+/// shield count after the boundary becomes `(1, 1)`) and the behavioral one
+/// (life 20 - 3 = 17 becomes 20). Measured at the pre-fix candidate: `(1, 1)`
+/// and life 20.
+///
+/// The card's printed type line is Artifact Creature; the scenario stages it as
+/// a plain creature because the artifact half is not load-bearing. What makes
+/// this the counterexample — and the eight Instant/Sorcery hosts of the same
+/// shape harmless — is only that it is a PERMANENT, so its definitions clear
+/// `object_replacement_candidate_applies`' `[Battlefield, Command]` zone gate.
+#[test]
+fn turn_windowed_printed_shield_is_stamped_and_does_not_survive_cleanup() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+    let project = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Urza's Science Fair Project",
+            4,
+            4,
+            URZAS_SCIENCE_FAIR_PROJECT_TEXT,
+        )
+        // CR 302.6: it entered this turn. Without this the 4/4 is a legal
+        // attacker in P0's own turn and `cross_boundary`'s
+        // `advance_to_phase(Phase::End)` STALLS SILENTLY at DeclareAttackers —
+        // the stall this file's helper doc warns about. Orthogonal to the
+        // replacement under test.
+        .with_summoning_sickness()
+        .id();
+    let bear = scenario.add_creature(P1, "Grizzly Bears", 3, 3).id();
+    let mut runner = scenario.build();
+
+    // Reach-guard: the card really is a battlefield permanent with its Oracle
+    // text applied, so everything below is about a live object.
+    assert_eq!(runner.state().objects[&project].zone, Zone::Battlefield);
+    assert!(
+        runner.state().objects[&project]
+            .abilities
+            .iter()
+            .any(|a| a.kind == AbilityKind::Activated),
+        "reach-guard: the {{2}} die-roll activated ability parsed, so the Oracle \
+         text was really applied to the object"
+    );
+
+    let shields_on = |runner: &GameRunner| -> (usize, usize) {
+        let obj = &runner.state().objects[&project];
+        (
+            obj.replacement_definitions
+                .iter_unchecked()
+                .filter(|r| r.shield_kind.is_shield())
+                .count(),
+            obj.base_replacement_definitions
+                .iter()
+                .filter(|r| r.shield_kind.is_shield())
+                .count(),
+        )
+    };
+
+    // Reach-guard + THE REVERT-FAILING STRUCTURAL ASSERTION. The mis-lowered
+    // shield really is installed on both surfaces (so the prune below is not
+    // vacuous), and it now carries the window its own clause states. Measured
+    // `expiry: None` before the fix.
+    assert_eq!(
+        shields_on(&runner),
+        (1, 1),
+        "reach-guard: the printed shield is installed on both surfaces"
+    );
+    let installed = runner.state().objects[&project]
+        .base_replacement_definitions
+        .iter()
+        .find(|r| r.shield_kind.is_shield())
+        .expect("reach-guard: the shield is on the base surface");
+    assert_eq!(
+        installed.shield_kind,
+        ShieldKind::Prevention {
+            amount: PreventionAmount::All
+        }
+    );
+    assert_eq!(
+        installed.expiry,
+        Some(RestrictionExpiry::EndOfTurn),
+        "CR 611.2a + CR 514.2: the clause's own 'this turn' must be recorded as \
+         the definition's window"
+    );
+
+    let life_before = runner.state().players[0].life;
+    cross_boundary(&mut runner);
+    assert_eq!(
+        runner.state().active_player,
+        P1,
+        "scenario must have advanced into P1's turn"
+    );
+    assert_eq!(
+        runner.state().objects[&project].zone,
+        Zone::Battlefield,
+        "the permanent itself never left — an unpruned shield of its would still apply"
+    );
+    // The finding's exact framing: a printed shield whose clause states a turn
+    // window must not be alive after the cleanup step, on EITHER surface.
+    assert_eq!(
+        shields_on(&runner),
+        (0, 0),
+        "CR 514.2: a printed shield stating 'this turn' must not survive cleanup"
+    );
+
+    // P1 attacks P0 with an unblocked 3/3. The shield was unscoped in both
+    // directions, so while alive it prevented this damage too.
+    assert!(
+        run_combat(&mut runner, P1, bear, P0, None),
+        "combat reach-guard: the attack must actually have happened"
+    );
+    // THE REVERT-FAILING BEHAVIORAL ASSERTION. Measured 20 -> 20 before the fix.
+    assert_eq!(
+        runner.state().players[0].life,
+        life_before - 3,
+        "CR 514.2: with the turn-windowed shield gone, ordinary combat damage lands"
     );
 }

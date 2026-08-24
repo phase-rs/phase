@@ -8417,6 +8417,11 @@ mod tests {
     /// Negative sibling in the same test: a CR 604.2 printed-static-shaped
     /// definition (`expiry: None`) on the same object must SURVIVE, proving the arm
     /// is expiry-keyed and not a blanket over `shield_kind`.
+    ///
+    /// The BASE surface is the one the doc comment's justification is about, so it
+    /// is staged and asserted here too — an earlier revision installed and asserted
+    /// only on `replacement_definitions`, which left the test green when the
+    /// `base_replacement_definitions` retain was deleted outright.
     #[test]
     fn cleanup_expires_end_of_combat_prevention_shield() {
         use crate::types::ability::{PreventionAmount, ReplacementDefinition, TargetFilter};
@@ -8446,10 +8451,15 @@ mod tests {
 
         {
             let obj = state.objects.get_mut(&id).unwrap();
-            obj.replacement_definitions.push(combat_bound);
-            obj.replacement_definitions.push(durable);
-            // Reach-guard: both definitions really are installed before cleanup.
+            obj.replacement_definitions.push(combat_bound.clone());
+            obj.replacement_definitions.push(durable.clone());
+            let base = std::sync::Arc::make_mut(&mut obj.base_replacement_definitions);
+            base.push(combat_bound);
+            base.push(durable);
+            // Reach-guard: both definitions really are installed on BOTH surfaces
+            // before cleanup.
             assert_eq!(obj.replacement_definitions.len(), 2);
+            assert_eq!(obj.base_replacement_definitions.len(), 2);
         }
 
         let mut events = Vec::new();
@@ -8464,6 +8474,18 @@ mod tests {
         assert_eq!(
             obj.replacement_definitions[0].expiry, None,
             "CR 604.2: the surviving definition is the printed-static-shaped one"
+        );
+        // CR 500.1 + CR 511.3: `complete_end_combat_teardown` never touches the
+        // base surface, so this arm is the sole base-side catcher. Deleting the
+        // base-side retain must turn this red.
+        assert_eq!(
+            obj.base_replacement_definitions.len(),
+            1,
+            "the EndOfCombat shield must be pruned from base_replacement_definitions too"
+        );
+        assert_eq!(
+            obj.base_replacement_definitions[0].expiry, None,
+            "CR 604.2: the surviving BASE definition is the printed-static-shaped one"
         );
     }
 

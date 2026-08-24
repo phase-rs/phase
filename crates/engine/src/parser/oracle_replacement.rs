@@ -10677,6 +10677,68 @@ pub(crate) fn parse_bidirectional_damage_prevention(
     Some(vec![recipient_half, source_half])
 }
 
+/// CR 611.2a + CR 514.2: The window a prevention clause states FOR ITSELF,
+/// mapped to the `RestrictionExpiry` the runtime prunes read.
+///
+/// `turns::execute_cleanup` reads `expiry` and only `expiry` — no prune infers a
+/// lifetime from `shield_kind` — so a stated window the parser drops produces a
+/// definition nothing can ever remove. That is not hypothetical: Urza's Science
+/// Fair Project's die-roll result row "Prevent all combat damage it would deal
+/// this turn." lowers to a printed, object-hosted `DamageDone` shield with
+/// neither `valid_card` nor `damage_target_filter`, on an Artifact Creature — a
+/// PERMANENT, so unlike the eight Instant/Sorcery hosts of the same shape it is
+/// not neutralized by `object_replacement_candidate_applies`' `[Battlefield,
+/// Command]` zone gate. Unstamped, it prevents ALL combat damage in the game, to
+/// or from either player, for the rest of the game.
+///
+/// POSITION IS THE WHOLE POINT, so this delegates to the existing positional
+/// authority `oracle_effect::lower::strip_trailing_duration` rather than
+/// scanning the clause for a
+/// duration phrase. "this turn" also occurs inside SUBORDINATE clauses that are
+/// conditions rather than windows — Neriv, Heart of the Storm's "a creature you
+/// control that entered this turn would deal damage" and Aether Revolt's "as
+/// long as a permanent left the battlefield under your control this turn" are
+/// both printed statics hosted on PERMANENTS, and stamping either would delete a
+/// correct replacement at the next cleanup step. Only a clause-FINAL duration is
+/// the effect's own window, and `strip_trailing_duration` already owns that
+/// judgement, including its per-turn-quantity lookback guards.
+///
+/// CR 604.2: a printed static ability states no window at all, so the ordinary
+/// case returns `None` and the definition stays durable — exactly what Solitary
+/// Confinement, Fog Bank, Nine Lives and Pariah require.
+fn stated_clause_expiry(clause_lower: &str) -> Option<crate::types::ability::RestrictionExpiry> {
+    use crate::types::ability::RestrictionExpiry;
+
+    let (_, duration) = super::oracle_effect::lower::strip_trailing_duration(clause_lower);
+    match duration? {
+        // CR 514.2: "this turn" / "until end of turn" ends at the cleanup step.
+        Duration::UntilEndOfTurn => Some(RestrictionExpiry::EndOfTurn),
+        // CR 511.2: "this combat" / "until end of combat" expires at the end of
+        // the combat phase; `complete_end_combat_teardown` catches the live and
+        // pending surfaces and the cleanup prune catches the base surface.
+        Duration::UntilEndOfCombat => Some(RestrictionExpiry::EndOfCombat),
+        // The player-relative windows need a concrete `PlayerId` that does not
+        // exist at parse time (`RestrictionExpiry::UntilPlayerNextTurn` and
+        // `UntilEndOfNextTurnOf` both carry one), so only the runtime seam
+        // (`effects::add_target_replacement::expiry_from_duration`) can resolve
+        // them. Deliberately unmapped rather than approximated; no printed
+        // prevention clause in the corpus states one.
+        Duration::UntilNextTurnOf { .. } | Duration::UntilEndOfNextTurnOf { .. } => None,
+        // Not turn windows: these end on an event or a condition, and the prunes
+        // that end them key on that event — the battlefield-exit prune in
+        // `layers.rs`, the CR 611.2b `ReplacementCondition` gate — not on
+        // `expiry`. Stamping a turn window here would cut them short.
+        Duration::UntilHostLeavesPlay
+        | Duration::UntilNextStepOf { .. }
+        | Duration::ForAsLongAs { .. }
+        | Duration::UntilSourceExilesAnotherCard
+        | Duration::UntilOpponentBecomesMonarch => None,
+        // CR 604.2: an explicitly permanent window is the printed-static case —
+        // no expiry, and the definition must survive every cleanup step.
+        Duration::Permanent => None,
+    }
+}
+
 /// CR 615: Parse damage prevention replacement effects.
 /// Handles:
 /// - "prevent all combat damage that would be dealt [this turn]" (Fog, Moments Peace)
@@ -10947,6 +11009,16 @@ fn parse_damage_prevention_replacement(
     }
     if let Some(sf) = damage_source_filter {
         def = def.damage_source_filter(sf);
+    }
+    // CR 611.2a + CR 514.2: record the window this clause states for ITSELF, so
+    // `expiry` — the single lifetime authority `turns::execute_cleanup` reads —
+    // carries what the card actually says instead of silently dropping it. A
+    // CR 604.2 printed static states no window, so `stated_clause_expiry`
+    // returns `None` for it and the definition stays durable.
+    if def.expiry.is_none() {
+        if let Some(expiry) = stated_clause_expiry(working_lower) {
+            def = def.expiry(expiry);
+        }
     }
     // Capture whether the recipient filter was event-driven (typed
     // `valid_card`) before moving it onto `def` — the follow-up rewrite
@@ -12110,7 +12182,8 @@ mod tests {
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
         AbilityCondition, Comparator, ControllerRef, CountScope, QuantityExpr,
-        QuantityModification, QuantityRef, ReplacementCondition, ShieldKind, ZoneRef,
+        QuantityModification, QuantityRef, ReplacementCondition, RestrictionExpiry, ShieldKind,
+        ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
@@ -14045,6 +14118,61 @@ mod tests {
             }
             other => panic!("expected Typed opponent-controlled source filter, got {other:?}"),
         }
+    }
+
+    /// CR 611.2a + CR 514.2 vs CR 604.2: `expiry` records the window a prevention
+    /// clause states FOR ITSELF, and nothing else. Shape-level companion to the
+    /// runtime pin in
+    /// `tests/integration/printed_damage_prevention_survives_turn.rs::turn_windowed_printed_shield_is_stamped_and_does_not_survive_cleanup`.
+    ///
+    /// The discriminating half is the third case: "this turn" occurring inside a
+    /// SUBORDINATE condition is not a window, and stamping it would delete a
+    /// correct printed static (Neriv, Heart of the Storm — a real, format-legal
+    /// PERMANENT) at the next cleanup step.
+    #[test]
+    fn prevention_expiry_records_only_a_clause_final_stated_window() {
+        // Verbatim Urza's Science Fair Project, result row 2. A trailing "this
+        // turn" IS this effect's own window.
+        let windowed = parse_replacement_line(
+            "Prevent all combat damage it would deal this turn.",
+            "Urza's Science Fair Project",
+        )
+        .expect("the prevention clause must still parse");
+        assert!(windowed.shield_kind.is_shield());
+        assert_eq!(
+            windowed.expiry,
+            Some(RestrictionExpiry::EndOfTurn),
+            "CR 611.2a: a clause-final 'this turn' is the effect's stated window"
+        );
+
+        // Verbatim Solitary Confinement, line 3. CR 604.2: a printed static
+        // states no window, so it must stay durable.
+        let durable = parse_replacement_line(
+            "Prevent all damage that would be dealt to you.",
+            "Solitary Confinement",
+        )
+        .expect("the printed static must still parse");
+        assert!(durable.shield_kind.is_shield());
+        assert_eq!(
+            durable.expiry, None,
+            "CR 604.2: a printed static's shield carries no window"
+        );
+
+        // Verbatim Neriv, Heart of the Storm. "this turn" sits inside the
+        // subordinate "that entered this turn" CONDITION, not at the end of the
+        // clause — stamping it would prune a correct printed static off a
+        // permanent at the first cleanup step.
+        let conditioned = parse_replacement_line(
+            "If a creature you control that entered this turn would deal damage, \
+             it deals twice that much damage instead.",
+            "Neriv, Heart of the Storm",
+        )
+        .expect("Neriv's printed replacement must still parse");
+        assert_eq!(
+            conditioned.expiry, None,
+            "CR 604.2: 'entered this turn' is a condition, not a duration — a \
+             printed static must not acquire a turn window from it"
+        );
     }
 
     /// Sibling coverage for the same bare "prevent N of that damage" idiom with

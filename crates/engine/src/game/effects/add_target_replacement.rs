@@ -58,7 +58,14 @@ pub(crate) fn expiry_from_duration(
         Some(Duration::ForAsLongAs { .. }) => None,
         Some(Duration::UntilSourceExilesAnotherCard) => None,
         Some(Duration::UntilOpponentBecomesMonarch) => None,
-        // CR 611.2a: no duration at all — the effect is not turn-bound.
+        // CR 611.2a: an explicitly permanent window has no `RestrictionExpiry`
+        // counterpart, because none of them means "never ends". `None` here is
+        // "unmapped", NOT "durable" — a SHIELD that reaches
+        // `replacement_with_ability_expiry` still picks up the engine's
+        // `EndOfTurn` fallback from `with_resolution_shield_expiry` two frames
+        // below; only a non-shield rider actually stays durable. No corpus
+        // prevention ability carries `Duration::Permanent`, so nothing reaches
+        // that combination today.
         Some(Duration::Permanent) => None,
     }
 }
