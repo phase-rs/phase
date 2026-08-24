@@ -94,6 +94,17 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * admitted; see the gate for why.
  *
  * Bumps to date:
+ *  27 — WaitingFor.ChooseDungeon.options changed from DungeonId[] to
+ *       DungeonPreview[], and ChooseDungeonRoom dropped option_names, gained a
+ *       required dungeon_name, and changed options from number[] to
+ *       RoomPreview[], so each option carries the room's printed name and
+ *       room-ability text (CR 309.4b-c). A PARSE bump like 16, not a silent
+ *       capability loss like 24: none of the new fields carry a serde default,
+ *       so a v26 peer cannot deserialize a dungeon-choice snapshot at all.
+ *       DerivedViews.dungeon_rooms rides along in the same bump — it IS
+ *       optional and would parse on a v26 peer, but this client deleted its
+ *       dungeon_progress room-index derivation, so a v26 host would leave a
+ *       v27 guest with no dungeon badge.
  *  26 — DerivedViews.current_target_kind publishes the engine's CR 115.1
  *       classification of the live target announcement. The field is optional
  *       and parses on a v24 peer, so the loss is silent: this client deleted
@@ -146,7 +157,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 26 as const;
+export const WIRE_PROTOCOL_VERSION = 27 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   // `wireProtocolVersion` is optional on both first-contact guest messages:

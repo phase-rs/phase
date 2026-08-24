@@ -203,6 +203,17 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 36 — WaitingFor.ChooseDungeon.options changed from DungeonId[] to
+ *      DungeonPreview[], and ChooseDungeonRoom dropped option_names, gained a
+ *      required dungeon_name, and changed options from number[] to
+ *      RoomPreview[], so each option carries the room's printed name and
+ *      room-ability text (CR 309.4b-c). A PARSE bump like 23, not a capability
+ *      bump like 24: none of the new fields carry a serde default, so a v35
+ *      peer fails deserialization on a dungeon-choice GameState outright
+ *      rather than degrading silently. DerivedViews.dungeon_rooms rides along
+ *      in the same bump — it IS serde-optional, but this client deleted its
+ *      dungeon_progress room-index derivation, so a v35 server that omits it
+ *      would leave this client rendering no dungeon badge at all.
  * 35 — DerivedViews.current_target_kind publishes the engine's CR 115.1
  *      classification of the live target announcement. A CAPABILITY bump like
  *      24 and 32, not a parse bump: the field is serde-optional, but this
@@ -269,7 +280,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 35;
+export const PROTOCOL_VERSION = 36;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

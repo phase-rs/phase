@@ -36,8 +36,8 @@ const viewerInteractionWithProducedMana = {
 } as never;
 
 describe("encodeWireMessage / decodeWireMessage", () => {
-  it("pins the P2P wire protocol to v26", () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(26);
+  it("pins the P2P wire protocol to v27", () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(27);
   });
 
   it("defaults shortcut actions for a legacy payload created before the additive field", () => {
