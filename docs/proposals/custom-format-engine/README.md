@@ -1,6 +1,8 @@
 # Custom ("Design Your Own") Format Engine — Design Proposal
 
-**Status:** research and design only — no engine or frontend code in this PR.
+**Status:** design merged. Implementation is underway, phase by phase — see
+`IMPLEMENTATION_PLAN.md` for the sequencing and current status of each
+phase.
 
 This is a design proposal for a general, data-driven custom-format layer,
 motivated by wanting to support four Eternal Central retro formats (Old
@@ -27,7 +29,13 @@ Originating discussion: [phase-rs/phase#5312](https://github.com/phase-rs/phase/
   School (needs no legacy-rules engine work at all); phase 2 is the four EC
   formats plus the legacy-rules wiring (mana burn, damage-on-the-stack, wish,
   legend rule) they need.
+- **IMPLEMENTATION_PLAN.md** — the phased build-out charter derived from
+  this design: seven phases (1a–2cd), what each delivers, their
+  dependencies, and any correction a phase's own plan review surfaced along
+  the way. `CombatDamageTiming::OnStack` (and the two EC presets that need
+  it) is deliberately excluded — a separate, later, larger sub-project per
+  §6/§7/§8 below.
 
-This is intended as a discussion artifact for maintainer review, not a
-ready-to-merge implementation plan. Feedback on the schema shape and the
-delivery-surface recommendation (§7 of PLAN.md) is the main ask.
+The design (`CONTEXT.md`/`RESEARCH.md`/`PLAN.md`) is merged as reviewed.
+Each implementation phase lands as its own PR, planned and reviewed
+independently before merge.
