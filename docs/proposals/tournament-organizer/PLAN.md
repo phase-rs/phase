@@ -98,11 +98,53 @@ file:line evidence in RESEARCH.md, not assumed from the discussion's prose.
 /// `TournamentFormat::Commander` split would duplicate three algorithms
 /// that differ only in this one number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MatchArity(pub u8);
+#[serde(try_from = "u8", into = "u8")]
+pub struct MatchArity(u8); // REVISED, maintainer review: field is now private —
+                           // construction goes through `new()`, never a bare
+                           // tuple-struct literal or an unvalidated deserialize.
 
 impl MatchArity {
     pub const HEAD_TO_HEAD: MatchArity = MatchArity(2);
     pub const COMMANDER_POD: MatchArity = MatchArity(4);
+
+    /// NEW, maintainer review — validated construction. Rejects `0`/`1`
+    /// (not a real "players per pairing" count — a pairing needs at least
+    /// two seats to pair anyone) and caps at `128`, the largest `n` for
+    /// which `win_points = 2n - 1` still fits `u8` (`2*128-1 = 255`).
+    /// `#[serde(try_from = "u8")]` above routes wire deserialization through
+    /// this same constructor — a malformed `CreateTournament` payload is
+    /// rejected at the deserialization boundary, not accepted and only
+    /// discovered broken later inside pairing/scoring logic.
+    pub fn new(n: u8) -> Result<Self, String> {
+        if n < 2 {
+            return Err(format!(
+                "MatchArity must be at least 2 (a pairing needs ≥2 seats), got {n}"
+            ));
+        }
+        if n > 128 {
+            return Err(format!(
+                "MatchArity {n} exceeds 128 — win_points (2n-1) would overflow u8"
+            ));
+        }
+        Ok(MatchArity(n))
+    }
+
+    pub fn get(self) -> u8 {
+        self.0
+    }
+}
+
+impl TryFrom<u8> for MatchArity {
+    type Error = String;
+    fn try_from(n: u8) -> Result<Self, Self::Error> {
+        Self::new(n)
+    }
+}
+
+impl From<MatchArity> for u8 {
+    fn from(arity: MatchArity) -> u8 {
+        arity.0
+    }
 }
 
 /// Tournament match-point scoring. MSTR generalizes MTR §2.1's 3/1/0 to a
@@ -189,26 +231,90 @@ pub struct TournamentPlayer {
     pub player_token: String,             // minted at join, NOT socket-bound — fixes #4615 finding #1
     pub display_name: String,
     pub dropped: bool,
-    pub had_bye: bool,                    // bye assignment prefers players who haven't had one
-    pub had_short_pod: bool,               // NEW: arity > 2 only — see pod-sizing below
+    // NOTE, maintainer review: `had_bye`/`had_short_pod` are NOT stored
+    // fields here anymore — see the "Durable pairing history" note below
+    // `TournamentPairing` for why they moved to derived queries over
+    // `pairings` instead.
 }
 
-/// A single pairing. 2 players for a head-to-head match. Up to `arity`
-/// players for a pod match; may be exactly `arity - 1` for a *short pod*
-/// (MSTR: prefer one undersized pod over multiple byes — see below) or
-/// exactly 1 for a genuine bye.
+/// REVISED, maintainer review — `TournamentPairing` gains a stable identity
+/// and an explicit, durable outcome slot. The previous sketch (`round` +
+/// `players` only) could describe WHO is paired but had nowhere to durably
+/// record WHAT happened, even though rematch avoidance (§2 point 2 above)
+/// and standings/tiebreak computation (below) both require querying prior
+/// results and prior opponents — there was no data for those queries to
+/// read. Fixed by making `pairings` (on `TournamentMeta`) the single
+/// source of truth every derived view reads fresh, not an incrementally-
+/// mutated side structure that a corrected/re-reported result could drift
+/// out of sync with:
+///
+/// - **Durable pairing history.** `pairings: Vec<TournamentPairing>`
+///   accumulates every pairing ever generated, across every round — never
+///   pruned, never summarized into running totals elsewhere. Match points,
+///   opponents faced (rematch avoidance and tiebreak averaging alike),
+///   `had_bye`, and `had_short_pod` are ALL derived by scanning this list
+///   fresh, not stored as separately-mutated fields anywhere:
+///   `fn had_bye(key, pairings) -> bool` (any pairing where
+///   `players == [key]` and `outcome == Some(Bye)`),
+///   `fn had_short_pod(key, arity, pairings) -> bool` (any pairing sized
+///   `arity.get() - 1` containing `key`), `fn prior_opponents(key,
+///   pairings) -> HashSet<String>` (every co-`players` entry across every
+///   pairing containing `key`). This is what makes "replay-safe result
+///   update" well-defined: `report_result(pairing_id, outcome)` is a single
+///   `pairings[i].outcome = Some(outcome)` write (a correction simply
+///   overwrites the prior value), and every derived view recomputes from
+///   the corrected history on its next read — there is no separate cache
+///   or running total that a correction could leave stale.
+///
+/// `players` holds 2 keys for a head-to-head pairing, up to `arity` for a
+/// pod pairing; it may be exactly `arity - 1` for a *short pod* (§2 point
+/// 4) or exactly 1 for a bye (§2 point 5).
 pub struct TournamentPairing {
+    pub id: PairingId,                    // stable identity — see below
     pub round: u32,
     pub players: Vec<String>,             // player_key, len in 1..=arity.0
+    pub outcome: Option<PairingOutcome>,   // None = pending; Some(_) once resolved
 }
 
-/// One pairing's reported outcome. MSTR: "Match results, not individual
-/// Game results, are reported" for pods — a pod match has exactly one
-/// winner or is a full draw, never per-seat placement (RESEARCH.md §13).
+/// Stable, tournament-scoped pairing identity — a monotonic counter, not a
+/// re-derivable index (pairings are never removed or reordered, so a plain
+/// `u32` counter minted at generation time is sufficient; no UUID needed
+/// since this never leaves the tournament's own scope).
+pub type PairingId = u32;
+
+/// A pairing's resolved outcome, once it has one. REVISED, maintainer
+/// review: this now has THREE variants, not the two `PodOutcome` had
+/// before — `Bye` and `Forfeit` are pulled OUT of `PodOutcome` entirely
+/// rather than smuggled through it, because both are server-assigned
+/// facts, never client-reported results, and conflating them with a real
+/// reported `PodOutcome` was exactly the ambiguity maintainer review
+/// flagged ("does not distinguish a one-player bye from a reported
+/// draw/decisive match").
+pub enum PairingOutcome {
+    /// Auto-assigned the instant a 1-player pairing is generated (§2 point
+    /// 5) — never client-reported, never passes through
+    /// `validate_match_result`'s reported-outcome path at all.
+    Bye,
+    /// Auto-assigned when every player but one in a pairing has dropped
+    /// before the pairing was reported (§2's drop-timing note below) — the
+    /// remaining player wins by forfeit. Also never client-reported.
+    Forfeit { winner: String },
+    /// A real, client-or-organizer-reported result for a pairing that was
+    /// actually played.
+    Reported(PodOutcome),
+}
+
+/// The reported content of a PLAYED pairing. MSTR: "Match results, not
+/// individual Game results, are reported" for pods — a pod match has
+/// exactly one winner or is a full draw, never per-seat placement
+/// (RESEARCH.md §13). Never represents a bye or a forfeit — see
+/// `PairingOutcome` above.
 pub enum PodOutcome {
-    /// `game_wins` is only meaningful (and only validated) for a
-    /// `HEAD_TO_HEAD` pairing's Bo3 game-win consistency check below —
-    /// pods are single-game per MSTR default, so it's empty/unused there.
+    /// `game_wins` is validated differently by arity (see
+    /// `validate_match_result` below): for `HEAD_TO_HEAD`, it MUST contain
+    /// exactly the two participants with a legal completed-Bo3 tally; for
+    /// a pod (`arity > 2`), it MUST be empty — pods are single-game per
+    /// MSTR default, so there is no per-player game-win count to report.
     Decisive { winner: String, game_wins: std::collections::HashMap<String, u8> },
     Draw,
 }
@@ -294,8 +400,9 @@ Commander-pod requirement, rather than needing two:
    Fairness now spreads across however many short pods a round actually
    needs (potentially more than one), not just one: when selecting which
    `b * (arity.0 - 1)` players go into short pods this round, prefer players
-   who haven't already had one (`had_short_pod`) across the full selection,
-   the same fairness rule as `had_bye`, generalized from "pick one player"
+   who haven't already had one (`had_short_pod(key, arity, pairings)`, the
+   same derived-over-pairing-history query as `had_bye`, not a stored
+   field) across the full selection, generalized from "pick one player"
    to "pick the `b`-pod-worth of players." At `arity = 2` there is no
    short-pod case (`arity.0 - 1 == 1`, which is just the existing bye
    path) — this fallback is `arity > 2` only, unchanged.
@@ -323,18 +430,56 @@ Commander-pod requirement, rather than needing two:
      `{3,4}`-only solution at `n=5`, so this case's bye is assigned via
      point 5 exactly as for `n=1` — only one bye, not the `n=2` exception,
      since a valid 4-player pod IS available here).
-   - **Player drops mid-round producing any of these counts** (a
-     tournament that started larger can shrink to `n ∈ {0,1,2,5}` active
-     players through drops in a later round) use this exact same
-     resolution — there is no separate mechanism for "reached this count
-     via drops" versus "started at this count." A dropped player is simply
-     excluded from the active-player count `n` this pairing step operates
-     on, per the existing `TournamentPlayer.dropped` field (§2 above); they
-     never appear in that round's pairings or standings-affecting bye
-     assignment.
+   - **Drops that reduce the active pool BEFORE the next round's pairings
+     are generated** (a tournament that started larger can shrink to
+     `n ∈ {0,1,2,5}` active players through drops between rounds) use this
+     exact same resolution — there is no separate mechanism for "reached
+     this count via drops" versus "started at this count." A dropped
+     player is simply excluded from the active-player count `n` this
+     pairing step operates on, per the existing `TournamentPlayer.dropped`
+     field (§2 above); they never appear in that round's pairings or
+     standings-affecting bye assignment.
+   - **Drops AFTER a round's pairings are already generated, before that
+     pairing is reported — a genuinely different timing, REVISED per
+     maintainer/CodeRabbit review: the prior text only covered the
+     before-generation case and left this one unspecified.** When a drop is
+     recorded for a player who is a member of a `Pending` pairing for the
+     CURRENT round:
+     - **`HEAD_TO_HEAD` (2-player) pairing, one player drops:** the pairing
+       auto-settles immediately — the remaining player is awarded
+       `PairingOutcome::Forfeit { winner: remaining_player }` (§2's
+       `PairingOutcome` enum above), scored identically to a normal win at
+       `scoring.win_points`. This is a server-assigned fact, never a client
+       report, so it does not pass through `validate_match_result`'s
+       reported-outcome path (below) at all — mirroring exactly how a bye
+       is assigned, not reported.
+     - **Pod (`arity > 2`) pairing, one or more (but not all) players
+       drop:** the pod's `Pending` pairing is unaffected — the remaining
+       active players still play it out and report a real `PodOutcome`
+       when finished, same as if nobody had dropped. The ONE constraint:
+       `validate_match_result` (below) rejects a reported `winner` who has
+       since dropped — a dropped player cannot be credited a pod win after
+       the fact, even if the game was in their favor at the moment they
+       left.
+     - **Pod pairing where drops leave exactly one active player:** that
+       remaining player is awarded `PairingOutcome::Forfeit`, the same
+       mechanism as the head-to-head case, generalized — one auto-settled
+       forfeit-win for whoever is left, regardless of original pod size.
+     - **A pairing already `Some(outcome)` (already reported) before the
+       drop is recorded** is never retroactively altered — a later drop
+       cannot un-report a finished pairing; this is the same "corrections
+       overwrite, history doesn't get silently rewritten by unrelated
+       events" property the durable pairing-history design above already
+       establishes.
 5. Bye assignment (any `arity`, and the only path at `arity = 2`) prefers a
-   player who hasn't already had one (`had_bye` flag) among any players
-   still unassignable after pod-size fallback.
+   player who hasn't already had one (`had_bye(key, pairings)`, a derived
+   query over the pairing history — see the "Durable pairing history" note
+   above `TournamentPairing`, not a stored field) among any players still
+   unassignable after pod-size fallback. The generated pairing is a
+   1-player `TournamentPairing` whose `outcome` is set to
+   `Some(PairingOutcome::Bye)` immediately at generation time — a bye is
+   never left `Pending` waiting for a report, since there is nothing to
+   report.
 6. A bye scores as a win at `scoring.win_points` (2-0/6 game points at
    `arity = 2` per MTR Appendix C; `2n - 1` match points with no game-win
    count at `arity > 2` per MSTR), and the bye round is **excluded** (not
@@ -376,8 +521,16 @@ opponent-average calculations — those two pieces of logic are genuinely
 arity-independent and stay unforked; only the ranked list of *which*
 percentages to compute, and in what order, differs.
 
-**Match result validation** — fixes #4615 finding #2 directly, generalized
-to `PodOutcome`/arbitrary pod size:
+**Match result validation** — fixes #4615 finding #2 directly, and REWRITTEN
+per maintainer review to close two further gaps: (a) a head-to-head report
+could previously carry an empty or one-sided `game_wins` map and still
+pass, since the Bo3 check only ran `if !game_wins.is_empty()`; (b) nothing
+distinguished a client attempting to report a bye/forfeit from a real
+played result, since both flowed through the same `PodOutcome` type. Fixed
+by operating on `PairingOutcome` (§2) directly — `Bye`/`Forfeit` are
+server-assigned and never reach this validator via a client message at
+all (the message type for reporting a result only carries a `PodOutcome`
+payload, never a bare `PairingOutcome` — see PR 2's protocol variants):
 ```rust
 fn validate_match_result(pairing: &TournamentPairing, result: &PodOutcome) -> Result<(), String> {
     match result {
@@ -386,16 +539,38 @@ fn validate_match_result(pairing: &TournamentPairing, result: &PodOutcome) -> Re
             if !pairing.players.contains(winner) {
                 return Err("Winner must be one of the pod's players".to_string());
             }
-            // Bo3 game-win consistency check applies ONLY to head-to-head
-            // pairings — MSTR pods are single-game, there's no per-player
-            // game-win count to cross-check.
-            if pairing.players.len() == 2 && !game_wins.is_empty() {
+            if pairing.players.len() == 2 {
+                // HEAD_TO_HEAD — REVISED: require EXACTLY the two
+                // participant keys with a legal completed-Bo3 tally, not
+                // "if present, must be consistent." An empty or
+                // single-key game_wins map is now a hard rejection, not a
+                // silently-skipped check.
                 let (a, b) = (&pairing.players[0], &pairing.players[1]);
-                if game_wins.get(a) != game_wins.get(b) {
-                    let expected = if game_wins.get(a) > game_wins.get(b) { a } else { b };
-                    if winner != expected {
-                        return Err("Winner must match the player with more game wins".to_string());
-                    }
+                if game_wins.len() != 2 || !game_wins.contains_key(a) || !game_wins.contains_key(b) {
+                    return Err(
+                        "Head-to-head result must report game wins for exactly both players".to_string(),
+                    );
+                }
+                let (wa, wb) = (game_wins[a], game_wins[b]);
+                // Legal completed best-of-three tallies only: someone
+                // reaches 2, the other has 0 or 1. Rejects 1-0/0-0 (an
+                // unfinished match), 2-2, 3-anything, etc.
+                if !matches!((wa, wb), (2, 0) | (2, 1) | (0, 2) | (1, 2)) {
+                    return Err(format!("Illegal Bo3 game-win tally {wa}-{wb}"));
+                }
+                let expected = if wa > wb { a } else { b };
+                if winner != expected {
+                    return Err("Winner must match the player with more game wins".to_string());
+                }
+            } else {
+                // Pod (arity > 2) — REVISED: game_wins must be EMPTY, not
+                // merely unchecked. MSTR pods are single-game; a client
+                // attaching game-win data to a pod result has no value for
+                // it to mean, so reject rather than silently ignore.
+                if !game_wins.is_empty() {
+                    return Err(
+                        "Pod results are single-game per MSTR — game_wins must be empty".to_string(),
+                    );
                 }
             }
             Ok(())
@@ -403,6 +578,13 @@ fn validate_match_result(pairing: &TournamentPairing, result: &PodOutcome) -> Re
     }
 }
 ```
+A dropped player can never be the `winner` of a pod result reported after
+their drop — `validate_match_result` checks `pairing.players.contains(winner)`
+against the pairing's ORIGINAL seat list (drops don't remove a player from
+`pairing.players` retroactively), so this needs one more check specific to
+the drop-timing case above: reject `winner` if `TournamentPlayer.dropped`
+is true for that player at validation time, closing the "credited a win
+after leaving" gap the drop-timing note above calls out.
 
 **Expiry** — fixes #4615 finding #3 directly: `last_activity_at` bumped on
 every mutating call (`join_tournament`, `start_round`, `report_result`,
@@ -605,3 +787,45 @@ rejects `BracketShape::SingleElimination` paired with any
 concrete regression test proving pod-based SE's exclusion from v1 is an
 enforced construction-time rejection, not just a documentation note that a
 future implementer could silently miss.
+
+**NEW — maintainer review (`MatchArity` validated construction, §1)**:
+`MatchArity::new(0)` and `::new(1)` both return `Err`; `MatchArity::new(129)`
+returns `Err` (the first value where `2n-1` would overflow `u8`);
+`MatchArity::new(128)` succeeds and `ScoringPolicy::default_for_arity`
+produces `win_points: 255` without panicking or wrapping — the concrete
+regression test for the exact overflow maintainer review identified.
+Deserializing a `CreateTournament` payload with `arity: 0` in its wire
+JSON is rejected at deserialization (via `#[serde(try_from = "u8")]`), not
+accepted and only discovered broken later.
+
+**NEW — maintainer review (durable pairing history and replay-safe
+correction, §2)**: a test that reports a result for a pairing, then reports
+a DIFFERENT result for the same `pairing_id` (a correction), and asserts
+every derived view (standings, that pairing's own `outcome`, both players'
+`prior_opponents`) reflects only the corrected result — no residue from
+the first report anywhere, proving the derive-from-history design is
+genuinely replay-safe and not just replay-tolerant for the exact fields
+someone thought to reset. A second test asserts `had_bye`/`had_short_pod`/
+`prior_opponents` all correctly derive from a multi-round pairing history
+with no separate stored field to fall out of sync.
+
+**NEW — maintainer review (drop-timing forfeit resolution, §2)**: three
+dedicated tests — (a) a `HEAD_TO_HEAD` pairing where one player drops while
+`Pending` auto-resolves to `PairingOutcome::Forfeit` for the remaining
+player, scored as a normal win; (b) a pod pairing where one of four players
+drops while `Pending` does NOT auto-resolve — the pod stays `Pending` and
+a subsequent real `PodOutcome` report for the remaining players is
+accepted normally; (c) `validate_match_result` rejects a reported `winner`
+whose `TournamentPlayer.dropped` is true, even when that player is
+otherwise a legitimate member of `pairing.players`.
+
+**NEW — maintainer review (tightened head-to-head result validation, §2)**:
+a dedicated test matrix for `validate_match_result` covering every illegal
+`game_wins` shape for a `HEAD_TO_HEAD` pairing — empty map (rejected, was
+previously silently accepted), single-key map (rejected), a legal-looking
+but incomplete tally like `1-0` (rejected, not a completed Bo3), `2-2`
+(rejected), and each of the four legal completed tallies (`2-0`, `2-1`,
+`0-2`, `1-2`) accepted with the correct winner and rejected with the wrong
+one. A sibling test confirms a pod (`arity > 2`) result with a non-empty
+`game_wins` is rejected outright, and one with an empty map validates
+normally.

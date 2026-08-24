@@ -61,13 +61,23 @@ otherwise — findings marked "UPDATED" or "NEW" were re-verified or newly
 found against current `main` in a later pass. See RESEARCH.md for exact
 file:line evidence.
 
-1. **Greenfield, confirmed.** No `tournament.rs`, `TournamentManager`, or any
-   tournament-related type exists anywhere in `crates/lobby-broker/src/` (or
-   elsewhere in the workspace) on `main` today. `ls crates/lobby-broker/src/`
-   shows only `broker.rs`, `env.rs`, `inbound_guard.rs`, `lib.rs`, `lobby.rs`,
-   `protocol.rs`, `reservation_auth.rs`, `validation.rs`. #4615 was closed
-   without merging, so none of its work landed. This is a true from-scratch
-   design, not a partially-built stub.
+1. **Greenfield within `lobby-broker` specifically, confirmed — REVISED,
+   maintainer review: the original wording overreached to "or elsewhere in
+   the workspace," which contradicts finding #8's own `draft-core` citation
+   below and is corrected here, not merely reworded.** No `tournament.rs`,
+   `TournamentManager`, or any lobby-scoped tournament type exists anywhere
+   in `crates/lobby-broker/src/` on `main` today. `ls
+   crates/lobby-broker/src/` shows only `broker.rs`, `env.rs`,
+   `inbound_guard.rs`, `lib.rs`, `lobby.rs`, `protocol.rs`,
+   `reservation_auth.rs`, `validation.rs`. #4615 was closed without
+   merging, so none of its `lobby-broker`-side work landed. This crate's
+   `TournamentManager` is a true from-scratch design, not a partially-built
+   stub — but `crates/draft-core` DOES already have a working, tested
+   Swiss-pairing implementation for a different purpose (draft-pod
+   mini-tournaments, finding #8 below) that this proposal explicitly draws
+   on as prior art. Do not read this finding as "no tournament-pairing code
+   exists in the workspace" — only "none exists in `lobby-broker`,"  which
+   is the crate this proposal actually adds to.
 
 2. **`LobbyManager` + `Broker::handle` + `ConnState` + functional-core pattern
    — confirmed exactly as described.** `crates/lobby-broker/src/lobby.rs:96`
