@@ -316,6 +316,29 @@ describe("ActionButton", () => {
     expect(vi.mocked(dispatchAction)).toHaveBeenCalledWith({ type: "CancelAutoPass" });
   });
 
+  it("keeps UntilStackEmpty cancel-only when the local player holds priority", () => {
+    useGameStore.setState({
+      gameMode: "online",
+      gameState: {
+        ...createGameState(priorityPrompt()),
+        phase: "PostCombatMain",
+        active_player: 0,
+        auto_pass: { 0: { type: "UntilStackEmpty", initial_stack_len: 1 } },
+        stack: [spellStackEntry(1)],
+      },
+      waitingFor: priorityPrompt(),
+      legalActions: [],
+      isResolvingAll: false,
+    });
+    useMultiplayerStore.setState({ activePlayerId: 0, actionPending: false });
+
+    render(<ActionButton />);
+
+    expect(screen.getByRole("button", { name: "Resolving Stack..." })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Resolve" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Resolve All" })).not.toBeInTheDocument();
+  });
+
   it("no longer client-gates Confirm/Skip on a must-attack creature (engine is the authority)", () => {
     const target = { type: "Player", data: 1 } as const;
     const wf: WaitingFor = {
