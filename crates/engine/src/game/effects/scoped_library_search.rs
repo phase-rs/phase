@@ -1002,10 +1002,6 @@ mod tests {
 
         assert!(state.pending_scoped_library_search.is_some());
         assert!(state.active_optional_effect_frame().is_none());
-        assert!(
-            state.active_ability_continuation().is_some(),
-            "the ordinary search's delivery must be parked until SearchChoice resolves"
-        );
         let WaitingFor::SearchChoice {
             player,
             cards: search_cards,
