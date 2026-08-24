@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.62.0",
   "type": "module",
-  "packageManager": "pnpm@11.13.0",
+  "packageManager": "pnpm@11.13.1",
   "scripts": {
     "dev": "vite",
     "build": "pnpm run protocol:check && tsc -b && vite build",

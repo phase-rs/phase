@@ -101,8 +101,8 @@ fi
 pnpm_major="$(pnpm --version 2>/dev/null | cut -d. -f1)"
 if ! [ "${pnpm_major:-0}" -ge 10 ] 2>/dev/null; then
   echo "ERROR: pnpm >= 10 required (found ${pnpm_major:-unknown})" >&2
-  echo "  client/package.json pins pnpm@11.13.0; pnpm 10+ switches to it automatically." >&2
-  echo "  Upgrade: corepack enable && corepack use pnpm@11.13.0" >&2
+  echo "  client/package.json pins pnpm@11.13.1; pnpm 10+ switches to it automatically." >&2
+  echo "  Upgrade: corepack enable && corepack use pnpm@11.13.1" >&2
   echo "  Or see: https://pnpm.io/installation" >&2
   exit 1
 fi
