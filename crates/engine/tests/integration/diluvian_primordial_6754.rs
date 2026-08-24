@@ -6,9 +6,10 @@ use engine::types::ability::{
     AbilityDefinition, Effect, SpellStackToGraveyardReplacement, TargetRef,
 };
 use engine::types::actions::GameAction;
+use engine::types::format::FormatConfig;
 use engine::types::game_state::{CastOfferKind, CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 use engine::types::PlayerId;
@@ -189,6 +190,73 @@ fn diluvian_primordial_uses_selected_pairs_as_its_fixed_free_cast_pool() {
     assert_eq!(runner.state().objects[&p2_selected].zone, Zone::Graveyard);
     assert_eq!(runner.state().objects[&p1_extra].zone, Zone::Graveyard);
     assert_eq!(runner.state().objects[&p2_extra].zone, Zone::Graveyard);
+}
+
+/// CR 903.4 + CR 903.5c + CR 608.2g: Color identity constrains deck
+/// construction, not casting permissions granted during a game. A blue
+/// Commander player may therefore cast the red opponent spell selected for
+/// Diluvian Primordial's free-cast window.
+#[test]
+fn diluvian_primordial_casts_off_identity_opponent_spell_in_commander() {
+    let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        )],
+    );
+    let commander = scenario
+        .add_creature_to_hand(P0, "Blue Commander", 2, 2)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        })
+        .id();
+    scenario.with_commander(commander);
+    let primordial = scenario
+        .add_creature_to_hand_from_oracle(P0, "Diluvian Primordial", 5, 5, DILUVIAN_ORACLE)
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    let red_opponent_spell = scenario
+        .add_spell_to_graveyard(P1, "Red Opponent Spell", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        })
+        .from_oracle_text("Draw a card.")
+        .id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&primordial].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: primordial,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting Diluvian Primordial must succeed");
+    advance_to_trigger_target_selection(&mut runner);
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(red_opponent_spell)),
+        })
+        .expect("opponent red instant must be a legal Diluvian target");
+    advance_to_free_cast_window(&mut runner);
+
+    runner
+        .act(GameAction::FreeCastWindowChoice {
+            selection: Some(red_opponent_spell),
+        })
+        .expect("Diluvian must cast the selected red opponent spell despite P0's blue identity");
+    assert_eq!(
+        runner.state().objects[&red_opponent_spell].zone,
+        Zone::Stack
+    );
 }
 
 /// CR 608.2b + CR 608.2g: A paired target that leaves its graveyard before

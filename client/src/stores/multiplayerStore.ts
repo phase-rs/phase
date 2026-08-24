@@ -471,6 +471,7 @@ async function startActiveP2PHostGame(
   saveActiveGame({ id: gameId, mode: "p2p-host", difficulty: "" });
   useGameStore.setState({ gameId });
   setState({
+    activePlayerId: 0,
     pendingGameRoute: `/game/${gameId}?mode=p2p-host`,
     hostGameCode: null,
     hostingStatus: "idle",

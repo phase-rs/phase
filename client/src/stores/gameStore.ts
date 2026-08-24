@@ -115,7 +115,7 @@ export const GAME_MODE_TRAITS: Record<GameMode, GameModeTraits> = {
   "local": { authority: "client", company: "solo", seat: "seat-zero" },
   "native-ai": { authority: "wire", company: "solo", seat: "seat-zero" },
   "online": { authority: "wire", company: "remote-humans", seat: "wire-assigned" },
-  "p2p-host": { authority: "wire", company: "remote-humans", seat: "wire-assigned" },
+  "p2p-host": { authority: "wire", company: "remote-humans", seat: "seat-zero" },
   "p2p-join": { authority: "wire", company: "remote-humans", seat: "wire-assigned" },
   "draft-match": { authority: "wire", company: "remote-humans", seat: "wire-assigned" },
   "spectate": { authority: "wire", company: "remote-humans", seat: "no-seat" },

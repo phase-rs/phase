@@ -4262,7 +4262,7 @@ pub enum TypeFilter {
     Permanent,
     Card,
     Any,
-    /// CR 205.4b: Negation — matches objects whose type does NOT match the inner filter.
+    /// CR 205.2a + CR 205.3: Negation — matches objects whose type does NOT match the inner filter.
     /// "noncreature" → `Non(Box::new(Creature))`, "non-Human" → `Non(Box::new(Subtype("Human")))`
     Non(Box<TypeFilter>),
     /// CR 205.3: Matches objects with a specific subtype (creature type, land type, etc.).
@@ -5005,7 +5005,7 @@ pub enum FilterProp {
     /// stack object's static printed modality (`obj.modal.is_some()`), a printed
     /// characteristic present from object creation.
     Modal,
-    /// CR 205.4b: Matches objects that do NOT have a specific color.
+    /// CR 105.2: Matches objects that do NOT have a specific color.
     /// Parallel to `HasColor` — used for "nonblack", "nonwhite" in negation stacks.
     NotColor {
         color: ManaColor,
@@ -26231,8 +26231,8 @@ pub enum ContinuousModification {
     /// CR 205.4 + CR 707.9d: Add a supertype to the affected object's
     /// supertypes (e.g., Sarkhan, Soul Aflame: "it's legendary in addition
     /// to its other types"). Idempotent: pushing an already-present supertype
-    /// is a no-op. Applied at Layer 4 (CR 613.1d) because supertypes are
-    /// types per CR 205.4b.
+    /// is a no-op. Applied at Layer 4 (CR 613.1d), which covers card type,
+    /// subtype, and supertype changes alike.
     AddSupertype {
         supertype: Supertype,
     },

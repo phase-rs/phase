@@ -23,7 +23,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { PLAYER_ID, SPECTATOR_PLAYER_ID } from "../../constants/game";
 import type { GameMode } from "../../stores/gameStore";
-import { GAME_MODE_TRAITS, hasRemoteHumans, useGameStore } from "../../stores/gameStore";
+import { GAME_MODE_TRAITS, seatSource, useGameStore } from "../../stores/gameStore";
 import { useMultiplayerStore } from "../../stores/multiplayerStore";
 import { getPlayerId, usePlayerId } from "../usePlayerId";
 
@@ -47,7 +47,7 @@ describe("local seat resolution", () => {
     useMultiplayerStore.setState({ activePlayerId: null, isSpectator: false });
   });
 
-  it.each(ALL_MODES.filter((mode) => hasRemoteHumans(mode)))(
+  it.each(ALL_MODES.filter((mode) => seatSource(mode) === "wire-assigned"))(
     "%s: a client told it holds seat 1 is never answered seat 0",
     (mode) => {
       seatMe(mode, 1);
@@ -57,6 +57,13 @@ describe("local seat resolution", () => {
       expect(getPlayerId()).not.toBe(PLAYER_ID);
     },
   );
+
+  it("keeps the P2P host at seat 0 despite a stale wire assignment", () => {
+    seatMe("p2p-host", 2);
+    const { result } = renderHook(() => usePlayerId());
+    expect(result.current).toBe(PLAYER_ID);
+    expect(getPlayerId()).toBe(PLAYER_ID);
+  });
 
   it("seats a pod-draft guest at the seat the pod gave them", () => {
     seatMe("draft-match", 1);
@@ -76,7 +83,7 @@ describe("local seat resolution", () => {
   // game must keep answering 0 even when a previous online game left a stale
   // `activePlayerId` behind. These rows are green with and without the fix —
   // they nail the behaviour down, they do not evidence it.
-  it.each(ALL_MODES.filter((mode) => !hasRemoteHumans(mode)))(
+  it.each(ALL_MODES.filter((mode) => seatSource(mode) === "seat-zero"))(
     "%s: a solo game ignores a stale wire seat",
     (mode) => {
       seatMe(mode, 1);

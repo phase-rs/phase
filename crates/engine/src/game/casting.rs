@@ -7283,19 +7283,6 @@ fn prepare_spell_cast_with_variant_override_inner(
             object_id,
             &obj.casting_restrictions,
         )?;
-
-        if state.format_config.command_zone
-            && !super::commander::can_cast_in_color_identity(
-                state,
-                &obj.color,
-                &obj.mana_cost,
-                player,
-            )
-        {
-            return Err(EngineError::ActionNotAllowed(
-                "Card is outside commander's color identity".to_string(),
-            ));
-        }
     }
 
     // CR 408.3 + CR 903.8: Commanders cast from the command zone incur a tax.

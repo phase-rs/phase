@@ -652,6 +652,7 @@ describe("multiplayerStore", () => {
   });
 
   it("transfers a started P2P host to the game route exactly once", async () => {
+    useMultiplayerStore.setState({ activePlayerId: 2 });
     const ok = await useMultiplayerStore.getState().startP2PHostingSession(
       hostingSettings(),
       {
@@ -666,6 +667,7 @@ describe("multiplayerStore", () => {
     await useMultiplayerStore.getState().startLobbyWithCurrentPlayers();
     const route = useMultiplayerStore.getState().pendingGameRoute;
     expect(route).toMatch(/^\/game\/[^?]+\?mode=p2p-host$/);
+    expect(useMultiplayerStore.getState().activePlayerId).toBe(0);
     const gameId = route!.slice("/game/".length, -"?mode=p2p-host".length);
 
     // A different route cannot steal the active host; the correct route can
@@ -679,6 +681,24 @@ describe("multiplayerStore", () => {
     // dispose it before the route's own cleanup runs.
     useMultiplayerStore.getState().cancelHosting();
     expect(p2pMocks.dispose).not.toHaveBeenCalled();
+  });
+
+  it("does not assign the host seat until the P2P game has started", async () => {
+    const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+      hostingSettings(),
+      { main_deck: ["Forest"], sideboard: [], commander: [] },
+      { useBroker: false },
+    );
+    expect(ok).toBe(true);
+    useMultiplayerStore.setState({ activePlayerId: 2 });
+    p2pMocks.startPregameGame.mockRejectedValueOnce(new Error("start failed"));
+
+    await expect(useMultiplayerStore.getState().startLobbyWithCurrentPlayers()).rejects.toThrow(
+      "start failed",
+    );
+
+    expect(useMultiplayerStore.getState().activePlayerId).toBe(2);
+    expect(useMultiplayerStore.getState().pendingGameRoute).toBeNull();
   });
 
   it("reports a server host connection error instead of falling through to P2P", async () => {
