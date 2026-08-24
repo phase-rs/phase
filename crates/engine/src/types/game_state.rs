@@ -10625,6 +10625,135 @@ fn migrate_legacy_turn_face_up_resume(value: &mut serde_json::Value) -> Result<(
     Ok(())
 }
 
+/// Protocol 36 / P2P 27: `WaitingFor::ChooseDungeon` carried
+/// `options: Vec<DungeonId>` and `WaitingFor::ChooseDungeonRoom` carried
+/// `options: Vec<u8>` plus `option_names: Vec<String>` before each option grew
+/// the room's printed name and room-ability text (CR 309.4b-c).
+///
+/// A save paused at either prompt therefore cannot deserialize into the current
+/// shape. This migrates rather than rejects because the migration is TOTAL: the
+/// legacy payload's scalars are exactly the keys into the static dungeon table.
+/// A `DungeonId` resolves its own topmost room (CR 309.4a), and a room index
+/// resolves that room's name and text, so the rebuilt preview is identical to
+/// what the current engine would emit at that position — no saved game is lost
+/// and no field is guessed. `option_names` is dropped because `RoomPreview::name`
+/// now carries it from the same authority.
+///
+/// Rebuilt through `dungeon::dungeon_preview` / `dungeon::room_preview` rather
+/// than hand-written JSON, so this migration cannot drift from the shape the
+/// prompts actually emit.
+///
+/// Idempotent: legacy options are scalars (string / number) and current ones are
+/// objects, so a re-run over already-current state matches nothing. A `DungeonId`
+/// this engine does not know is a hard error — that is corrupt state, not a
+/// migratable shape.
+fn migrate_legacy_dungeon_choice_previews(value: &mut serde_json::Value) -> Result<(), String> {
+    use crate::game::dungeon::{dungeon_preview, room_preview, DungeonId};
+    use std::str::FromStr;
+
+    fn parse_dungeon(value: &serde_json::Value, field: &str) -> Result<DungeonId, String> {
+        let name = value
+            .as_str()
+            .ok_or_else(|| format!("legacy dungeon prompt {field} must be a string"))?;
+        DungeonId::from_str(name)
+            .map_err(|_| format!("legacy dungeon prompt {field} names an unknown dungeon: {name}"))
+    }
+
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                migrate_legacy_dungeon_choice_previews(value)?;
+            }
+        }
+        serde_json::Value::Object(object) => {
+            let variant = object.get("type").and_then(serde_json::Value::as_str);
+            match variant {
+                Some("ChooseDungeon") => {
+                    if let Some(data) = object.get_mut("data").and_then(|d| d.as_object_mut()) {
+                        let is_legacy = data
+                            .get("options")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|options| {
+                                options.iter().any(serde_json::Value::is_string)
+                            });
+                        if is_legacy {
+                            let options = data
+                                .get("options")
+                                .and_then(serde_json::Value::as_array)
+                                .expect("checked above")
+                                .clone();
+                            let previews = options
+                                .iter()
+                                .map(|option| {
+                                    let id = parse_dungeon(option, "options entry")?;
+                                    serde_json::to_value(dungeon_preview(id))
+                                        .map_err(|error| error.to_string())
+                                })
+                                .collect::<Result<Vec<_>, String>>()?;
+                            data.insert("options".to_string(), serde_json::Value::Array(previews));
+                        }
+                    }
+                }
+                Some("ChooseDungeonRoom") => {
+                    if let Some(data) = object.get_mut("data").and_then(|d| d.as_object_mut()) {
+                        let is_legacy = data
+                            .get("options")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|options| {
+                                options.iter().any(serde_json::Value::is_number)
+                            })
+                            || data.contains_key("option_names");
+                        if is_legacy {
+                            let dungeon = parse_dungeon(
+                                data.get("dungeon").ok_or_else(|| {
+                                    "legacy ChooseDungeonRoom is missing dungeon".to_string()
+                                })?,
+                                "dungeon",
+                            )?;
+                            let options = data
+                                .get("options")
+                                .and_then(serde_json::Value::as_array)
+                                .ok_or_else(|| {
+                                    "legacy ChooseDungeonRoom options must be an array".to_string()
+                                })?
+                                .clone();
+                            let previews = options
+                                .iter()
+                                .map(|option| {
+                                    let index = option.as_u64().ok_or_else(|| {
+                                        "legacy ChooseDungeonRoom options entry must be a number"
+                                            .to_string()
+                                    })?;
+                                    let index = u8::try_from(index).map_err(|_| {
+                                        format!("legacy ChooseDungeonRoom room index {index} is out of range")
+                                    })?;
+                                    serde_json::to_value(room_preview(dungeon, index))
+                                        .map_err(|error| error.to_string())
+                                })
+                                .collect::<Result<Vec<_>, String>>()?;
+                            // `option_names` is superseded by `RoomPreview::name`.
+                            data.remove("option_names");
+                            data.insert(
+                                "dungeon_name".to_string(),
+                                serde_json::Value::from(
+                                    crate::game::dungeon::get_definition(dungeon).name,
+                                ),
+                            );
+                            data.insert("options".to_string(), serde_json::Value::Array(previews));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            for value in object.values_mut() {
+                migrate_legacy_dungeon_choice_previews(value)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn delayed_trigger_install_command(
     entry: &serde_json::Value,
 ) -> Option<&serde_json::Map<String, serde_json::Value>> {
@@ -18078,6 +18207,7 @@ impl GameStateDecode {
             )?;
         }
         migrate_legacy_turn_face_up_resume(&mut value)?;
+        migrate_legacy_dungeon_choice_previews(&mut value)?;
         let mut state = Self::materialize_prepared(value)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         validate_trigger_firing_coherence(&state)?;
@@ -18109,6 +18239,10 @@ impl GameStateDecode {
         migrate_legacy_mana_target_roles(value)?;
         migrate_legacy_tap_effects(value);
         migrate_legacy_turn_face_up_resume(value)?;
+        // Protocol 36: a v2 resolution wire is still accepted, and a v2 save can
+        // be paused at either dungeon prompt, so the compatibility boundary has
+        // to rebuild those payloads before `RawGameStateFields` sees them.
+        migrate_legacy_dungeon_choice_previews(value)?;
         Ok(())
     }
 
@@ -26216,6 +26350,173 @@ mod tests {
                 "expected root-alias coherence failure, got {error}"
             );
         }
+    }
+
+    /// Rewrites a captured dungeon prompt back to its pre-protocol-36 payload:
+    /// `ChooseDungeon` held bare `DungeonId`s, and `ChooseDungeonRoom` held bare
+    /// room indices plus a parallel `option_names`, with no `dungeon_name`.
+    fn downgrade_dungeon_prompt_to_legacy(persisted: &mut serde_json::Value) {
+        let state = if persisted.get("state").is_some() {
+            persisted
+                .get_mut("state")
+                .expect("trusted fixture has an inner state")
+        } else {
+            persisted
+        };
+        let waiting = state
+            .get_mut("waiting_for")
+            .expect("fixture is paused at a prompt");
+        let variant = waiting
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .expect("waiting_for is adjacently tagged")
+            .to_string();
+        let data = waiting
+            .get_mut("data")
+            .and_then(|data| data.as_object_mut())
+            .expect("dungeon prompts carry data");
+        let options = data
+            .get("options")
+            .and_then(serde_json::Value::as_array)
+            .expect("dungeon prompts carry options")
+            .clone();
+        match variant.as_str() {
+            "ChooseDungeon" => {
+                let legacy = options
+                    .iter()
+                    .map(|option| option["dungeon"].clone())
+                    .collect();
+                data.insert("options".to_string(), serde_json::Value::Array(legacy));
+            }
+            "ChooseDungeonRoom" => {
+                let names = options
+                    .iter()
+                    .map(|option| option["name"].clone())
+                    .collect();
+                let indices = options
+                    .iter()
+                    .map(|option| option["index"].clone())
+                    .collect();
+                data.remove("dungeon_name");
+                data.insert("option_names".to_string(), serde_json::Value::Array(names));
+                data.insert("options".to_string(), serde_json::Value::Array(indices));
+            }
+            other => panic!("not a dungeon prompt: {other}"),
+        }
+    }
+
+    fn restore_both_envelopes(state: GameState) -> [GameState; 2] {
+        let mut raw = serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("serialize raw fixture");
+        let mut trusted =
+            serde_json::to_value(PersistedGameState::capture(state)).expect("serialize trusted");
+        downgrade_dungeon_prompt_to_legacy(&mut raw);
+        downgrade_dungeon_prompt_to_legacy(&mut trusted);
+        [
+            serde_json::from_value::<PersistedGameState>(raw)
+                .expect("raw legacy dungeon prompt migrates")
+                .into_game_state(),
+            serde_json::from_value::<PersistedGameState>(trusted)
+                .expect("trusted legacy dungeon prompt migrates")
+                .into_game_state(),
+        ]
+    }
+
+    /// Protocol 36: a save paused at `ChooseDungeon` predates `DungeonPreview`.
+    /// The migration must rebuild each option's topmost room (CR 309.4a) rather
+    /// than fail to deserialize, through BOTH persistence ingresses.
+    #[test]
+    fn legacy_choose_dungeon_prompt_migrates_through_both_envelopes() {
+        use crate::game::dungeon::{dungeon_preview, DungeonId};
+
+        let mut state = GameState::new_two_player(42);
+        let expected: Vec<_> = [
+            DungeonId::LostMineOfPhandelver,
+            DungeonId::DungeonOfTheMadMage,
+            DungeonId::TombOfAnnihilation,
+        ]
+        .into_iter()
+        .map(dungeon_preview)
+        .collect();
+        state.waiting_for = WaitingFor::ChooseDungeon {
+            player: PlayerId(0),
+            options: expected.clone(),
+        };
+
+        for restored in restore_both_envelopes(state) {
+            match &restored.waiting_for {
+                WaitingFor::ChooseDungeon { player, options } => {
+                    assert_eq!(*player, PlayerId(0));
+                    // Rebuilt from the static table, so it is not merely
+                    // parseable — it equals what the engine emits today.
+                    assert_eq!(options, &expected);
+                }
+                other => panic!("expected ChooseDungeon, got {other:?}"),
+            }
+        }
+    }
+
+    /// Protocol 36: a save paused at `ChooseDungeonRoom` predates `RoomPreview`,
+    /// `dungeon_name`, and the removal of `option_names`. Room indices resolve
+    /// their own name and printed effect (CR 309.4b-c), so the rebuild is total.
+    #[test]
+    fn legacy_choose_dungeon_room_prompt_migrates_through_both_envelopes() {
+        use crate::game::dungeon::{room_preview, DungeonId};
+
+        let mut state = GameState::new_two_player(42);
+        let expected: Vec<_> = [1, 2]
+            .into_iter()
+            .map(|room| room_preview(DungeonId::LostMineOfPhandelver, room))
+            .collect();
+        state.waiting_for = WaitingFor::ChooseDungeonRoom {
+            player: PlayerId(0),
+            dungeon: DungeonId::LostMineOfPhandelver,
+            dungeon_name: "Lost Mine of Phandelver".to_string(),
+            options: expected.clone(),
+        };
+
+        for restored in restore_both_envelopes(state) {
+            match &restored.waiting_for {
+                WaitingFor::ChooseDungeonRoom {
+                    player,
+                    dungeon,
+                    dungeon_name,
+                    options,
+                } => {
+                    assert_eq!(*player, PlayerId(0));
+                    assert_eq!(*dungeon, DungeonId::LostMineOfPhandelver);
+                    // Recovered from `dungeon`, which the legacy payload kept.
+                    assert_eq!(dungeon_name, "Lost Mine of Phandelver");
+                    assert_eq!(options, &expected);
+                    assert_eq!(options[0].text, "Create a 1/1 red Goblin creature token.");
+                }
+                other => panic!("expected ChooseDungeonRoom, got {other:?}"),
+            }
+        }
+    }
+
+    /// The migration is a rebuild, not a guess: a dungeon name this engine does
+    /// not know is corrupt state and must surface, not silently drop an option.
+    #[test]
+    fn legacy_dungeon_prompt_rejects_an_unknown_dungeon() {
+        use crate::game::dungeon::{dungeon_preview, DungeonId};
+
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::ChooseDungeon {
+            player: PlayerId(0),
+            options: vec![dungeon_preview(DungeonId::LostMineOfPhandelver)],
+        };
+        let mut raw = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
+            .expect("serialize raw fixture");
+        downgrade_dungeon_prompt_to_legacy(&mut raw);
+        raw["waiting_for"]["data"]["options"][0] = serde_json::Value::from("CatacombsOfNowhere");
+
+        let error = serde_json::from_value::<PersistedGameState>(raw)
+            .expect_err("an unknown dungeon must not migrate");
+        assert!(
+            error.to_string().contains("unknown dungeon"),
+            "expected an unknown-dungeon rejection, got {error}"
+        );
     }
 
     fn ordinary_pending_trigger(source: ObjectId, turn_number: u32) -> PendingTrigger {
