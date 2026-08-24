@@ -14585,10 +14585,11 @@ mod tests {
     /// `with_resolution_shield_expiry`'s `EndOfTurn` shield fallback; at this
     /// printed seam `None` is DURABLE and nothing else can ever prune the shield.
     ///
-    /// The two positive rows below are NOT redundant: they reach DIFFERENT legs of
-    /// the same `stated_clause_expiry` arm — `Duration::UntilNextTurnOf` and
+    /// The three positive rows below are NOT redundant: they reach ALL THREE of the
+    /// DIFFERENT legs of the same `stated_clause_expiry` arm —
+    /// `Duration::UntilNextTurnOf`, `Duration::UntilEndOfNextTurnOf` and
     /// `Duration::UntilNextStepOf` — and each leg must be pinned separately, since
-    /// moving either one back to `None` on its own is otherwise invisible.
+    /// moving any one of them back to `None` on its own is otherwise invisible.
     #[test]
     fn stated_but_unmappable_printed_window_is_bounded_not_immortal() {
         for (text, why) in [
@@ -14598,6 +14599,14 @@ mod tests {
                 // does not exist at parse time.
                 "Prevent all damage that would be dealt to you until your next turn.",
                 "the player-relative turn window (`UntilNextTurnOf`)",
+            ),
+            (
+                // "until the end of your next turn" lowers to
+                // `Duration::UntilEndOfNextTurnOf`, a SECOND player-relative turn
+                // window that is a whole turn later than `UntilNextTurnOf` and
+                // likewise needs a `PlayerId` the parse seam cannot supply.
+                "Prevent all damage that would be dealt to you until the end of your next turn.",
+                "the end-of-next-turn window (`UntilEndOfNextTurnOf`)",
             ),
             (
                 // CR 500.4: "until your next upkeep" lowers to
