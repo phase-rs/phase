@@ -1737,6 +1737,22 @@ pub(super) fn change_zone_target_choice_timing(
 }
 
 pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
+    if matches!(
+        clause_ir.parsed.effect,
+        Effect::Attach { .. } | Effect::CastFromZone { .. }
+    ) {
+        let lower = clause_ir
+            .source
+            .fragment()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        // CR 115.10a + CR 608.2d: "attach an Equipment" and "cast that card"
+        // choose an untargeted object while resolving. Their explicit "target"
+        // counterparts remain stack-time choices.
+        if !nom_primitives::scan_contains(&lower, "target ") {
+            return TargetChoiceTiming::Resolution;
+        }
+    }
     if let Effect::ChooseCounterKind { target } = &clause_ir.parsed.effect {
         let lower = clause_ir
             .source
