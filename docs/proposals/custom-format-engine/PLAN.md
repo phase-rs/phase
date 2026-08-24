@@ -964,17 +964,34 @@ mirroring how `FormatConfig::pioneer()` spreads `..Self::standard()`:
   (RESEARCH.md §1) and the engine enforces only set-code membership (§1's
   round-12 note); `description` MUST state this (e.g. "Legality is approximated
   at the set-code level; original-printing frame/foil is not enforced.").
-- `old_school_95()` — `let mut d = old_school_93_94(); d.legal_sets.get_or_insert_with(Vec::new).extend([4ED,
-  ICE, CHR, REN, HML]); d.restricted.extend([Demonic Consultation, Mana Crypt]);
-  d.banned.extend([Amulet of Quoz, Timmerian Fiends]; legacy unchanged`. **Fixed
-  this round (maintainer review, CodeRabbit finding): `legal_sets` is
-  `Option<Vec<SetCode>>` (§1), not a bare `Vec` — `.extend()` cannot be called
-  on it directly. `get_or_insert_with(Vec::new)` extends the base's `Some(...)`
-  vector in place (its only legal state per `old_school_93_94()`'s own
-  construction — a restricted-pool preset never leaves this `None`) while
-  still being correct if a future refactor ever changed that invariant, rather
-  than assuming it silently.** `printing_fidelity`: inherited `SetCodeApproximation`
-  from the base `d` — same source requirement, same enforcement gap.
+- `old_school_95()` — `let mut d = old_school_93_94();
+  d.rules.legality.legal_sets.get_or_insert_with(Vec::new).extend([4ED, ICE,
+  CHR, REN, HML]); d.rules.legality.restricted.extend([Demonic Consultation,
+  Mana Crypt]); d.rules.legality.banned.extend([Amulet of Quoz, Timmerian
+  Fiends]); legacy unchanged`. **Fixed this round (maintainer review): two
+  independent bugs in the earlier sketch, both against §1's own declared
+  schema —**
+  1. **Nesting.** `legal_sets`/`restricted`/`banned` are not fields on
+     `CustomFormatDef` (`d`) at all — they live at `d.rules.legality.*`
+     (`CustomFormatDef.rules: CustomFormatRules`, `CustomFormatRules.legality:
+     LegalityRules`, §1). The prior sketch accessed `d.legal_sets` etc.
+     directly, which does not compile against the struct this proposal itself
+     defines. Every mutation now composes through the real path.
+  2. **`Option` handling.** `legal_sets` is `Option<Vec<SetCode>>` (§1), not a
+     bare `Vec` — `.extend()` cannot be called on it directly.
+     `get_or_insert_with(Vec::new)` extends the base's `Some(...)` vector in
+     place (its only legal state per `old_school_93_94()`'s own construction
+     — a restricted-pool preset never leaves this `None`) while still being
+     correct if a future refactor ever changed that invariant, rather than
+     assuming it silently.
+
+  `printing_fidelity`: inherited `SetCodeApproximation` from the base `d` —
+  same source requirement, same enforcement gap. **New preset-inheritance
+  test (§6):** asserts `old_school_95()`'s resolved `rules.legality` contains
+  every `old_school_93_94()` set/restricted/banned entry PLUS exactly its own
+  five/two/two declared additions — not just that the extra entries are
+  present, so a future edit can't silently drop or duplicate the inherited
+  93-94 base while adding 95's deltas.
 - `middle_school()` — `rules`: sets = Fourth Edition..Scourge; restricted =
   []; banned = [25 names]; legacy = `{ mana_burn: ManaBurnPolicy::Obsolete,
   damage_timing: CombatDamageTiming::OnStack, wish_scope:
@@ -1317,6 +1334,18 @@ legality logic on the client.
   its source ruleset; each preset's stated list *count* in a doc comment
   matches `.len()` of the actual list (guards against the round-2 23-vs-25 /
   37-vs-44 class of mislabeling recurring silently).
+- **`old_school_95()` correctly inherits `old_school_93_94()`'s base and adds
+  only its own delta** (new — maintainer review round 12): assert
+  `old_school_95().rules.legality.legal_sets` is `Some(_)` containing every
+  set in `old_school_93_94().rules.legality.legal_sets` PLUS exactly the
+  five declared additions (4ED, ICE, CHR, REN, HML) — not a superset check
+  alone, an exact-set comparison, so a future edit can't silently drop an
+  inherited entry while still passing a "contains my new sets" assertion.
+  Mirrored for `restricted` (93-94's list plus exactly Demonic Consultation
+  and Mana Crypt) and `banned` (93-94's list plus exactly Amulet of Quoz and
+  Timmerian Fiends). This is also where a `d.rules.legality.*`-vs-`d.*`
+  nesting regression (§2's round-12 fix) would be caught mechanically,
+  rather than only by inspection.
 - **Mana burn — pool persistence AND life loss** (revised again — maintainer
   review round 3, CONTEXT.md point 1; round 2's version only tested the
   life-loss gate and would have passed against the wrong mechanism):
