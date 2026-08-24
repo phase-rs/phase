@@ -37,6 +37,9 @@ type CastOfferWaitingFor = Extract<WaitingFor, { type: "CastOffer" }>;
 type LoopShortcutWaitingFor = Extract<WaitingFor, { type: "LoopShortcut" }>;
 type RespondToShortcutWaitingFor = Extract<WaitingFor, { type: "RespondToShortcut" }>;
 type CopyRetargetWaitingFor = Extract<WaitingFor, { type: "CopyRetarget" }>;
+type CopyTargetChoiceWaitingFor = Extract<WaitingFor, { type: "CopyTargetChoice" }>;
+type ExploreChoiceWaitingFor = Extract<WaitingFor, { type: "ExploreChoice" }>;
+type PopulateChoiceWaitingFor = Extract<WaitingFor, { type: "PopulateChoice" }>;
 type RetargetChoiceWaitingFor = Extract<WaitingFor, { type: "RetargetChoice" }>;
 type ReturnAsAuraTargetWaitingFor = Extract<WaitingFor, { type: "ReturnAsAuraTarget" }>;
 type WaitingForWithData = Extract<WaitingFor, { data: object }>;
@@ -300,6 +303,49 @@ export const buildCopyRetargetWaitingFor = (
   return copyRetargetWaitingForFactory.withData(overrides.data ?? {}).build();
 };
 
+export class CopyTargetChoiceWaitingForFactory
+  extends PlayerWaitingForFactory<CopyTargetChoiceWaitingFor> {}
+
+export const copyTargetChoiceWaitingForFactory =
+  CopyTargetChoiceWaitingForFactory.define((): CopyTargetChoiceWaitingFor => ({
+    type: "CopyTargetChoice",
+    data: { player: 0, source_id: 1, valid_targets: [] },
+  }));
+
+export const buildCopyTargetChoiceWaitingFor = (
+  overrides: Partial<CopyTargetChoiceWaitingFor> = {},
+): CopyTargetChoiceWaitingFor => {
+  return copyTargetChoiceWaitingForFactory.withData(overrides.data ?? {}).build();
+};
+
+export class ExploreChoiceWaitingForFactory extends PlayerWaitingForFactory<ExploreChoiceWaitingFor> {}
+
+export const exploreChoiceWaitingForFactory =
+  ExploreChoiceWaitingForFactory.define((): ExploreChoiceWaitingFor => ({
+    type: "ExploreChoice",
+    data: { player: 0, source_id: 1, choosable: [], remaining: [], pending_effect: {} },
+  }));
+
+export const buildExploreChoiceWaitingFor = (
+  overrides: Partial<ExploreChoiceWaitingFor> = {},
+): ExploreChoiceWaitingFor => {
+  return exploreChoiceWaitingForFactory.withData(overrides.data ?? {}).build();
+};
+
+export class PopulateChoiceWaitingForFactory extends PlayerWaitingForFactory<PopulateChoiceWaitingFor> {}
+
+export const populateChoiceWaitingForFactory =
+  PopulateChoiceWaitingForFactory.define((): PopulateChoiceWaitingFor => ({
+    type: "PopulateChoice",
+    data: { player: 0, source_id: 1, valid_tokens: [] },
+  }));
+
+export const buildPopulateChoiceWaitingFor = (
+  overrides: Partial<PopulateChoiceWaitingFor> = {},
+): PopulateChoiceWaitingFor => {
+  return populateChoiceWaitingForFactory.withData(overrides.data ?? {}).build();
+};
+
 export class RetargetChoiceWaitingForFactory extends PlayerWaitingForFactory<RetargetChoiceWaitingFor> {}
 
 export const retargetChoiceWaitingForFactory =
@@ -481,6 +527,18 @@ export class WaitingForVariantFactory extends Factory<WaitingFor, WaitingForTran
     data: Partial<TriggerTargetSelectionWaitingFor["data"]> = {},
   ) {
     return this.variant(triggerTargetSelectionWaitingForFactory.withData(data).build());
+  }
+
+  copyTargetChoice(data: Partial<CopyTargetChoiceWaitingFor["data"]> = {}) {
+    return this.variant(copyTargetChoiceWaitingForFactory.withData(data).build());
+  }
+
+  exploreChoice(data: Partial<ExploreChoiceWaitingFor["data"]> = {}) {
+    return this.variant(exploreChoiceWaitingForFactory.withData(data).build());
+  }
+
+  populateChoice(data: Partial<PopulateChoiceWaitingFor["data"]> = {}) {
+    return this.variant(populateChoiceWaitingForFactory.withData(data).build());
   }
 
   chooseXValue(data: Partial<ChooseXValueWaitingFor["data"]> = {}) {
@@ -728,6 +786,18 @@ export class GameStateFactory extends Factory<GameState> {
     data: Partial<TriggerTargetSelectionWaitingFor["data"]> = {},
   ) {
     return this.waitingFor(waitingForFactory.triggerTargetSelection(data).build());
+  }
+
+  copyTargetChoice(data: Partial<CopyTargetChoiceWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.copyTargetChoice(data).build());
+  }
+
+  exploreChoice(data: Partial<ExploreChoiceWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.exploreChoice(data).build());
+  }
+
+  populateChoice(data: Partial<PopulateChoiceWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.populateChoice(data).build());
   }
 
   chooseXValue(data: Partial<ChooseXValueWaitingFor["data"]> = {}) {
