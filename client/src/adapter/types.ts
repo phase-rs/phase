@@ -1861,7 +1861,7 @@ export type WaitingFor =
         resume: CostResume;
       };
     }
-  | { type: "BlightChoice"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_cast: PendingCast } }
+  | { type: "BlightChoice"; data: { player: PlayerId; counters: number; creatures: ObjectId[]; pending_cast: PendingCast } }
   | { type: "PayManaAbilityMana"; data: { player: PlayerId; options: ManaType[][]; pending_mana_ability: unknown } }
   | {
       type: "ChooseManaColor";

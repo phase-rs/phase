@@ -588,7 +588,7 @@ export function getBoardChoiceView(
         player: waitingFor.data.player,
         objectIds: waitingFor.data.creatures,
         intent: "blight",
-        selection: confirmedCountSelection(waitingFor.data.count, waitingFor.data.count),
+        selection: confirmedCountSelection(1, 1),
         response: { type: "SelectCards" },
         sourceId: waitingFor.data.pending_cast.object_id,
         cancelAction: { type: "CancelCast" },

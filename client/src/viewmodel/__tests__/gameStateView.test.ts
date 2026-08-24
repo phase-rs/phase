@@ -17,6 +17,7 @@ import {
   buildCopyTargetSlot,
   buildGameState,
   buildGameStateWithoutSeatOrder,
+  buildPendingCast,
   buildPlayers,
   buildTargetSelectionProgress,
   buildTargetSelectionSlot,
@@ -273,6 +274,31 @@ describe("getBattlefieldSacrificeChoice", () => {
 });
 
 describe("getBoardChoiceView", () => {
+  it("maps BlightChoice to one confirmed creature selection", () => {
+    const choice = getBoardChoiceView({
+      type: "BlightChoice",
+      data: {
+        player: 0,
+        counters: 3,
+        creatures: [10, 11],
+        pending_cast: buildPendingCast({ object_id: 99 }),
+      },
+    });
+
+    expect(choice).toMatchObject({
+      player: 0,
+      objectIds: [10, 11],
+      intent: "blight",
+      selection: { type: "exactCount", count: 1 },
+      response: { type: "SelectCards" },
+      sourceId: 99,
+      cancelAction: { type: "CancelCast" },
+    });
+    expect(choice).not.toBeNull();
+    if (!choice) return;
+    expect(canConfirmBoardChoice(choice, [10], undefined)).toBe(true);
+  });
+
   it("maps PayCost ReturnToHand to a confirmed board choice", () => {
     const choice = getBoardChoiceView(
       {
