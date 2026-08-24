@@ -150,6 +150,27 @@ describe("ActionButton", () => {
     expect(screen.getByRole("button", { name: "Resolve" })).toBeInTheDocument();
   });
 
+  it("keeps priority actions available when end-of-turn auto-pass pauses for an opponent's stack object", () => {
+    useGameStore.setState({
+      gameMode: "online",
+      gameState: {
+        ...createGameState(priorityPrompt()),
+        phase: "PostCombatMain",
+        active_player: 0,
+        stack: [spellStackEntry(1)],
+      },
+      waitingFor: priorityPrompt(),
+      legalActions: [],
+    });
+    useMultiplayerStore.setState({ activePlayerId: 0, actionPending: false });
+
+    render(<ActionButton />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Resolve" }));
+    expect(vi.mocked(dispatchAction)).toHaveBeenCalledWith({ type: "PassPriority" });
+    expect(screen.getByRole("button", { name: "Auto-Passing to End Step..." })).toBeInTheDocument();
+  });
+
   it("disables resolve controls while Resolve All is draining", () => {
     useGameStore.setState({
       gameMode: "online",
@@ -290,6 +311,7 @@ describe("ActionButton", () => {
 
     const cancel = screen.getByRole("button", { name: "Resolving Stack..." });
     expect(cancel).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Resolve" })).not.toBeInTheDocument();
     fireEvent.click(cancel);
     expect(vi.mocked(dispatchAction)).toHaveBeenCalledWith({ type: "CancelAutoPass" });
   });
