@@ -8,6 +8,7 @@
 //! other creatures and doubles their +1/+1 counters cleanly.
 
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -149,12 +150,19 @@ fn kinetic_ooze_x10_doubles_counters_on_other_target_creature_without_panic() {
     }
 
     // The declared bear becomes illegal while the trigger waits on the stack,
-    // while the decoy remains legal. Its target identity must not be replaced.
+    // while the decoy remains legal. Use the production zone-change pipeline so
+    // CR 400.7's battlefield-only state (including counters) is cleared.
     {
+        let mut events = Vec::new();
         let state = committed.state_mut();
-        state.battlefield.retain(|id| *id != bear);
-        state.objects.get_mut(&bear).expect("bear exists").zone = Zone::Graveyard;
-        state.players[P0.0 as usize].graveyard.push_back(bear);
+        assert!(
+            !move_object_for_test(
+                state,
+                ZoneMoveRequest::effect(bear, Zone::Graveyard, ooze),
+                &mut events,
+            ),
+            "the fixture has no replacement choice for the bear's zone change"
+        );
     }
 
     let outcome = committed.resolve();
@@ -192,8 +200,8 @@ fn kinetic_ooze_x10_doubles_counters_on_other_target_creature_without_panic() {
         runner.state().objects[&bear]
             .counters
             .get(&CounterType::Plus1Plus1),
-        Some(&1),
-        "the bear left the battlefield after being announced and must not be replaced"
+        None,
+        "the zone-change pipeline must clear the bear's battlefield counters"
     );
     assert_eq!(
         runner.state().objects[&recipient]

@@ -5847,21 +5847,16 @@ fn damage_any_target_legal_targets(
 }
 
 /// CR 603.12 + CR 608.2d: Whether a chained sub-ability chooses its targets while
-/// resolving rather than as its parent goes on the stack. Ordinary conditional and
-/// additional-cost-paid clauses retain their announced targets (CR 601.2c / CR 603.3d).
+/// resolving rather than as its parent goes on the stack. Ordinary conditional,
+/// optional, and additional-cost-paid clauses retain their announced targets
+/// (CR 601.2c / CR 603.3d).
 fn defers_conditional_target_selection(sub: &ResolvedAbility) -> bool {
-    matches!(
-        &sub.condition,
-        Some(AbilityCondition::WhenYouDo)
-    ) || matches!(
-        &sub.condition,
-        Some(AbilityCondition::AdditionalCostPaidInstead) if !sub.context.additional_cost_paid
-    ) || sub.target_choice_timing == TargetChoiceTiming::Resolution
-        // CR 608.2d + CR 601.2c: "You may" sub-instructions (Nahiri, the
-        // Lithomancer +2 attach) choose whether to perform the action at
-        // resolution; their targets are announced only if the controller
-        // accepts, not when the loyalty ability is activated.
-        || sub.optional
+    matches!(&sub.condition, Some(AbilityCondition::WhenYouDo))
+        || matches!(
+            &sub.condition,
+            Some(AbilityCondition::AdditionalCostPaidInstead) if !sub.context.additional_cost_paid
+        )
+        || sub.target_choice_timing == TargetChoiceTiming::Resolution
 }
 
 fn defers_sub_ability_target_selection(effect: &Effect) -> bool {
@@ -10855,6 +10850,22 @@ mod tests {
                 .targets
                 .is_empty());
         }
+
+        let mut optional_stack_timing = chain(SubAbilityLink::ContinuationStep);
+        optional_stack_timing
+            .sub_ability
+            .as_deref_mut()
+            .and_then(|change_zone| change_zone.sub_ability.as_deref_mut())
+            .and_then(|shuffle| shuffle.sub_ability.as_deref_mut())
+            .expect("counter continuation must exist")
+            .optional = true;
+        let slots = build_target_slots(&state, &optional_stack_timing)
+            .expect("optional stack-time target traversal should build");
+        assert_eq!(slots.len(), 1);
+        assert!(slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(creature)));
+        assert_eq!(minimum_targets_in_chain(&state, &optional_stack_timing), 1);
     }
 
     /// CR 608.2c + CR 115.1: Arcum Dagsson / #4678 — "Target artifact creature's
