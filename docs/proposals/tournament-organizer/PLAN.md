@@ -283,9 +283,9 @@ Commander-pod requirement, rather than needing two:
    by the same reasoning the Chicken McNugget/Frobenius bound gives for any
    two coprime pod sizes, the only counts with NO all-`{arity-1,arity}`
    partition are the small ones below `(arity.0 - 1) * (arity.0 - 2)` that
-   the formula fails to solve (for `arity = 4`: `n ∈ {1, 2, 5}` — these
-   degenerate cases fall through to bye assignment below, same as today,
-   not a new mechanism). Minimizing `b` first (trying `b = 0, 1, 2, ...`
+   the formula fails to solve (for `arity = 4`: `n ∈ {1, 2, 5}` — see the
+   explicit per-count resolution below, not left as an undefined
+   fall-through). Minimizing `b` first (trying `b = 0, 1, 2, ...`
    in order and taking the first fit) is what makes 9 players resolve to
    `3+3+3` (`b=3`, the minimum that works — `b=0,1,2` all fail divisibility)
    and 10 players resolve to `4+3+3` (`b=2`) rather than an arbitrarily
@@ -299,6 +299,39 @@ Commander-pod requirement, rather than needing two:
    to "pick the `b`-pod-worth of players." At `arity = 2` there is no
    short-pod case (`arity.0 - 1 == 1`, which is just the existing bye
    path) — this fallback is `arity > 2` only, unchanged.
+
+   **Explicit resolution for `n ∈ {0, 1, 2, 5}` at `arity = 4` — CodeRabbit
+   flagged this as undefined; it is not new mechanism, but it does need
+   stating explicitly rather than left as an implicit fall-through:**
+   - `n = 0`: no active players remain to pair. This isn't a pairing
+     outcome at all — it means the tournament has no players left to run a
+     round for, which is a tournament-completion condition (§2's broader
+     lifecycle), not something this pairing step needs to handle.
+   - `n = 1`: the sole active player gets a bye — same single-bye path §2
+     point 5 already specifies (scores as a win, excluded from
+     opponents'-percentage averaging per point 6 below). No pod forms.
+   - `n = 2`: no pod of size 3 or 4 can be formed from 2 players, and no
+     single short pod covers it either — this is the one genuine exception
+     to "avoid multiple byes": **both players receive a bye this round**,
+     each scored via the same existing bye rule (point 6). This is an
+     accepted, explicit exception to the "prefer one short pod over
+     multiple byes" preference (§13's MSTR citation), not a violation of
+     it — that preference exists to avoid multiple byes when a valid pod
+     partition is available; at `n = 2` none is.
+   - `n = 5`: resolves to one 4-pod plus a single bye for the fifth
+     player (the partition algorithm's own `b` search correctly finds no
+     `{3,4}`-only solution at `n=5`, so this case's bye is assigned via
+     point 5 exactly as for `n=1` — only one bye, not the `n=2` exception,
+     since a valid 4-player pod IS available here).
+   - **Player drops mid-round producing any of these counts** (a
+     tournament that started larger can shrink to `n ∈ {0,1,2,5}` active
+     players through drops in a later round) use this exact same
+     resolution — there is no separate mechanism for "reached this count
+     via drops" versus "started at this count." A dropped player is simply
+     excluded from the active-player count `n` this pairing step operates
+     on, per the existing `TournamentPlayer.dropped` field (§2 above); they
+     never appear in that round's pairings or standings-affecting bye
+     assignment.
 5. Bye assignment (any `arity`, and the only path at `arity = 2`) prefers a
    player who hasn't already had one (`had_bye` flag) among any players
    still unassignable after pod-size fallback.
@@ -432,6 +465,15 @@ order are all designed as functions of it from day one.
   count for each, no bye is issued when a short-pod-only partition exists,
   and `had_short_pod` fairness spreads correctly across however many
   players a round actually shorts (not just tracking a single player).
+- **NEW — CodeRabbit**: a dedicated test for each `COMMANDER_POD`-arity
+  degenerate active-player count — `n = 1` (single bye, no pod, scored per
+  point 5), `n = 2` (both players receive a bye — the one explicit
+  multiple-bye exception, both scored per point 5, no pod attempted), and
+  `n = 5` (one 4-pod plus exactly one bye, not the `n=2` multi-bye case) —
+  plus a test confirming a mid-tournament drop that reduces the active
+  count to one of these values (e.g. 6 active players, 1 drops mid-event,
+  leaving 5 for the next round) resolves identically to starting a round
+  at that count directly, proving drops aren't a separate code path.
 - A dedicated test asserting `validate_match_result` rejects a
   `HEAD_TO_HEAD` report where game-win counts differ but `winner` names the
   side with fewer game wins, AND a test confirming a `COMMANDER_POD`
