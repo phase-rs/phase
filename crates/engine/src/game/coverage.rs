@@ -4474,16 +4474,19 @@ fn fmt_trigger_constraint(c: &crate::types::ability::TriggerConstraint) -> Strin
 }
 
 /// Format an `AttackTargetFilter` — the attacked-target scope shared by
-/// "attacks [a player/planeswalker/battle]" triggers (CR 508.3a) and attack
-/// restrictions (CR 506.2).
+/// "attacks [a player/planeswalker/battle]" triggers (CR 508.3a) and can't-attack
+/// restrictions, which are checked against the declaration in CR 508.1c. The
+/// space of legal attacked targets is CR 506.2: the defending player, the
+/// planeswalkers they control, and the battles they protect.
 ///
 /// Every variant is a DISTINCT predicate and earns its own label. Collapsing
 /// `Player` into `PlayerOrPlaneswalker` would print a strictly wider predicate
 /// than the card (CR 508.3e: a player-attacks-player trigger must not fire on a
 /// planeswalker- or battle-only declaration), and `Owner`/`OwnerOrPlaneswalker`
-/// are owner-relative (CR 508.1a / CR 508.1c), not controller-relative. The
-/// parse-details / Alt-hover overlay is what bug triage reads, so a label weaker
-/// than the predicate reads there as an engine bug.
+/// name the OWNER (CR 108.3 — the player who started the game with the card),
+/// not the controller (CR 109.4); a donated or stolen permanent has different
+/// players in those two roles. The parse-details / Alt-hover overlay is what bug
+/// triage reads, so a label weaker than the predicate reads there as an engine bug.
 fn fmt_attack_target_filter(filter: &crate::types::triggers::AttackTargetFilter) -> &'static str {
     use crate::types::triggers::AttackTargetFilter as ATF;
     match filter {
@@ -4491,14 +4494,17 @@ fn fmt_attack_target_filter(filter: &crate::types::triggers::AttackTargetFilter)
         ATF::Planeswalker => "a planeswalker",
         ATF::PlayerOrPlaneswalker => "a player or planeswalker",
         ATF::Battle => "a battle",
-        // CR 508.1a: owner-relative, not controller-relative.
+        // CR 108.3 vs CR 109.4: the OWNER (who started the game with the card),
+        // which need not be the current controller.
         ATF::Owner => "its owner",
-        // CR 508.1c: the owning player plus planeswalkers that player controls.
+        // CR 108.3 + CR 109.4: the owning player, plus the planeswalkers that
+        // same player controls.
         ATF::OwnerOrPlaneswalker => "its owner or planeswalkers its owner controls",
-        // CR 508.1c + CR 508.5 + CR 310.5: includes battles, unlike
-        // `PlayerOrPlaneswalker`.
+        // CR 310.5 + CR 506.2: battles may be attacked, so this scope covers them
+        // as well as planeswalkers — unlike `PlayerOrPlaneswalker`.
         ATF::PlayerOrPermanents => "a player or permanents they control",
-        // CR 725.1: a Player-type attack whose defender must hold the monarch.
+        // CR 725.1: the monarch is a player designation, and no player is the
+        // monarch until an effect creates one.
         ATF::Monarch => "the monarch",
     }
 }
