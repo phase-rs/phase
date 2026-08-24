@@ -7634,6 +7634,14 @@ pub fn retarget_slot_violation(
 }
 
 fn minimum_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> usize {
+    // CR 601.2c + CR 603.3d: only targets announced while this ability is put on
+    // the stack reserve slots from an earlier multi-target sibling. A conditional
+    // continuation is announced, if at all, during resolution, so counting its
+    // targets here would let it steal the earlier sibling's selected slots.
+    if defers_conditional_target_selection(ability) {
+        return 0;
+    }
+
     let attach_targets = if let Effect::Attach { attachment, target } = &ability.effect {
         if ability.optional_targeting {
             0

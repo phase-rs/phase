@@ -24,6 +24,14 @@ fn kinetic_ooze_x10_doubles_counters_on_other_target_creature_without_panic() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
+    // The first optional target must be consumed before the conditional
+    // counter-doubling target is selected. This is the reported failing shape:
+    // before the regression fix, reserving the conditional target caused the
+    // first selection to fail with "Unused selected target slots".
+    let artifact = scenario
+        .add_creature(P1, "Clockwork Relic", 1, 1)
+        .as_artifact()
+        .id();
     // The "other target creature" whose +1/+1 counters the X>=10 clause doubles.
     let bear = scenario.add_creature(P0, "Grizzly Bear", 2, 2).id();
     scenario.with_counter(bear, CounterType::Plus1Plus1, 1);
@@ -52,10 +60,13 @@ fn kinetic_ooze_x10_doubles_counters_on_other_target_creature_without_panic() {
 
     // Cast with X = 10 — this activates the X>=10 "double the number of +1/+1
     // counters on any number of other target creatures" sub-clause, which is the
-    // clause that panicked. `bear` is offered as an eligible "other target
-    // creature"; the optional "destroy up to one target artifact or enchantment"
-    // slot has no legal target and is skipped.
-    let outcome = runner.cast(ooze).x(10).target_objects(&[bear]).resolve();
+    // clause that panicked. The first selection destroys the artifact; the
+    // second chooses the bear for the conditional counter-doubling instruction.
+    let outcome = runner
+        .cast(ooze)
+        .x(10)
+        .target_objects(&[artifact, bear])
+        .resolve();
 
     // The p0 fix: on `main` this panics with `Invalid action: Unused selected
     // target slots` while resolving the ETB; with the multi-target bound restored
@@ -75,7 +86,18 @@ fn kinetic_ooze_x10_doubles_counters_on_other_target_creature_without_panic() {
         "Kinetic Ooze must resolve onto the battlefield"
     );
     assert!(
+        !runner.state().objects.contains_key(&artifact),
+        "the first optional target must be assigned to the destroy instruction"
+    );
+    assert!(
         runner.state().objects.contains_key(&bear),
         "the targeted other creature must remain in play after a clean resolution"
+    );
+    assert_eq!(
+        runner.state().objects[&bear]
+            .counters
+            .get(&CounterType::Plus1Plus1),
+        Some(&2),
+        "the conditional target's +1/+1 counters must double"
     );
 }
