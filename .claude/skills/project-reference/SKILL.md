@@ -264,6 +264,10 @@ State is filtered per-player (`filter_state_for_player`) to hide opponent's hand
 - `PHASE_LOG_DIR` — Log directory for phase-server. When set, logs to files instead of stdout (main log: `<dir>/phase-server.log`, per-game logs: `<dir>/games/<code>.log`)
 - `PHASE_CORS_ORIGIN` — Custom CORS origin for phase-server (default: allows common dev ports)
 - `PHASE_LOG_JSON` — Enable JSON-formatted log output for phase-server
+- `PHASE_MAX_CONNECTIONS` — phase-server concurrent WebSocket cap before upgrades get 503 (default `200`; `--max-connections`)
+- `PHASE_MAX_GAMES` — phase-server concurrent game-session cap before `CreateGame` is refused (default `100`; `--max-games`)
+- `PHASE_METRICS_PORT` — When set, phase-server serves Prometheus metrics at `/metrics` on a second listener on this port (`--metrics-port`). Unset means no metrics listener; keep it off the public port
+- `PHASE_REPLICA_ORDINAL` — This process's ordinal within a replica set, exposed as the `phase_replica_ordinal` gauge so an autoscaler can identify the highest replica still holding players (`--replica-ordinal`)
 
 ## GitHub / git CLI (automation)
 

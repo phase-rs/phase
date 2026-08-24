@@ -274,19 +274,23 @@ pub(crate) fn scale_mana_cost(base: &ManaCost, times: u32) -> ManaCost {
 /// authority (`game::costs`). The duplicate
 /// Mana/ManaDynamic/PayLife/PayEnergy/Composite/Discard payment arms that used
 /// to live here were folded into `costs::pay_ability_cost_for_resolution`
-/// (cost-payment unification, Phase 2); the resolution-time affordability match
-/// that used to live here (`can_pay_resolution_ability_cost`, A3) was folded
-/// into `costs::can_pay` with `PaymentScope::Resolution` (Phase 5).
+/// (cost-payment unification); the resolution-time payability match
+/// that used to live here (`can_pay_resolution_ability_cost`) was folded
+/// into `costs::can_pay` with `PaymentScope::Resolution`.
 ///
 /// CR 601.2h: only the multi-cost `Composite` shape is pre-gated through the
-/// affordability authority — it is the one with cross-sub-cost atomicity
+/// payability authority — it is the one with cross-sub-cost atomicity
 /// ("partial payments are not allowed"), so a `Composite` must never commit one
 /// sub-cost before discovering a later sub-cost is unpayable. A *singleton* cost
 /// needs no pre-gate: the authority's own internal pre-flight + `Failed` mapping
 /// is exactly equivalent, and pre-gating it would re-run the board-scale auto-tap
-/// planner and re-resolve the `QuantityExpr` a second time (Phase 4 deferred
+/// planner and re-resolve the `QuantityExpr` a second time (a deferred
 /// perf fix). The authority's outcome maps to the resolution-scope failure
 /// channel (`cost_payment_failed_flag`).
+///
+/// CR 614.17b: after the counter-placement fold, this pre-gate can also refuse a
+/// `Composite` whose payment would include an event a mandatory can't-effect
+/// forbids, not only one the payer cannot afford.
 fn resolve_ability_cost_payment(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -309,7 +313,7 @@ fn resolve_ability_cost_payment(
         state.cost_payment_failed_flag = true;
         return Ok(PaymentOutcome::Failed {
             reason: PaymentFailure {
-                reason: "resolution-time cost not affordable (pre-gate)".to_string(),
+                reason: "resolution-time cost not payable (pre-gate)".to_string(),
             },
         });
     }

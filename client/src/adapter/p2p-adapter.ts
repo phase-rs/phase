@@ -1507,6 +1507,40 @@ export class P2PHostAdapter implements EngineAdapter {
       identified = true;
       unsub();
 
+      // Host-side wire-version gate. A guest that stamps a version unequal
+      // to ours cannot be paired, so refuse it here — before a seat or a deck
+      // is allocated — through the rejection affordance this gate already
+      // has. `reconnect_rejected` is `{ type, reason }` only, so even a guest
+      // on an older bundle can decode it.
+      //
+      // ABSENT MEANS ADMIT. The version is bumped only on a
+      // non-backward-compatible change, so {guests on an older bundle}
+      // strictly contains {guests that are wire-incompatible}: an absent
+      // field reports bundle age, not incompatibility, and refusing on it
+      // would drop guests that pair fine today with a reason that is
+      // factually false for them. The consequence, stated rather than
+      // implied: this host cannot distinguish a compatible old bundle from
+      // an incompatible one. `P2PGuestAdapter.handleHostMessage` is the
+      // authority for the latter. This mirrors the call `acceptsHostAuthority`
+      // already makes for its own additive stamp. What this gate buys is
+      // prospective: once both sides ship, every future bump is caught
+      // host-side at first contact.
+      const guestVersion =
+        msg.type === "guest_deck" || msg.type === "reconnect" ? msg.wireProtocolVersion : undefined;
+      if (guestVersion !== undefined && guestVersion !== WIRE_PROTOCOL_VERSION) {
+        // Reaches the refused guest's user RAW, the same way the guest-side
+        // reason at `handleHostMessage` does. `i18n/README.md` asks for `t()`
+        // on frontend-authored strings; this one is new text on that raw path
+        // and is written unkeyed deliberately, to match the incumbent
+        // wording rather than split the pair. Noted, not fixed: the raw-string
+        // path is pre-existing and out of scope here.
+        const reason = `Wire protocol mismatch: guest sent v${guestVersion}, this host speaks v${WIRE_PROTOCOL_VERSION}. Refresh both windows.`;
+        traceAdapter("Host", "first-message-version-mismatch", { type: msg.type, guestVersion });
+        void this.send(session, { type: "reconnect_rejected", reason });
+        session.close("Wire protocol mismatch");
+        return;
+      }
+
       if (msg.type === "reconnect") {
         traceAdapter("Host", "first-message", { type: msg.type });
         this.handleReconnect(session, msg.playerToken, msg.sessionKey);
@@ -2970,6 +3004,7 @@ export class P2PGuestAdapter implements EngineAdapter {
       this.send({
         type: "reconnect",
         playerToken: this.playerToken,
+        wireProtocolVersion: WIRE_PROTOCOL_VERSION,
         ...(this.authority ? { sessionKey: this.authority.sessionKey } : {}),
       });
     } else {
@@ -2979,6 +3014,7 @@ export class P2PGuestAdapter implements EngineAdapter {
         deckData: this.deckData,
         displayName: this.displayName,
         reservationToken: this.reservationToken,
+        wireProtocolVersion: WIRE_PROTOCOL_VERSION,
       });
     }
   }
@@ -3189,9 +3225,27 @@ export class P2PGuestAdapter implements EngineAdapter {
     // PEER_ID_PREFIX bump prevents *room discovery* across mismatched
     // bundles, but a same-version-prefix-different-message-shape change
     // would slip past it — that's what this guards.
+    //
+    // This is the SOLE guest-side enforcement point for the rule.
+    // `validateMessage` once checked it too, one layer lower: it threw from
+    // inside `decodeWireMessage`, and `peer.ts` warns-and-drops on a decode
+    // throw, so the frame died in the transport and this branch was dead code
+    // for the case it was written for. A lower layer cannot surface the
+    // mismatch — rejecting `gameSetupPromise` and emitting `reconnectFailed`
+    // both need adapter state the transport has no access to.
     if (msg.type === "game_setup" || msg.type === "reconnect_ack") {
-      if (msg.wireProtocolVersion !== WIRE_PROTOCOL_VERSION) {
-        const reason = `Wire protocol mismatch: host sent v${msg.wireProtocolVersion}, this client speaks v${WIRE_PROTOCOL_VERSION}. Refresh both windows.`;
+      // Read through a widened local: these two messages DECLARE the field at
+      // the literal `typeof WIRE_PROTOCOL_VERSION`, so comparing `msg.…`
+      // directly narrows `msg` to `never` in the mismatch branch and the
+      // interpolation below stops compiling. The runtime value is whatever the
+      // host actually sent, which is the entire point of the check.
+      const hostVersion: number = msg.wireProtocolVersion;
+      if (hostVersion !== WIRE_PROTOCOL_VERSION) {
+        // This reason reaches the user RAW: rejectGameSetup → AdapterError
+        // → GameProvider's error toast. `i18n/README.md` asks for `t()` on
+        // frontend-authored strings; this path predates that and is left as
+        // found — the violation is pre-existing and out of scope here.
+        const reason = `Wire protocol mismatch: host sent v${hostVersion}, this client speaks v${WIRE_PROTOCOL_VERSION}. Refresh both windows.`;
         console.error("[P2PGuestAdapter]", reason);
         this.terminated = true;
         this.rejectGameSetup(reason);
@@ -3498,6 +3552,7 @@ export class P2PGuestAdapter implements EngineAdapter {
         this.send({
           type: "reconnect",
           playerToken: this.playerToken,
+          wireProtocolVersion: WIRE_PROTOCOL_VERSION,
           ...(this.authority ? { sessionKey: this.authority.sessionKey } : {}),
         });
       }

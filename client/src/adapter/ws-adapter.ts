@@ -332,7 +332,20 @@ export interface ServerInfo {
 }
 
 /**
- * Why this client cannot talk to `info`, or `null` when it can.
+ * Which protocol surface a socket is opened for.
+ *
+ * The surface is a property of the CALLER's intent, not of the server: a `Full`
+ * server serves both. `ClientMessage::SubscribeLobby` and friends are "always
+ * allowed" in either server mode (`reject_if_disabled` in
+ * `crates/phase-server/src/main.rs`), and the whole lobby frame set —
+ * `LobbyClientMessage` / `LobbyServerMessage` in
+ * `crates/lobby-broker/src/protocol.rs` — carries no `GameState` and no
+ * `GameAction`. That is what lets the two surfaces version independently.
+ */
+export type ProtocolSurface = "full" | "lobby";
+
+/**
+ * Why this client cannot talk to `info` on `surface`, or `null` when it can.
  *
  * SINGLE AUTHORITY for the protocol window. The handshake in
  * `openPhaseSocket.ts` and the compatibility badge in `multiplayerStore.ts`
@@ -340,24 +353,37 @@ export interface ServerInfo {
  * as usable by the other.
  *
  * Three policies, by surface:
- *  - Full servers: exact match. GameState/GameAction payloads are neither
+ *  - Full-game surface: exact match. GameState/GameAction payloads are neither
  *    forward- nor backward-compatible across a bump.
- *  - Lobby brokers advertising a lobby version: floor only, NO CEILING. See
- *    {@link MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL}.
- *  - Lobby brokers that predate the field: the legacy one-version window on
- *    `protocolVersion`, unchanged, so already-deployed brokers stay reachable.
+ *  - Lobby surface, server advertising a lobby version: floor only, NO CEILING.
+ *    See {@link MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL}.
+ *  - Lobby surface, server predating the field: the legacy one-version window
+ *    on `protocolVersion`, unchanged, so already-deployed brokers stay
+ *    reachable.
+ *
+ * The surface comes from the caller, never from `info.mode`. A `Full` server
+ * serves the lobby too, so reading the mode alone refuses a lobby socket to a
+ * server whose `lobbyProtocolVersion` matches and whose only incompatibility is
+ * with a game that socket will never carry — which a browser can only report as
+ * "unreachable", not as "a version you cannot play on".
  */
-export function serverProtocolRejection(info: ServerInfo): string | null {
-  if (info.mode === "LobbyOnly" && info.lobbyProtocolVersion !== undefined) {
+export function serverProtocolRejection(
+  info: ServerInfo,
+  surface: ProtocolSurface = "full",
+): string | null {
+  // A `LobbyOnly` server has no full-game surface at all, so every socket to
+  // one is a lobby socket whatever the caller asked for.
+  const onLobbySurface = surface === "lobby" || info.mode === "LobbyOnly";
+
+  if (onLobbySurface && info.lobbyProtocolVersion !== undefined) {
     return info.lobbyProtocolVersion < MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL
       ? `Lobby protocol version ${info.lobbyProtocolVersion} is older than supported (client speaks ${LOBBY_PROTOCOL_VERSION}, min ${MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL}).`
       : null;
   }
 
-  const minAccepted =
-    info.mode === "LobbyOnly"
-      ? LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL
-      : MIN_SUPPORTED_SERVER_PROTOCOL;
+  const minAccepted = onLobbySurface
+    ? LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL
+    : MIN_SUPPORTED_SERVER_PROTOCOL;
   if (info.protocolVersion < minAccepted) {
     return `Server protocol version ${info.protocolVersion} is older than supported (client speaks ${PROTOCOL_VERSION}, min ${minAccepted}). Please wait for the lobby to finish rolling out.`;
   }

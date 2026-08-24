@@ -42346,6 +42346,184 @@ fn necromancy_delayed_sacrifice_when_leaves() {
     );
 }
 
+/// CR 611.2a regression (this fix): the reanimator-Aura's re-targeted Enchant
+/// grant has no stated duration and must last until the Aura leaves the
+/// battlefield (CR 611.2a: "no duration stated" = "until end of game"), not
+/// merely until end of turn. Proves the grant survives a REAL cleanup step —
+/// the actual reported bug ("reanimated creature spuriously sacrificed one
+/// turn after reanimating").
+///
+/// LIVE-REVERT EVIDENCE: reverting `duration: Some(Duration::Permanent)` to
+/// `duration: None` in `build_aura_attach_clause` makes the grant default to
+/// Duration::UntilEndOfTurn, so `execute_cleanup`'s `prune_end_of_turn_effects`
+/// drops the re-targeted Enchant restriction, the Aura's Enchant restriction
+/// reverts to the original graveyard-card restriction, and the final
+/// `check_state_based_actions` pass sacrifices the Aura to its owner's
+/// graveyard under CR 704.5m — the post-cleanup assertions below fail.
+#[test]
+fn animate_dead_keyword_swap_survives_cleanup_step() {
+    use crate::game::game_object::AttachTarget;
+
+    let (mut state, aura_id, creature_id) = reanimate_grizzly_via_animate_dead();
+
+    assert!(
+        state.battlefield.contains(&aura_id),
+        "precondition: Aura on battlefield before cleanup"
+    );
+    assert_eq!(
+        state.objects[&creature_id].zone,
+        Zone::Battlefield,
+        "precondition: creature on battlefield before cleanup"
+    );
+
+    let mut cleanup_events = Vec::new();
+    let waiting = crate::game::turns::execute_cleanup(&mut state, &mut cleanup_events);
+    assert!(
+        waiting.is_none(),
+        "reach-guard: cleanup must run the end-of-turn pruning path (empty \
+         hand, no discard-to-hand-size needed), not divert into a WaitingFor \
+         branch; got {waiting:?}"
+    );
+
+    let mut sba_events = Vec::new();
+    crate::game::sba::check_state_based_actions(&mut state, &mut sba_events);
+    assert!(
+        state.battlefield.contains(&aura_id),
+        "Aura must survive a real cleanup step (CR 611.2a: unstated duration \
+         is permanent, not until-end-of-turn)"
+    );
+    assert_eq!(
+        state.objects[&aura_id].attached_to,
+        Some(AttachTarget::Object(creature_id)),
+        "Aura must remain attached to the reanimated creature after cleanup"
+    );
+    assert_eq!(
+        state.objects[&creature_id].zone,
+        Zone::Battlefield,
+        "reanimated creature must remain on the battlefield after cleanup \
+         (must not be spuriously sacrificed one turn after reanimating)"
+    );
+}
+
+/// CR 611.2a regression (this fix), GrantOnly shape: mirrors
+/// `animate_dead_keyword_swap_survives_cleanup_step` for Necromancy's
+/// subtype+keyword grant (rather than Animate Dead's remove+add swap).
+#[test]
+fn necromancy_grant_shape_survives_cleanup_step() {
+    use crate::game::game_object::AttachTarget;
+
+    let (mut state, necromancy_id, creature_id) = reanimate_grizzly_via_necromancy();
+
+    assert!(
+        state.battlefield.contains(&necromancy_id),
+        "precondition: Necromancy on battlefield before cleanup"
+    );
+    assert_eq!(
+        state.objects[&creature_id].zone,
+        Zone::Battlefield,
+        "precondition: creature on battlefield before cleanup"
+    );
+
+    let mut cleanup_events = Vec::new();
+    let waiting = crate::game::turns::execute_cleanup(&mut state, &mut cleanup_events);
+    assert!(
+        waiting.is_none(),
+        "reach-guard: cleanup must run the end-of-turn pruning path; got {waiting:?}"
+    );
+
+    let mut sba_events = Vec::new();
+    crate::game::sba::check_state_based_actions(&mut state, &mut sba_events);
+    assert!(
+        state.battlefield.contains(&necromancy_id),
+        "Necromancy must survive a real cleanup step (CR 611.2a)"
+    );
+    assert!(
+        state.objects[&necromancy_id]
+            .card_types
+            .subtypes
+            .contains(&"Aura".to_string()),
+        "Necromancy must remain an Aura after cleanup (AddSubtype grant not pruned)"
+    );
+    assert!(
+        state.objects[&necromancy_id]
+            .keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Enchant(_))),
+        "Necromancy must retain its Enchant keyword after cleanup"
+    );
+    assert_eq!(
+        state.objects[&necromancy_id].attached_to,
+        Some(AttachTarget::Object(creature_id)),
+        "Necromancy must remain attached to the reanimated creature after cleanup"
+    );
+    assert_eq!(
+        state.objects[&creature_id].zone,
+        Zone::Battlefield,
+        "reanimated creature must remain on the battlefield after cleanup"
+    );
+}
+
+/// CR 611.2a + CR 603.7 + CR 704.5m composed regression: proves the grant
+/// surviving a real cleanup step does NOT interfere with the pre-existing,
+/// fix-independent ordinary removal-triggered delayed sacrifice (CR 603.7)
+/// when the Aura is later force-removed by an unrelated effect.
+#[test]
+fn animate_dead_grant_survives_cleanup_then_ordinary_removal_still_sacrifices() {
+    let (mut state, aura_id, creature_id) = reanimate_grizzly_via_animate_dead();
+
+    let mut cleanup_events = Vec::new();
+    let waiting = crate::game::turns::execute_cleanup(&mut state, &mut cleanup_events);
+    assert!(
+        waiting.is_none(),
+        "reach-guard: cleanup ran cleanly; got {waiting:?}"
+    );
+    let mut sba_events = Vec::new();
+    crate::game::sba::check_state_based_actions(&mut state, &mut sba_events);
+    assert!(
+        state.battlefield.contains(&aura_id),
+        "reach-guard: Aura survives cleanup (this fix) before we test removal"
+    );
+    assert_eq!(state.objects[&creature_id].zone, Zone::Battlefield);
+
+    // Force-remove the Aura via an unrelated effect (NOT the duration bug),
+    // routed through the real replacement-aware zone pipeline (CR 614) rather
+    // than a direct `zones::move_to_zone` call — a departure replacement could
+    // otherwise prevent or modify this move, and this test must observe the
+    // same event stream production would emit. Then resolve the delayed
+    // leaves-battlefield trigger using the CORRECT function for
+    // Effect::CreateDelayedTrigger-created abilities (CR 603.7).
+    let mut events = Vec::new();
+    let move_result = zone_pipeline::move_object(
+        &mut state,
+        ZoneMoveRequest::effect(aura_id, Zone::Graveyard, aura_id),
+        &mut events,
+    );
+    assert!(
+        matches!(move_result, ZoneMoveResult::Done),
+        "unrelated-effect removal must complete synchronously with no pending \
+         replacement choice for this simple removal"
+    );
+    crate::game::triggers::check_delayed_triggers(&mut state, &events);
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "the delayed leaves-battlefield sacrifice must be on the stack"
+    );
+
+    let mut sac_events = Vec::new();
+    stack::resolve_top(&mut state, &mut sac_events);
+    assert!(
+        !state.battlefield.contains(&creature_id),
+        "reanimated creature must still be sacrificed when the Aura leaves, \
+         even after having survived a cleanup step first"
+    );
+    assert_eq!(
+        state.objects[&creature_id].zone,
+        Zone::Graveyard,
+        "sacrificed creature must go to its owner's graveyard"
+    );
+}
+
 /// CR 608.2b regression (issue #640): if the ETB trigger's chosen target leaves
 /// the graveyard before the trigger resolves, the trigger is removed from the
 /// stack and does nothing — Necromancy stays a plain (non-Aura) Enchantment with

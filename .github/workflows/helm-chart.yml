@@ -1,0 +1,197 @@
+name: Helm chart
+
+# Lint and render deploy/helm/phase-server. The chart has no CI coverage
+# otherwise, and its failure mode is quiet: a template that renders invalid or
+# empty YAML only shows up at `helm upgrade` time on someone's cluster.
+#
+# No secrets, no cluster: this only runs `helm lint` and `helm template`.
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/helm/**'
+      - '.github/workflows/helm-chart.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/helm/**'
+      - '.github/workflows/helm-chart.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    name: helm lint + template
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Pinned by commit SHA: a mutable tag can be force-pushed under us.
+      # This job only reads the tree, so it needs no credentials left on disk.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+        with:
+          version: v3.16.3
+
+      - name: helm lint (default values)
+        run: helm lint deploy/helm/phase-server
+
+      - name: helm template (default values)
+        run: |
+          helm template phase-server deploy/helm/phase-server \
+            --namespace phase > /tmp/default.yaml
+          test -s /tmp/default.yaml
+
+      # The opt-in paths render entirely different workloads (StatefulSet,
+      # IngressRoutes, PrometheusRule, HPA), so a default-values render alone
+      # would leave most of the chart untested.
+      - name: helm template (scale-out + metrics + autoscaling)
+        run: |
+          cat > /tmp/scaleout.yaml <<'EOF'
+          ingress:
+            host: phase.example.com
+            tls:
+              clusterIssuer: letsencrypt
+          scaleOut:
+            enabled: true
+            replicaMax: 3
+          metrics:
+            enabled: true
+          autoscaling:
+            enabled: true
+          EOF
+          helm lint deploy/helm/phase-server -f /tmp/scaleout.yaml
+          # Every kind the chart gates on, not just the group: the templates
+          # test `APIVersions.Has` per resource, and a real cluster's discovery
+          # populates both forms. Passing only the group renders no monitors at
+          # all, which the assertions below would let pass silently.
+          # `serviceMonitor` is off by default, so it is enabled here to cover
+          # the second gate.
+          helm template phase-server deploy/helm/phase-server \
+            --namespace phase -f /tmp/scaleout.yaml \
+            --set metrics.serviceMonitor.enabled=true \
+            --api-versions monitoring.coreos.com/v1 \
+            --api-versions monitoring.coreos.com/v1/PrometheusRule \
+            --api-versions monitoring.coreos.com/v1/PodMonitor \
+            --api-versions monitoring.coreos.com/v1/ServiceMonitor > /tmp/scaleout-render.yaml
+          test -s /tmp/scaleout-render.yaml
+          grep -q 'kind: StatefulSet' /tmp/scaleout-render.yaml
+          grep -q 'kind: HorizontalPodAutoscaler' /tmp/scaleout-render.yaml
+          grep -q 'kind: PrometheusRule' /tmp/scaleout-render.yaml
+          grep -q 'kind: PodMonitor' /tmp/scaleout-render.yaml
+          grep -q 'kind: ServiceMonitor' /tmp/scaleout-render.yaml
+
+      # With no prometheus-operator CRDs the operator path must FAIL rather than
+      # render: hpa.yaml would otherwise install an HPA whose only producer of
+      # `phase:wanted_replicas` — the PrometheusRule — was silently skipped.
+      - name: helm template (scale-out, no operator CRDs) must fail
+        run: |
+          if helm template phase-server deploy/helm/phase-server \
+               --namespace phase -f /tmp/scaleout.yaml > /tmp/no-crd.yaml 2>/tmp/no-crd.err; then
+            echo "expected the render to fail without monitoring.coreos.com/v1"; exit 1
+          fi
+          # Match the capability the guard names, not its prose: the message
+          # has already been reworded once, and this assertion silently stopped
+          # matching it.
+          grep -q 'monitoring.coreos.com/v1/PrometheusRule' /tmp/no-crd.err
+
+      # The escape hatch stays open: with prometheusRule.enabled=false the operator
+      # is not required at all, because the recording rule is supplied externally
+      # (prometheus-adapter externalRules). That must still render on a bare cluster.
+      - name: helm template (scale-out, external recording rule, no CRDs)
+        run: |
+          helm template phase-server deploy/helm/phase-server \
+            --namespace phase -f /tmp/scaleout.yaml \
+            --set autoscaling.prometheusRule.enabled=false > /tmp/no-crd.yaml
+          test -s /tmp/no-crd.yaml
+          grep -q 'kind: StatefulSet' /tmp/no-crd.yaml
+          grep -q 'kind: HorizontalPodAutoscaler' /tmp/no-crd.yaml
+          if grep -q 'kind: PodMonitor' /tmp/no-crd.yaml; then echo "unexpected 'kind: PodMonitor' in /tmp/no-crd.yaml"; exit 1; fi
+          if grep -q 'kind: PrometheusRule' /tmp/no-crd.yaml; then echo "unexpected 'kind: PrometheusRule' in /tmp/no-crd.yaml"; exit 1; fi
+
+      # Guards the chart's central safety property: the default path must stay a
+      # single-replica Deployment, and scale-out must give every ordinal its own
+      # claim. Two processes on one games.db is destructive.
+      - name: assert the storage invariants
+        run: |
+          # The kind, not just the count: `replicas: 1` alone would still pass
+          # if the default path became a single-replica StatefulSet, which is
+          # the shape this invariant exists to keep it out of.
+          grep -q 'kind: Deployment' /tmp/default.yaml
+          grep -q 'replicas: 1' /tmp/default.yaml
+          grep -q 'volumeClaimTemplates' /tmp/scaleout-render.yaml
+          if grep -q 'kind: Deployment' /tmp/scaleout-render.yaml; then echo "unexpected 'kind: Deployment' in /tmp/scaleout-render.yaml"; exit 1; fi
+
+      # `scaleOut.scheme` names the URL each ordinal advertises, and the client
+      # turns that string into the "CODE@host" share link a friend dials. Every
+      # IngressRoute the chart renders terminates TLS, so `http` is refused
+      # while the chart owns the edge — and stays legal when it does not.
+      - name: helm template (scale-out, advertised scheme)
+        run: |
+          if helm template phase-server deploy/helm/phase-server \
+               --namespace phase -f /tmp/scaleout.yaml \
+               --set scaleOut.scheme=http \
+               --api-versions monitoring.coreos.com/v1 \
+               --api-versions monitoring.coreos.com/v1/PrometheusRule \
+               --api-versions monitoring.coreos.com/v1/PodMonitor \
+               --api-versions monitoring.coreos.com/v1/ServiceMonitor \
+               > /tmp/scheme-http.yaml 2>/tmp/scheme-http.err; then
+            echo "expected http to be refused while the chart renders TLS routes"; exit 1
+          fi
+          grep -q 'scaleOut.scheme' /tmp/scheme-http.err
+
+          # Control: the guard has to fire on the contradiction, not on the
+          # knob. Without this the case above would pass on a chart that
+          # rejected every scheme.
+          helm template phase-server deploy/helm/phase-server \
+            --namespace phase -f /tmp/scaleout.yaml \
+            --set scaleOut.scheme=https \
+            --api-versions monitoring.coreos.com/v1 \
+            --api-versions monitoring.coreos.com/v1/PrometheusRule \
+            --api-versions monitoring.coreos.com/v1/PodMonitor \
+            --api-versions monitoring.coreos.com/v1/ServiceMonitor > /tmp/scheme-https.yaml
+          # One entry route plus one per ordinal, at scaleOut.replicaMax 3 above.
+          routes=$(grep -c 'kind: IngressRoute' /tmp/scheme-https.yaml)
+          test "$routes" -eq 4
+
+          # No chart-managed route means the operator owns the edge, so the
+          # advertised scheme is theirs to choose.
+          helm template phase-server deploy/helm/phase-server \
+            --namespace phase -f /tmp/scaleout.yaml \
+            --set scaleOut.scheme=http --set ingress.enabled=false \
+            --api-versions monitoring.coreos.com/v1 \
+            --api-versions monitoring.coreos.com/v1/PrometheusRule \
+            --api-versions monitoring.coreos.com/v1/PodMonitor \
+            --api-versions monitoring.coreos.com/v1/ServiceMonitor > /tmp/scheme-noingress.yaml
+          if grep -q 'kind: IngressRoute' /tmp/scheme-noingress.yaml; then echo "unexpected 'kind: IngressRoute' in /tmp/scheme-noingress.yaml"; exit 1; fi
+          grep -q 'value: "http://phase-"' /tmp/scheme-noingress.yaml
+
+      # The HPA reads `phase:wanted_replicas`, the PrometheusRule produces it,
+      # and the rule reads gauges only a PodMonitor or ServiceMonitor scrapes.
+      # A partial operator install can register the rule's CRD and neither
+      # monitor's, so the chart must refuse rather than ship an HPA that can
+      # never get its metric.
+      - name: helm template (autoscaling without a monitor CRD) must fail
+        run: |
+          if helm template phase-server deploy/helm/phase-server \
+               --namespace phase -f /tmp/scaleout.yaml \
+               --api-versions monitoring.coreos.com/v1 \
+               --api-versions monitoring.coreos.com/v1/PrometheusRule \
+               > /tmp/no-monitor.yaml 2>/tmp/no-monitor.err; then
+            echo "expected the render to fail with no PodMonitor or ServiceMonitor CRD"; exit 1
+          fi
+          grep -q 'monitor that will actually render' /tmp/no-monitor.err
+
+          # Control: adding only the PodMonitor kind clears it, so the guard
+          # tracks the missing CRD rather than refusing autoscaling outright.
+          helm template phase-server deploy/helm/phase-server \
+            --namespace phase -f /tmp/scaleout.yaml \
+            --api-versions monitoring.coreos.com/v1 \
+            --api-versions monitoring.coreos.com/v1/PrometheusRule \
+            --api-versions monitoring.coreos.com/v1/PodMonitor > /tmp/with-monitor.yaml
+          grep -q 'kind: PodMonitor' /tmp/with-monitor.yaml
+          grep -q 'kind: PrometheusRule' /tmp/with-monitor.yaml
+          grep -q 'kind: HorizontalPodAutoscaler' /tmp/with-monitor.yaml

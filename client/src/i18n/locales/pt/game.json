@@ -788,7 +788,7 @@
     "nounPlaneswalker": "planeswalker",
     "nounTargetPermanent": "permanente alvo",
     "nounTarget": "alvo",
-    "nounOrPlayer": "{{noun}} ou jogador",
+    "nounOrPlayer": "{{noun}} ou um jogador",
     "confirmTap": "Confirmar Virar ({{selected}}/{{count}})",
     "keepCurrentTargets": "Manter Alvos Atuais",
     "skip": "Pular",

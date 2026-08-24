@@ -141,9 +141,26 @@ describe("targeting article agreement (#7692)", () => {
     });
   });
 
-  // German is DECLINED on the record (three-way gender has no two-way bracket
-  // analogue) and Polish carries no article. Pinned so the decline is a decision
-  // in the tree, not an omission a later reader repairs by guessing.
+  // Both DECLINED, for different reasons, and neither decline means "correct".
+  //
+  // de: the it/pt bracket hedge has no analogue here — `eine` is feminine, not
+  // ungendered, and three-way gender has no two-way bracket. So `one` disagrees
+  // with every masculine or neuter noun: `nounPlaneswalker`, `nounPlayer`,
+  // `nounSpell` and `nounTarget` all render "eine <masc/neut>". #7692 WIDENED
+  // that cost rather than creating it — `nounPlaneswalker` was effectively
+  // unreachable before, because the old client-side inference tested "no Land"
+  // ahead of the planeswalker branch, so an ordinary planeswalker rendered
+  // `nounNonlandPermanent`, which is feminine and agreed. Repairing German needs
+  // case-aware phrasing (`one` and `upToOne` do not even govern the same case),
+  // not a bracket. Not attempted here.
+  //
+  // pl: `one` carries no article and IS correct, which is the half pinned below.
+  // `upToOne` is not — "do jednego" governs the genitive while every noun value
+  // is nominative, so all of them are ungrammatical there. Deliberately left
+  // unpinned: pinning a string that is known-wrong would record it as intended.
+  //
+  // Pinned so each decline is a decision in the tree, not an omission a later
+  // reader repairs by guessing.
   it("leaves the de and pl articles untouched", () => {
     expect(resources.de.game).toMatchObject({ targeting: { one: "eine {{target}}" } });
     expect(resources.pl.game).toMatchObject({ targeting: { one: "{{target}}" } });

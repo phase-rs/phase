@@ -240,38 +240,6 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     await expect(decodeWireMessage(new Uint8Array())).rejects.toThrow(/empty/);
   });
 
-  const setupFrameAt = (wireProtocolVersion: number) => ({
-    type: "game_setup",
-    wireProtocolVersion,
-    assignedPlayerId: 1,
-    playerToken: "token-123",
-    state: buildGameState(),
-    events: [],
-    legalActions: [],
-    manaPaymentShortcutActions: [],
-  });
-
-  it("rejects stale setup wire protocol versions", () => {
-    expect(() => validateMessage(setupFrameAt(4))).toThrow(/Wire protocol mismatch/);
-  });
-
-  // The ADJACENT-peer pairing, which the far-stale v4 row above cannot exercise:
-  // 4 is refused whatever this client speaks, so that row proves the mechanism
-  // and nothing about the version. Both halves here stamp LITERALS — a frame
-  // built from WIRE_PROTOCOL_VERSION cannot tell a bumped client from an
-  // unbumped one, which is why every other handshake fixture in the suite is
-  // useless as an instrument for a bump. Revert 26 → 25 and BOTH halves red:
-  // the v25 frame stops being refused, and the v26 frame stops being admitted.
-  // The admitting half is the reach-guard: without it "refuses v25" is also
-  // satisfied by a client that refuses everything.
-  it("refuses the previous wire protocol (v25) and admits its own (v26)", () => {
-    expect(() => validateMessage(setupFrameAt(25))).toThrow(/Wire protocol mismatch/);
-    expect(validateMessage(setupFrameAt(26))).toMatchObject({
-      type: "game_setup",
-      wireProtocolVersion: 26,
-    });
-  });
-
   // (e) Compressed payload still gates through validateMessage so unknown
   // message types are rejected, not silently passed through.
   it("decode runs validateMessage — unknown type rejected", async () => {

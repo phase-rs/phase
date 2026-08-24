@@ -6533,8 +6533,10 @@ pub(crate) fn drain_pending_cost_move_resume(
         // opponent's Solemnity would prevent the counters) must still complete the
         // parked activation instead of wedging, so `LoyaltyActivation` is eligible
         // at the Prevented boundary as well. Counter-addition unless payments
-        // are eligible here too: a prevented counter placement fails the cost
-        // (CR 118.3) and must resolve the pending unless branch, not wedge.
+        // are eligible here too: whether a prevented placement leaves that
+        // payment paid or failed is `resume_counter_addition_unless_payment`'s
+        // call, argued in its own header; either way the pending unless branch
+        // must resolve here, not wedge.
         CostMoveDrainBoundary::ReplacementPrevented { .. } => matches!(
             state.pending_cost_move_resume,
             Some(
@@ -6626,11 +6628,7 @@ pub(crate) fn drain_pending_cost_move_resume(
         state.pending_cost_move_resume,
         Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
     ) {
-        engine_payment_choices::resume_counter_addition_unless_payment(
-            state,
-            events,
-            matches!(boundary, CostMoveDrainBoundary::ReplacementDelivered { .. }),
-        )?
+        engine_payment_choices::resume_counter_addition_unless_payment(state, events, boundary)?
     } else if matches!(
         state.pending_cost_move_resume,
         Some(PendingCostMoveResume::RandomDiscardUnlessPayment(..))
@@ -21448,5 +21446,68 @@ mod resolving_carrier_settle_tests {
                 "{described}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod cost_move_drain_priority_boundary_tests {
+    use super::{drain_pending_cost_move_resume, CostMoveDrainBoundary};
+    use crate::types::ability::{AbilityCost, Effect, ResolvedAbility, TargetFilter};
+    use crate::types::game_state::{GameState, PendingCostMoveResume};
+    use crate::types::identifiers::ObjectId;
+    use crate::types::mana::ManaCost;
+    use crate::types::player::PlayerId;
+
+    /// `engine_payment_choices::resume_counter_addition_unless_payment` maps
+    /// `CostMoveDrainBoundary::PriorityBoundary` to `unreachable!`, and nothing but
+    /// this eligibility table makes that true: it admits only `DelveManaPayment` and
+    /// `ManaAbilityPayment` at that boundary. Nothing else in the crate pinned that
+    /// premise, so widening the table would leave the suite green and abort a live
+    /// session instead.
+    ///
+    /// This pins the guard, not the panic. A `#[should_panic]` row would assert the
+    /// panic is *reachable*, which is the inverse of the invariant. Admitting
+    /// `CounterAdditionUnlessPayment` at `PriorityBoundary` turns this row red: the
+    /// root takes the parked continuation and panics before it can return `Ok(None)`.
+    #[test]
+    fn a_parked_counter_addition_unless_payment_is_never_drained_at_the_priority_boundary() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_cost_move_resume =
+            Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::generic(2),
+                },
+                pending_effect: Box::new(ResolvedAbility::new(
+                    Effect::TargetOnly {
+                        target: TargetFilter::Any,
+                    },
+                    vec![],
+                    ObjectId(60),
+                    PlayerId(0),
+                )),
+                trigger_event: None,
+                effect_description: None,
+                remaining: Vec::new(),
+            });
+        let mut events = Vec::new();
+
+        let drained = drain_pending_cost_move_resume(
+            &mut state,
+            &mut events,
+            CostMoveDrainBoundary::PriorityBoundary,
+        );
+
+        assert!(
+            matches!(drained, Ok(None)),
+            "the priority boundary must not drain a counter-addition unless-payment"
+        );
+        assert!(
+            matches!(
+                state.pending_cost_move_resume,
+                Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
+            ),
+            "the continuation must stay parked for the replacement boundary that owns it"
+        );
+        assert!(events.is_empty(), "an ineligible drain must emit no events");
     }
 }

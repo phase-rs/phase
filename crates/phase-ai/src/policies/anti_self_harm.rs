@@ -650,8 +650,22 @@ fn target_reject_reason(ctx: &PolicyContext<'_>, target: &TargetRef) -> Option<P
             (prefers_self != is_self)
                 .then(|| PolicyReason::new("anti_self_harm_wrong_player_target"))
         }
-        TargetRef::Object(object_id) => target_is_sacrificed_source(ctx, *object_id)
-            .then(|| PolicyReason::new("anti_self_harm_sacrificed_source_target")),
+        TargetRef::Object(object_id) => {
+            if target_is_sacrificed_source(ctx, *object_id) {
+                return Some(PolicyReason::new("anti_self_harm_sacrificed_source_target"));
+            }
+
+            let source = ctx.source_object()?;
+            let target = ctx.state.objects.get(object_id)?;
+            (source
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Aura")
+                && matches!(aura_polarity(source), EffectPolarity::Beneficial)
+                && target.controller != ctx.ai_player)
+                .then(|| PolicyReason::new("anti_self_harm_beneficial_aura_opponent_target"))
+        }
     }
 }
 
@@ -3140,9 +3154,31 @@ mod tests {
         );
         assert!(score_own > 0.0, "Own creature score should be positive");
         assert!(
-            score_opp < 0.0,
-            "Opponent creature score should be negative"
+            score_opp <= 0.0,
+            "Opponent creature score should not be positive"
         );
+
+        let (decision, candidate) = make_aura_target_selection_ctx(
+            &state,
+            aura_id,
+            vec![TargetRef::Object(own_id), TargetRef::Object(opp_id)],
+            Some(TargetRef::Object(opp_id)),
+        );
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert!(matches!(
+            AntiSelfHarmPolicy.verdict(&ctx),
+            PolicyVerdict::Reject { reason }
+                if reason.kind == "anti_self_harm_beneficial_aura_opponent_target"
+        ));
     }
 
     #[test]

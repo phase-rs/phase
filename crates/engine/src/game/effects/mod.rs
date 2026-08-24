@@ -11323,7 +11323,7 @@ fn resolve_chain_body(
         // rest ride along in `WaitingFor::UnlessPayment.remaining`.
         let unless_payers =
             resolve_unless_payers(state, ability_for_unless.as_ref(), &unless_pay.payer);
-        if let Some((&payer, remaining_payers)) = unless_payers.split_first() {
+        if !unless_payers.is_empty() {
             // CR 118.4 + CR 107.3c: Resolve a dynamic-generic mana cost into a
             // fixed `Mana { cost }` BEFORE entering the prompt — the runtime
             // payment site only handles static AbilityCost variants.
@@ -11428,7 +11428,29 @@ fn resolve_chain_body(
                 }
                 // Non-counter unless-modified effects: pre-fold behavior was
                 // to fall through and execute the effect.
-            } else {
+                // CR 614.17b: "If an event can't happen, a player can't choose to pay a cost
+                // that includes that event." The CR 118.12a poll's HEAD is the first payer for
+                // whom paying this cost does NOT require an impossible event; when nobody
+                // qualifies, control falls out of this chain and the unless-effect resolves,
+                // exactly as the CR 118.6 unpayable-cost branch in this same chain already does.
+                //
+                // CR 614.17a: only the HEAD is filtered. `remaining` receives the untouched
+                // POSITIONAL tail from the head onward, never a re-derived list, so a
+                // prohibition that lifts mid-window cannot have silently removed a LATER payer
+                // from the poll — `finish_unless_payment` re-asks the question live at each
+                // re-emit. (Payers ahead of the head were asked and could not choose to pay.)
+            } else if let Some((&payer, remaining_payers)) = unless_payers
+                .iter()
+                .position(|p| {
+                    !crate::game::costs::resolution_cost_includes_impossible_event(
+                        state,
+                        *p,
+                        &resolved_cost,
+                        ability,
+                    )
+                })
+                .and_then(|head| unless_payers[head..].split_first())
+            {
                 let mut pending = ability.clone();
                 pending.unless_pay = None;
                 // CR 118.12a: A disjunctive unless-cost (`OneOf`) surfaces a
