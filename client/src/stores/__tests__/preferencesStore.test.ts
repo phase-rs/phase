@@ -24,7 +24,7 @@ describe("preferencesStore", () => {
         sfxMuted: false,
         musicMuted: false,
         masterMuted: false,
-        multiplayerBoardLayout: "split",
+        multiplayerBoardLayout: "auto",
         multiplayerSplitLayoutNudgeDismissed: true,
         aiSeats: [{ difficulty: "Medium", deckId: "Random" }],
         aiBracketFilter: [],
@@ -44,7 +44,7 @@ describe("preferencesStore", () => {
     // Read the store's real initialization snapshot (the getInitialState idiom
     // used below): the shared beforeEach writes its own defaults snapshot, so a
     // getState() read here would assert that snapshot, not buildDefaultPreferences().
-    expect(usePreferencesStore.getInitialState().multiplayerBoardLayout).toBe("split");
+    expect(usePreferencesStore.getInitialState().multiplayerBoardLayout).toBe("auto");
     expect(usePreferencesStore.getInitialState().multiplayerSplitLayoutNudgeDismissed).toBe(true);
     expect(state.aiSeats).toEqual([{ difficulty: "Medium", deckId: "Random" }]);
     expect(state.priorityPassingMode).toBe("Standard");
@@ -101,13 +101,11 @@ describe("preferencesStore", () => {
   });
 
   it("setMultiplayerBoardLayout updates multiplayer board layout", () => {
-    // Set the NON-default value: "split" is the default, so asserting it here
-    // would pass with the setter deleted.
     act(() => {
-      usePreferencesStore.getState().setMultiplayerBoardLayout("focused");
+      usePreferencesStore.getState().setMultiplayerBoardLayout("split");
     });
 
-    expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("focused");
+    expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("split");
   });
 
   it("updates the multiplayer split-layout nudge dismissal independently", () => {
@@ -116,7 +114,7 @@ describe("preferencesStore", () => {
     });
 
     expect(usePreferencesStore.getState().multiplayerSplitLayoutNudgeDismissed).toBe(false);
-    expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("split");
+    expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("auto");
   });
 
   it("setFollowActiveOpponent updates the value", () => {
@@ -278,6 +276,7 @@ describe("preferencesStore", () => {
       usePreferencesStore.getState().setCardSize("small");
       usePreferencesStore.getState().setFollowActiveOpponent(true);
       usePreferencesStore.getState().setAiSeatDifficulty(0, "VeryHard");
+      usePreferencesStore.getState().setMultiplayerBoardLayout("auto");
     });
 
     // Zustand persist writes to localStorage
@@ -288,6 +287,7 @@ describe("preferencesStore", () => {
     expect(parsed.state.cardSize).toBe("small");
     expect(parsed.state.followActiveOpponent).toBe(true);
     expect(parsed.state.aiSeats[0].difficulty).toBe("VeryHard");
+    expect(parsed.state.multiplayerBoardLayout).toBe("auto");
   });
 
   it("migrates v1 enum animationSpeed='instant' to multiplier 0", () => {
@@ -623,6 +623,35 @@ describe("preferencesStore", () => {
 
     expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("focused");
   });
+
+  it("uses auto when a v30 persisted profile has no layout preference", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { cardSize: "large" }, version: 30 }),
+    );
+
+    act(() => {
+      usePreferencesStore.persist.rehydrate();
+    });
+
+    expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("auto");
+  });
+
+  it.each(["focused", "split"] as const)(
+    "preserves the explicit v30 %s layout",
+    (multiplayerBoardLayout) => {
+      localStorage.setItem(
+        "phase-preferences",
+        JSON.stringify({ state: { multiplayerBoardLayout }, version: 30 }),
+      );
+
+      act(() => {
+        usePreferencesStore.persist.rehydrate();
+      });
+
+      expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe(multiplayerBoardLayout);
+    },
+  );
 
   it.each([
     ["focused", false],

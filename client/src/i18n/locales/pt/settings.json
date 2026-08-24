@@ -70,6 +70,7 @@
     "showOpponentBoard": "Mostrar o tabuleiro do oponente ao passar o mouse sobre o HUD",
     "multiplayerBoardLayout": "Layout do campo multijogador",
     "multiplayerBoardLayoutOptions": {
+      "auto": "Automático",
       "focused": "Oponente em foco",
       "split": "Mesa dividida"
     },

@@ -154,11 +154,12 @@ describe("getVisibleBoardPlayerIds", () => {
 });
 
 describe("split board ownership helpers", () => {
-  it("resolves split only at desktop multiplayer widths", () => {
-    expect(resolveMultiplayerBoardLayout("split", 3, true)).toBe("focused");
-    expect(resolveMultiplayerBoardLayout("split", 3, false)).toBe("split");
+  it("resolves auto by viewport while honoring explicit multiplayer choices", () => {
+    expect(resolveMultiplayerBoardLayout("auto", 3, true)).toBe("focused");
+    expect(resolveMultiplayerBoardLayout("auto", 3, false)).toBe("split");
+    expect(resolveMultiplayerBoardLayout("split", 3, true)).toBe("split");
+    expect(resolveMultiplayerBoardLayout("focused", 3, false)).toBe("focused");
     expect(resolveMultiplayerBoardLayout("split", 2, false)).toBe("focused");
-    expect(resolveMultiplayerBoardLayout("focused", 4, false)).toBe("focused");
   });
 
   it("activates split layout only for 3+ player games", () => {

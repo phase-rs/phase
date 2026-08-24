@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { usePreferencesStore } from "../../../stores/preferencesStore";
@@ -27,5 +27,16 @@ describe("PreferencesModal card preview", () => {
     fireEvent.click(checkbox);
 
     expect(usePreferencesStore.getState().showCardPreviewFooter).toBe(false);
+  });
+
+  it("offers Auto as the viewport-adaptive multiplayer board layout", () => {
+    usePreferencesStore.setState({ multiplayerBoardLayout: "focused" });
+    render(<PreferencesModal onClose={vi.fn()} initialTab="visual" />);
+
+    const group = screen.getByText("Multiplayer Board Layout").parentElement;
+    expect(group).not.toBeNull();
+    fireEvent.click(within(group!).getByRole("button", { name: "Auto" }));
+
+    expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("auto");
   });
 });

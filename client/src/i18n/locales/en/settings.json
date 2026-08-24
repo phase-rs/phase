@@ -74,6 +74,7 @@
     "showOpponentBoard": "Show opponent's board on HUD hover",
     "multiplayerBoardLayout": "Multiplayer Board Layout",
     "multiplayerBoardLayoutOptions": {
+      "auto": "Auto",
       "focused": "Focused opponent",
       "split": "Split table"
     },
