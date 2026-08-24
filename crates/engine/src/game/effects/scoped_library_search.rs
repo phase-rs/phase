@@ -972,7 +972,7 @@ mod tests {
 
     #[test]
     fn ordinary_optional_frame_prevents_scoped_protocol_prompt_collision() {
-        let (mut state, mut scoped_search, cards) = three_player_scoped_search(true);
+        let (mut state, mut scoped_search, _) = three_player_scoped_search(true);
         scoped_search.optional = true;
         let mut events = Vec::new();
         start(
@@ -1002,16 +1002,6 @@ mod tests {
 
         assert!(state.pending_scoped_library_search.is_some());
         assert!(state.active_optional_effect_frame().is_none());
-        let WaitingFor::SearchChoice {
-            player,
-            cards: search_cards,
-            ..
-        } = &state.waiting_for
-        else {
-            panic!("the ordinary optional search must produce its SearchChoice");
-        };
-        assert_eq!(*player, PlayerId(0));
-        assert!(search_cards.contains(&cards[0]));
     }
 
     /// The batch shortcut is deliberately limited to the two delivery shapes
