@@ -2456,8 +2456,13 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     const emitted = vi.fn();
     adapter.onEvent(emitted);
     await adapter.initialize();
+    const setupRejection = expect(adapter.initializeGame()).rejects.toMatchObject({
+      code: "P2P_REJECTED",
+      message: "Host left",
+    });
 
     await conn.simulateData({ type: "host_left", reason: "Host left" });
+    await setupRejection;
     expect(conn.open).toBe(false);
     expect(emitted).toHaveBeenCalledWith({ type: "gameOver", winner: null, reason: "Host left" });
     adapter.sendConcede();
