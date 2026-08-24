@@ -106,7 +106,11 @@ export async function openBrokerClient(
   wsUrl: string,
   opts: OpenBrokerOptions = {},
 ): Promise<BrokerClient> {
-  const socket = await openPhaseSocket(wsUrl, opts);
+  const socket = await openPhaseSocket(wsUrl, { ...opts, surface: "lobby" });
+  // Load-bearing for surface safety, not just for API shape: `registerHost`
+  // sends `CreateGameWithSettings`, which a `Full` server answers by creating a
+  // server-run game and streaming its state. Refusing every non-`LobbyOnly`
+  // server here is what keeps that frame off a lobby-surface socket.
   if (socket.serverInfo.mode !== "LobbyOnly") {
     socket.close();
     throw new HandshakeError(
@@ -279,10 +283,39 @@ export function resolveGuestOver(
   password?: string,
   opts: ResolveGuestOptions = {},
 ): Promise<ResolveResult> {
-  const { ws } = socket;
+  const { ws, serverInfo } = socket;
   const { signal, timeoutMs = 10_000 } = opts;
 
   return new Promise<ResolveResult>((resolve) => {
+    // SINGLE AUTHORITY for putting `JoinGameWithPassword` on the wire, and the
+    // only frame a lobby-surface socket sends that a `Full` server can answer
+    // off its server-run game path.
+    //
+    // This resolver asks for `PeerInfo` — the peer id of a P2P host. A `Full`
+    // server has none to give: both of its lobby registrations hardcode
+    // `host_peer_id: String::new()` ("Full-mode server runs the engine itself —
+    // no PeerJS peer is involved"), so every row it publishes carries
+    // `is_p2p: false` and no caller should route a Full server's code here.
+    //
+    // Sending anyway would be worse than useless. The frame skips the broker
+    // branch on a `Full` server (`if matches!(mode, ServerMode::LobbyOnly)` in
+    // `crates/phase-server/src/main.rs`), attaches a session, and replies
+    // `SessionAttached` + `StateUpdate` — neither of which the listener below
+    // handles, so the promise would hang to its timeout and report
+    // `connection_lost` AFTER the server had already seated the guest. Refusing
+    // every `Full` server, not merely the version-mismatched ones, is what makes
+    // "a relaxed lobby socket never carries a full-game join" unconditional.
+    // Browsing such a server's lobby stays available; only joining through this
+    // resolver is refused.
+    if (serverInfo.mode === "Full") {
+      resolve({
+        ok: false,
+        reason: "error",
+        message:
+          "This server runs its own games, so it has no peer-to-peer room to join.",
+      });
+      return;
+    }
     if (ws.readyState !== WebSocket.OPEN) {
       resolve({
         ok: false,

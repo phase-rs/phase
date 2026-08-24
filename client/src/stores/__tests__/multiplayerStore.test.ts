@@ -46,6 +46,7 @@ import {
   loadWsSession,
   saveWsSession,
 } from "../../services/multiplayerSession";
+import { openPhaseSocket, withReconnect } from "../../services/openPhaseSocket";
 
 const p2pMocks = vi.hoisted(() => ({
   hostDestroy: vi.fn(),
@@ -233,6 +234,46 @@ describe("multiplayerStore", () => {
     expect(
       isServerCompatible(server("Full", PROTOCOL_VERSION - 1, LOBBY_PROTOCOL_VERSION)),
     ).toBe(false);
+  });
+
+  // Guards the wiring, not the window: `serverProtocolRejection` can be
+  // surface-aware and the lobby still unreachable if the one socket that
+  // browses it forgets to say which surface it is on.
+  it("opens the shared subscription socket on the lobby surface", async () => {
+    const socket = {
+      serverInfo: {
+        version: "test",
+        buildCommit: "test",
+        mode: "Full" as const,
+        protocolVersion: PROTOCOL_VERSION - 2,
+        lobbyProtocolVersion: LOBBY_PROTOCOL_VERSION,
+      },
+      ws: { readyState: 1, addEventListener: vi.fn(), removeEventListener: vi.fn(), send: vi.fn() },
+      close: vi.fn(),
+    };
+    vi.mocked(withReconnect).mockImplementationOnce((factory, opts) => {
+      let current: Awaited<ReturnType<typeof factory>> | null = null;
+      // The real implementation notifies from an async continuation, after it
+      // has returned the handle the store stores. Reproduce that ordering —
+      // notifying synchronously would find no handle to read `current()` from.
+      void (async () => {
+        current = await factory(0);
+        opts?.onStateChange?.("open");
+      })();
+      return { current: () => current, close: vi.fn() };
+    });
+    vi.mocked(openPhaseSocket).mockResolvedValueOnce(
+      socket as unknown as Awaited<ReturnType<typeof openPhaseSocket>>,
+    );
+
+    const opened = await useMultiplayerStore.getState().ensureSubscriptionSocket();
+
+    expect(opened).toBe(socket);
+    expect(openPhaseSocket).toHaveBeenCalledWith(
+      "ws://localhost:8787",
+      expect.objectContaining({ surface: "lobby" }),
+    );
+    useMultiplayerStore.getState().closeSubscriptionSocket();
   });
 
   it("persists displayName across store resets", () => {

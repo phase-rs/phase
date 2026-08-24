@@ -1323,7 +1323,7 @@ fn parse_spells_have_quoted_keyword_list(text: &str) -> Option<Vec<StaticDefinit
 /// "multicolored") from a lowercase subject, returning the remainder and the
 /// matching `FilterProp::ColorCount` (CR 105.2). Mirrors the color-quality
 /// prefixes `oracle_target` recognizes before a type word.
-fn peel_color_quality_prefix(subject: &str) -> (&str, Option<FilterProp>) {
+pub(crate) fn peel_color_quality_prefix(subject: &str) -> (&str, Option<FilterProp>) {
     alt((
         value(
             FilterProp::ColorCount {

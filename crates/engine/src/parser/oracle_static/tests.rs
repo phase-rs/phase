@@ -33246,3 +33246,120 @@ fn source_object_self_references_lower_to_cant_be_blocked_by() {
         );
     }
 }
+
+/// CR 118.9 + CR 601.2a (#7575): Warped Space — a once-per-turn {0}
+/// alternative for "a spell you cast from exile". The origin-zone qualifier
+/// lowers to `FilterProp::InZone { Exile }`, which the runtime spell-filter
+/// path compares against the cast's origin zone.
+#[test]
+fn alt_cost_warped_space_once_per_turn_from_exile() {
+    let def = parse_spells_alternative_cost(
+        "Once each turn, you may pay {0} rather than pay the mana cost for a spell you cast from exile.",
+    )
+    .expect("Warped Space must parse to a CastWithAlternativeCost static");
+    match &def.mode {
+        StaticMode::CastWithAlternativeCost {
+            cost, frequency, ..
+        } => {
+            assert_eq!(
+                *cost,
+                AbilityCost::Mana {
+                    cost: crate::types::mana::ManaCost::zero()
+                }
+            );
+            assert_eq!(*frequency, CastFrequency::OncePerTurn);
+        }
+        other => panic!("expected CastWithAlternativeCost, got {other:?}"),
+    }
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.properties
+                    .contains(&FilterProp::InZone { zone: Zone::Exile }),
+                "expected InZone(Exile) origin-zone prop, got {:?}",
+                tf.properties
+            );
+        }
+        other => panic!("expected Typed(spell you cast from exile), got {other:?}"),
+    }
+}
+
+/// CR 118.9 + CR 601.2a (#7575): Tlincalli Hunter — the same shape with a type
+/// prefix: "a creature spell you cast from exile". Article peeled, type kept,
+/// zone qualifier kept.
+#[test]
+fn alt_cost_tlincalli_hunter_creature_from_exile() {
+    let def = parse_spells_alternative_cost(
+        "Once each turn, you may pay {0} rather than pay the mana cost for a creature spell you cast from exile.",
+    )
+    .expect("Tlincalli Hunter must parse");
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "expected Creature type filter, got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                tf.properties
+                    .contains(&FilterProp::InZone { zone: Zone::Exile }),
+                "expected InZone(Exile), got {:?}",
+                tf.properties
+            );
+        }
+        other => panic!("expected Typed(creature spell from exile), got {other:?}"),
+    }
+}
+
+/// CR 118.9 + CR 601.2a (#7575): Darksteel Monolith — "a colorless spell you
+/// cast from your hand". The color word must survive as a constraint (an
+/// over-broad any-spell filter would grant free colored casts), and the zone
+/// must be Hand.
+#[test]
+fn alt_cost_darksteel_monolith_colorless_from_hand() {
+    let def = parse_spells_alternative_cost(
+        "Once each turn, you may pay {0} rather than pay the mana cost for a colorless spell you cast from your hand.",
+    )
+    .expect("Darksteel Monolith must parse");
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(
+                tf.properties
+                    .contains(&FilterProp::InZone { zone: Zone::Hand }),
+                "expected InZone(Hand), got {:?}",
+                tf.properties
+            );
+            assert!(
+                tf.properties.contains(&FilterProp::ColorCount {
+                    comparator: Comparator::EQ,
+                    count: 0,
+                }),
+                "the colorless constraint (ColorCount EQ 0, CR 105.2) must survive lowering, got {tf:?}"
+            );
+        }
+        other => panic!("expected Typed(colorless spell from hand), got {other:?}"),
+    }
+}
+
+/// PIN (green before #7575, Regel 5): As Foretold's zone-less line keeps
+/// parsing unchanged — once-per-turn frequency, no InZone prop.
+#[test]
+fn alt_cost_as_foretold_stays_zone_free() {
+    let def = parse_spells_alternative_cost(
+        "Once each turn, you may pay {0} rather than pay the mana cost for a spell you cast.",
+    )
+    .expect("As Foretold must keep parsing");
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(
+                !tf.properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::InZone { .. })),
+                "no origin-zone prop may appear on the zone-less line, got {:?}",
+                tf.properties
+            );
+        }
+        other => panic!("expected Typed(any spell), got {other:?}"),
+    }
+}

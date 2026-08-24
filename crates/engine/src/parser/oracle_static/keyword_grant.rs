@@ -4,6 +4,8 @@
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use nom::character::complete::alphanumeric1;
+use nom::combinator::not;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RuleStaticPredicate {
@@ -414,15 +416,10 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
         // correctly. Each qualifier consumes its own bytes.
         let mut cursor = after_spells;
 
-        // Parse optional zone qualifier: "from exile", "from your graveyard"
-        let zone_filter = if let Ok((rest, zone)) = alt((
-            value(Zone::Exile, tag::<_, _, VE<'_>>("from exile")),
-            value(Zone::Hand, tag("from your hand")),
-        ))
-        .parse(cursor)
-        {
-            cursor = rest.trim_start();
-            Some(FilterProp::InZone { zone })
+        // Parse optional zone qualifier via the shared authority below.
+        let zone_filter = if let Some((rest, prop)) = parse_cast_origin_zone_qualifier(cursor) {
+            cursor = rest;
+            Some(prop)
         } else {
             None
         };
@@ -678,6 +675,28 @@ pub(crate) fn parse_cast_as_though_flash_static(
         .description(text.to_string())
         .active_zones(vec![Zone::Battlefield]),
     )
+}
+
+/// CR 601.2a: Optional origin-zone qualifier on a "spell(s) you cast" subject —
+/// "from exile" / "from your hand". Single authority for the recognized zone
+/// list, shared by the keyword-grant subject walk and the alternative-cost
+/// grant lowering (`parse_spells_alternative_cost`). The runtime spell-filter
+/// path compares `FilterProp::InZone` against the cast's ORIGIN zone
+/// (`spell_object_matches_filter_inner`), so the lowered prop means "cast from
+/// that zone", not "currently in that zone".
+pub(crate) fn parse_cast_origin_zone_qualifier(input: &str) -> Option<(&str, FilterProp)> {
+    // Word boundary: "from exile" must not accept "from exiled..." (the repo's
+    // parser doctrine — near-miss tokens reject, PR #7543's pattern).
+    terminated(
+        alt((
+            value(Zone::Exile, tag::<_, _, OracleError<'_>>("from exile")),
+            value(Zone::Hand, tag("from your hand")),
+        )),
+        not(alphanumeric1),
+    )
+    .parse(input)
+    .ok()
+    .map(|(rest, zone)| (rest.trim_start(), FilterProp::InZone { zone }))
 }
 
 pub(crate) fn apply_spell_keyword_subject_constraints(
