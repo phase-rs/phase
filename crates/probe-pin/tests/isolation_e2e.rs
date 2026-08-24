@@ -39,6 +39,8 @@ use probe_pin::mutate::Mount;
 use probe_pin::verdict::{self, Verdict};
 use probe_pin::{Abort, HarnessMarker};
 
+mod common;
+
 const PROD: &str = "crates/probe-pin/tests/fixtures/prod.txt";
 /// Row 21 arm 2 WRITES this path. It is gitignored (`.gitignore:113` = `tmp/`), so the arm
 /// cannot leak into the tree even when its assertion panics before a restore — and it is
@@ -713,7 +715,7 @@ fn wiring_validate_paths() {
     std::fs::create_dir_all(root().join(TMP)).unwrap();
     let link = root().join(TMP).join("escape_link");
     std::fs::remove_file(&link).ok();
-    std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+    common::symlink(outside.path(), &link).unwrap();
 
     let text = std::fs::read_to_string(root().join("crates/probe-pin/tests/fixtures/dogfood.toml"))
         .unwrap()
@@ -867,7 +869,7 @@ fn script_failure_is_named_not_inferred() {
     std::fs::create_dir_all(&bin).unwrap();
     // enough to reach the script, and nothing the script needs after that
     for tool in ["unshare", "bash"] {
-        std::os::unix::fs::symlink(on_path(tool), bin.join(tool)).unwrap();
+        common::symlink(on_path(tool), bin.join(tool)).unwrap();
     }
     for missing in ["mount", "cmp", "timeout"] {
         assert!(

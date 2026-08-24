@@ -47,11 +47,28 @@ pub struct Run {
 /// A signal-killed process has no exit CODE at all — `timeout` re-raises the child's signal
 /// rather than translating it. Every shell reports `128 + signal` for that, and so does
 /// probe-pin: a stack-overflow abort is the 134 that `HarnessIncomplete`'s message quotes.
+#[cfg(unix)]
 pub fn exit_rc(status: &std::process::ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt;
     status
         .code()
         .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
+}
+
+/// The non-Unix arm exists so the crate COMPILES off Unix — `cargo check --workspace` on a
+/// Windows checkout — not so it runs there: `child_command` shells out to `unshare` and the
+/// SCRIPT calls `mount --bind`, so a real isolated run stays Unix-only either way.
+///
+/// There is no signal to fold in. A terminated process on Windows reports an exit code like
+/// any other — the OS carries the termination reason IN the code (`STATUS_STACK_OVERFLOW`
+/// surfaces as `0xC00000FD`, not as a separate signal number) — so `128 + signal` has no
+/// analogue and `code()` alone IS the exit code. The `unwrap_or` is unreachable on Windows,
+/// where `ExitStatus::code()` is always `Some`; 128 is what the Unix arm yields for the
+/// matching "no code, no signal" status, so both arms agree on the one status neither
+/// platform can describe.
+#[cfg(not(unix))]
+pub fn exit_rc(status: &std::process::ExitStatus) -> i32 {
+    status.code().unwrap_or(128)
 }
 
 /// The flags probe-pin itself puts on the target's argv — the OWNERSHIP allowlist. Everything
