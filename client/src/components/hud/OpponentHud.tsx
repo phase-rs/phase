@@ -291,8 +291,8 @@ export function OpponentHud({
               {opponentDesignations.hasInitiative ? <InitiativeBadge /> : null}
               {opponentDesignations.hasCityBlessing ? <CityBlessingBadge /> : null}
               {opponentDesignations.hasEnduringStory ? <EnduringStoryBadge /> : null}
-              {opponentDesignations.activeDungeon ? (
-                <DungeonBadge dungeonName={opponentDesignations.activeDungeon} roomIndex={opponentDesignations.currentRoom} />
+              {opponentDesignations.dungeonRoom ? (
+                <DungeonBadge room={opponentDesignations.dungeonRoom} />
               ) : null}
               {isOpponentPhasedOut ? <StatusBadge label={t("player.phasedOut")} tone="neutral" /> : null}
               {opponentDesignations.ringLevel > 0 ? (
@@ -748,8 +748,8 @@ function OpponentTab({
       {designations.hasInitiative ? <InitiativeBadge /> : null}
       {designations.hasCityBlessing ? <CityBlessingBadge /> : null}
       {designations.hasEnduringStory ? <EnduringStoryBadge /> : null}
-      {designations.activeDungeon ? (
-        <DungeonBadge dungeonName={designations.activeDungeon} roomIndex={designations.currentRoom} />
+      {designations.dungeonRoom ? (
+        <DungeonBadge room={designations.dungeonRoom} />
       ) : null}
       {designations.ringLevel > 0 ? (
         <CounterBadge

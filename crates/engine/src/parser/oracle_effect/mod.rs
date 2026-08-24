@@ -6380,6 +6380,18 @@ pub(crate) fn classify_and_parse_counter_choice_list(
     Some(classify_counter_choice_list(&lower)?.entries)
 }
 
+/// CR 122.1b: Parse a bare "from among" counter list ("menace, deathtouch, and
+/// lifelink") into typed entries. Shares the item authority
+/// (`parse_counter_choice_list_entries`) with `classify_counter_choice_list`'s
+/// FromAmong arm — the caller has already consumed the "from among" preamble.
+pub(crate) fn classify_and_parse_from_among_counter_list(
+    list_text: &str,
+) -> Option<Vec<(CounterType, QuantityExpr)>> {
+    let lower = list_text.to_lowercase();
+    let items = split_choice_list_items(&lower)?;
+    parse_counter_choice_list_entries(ChoiceListShape::FromAmong, &items)
+}
+
 /// CR 122.1 + CR 122.1a + CR 122.1b: Parse shared-target counter choices of the form
 /// "put your choice of A counter-pattern, B counter-pattern, or C
 /// counter-pattern on TARGET" (N-ary branches).
@@ -14375,11 +14387,29 @@ fn build_aura_attach_clause(
         },
     )
     .sub_ability(delayed);
-    // CR 613.1d + CR 613.1f + CR 611.2a: the Aura's own layer-4/6 continuous
-    // grant with no stated duration lasts until end of game (CR 611.2a).
+    // CR 611.2a: no stated duration on this continuous grant means "lasts
+    // until the end of the game" — Duration::Permanent. Setting this
+    // explicitly is REQUIRED: game/effects/effect.rs's
+    // `ability.duration.or(duration).unwrap_or(Duration::UntilEndOfTurn)`
+    // would otherwise default it to UntilEndOfTurn, and
+    // game/layers.rs::prune_end_of_turn_effects would drop the re-targeted
+    // Enchant restriction at the next cleanup step — un-swapping it back to
+    // the original graveyard-card restriction and causing the Aura to fail
+    // CR 704.5m (not attached to a legal object) on the very next SBA check,
+    // sacrificing the reanimated creature one turn after it entered. Mirrors
+    // the Borg artifact-creature retype (oracle_effect/imperative.rs:12245-
+    // 12262) and the "becomes" continuous effect (oracle_replacement.rs:2492-
+    // 2506) — both explicit `Some(Duration::Permanent)` for the identical
+    // reason. Unlike those two call sites, this ability is not also given a
+    // `.duration(Duration::Permanent)` builder call: `GenericEffect`'s struct
+    // field alone drives the fallback in effect.rs, so the builder-level
+    // duration (which governs a different, ability-level concern) is
+    // correctly left unset here — the two precedents' redundant builder call
+    // is harmless but not required, and this fix intentionally does not
+    // mirror it.
     // `OriginalSource` references the Aura even though this node's
     // source_id is rebound to the creature by the parent ChangeZone's
-    // forward_result. `duration: None` — an unstated-duration continuous grant.
+    // forward_result.
     //
     // Swap shape (Animate Dead / Dance of the Dead, already printed as Auras):
     // remove the printed Enchant restriction and add the post-reanimation one
@@ -14404,7 +14434,7 @@ fn build_aura_attach_clause(
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(TargetFilter::OriginalSource)
                 .modifications(modifications)],
-            duration: None,
+            duration: Some(Duration::Permanent),
             target: None,
             end_cost: None,
         },

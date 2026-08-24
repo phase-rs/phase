@@ -72,6 +72,31 @@ describe("GameMenu", () => {
     expect(screen.getByRole("button", { name: "Switch to split table view Legacy" })).toBeInTheDocument();
   });
 
+  it("routes the split-layout nudge through its supplied callbacks", () => {
+    const onTryMultiplayerSplitLayout = vi.fn();
+    const onDismissMultiplayerSplitLayoutNudge = vi.fn();
+    renderGameMenu({
+      showMultiplayerSplitLayoutNudge: true,
+      onTryMultiplayerSplitLayout,
+      onDismissMultiplayerSplitLayoutNudge,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+    fireEvent.click(screen.getByRole("button", { name: "Try split view" }));
+
+    expect(onTryMultiplayerSplitLayout).toHaveBeenCalledOnce();
+    expect(onDismissMultiplayerSplitLayoutNudge).not.toHaveBeenCalled();
+  });
+
+  it("hides the split-layout nudge without its complete callback contract", () => {
+    renderGameMenu({ showMultiplayerSplitLayoutNudge: true });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+
+    expect(screen.queryByRole("button", { name: "Try split view" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Not now" })).toBeNull();
+  });
+
   it("opens sandbox tools from the collapsed menu", () => {
     const onSandboxToolsClick = vi.fn();
     renderGameMenu({ showSandboxTools: true, onSandboxToolsClick });

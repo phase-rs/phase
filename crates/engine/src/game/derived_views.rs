@@ -562,6 +562,27 @@ pub enum TargetObjectCategory {
     Object,
 }
 
+/// CR 309.4a-c: Where one player's venture marker currently sits, named.
+///
+/// `state.dungeon_progress` carries only `(DungeonId, room index)`; the room's
+/// printed name (CR 309.4b) and its room ability's printed effect (CR 309.4c)
+/// live in the static dungeon definitions, which the client has no copy of.
+/// Projecting them here is what lets the dungeon HUD badge say which room the
+/// marker is on and what that room did, instead of a bare index.
+///
+/// Built by `dungeon_rooms` from `game::dungeon`, the same authority the
+/// venture prompts and the game log read, so no two surfaces can describe one
+/// room differently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DungeonRoomView {
+    pub dungeon: crate::game::dungeon::DungeonId,
+    pub dungeon_name: String,
+    pub room: crate::game::dungeon::RoomPreview,
+    /// CR 309.4: total rooms on the dungeon card, so the badge can place the
+    /// marker ("room 3 of 7") rather than showing a naked index.
+    pub room_count: u8,
+}
+
 /// Engine-authored projections used by the display layer. Keep this struct
 /// small — every field becomes mandatory payload on every state snapshot
 /// the client receives. Add a new field only when the frontend would
@@ -667,6 +688,18 @@ pub struct DerivedViews {
     /// Empty in non-Commander formats (see `derive_views` JIT short-circuit).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub commander_damage_by_attacker: BTreeMap<PlayerId, Vec<CommanderDamageView>>,
+
+    /// CR 309.4a-c: the named room each venturing player's marker sits on,
+    /// keyed by that player. Absent for players with no dungeon in the command
+    /// zone, and omitted entirely when nobody is venturing — which is every
+    /// game without a dungeon card in it.
+    ///
+    /// CR 309.2b + CR 400.2 + CR 309.4: the dungeon card sits in the command
+    /// zone, the command zone is a public zone, and the venture marker on it
+    /// shows which room its owner is in. All of that is public, so this
+    /// projection is not viewer-filtered.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub dungeon_rooms: BTreeMap<PlayerId, DungeonRoomView>,
 
     /// Engine-authored coalesced view of the stack. Adjacent entries with
     /// the same (source, kind, description, targets) signature collapse
@@ -1059,6 +1092,33 @@ fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<Mana
     ))
 }
 
+/// CR 309.4a-c: name the room each venturing player's marker currently sits on.
+///
+/// `dungeon_progress` may keep an entry with `current_dungeon: None` after a
+/// dungeon is completed (CR 309.7), so the active dungeon — not the presence of
+/// an entry — is the projection's gate. Empty (and omitted from the wire) in
+/// every game without a dungeon, which is the dominant case.
+fn dungeon_rooms(state: &GameState) -> BTreeMap<PlayerId, DungeonRoomView> {
+    state
+        .dungeon_progress
+        .iter()
+        .filter_map(|(&player, progress)| {
+            let dungeon = progress.current_dungeon?;
+            Some((
+                player,
+                DungeonRoomView {
+                    dungeon,
+                    dungeon_name: crate::game::dungeon::get_definition(dungeon)
+                        .name
+                        .to_string(),
+                    room: crate::game::dungeon::room_preview(dungeon, progress.current_room),
+                    room_count: crate::game::dungeon::room_count(dungeon),
+                },
+            ))
+        })
+        .collect()
+}
+
 /// CR 115.1 + CR 601.2c: classify what the LIVE target announcement is offering
 /// the announcing player, so the client can name the choice instead of
 /// re-deriving it from raw object fields.
@@ -1309,6 +1369,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         blocker_assignment_pairs: blocker_assignment_pairs(state),
         debug_library_cards: debug_library_cards(state, viewer),
         current_target_kind: current_target_kind(state),
+        dungeon_rooms: dungeon_rooms(state),
         ..DerivedViews::default()
     };
 
@@ -2812,6 +2873,53 @@ mod tests {
             }
         }
         state
+    }
+
+    /// CR 309.4b-c: the HUD badge reads the room's name and printed effect off
+    /// this projection, because `dungeon_progress` carries only a room index
+    /// and the client has no copy of the dungeon definitions.
+    #[test]
+    fn dungeon_rooms_names_the_room_the_marker_is_on() {
+        use crate::game::dungeon::{DungeonId, DungeonProgress};
+
+        let mut state = GameState::new_two_player(42);
+        state.dungeon_progress.insert(
+            PlayerId(0),
+            DungeonProgress {
+                current_dungeon: Some(DungeonId::LostMineOfPhandelver),
+                current_room: 2,
+                ..Default::default()
+            },
+        );
+
+        let views = derive_views(&state, None);
+        let room = views
+            .dungeon_rooms
+            .get(&PlayerId(0))
+            .expect("venturing player is projected");
+
+        assert_eq!(room.dungeon, DungeonId::LostMineOfPhandelver);
+        assert_eq!(room.dungeon_name, "Lost Mine of Phandelver");
+        assert_eq!(room.room.index, 2);
+        assert_eq!(room.room.name, "Mine Tunnels");
+        assert_eq!(room.room.text, "Create a Treasure token.");
+        assert_eq!(room.room_count, 7);
+    }
+
+    /// CR 309.7: a completed dungeon leaves a `current_dungeon: None` entry
+    /// behind. The active dungeon — not the presence of the entry — gates the
+    /// projection, so a player who finished a dungeon shows no badge.
+    #[test]
+    fn dungeon_rooms_skips_players_with_no_active_dungeon() {
+        use crate::game::dungeon::{DungeonId, DungeonProgress};
+
+        let mut state = GameState::new_two_player(42);
+        let mut progress = DungeonProgress::default();
+        progress.completed.insert(DungeonId::TombOfAnnihilation);
+        state.dungeon_progress.insert(PlayerId(0), progress);
+
+        let views = derive_views(&state, None);
+        assert!(views.dungeon_rooms.is_empty());
     }
 
     /// JIT short-circuit: non-Commander formats must return an empty view

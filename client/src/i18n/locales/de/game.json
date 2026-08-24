@@ -460,8 +460,9 @@
     "cityBlessingTooltip": "Segen der Stadt — kontrolliert zehn oder mehr bleibende Karten (Aufstieg)",
     "enduringStory": "Bleibende Geschichte",
     "enduringStoryTooltip": "Bleibende Geschichte — erhalten, wenn du eine Storied bleibende Karte und drei oder mehr Artefakte, legendäre bleibende Karten und/oder Sagen kontrollierst; bleibt für den Rest der Partie bestehen",
-    "dungeonAriaLabel": "Wagt sich in {{name}} vor, Raum {{room}}",
-    "dungeonTooltip": "Wagt sich in {{name}} vor — Raum {{room}}",
+    "dungeonAriaLabel": "Wagt sich in {{name}} vor, {{roomName}}, Raum {{room}} von {{total}}",
+    "dungeonRoomTooltip": "{{roomName}} — Raum {{room}} von {{total}}",
+    "dungeonTooltip": "Wagt sich in {{name}} vor",
     "poisonAriaLabel_one": "{{count}} Giftmarke",
     "poisonAriaLabel_other": "{{count}} Giftmarken",
     "poisonTooltip": "Giftmarken: {{count}}\nEin Spieler mit zehn oder mehr Giftmarken verliert das Spiel.",
@@ -788,6 +789,7 @@
     "nounPlaneswalker": "Planeswalker",
     "nounTargetPermanent": "bleibende Karte als Ziel",
     "nounTarget": "Ziel",
+    "nounOrPlayer": "{{noun}} oder Spieler",
     "confirmTap": "Tappen bestätigen ({{selected}}/{{count}})",
     "keepCurrentTargets": "Aktuelle Ziele behalten",
     "skip": "Überspringen",
@@ -2126,7 +2128,8 @@
     "title": "{{name}} - Optionaler Effekt",
     "yes": "Ja",
     "no": "Nein",
-    "dontAskAgain": "Dieses Spiel nicht mehr fragen"
+    "dontAskAgain": "Dieses Spiel nicht mehr fragen",
+    "dontAskAgainForSameCard": "Auf jede Kopie dieser Karte anwenden"
   },
   "topOrBottom": {
     "cardFallback": "Card",

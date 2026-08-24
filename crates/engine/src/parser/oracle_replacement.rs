@@ -3986,77 +3986,110 @@ fn parse_enters_with_counters(
     // always the recipient). Runtime folds the chosen counter pre-entry via the
     // deferred-entry-events capture in `engine_replacement.rs` /
     // `engine_resolution_choices.rs`.
-    if let Some((choices, _on)) = strip_enters_with_choice_target(after_additional) {
-        if let Some(entries) =
-            crate::parser::oracle_effect::classify_and_parse_counter_choice_list(choices)
-        {
-            // `classify_and_parse_counter_choice_list` already requires len >= 2.
-            let branches: Vec<AbilityDefinition> = entries
-                .into_iter()
-                .map(|(counter_type, count)| {
-                    let mut def = AbilityDefinition::new(
-                        AbilityKind::Spell,
-                        Effect::PutCounter {
-                            counter_type: counter_type.clone(),
-                            count,
-                            // CR 614.12a: the entering permanent is the recipient.
-                            target: TargetFilter::SelfRef,
-                        },
-                    );
-                    def.description = Some(format!("a {} counter", counter_type.display_phrase()));
-                    def
-                })
-                .collect();
+    let choice_branches: Option<Vec<AbilityDefinition>> = if let Some((choices, _on)) =
+        strip_enters_with_choice_target(after_additional)
+    {
+        crate::parser::oracle_effect::classify_and_parse_counter_choice_list(choices).map(
+            |entries| {
+                // `classify_and_parse_counter_choice_list` already requires len >= 2.
+                entries
+                    .into_iter()
+                    .map(|(counter_type, count)| {
+                        let mut def = AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::PutCounter {
+                                counter_type: counter_type.clone(),
+                                count,
+                                // CR 614.12a: the entering permanent is the recipient.
+                                target: TargetFilter::SelfRef,
+                            },
+                        );
+                        def.description =
+                            Some(format!("a {} counter", counter_type.display_phrase()));
+                        def
+                    })
+                    .collect()
+            },
+        )
+    } else if let Some(list_text) = strip_enters_with_two_different_from_among(after_additional) {
+        // CR 614.12a + CR 608.2d: Grimdancer's reordered multi-pick form —
+        // "your choice of two different counters on it from among <list>".
+        // Choosing two distinct kinds is the same decision as choosing one
+        // unordered pair, so build the C(n,2) pairs; each branch chains two
+        // self-targeted `PutCounter`s via `build_enters_counter_ability`, and
+        // `resolve_branch` runs the chosen branch's full sub-ability chain
+        // before the deferred entry replays, so both counters fold pre-entry.
+        crate::parser::oracle_effect::classify_and_parse_from_among_counter_list(list_text).map(
+            |entries| {
+                let mut branches = Vec::new();
+                for i in 0..entries.len() {
+                    for j in (i + 1)..entries.len() {
+                        let mut def = build_enters_counter_ability(vec![
+                            entries[i].clone(),
+                            entries[j].clone(),
+                        ]);
+                        def.description = Some(format!(
+                            "a {} counter and a {} counter",
+                            entries[i].0.display_phrase(),
+                            entries[j].0.display_phrase()
+                        ));
+                        branches.push(def);
+                    }
+                }
+                branches
+            },
+        )
+    } else {
+        None
+    };
 
-            let choice = AbilityDefinition::new(
+    if let Some(branches) = choice_branches {
+        let choice = AbilityDefinition::new(
+            AbilityKind::Spell,
+            // CR 608.2d: resolution choice — controller picks the branch.
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches,
+            },
+        );
+        let mut choice = choice;
+        choice.description = Some("your choice of counter".to_string());
+
+        // Compose with "enters tapped" if present (mirrors the single-counter
+        // tail below).
+        let execute = if has_enters_tapped_phrase(work_text) {
+            AbilityDefinition::new(
                 AbilityKind::Spell,
-                // CR 608.2d: resolution choice — controller picks the branch.
-                Effect::ChooseOneOf {
-                    chooser: PlayerFilter::Controller,
-                    branches,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 },
-            );
-            let mut choice = choice;
-            choice.description = Some("your choice of counter".to_string());
+            )
+            .sub_ability(choice)
+        } else {
+            choice
+        };
 
-            // Compose with "enters tapped" if present (mirrors the single-counter
-            // tail below).
-            let execute = if has_enters_tapped_phrase(work_text) {
-                AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::SetTapState {
-                        target: TargetFilter::SelfRef,
-                        scope: EffectScope::Single,
-                        state: TapStateChange::Tap,
-                    },
-                )
-                .sub_ability(choice)
-            } else {
-                choice
-            };
+        // CR 614.1c: "enters with" is a replacement effect on the Moved event,
+        // battlefield-entry-scoped (see destination-gate note above).
+        let mut def = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(execute)
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Battlefield)
+            .description(original_text.to_string());
 
-            // CR 614.1c: "enters with" is a replacement effect on the Moved event,
-            // battlefield-entry-scoped (see destination-gate note above).
-            let mut def = ReplacementDefinition::new(ReplacementEvent::Moved)
-                .execute(execute)
-                .valid_card(TargetFilter::SelfRef)
-                .destination_zone(Zone::Battlefield)
-                .description(original_text.to_string());
-
-            // CR 614.1c: Attach the single applicable gate. The " unless " gate
-            // and the trailing conditional-suffix gate are mutually exclusive —
-            // one condition slot — so their co-occurrence fails closed.
-            let other_suffix =
-                enters_with_condition_suffix(is_escape, &kicker_condition, work_text);
-            match resolve_enters_with_condition(&unless_outcome, &leading_if_outcome, other_suffix)
-            {
-                None => return None,
-                Some(Some(cond)) => def = def.condition(cond),
-                Some(None) => {}
-            }
-
-            return Some(def);
+        // CR 614.1c: Attach the single applicable gate. The " unless " gate
+        // and the trailing conditional-suffix gate are mutually exclusive —
+        // one condition slot — so their co-occurrence fails closed.
+        let other_suffix = enters_with_condition_suffix(is_escape, &kicker_condition, work_text);
+        match resolve_enters_with_condition(&unless_outcome, &leading_if_outcome, other_suffix) {
+            None => return None,
+            Some(Some(cond)) => def = def.condition(cond),
+            Some(None) => {}
         }
+
+        return Some(def);
     }
 
     let counter_entries = parse_enters_counter_entries(after_additional);
@@ -4818,6 +4851,26 @@ fn strip_enters_with_choice_target(after_choice: &str) -> Option<(&str, &str)> {
     } else {
         None
     }
+}
+
+/// CR 614.12a: Grimdancer's reordered multi-pick surface. Given the text AFTER
+/// "enters with " (e.g. "your choice of two different counters on it from
+/// among menace, deathtouch, and lifelink."), return the bare counter list
+/// ("menace, deathtouch, and lifelink") when the recipient is the entering
+/// permanent itself. The list TRAILS the self-reference here — the mirror of
+/// `strip_enters_with_choice_target`'s "<list> on it" order.
+fn strip_enters_with_two_different_from_among(after_choice: &str) -> Option<&str> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("your choice of two different counters on ")
+        .parse(after_choice)
+        .ok()?;
+    // CR 614.12a: the recipient must be the entering permanent itself.
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("it"), tag("~")))
+        .parse(rest)
+        .ok()?;
+    let (list, _) = tag::<_, _, OracleError<'_>>(" from among ")
+        .parse(rest)
+        .ok()?;
+    Some(list.trim().trim_end_matches('.'))
 }
 
 fn build_enters_counter_ability(entries: Vec<(CounterType, QuantityExpr)>) -> AbilityDefinition {
@@ -16482,6 +16535,60 @@ mod tests {
                 CounterType::Keyword(KeywordKind::Lifelink),
             ],
         );
+    }
+
+    /// CR 614.12a + CR 608.2d: Grimdancer — "enters with your choice of two
+    /// different counters on it from among menace, deathtouch, and lifelink."
+    /// Choosing two distinct kinds is the same decision as choosing one
+    /// unordered pair, so the line lowers to a `ChooseOneOf` over the three
+    /// pairs, each branch chaining two self-targeted `PutCounter`s (both fold
+    /// pre-entry through the deferred-entry capture, like the single pick).
+    #[test]
+    fn enters_with_two_different_counters_from_among_builds_pair_choice() {
+        use crate::types::keywords::KeywordKind;
+
+        let def = parse_replacement_line(
+            "This creature enters with your choice of two different counters on it from among menace, deathtouch, and lifelink.",
+            "Grimdancer",
+        )
+        .unwrap();
+        let execute = def.execute.as_ref().unwrap();
+        let Effect::ChooseOneOf { chooser, branches } = &*execute.effect else {
+            panic!("expected ChooseOneOf, got {:?}", execute.effect);
+        };
+        assert_eq!(*chooser, PlayerFilter::Controller);
+        let expected = [
+            (KeywordKind::Menace, KeywordKind::Deathtouch),
+            (KeywordKind::Menace, KeywordKind::Lifelink),
+            (KeywordKind::Deathtouch, KeywordKind::Lifelink),
+        ];
+        assert_eq!(branches.len(), expected.len());
+        for (branch, (first, second)) in branches.iter().zip(expected) {
+            let Effect::PutCounter {
+                counter_type,
+                target,
+                ..
+            } = &*branch.effect
+            else {
+                panic!("expected PutCounter head, got {:?}", branch.effect);
+            };
+            assert_eq!(counter_type, &CounterType::Keyword(first));
+            assert_eq!(target, &TargetFilter::SelfRef);
+            let sub = branch
+                .sub_ability
+                .as_deref()
+                .expect("pair branch must chain its second counter");
+            let Effect::PutCounter {
+                counter_type,
+                target,
+                ..
+            } = &*sub.effect
+            else {
+                panic!("expected PutCounter sub, got {:?}", sub.effect);
+            };
+            assert_eq!(counter_type, &CounterType::Keyword(second));
+            assert_eq!(target, &TargetFilter::SelfRef);
+        }
     }
 
     #[test]

@@ -203,6 +203,24 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 36 — WaitingFor.ChooseDungeon.options changed from DungeonId[] to
+ *      DungeonPreview[], and ChooseDungeonRoom dropped option_names, gained a
+ *      required dungeon_name, and changed options from number[] to
+ *      RoomPreview[], so each option carries the room's printed name and
+ *      room-ability text (CR 309.4b-c). A PARSE bump like 23, not a capability
+ *      bump like 24: none of the new fields carry a serde default, so a v35
+ *      peer fails deserialization on a dungeon-choice GameState outright
+ *      rather than degrading silently. DerivedViews.dungeon_rooms rides along
+ *      in the same bump — it IS serde-optional, but this client deleted its
+ *      dungeon_progress room-index derivation, so a v35 server that omits it
+ *      would leave this client rendering no dungeon badge at all.
+ * 35 — DerivedViews.current_target_kind publishes the engine's CR 115.1
+ *      classification of the live target announcement. A CAPABILITY bump like
+ *      24 and 32, not a parse bump: the field is serde-optional, but this
+ *      client deleted inferTargetNoun, so a v34 server that omits it would
+ *      leave this client naming no target at all — silently, with no parse
+ *      error to catch it. The handshake is the only place that pairing is
+ *      refusable.
  * 33 — LegendCandidateIdentity adds Unknown so face-down legend candidates do
  *      not publish an affirmative original/copy identity.
  * 32 — DerivedViews.legend_candidate_identities publishes the engine-authored
@@ -262,7 +280,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 34;
+export const PROTOCOL_VERSION = 36;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -325,7 +343,20 @@ export interface ServerInfo {
 }
 
 /**
- * Why this client cannot talk to `info`, or `null` when it can.
+ * Which protocol surface a socket is opened for.
+ *
+ * The surface is a property of the CALLER's intent, not of the server: a `Full`
+ * server serves both. `ClientMessage::SubscribeLobby` and friends are "always
+ * allowed" in either server mode (`reject_if_disabled` in
+ * `crates/phase-server/src/main.rs`), and the whole lobby frame set —
+ * `LobbyClientMessage` / `LobbyServerMessage` in
+ * `crates/lobby-broker/src/protocol.rs` — carries no `GameState` and no
+ * `GameAction`. That is what lets the two surfaces version independently.
+ */
+export type ProtocolSurface = "full" | "lobby";
+
+/**
+ * Why this client cannot talk to `info` on `surface`, or `null` when it can.
  *
  * SINGLE AUTHORITY for the protocol window. The handshake in
  * `openPhaseSocket.ts` and the compatibility badge in `multiplayerStore.ts`
@@ -333,24 +364,37 @@ export interface ServerInfo {
  * as usable by the other.
  *
  * Three policies, by surface:
- *  - Full servers: exact match. GameState/GameAction payloads are neither
+ *  - Full-game surface: exact match. GameState/GameAction payloads are neither
  *    forward- nor backward-compatible across a bump.
- *  - Lobby brokers advertising a lobby version: floor only, NO CEILING. See
- *    {@link MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL}.
- *  - Lobby brokers that predate the field: the legacy one-version window on
- *    `protocolVersion`, unchanged, so already-deployed brokers stay reachable.
+ *  - Lobby surface, server advertising a lobby version: floor only, NO CEILING.
+ *    See {@link MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL}.
+ *  - Lobby surface, server predating the field: the legacy one-version window
+ *    on `protocolVersion`, unchanged, so already-deployed brokers stay
+ *    reachable.
+ *
+ * The surface comes from the caller, never from `info.mode`. A `Full` server
+ * serves the lobby too, so reading the mode alone refuses a lobby socket to a
+ * server whose `lobbyProtocolVersion` matches and whose only incompatibility is
+ * with a game that socket will never carry — which a browser can only report as
+ * "unreachable", not as "a version you cannot play on".
  */
-export function serverProtocolRejection(info: ServerInfo): string | null {
-  if (info.mode === "LobbyOnly" && info.lobbyProtocolVersion !== undefined) {
+export function serverProtocolRejection(
+  info: ServerInfo,
+  surface: ProtocolSurface = "full",
+): string | null {
+  // A `LobbyOnly` server has no full-game surface at all, so every socket to
+  // one is a lobby socket whatever the caller asked for.
+  const onLobbySurface = surface === "lobby" || info.mode === "LobbyOnly";
+
+  if (onLobbySurface && info.lobbyProtocolVersion !== undefined) {
     return info.lobbyProtocolVersion < MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL
       ? `Lobby protocol version ${info.lobbyProtocolVersion} is older than supported (client speaks ${LOBBY_PROTOCOL_VERSION}, min ${MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL}).`
       : null;
   }
 
-  const minAccepted =
-    info.mode === "LobbyOnly"
-      ? LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL
-      : MIN_SUPPORTED_SERVER_PROTOCOL;
+  const minAccepted = onLobbySurface
+    ? LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL
+    : MIN_SUPPORTED_SERVER_PROTOCOL;
   if (info.protocolVersion < minAccepted) {
     return `Server protocol version ${info.protocolVersion} is older than supported (client speaks ${PROTOCOL_VERSION}, min ${minAccepted}). Please wait for the lobby to finish rolling out.`;
   }

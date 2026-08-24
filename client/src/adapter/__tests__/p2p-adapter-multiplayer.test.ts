@@ -484,7 +484,9 @@ const NATIVE_GUEST_ATTACHMENT = {
 
 async function joinGuest(
   emitConnection: (c: DataConnection) => void,
-  msg: { type: "guest_deck"; deckData: unknown } | { type: "reconnect"; playerToken: string },
+  msg:
+    | { type: "guest_deck"; deckData: unknown; wireProtocolVersion?: number }
+    | { type: "reconnect"; playerToken: string; wireProtocolVersion?: number },
 ): Promise<FakeOpenableConnection> {
   const conn = new FakeOpenableConnection();
   emitConnection(conn as unknown as DataConnection);
@@ -2624,5 +2626,188 @@ describe("P2PHostAdapter — shared-engine ownership", () => {
     await expect(adapter.submitAction({ type: "PassPriority" }, 0)).rejects.toThrow(
       "P2P host adapter has been disposed",
     );
+  });
+});
+
+describe("P2P wire-protocol version gate", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const setupFrameAt = (wireProtocolVersion: number) => ({
+    type: "game_setup" as const,
+    wireProtocolVersion,
+    assignedPlayerId: 1,
+    playerToken: "seat-token",
+    state: remoteState("setup"),
+    events: [],
+    legalActions: [],
+    autoPassRecommended: false,
+    manaPaymentShortcutActions: [],
+  });
+
+  function makeGuest(
+    conn: FakeDataConnection = new FakeDataConnection(),
+    peer?: unknown,
+    existingPlayerToken?: string,
+  ) {
+    const adapter = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      (peer ?? createFakePeer().peer) as unknown as Peer,
+      "host-peer",
+      conn as unknown as DataConnection,
+      existingPlayerToken,
+    );
+    const emitted = vi.fn();
+    adapter.onEvent(emitted);
+    return { conn, adapter, emitted };
+  }
+
+  const sentOfType = async (conn: FakeDataConnection, type: string) =>
+    (await conn.getSentMessages()).find(
+      (m) => typeof m === "object" && m !== null && (m as { type: string }).type === type,
+    ) as { type: string; reason?: string; wireProtocolVersion?: number } | undefined;
+
+  // Relocated here from `protocol.test.ts`, where this pair guarded
+  // `validateMessage`. The version rule now lives solely in
+  // `P2PGuestAdapter.handleHostMessage`, so an instrument pointed at the
+  // validator would guard nothing; this one points at the adapter's DECISION.
+  // The frame also traverses the real validator on the way in — this file's
+  // decode stub ends in `real.validateMessage` — so a regression that put the
+  // check back into the transport would surface here as the refusing half
+  // never emitting.
+  //
+  // Both halves stamp LITERALS. A frame built from WIRE_PROTOCOL_VERSION
+  // cannot tell a bumped client from an unbumped one, which is why every
+  // other handshake fixture in the suite is useless as an instrument for a
+  // bump. Revert 27 → 26 and BOTH halves red: the v26 frame stops being
+  // refused, and the v27 frame stops being admitted. The admitting half is
+  // the reach-guard — without it "refuses v26" is also satisfied by a client
+  // that refuses everything.
+  it("refuses the previous wire protocol (v26) and admits its own (v27)", async () => {
+    const refusing = makeGuest();
+    await refusing.adapter.initialize();
+    await refusing.conn.simulateData(setupFrameAt(26));
+
+    await expect(refusing.adapter.initializeGame()).rejects.toMatchObject({
+      code: "P2P_REJECTED",
+      message: expect.stringContaining("Wire protocol mismatch"),
+    });
+    expect(refusing.emitted).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "reconnectFailed" }),
+    );
+
+    const admitting = makeGuest();
+    await admitting.adapter.initialize();
+    await admitting.conn.simulateData(setupFrameAt(27));
+
+    await expect(admitting.adapter.initializeGame()).resolves.toBeDefined();
+    expect(admitting.emitted).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "reconnectFailed" }),
+    );
+  });
+
+  // Derived, not a literal: this gate tests "unequal", not any particular
+  // version, so it must not become a second bump tripwire. The literal-stamped
+  // instrument is the guest-side pair above.
+  const SKEWED_GUEST_VERSION = WIRE_PROTOCOL_VERSION + 1;
+
+  it("refuses a guest whose first contact stamps a different wire version", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+      wireProtocolVersion: SKEWED_GUEST_VERSION,
+    });
+
+    const rejected = await sentOfType(guest, "reconnect_rejected");
+    expect(rejected).toBeDefined();
+    // Mirrors the guest-side wording so both peers read the same sentence.
+    expect(rejected!.reason).toBe(
+      `Wire protocol mismatch: guest sent v${SKEWED_GUEST_VERSION}, this host speaks v${WIRE_PROTOCOL_VERSION}. Refresh both windows.`,
+    );
+    expect(guest.open).toBe(false);
+    expect(await sentOfType(guest, "game_setup")).toBeUndefined();
+    adapter.dispose();
+  });
+
+  // The discriminator for "absent means admit". Without it this gate is
+  // indistinguishable from one that treats a missing field as a mismatch —
+  // which would refuse every guest on an older bundle, including the ones
+  // that pair fine today.
+  it("admits a guest that stamps no wire version at all", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+
+    expect(await sentOfType(guest, "reconnect_rejected")).toBeUndefined();
+    expect(guest.open).toBe(true);
+    expect(await sentOfType(guest, "game_setup")).toBeDefined();
+    adapter.dispose();
+  });
+
+  // The two first-contact stamp sites, asserted on the OUTBOUND frame. Neither
+  // was covered before: deleting either stamp left the whole suite green,
+  // because a guest that fails to stamp is indistinguishable from an older
+  // bundle and the host's absent-means-admit branch swallows it silently. A
+  // refactor dropping the `guest_deck` stamp would turn Unit 2 into a no-op
+  // for every fresh join — the common path — with nothing red.
+  it("stamps the wire version on both first-contact guest messages", async () => {
+    const fresh = makeGuest();
+    await fresh.adapter.initialize();
+    // `initialize` does not await its own send: `peer.ts` queues the encode,
+    // and `getSentMessages` drains decode-side work only. Flush the queue
+    // before reading, or the frame has not reached `conn.send` yet.
+    await vi.advanceTimersByTimeAsync(0);
+    const guestDeck = await sentOfType(fresh.conn, "guest_deck");
+    expect(guestDeck).toBeDefined();
+    expect(guestDeck!.wireProtocolVersion).toBe(WIRE_PROTOCOL_VERSION);
+
+    const resuming = makeGuest(new FakeDataConnection(), undefined, "prior-token");
+    await resuming.adapter.initialize();
+    await vi.advanceTimersByTimeAsync(0);
+    const reconnect = await sentOfType(resuming.conn, "reconnect");
+    expect(reconnect).toBeDefined();
+    expect(reconnect!.wireProtocolVersion).toBe(WIRE_PROTOCOL_VERSION);
+  });
+
+  // The third stamp site: a guest that drops and comes back through
+  // `attemptReconnect` must still carry the version, or every reconnection
+  // after a transient blip would look like an old bundle to the host.
+  it("stamps the wire version on a reconnect after a transient drop", async () => {
+    const initialConn = new FakeDataConnection();
+    const rejoinConn = new FakeOpenableConnection();
+    const peer = {
+      on() {},
+      off() {},
+      destroy() {},
+      connect: () => rejoinConn,
+    };
+    const { adapter, conn } = makeGuest(initialConn, peer);
+    await adapter.initialize();
+    await conn.simulateData(setupFrameAt(WIRE_PROTOCOL_VERSION));
+    await adapter.initializeGame();
+
+    conn.simulateClose();
+    // Drain the first backoff step, then complete the WebRTC open handshake
+    // the reconnect path awaits.
+    await vi.advanceTimersByTimeAsync(1_000);
+    rejoinConn.fireOpen();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const reconnect = await sentOfType(rejoinConn, "reconnect");
+    expect(reconnect).toBeDefined();
+    expect(reconnect!.wireProtocolVersion).toBe(WIRE_PROTOCOL_VERSION);
+    adapter.dispose();
   });
 });

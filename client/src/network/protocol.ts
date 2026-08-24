@@ -79,7 +79,37 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * in-band and surface an actionable "refresh both windows" message instead
  * of silently corrupting state.
  *
+ * A host → guest mismatch is enforced in exactly ONE place:
+ * `P2PGuestAdapter.handleHostMessage` (`adapter/p2p-adapter.ts`).
+ * `validateMessage` below deliberately does NOT check it. A throw from there
+ * propagates out of `decodeWireMessage` into the `catch` in `peer.ts`, which
+ * warns and drops the frame — so the host's `game_setup` never reaches the
+ * adapter, the setup promise never settles and the guest hangs on the
+ * connecting screen with no layer able to tell the user. Only the adapter
+ * holds the state needed to perform the response.
+ *
+ * The guest → host direction has its own single site: guests stamp this version
+ * on `guest_deck` / `reconnect`, and `P2PHostAdapter`'s first-contact gate
+ * refuses a stamped mismatch. That field is optional and an absent one is
+ * admitted; see the gate for why.
+ *
  * Bumps to date:
+ *  27 — WaitingFor.ChooseDungeon.options changed from DungeonId[] to
+ *       DungeonPreview[], and ChooseDungeonRoom dropped option_names, gained a
+ *       required dungeon_name, and changed options from number[] to
+ *       RoomPreview[], so each option carries the room's printed name and
+ *       room-ability text (CR 309.4b-c). A PARSE bump like 16, not a silent
+ *       capability loss like 24: none of the new fields carry a serde default,
+ *       so a v26 peer cannot deserialize a dungeon-choice snapshot at all.
+ *       DerivedViews.dungeon_rooms rides along in the same bump — it IS
+ *       optional and would parse on a v26 peer, but this client deleted its
+ *       dungeon_progress room-index derivation, so a v26 host would leave a
+ *       v27 guest with no dungeon badge.
+ *  26 — DerivedViews.current_target_kind publishes the engine's CR 115.1
+ *       classification of the live target announcement. The field is optional
+ *       and parses on a v24 peer, so the loss is silent: this client deleted
+ *       inferTargetNoun, so a v24 host would leave a v25 guest naming no
+ *       target at all. The handshake is the only place to refuse it.
  *  23 — WaitingFor::AlternativeCastChoice.alternative_additional_cost_description
  *       changed from a string to a typed Emerge-sacrifice descriptor. Older
  *       clients would receive an object where their modal expects display text.
@@ -127,10 +157,15 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 25 as const;
+export const WIRE_PROTOCOL_VERSION = 27 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
-  | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }
+  // `wireProtocolVersion` is optional on both first-contact guest messages:
+  // guests on an older bundle cannot stamp it, and the host admits those.
+  // Typed `number` rather than `typeof WIRE_PROTOCOL_VERSION` on purpose —
+  // the literal type would narrow the host's "present and unequal" branch
+  // to `never`.
+  | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string; wireProtocolVersion?: number }
   | ({
       type: "game_setup";
       wireProtocolVersion: typeof WIRE_PROTOCOL_VERSION;
@@ -163,7 +198,7 @@ export type P2PMessage = P2PAuthorityWire & (
   /** Protected by a draft-installed match capability on the host. */
   | { type: "match_concede" }
   // Reconnect: guest presents prior token; host accepts (with fresh state) or rejects.
-  | { type: "reconnect"; playerToken: string; sessionKey?: P2PSessionKey }
+  | { type: "reconnect"; playerToken: string; sessionKey?: P2PSessionKey; wireProtocolVersion?: number }
   | ({
       type: "reconnect_ack";
       wireProtocolVersion: typeof WIRE_PROTOCOL_VERSION;
@@ -252,14 +287,6 @@ export function validateMessage(raw: unknown): P2PMessage {
   const msg = raw as { type: string };
   if (!VALID_TYPES.has(msg.type)) {
     throw new Error(`Invalid message type: ${msg.type}`);
-  }
-  if (msg.type === "game_setup" || msg.type === "reconnect_ack") {
-    const versioned = raw as { wireProtocolVersion?: unknown };
-    if (versioned.wireProtocolVersion !== WIRE_PROTOCOL_VERSION) {
-      throw new Error(
-        `Wire protocol mismatch: host sent v${String(versioned.wireProtocolVersion)}, this client speaks v${WIRE_PROTOCOL_VERSION}`,
-      );
-    }
   }
   return raw as P2PMessage;
 }

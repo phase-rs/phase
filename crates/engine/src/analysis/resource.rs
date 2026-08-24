@@ -11301,6 +11301,7 @@ mod tests {
                     source_id: on_board[0],
                     description: None,
                     may_trigger_key: None,
+                    same_card_may_trigger_choice_available: false,
                 },
                 true,
             ),

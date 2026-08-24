@@ -26856,3 +26856,40 @@ fn you_attack_trigger_binds_its_attacked_player_object() {
          CR 508.3e object: {qualified:#?}"
     );
 }
+
+/// CR 201.5a: `scrub_modification_descriptions`'s `GrantReplacement` arm must
+/// reach the nested `ReplacementDefinition`'s description, the same as its
+/// `GrantAbility`/`GrantTrigger`/`GrantStaticAbility` siblings. The production
+/// `GrantReplacement` producer (`leave_battlefield_exile_replacement`) never
+/// carries a description today, so this is a direct unit test of the scrub
+/// function itself rather than an end-to-end parse, proving the sweep is
+/// complete for the day a producer does attach one (or a self-referencing
+/// granted "would leave the battlefield" rider is added).
+///
+/// Revert-to-red: removing the `GrantReplacement` arm (falling through to the
+/// wildcard `_ => {}`) leaves the raw placeholder character in the nested
+/// definition's description, flipping the assertion below to a failure.
+#[test]
+fn scrub_modification_descriptions_reaches_grant_replacement() {
+    let mut replacement = ReplacementDefinition::new(ReplacementEvent::Moved);
+    replacement.description = Some(format!(
+        "If {GRANTING_SELF_PLACEHOLDER} would leave the battlefield, exile it instead."
+    ));
+    let mut modification = ContinuousModification::GrantReplacement {
+        replacement: Box::new(replacement),
+    };
+    scrub_modification_descriptions(&mut modification);
+    let ContinuousModification::GrantReplacement { replacement } = &modification else {
+        panic!("expected GrantReplacement to survive scrubbing unchanged in shape");
+    };
+    assert!(
+        !replacement
+            .description
+            .as_deref()
+            .unwrap()
+            .contains(GRANTING_SELF_PLACEHOLDER),
+        "the scrub loop must remove the raw placeholder char from a granted \
+         replacement's description, got {:?}",
+        replacement.description
+    );
+}

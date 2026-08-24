@@ -6018,6 +6018,7 @@ mod tests {
             source_id: ObjectId(100),
             description: None,
             may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
         };
         let mut repeated = restore_v1_repeated_optional_payment_fixture(
             repeated,
@@ -6044,6 +6045,7 @@ mod tests {
             source_id: ObjectId(102),
             description: None,
             may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
         };
         let mut optional = restore_v1_optional_effect_fixture(
             optional,
@@ -7360,6 +7362,7 @@ mod tests {
             source_id: ObjectId(151),
             description: None,
             may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
         };
         let mut buried_optional_frames = ResolutionStack::default();
         buried_optional_frames.push_inner(ResolutionFrame::OptionalEffect(OptionalEffectFrame {

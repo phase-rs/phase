@@ -157,7 +157,7 @@ fn materialize_catalog_token_payload(
     materialized.source = TokenAbilitySource::CatalogRulesText;
     materialized.rules_text = Some(rules_text.to_string());
     let (static_definitions, modifications, unparsed_lines) =
-        catalog_rules_text_abilities(rules_text);
+        catalog_rules_text_abilities(rules_text, &preset.body.display_name);
     materialized.static_definitions = static_definitions;
     materialized.unparsed_rules_text_lines = unparsed_lines;
 
@@ -4365,11 +4365,19 @@ fn apply_token_ability_payload(obj: &mut GameObject, materialized: TokenAbilityM
 
 fn catalog_rules_text_abilities(
     rules_text: &str,
+    card_name: &str,
 ) -> (
     Vec<StaticDefinition>,
     Vec<ContinuousModification>,
     Vec<String>,
 ) {
+    // CR 201.5 + CR 201.5a: A card's Oracle text uses its name to refer to
+    // itself, and a granted ability that refers to its granter by name refers
+    // only to that specific granter. Token catalog rules text is parsed
+    // independently of `parse_oracle_ir`'s single entry point, so it needs its
+    // own `normalize_card_name_refs` pass here, mirroring `parse_oracle_ir`'s
+    // call in `oracle.rs`.
+    let rules_text = crate::parser::oracle_util::normalize_card_name_refs(rules_text, card_name);
     let mut static_definitions = Vec::new();
     let mut modifications = Vec::new();
     let mut unparsed_lines = Vec::new();
@@ -4393,6 +4401,16 @@ fn catalog_rules_text_abilities(
                     .map(normalized_token_static_definition),
             );
         }
+    }
+    // CR 201.5a: catch any residual `GRANTING_SELF_PLACEHOLDER` left in the
+    // parsed statics'/modifications' display `description`s, mirroring
+    // `scrub_granting_placeholder_descriptions`'s whole-tree sweep in
+    // `oracle.rs` for this independent parse entry point.
+    for def in &mut static_definitions {
+        crate::parser::oracle::scrub_static_descriptions(def);
+    }
+    for modification in &mut modifications {
+        crate::parser::oracle::scrub_modification_descriptions(modification);
     }
     (static_definitions, modifications, unparsed_lines)
 }
@@ -8449,6 +8467,7 @@ mod tests {
              This creature can't block.\n\
              {T}: Add {G}.\n\
              When this creature dies, you gain 1 life.",
+            "Test Card",
         );
         assert!(unparsed_lines.is_empty());
 
@@ -8481,6 +8500,102 @@ mod tests {
                 ContinuousModification::GrantTrigger { .. }
             )),
             "trigger rules text must route to GrantTrigger, got {modifications:?}"
+        );
+    }
+
+    /// Revert-to-red: removing the `card_name` threading in
+    /// `catalog_rules_text_abilities` reverts this to `TriggerMode::Unknown`
+    /// with the raw text, since the bare "galactus attacks..." subject
+    /// matches no recognized pattern and falls through to the terminal
+    /// fallback.
+    #[test]
+    fn catalog_galactus_preset_trigger_subject_normalizes() {
+        let (_statics, modifications, _unparsed_lines) = catalog_rules_text_abilities(
+            "Flying, trample\nWhenever Galactus attacks, destroy target land.",
+            "Galactus",
+        );
+
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::GrantTrigger { trigger }
+                    if trigger.mode == TriggerMode::Attacks
+                        && trigger.valid_card == Some(TargetFilter::SelfRef)
+            )),
+            "card-name subject in an attack trigger must normalize to a \
+             self-referential TriggerMode::Attacks, got {modifications:?}"
+        );
+    }
+
+    /// Revert-to-red: without normalization, no `StaticDefinition` is
+    /// produced for this line at all (`parse_self_color_subject`'s `alt()`
+    /// doesn't match the bare name "Mechtitan"), and the CDA silently
+    /// vanishes into an inert `GrantAbility` instead.
+    #[test]
+    fn catalog_mechtitan_preset_cda_subject_normalizes() {
+        let (static_definitions, _modifications, _unparsed_lines) = catalog_rules_text_abilities(
+            "Mechtitan is all colors.\nFlying, vigilance, trample, lifelink, haste",
+            "Mechtitan",
+        );
+
+        assert!(
+            static_definitions.iter().any(|def| {
+                def.characteristic_defining
+                    && def.affected == Some(TargetFilter::SelfRef)
+                    && def.modifications.iter().any(|modification| matches!(
+                        modification,
+                        ContinuousModification::SetColor { colors }
+                            if colors.len() == 5
+                    ))
+            }),
+            "card-name subject in a CDA color-setting static must normalize to a \
+             self-referential characteristic-defining SetColor{{all 5 colors}}, got {static_definitions:?}"
+        );
+    }
+
+    /// Revert-to-red: without normalization, the effect's target is
+    /// `TargetFilter::Any` (the unconsumed literal name falls through
+    /// `parse_target`'s terminal fallback), meaning the token would copy
+    /// any legal target instead of itself.
+    #[test]
+    fn catalog_council_of_reeds_preset_copy_effect_normalizes() {
+        let (_statics, modifications, _unparsed_lines) = catalog_rules_text_abilities(
+            "The \"legend rule\" doesn't apply to creatures you control.\n\
+             At the beginning of combat on your turn, if you've cast a noncreature \
+             spell this turn, create a token that's a copy of Council of Reeds.\n\
+             (This token's mana cost is {2}{U}.)",
+            "Council of Reeds",
+        );
+
+        fn ability_has_self_copy(def: &AbilityDefinition) -> bool {
+            matches!(
+                *def.effect,
+                Effect::CopyTokenOf {
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ) || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(ability_has_self_copy)
+                || def
+                    .else_ability
+                    .as_deref()
+                    .is_some_and(ability_has_self_copy)
+                || def.mode_abilities.iter().any(ability_has_self_copy)
+        }
+
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::GrantTrigger { trigger }
+                    if trigger
+                        .execute
+                        .as_deref()
+                        .is_some_and(ability_has_self_copy)
+            )),
+            "card-name copy-of subject must normalize to a self-referential \
+             CopyTokenOf, got {modifications:?}"
         );
     }
 
@@ -8741,6 +8856,206 @@ mod tests {
         assert!(equip
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery));
+    }
+
+    /// CR 201.5a end-to-end proof: Toggo's Rock grants the equipped creature
+    /// "{1}, {T}, Sacrifice Rock: This creature deals 2 damage to any
+    /// target." Rock (the card literally named in the cost) must be the
+    /// object sacrificed — not the host it's equipped to — and the scrub
+    /// pass (Step 1) must have removed the raw placeholder character from
+    /// the granted ability's description before it ever reaches the host.
+    ///
+    /// Revert-to-red: reverting the `card_name` threading in
+    /// `catalog_rules_text_abilities` (Step 2) does NOT bind the sacrifice
+    /// cost to the host. Verified empirically (temporarily disabling the
+    /// `normalize_card_name_refs` call and printing the resulting cost): it
+    /// produces a generic, UNBOUND
+    /// `AbilityCost::Sacrifice(SacrificeCost { target: Typed(TypedFilter {
+    /// type_filters: [], controller: None, properties: [] }), .. })` that
+    /// matches any permanent, not a host-bound `SelfRef`. Because that filter
+    /// is unconstrained, `pay_with(&[rock_id])` below still succeeds even
+    /// under the reverted code (Rock trivially satisfies "any permanent"),
+    /// and the runtime activate/pay/resolve assertions still pass — they
+    /// exercise that the grant-and-activate mechanism works end-to-end (a
+    /// real but separate property), not the granter-binding regression
+    /// itself. The pre-activation `TargetFilter` equality assertion
+    /// immediately below is the one check in this test that is actually
+    /// load-bearing for this regression.
+    ///
+    /// For the placeholder-leak assertion: Rock's granted ability is a
+    /// granted *activated* ability, routed through `parse_quoted_ability`
+    /// (`oracle_static/grammar.rs`), which already calls its own
+    /// `sanitize_granting_placeholder` independent of the two scrub loops
+    /// added to `catalog_rules_text_abilities` in this diff — so disabling
+    /// only those two loops does not reproduce a leak here. See
+    /// `catalog_synthetic_equipment_grant_trigger_scrub_removes_placeholder`
+    /// for the case (a granted TRIGGER, with no independent scrubber) that
+    /// actually exercises the new scrub loops.
+    #[test]
+    fn catalog_toggo_rock_sacrifice_cost_binds_to_rock_not_host() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::mana::{ManaType, ManaUnit};
+
+        fn sacrifice_target(cost: &AbilityCost) -> Option<&TargetFilter> {
+            match cost {
+                AbilityCost::Sacrifice(sac) => Some(&sac.target),
+                AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+                    costs.iter().find_map(sacrifice_target)
+                }
+                _ => None,
+            }
+        }
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::White, ObjectId(0), false, vec![])],
+        );
+        let host = scenario.add_creature(P0, "Bearer", 2, 2).id();
+
+        let mut runner = scenario.build();
+        let rock_id = build_catalog_token(
+            runner.state_mut(),
+            "Rock",
+            "1657233e-c9e1-54ff-aa5a-6e2e2846be42",
+        );
+        {
+            let st = runner.state_mut();
+            st.objects.get_mut(&rock_id).unwrap().attached_to = Some(AttachTarget::Object(host));
+            st.layers_dirty.mark_full();
+        }
+        crate::game::layers::evaluate_layers(runner.state_mut());
+
+        let idx = runner.state().objects[&host]
+            .abilities
+            .iter()
+            .position(|a| a.cost.as_ref().and_then(sacrifice_target).is_some())
+            .expect("host must carry Rock's granted sacrifice-cost ability after evaluate_layers");
+
+        assert_eq!(
+            runner.state().objects[&host].abilities[idx]
+                .cost
+                .as_ref()
+                .and_then(sacrifice_target),
+            Some(&TargetFilter::SpecificObject { id: rock_id }),
+            "CR 201.5a: the sacrifice cost must target Rock (the granting object), not the host"
+        );
+        assert!(
+            !runner.state().objects[&host].abilities[idx]
+                .description
+                .as_deref()
+                .unwrap_or_default()
+                .contains(crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER),
+            "granted ability description must not leak the raw placeholder char"
+        );
+
+        let outcome = runner
+            .activate(host, idx)
+            .target_player(P1)
+            .pay_with(&[rock_id])
+            .resolve();
+
+        // CR 111.7 + CR 704.5d: Rock is a token, so once it's sacrificed off the
+        // battlefield it ceases to exist as a state-based action and is purged
+        // from `state.objects` entirely — it never sits observably in the
+        // graveyard the way a card-backed permanent would (contrast
+        // `deconstruction_hammer_sacrifice_hits_the_equipment_not_the_host`,
+        // whose Hammer is a real card and persists at `zone_of == Graveyard`).
+        assert!(
+            !outcome.state().objects.contains_key(&rock_id),
+            "Rock (the object actually named in the cost) must be sacrificed and, \
+             being a token, cease to exist"
+        );
+        assert_eq!(
+            outcome.zone_of(host),
+            Zone::Battlefield,
+            "the equipped creature survives"
+        );
+    }
+
+    /// CR 201.5a: proves the two `scrub_static_descriptions` /
+    /// `scrub_modification_descriptions` loops at the end of
+    /// `catalog_rules_text_abilities` actually do something. Rock's own test
+    /// above (a granted *activated* ability, routed through
+    /// `parse_quoted_ability`) is scrubbed independently by that grammar's own
+    /// `sanitize_granting_placeholder` call and does not exercise these two
+    /// loops. A granted *trigger* has no such independent scrubber, so this
+    /// synthetic Equipment's granted "Whenever this creature attacks,
+    /// sacrifice <self>" trigger — parsed via `parse_static_line_multi` →
+    /// `classify_quoted_inner`'s `GrantTrigger` branch, never touching
+    /// `parse_quoted_ability` — is the case that actually needs the new
+    /// scrub loops.
+    ///
+    /// Revert-to-red: commenting out the two scrub loops (while leaving
+    /// `normalize_card_name_refs` intact) leaves the raw
+    /// `GRANTING_SELF_PLACEHOLDER` char in the granted trigger's
+    /// `description`, flipping the no-leak assertion below to a failure.
+    #[test]
+    fn catalog_synthetic_equipment_grant_trigger_scrub_removes_placeholder() {
+        let (static_definitions, _modifications, unparsed_lines) = catalog_rules_text_abilities(
+            "Equipped creature has \"Whenever this creature attacks, sacrifice Ember Golem.\"",
+            "Ember Golem",
+        );
+        assert!(
+            unparsed_lines.is_empty(),
+            "line must fully parse, got unparsed: {unparsed_lines:?}"
+        );
+
+        fn find_grant_trigger(def: &StaticDefinition) -> Option<&TriggerDefinition> {
+            def.modifications.iter().find_map(|m| match m {
+                ContinuousModification::GrantTrigger { trigger } => Some(trigger.as_ref()),
+                _ => None,
+            })
+        }
+
+        let trigger = static_definitions
+            .iter()
+            .find_map(find_grant_trigger)
+            .unwrap_or_else(|| {
+                panic!(
+                    "quoted \"Whenever ...\" body must parse to a GrantTrigger, \
+                     got {static_definitions:?}"
+                )
+            });
+
+        let sacrifices_granter = trigger.execute.as_deref().is_some_and(|def| {
+            matches!(
+                *def.effect,
+                Effect::Sacrifice {
+                    target: TargetFilter::GrantingObject,
+                    ..
+                }
+            )
+        });
+        assert!(
+            sacrifices_granter,
+            "the granted trigger's sacrifice effect must target the GRANTING object \
+             (the equipment itself), got {trigger:?}"
+        );
+
+        // NOTE: check the actual `description` fields directly, NOT a
+        // `{:?}`-formatted dump of the tree — `Debug` escapes the raw private-use
+        // char to the literal text `\u{e0002}`, so searching a Debug string for
+        // the real character is always false regardless of whether scrubbing ran.
+        let placeholder = crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
+        let leaked = static_definitions.iter().any(|def| {
+            def.description
+                .as_deref()
+                .is_some_and(|d| d.contains(placeholder))
+                || def.modifications.iter().any(|m| match m {
+                    ContinuousModification::GrantTrigger { trigger } => trigger
+                        .description
+                        .as_deref()
+                        .is_some_and(|d| d.contains(placeholder)),
+                    _ => false,
+                })
+        });
+        assert!(
+            !leaked,
+            "the new scrub loops must remove the raw placeholder char from the \
+             granted trigger's description, got {static_definitions:#?}"
+        );
     }
 
     #[test]

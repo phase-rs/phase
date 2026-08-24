@@ -2212,12 +2212,12 @@ pub(crate) fn spell_cast_origin(state: &GameState, object_id: ObjectId) -> Optio
     state.objects.get(&object_id).and_then(|o| o.cast_from_zone)
 }
 
-/// CR 601.2a + CR 603.4: Look up the pre-announcement zone for a spell that
+/// CR 601.2a: Look up the pre-announcement zone for a spell that
 /// is currently mid-cast. `obj.zone` stays at the origin until `finalize_cast`
 /// performs the Hand→Stack move itself, but should the ordering ever change
 /// this fallback preserves correctness for filters like "spells you cast from
 /// exile have convoke" that must evaluate against the pre-announcement zone.
-fn pending_cast_origin_zone_for(state: &GameState, object_id: ObjectId) -> Option<Zone> {
+pub(super) fn pending_cast_origin_zone_for(state: &GameState, object_id: ObjectId) -> Option<Zone> {
     if let Some(pc) = state.waiting_for.pending_cast_ref() {
         if pc.object_id == object_id {
             return Some(pc.origin_zone);
@@ -2229,6 +2229,30 @@ fn pending_cast_origin_zone_for(state: &GameState, object_id: ObjectId) -> Optio
         }
     }
     None
+}
+
+/// CR 601.2a: The cast's origin zone as grant filters must see it — the
+/// IN-FLIGHT pending-cast record first (the current cast's own truth), the
+/// persisted origin second ([`spell_cast_origin`], which owns the stack
+/// ability-context vs. permanent-object storage split and survives
+/// `finalize_cast`), the object's current zone last. Single chain shared by
+/// the keyword-grant walkers and the alternative-cost grant, so a zone-less
+/// grant (Rooftop Storm) keeps matching a hand cast — and an origin-scoped
+/// grant its exile cast — when re-asked after finalize, for permanents and
+/// instants/sorceries alike, while a NEW cast never inherits a previous
+/// cast's stamp.
+pub(super) fn spell_cast_origin_zone(
+    state: &GameState,
+    spell_obj: &crate::game::game_object::GameObject,
+) -> Zone {
+    // The IN-FLIGHT cast's record outranks the persisted stamp: the stamp is
+    // written at finalize, so during a NEW cast it can only describe a
+    // PREVIOUS cast of this object — a graveyard recast must not inherit a
+    // stale hand origin. Post-finalize the pending record is gone and the
+    // persisted authority answers.
+    pending_cast_origin_zone_for(state, spell_obj.id)
+        .or_else(|| spell_cast_origin(state, spell_obj.id))
+        .unwrap_or(spell_obj.zone)
 }
 
 /// Collect the keywords granted to `object_id` by `CastWithKeyword` statics
@@ -2247,14 +2271,8 @@ fn granted_spell_keywords_for(
         return Vec::new();
     };
 
-    // CR 601.2a: Prefer cast_from_zone (stamped during finalize_cast and persists
-    // through SpellCast event) over pending_cast_origin_zone_for (transient and
-    // cleared after finalize_cast). This ensures origin zone is available when
-    // triggers are processed for filters like "InZone { zone: Hand }".
-    let origin_zone = spell_obj
-        .cast_from_zone
-        .or_else(|| pending_cast_origin_zone_for(state, object_id))
-        .unwrap_or(spell_obj.zone);
+    // CR 601.2a: single origin-zone chain (see `spell_cast_origin_zone`).
+    let origin_zone = spell_cast_origin_zone(state, spell_obj);
 
     let mut keywords = Vec::new();
     // CR 702.26b + CR 604.1: Functioning gate owned by
@@ -2324,10 +2342,8 @@ fn granted_spell_keyword_instances_for(
         return Vec::new();
     };
 
-    let origin_zone = spell_obj
-        .cast_from_zone
-        .or_else(|| pending_cast_origin_zone_for(state, object_id))
-        .unwrap_or(spell_obj.zone);
+    // CR 601.2a: single origin-zone chain (see `spell_cast_origin_zone`).
+    let origin_zone = spell_cast_origin_zone(state, spell_obj);
 
     let mut keywords = Vec::new();
     for (source_obj, def) in super::functioning_abilities::game_active_statics(state) {
@@ -2487,7 +2503,10 @@ pub(super) fn granted_spell_alternative_cost_for(
     fused: bool,
 ) -> Option<GrantedSpellAlternativeCost> {
     let spell_obj = state.objects.get(&object_id)?;
-    let origin_zone = pending_cast_origin_zone_for(state, object_id).unwrap_or(spell_obj.zone);
+    // CR 601.2a: same origin chain as the keyword-grant walkers, so a re-ask
+    // after finalize (cast_from_zone stamped, pending cleared) still sees the
+    // true origin instead of Zone::Stack.
+    let origin_zone = spell_cast_origin_zone(state, spell_obj);
 
     // CR 604.1: Functioning gate owned by `game_active_statics`.
     for (source_obj, def) in super::functioning_abilities::game_active_statics(state) {
@@ -2510,18 +2529,39 @@ pub(super) fn granted_spell_alternative_cost_for(
             continue;
         }
 
-        let matches = def.affected.as_ref().is_none_or(|filter| {
-            super::filter::spell_object_matches_filter_from_state_for(
-                state,
-                spell_obj,
-                origin_zone,
-                caster,
-                filter,
-                source_obj.id,
-                &state.all_creature_types,
-                fused,
-            )
-        });
+        // CR 118.9 + CR 601.2a (#7575): the offer's default reach is hand
+        // casts. For a NON-hand origin the match must come THROUGH a branch
+        // that itself constrains the cast's origin zone (Warped Space's "a
+        // spell you cast from exile") — a mixed `Or` whose unscoped branch
+        // matched must not unlock the non-hand reach, and a filterless grant
+        // ("spells you cast") is zone-less by definition. Zone-less grants
+        // (Rooftop Storm class) therefore keep their hand-only reach.
+        let matches = if origin_zone == Zone::Hand {
+            def.affected.as_ref().is_none_or(|filter| {
+                super::filter::spell_object_matches_filter_from_state_for(
+                    state,
+                    spell_obj,
+                    origin_zone,
+                    caster,
+                    filter,
+                    source_obj.id,
+                    &state.all_creature_types,
+                    fused,
+                )
+            })
+        } else {
+            def.affected.as_ref().is_some_and(|filter| {
+                matches_via_origin_scoped_branch(
+                    state,
+                    spell_obj,
+                    origin_zone,
+                    caster,
+                    filter,
+                    source_obj.id,
+                    fused,
+                )
+            })
+        };
         if matches {
             return Some(GrantedSpellAlternativeCost {
                 // CR 107.3c + CR 118.9: A static's alternative cost can bind X
@@ -2538,6 +2578,149 @@ pub(super) fn granted_spell_alternative_cost_for(
     }
 
     None
+}
+
+/// CR 118.9 + CR 601.2a: Whether this cast matches the grant's `affected`
+/// filter THROUGH a branch that itself constrains the cast's ORIGIN zone
+/// (`InZone`/`InAnyZone` — Warped Space's "a spell you cast from exile").
+///
+/// This is a per-cast question, not a whole-filter presence bit:
+/// `Or(hand-scoped, Creature)` matched by an exile Creature through the
+/// unscoped branch is NOT an origin-scoped match, so the non-hand
+/// alternative-cost reach stays closed for that cast. `Not` is an exclusion,
+/// never a scope.
+///
+/// Exhaustive by design — no wildcard arm: a future filter variant that can
+/// nest a zone constraint must be classified here explicitly instead of
+/// silently falling into the hand-only default.
+fn matches_via_origin_scoped_branch(
+    state: &GameState,
+    spell_obj: &GameObject,
+    origin_zone: Zone,
+    caster: PlayerId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    fused: bool,
+) -> bool {
+    let full_match = |f: &TargetFilter| {
+        super::filter::spell_object_matches_filter_from_state_for(
+            state,
+            spell_obj,
+            origin_zone,
+            caster,
+            f,
+            source_id,
+            &state.all_creature_types,
+            fused,
+        )
+    };
+    match filter {
+        TargetFilter::Typed(typed) => {
+            typed.properties.iter().any(|prop| {
+                matches!(
+                    prop,
+                    crate::types::ability::FilterProp::InZone { .. }
+                        | crate::types::ability::FilterProp::InAnyZone { .. }
+                )
+            }) && full_match(filter)
+        }
+        // A disjunction is origin-scoped only through a branch that is.
+        TargetFilter::Or { filters } => filters.iter().any(|f| {
+            matches_via_origin_scoped_branch(
+                state,
+                spell_obj,
+                origin_zone,
+                caster,
+                f,
+                source_id,
+                fused,
+            )
+        }),
+        // A conjunction must match as a whole AND carry some leg that is an
+        // origin-scoped match in its own right (recursing keeps a mixed `Or`
+        // nested under `And` honest too).
+        TargetFilter::And { filters } => {
+            full_match(filter)
+                && filters.iter().any(|f| {
+                    matches_via_origin_scoped_branch(
+                        state,
+                        spell_obj,
+                        origin_zone,
+                        caster,
+                        f,
+                        source_id,
+                        fused,
+                    )
+                })
+        }
+        TargetFilter::TrackedSetFiltered { filter: inner, .. } => {
+            full_match(filter)
+                && matches_via_origin_scoped_branch(
+                    state,
+                    spell_obj,
+                    origin_zone,
+                    caster,
+                    inner,
+                    source_id,
+                    fused,
+                )
+        }
+        // A negated zone prop is an exclusion, not an origin scope.
+        TargetFilter::Not { .. } => false,
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        // CR 118.9: a player-identity filter selects PLAYERS, so it can never
+        // carry a constraint on a spell's ORIGIN ZONE — same as every other
+        // player variant in this group.
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
 }
 
 pub(crate) fn effective_spell_keywords(

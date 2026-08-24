@@ -454,6 +454,7 @@ fn advance_acceptance(
         source_id,
         description,
         may_trigger_key: None,
+        same_card_may_trigger_choice_available: false,
     };
     Ok(())
 }

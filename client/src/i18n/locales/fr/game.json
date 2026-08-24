@@ -460,8 +460,9 @@
     "cityBlessingTooltip": "Bénédiction de la cité — contrôle dix permanents ou plus (Ascension)",
     "enduringStory": "Histoire durable",
     "enduringStoryTooltip": "Histoire durable — obtenue en contrôlant un permanent avec Storied et au moins trois artefacts, permanents légendaires et/ou sagas ; dure pour le reste de la partie",
-    "dungeonAriaLabel": "Aventure dans {{name}}, salle {{room}}",
-    "dungeonTooltip": "Aventure dans {{name}} — salle {{room}}",
+    "dungeonAriaLabel": "Aventure dans {{name}}, {{roomName}}, salle {{room}} sur {{total}}",
+    "dungeonRoomTooltip": "{{roomName}} — salle {{room}} sur {{total}}",
+    "dungeonTooltip": "Aventure dans {{name}}",
     "poisonAriaLabel_one": "{{count}} marqueur poison",
     "poisonAriaLabel_other": "{{count}} marqueurs poison",
     "poisonTooltip": "Marqueurs poison : {{count}}\nUn joueur avec dix marqueurs poison ou plus perd la partie.",
@@ -788,6 +789,7 @@
     "nounPlaneswalker": "planeswalker",
     "nounTargetPermanent": "permanent ciblé",
     "nounTarget": "cible",
+    "nounOrPlayer": "{{noun}} ou joueur",
     "confirmTap": "Confirmer l'engagement ({{selected}}/{{count}})",
     "keepCurrentTargets": "Conserver les cibles actuelles",
     "skip": "Ignorer",
@@ -2126,7 +2128,8 @@
     "title": "{{name}} - Effet facultatif",
     "yes": "Oui",
     "no": "Non",
-    "dontAskAgain": "Ne plus demander pendant cette partie"
+    "dontAskAgain": "Ne plus demander pendant cette partie",
+    "dontAskAgainForSameCard": "Appliquer à chaque exemplaire de cette carte"
   },
   "topOrBottom": {
     "cardFallback": "Card",

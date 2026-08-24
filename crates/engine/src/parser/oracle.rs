@@ -7277,19 +7277,84 @@ fn scrub_trigger_descriptions(trig: &mut TriggerDefinition) {
     }
 }
 
-fn scrub_static_descriptions(st: &mut StaticDefinition) {
+pub(crate) fn scrub_static_descriptions(st: &mut StaticDefinition) {
     scrub_description(&mut st.description);
     for modification in st.modifications.iter_mut() {
-        match modification {
-            ContinuousModification::GrantAbility { definition } => {
-                scrub_ability_descriptions(definition)
-            }
-            ContinuousModification::GrantTrigger { trigger } => scrub_trigger_descriptions(trigger),
-            ContinuousModification::GrantStaticAbility { definition } => {
-                scrub_static_descriptions(definition)
-            }
-            _ => {}
+        scrub_modification_descriptions(modification);
+    }
+}
+
+pub(crate) fn scrub_modification_descriptions(modification: &mut ContinuousModification) {
+    match modification {
+        ContinuousModification::GrantAbility { definition } => {
+            scrub_ability_descriptions(definition)
         }
+        ContinuousModification::GrantTrigger { trigger } => scrub_trigger_descriptions(trigger),
+        ContinuousModification::GrantStaticAbility { definition } => {
+            scrub_static_descriptions(definition)
+        }
+        ContinuousModification::GrantReplacement { replacement } => {
+            scrub_replacement_descriptions(replacement)
+        }
+        // Remaining modifications carry no nested ability/trigger/static/
+        // replacement description to scrub — mirrors the exhaustive-match
+        // model in `ability_visit.rs`'s `visit_continuous_mod_scoped`, minus
+        // that walker's `CopyValues` recursion (it copies P/T/color/type
+        // values from a source, not a description-bearing structure, so it
+        // has nothing for this scrubber to reach).
+        ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+        | ContinuousModification::CopyValues { .. }
+        | ContinuousModification::CopyChosen
+        | ContinuousModification::SetName { .. }
+        | ContinuousModification::SetTextName { .. }
+        | ContinuousModification::AddPower { .. }
+        | ContinuousModification::AddToughness { .. }
+        | ContinuousModification::SetPower { .. }
+        | ContinuousModification::SetToughness { .. }
+        | ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
+        | ContinuousModification::RemoveKeyword { .. }
+        | ContinuousModification::RemoveAllAbilities
+        | ContinuousModification::AddType { .. }
+        | ContinuousModification::RemoveType { .. }
+        | ContinuousModification::AddSubtype { .. }
+        | ContinuousModification::RemoveSubtype { .. }
+        | ContinuousModification::SetCardTypes { .. }
+        | ContinuousModification::RemoveAllSubtypes { .. }
+        | ContinuousModification::SetDynamicPower { .. }
+        | ContinuousModification::SetDynamicToughness { .. }
+        | ContinuousModification::SetPowerDynamic { .. }
+        | ContinuousModification::SetToughnessDynamic { .. }
+        | ContinuousModification::AddDynamicPower { .. }
+        | ContinuousModification::AddDynamicToughness { .. }
+        | ContinuousModification::AddDynamicKeyword { .. }
+        | ContinuousModification::AddAllCreatureTypes
+        | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddChosenSubtype { .. }
+        | ContinuousModification::AddChosenColor { .. }
+        | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::AddChosenKeyword
+        | ContinuousModification::SetColor { .. }
+        | ContinuousModification::AddColor { .. }
+        | ContinuousModification::AddStaticMode { .. }
+        | ContinuousModification::SwitchPowerToughness
+        | ContinuousModification::AssignDamageFromToughness
+        | ContinuousModification::AssignDamageAsThoughUnblocked
+        | ContinuousModification::AssignNoCombatDamage
+        | ContinuousModification::ChangeController
+        | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::SetChosenName
+        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource
+        | ContinuousModification::AddSupertype { .. }
+        | ContinuousModification::RemoveSupertype { .. }
+        | ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::SetStartingLoyalty { .. }
+        | ContinuousModification::RemoveManaCost => {}
     }
 }
 

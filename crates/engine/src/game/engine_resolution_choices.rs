@@ -6525,7 +6525,7 @@ pub(super) fn handle_resolution_choice(
             ResolutionChoiceOutcome::WaitingFor(waiting_for)
         }
         (WaitingFor::ChooseDungeon { player, options }, GameAction::ChooseDungeon { dungeon }) => {
-            if !options.contains(&dungeon) {
+            if !options.iter().any(|o| o.dungeon == dungeon) {
                 return Err(EngineError::InvalidAction(
                     "Invalid dungeon choice".to_string(),
                 ));
@@ -6564,7 +6564,7 @@ pub(super) fn handle_resolution_choice(
             },
             GameAction::ChooseDungeonRoom { room_index },
         ) => {
-            if !options.contains(&room_index) {
+            if !options.iter().any(|o| o.index == room_index) {
                 return Err(EngineError::InvalidAction(
                     "Invalid dungeon room choice".to_string(),
                 ));

@@ -460,8 +460,9 @@
     "cityBlessingTooltip": "Błogosławieństwo miasta — kontroluje dziesięć lub więcej trwałych (Ascend)",
     "enduringStory": "Trwała historia",
     "enduringStoryTooltip": "Trwała historia — zdobyta za kontrolowanie permanenta ze Storied i co najmniej trzech artefaktów, legendarnych permanentów i/lub Sag; trwa do końca gry",
-    "dungeonAriaLabel": "Wyprawa w {{name}}, pokój {{room}}",
-    "dungeonTooltip": "Wyprawa w {{name}} — pokój {{room}}",
+    "dungeonAriaLabel": "Wyprawa w {{name}}, {{roomName}}, pokój {{room}} z {{total}}",
+    "dungeonRoomTooltip": "{{roomName}} — pokój {{room}} z {{total}}",
+    "dungeonTooltip": "Wyprawa w {{name}}",
     "poisonAriaLabel_one": "{{count}} znacznik trucizny",
     "poisonAriaLabel_other": "{{count}} znaczników trucizny",
     "poisonTooltip": "Znaczniki trucizny: {{count}}\nGracz z co najmniej dziesięcioma znacznikami trucizny przegrywa grę.",
@@ -790,6 +791,7 @@
     "nounPlaneswalker": "wędrowiec",
     "nounTargetPermanent": "docelowy trwały",
     "nounTarget": "cel",
+    "nounOrPlayer": "{{noun}} lub gracz",
     "confirmTap": "Potwierdź obrócenie ({{selected}}/{{count}})",
     "keepCurrentTargets": "Zachowaj bieżące cele",
     "skip": "Pomiń",
@@ -2126,7 +2128,8 @@
     "title": "{{name}} - Efekt opcjonalny",
     "yes": "Tak",
     "no": "Nie",
-    "dontAskAgain": "Nie pytaj ponownie w tej grze"
+    "dontAskAgain": "Nie pytaj ponownie w tej grze",
+    "dontAskAgainForSameCard": "Zastosuj do każdej kopii tej karty"
   },
   "topOrBottom": {
     "cardFallback": "Karta",

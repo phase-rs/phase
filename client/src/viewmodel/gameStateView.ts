@@ -61,6 +61,19 @@ export function isOneOnOne(gameState: GameState | null): boolean {
   return getSeatCount(gameState) === 2;
 }
 
+/**
+ * Resolves the display layout without mutating the persisted raw preference.
+ * Split view needs at least three seats and a desktop-width viewport; a
+ * focused preference is always honored.
+ */
+export function resolveMultiplayerBoardLayout(
+  layout: MultiplayerBoardLayout,
+  seatCount: number,
+  isMobile: boolean,
+): MultiplayerBoardLayout {
+  return layout === "split" && seatCount > 2 && !isMobile ? "split" : "focused";
+}
+
 export function isSplitBoardActive(
   layout: MultiplayerBoardLayout,
   seatCount: number,

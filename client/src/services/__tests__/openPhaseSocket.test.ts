@@ -191,7 +191,7 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("holds Full servers to an exact match even when they advertise a lobby version", async () => {
+  it("holds the full-game surface to an exact match even when the server advertises a lobby version", async () => {
     // A Full server runs the engine; GameState payloads are not compatible
     // across a bump regardless of what it says about the lobby surface.
     const promise = openPhaseSocket("ws://test");
@@ -205,6 +205,83 @@ describe("openPhaseSocket", () => {
     );
 
     await expect(promise).rejects.toMatchObject({ kind: "protocol_mismatch" });
+  });
+
+  // The self-hosted case: a `Full` server pinned to a released image sits behind
+  // a client built from main. Its lobby surface is current, so browsing must
+  // work; only PLAYING on it is refused, by the exact-match test above.
+  it("reaches a Full server's lobby surface when its full-game protocol is stale", async () => {
+    const staleHello = helloFrame({
+      protocol_version: PROTOCOL_VERSION - 2,
+      mode: "Full",
+      lobby_protocol_version: LOBBY_PROTOCOL_VERSION,
+    });
+
+    // Same server, same frame, default surface: still refused. Without this the
+    // assertion below could pass on a server this client would have accepted
+    // anyway, proving nothing about the surface parameter.
+    const fullSurface = openPhaseSocket("ws://test");
+    MockWebSocket.instances[0].deliverMessage(staleHello);
+    await expect(fullSurface).rejects.toMatchObject({ kind: "protocol_mismatch" });
+
+    const lobbySurface = openPhaseSocket("ws://test", { surface: "lobby" });
+    const ws = MockWebSocket.instances[1];
+    ws.deliverMessage(staleHello);
+    const socket = await lobbySurface;
+
+    expect(socket.serverInfo.protocolVersion).toBe(PROTOCOL_VERSION - 2);
+    // The echo is what an already-deployed server gates on: it has no surface
+    // field to branch on, so a hello carrying this client's own newer number
+    // would be rejected outright.
+    expect(ws.send).toHaveBeenCalledWith(
+      expect.stringContaining(`"protocol_version":${PROTOCOL_VERSION - 2}`),
+    );
+    expect(ws.send).not.toHaveBeenCalledWith(
+      expect.stringContaining(`"protocol_version":${PROTOCOL_VERSION}`),
+    );
+    // ...while still declaring the surface version a lobby-aware server gates on.
+    expect(ws.send).toHaveBeenCalledWith(
+      expect.stringContaining(`"lobby_protocol_version":${LOBBY_PROTOCOL_VERSION}`),
+    );
+  });
+
+  it("still refuses a lobby-surface socket below the lobby floor", async () => {
+    // The surface parameter widens the window it is measured against; it does
+    // not waive the measurement.
+    const promise = openPhaseSocket("ws://test", { surface: "lobby" });
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(
+      helloFrame({
+        protocol_version: PROTOCOL_VERSION,
+        mode: "Full",
+        lobby_protocol_version: LOBBY_PROTOCOL_VERSION - 1,
+      }),
+    );
+
+    await expect(promise).rejects.toMatchObject({ kind: "protocol_mismatch" });
+  });
+
+  // LEGACY PATH on the lobby surface: a server advertising no lobby version
+  // says nothing about its lobby frames, so the derived one-version window on
+  // `protocol_version` is all there is to go on.
+  it("falls back to the derived window on the lobby surface when no lobby version is advertised", async () => {
+    const withinWindow = openPhaseSocket("ws://test", { surface: "lobby" });
+    MockWebSocket.instances[0].deliverMessage(
+      helloFrame({
+        protocol_version: LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL,
+        mode: "Full",
+      }),
+    );
+    await expect(withinWindow).resolves.toBeDefined();
+
+    const belowWindow = openPhaseSocket("ws://test", { surface: "lobby" });
+    MockWebSocket.instances[1].deliverMessage(
+      helloFrame({
+        protocol_version: LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL - 1,
+        mode: "Full",
+      }),
+    );
+    await expect(belowWindow).rejects.toMatchObject({ kind: "protocol_mismatch" });
   });
 
   it("always declares its own lobby protocol version in ClientHello", async () => {
