@@ -505,6 +505,20 @@ LegalityRules {
 // stays machine-readable for whoever eventually builds Open item 2.
 
 // RESOLVED — round 11, maintainer review + direct follow-up discussion.
+// **PARTIALLY SUPERSEDED — round 12 (see the `printing_fidelity` note near
+// the `CustomFormatDef` struct later in this section for the current
+// resolution).** Round 11's registration-gate conclusion below (no new
+// blocking axis, `IMPLEMENTED_LEGACY_AXES`/mana burn only) still holds — no
+// engine-owned printing predicate is being built, per the maintainer's own
+// second offered option, exercised in round 12. What's retracted is the
+// PREMISE that `legal_sets`-only enforcement is therefore not an
+// approximation of anything: the maintainer's later review of this exact
+// resolution correctly rejected that framing (an existing format with no
+// documented printing requirement, Premodern included, isn't a
+// rules-correctness argument for a new preset whose OWN source rule is
+// stricter). Read this block for its still-accurate research on what the
+// engine does and doesn't check; read round 12's note for what the
+// proposal actually resolves to disclose about that gap.
 // SUPERSEDES round 10's resolution below (retracted, not layered on top —
 // round 11's review correctly rejected it): round 10 tried to answer
 // CONTEXT.md open item #2 by pairing "legal_sets is the whole legality
@@ -805,8 +819,79 @@ CustomFormatDef {
                                         // for `legal_sets` (§1) and
                                         // `range_of_influence` — not a new
                                         // convention.
+    printing_fidelity: PrintingFidelity,    // NEW — round 12, maintainer
+                                        // review (repeated rejection of the
+                                        // round-11 "same model as Premodern"
+                                        // framing — see §1's round-12 note
+                                        // below for the full argument).
+                                        // Required on every `CustomFormatDef`,
+                                        // no default: whichever variant
+                                        // applies must be an explicit
+                                        // authoring decision, exactly like
+                                        // `reprint_policy` above.
+}
+
+enum PrintingFidelity {
+    /// This preset's `reprint_policy` is `None` — no source paper-format
+    /// reprint intent is declared (every Axis A lobby save; `swedish_old_school()`
+    /// until CONTEXT.md Open item 6 resolves its own `reprint_policy` value).
+    /// There is nothing to approximate because nothing is being claimed.
+    NotApplicable,
+    /// This preset's `reprint_policy` is `Some(_)` — a real, sourced paper-format
+    /// reprint intent IS declared, but the engine enforces it only at set-code
+    /// membership (`legal_sets`, §3) — the same granularity every format in this
+    /// engine, built-in or custom, has ever enforced (round 11's finding, still
+    /// true). It does NOT enforce printing/frame/border/foil, which some source
+    /// rulesets (Old School 93-94/95 among them, RESEARCH.md §1) state as a real
+    /// requirement. `description` MUST disclose this in player-facing text (§6's
+    /// preset-integrity test enforces the pairing, not just the field's presence).
+    SetCodeApproximation,
 }
 ```
+
+**Why this field exists — round 12, maintainer review (supersedes round 11's
+framing below, which is kept for its still-accurate research, not as the
+resolution):** round 11 argued that `legal_sets` membership isn't an
+approximation of Old School 93-94/95's legality at all, because no format in
+this engine — Premodern included — has ever enforced more than set-code
+membership. The maintainer's review of that exact resolution correctly
+rejected it on a second look: **an existing format with no documented
+printing-level requirement is not a rules-correctness argument for a NEW
+preset whose OWN documented source rule is stricter.** `Premodern` never
+claimed frame/art fidelity in the first place, so it enforcing only set codes
+is not an approximation of anything — nothing is missing relative to its own
+source. Old School 93-94/95's own cited source (RESEARCH.md §1) explicitly
+requires non-foil reprints with original frame and art; `legal_sets`
+membership genuinely falls short of that specific, stated requirement, and
+round 11's "no format does more" observation, while accurate, doesn't change
+what this format's own source rule says.
+
+**The product decision (round 12, maintainer's second offered option, taken
+deliberately over the first):** do not build engine-owned printing/frame
+enforcement — CONTEXT.md's Open item 2 survey already scoped that as a real,
+separate, moderate-lift feature (the engine and frontend printing systems are
+disconnected today; wiring them is a genuine, general, future project, not
+specific to Old School). Instead, accept the set-code-only approximation
+explicitly, and require every preset that makes it to disclose it in its own
+player-facing `description` rather than only in a developer-facing doc
+comment. The reasoning this proposal rests that acceptance on, distinct from
+round 11's now-superseded analogy: **in a digital-only client, a printing's
+frame, border, and foil status have no gameplay consequence at all** — a
+card with identical Oracle text is identical for every rules purpose the
+engine cares about, regardless of which physical printing it "represents."
+The frame/art requirement exists in the paper community's own ruleset for a
+reason that has no digital equivalent — provenance and anti-counterfeiting
+at a physical table — not because the alternate-frame printing plays
+differently. Declining to model a purely cosmetic, paper-specific concern is
+a legitimate product scope decision; silently presenting the approximation
+as full fidelity is not, which is why `printing_fidelity` and its
+disclosure requirement exist as a typed, tested construction-time
+requirement rather than a comment. This directly satisfies the maintainer's
+second offered resolution ("explicitly scope the presets as an oracle-card/
+set-code approximation") without the first (build the predicate) — the
+`PrintingFidelity::SetCodeApproximation` label on every affected preset IS
+that explicit scoping, made structural rather than a documented convention
+this proposal's own §7 principle would otherwise reject.
 
 The registry (`custom_format_registry() -> Vec<CustomFormatDef>`) hands the
 frontend labels/short-labels/descriptions just like `FormatMetadata` already
@@ -814,7 +899,11 @@ does for built-in formats — unchanged from the original design. What changed
 is only where `reprint_policy` sits: previously a field on `LegalityRules`
 (implying it travels with and is enforced by the resolved ruleset); now a
 field on `CustomFormatDef` alongside the other purely-descriptive fields,
-never serialized into `FormatConfig.custom_rules` at all.
+never serialized into `FormatConfig.custom_rules` at all. `printing_fidelity`
+sits beside it for the same reason (§1's round-12 note above): both are
+authoring-time, player-facing disclosures about what a preset's `rules`
+payload does and does not enforce, never part of the wire-traveling,
+engine-consumed struct.
 
 ## 2. Parameterizing the formats as data (not N blocks)
 
@@ -848,7 +937,11 @@ not appear as a selectable format until that item resolves:
   a value pending confirmation, but the genuinely correct value until
   CONTEXT.md Open item 6 resolves (there is no confirmed authored intent to
   declare yet; `None` says exactly that, distinctly from a lobby save's
-  permanent `None`, which has no intent to declare, period). Ante-card
+  permanent `None`, which has no intent to declare, period). `printing_fidelity`
+  (NEW — round 12): `NotApplicable`, following directly from `reprint_policy:
+  None` per §1's pairing rule — revisit alongside Open item 6, since resolving
+  that item to a real `Some(_)` value also flips this to
+  `SetCodeApproximation` with a matching `description` update. Ante-card
   handling remains open per Open item 5 separately; do not encode either
   without resolving its own item first.
 
@@ -866,15 +959,29 @@ mirroring how `FormatConfig::pioneer()` spreads `..Self::standard()`:
   burn as its only legacy exception). `reprint_policy` (on `CustomFormatDef`):
   `Some(AllowSpecialReprintSets)` — RESEARCH.md's §1 subsection for this
   format explicitly includes CE/ICE as legal reprint sources within
-  `legal_sets`.
-- `old_school_95()` — `let mut d = old_school_93_94(); d.legal_sets.extend([4ED,
+  `legal_sets`. `printing_fidelity` (NEW — round 12): `SetCodeApproximation`
+  — this format's source rule requires non-foil original-frame/art reprints
+  (RESEARCH.md §1) and the engine enforces only set-code membership (§1's
+  round-12 note); `description` MUST state this (e.g. "Legality is approximated
+  at the set-code level; original-printing frame/foil is not enforced.").
+- `old_school_95()` — `let mut d = old_school_93_94(); d.legal_sets.get_or_insert_with(Vec::new).extend([4ED,
   ICE, CHR, REN, HML]); d.restricted.extend([Demonic Consultation, Mana Crypt]);
-  d.banned.extend([Amulet of Quoz, Timmerian Fiends]; legacy unchanged`.
+  d.banned.extend([Amulet of Quoz, Timmerian Fiends]; legacy unchanged`. **Fixed
+  this round (maintainer review, CodeRabbit finding): `legal_sets` is
+  `Option<Vec<SetCode>>` (§1), not a bare `Vec` — `.extend()` cannot be called
+  on it directly. `get_or_insert_with(Vec::new)` extends the base's `Some(...)`
+  vector in place (its only legal state per `old_school_93_94()`'s own
+  construction — a restricted-pool preset never leaves this `None`) while
+  still being correct if a future refactor ever changed that invariant, rather
+  than assuming it silently.** `printing_fidelity`: inherited `SetCodeApproximation`
+  from the base `d` — same source requirement, same enforcement gap.
 - `middle_school()` — `rules`: sets = Fourth Edition..Scourge; restricted =
   []; banned = [25 names]; legacy = `{ mana_burn: ManaBurnPolicy::Obsolete,
   damage_timing: CombatDamageTiming::OnStack, wish_scope:
   WishOutsideGameScope::PreM10ReachesExile }`. `reprint_policy` (on the
-  `CustomFormatDef`, not `rules` — round 6): `Some(AllowAnyPrinting)`. **Per the
+  `CustomFormatDef`, not `rules` — round 6): `Some(AllowAnyPrinting)`.
+  `printing_fidelity` (NEW — round 12): `SetCodeApproximation`, same
+  disclosure requirement as Old School above. **Per the
   preset-readiness gate (§7, tightened this round): this preset may not be
   registered until `CombatDamageTiming::OnStack` (§4/§6, LARGE) is fully
   implemented — no partial/caveated exposure.**
@@ -884,7 +991,9 @@ mirroring how `FormatConfig::pioneer()` spreads `..Self::standard()`:
   `{ mana_burn: ManaBurnPolicy::Obsolete, damage_timing:
   CombatDamageTiming::OnStack, wish_scope:
   WishOutsideGameScope::PreM10ReachesExile }`. `reprint_policy` (on the
-  `CustomFormatDef`): `Some(OriginalPrintingsOnly)`. **Same registration block
+  `CustomFormatDef`): `Some(OriginalPrintingsOnly)`. `printing_fidelity`
+  (NEW — round 12): `SetCodeApproximation`, same disclosure requirement.
+  **Same registration block
   as Middle School** — not selectable until `CombatDamageTiming::OnStack` lands.
 
 Set codes must be verified against the engine's `set_catalog` (MTGJSON codes)
@@ -1162,6 +1271,22 @@ legality logic on the client.
   produces `Some(_)` with its own specific documented variant — five
   separate assertions, not one shared "is `Some`" check, so a copy-paste
   preset that forgets to set its own value is caught.
+- **`printing_fidelity` is paired with `reprint_policy`, and disclosed in
+  `description`, for every registered preset** (new — maintainer review
+  round 12, §1's new field): for every `CustomFormatDef` `custom_format_registry()`
+  would return, assert `def.reprint_policy.is_some() == matches!(def.printing_fidelity,
+  PrintingFidelity::SetCodeApproximation)` — the two fields must never
+  disagree (a `Some(_)` reprint intent with `NotApplicable` fidelity would
+  silently claim full fidelity; a `None` reprint intent with
+  `SetCodeApproximation` would disclose a limitation for a format that never
+  claimed the stricter requirement in the first place). For every preset
+  whose `printing_fidelity` is `SetCodeApproximation` (today: `old_school_93_94`,
+  `old_school_95`, `middle_school`, `classic_magic`), additionally assert
+  `description` contains a substring disclosing the set-code-only
+  approximation — not merely that the enum variant is set, so a future
+  preset can't satisfy the pairing check while leaving the player-facing
+  text silent about it. This is the technical mechanism the round-12 note
+  in §1 promises — the disclosure is enforced, not a documented convention.
 - Set-membership legality: assert cards from in-pool and out-of-pool sets pass /
   fail — for arbitrary set lists, not just the four presets.
 - **`legal_sets: None` accepts every card** (new — maintainer review round 2,
@@ -1409,6 +1534,20 @@ now) belongs on `CustomFormatDef` instead, outside this gate's scope by
 construction — round 6's actual lesson: when a field doesn't cleanly belong
 in the gate's coverage, that's a signal it may be in the wrong struct, not
 just missing from the gate.
+
+**A second, separate construction-time gate — round 12, `CustomFormatDef`
+metadata, not `CustomFormatRules`:** `custom_format_registry()` additionally
+rejects (build-time or startup-check, same choice as above) any def where
+`reprint_policy.is_some() != matches!(printing_fidelity,
+PrintingFidelity::SetCodeApproximation)`, and any `SetCodeApproximation` def
+whose `description` doesn't disclose the limitation (§6's test is this same
+check, run offline). This is deliberately a DIFFERENT gate from
+`IMPLEMENTED_LEGACY_AXES` — it does not block registration on unimplemented
+engine work (there is none to wait for; §1's round-12 note explains why no
+printing predicate is being built), it blocks on an authoring omission
+(a preset that declares reprint intent but forgets to disclose the known
+approximation, or vice versa). Both gates independently apply to the same
+four EC presets; neither substitutes for the other.
 - `swedish_old_school()` (phase 1) is BLOCKED from registration by
   CONTEXT.md Open item 6 alone — the reprint-policy metadata VALUE needs
   confirming against the primary source before shipping, so a future

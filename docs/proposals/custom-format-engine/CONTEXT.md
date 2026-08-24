@@ -848,6 +848,46 @@ its resolution directly:
      worth pursuing, but as their own separate, general proposals — not as
      part of resolving this item. See PLAN.md §1's "RESOLVED — round 11"
      note. This is no longer an open product decision.
+   - **Correction — round 12: it WAS still an open product decision, and
+     round 11's premise didn't survive the maintainer's follow-up review of
+     this exact resolution.** The maintainer correctly rejected "no format
+     checks printing/frame/foil" as sufficient justification here: Premodern
+     never claimed a printing-level requirement in the first place, so it
+     stopping at set-code membership isn't an approximation of anything.
+     Old School 93-94/95's own cited source (RESEARCH.md §1) explicitly DOES
+     require non-foil original-frame/art reprints — `legal_sets` genuinely
+     falls short of that specific stated rule, regardless of what every
+     other format does or doesn't check.
+   - **Final resolution, round 12 (a real product decision, made
+     deliberately rather than resolved away by precedent):** decline to
+     build engine-owned printing/frame enforcement — confirmed above that
+     the engine's and frontend's printing systems are disconnected and
+     wiring them is a genuine, moderate-lift, general future feature, not
+     an old-school-specific one. Instead, accept the set-code-only
+     approximation on the grounds that it's genuinely acceptable for THIS
+     engine, not merely convenient: in a digital-only client, a printing's
+     frame/border/foil status has zero gameplay consequence — two printings
+     with identical Oracle text are identical for every rules purpose the
+     engine cares about. The paper community's frame/art requirement serves
+     an anti-counterfeiting/provenance function specific to a physical
+     table, which has no digital equivalent. Declining to model that purely
+     cosmetic, paper-specific concern is a legitimate scope decision — but
+     presenting the approximation as full fidelity would not be, which is
+     why this is disclosed structurally rather than left as a rejected
+     framing repeated with different words: `CustomFormatDef` gains a
+     `printing_fidelity: PrintingFidelity` field (new enum:
+     `NotApplicable` / `SetCodeApproximation`), required and paired with
+     `reprint_policy` at construction time (enforced by a registry gate and
+     a test, not a doc comment — see PLAN.md §1's "round 12" note near the
+     `CustomFormatDef` struct, §6's new test, and §7's second gate). Every
+     preset with `reprint_policy: Some(_)` — the four EC formats — must set
+     `printing_fidelity: SetCodeApproximation` and disclose the limitation
+     in its player-facing `description`. This is the maintainer's own
+     second offered resolution ("explicitly scope the presets as an
+     oracle-card/set-code approximation"), made structural rather than
+     documentary, and it is now genuinely closed — not by analogy to what
+     other formats don't check, but by disclosing what this format's own
+     stricter rule isn't getting.
 3. **Classic Magic B&R cadence.** EC updates Classic's banlist twice yearly
    (Jan 1 / Jul 1). Bundled-preset data is version-controlled, so updates are
    ordinary edits — but whether we want a dated/versioned banlist history is
