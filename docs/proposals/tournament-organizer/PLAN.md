@@ -159,18 +159,83 @@ impl From<MatchArity> for u8 {
 /// work" for why this is NOT a field of the engine crate's
 /// `CustomFormatDef`/`LegacyRuleSet` (phase 58).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawScoringPolicy", into = "RawScoringPolicy")]
 pub struct ScoringPolicy {
+    win_points: u8,  // REVISED, maintainer review: private — see `new()`
+    draw_points: u8, // below. `ScoringPolicy` is organizer-overridable at
+    loss_points: u8, // `CreateTournament` (this doc's own §1 text, above),
+                     // exactly like `MatchArity` — it needed the identical
+                     // validated-construction treatment `MatchArity` got in
+                     // an earlier round, not a narrower exemption.
+}
+
+/// Plain deserialization target for the `#[serde(try_from = ...)]`
+/// boundary — same pattern `MatchArity` uses via `try_from = "u8"`,
+/// generalized to a 3-field struct instead of a single scalar.
+#[derive(Deserialize)]
+pub struct RawScoringPolicy {
     pub win_points: u8,
     pub draw_points: u8,
     pub loss_points: u8,
 }
 
 impl ScoringPolicy {
+    /// NEW, maintainer review — validated construction. `win_points == 0`
+    /// is rejected here: it is the shared tiebreak floor's denominator
+    /// (`1.0 / scoring.win_points as f64`, below) — zero reaches an
+    /// invalid (infinite) floor instead of being caught at the boundary
+    /// where organizer-supplied configuration actually enters the broker.
+    /// Per review scope: this does NOT impose any ordering between
+    /// `win_points`/`draw_points`/`loss_points` — organizer overrides are
+    /// explicitly supported (some communities score draws as 0, TopDeck.gg
+    /// uses a different win value entirely) and a stricter ordering rule
+    /// would need its own separately-cited requirement, not an
+    /// implicit side effect of this fix.
+    pub fn new(win_points: u8, draw_points: u8, loss_points: u8) -> Result<Self, String> {
+        if win_points == 0 {
+            return Err(
+                "win_points must be non-zero — used as the tiebreak floor's denominator".to_string(),
+            );
+        }
+        Ok(Self { win_points, draw_points, loss_points })
+    }
+
+    pub fn win_points(&self) -> u8 {
+        self.win_points
+    }
+    pub fn draw_points(&self) -> u8 {
+        self.draw_points
+    }
+    pub fn loss_points(&self) -> u8 {
+        self.loss_points
+    }
+
     /// MSTR-derived default: `2n - 1` match points for a win, `n` being
     /// `MatchArity`. At `arity = HEAD_TO_HEAD` this is exactly MTR §2.1's
-    /// 3/1/0 — the same formula, not a special case of it.
+    /// 3/1/0 — the same formula, not a special case of it. `arity` is
+    /// already validated to `2..=128` by `MatchArity::new` (§1 above), so
+    /// `2 * arity.0 - 1` is always in `3..=255` here — never zero, so this
+    /// internal construction path doesn't need to route through the
+    /// fallible `new()` the way external/deserialized input does.
     pub fn default_for_arity(arity: MatchArity) -> Self {
         Self { win_points: 2 * arity.0 - 1, draw_points: 1, loss_points: 0 }
+    }
+}
+
+impl TryFrom<RawScoringPolicy> for ScoringPolicy {
+    type Error = String;
+    fn try_from(raw: RawScoringPolicy) -> Result<Self, String> {
+        Self::new(raw.win_points, raw.draw_points, raw.loss_points)
+    }
+}
+
+impl From<ScoringPolicy> for RawScoringPolicy {
+    fn from(policy: ScoringPolicy) -> Self {
+        Self {
+            win_points: policy.win_points,
+            draw_points: policy.draw_points,
+            loss_points: policy.loss_points,
+        }
     }
 }
 
@@ -797,6 +862,19 @@ regression test for the exact overflow maintainer review identified.
 Deserializing a `CreateTournament` payload with `arity: 0` in its wire
 JSON is rejected at deserialization (via `#[serde(try_from = "u8")]`), not
 accepted and only discovered broken later.
+
+**NEW — maintainer review (`ScoringPolicy` validated construction, §1)**:
+the identical sibling test for the identical sibling gap — `ScoringPolicy::
+new(0, 1, 0)` returns `Err`; `new(3, 1, 0)` succeeds; a `CreateTournament`
+payload whose wire JSON carries `scoring.win_points: 0` is rejected at
+deserialization (via `#[serde(try_from = "RawScoringPolicy")]`), never
+reaching the tiebreak floor's `1.0 / scoring.win_points as f64` division as
+a live `NaN`/`inf` value. `new(3, 1, 0)` and every other combination with
+`win_points > 0` succeeds regardless of the relationship between
+`win_points`/`draw_points`/`loss_points` — this validation is deliberately
+scoped to the one value that's structurally unsafe (a zero denominator),
+not a policy opinion about which combinations of the three are sensible
+tournament rules.
 
 **NEW — maintainer review (durable pairing history and replay-safe
 correction, §2)**: a test that reports a result for a pairing, then reports
