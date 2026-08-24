@@ -492,6 +492,75 @@ fn ordruun_mentor_offers_exactly_the_attackers_of_the_attacked_player_cr_603_3d(
     );
 }
 
+/// CR 508.3e — the RESTRICTION half: a planeswalker-only declaration must not
+/// fire a "Whenever you attack a player" trigger at all.
+///
+/// CR 508.3e: "It won't trigger if a creature is put onto the battlefield
+/// attacking or if a creature attacks a planeswalker or a battle."
+///
+/// Before this change the class parsed with `attack_target_filter: None` — a
+/// bare CR 508.3d "you attack" — so any declaration fired it, planeswalker or
+/// not. The parser row asserts the field; this row proves the field is actually
+/// load-bearing at runtime.
+///
+/// It also answers the reachability question the per-attacked-player split
+/// raises: that split maps a planeswalker to its controller (CR 508.5a /
+/// CR 310.8d) when grouping, which in isolation looks like it could admit a
+/// planeswalker attack as a player attack. It cannot — the
+/// `attack_target_filter` type gate runs UPSTREAM, inside
+/// `matching_you_attack_pairs`, so a planeswalker-only declaration produces
+/// zero pairs and therefore zero firings before any grouping happens. This row
+/// pins that ordering.
+#[test]
+fn ordruun_mentor_does_not_fire_on_a_planeswalker_only_attack_cr_508_3e() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+    {
+        let mut builder = scenario.add_creature(P0, "Ordruun Mentor", 3, 2);
+        builder.from_oracle_text(
+            "Mentor (Whenever this creature attacks, put a +1/+1 counter on target attacking creature with lesser power.)\n\
+             Whenever you attack a player, target creature that's attacking that player gains first strike until end of turn.",
+        );
+        builder.id()
+    };
+    let attacker = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    // A planeswalker controlled by the opponent, so the only declared attack is
+    // aimed at a permanent rather than at P1 personally.
+    let walker = scenario
+        .add_planeswalker_from_oracle(P1, "Test Walker", "Jace", 4, "")
+        .id();
+
+    let mut runner = scenario.build();
+    evaluate_layers(runner.state_mut());
+
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Planeswalker(walker))])
+        .expect("DeclareAttackers should succeed");
+
+    let firings = runner
+        .state()
+        .stack
+        .iter()
+        .filter(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }))
+        .count();
+    assert_eq!(
+        firings,
+        0,
+        "CR 508.3e: attacking only a planeswalker is not attacking a PLAYER, so \
+         the trigger must not fire at all. stack={:?}",
+        runner.stack_names()
+    );
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "a non-firing trigger must not prompt for targets either; waiting_for={:?}",
+        runner.state().waiting_for
+    );
+}
+
 /// CR 508.3e — the two-defender discrimination: each firing is bound to ITS
 /// OWN attacked player.
 ///

@@ -26846,11 +26846,22 @@ fn you_attack_trigger_binds_its_attacked_player_object() {
         &["Creature"],
         &[],
     );
+    // Positive reach-guard: `.all()` over an empty iterator is vacuously true,
+    // so a parse regression that drops the trigger entirely would pass the
+    // assertion below for the wrong reason.
+    let qualified_you_attack: Vec<_> = qualified
+        .triggers
+        .iter()
+        .filter(|t| t.mode == TriggerMode::YouAttack)
+        .collect();
     assert!(
-        qualified
-            .triggers
+        !qualified_you_attack.is_empty(),
+        "the qualified phrase must still produce a YouAttack trigger — an empty \
+         set would make the next assertion vacuous: {qualified:#?}"
+    );
+    assert!(
+        qualified_you_attack
             .iter()
-            .filter(|t| t.mode == TriggerMode::YouAttack)
             .all(|t| t.attack_target_filter.is_none()),
         "a qualified attacked-player phrase must not be read as the bare \
          CR 508.3e object: {qualified:#?}"
