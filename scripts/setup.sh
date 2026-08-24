@@ -91,6 +91,22 @@ if [ "${#missing[@]}" -ne 0 ]; then
   exit 1
 fi
 
+# --- Preflight: pnpm major version ---
+# pnpm settings (the security `overrides`) live in client/pnpm-workspace.yaml,
+# which only pnpm 10.6+ reads. pnpm 9 also ignores the `packageManager` pin in
+# client/package.json, so it can neither read the overrides nor hand off to the
+# pinned pnpm — it fails the frozen install with an opaque
+# ERR_PNPM_LOCKFILE_CONFIG_MISMATCH. pnpm 10+ self-switches to the pin, so gate
+# on the major and fail with an actionable message instead.
+pnpm_major="$(pnpm --version 2>/dev/null | cut -d. -f1)"
+if ! [ "${pnpm_major:-0}" -ge 10 ] 2>/dev/null; then
+  echo "ERROR: pnpm >= 10 required (found ${pnpm_major:-unknown})" >&2
+  echo "  client/package.json pins pnpm@11.13.0; pnpm 10+ switches to it automatically." >&2
+  echo "  Upgrade: corepack enable && corepack use pnpm@11.13.0" >&2
+  echo "  Or see: https://pnpm.io/installation" >&2
+  exit 1
+fi
+
 # --- Preflight: soft tool (tilt-dev/tilt, NOT other CLIs named "tilt") ---
 # Multiple unrelated binaries ship as `tilt` (e.g. Go template tools). The
 # tilt-dev/tilt binary is the only one whose help text references the
