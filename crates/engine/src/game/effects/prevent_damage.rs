@@ -1,3 +1,4 @@
+use crate::game::effects::add_target_replacement::ReplacementDurationExpiry;
 use crate::game::effects::choose_damage_source;
 use crate::game::quantity::resolve_quantity;
 use crate::types::ability::{
@@ -418,19 +419,29 @@ pub fn resolve(
     // "this turn", NOT a CR rule (CR 611.2a's no-duration case is "until the end
     // of the game"). Without it, `turns::execute_cleanup` — which reads `expiry`
     // alone — would leave every duration-less resolution shield immortal.
-    if let Some(expiry) = crate::game::effects::add_target_replacement::expiry_from_duration(
+    let expiry = match crate::game::effects::add_target_replacement::expiry_from_duration(
         prevention_duration.as_ref(),
         ability.controller,
-    )
-    .or_else(|| {
-        crate::game::effects::add_target_replacement::expiry_from_duration(
-            ability.duration.as_ref(),
-            ability.controller,
-        )
-    }) {
-        shield = shield.expiry(expiry);
+    ) {
+        ReplacementDurationExpiry::Unstated => {
+            crate::game::effects::add_target_replacement::expiry_from_duration(
+                ability.duration.as_ref(),
+                ability.controller,
+            )
+        }
+        expiry => expiry,
+    };
+    match expiry {
+        ReplacementDurationExpiry::Explicit(expiry) => shield = shield.expiry(expiry),
+        ReplacementDurationExpiry::Unstated => {
+            shield = shield.with_resolution_shield_expiry();
+        }
+        ReplacementDurationExpiry::GateControlled | ReplacementDurationExpiry::Unsupported => {
+            // CR 611.2a: neither a condition-bound nor an unsupported stated
+            // duration may be rewritten as an end-of-turn shield.
+            return Ok(());
+        }
     }
-    shield = shield.with_resolution_shield_expiry();
 
     // CR 609.7 + CR 609.7a: "prevent that damage" from "a <color/type> source of
     // your choice" (Circle/Rune of Protection cycles) — the source is a player

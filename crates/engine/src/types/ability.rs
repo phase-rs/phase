@@ -25625,8 +25625,7 @@ impl ReplacementDefinition {
     }
 
     /// Stamp the engine's default turn window on a shield created by the
-    /// RESOLUTION of a spell or ability that stated no window this engine can
-    /// represent.
+    /// RESOLUTION of a spell or ability that stated no duration.
     ///
     /// **This default is an engine fallback, not a rule.** CR 611.2a says a
     /// resolution-created continuous effect with no stated duration "lasts until
@@ -25640,26 +25639,8 @@ impl ReplacementDefinition {
     /// CR 514.2 is the rule the window obeys ONCE STAMPED
     /// (`turns::execute_cleanup`).
     ///
-    /// Known gap, deliberate: the same default is applied to a shield whose
-    /// ability DID state a window that
-    /// [`crate::game::effects::add_target_replacement::expiry_from_duration`]
-    /// cannot represent — today that is `Old Fat Spider Can't See Me` chapter II
-    /// ("for as long as this Saga remains on the battlefield"), plus the printed
-    /// statics the parser lowered onto the resolution path (Phyrexian Vindicator,
-    /// Plated Pegasus, Gisela Blade of Goldnight, Battletide Alchemist, Shield of
-    /// the Avatar, Magma Pummeler, Cover of Winter, and Mount Keralia — whose text
-    /// says "this game"). For all of these the stamp is a turn window where the
-    /// card wants a longer one. It is behaviour-preserving (the pre-fix
-    /// `ShieldKind::is_shield()` cleanup prune removed them identically) and
-    /// conservative (a shield that ends too early is a missed prevention, never an
-    /// immortal one), but it is NOT rules-correct. See `expiry_from_duration` for
-    /// why each unrepresentable `Duration` maps to `None`.
-    ///
-    /// Never overwrites an explicit `expiry` (`EndOfCombat`, `UntilPlayerNextTurn`,
-    /// ...). NOTE the precise scope of that guarantee: it is true of the `expiry`
-    /// FIELD and false of a stated `Duration` — a `Duration` that
-    /// `expiry_from_duration` maps to `None` never becomes an `expiry`, so this
-    /// helper cannot see it and will stamp over the card's intent.
+    /// The installation seam rejects a stated duration it cannot represent rather
+    /// than reaching this fallback and shortening the printed window.
     ///
     /// Applies only to shield-carrying definitions: a runtime-installed NON-shield
     /// rider may legitimately be durable (the CR 611.2b `ControllerControlsSource`
@@ -25669,9 +25650,15 @@ impl ReplacementDefinition {
     /// CR 604.2 + CR 611.3b: a printed static ability's shield never passes through
     /// a resolution seam, so it keeps `expiry: None` and stays active for as long
     /// as its object remains in a zone the replacement pipeline scans.
-    pub fn with_resolution_shield_expiry(mut self) -> Self {
-        if self.shield_kind.is_shield() && self.expiry.is_none() {
+    fn stamp_default_turn_expiry(&mut self) {
+        if self.expiry.is_none() {
             self.expiry = Some(RestrictionExpiry::EndOfTurn);
+        }
+    }
+
+    pub fn with_resolution_shield_expiry(mut self) -> Self {
+        if self.shield_kind.is_shield() {
+            self.stamp_default_turn_expiry();
         }
         self
     }
@@ -25692,9 +25679,7 @@ impl ReplacementDefinition {
     /// An explicit `.expiry(..)` always wins, whether applied before or after.
     pub fn regeneration_shield(mut self) -> Self {
         self.shield_kind = ShieldKind::Regeneration;
-        if self.expiry.is_none() {
-            self.expiry = Some(RestrictionExpiry::EndOfTurn);
-        }
+        self.stamp_default_turn_expiry();
         self
     }
 
@@ -25726,9 +25711,7 @@ impl ReplacementDefinition {
     /// `.expiry(..)` always wins, whether applied before or after.
     pub fn prevention_oneshot_shield(mut self) -> Self {
         self.shield_kind = ShieldKind::PreventionOneShot;
-        if self.expiry.is_none() {
-            self.expiry = Some(RestrictionExpiry::EndOfTurn);
-        }
+        self.stamp_default_turn_expiry();
         self
     }
 
@@ -25743,9 +25726,7 @@ impl ReplacementDefinition {
     /// from `shield_kind`. An explicit `.expiry(..)` always wins.
     pub fn damage_replacement_oneshot_shield(mut self) -> Self {
         self.shield_kind = ShieldKind::DamageReplacementOneShot;
-        if self.expiry.is_none() {
-            self.expiry = Some(RestrictionExpiry::EndOfTurn);
-        }
+        self.stamp_default_turn_expiry();
         self
     }
 
@@ -25769,9 +25750,7 @@ impl ReplacementDefinition {
             amount,
             lifetime,
         };
-        if self.expiry.is_none() {
-            self.expiry = Some(RestrictionExpiry::EndOfTurn);
-        }
+        self.stamp_default_turn_expiry();
         self
     }
 

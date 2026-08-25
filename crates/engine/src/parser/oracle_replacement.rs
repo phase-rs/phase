@@ -3,9 +3,9 @@ use std::str::FromStr;
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
-use nom::character::complete::{char, multispace0, multispace1};
-use nom::combinator::{all_consuming, eof, map_opt, opt, peek, rest, value};
-use nom::multi::separated_list1;
+use nom::character::complete::{anychar, char, multispace0, multispace1};
+use nom::combinator::{all_consuming, eof, map_opt, opt, peek, recognize, rest, value};
+use nom::multi::{many_till, separated_list1};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
@@ -10960,8 +10960,10 @@ pub(crate) fn parse_bidirectional_damage_prevention(
     // step, which is the Solitary Confinement defect wearing a different hat.
     // Anchoring on the ellipsis phrase makes the window come from the same
     // sentence the subject did, by construction.
-    if let Some(expiry) = stated_clause_expiry(norm_lower, BIDIRECTIONAL_ELLIPSIS_ANCHOR) {
-        base = base.expiry(expiry);
+    match stated_clause_expiry(norm_lower, BIDIRECTIONAL_ELLIPSIS_ANCHOR) {
+        StatedClauseExpiry::Explicit(expiry) => base = base.expiry(expiry),
+        StatedClauseExpiry::Durable => {}
+        StatedClauseExpiry::Unsupported => return None,
     }
 
     let recipient_half = base.clone().valid_card(subject.clone());
@@ -11031,62 +11033,49 @@ const BIDIRECTIONAL_ELLIPSIS_ANCHOR: &str = "dealt to and dealt by ";
 /// `expiry: null` and are inert only because they are Instants/Sorceries that
 /// never reach the battlefield. The premise holds unconditionally only for
 /// PERMANENT hosts.
-fn stated_clause_expiry(
-    clause_lower: &str,
-    window_anchor: &str,
-) -> Option<crate::types::ability::RestrictionExpiry> {
+enum StatedClauseExpiry {
+    Explicit(crate::types::ability::RestrictionExpiry),
+    Durable,
+    Unsupported,
+}
+
+fn stated_clause_expiry(clause_lower: &str, window_anchor: &str) -> StatedClauseExpiry {
     use crate::types::ability::RestrictionExpiry;
 
-    let sentence = prevention_clause_owns_trailing_window(clause_lower, window_anchor)?;
+    let Some(sentence) = prevention_clause_owns_trailing_window(clause_lower, window_anchor) else {
+        return StatedClauseExpiry::Durable;
+    };
     let (_, duration) = super::oracle_effect::lower::strip_trailing_duration(sentence);
-    match duration? {
+    match duration {
+        None => StatedClauseExpiry::Durable,
         // CR 514.2: "this turn" / "until end of turn" ends at the cleanup step.
-        Duration::UntilEndOfTurn => Some(RestrictionExpiry::EndOfTurn),
+        Some(Duration::UntilEndOfTurn) => {
+            StatedClauseExpiry::Explicit(RestrictionExpiry::EndOfTurn)
+        }
         // CR 511.2: "this combat" / "until end of combat" expires at the end of
         // the combat phase; `complete_end_combat_teardown` catches the live and
         // pending surfaces and the cleanup prune catches the base surface.
-        Duration::UntilEndOfCombat => Some(RestrictionExpiry::EndOfCombat),
-        // CR 500.4 + CR 514.2: These ARE real, bounded windows — the clause said
-        // so — but `RestrictionExpiry` has no counterpart the parse-time seam can
-        // build: the player-relative variants (`UntilPlayerNextTurn`,
-        // `UntilEndOfNextTurnOf`) both carry a concrete `PlayerId` that does not
-        // exist AT PARSE TIME, and there is no step-keyed replacement prune at all
-        // for the CR 500.4 step/phase windows `UntilNextStepOf` expresses.
-        //
-        // THE EXACT FIX, when someone comes to remove this approximation: the
-        // `PlayerId` does exist at INSTALL time. `game/printed_cards.rs` seeds
-        // `base_replacement_definitions` onto an object whose controller is
-        // already known, and `effects::add_restriction::fill_runtime_fields` is
-        // the established pattern for exactly this parse-time-hole/install-time-
-        // fill split. So the durable fix is a player-relative `RestrictionExpiry`
-        // variant left unbound by the parser and filled at install, plus a
-        // step-keyed prune for `UntilNextStepOf`; it is NOT "teach the parser to
-        // guess a player". Recorded here so the approximation below does not
-        // ossify into the assumed-correct answer.
-        //
-        // Until then, approximate to the nearest bounded window instead of
-        // dropping to `None`, because the two seams are NOT symmetric: at the
-        // resolution seam
-        // (`effects::add_target_replacement::expiry_from_duration`) an unmapped
-        // `None` is caught by that path's `EndOfTurn` shield fallback, but a
-        // printed def with `expiry: None` is DURABLE — `turns::execute_cleanup`
-        // has nothing else to key on, so the shield becomes immortal. A window
-        // that ends too early is a bounded rules error; an immortal printed
-        // shield is the game-wide lockout this commit exists to prevent.
-        Duration::UntilNextTurnOf { .. }
-        | Duration::UntilEndOfNextTurnOf { .. }
-        | Duration::UntilNextStepOf { .. } => Some(RestrictionExpiry::EndOfTurn),
+        Some(Duration::UntilEndOfCombat) => {
+            StatedClauseExpiry::Explicit(RestrictionExpiry::EndOfCombat)
+        }
+        // CR 611.2a + CR 500.4: a parsed static replacement has no installation
+        // context from which to bind these player/step-relative windows. Rejecting
+        // the definition keeps coverage honest; mapping them to EndOfTurn would
+        // silently shorten the card's stated duration.
+        Some(Duration::UntilNextTurnOf { .. })
+        | Some(Duration::UntilEndOfNextTurnOf { .. })
+        | Some(Duration::UntilNextStepOf { .. }) => StatedClauseExpiry::Unsupported,
         // Not turn windows: these end on an event or a condition, so `None` is the
         // CORRECT answer, not an unmapped one — the battlefield-exit prune in
         // `layers.rs` and the CR 611.2b `ReplacementCondition` gate end them, and
         // stamping any turn window here would cut them short.
-        Duration::UntilHostLeavesPlay
-        | Duration::ForAsLongAs { .. }
-        | Duration::UntilSourceExilesAnotherCard
-        | Duration::UntilOpponentBecomesMonarch => None,
+        Some(Duration::UntilHostLeavesPlay)
+        | Some(Duration::ForAsLongAs { .. })
+        | Some(Duration::UntilSourceExilesAnotherCard)
+        | Some(Duration::UntilOpponentBecomesMonarch) => StatedClauseExpiry::Durable,
         // CR 604.2: an explicitly permanent window is the printed-static case —
         // no expiry, and the definition must survive every cleanup step.
-        Duration::Permanent => None,
+        Some(Duration::Permanent) => StatedClauseExpiry::Durable,
     }
 }
 
@@ -11201,9 +11190,9 @@ fn prevention_clause_owns_trailing_window<'a>(
 /// The FIRST sentence of `clause_lower` that carries `anchor`, or `None` if no
 /// sentence does.
 ///
-/// Sentence boundaries are walked with `take_until(". ")` rather than a string
-/// split so the whole traversal stays inside the combinator grammar. The anchor is
-/// matched at word boundaries only, so it cannot fire mid-word.
+/// Sentence boundaries are walked with nom combinators rather than a string split,
+/// recognizing space and newline sentence separators. The anchor is matched at word
+/// boundaries only, so it cannot fire mid-word.
 ///
 /// FIRST is the right answer for both callers because each caller passes the same
 /// phrase its own definition-building anchored on: `parse_damage_prevention_replacement`
@@ -11220,13 +11209,20 @@ fn prevention_clause_owns_trailing_window<'a>(
 fn sentence_carrying_anchor<'a>(clause_lower: &'a str, anchor: &str) -> Option<&'a str> {
     let mut remaining = clause_lower;
     loop {
-        // `take_until(". ")` leaves the separator at the head of its remainder, so
-        // pairing it with `tag(". ")` in one sequence is total: either both match
-        // (a real sentence boundary) or `take_until` failed and there is no further
-        // boundary at all. There is no third outcome to branch on.
+        // `many_till(anychar, peek(sentence_boundary))` stops at the FIRST supported
+        // sentence separator, so a later ". " cannot swallow an earlier newline
+        // boundary. Pairing it with the same boundary parser consumes exactly that
+        // separator and preserves the traversal grammar.
         let (sentence, tail) = match (
-            take_until::<_, _, OracleError<'_>>(". "),
-            tag::<_, _, OracleError<'_>>(". "),
+            recognize(many_till(
+                anychar::<_, OracleError<'_>>,
+                peek(alt((
+                    tag::<_, _, OracleError<'_>>(". "),
+                    tag(".\r\n"),
+                    tag(".\n"),
+                ))),
+            )),
+            alt((tag::<_, _, OracleError<'_>>(". "), tag(".\r\n"), tag(".\n"))),
         )
             .parse(remaining)
         {
@@ -11534,8 +11530,10 @@ fn parse_damage_prevention_replacement(
     // setting `expiry` earlier, that arm's answer is the more specific one and
     // must win over this generic clause-window read.
     if def.expiry.is_none() {
-        if let Some(expiry) = stated_clause_expiry(working_lower, PREVENTION_VERB_ANCHOR) {
-            def = def.expiry(expiry);
+        match stated_clause_expiry(working_lower, PREVENTION_VERB_ANCHOR) {
+            StatedClauseExpiry::Explicit(expiry) => def = def.expiry(expiry),
+            StatedClauseExpiry::Durable => {}
+            StatedClauseExpiry::Unsupported => return None,
         }
     }
     // Capture whether the recipient filter was event-driven (typed
@@ -14847,19 +14845,11 @@ mod tests {
         }
     }
 
-    /// CR 500.4 + CR 514.2: a STATED window the `RestrictionExpiry` vocabulary
-    /// cannot express must still be bounded, because the two seams are asymmetric.
-    /// At the resolution seam an unmapped `None` is caught by
-    /// `with_resolution_shield_expiry`'s `EndOfTurn` shield fallback; at this
-    /// printed seam `None` is DURABLE and nothing else can ever prune the shield.
-    ///
-    /// The three positive rows below are NOT redundant: they reach ALL THREE of the
-    /// DIFFERENT legs of the same `stated_clause_expiry` arm —
-    /// `Duration::UntilNextTurnOf`, `Duration::UntilEndOfNextTurnOf` and
-    /// `Duration::UntilNextStepOf` — and each leg must be pinned separately, since
-    /// moving any one of them back to `None` on its own is otherwise invisible.
+    /// CR 611.2a + CR 500.4: a stated window that cannot be bound at the
+    /// replacement-installation seam must fail closed, never become a different
+    /// end-of-turn window or a durable shield.
     #[test]
-    fn stated_but_unmappable_printed_window_is_bounded_not_immortal() {
+    fn stated_but_unmappable_printed_window_fails_closed() {
         for (text, why) in [
             (
                 // "until your next turn" lowers to `Duration::UntilNextTurnOf`,
@@ -14887,16 +14877,10 @@ mod tests {
                 "the step-keyed window (`UntilNextStepOf`)",
             ),
         ] {
-            let bounded = parse_replacement_line(text, "Probe Card")
-                .unwrap_or_else(|| panic!("the prevention clause must still parse: {text}"));
-            assert!(bounded.shield_kind.is_shield(), "reach-guard: shield built");
-            assert_eq!(
-                bounded.expiry,
-                Some(RestrictionExpiry::EndOfTurn),
-                "CR 514.2: {why} is stated-but-unmappable, so it is approximated to the \
-                 nearest bounded window — a shield that ends early is a bounded rules \
-                 error, a printed shield with no expiry is an immortal game-wide lockout \
-                 ({text})"
+            assert!(
+                parse_replacement_line(text, "Probe Card").is_none(),
+                "CR 611.2a: {why} cannot be represented at this seam, so the parser must \
+                 not install a replacement with an invented lifetime ({text})"
             );
         }
 
@@ -14908,6 +14892,21 @@ mod tests {
         )
         .expect("the printed static must still parse");
         assert_eq!(durable.expiry, None);
+    }
+
+    #[test]
+    fn prevention_window_does_not_cross_newline_sentence_boundary() {
+        for separator in ["\n", "\r\n"] {
+            let text = format!(
+                "Prevent all damage that would be dealt to you.{separator}Target creature gets +1/+1 until end of turn."
+            );
+            let definition = parse_replacement_line(&text, "Boundary Probe")
+                .expect("the first prevention sentence must still parse");
+            assert_eq!(
+                definition.expiry, None,
+                "the later sentence's duration must not be attached across {separator:?}"
+            );
+        }
     }
 
     /// Sibling coverage for the same bare "prevent N of that damage" idiom with
