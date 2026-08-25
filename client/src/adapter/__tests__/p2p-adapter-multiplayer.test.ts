@@ -1501,7 +1501,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       nativeBridge: object | null;
       nativeDeliveredViews: Map<number, { revision: number; snapshot: EngineSnapshot }>;
       authoritativeRevision: number;
-      enqueueNativeDelivery: (operation: () => Promise<void>) => Promise<void>;
+      enqueueDelivery: (operation: () => Promise<void>) => Promise<void>;
     };
     const oldSnapshot: EngineSnapshot = {
       state: remoteState("native revision one"),
@@ -1517,7 +1517,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     host.nativeDeliveredViews.set(1, { revision: 1, snapshot: oldSnapshot });
     host.authoritativeRevision = 1;
     const revisionDelivery = deferred<void>();
-    const inFlightRevision = host.enqueueNativeDelivery(async () => {
+    const inFlightRevision = host.enqueueDelivery(async () => {
       host.authoritativeRevision = 2;
       await revisionDelivery.promise;
       host.nativeDeliveredViews.set(1, { revision: 2, snapshot: currentSnapshot });
