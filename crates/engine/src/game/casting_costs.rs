@@ -8407,11 +8407,19 @@ pub(super) fn effective_replicate_additional_cost_instances(
         })
         .enumerate()
         .map(|(ordinal, cost)| {
+            // CR 601.2f: Additional costs must be concrete before affordability
+            // and payment; Hatchery Sliver's `SelfManaCost` is the recipient
+            // spell's mana cost, not a free placeholder.
+            let cost = super::keywords::resolve_self_mana_in_ability_cost(
+                state,
+                object_id,
+                &AbilityCost::Mana { cost },
+            );
             AdditionalCostInstance::new_with_ordinal(
                 AdditionalCostOrigin::Replicate,
                 u32::try_from(ordinal).unwrap_or(u32::MAX),
                 AdditionalCost::Optional {
-                    cost: AbilityCost::Mana { cost },
+                    cost,
                     repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
                 },
             )
