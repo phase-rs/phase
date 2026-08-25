@@ -26,7 +26,7 @@ separate, later, larger sub-project.
 | Phase | What it delivers | Depends on |
 |---|---|---|
 | **1a** | General engine schema: `GameFormat::Custom(CustomFormatId)`, `CustomFormatRules`/`StructuralRules`/`LegalityRules`/`CustomFormatDef`, the four `LegacyRuleSet` axes (schema only, gated so none can be declared until a later phase implements it), hand-written `GameFormat` wire format. No registry, no evaluation, no frontend. | — |
-| **1b** | Consumption-site audit: widens three `engine-wasm` exports to take a resolved `FormatConfig` instead of a bare `GameFormat`, adds `FormatConfig`'s still-missing `sideboard_policy`/`default_deck_copy_limit` stored fields, and migrates the one remaining bare-`GameFormat` `.sideboard_policy()` call in `companion.rs` (the `uses_commander()` migration across `companion.rs`/`deck_loading.rs`/`match_flow.rs` landed in Phase 1a itself — see its section below). | 1a |
+| **1b** | Consumption-site audit: widens three `engine-wasm` exports to take a resolved `FormatConfig` instead of a bare `GameFormat`, and adds `FormatConfig`'s still-missing `default_deck_copy_limit` stored field (the `uses_commander()`/`sideboard_policy()` migrations across `companion.rs`/`deck_loading.rs`/`match_flow.rs`, and their stored fields, landed in Phase 1a itself — see its section below). | 1a |
 | **1c** | Axis A — "save the current lobby setup as a custom format," an ad-hoc, client-persisted format built from a lobby's live settings. | 1a, 1b |
 | **1d** | Real deck-legality evaluation for `Custom` formats (mirroring the existing constructed/commander evaluators), the `custom_format_registry()` gate, and the first registry preset, `swedish_old_school()`. | 1a, 1b, 1c |
 | **2a** | Axis B presets: `old_school_93_94()` and `old_school_95()`. Constructors + preset-integrity tests only depend on 1d; **registration** (making them selectable via `custom_format_registry()`) additionally depends on 2b — see below. | 1d (construction); 1d + 2b (registration) |
@@ -133,18 +133,31 @@ to take the resolved `uses_commander: bool` instead of a bare `GameFormat`,
 with every call site updated to pass it from the caller's own resolved
 context.
 
-**Correction to an earlier claim in this document:** `FormatConfig` stores
-`uses_commander` and `supplies_fixed_deck` as derived fields — it does
-**not** yet store `sideboard_policy` or `default_deck_copy_limit`; both
-remain the bare `GameFormat::sideboard_policy()`/`::default_deck_copy_limit()`
-methods (which, per Phase 1a, already return a disclosed fail-closed
-fallback for `Custom` rather than panicking, so this is a code-cleanliness
-gap for Phase 1b to close, not a safety one).
+The same three files had the identical problem for `sideboard_policy()`,
+found in the next review round — and worse in one respect: unlike
+`uses_commander`, a Custom format's declared sideboard policy already
+exists as a real field (`custom_rules.structural.sideboard_policy`) the
+moment `CustomFormatRules` is constructed, so the disclosed `Forbidden`
+fallback wasn't just "no safe answer available," it silently discarded
+known data — submitted sideboards were emptied, capped at zero, and hidden
+from companion candidates even when the real policy was `Unlimited`. Fixed
+the same way: `FormatConfig` now stores its own `sideboard_policy` field
+(mirroring `uses_commander`/`supplies_fixed_deck`), derived once at
+construction for every built-in, and the three consumers read that field.
+
+**Correction to an earlier claim in this document:** `FormatConfig` now
+stores `uses_commander`, `supplies_fixed_deck`, *and* `sideboard_policy` as
+derived fields (all landed in Phase 1a). Only `default_deck_copy_limit`
+remains the bare `GameFormat::default_deck_copy_limit()` method (which
+already returns a disclosed fail-closed fallback for `Custom` rather than
+panicking, so this is a code-cleanliness gap for Phase 1b to close, not a
+safety one).
 
 ## Phase 1b — Consumption-site audit + caller migration
 
-With the `uses_commander()` migration above pulled forward into Phase 1a,
-this phase's remaining scope is narrower than originally charted:
+With the `uses_commander()`/`sideboard_policy()` migrations above pulled
+forward into Phase 1a, this phase's remaining scope is narrower than
+originally charted:
 
 - Three functions in `crates/engine-wasm/src/lib.rs` currently call a bare
   `GameFormat` method directly with no `FormatConfig` context:
@@ -156,12 +169,9 @@ this phase's remaining scope is narrower than originally charted:
   charter named (that function has its own local wildcard-matched dispatch
   and was never at risk). This phase widens all three to take a resolved
   `FormatConfig` instead of a bare `GameFormat`.
-- Add the stored `sideboard_policy`/`default_deck_copy_limit` fields
-  `FormatConfig` is still missing (see the correction above), and migrate
-  `companion.rs`'s remaining direct `.sideboard_policy()` bare-`GameFormat`
-  call (already panic-safe today, since that method has a disclosed
-  fallback for `Custom` — this is architectural cleanup, not a safety fix)
-  to read the new stored field instead.
+- Add the stored `default_deck_copy_limit` field `FormatConfig` is still
+  missing (see the correction above) — the last of the four derived fields
+  not yet mirrored as a stored field.
 
 ## Phase 1c — Axis A: save-as-custom-format
 
