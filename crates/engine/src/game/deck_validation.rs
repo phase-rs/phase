@@ -1079,7 +1079,11 @@ fn evaluate_brawl(
 
     // Exact total card count from the format config (main + commander,
     // accounting for commander listed in main).
-    let deck_size = usize::from(FormatConfig::for_format(game_format).deck_size);
+    let deck_size = usize::from(
+        FormatConfig::for_format(game_format)
+            .expect("evaluate_brawl is only dispatched for a Brawl-family GameFormat")
+            .deck_size,
+    );
     let represented_in_main = request
         .commander
         .iter()
@@ -2287,7 +2291,11 @@ fn quick_brawl_check(
                 "Brawl commander must be a legendary creature or legendary planeswalker",
             skip_commander_legality: false,
         },
-        usize::from(FormatConfig::for_format(game_format).deck_size),
+        usize::from(
+            FormatConfig::for_format(game_format)
+                .expect("quick_brawl_check is only dispatched for a Brawl-family GameFormat")
+                .deck_size,
+        ),
         game_format,
     )
 }

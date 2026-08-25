@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::database::legality::LegalityFormat;
-use crate::types::custom_format::{custom_format_registry, CustomFormatId, CustomFormatRules};
+use crate::types::custom_format::{
+    custom_format_registry, CustomFormatId, CustomFormatRules, FormatConfigError,
+};
 use crate::types::player::PlayerId;
 
 /// Broad grouping used by the UI to visually cluster related formats
@@ -288,6 +290,7 @@ where
 
 /// Configuration for a game format, describing player counts, starting life, deck rules, etc.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub struct FormatConfig {
     pub format: GameFormat,
     pub starting_life: i32,
@@ -342,6 +345,42 @@ pub struct FormatConfig {
     /// above is boxed for the same reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_rules: Option<Box<CustomFormatRules>>,
+}
+
+/// Deserializing via the derive above, unchecked, would let an external
+/// payload construct `format: Custom(id)` with `custom_rules: None` or a
+/// mismatched id — `custom_format::validate_custom_rules_consistency` exists
+/// precisely to reject that, but a validator nobody calls doesn't protect
+/// anything. `#[serde(remote = "Self")]` on `FormatConfig` above generates
+/// this type's normal derived field-by-field (de)serialization as plain
+/// inherent `FormatConfig::serialize`/`FormatConfig::deserialize` functions
+/// (not the `Serialize`/`Deserialize` trait impls, which are instead
+/// hand-written here) — the standard serde idiom for "derive, then validate
+/// before accepting," with zero duplicated field declarations. `Serialize`
+/// needs no validation (an in-memory `FormatConfig` is already guaranteed
+/// consistent) and is a pure passthrough; `Deserialize` is the single
+/// authoritative `FormatConfig` ingress — every deserialization path (WASM
+/// boundary, lobby-broker/server-core protocol payloads, replay/save files)
+/// goes through it.
+impl Serialize for FormatConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        Self::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for FormatConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let config = Self::deserialize(deserializer)?;
+        crate::types::custom_format::validate_custom_rules_consistency(&config)
+            .map_err(serde::de::Error::custom)?;
+        Ok(config)
+    }
 }
 
 impl FormatTopology {
@@ -1270,8 +1309,17 @@ impl FormatConfig {
     /// counts for Commander) are intentionally not recovered — guests use
     /// this purely to filter their local deck picker, and the host's own
     /// FormatConfig remains authoritative once the P2P session is established.
-    pub fn for_format(format: GameFormat) -> Self {
-        match format {
+    ///
+    /// Returns `Err` for `GameFormat::Custom` rather than panicking: this is
+    /// a public factory, callable with any `GameFormat` a caller happens to
+    /// hold — including one parsed straight from untrusted external input,
+    /// since `GameFormat::from_str` accepts any `"Custom:<u16>"` string. A
+    /// bare `GameFormat` carries no `CustomFormatRules` to build structural
+    /// rules from, so there is no default to fall back to here; callers that
+    /// might see a Custom format from an external source must handle the
+    /// rejection rather than the function terminating the process.
+    pub fn for_format(format: GameFormat) -> Result<Self, FormatConfigError> {
+        Ok(match format {
             GameFormat::Standard => Self::standard(),
             GameFormat::Limited => Self::limited(),
             GameFormat::Commander => Self::commander(),
@@ -1294,10 +1342,13 @@ impl FormatConfig {
             GameFormat::Archenemy => Self::archenemy(),
             GameFormat::Planechase => Self::planechase(),
             GameFormat::Momir => Self::momir(),
-            GameFormat::Custom(_) => unreachable!(
-                "for_format cannot resolve an ad-hoc Custom format's structural rules — read custom_rules from the resolved FormatConfig/CustomFormatRules instead"
-            ),
-        }
+            GameFormat::Custom(id) => {
+                return Err(FormatConfigError(format!(
+                    "for_format cannot resolve ad-hoc Custom format {} structural rules — read custom_rules from the resolved FormatConfig/CustomFormatRules instead",
+                    id.0
+                )))
+            }
+        })
     }
 }
 
@@ -1685,7 +1736,7 @@ mod tests {
     #[test]
     fn limited_for_format_roundtrip() {
         assert_eq!(
-            FormatConfig::for_format(GameFormat::Limited),
+            FormatConfig::for_format(GameFormat::Limited).unwrap(),
             FormatConfig::limited()
         );
     }
@@ -1693,7 +1744,7 @@ mod tests {
     #[test]
     fn premodern_for_format_roundtrip() {
         assert_eq!(
-            FormatConfig::for_format(GameFormat::Premodern),
+            FormatConfig::for_format(GameFormat::Premodern).unwrap(),
             FormatConfig::premodern()
         );
     }
@@ -1728,7 +1779,7 @@ mod tests {
         }
         // Variants not in the user-facing registry still respect the invariant.
         for format in [GameFormat::TwoHeadedGiant, GameFormat::Limited] {
-            let config = FormatConfig::for_format(format);
+            let config = FormatConfig::for_format(format).unwrap();
             assert_eq!(config.uses_commander, format.uses_commander());
             assert_eq!(config.supplies_fixed_deck, format.supplies_fixed_deck());
         }

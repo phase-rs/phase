@@ -42,48 +42,66 @@ pub type CardName = String;
 /// has no number in the current Comprehensive Rules (see the "Mana Burn
 /// (Obsolete)" glossary entry, `docs/MagicCompRules.txt`). This axis exists
 /// so a historically-accurate custom format (e.g. Old School 93/94) can opt
-/// back into it. Schema only in this phase — no enforcement exists until a
-/// later phase wires it into `types/mana.rs`'s cleanup-step unspent-mana
-/// handling.
+/// back into it. Variant names match `docs/proposals/custom-format-engine/
+/// PLAN.md`'s canonical schema exactly. Schema only in this phase — no
+/// enforcement exists until a later phase wires it into `types/mana.rs`'s
+/// cleanup-step unspent-mana handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ManaBurnPolicy {
+    /// No mana burn (removed post-M10).
     #[default]
-    Off,
-    Legacy,
+    Modern,
+    /// Life loss for unspent mana at real phase-group boundaries. EC/Swedish
+    /// target era.
+    Obsolete,
 }
 
 /// CR 510 (Combat Damage Step): the modern rules deal all combat damage —
 /// first strike and regular — in one unified damage step per combat-damage
-/// sub-step. `Legacy` reproduces the older two-fully-sequenced-steps
-/// procedure some historical rule sets used. Schema only in this phase.
+/// sub-step, not using the stack (CR 510.2). `OnStack` reproduces the older
+/// pre-6th-edition procedure, where assigned combat damage was itself placed
+/// on the stack as a stack object rather than a triggered ability, giving
+/// players a priority window between assignment and dealing before it
+/// resolved. Variant names match `docs/proposals/custom-format-engine/
+/// PLAN.md`'s canonical schema exactly. Schema only in this phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum CombatDamageTiming {
     #[default]
     Modern,
-    Legacy,
+    OnStack,
 }
 
 /// Scope for "Wish"-style effects that fetch a card from outside the game.
 /// No single Comprehensive Rules number governs this generically — each
 /// Wish-effect card's own Oracle text defines its behavior, against the
-/// general "outside the game" zone concept (CR 100.4, CR 108.3). Schema only
-/// in this phase.
+/// general "outside the game" zone concept (CR 100.4, CR 108.3). Variant
+/// names match `docs/proposals/custom-format-engine/PLAN.md`'s canonical
+/// schema exactly. Schema only in this phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum WishOutsideGameScope {
+    /// Modern CR 400.11/400.11a: "outside the game" is not a zone; only the
+    /// sideboard is reachable.
     #[default]
-    SideboardOnly,
-    AnyCardOutsideGame,
+    PostM10SideboardOnly,
+    /// Pre-M10: a Wish could retrieve an owned card that had been removed
+    /// from the game (today's exile).
+    PreM10ReachesExile,
 }
 
-/// CR 704.5j: the "legend rule" state-based action. `Global` reproduces a
-/// historical ruling some casual formats use, checking the rule across all
-/// players' legendary permanents of the same name combined rather than
-/// per-player. Schema only in this phase.
+/// CR 704.5j: the "legend rule" state-based action. `PreM14AnyController`
+/// reproduces a historical ruling some casual formats use (the Legends
+/// 1994 / pre-M14 "both die" form): same-named legendary permanents go to
+/// their owners' graveyards across ALL controllers combined, choicelessly,
+/// rather than per-controller. Variant names match `docs/proposals/
+/// custom-format-engine/PLAN.md`'s canonical schema exactly. Schema only in
+/// this phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum LegendRuleScope {
+    /// Per-controller + choice (post-2013-07 M14). All four EC presets use
+    /// this.
     #[default]
-    PerPlayer,
-    Global,
+    Modern,
+    PreM14AnyController,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +162,22 @@ impl CommanderEligibilityRule {
     }
 }
 
+/// Whether a custom format uses the command zone (CR 903) and, if so, its
+/// commander-damage threshold and eligibility predicate. A single
+/// discriminated type instead of three independently-settable fields, so a
+/// state like "command zone disabled, but a commander-damage threshold and
+/// eligibility rule are set" is unrepresentable — the engine would otherwise
+/// have no valid semantic reading for it, and neither registration gate
+/// could catch it (serde happily accepts it either way).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommandZoneMode {
+    Disabled,
+    Enabled {
+        commander_damage_threshold: Option<u8>,
+        eligibility_rule: CommanderEligibilityRule,
+    },
+}
+
 /// The structural game-parameter snapshot a lobby's "save as custom format"
 /// action captures. Every field mirrors an existing `FormatConfig` field 1:1.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,8 +187,7 @@ pub struct StructuralRules {
     pub max_players: u8,
     pub deck_size: u16,
     pub singleton: bool,
-    pub command_zone: bool,
-    pub commander_damage_threshold: Option<u8>,
+    pub command_zone_mode: CommandZoneMode,
     #[serde(default)]
     pub range_of_influence: Option<Box<RangeOfInfluenceConfig>>,
     pub team_based: bool,
@@ -162,7 +195,6 @@ pub struct StructuralRules {
     /// by a RESOLVED `FormatConfig.sideboard_policy` field — that's a later
     /// phase's widening.
     pub sideboard_policy: SideboardPolicy,
-    pub commander_eligibility_rule: Option<CommanderEligibilityRule>,
 }
 
 /// Legality/era rules. `legal_sets: None` means unrestricted (every card

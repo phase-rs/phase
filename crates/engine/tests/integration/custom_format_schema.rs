@@ -7,7 +7,7 @@
 
 use engine::types::custom_format::{
     passes_legacy_axis_gate, passes_reprint_fidelity_gate, validate_custom_rules_consistency,
-    CombatDamageTiming, CommanderEligibilityRule, CustomFormatDef, CustomFormatId,
+    CombatDamageTiming, CommandZoneMode, CommanderEligibilityRule, CustomFormatDef, CustomFormatId,
     CustomFormatRules, LegacyRuleSet, LegalityRules, ManaBurnPolicy, PrintingFidelity,
     ReprintPolicy, SetCode, StructuralRules, WishOutsideGameScope,
 };
@@ -20,12 +20,10 @@ fn sample_structural() -> StructuralRules {
         max_players: 4,
         deck_size: 60,
         singleton: false,
-        command_zone: false,
-        commander_damage_threshold: None,
+        command_zone_mode: CommandZoneMode::Disabled,
         range_of_influence: None,
         team_based: false,
         sideboard_policy: SideboardPolicy::Unlimited,
-        commander_eligibility_rule: None,
     }
 }
 
@@ -139,7 +137,7 @@ fn validate_custom_rules_consistency_rejects_builtin_with_custom_rules() {
 #[test]
 fn validate_custom_rules_consistency_accepts_every_builtin_default() {
     for meta in GameFormat::registry() {
-        let config = FormatConfig::for_format(meta.format);
+        let config = FormatConfig::for_format(meta.format).unwrap();
         assert!(
             validate_custom_rules_consistency(&config).is_ok(),
             "{:?}: built-in default config must be accepted",
@@ -151,7 +149,7 @@ fn validate_custom_rules_consistency_accepts_every_builtin_default() {
 #[test]
 fn legacy_axis_gate_rejects_undeclared_axis() {
     let mut def = sample_def(1);
-    def.rules.legality.legacy.mana_burn = ManaBurnPolicy::Legacy;
+    def.rules.legality.legacy.mana_burn = ManaBurnPolicy::Obsolete;
     assert!(!passes_legacy_axis_gate(&def));
 }
 
@@ -346,12 +344,20 @@ fn game_format_serialization_is_byte_identical_to_old_derive_for_builtins() {
 #[test]
 fn format_config_for_format_still_works_for_every_builtin() {
     for meta in GameFormat::registry() {
-        let config = FormatConfig::for_format(meta.format);
+        let config = FormatConfig::for_format(meta.format).unwrap();
         assert!(matches!(
             config.format.default_deck_copy_limit(),
             DeckCopyLimit::Unlimited | DeckCopyLimit::UpTo(_)
         ));
     }
+}
+
+#[test]
+fn format_config_for_format_rejects_custom() {
+    // The public-factory panic CodeRabbit/the maintainer flagged: a bare
+    // GameFormat::Custom parsed from external input must not terminate the
+    // process here — for_format has no CustomFormatRules to build from.
+    assert!(FormatConfig::for_format(GameFormat::Custom(CustomFormatId(1))).is_err());
 }
 
 #[test]
@@ -442,4 +448,74 @@ fn validate_name_deck_for_format_full_rejects_custom_format_honestly() {
         Err(reasons) => assert!(reasons.iter().any(|r| r.contains("not yet supported"))),
         Ok(()) => panic!("expected Custom format validation to be rejected as not yet supported"),
     }
+}
+
+#[test]
+fn companion_candidates_returns_empty_for_custom_format_without_panicking() {
+    use engine::database::CardDatabase;
+    use engine::game::deck_validation::{companion_candidates, DeckCompatibilityRequest};
+
+    let db = CardDatabase::from_json_str("{}").expect("empty card database");
+    let request = DeckCompatibilityRequest {
+        selected_format: Some(GameFormat::Custom(CustomFormatId(1))),
+        ..Default::default()
+    };
+    // Exercises the exact guard added to companion_candidates: without it,
+    // `GameFormat::Custom(_).uses_commander()` inside the function's own
+    // `Option::filter` would panic. This is the direct production entry
+    // point `companion_candidates_js` (engine-wasm) calls with untrusted
+    // input — the other Custom tests above only cover it indirectly via
+    // `evaluate_deck_compatibility`.
+    assert_eq!(companion_candidates(&db, &request), Vec::<String>::new());
+}
+
+// The authoritative FormatConfig ingress: a malformed Custom payload (no
+// custom_rules, or a mismatched id) must be rejected at deserialization
+// time, not merely by a validator nothing calls. Each invalid value is
+// constructed directly in Rust (bypassing Deserialize, which has no reason
+// to reject it going the other way) and round-tripped through
+// `serde_json` — the only way to exercise `FormatConfig`'s real `Deserialize`
+// impl without hand-guessing its full field set.
+
+#[test]
+fn format_config_deserialization_rejects_custom_without_matching_rules() {
+    let invalid = FormatConfig {
+        format: GameFormat::Custom(CustomFormatId(1)),
+        custom_rules: None,
+        ..FormatConfig::standard()
+    };
+    let json = serde_json::to_value(&invalid).unwrap();
+    assert!(
+        serde_json::from_value::<FormatConfig>(json).is_err(),
+        "Custom format with no custom_rules must be rejected at deserialization"
+    );
+}
+
+#[test]
+fn format_config_deserialization_rejects_custom_with_mismatched_rules_id() {
+    let invalid = FormatConfig {
+        format: GameFormat::Custom(CustomFormatId(5)),
+        custom_rules: Some(Box::new(sample_rules(7))),
+        ..FormatConfig::standard()
+    };
+    let json = serde_json::to_value(&invalid).unwrap();
+    assert!(
+        serde_json::from_value::<FormatConfig>(json).is_err(),
+        "Custom format with mismatched custom_rules.id must be rejected at deserialization"
+    );
+}
+
+#[test]
+fn format_config_deserialization_accepts_consistent_custom_config() {
+    let rules = sample_rules(5);
+    let valid = FormatConfig {
+        format: GameFormat::Custom(rules.id),
+        custom_rules: Some(Box::new(rules)),
+        ..FormatConfig::standard()
+    };
+    let json = serde_json::to_value(&valid).unwrap();
+    assert!(
+        serde_json::from_value::<FormatConfig>(json).is_ok(),
+        "a consistent Custom FormatConfig must still deserialize successfully"
+    );
 }
