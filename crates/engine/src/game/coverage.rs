@@ -1896,14 +1896,34 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::OpponentLostLife => "each opponent who lost life this turn",
         PlayerFilter::OpponentGainedLife => "each opponent who gained life this turn",
         PlayerFilter::HasLostTheGame => "each player who has lost the game",
-        // CR 120.2a/120.2b: human string reflects the damage-kind selector.
-        PlayerFilter::OpponentDealtDamage { kind, .. } => match kind {
-            DamageKindFilter::CombatOnly => "each opponent who was dealt combat damage this turn",
-            DamageKindFilter::NoncombatOnly => {
-                "each opponent who was dealt noncombat damage this turn"
+        // CR 120.2a/120.2b + CR 120.9: every field here is behavior-bearing —
+        // `opponent_dealt_damage_matches` consumes the damage-source filter and
+        // the distinct-source threshold alongside the kind selector. Rendering
+        // only `kind` collapsed "any qualifying damage", "damage from a Dragon",
+        // and "damage from three distinct Pirates" into one signature, which
+        // makes a real semantic change invisible in the coverage receipt.
+        PlayerFilter::OpponentDealtDamage {
+            kind,
+            source,
+            min_sources,
+        } => {
+            let kind_text = match kind {
+                DamageKindFilter::CombatOnly => "combat damage",
+                DamageKindFilter::NoncombatOnly => "noncombat damage",
+                DamageKindFilter::Any => "damage",
+            };
+            let mut rendered = format!("each opponent who was dealt {kind_text}");
+            if let Some(source) = source.as_deref() {
+                rendered.push_str(&format!(" from {}", fmt_target(source)));
             }
-            DamageKindFilter::Any => "each opponent who was dealt damage this turn",
-        },
+            // CR 120.9: the default of 1 is "any matching source" and carries no
+            // information, so only a raised threshold is rendered.
+            if *min_sources > 1 {
+                rendered.push_str(&format!(" by {min_sources} distinct sources"));
+            }
+            rendered.push_str(" this turn");
+            return rendered;
+        }
         PlayerFilter::OpponentAttacked { subject, scope } => match (subject, scope) {
             (AttackSubject::You, AttackScope::ThisTurn) => "each opponent you attacked this turn",
             (AttackSubject::Source, AttackScope::ThisTurn) => {
@@ -1920,10 +1940,24 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
             "each opponent attacking the enchanted player"
         }
         PlayerFilter::All => "each player",
-        PlayerFilter::AllExcept { .. } => "each player other than the excluded player",
+        // CR 109.4: `AllExcept` is a recursive carrier — the excluded player is
+        // itself a `PlayerFilter`, so two different exclusions must not render
+        // identically.
+        PlayerFilter::AllExcept { exclude } => {
+            return format!("each player other than {}", fmt_player_filter(exclude));
+        }
         PlayerFilter::HighestSpeed => "each player with the highest speed",
         PlayerFilter::ZoneChangedThisWay => "each player who changed a card this way",
-        PlayerFilter::PerformedActionThisWay { .. } => "players who performed an action this way",
+        // CR 608.2c: the player scope and the action kind both select — "each
+        // opponent who discarded this way" is not "you who sacrificed this way".
+        PlayerFilter::PerformedActionThisWay { relation, action } => {
+            let who = match relation {
+                PlayerRelation::Controller => "you",
+                PlayerRelation::Opponent => "each opponent",
+                PlayerRelation::All => "each player",
+            };
+            return format!("{who} who performed {action:?} this way");
+        }
         PlayerFilter::OwnersOfCardsExiledBySource => "owners of cards exiled with source",
         PlayerFilter::TriggeringPlayer => "the triggering player",
         PlayerFilter::OpponentOtherThanTriggering => "each other opponent",
@@ -1931,9 +1965,15 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => {
             "opponents of the attacking player who aren't being attacked"
         }
-        PlayerFilter::VotedFor { .. } => "each player who voted for this option",
+        // CR 701.38: distinct ballots are distinct predicates.
+        PlayerFilter::VotedFor { choice_index } => {
+            return format!("each player who voted for choice {choice_index}");
+        }
         PlayerFilter::ParentObjectTargetController => "the parent target's controller",
-        PlayerFilter::ChosenPlayer { .. } => "the chosen player",
+        // CR 607.2d: the slot index selects WHICH stored choice is read.
+        PlayerFilter::ChosenPlayer { index } => {
+            return format!("the chosen player {index}");
+        }
         PlayerFilter::ParentObjectTargetOwner => "the parent target's owner",
         // CR 109.4 + CR 109.5: "each [player class] who controls [comparator]
         // [count] matching permanents"
@@ -1978,7 +2018,7 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
             relation,
             possession,
             filter,
-            ..
+            caused_by,
         } => {
             let who = match relation {
                 PlayerRelation::Controller => "you",
@@ -1989,7 +2029,15 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
                 PossessionAxis::Controller => "controlled",
                 PossessionAxis::Owner => "owned",
             };
-            return format!("{who} who {verb} a {filter:?} this way");
+            // `fmt_target`, not raw `Debug` — the sibling `ControlsCount` arm
+            // renders its nested population the same way, and a Debug dump is
+            // both unreadable and unstable as a signature.
+            let mut rendered = format!("{who} who {verb} a {} this way", fmt_target(filter));
+            // CR 608.2c: the cause stamp narrows WHICH "this way" set is read.
+            if let Some(cause) = caused_by {
+                rendered.push_str(&format!(" via {cause:?}"));
+            }
+            return rendered;
         }
     }
     .into()
@@ -11664,6 +11712,92 @@ pub fn format_semantic_audit_markdown(summary: &SemanticAuditSummary) -> String 
 
 #[cfg(test)]
 mod tests {
+
+    /// The coverage receipt exists so a reviewer can see a parser/semantic
+    /// change at card granularity. A formatter that drops a behavior-bearing
+    /// field silently defeats that: two predicates the runtime treats
+    /// differently render as one signature, and a real change shows as NO diff.
+    ///
+    /// Every field asserted here is consumed at runtime —
+    /// `opponent_dealt_damage_matches` takes `source` and `min_sources`
+    /// alongside `kind`, and `AllExcept` carries a nested `PlayerFilter`.
+    ///
+    /// Discriminating by construction: each group varies exactly ONE field and
+    /// asserts all renderings are pairwise distinct, so restoring any `..` that
+    /// drops that field collapses the group and fails.
+    #[test]
+    fn player_filter_signatures_keep_every_behavior_bearing_field() {
+        use crate::types::ability::{
+            DamageKindFilter, PlayerFilter, TargetFilter, TypeFilter, TypedFilter,
+        };
+
+        fn typed(t: TypeFilter) -> TargetFilter {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![t],
+                ..Default::default()
+            })
+        }
+        fn dealt(
+            kind: DamageKindFilter,
+            source: Option<TargetFilter>,
+            min_sources: u32,
+        ) -> PlayerFilter {
+            PlayerFilter::OpponentDealtDamage {
+                kind,
+                source: source.map(Box::new),
+                min_sources,
+            }
+        }
+
+        // The exact three forms that previously collapsed into one signature.
+        let any_damage = dealt(DamageKindFilter::Any, None, 1);
+        let from_creature = dealt(DamageKindFilter::Any, Some(typed(TypeFilter::Creature)), 1);
+        let three_distinct = dealt(DamageKindFilter::Any, None, 3);
+        // The source filter must be rendered by CONTENT, not merely "present".
+        let from_artifact = dealt(DamageKindFilter::Any, Some(typed(TypeFilter::Artifact)), 1);
+        // The kind selector still discriminates.
+        let combat_only = dealt(DamageKindFilter::CombatOnly, None, 1);
+
+        assert_all_distinct(&[
+            ("any damage", &any_damage),
+            ("from a creature", &from_creature),
+            ("from an artifact", &from_artifact),
+            ("3 distinct sources", &three_distinct),
+            ("combat only", &combat_only),
+        ]);
+
+        // `AllExcept` is a recursive carrier: different exclusions must differ.
+        assert_all_distinct(&[
+            (
+                "except controller",
+                &PlayerFilter::AllExcept {
+                    exclude: Box::new(PlayerFilter::Controller),
+                },
+            ),
+            (
+                "except defending player",
+                &PlayerFilter::AllExcept {
+                    exclude: Box::new(PlayerFilter::DefendingPlayer),
+                },
+            ),
+        ]);
+    }
+
+    /// Assert every rendering in `cases` is pairwise distinct, naming the pair
+    /// that collapsed. A collapsed pair is exactly the defect this guards.
+    fn assert_all_distinct(cases: &[(&str, &crate::types::ability::PlayerFilter)]) {
+        for (i, (label_a, a)) in cases.iter().enumerate() {
+            for (label_b, b) in cases.iter().skip(i + 1) {
+                let (rendered_a, rendered_b) = (fmt_player_filter(a), fmt_player_filter(b));
+                assert_ne!(
+                    rendered_a, rendered_b,
+                    "{label_a:?} and {label_b:?} are behaviorally different but \
+                     render identically as {rendered_a:?} — a real change \
+                     between them would be invisible in the coverage receipt"
+                );
+            }
+        }
+    }
 
     /// CR 113.3b / CR 113.3c + CR 109.4: the ability-kind and controller axes
     /// are independent, so `fmt_target` must render BOTH. Enumerated per-product
