@@ -96061,6 +96061,11 @@ scryfall_oracle_id = "8fa0fe02-2452-4386-8e0c-165757b0f0a3"
 scryfall_id = "1546013b-89d7-46b8-bfcb-9d150a50499f"
 
 [[token.source_card_refs]]
+card_name = "Food Coma"
+scryfall_oracle_id = "aab3774c-4ec3-4946-a09b-af0fab7cacb7"
+scryfall_id = "5ac60ed5-5f28-4e8b-9417-7b2ba52b5880"
+
+[[token.source_card_refs]]
 card_name = "Applejack"
 scryfall_oracle_id = "c81f22a3-b93a-4ea4-b2ae-557c12e07288"
 scryfall_id = "a8f02241-b268-43c8-b69e-bf10c8a9b9ca"
@@ -190748,6 +190753,11 @@ subtypes = ["Bird"]
 supertypes = []
 colors = ["Blue"]
 keywords = ["Flying"]
+
+[[token.source_card_refs]]
+card_name = "Swan Song"
+scryfall_oracle_id = "8ddfc283-c9b4-41a5-af88-cf0068e986cc"
+scryfall_id = "70d504b8-1e59-4cea-8e83-06bd4bc9ab68"
 
 [[token.source_card_refs]]
 card_name = "Swan Song"

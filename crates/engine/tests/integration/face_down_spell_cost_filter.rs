@@ -418,3 +418,66 @@ fn an_unpayable_exile_raise_withholds_the_face_down_offer() {
         "with the {{5}} unpayable the legal cast is the FACE-UP foretell one"
     );
 }
+/// CR 702.37b (Megamorph) + CR 601.2f: the keyword-sibling coverage for the
+/// COST path — Kadena's reduction must reach a Megamorph card's face-down
+/// cast exactly as it reaches Morph. Discriminating through the real cast:
+/// without the record fix the 3 mana are spent.
+#[test]
+fn kadenas_reduction_reaches_a_megamorph_spell() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Snake Sorcerer", 3, 3, KADENA_TEXT);
+    let morph = scenario
+        .add_creature_to_hand(P0, "Mega Beast", 4, 5)
+        .with_keyword(Keyword::Megamorph(ManaCost::generic(5)))
+        .with_mana_cost(ManaCost::generic(5))
+        .id();
+    scenario.with_mana_pool(P0, colorless(3));
+    let mut runner = scenario.build();
+
+    assert!(cast(&mut runner, morph), "the face-down cast must be legal");
+    assert!(
+        runner.state().objects[&morph].face_down
+            && runner.state().objects[&morph].zone == Zone::Stack,
+        "reach-guard: the Megamorph spell must be on the stack FACE DOWN"
+    );
+    assert_eq!(
+        unspent(&runner),
+        3,
+        "Kadena must reduce a Megamorph face-down cast to {{0}}"
+    );
+}
+
+/// CR 702.168b (Disguise) + CR 601.2f: the third keyword of the class on the
+/// COST path — Dream Chisel's {1} reduction must reach a Disguise card's
+/// face-down cast ({3} − {1} leaves 1 of 3).
+#[test]
+fn dream_chisels_reduction_reaches_a_disguise_spell() {
+    use engine::types::keywords::DisguiseCost;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Chisel Bearer", 2, 2, DREAM_CHISEL_TEXT);
+    let disguised = scenario
+        .add_creature_to_hand(P0, "Cloaked Beast", 4, 5)
+        .with_keyword(Keyword::Disguise(DisguiseCost::Mana(ManaCost::generic(5))))
+        .with_mana_cost(ManaCost::generic(5))
+        .id();
+    scenario.with_mana_pool(P0, colorless(3));
+    let mut runner = scenario.build();
+
+    assert!(
+        cast(&mut runner, disguised),
+        "the face-down cast must be legal"
+    );
+    assert!(
+        runner.state().objects[&disguised].face_down
+            && runner.state().objects[&disguised].zone == Zone::Stack,
+        "reach-guard: the Disguise spell must be on the stack FACE DOWN"
+    );
+    assert_eq!(
+        unspent(&runner),
+        1,
+        "a {{1}} reduction must reach a Disguise face-down cast"
+    );
+}

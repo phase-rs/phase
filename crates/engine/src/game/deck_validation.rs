@@ -93,12 +93,20 @@ pub fn signature_spell_selection_policy(
 /// the main deck into the dedicated companion slot. Candidate evaluation uses
 /// the same typed predicate as pregame reveal validation.
 pub fn companion_candidates(db: &CardDatabase, request: &DeckCompatibilityRequest) -> Vec<String> {
-    let Some(format) = request
+    // `GameFormat::uses_commander()` returns `Err` for `Custom` (a bare
+    // GameFormat cannot resolve it — see types::format). `selected_format`
+    // arrives from an untrusted request (this function is exposed directly
+    // via engine-wasm's `companion_candidates_js`). No companion-candidate
+    // resolution exists for Custom formats yet, so treating an `Err`/absent
+    // format the same as any other non-commander format (empty result) is
+    // the honest answer.
+    let uses_commander = request
         .selected_format
-        .filter(|format| format.uses_commander())
-    else {
+        .and_then(|format| format.uses_commander().ok())
+        .unwrap_or(false);
+    if !uses_commander {
         return Vec::new();
-    };
+    }
 
     request
         .main_deck
@@ -111,8 +119,8 @@ pub fn companion_candidates(db: &CardDatabase, request: &DeckCompatibilityReques
             let companion = DeckEntry::from_resolved_face(db, face, 1);
             let main = deck_entries_for_names(db, &remaining_main);
             let commanders = deck_entries_for_names(db, &request.commander);
-            let starting = companion_starting_deck(&main, &commanders, format);
-            is_eligible_companion(&companion, &starting, &commanders, format)
+            let starting = companion_starting_deck(&main, &commanders, uses_commander);
+            is_eligible_companion(&companion, &starting, &commanders, uses_commander)
                 .then(|| face.name.clone())
         })
         .collect::<BTreeSet<_>>()
@@ -823,8 +831,16 @@ fn validate_commander_companion(
     let companion = DeckEntry::from_resolved_face(db, face, 1);
     let main = deck_entries_for_names(db, &request.main_deck);
     let commanders = deck_entries_for_names(db, &request.commander);
-    let starting = companion_starting_deck(&main, &commanders, format);
-    if !is_eligible_companion(&companion, &starting, &commanders, format) {
+    // `format` here is always a real Commander/Brawl-family built-in — this
+    // function is only ever dispatched from evaluate_commander_with_format,
+    // evaluate_brawl, and quick_commander_check, each already gated to a
+    // guaranteed non-Custom format — so `.uses_commander()` is guaranteed
+    // `Ok` here.
+    let uses_commander = format
+        .uses_commander()
+        .expect("validate_commander_companion is only dispatched for a built-in format");
+    let starting = companion_starting_deck(&main, &commanders, uses_commander);
+    if !is_eligible_companion(&companion, &starting, &commanders, uses_commander) {
         reasons.push(format!(
             "{companion_name}: not a legal companion for this starting deck"
         ));
@@ -1072,7 +1088,11 @@ fn evaluate_brawl(
 
     // Exact total card count from the format config (main + commander,
     // accounting for commander listed in main).
-    let deck_size = usize::from(FormatConfig::for_format(game_format).deck_size);
+    let deck_size = usize::from(
+        FormatConfig::for_format(game_format)
+            .expect("evaluate_brawl is only dispatched for a Brawl-family GameFormat")
+            .deck_size,
+    );
     let represented_in_main = request
         .commander
         .iter()
@@ -1870,6 +1890,12 @@ fn quick_archenemy_check(
     }
 }
 
+/// Single authority for the Phase 1a "no `CustomFormatRules` resolver exists
+/// yet" rejection text, shared by the summary and full deck-compatibility
+/// paths so the two can never drift.
+const CUSTOM_FORMAT_UNSUPPORTED: &str =
+    "Custom format deck-compatibility checks are not yet supported.";
+
 fn evaluate_selected_format_summary(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
@@ -1878,7 +1904,22 @@ fn evaluate_selected_format_summary(
         return (None, Vec::new(), BTreeSet::new());
     };
 
-    if !format.uses_commander() && !request.companion.is_empty() {
+    // `GameFormat::uses_commander()` returns `Err` for `Custom` (a bare
+    // GameFormat cannot resolve it — see types::format), and the companion /
+    // signature-spell pre-guards below call it. `selected_format` arrives from
+    // an untrusted request, so Custom must be answered before those guards run.
+    if matches!(format, GameFormat::Custom(_)) {
+        return (
+            Some(false),
+            vec![CUSTOM_FORMAT_UNSUPPORTED.to_string()],
+            BTreeSet::new(),
+        );
+    }
+    let uses_commander = format
+        .uses_commander()
+        .expect("format is guaranteed non-Custom by the preceding check");
+
+    if !uses_commander && !request.companion.is_empty() {
         return (
             Some(false),
             vec![format!(
@@ -1918,7 +1959,7 @@ fn evaluate_selected_format_summary(
             db,
             request,
             format.legality_format().unwrap(),
-            format.label(),
+            &format.label(),
             format.sideboard_policy(),
         ),
         GameFormat::Commander => quick_commander_check(
@@ -1934,7 +1975,7 @@ fn evaluate_selected_format_summary(
             db,
             request,
             format.legality_format().unwrap(),
-            format.label(),
+            &format.label(),
             match format {
                 GameFormat::PauperCommander => CommanderVariantRules::pauper_commander(),
                 GameFormat::DuelCommander => CommanderVariantRules::duel_commander(),
@@ -1952,11 +1993,20 @@ fn evaluate_selected_format_summary(
             db,
             request,
             format.legality_format().unwrap(),
-            format.label(),
+            &format.label(),
             format,
         ),
         GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => {
             QuickCheckResult::compatible()
+        }
+        // No CustomFormatRules resolver exists yet (Phase 1b/1d). Honest
+        // "not yet supported" rather than a false compatible() (which would
+        // let an unvalidated custom deck reach game-init) or an
+        // incompatible() framed as if the deck failed a real rules check.
+        // Reached only for exhaustiveness — the early guard above answers
+        // Custom before `uses_commander()` would return `Err` for it.
+        GameFormat::Custom(_) => {
+            QuickCheckResult::incompatible(CUSTOM_FORMAT_UNSUPPORTED.to_string())
         }
     };
 
@@ -2253,7 +2303,11 @@ fn quick_brawl_check(
                 "Brawl commander must be a legendary creature or legendary planeswalker",
             skip_commander_legality: false,
         },
-        usize::from(FormatConfig::for_format(game_format).deck_size),
+        usize::from(
+            FormatConfig::for_format(game_format)
+                .expect("quick_brawl_check is only dispatched for a Brawl-family GameFormat")
+                .deck_size,
+        ),
         game_format,
     )
 }
@@ -2270,7 +2324,16 @@ fn evaluate_selected_format(
         return (None, Vec::new());
     };
 
-    if !format.uses_commander() && !request.companion.is_empty() {
+    // See `evaluate_selected_format_summary`: Custom must be answered before
+    // the `uses_commander()`-calling pre-guards, which return `Err` for it.
+    if matches!(format, GameFormat::Custom(_)) {
+        return (Some(false), vec![CUSTOM_FORMAT_UNSUPPORTED.to_string()]);
+    }
+    let uses_commander = format
+        .uses_commander()
+        .expect("format is guaranteed non-Custom by the preceding check");
+
+    if !uses_commander && !request.companion.is_empty() {
         return (
             Some(false),
             vec![format!(
@@ -2316,7 +2379,7 @@ fn evaluate_selected_format(
                 request,
                 unknown_cards,
                 format.legality_format().unwrap(),
-                format.label(),
+                &format.label(),
                 format.sideboard_policy(),
             );
             if !check.compatible {
@@ -2334,7 +2397,7 @@ fn evaluate_selected_format(
                 request,
                 unknown_cards,
                 format.legality_format().unwrap(),
-                format.label(),
+                &format.label(),
                 match format {
                     GameFormat::PauperCommander => CommanderVariantRules::pauper_commander(),
                     GameFormat::DuelCommander => CommanderVariantRules::duel_commander(),
@@ -2353,7 +2416,7 @@ fn evaluate_selected_format(
                 request,
                 unknown_cards,
                 format.legality_format().unwrap(),
-                format.label(),
+                &format.label(),
                 format,
             );
             if !check.compatible {
@@ -2397,6 +2460,14 @@ fn evaluate_selected_format(
             check.compatible
         }
         GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => true,
+        // See evaluate_selected_format_summary's Custom arm: no
+        // CustomFormatRules resolver exists yet. `false` is the honest,
+        // fail-closed "not yet supported" signal. Reached only for
+        // exhaustiveness — the early guard above answers Custom first.
+        GameFormat::Custom(_) => {
+            reasons.push(CUSTOM_FORMAT_UNSUPPORTED.to_string());
+            false
+        }
     };
 
     // CR 100.4 × MatchType::Bo3: BO3 requires a sideboard regardless of format.

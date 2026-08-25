@@ -57,6 +57,21 @@ function graveyardWingState() {
   return { gyCard, handCard };
 }
 
+function exileWingState() {
+  const exileCard = gameObjectFactory.withId(401).inExile().named("Plot Card").build();
+  const handCard = gameObjectFactory.withId(402).inHand().named("Hand Card").build();
+  const gameState = gameStateFactory
+    .withPlayers({ id: 0, hand: [handCard.id] }, 1)
+    .withObjects(exileCard, handCard)
+    .build({ exile: [exileCard.id] });
+  useGameStore.setState({
+    gameState,
+    spellCosts: {},
+    legalActionsByObject: { [String(exileCard.id)]: [castSpell(exileCard.id)] },
+  });
+  return { exileCard };
+}
+
 /**
  * Stand in for the browser's `:hover` hit-test, which jsdom does not implement.
  *
@@ -108,7 +123,7 @@ describe("castable graveyard/exile wing hover", () => {
     // would make a revert fail at this lookup rather than at the dismissal
     // assertion below, which is the behaviour this test exists to pin.
     const art = within(container).getByAltText("Encore Card");
-    const wing = art.closest<HTMLElement>(".cursor-pointer");
+    const wing = art.closest<HTMLElement>(".cursor-grab");
     expect(wing).not.toBeNull();
     simulatePointerOver(wing!);
 
@@ -147,5 +162,24 @@ describe("castable graveyard/exile wing hover", () => {
     const reorderable = container.querySelectorAll(HAND_REORDER_SELECTOR);
     expect(reorderable.length).toBe(1);
     expect((reorderable[0] as HTMLElement).dataset.objectId).toBe(String(handCard.id));
+  });
+
+  it("keeps exile and graveyard wing cards in the fan's interactive stacking layer", () => {
+    graveyardWingState();
+    const { container: graveyardContainer } = render(<PlayerHand />);
+    const graveyardWing = within(graveyardContainer)
+      .getByAltText("Encore Card")
+      .closest<HTMLElement>(".cursor-grab");
+    expect(graveyardWing).not.toBeNull();
+    expect(graveyardWing).toHaveStyle({ zIndex: "1" });
+
+    cleanup();
+    exileWingState();
+    const { container: exileContainer } = render(<PlayerHand />);
+    const exileWing = within(exileContainer)
+      .getByAltText("Plot Card")
+      .closest<HTMLElement>(".cursor-grab");
+    expect(exileWing).not.toBeNull();
+    expect(exileWing).toHaveStyle({ zIndex: "0" });
   });
 });

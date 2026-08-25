@@ -45675,6 +45675,38 @@ fn play_that_card_until_next_same_source_exile_has_source_invalidation() {
     );
 }
 
+#[test]
+fn unrelated_remains_exiled_text_cannot_extend_permission_duration() {
+    let ctx = ParseContext::default();
+    let valid = "cast that card this turn";
+    let valid_clause = try_parse_play_from_exile(TextPair::new(valid, valid), &ctx)
+        .expect("the permission grammar should recognize its own turn duration");
+    assert!(matches!(
+        valid_clause.effect,
+        Effect::GrantCastingPermission {
+            permission: CastingPermission::PlayFromExile {
+                duration: Duration::UntilEndOfTurn,
+                ..
+            },
+            ..
+        }
+    ));
+
+    let unrelated = "cast that card this turn, then another card remains exiled";
+    let unrelated_clause = try_parse_play_from_exile(TextPair::new(unrelated, unrelated), &ctx)
+        .expect("the existing this-turn permission classification should remain unchanged");
+    assert!(matches!(
+        unrelated_clause.effect,
+        Effect::GrantCastingPermission {
+            permission: CastingPermission::PlayFromExile {
+                duration: Duration::UntilEndOfTurn,
+                ..
+            },
+            ..
+        }
+    ));
+}
+
 /// Discriminating: the "for as long as it remains exiled, and mana of any
 /// type..." form (Blightwing Bandit class) must keep dispatching to
 /// `try_parse_exile_play_grant_with_any_mana` (duration `Permanent`), NOT be

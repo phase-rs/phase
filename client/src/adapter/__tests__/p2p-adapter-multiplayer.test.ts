@@ -404,6 +404,7 @@ function twoHeadedGiantConfig(): FormatConfig {
     commander_damage_threshold: null,
     range_of_influence: null,
     team_based: true,
+    sideboard_policy: { type: "Unlimited" },
     uses_commander: false,
     allow_debug_actions: false,
   };
@@ -421,6 +422,7 @@ function commanderConfig(): FormatConfig {
     commander_damage_threshold: 21,
     range_of_influence: null,
     team_based: false,
+    sideboard_policy: { type: "Forbidden" },
     uses_commander: true,
     allow_debug_actions: false,
   };

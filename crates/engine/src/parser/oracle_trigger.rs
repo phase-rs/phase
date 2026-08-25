@@ -7660,13 +7660,18 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
         alt((parse_subtyped_planeswalker, parse_attached_to_subject)).parse(input)
     }
 
-    fn parse_loyalty_line(input: &str) -> OracleResult<'_, TargetFilter> {
+    fn parse_loyalty_scope(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
+        alt((
+            map(preceded(tag(" of "), parse_loyalty_planeswalker), Some),
+            value(None, eof),
+        ))
+        .parse(input)
+    }
+
+    fn parse_loyalty_line(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
         preceded(
             alt((tag("whenever "), tag("when "))),
-            preceded(
-                tag("you activate a loyalty ability of "),
-                parse_loyalty_planeswalker,
-            ),
+            preceded(tag("you activate a loyalty ability"), parse_loyalty_scope),
         )
         .parse(input)
     }
@@ -7674,7 +7679,7 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
     if let Ok((_, pw_filter)) = all_consuming(parse_loyalty_line).parse(lower) {
         let mut def = make_base();
         def.mode = TriggerMode::LoyaltyAbilityActivated;
-        def.valid_card = Some(pw_filter);
+        def.valid_card = pw_filter;
         return Some((TriggerMode::LoyaltyAbilityActivated, def));
     }
 

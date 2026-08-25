@@ -3553,6 +3553,55 @@ fn trigger_combat_damage_look_then_exile_face_down_grants_impulse_play() {
     );
 }
 
+/// CR 406.3, CR 406.3a-b, CR 601.2a, and CR 611.2a: Rev's exact Oracle text
+/// grants its controller permission to look at and cast the face-down card for
+/// as long as it remains exiled. The intervening Treasure creation must not
+/// make "that card" bind to the token or lower the permission as an immediate
+/// during-resolution cast.
+#[test]
+fn rev_tithe_extractor_grants_lingering_cast_permission() {
+    use crate::types::identifiers::TrackedSetId;
+
+    let def = parse_trigger_line(
+        "Whenever one or more creatures you control deal combat damage to a player, create a Treasure token, then look at the top card of that player's library and exile it face down. You may cast that card for as long as it remains exiled.",
+        "Rev, Tithe Extractor",
+    );
+    let execute = def.execute.as_deref().expect("trigger should have execute");
+
+    let mut cursor = Some(execute);
+    let mut grant = None;
+    let mut immediate_cast = false;
+    while let Some(link) = cursor {
+        match link.effect.as_ref() {
+            effect @ Effect::GrantCastingPermission { .. } => grant = Some(effect),
+            Effect::CastFromZone { .. } => immediate_cast = true,
+            _ => {}
+        }
+        cursor = link.sub_ability.as_deref();
+    }
+
+    assert!(
+        !immediate_cast,
+        "Rev grants a later casting permission; it must not cast during resolution"
+    );
+    assert!(
+        matches!(
+            grant,
+            Some(Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    duration: Duration::Permanent,
+                    ..
+                },
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                ..
+            })
+        ),
+        "expected a permanent PlayFromExile grant on Rev's tracked face-down card, got: {grant:?}"
+    );
+}
+
 #[test]
 fn trigger_upkeep() {
     let def = parse_trigger_line(
@@ -18290,6 +18339,24 @@ fn harsh_mentor_ability_activation_trigger_accepts_oxford_type_list() {
 
 // --- CR 606.2: "Whenever you activate a loyalty ability of [pw]" ---
 
+/// CR 606.2: Ajani Unrelenting's unqualified form accepts every loyalty
+/// ability activated by the source controller, so it carries no card filter.
+#[test]
+fn loyalty_ability_trigger_without_planeswalker_qualifier() {
+    let def = parse_trigger_line(
+        "Whenever you activate a loyalty ability, create a 2/2 colorless Wizard Soldier creature token named Cadet.",
+        "Ajani Unrelenting",
+    );
+    assert_eq!(def.mode, TriggerMode::LoyaltyAbilityActivated);
+    assert_eq!(def.valid_card, None);
+    let execute = def.execute.as_ref().expect("execute ability present");
+    assert!(
+        !matches!(*execute.effect, Effect::Unimplemented { .. }),
+        "Ajani's Cadet effect should parse, got {:?}",
+        execute.effect
+    );
+}
+
 /// CR 606.2 + CR 205.3j: Chandra's Regulator — "a Chandra planeswalker"
 /// parses to a typed Planeswalker + Subtype("Chandra") filter on
 /// `valid_card`, mode `LoyaltyAbilityActivated`, and the effect is not
@@ -28488,6 +28555,36 @@ fn elder_brain_they_draw_binds_to_defending_player() {
         }
         other => panic!("expected Draw, got {other:?}"),
     }
+
+    use crate::types::identifiers::TrackedSetId;
+
+    let mut cursor = draw.sub_ability.as_deref();
+    let mut grant = None;
+    while let Some(link) = cursor {
+        if matches!(link.effect.as_ref(), Effect::GrantCastingPermission { .. }) {
+            grant = Some(link);
+            break;
+        }
+        cursor = link.sub_ability.as_deref();
+    }
+    let grant = grant.expect("the plural exile-play permission must remain in the effect chain");
+    assert!(
+        matches!(
+            grant.effect.as_ref(),
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    duration: Duration::Permanent,
+                    ..
+                },
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                ..
+            }
+        ),
+        "expected a permanent plural PlayFromExile grant on the tracked cards, got {:?}",
+        grant.effect
+    );
 }
 
 #[test]

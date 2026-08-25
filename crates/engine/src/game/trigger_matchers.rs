@@ -7352,6 +7352,45 @@ mod tests {
         ));
     }
 
+    /// CR 606.2 + CR 109.5: an unqualified loyalty-activation trigger accepts
+    /// any loyalty ability activated by its controller, while still rejecting
+    /// an ordinary activated ability from the same planeswalker.
+    #[test]
+    fn loyalty_ability_activation_without_card_filter_accepts_any_loyalty_kind() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Unqualified Loyalty Trigger".to_string(),
+            Zone::Battlefield,
+        );
+        let planeswalker =
+            create_pw_with_subtype(&mut state, PlayerId(0), "Jace, the Mind", "Jace");
+        let trigger = make_trigger(TriggerMode::LoyaltyAbilityActivated);
+
+        assert!(match_loyalty_ability_activated(
+            &GameEvent::AbilityActivated {
+                player_id: PlayerId(0),
+                source_id: planeswalker,
+                kind: crate::types::events::ActivatedAbilityKind::Loyalty,
+            },
+            &trigger,
+            &test_trigger_source_context(&state, source),
+            &state
+        ));
+        assert!(!match_loyalty_ability_activated(
+            &GameEvent::AbilityActivated {
+                player_id: PlayerId(0),
+                source_id: planeswalker,
+                kind: crate::types::events::ActivatedAbilityKind::Normal,
+            },
+            &trigger,
+            &test_trigger_source_context(&state, source),
+            &state
+        ));
+    }
+
     /// CR 606.2: a loyalty ability of a NON-Chandra planeswalker does not fire.
     #[test]
     fn loyalty_ability_activation_non_chandra_does_not_fire() {

@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-08-24T00:00:00Z",
+  "updated": "2026-08-25T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -158,6 +158,142 @@
       ]
     },
     {
+      "name": "Esper Blink",
+      "author": "MTGGoldfish",
+      "colors": [
+        "W",
+        "B",
+        "U"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 1,
+          "name": "Boggart Trawler"
+        },
+        {
+          "count": 3,
+          "name": "Emperor of Bones"
+        },
+        {
+          "count": 3,
+          "name": "Ephemerate"
+        },
+        {
+          "count": 4,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 3,
+          "name": "Flickerwisp"
+        },
+        {
+          "count": 4,
+          "name": "Flooded Strand"
+        },
+        {
+          "count": 2,
+          "name": "Godless Shrine"
+        },
+        {
+          "count": 1,
+          "name": "Hallowed Fountain"
+        },
+        {
+          "count": 4,
+          "name": "Marsh Flats"
+        },
+        {
+          "count": 1,
+          "name": "Meticulous Archive"
+        },
+        {
+          "count": 4,
+          "name": "Overlord of the Balemurk"
+        },
+        {
+          "count": 4,
+          "name": "Phelia, Exuberant Shepherd"
+        },
+        {
+          "count": 2,
+          "name": "Plains"
+        },
+        {
+          "count": 1,
+          "name": "Polluted Delta"
+        },
+        {
+          "count": 1,
+          "name": "Prismatic Ending"
+        },
+        {
+          "count": 4,
+          "name": "Quantum Riddler"
+        },
+        {
+          "count": 1,
+          "name": "Shadowy Backstreet"
+        },
+        {
+          "count": 4,
+          "name": "Solitude"
+        },
+        {
+          "count": 1,
+          "name": "Swamp"
+        },
+        {
+          "count": 2,
+          "name": "Teferi, Time Raveler"
+        },
+        {
+          "count": 4,
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 1,
+          "name": "Undercity Sewers"
+        },
+        {
+          "count": 1,
+          "name": "Watery Grave"
+        },
+        {
+          "count": 4,
+          "name": "Witch Enchanter"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Clarion Conqueror"
+        },
+        {
+          "count": 4,
+          "name": "Consign to Memory"
+        },
+        {
+          "count": 2,
+          "name": "Containment Priest"
+        },
+        {
+          "count": 2,
+          "name": "High Noon"
+        },
+        {
+          "count": 2,
+          "name": "Mystical Dispute"
+        },
+        {
+          "count": 3,
+          "name": "Wrath of the Skies"
+        }
+      ]
+    },
+    {
       "name": "Boros Energy",
       "author": "MTGGoldfish",
       "colors": [
@@ -301,142 +437,6 @@
         {
           "count": 1,
           "name": "Celestial Purge"
-        }
-      ]
-    },
-    {
-      "name": "Esper Blink",
-      "author": "MTGGoldfish",
-      "colors": [
-        "W",
-        "B",
-        "U"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 1,
-          "name": "Boggart Trawler"
-        },
-        {
-          "count": 3,
-          "name": "Emperor of Bones"
-        },
-        {
-          "count": 3,
-          "name": "Ephemerate"
-        },
-        {
-          "count": 4,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 3,
-          "name": "Flickerwisp"
-        },
-        {
-          "count": 4,
-          "name": "Flooded Strand"
-        },
-        {
-          "count": 2,
-          "name": "Godless Shrine"
-        },
-        {
-          "count": 1,
-          "name": "Hallowed Fountain"
-        },
-        {
-          "count": 4,
-          "name": "Marsh Flats"
-        },
-        {
-          "count": 1,
-          "name": "Meticulous Archive"
-        },
-        {
-          "count": 4,
-          "name": "Overlord of the Balemurk"
-        },
-        {
-          "count": 4,
-          "name": "Phelia, Exuberant Shepherd"
-        },
-        {
-          "count": 2,
-          "name": "Plains"
-        },
-        {
-          "count": 1,
-          "name": "Polluted Delta"
-        },
-        {
-          "count": 1,
-          "name": "Prismatic Ending"
-        },
-        {
-          "count": 4,
-          "name": "Quantum Riddler"
-        },
-        {
-          "count": 1,
-          "name": "Shadowy Backstreet"
-        },
-        {
-          "count": 4,
-          "name": "Solitude"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 2,
-          "name": "Teferi, Time Raveler"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 1,
-          "name": "Undercity Sewers"
-        },
-        {
-          "count": 1,
-          "name": "Watery Grave"
-        },
-        {
-          "count": 4,
-          "name": "Witch Enchanter"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Clarion Conqueror"
-        },
-        {
-          "count": 4,
-          "name": "Consign to Memory"
-        },
-        {
-          "count": 2,
-          "name": "Containment Priest"
-        },
-        {
-          "count": 2,
-          "name": "High Noon"
-        },
-        {
-          "count": 2,
-          "name": "Mystical Dispute"
-        },
-        {
-          "count": 3,
-          "name": "Wrath of the Skies"
         }
       ]
     },
@@ -862,141 +862,6 @@
       ]
     },
     {
-      "name": "Dimir Midrange",
-      "author": "MTGGoldfish",
-      "colors": [
-        "U",
-        "B"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Bloodstained Mire"
-        },
-        {
-          "count": 1,
-          "name": "Cling to Dust"
-        },
-        {
-          "count": 2,
-          "name": "Consign to Memory"
-        },
-        {
-          "count": 2,
-          "name": "Counterspell"
-        },
-        {
-          "count": 4,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 4,
-          "name": "Force of Negation"
-        },
-        {
-          "count": 2,
-          "name": "Island"
-        },
-        {
-          "count": 2,
-          "name": "Kaito, Bane of Nightmares"
-        },
-        {
-          "count": 3,
-          "name": "Orcish Bowmasters"
-        },
-        {
-          "count": 1,
-          "name": "Otawara, Soaring City"
-        },
-        {
-          "count": 4,
-          "name": "Polluted Delta"
-        },
-        {
-          "count": 4,
-          "name": "Psychic Frog"
-        },
-        {
-          "count": 4,
-          "name": "Quantum Riddler"
-        },
-        {
-          "count": 1,
-          "name": "Scalding Tarn"
-        },
-        {
-          "count": 2,
-          "name": "Sheoldred's Edict"
-        },
-        {
-          "count": 2,
-          "name": "Sink into Stupor"
-        },
-        {
-          "count": 3,
-          "name": "Spell Snare"
-        },
-        {
-          "count": 3,
-          "name": "Subtlety"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 2,
-          "name": "Tamiyo, Inquisitive Student"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 2,
-          "name": "Undercity Sewers"
-        },
-        {
-          "count": 3,
-          "name": "Watery Grave"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 3,
-          "name": "Break the Ice"
-        },
-        {
-          "count": 2,
-          "name": "Consign to Memory"
-        },
-        {
-          "count": 2,
-          "name": "Engineered Explosives"
-        },
-        {
-          "count": 3,
-          "name": "Mystical Dispute"
-        },
-        {
-          "count": 2,
-          "name": "Nihil Spellbomb"
-        },
-        {
-          "count": 1,
-          "name": "Requiting Hex"
-        },
-        {
-          "count": 2,
-          "name": "Toxic Deluge"
-        }
-      ]
-    },
-    {
       "name": "Devoted Combo",
       "author": "MTGGoldfish",
       "colors": [
@@ -1153,6 +1018,141 @@
         {
           "count": 2,
           "name": "Vexing Bauble"
+        }
+      ]
+    },
+    {
+      "name": "Dimir Midrange",
+      "author": "MTGGoldfish",
+      "colors": [
+        "U",
+        "B"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Bloodstained Mire"
+        },
+        {
+          "count": 1,
+          "name": "Cling to Dust"
+        },
+        {
+          "count": 2,
+          "name": "Consign to Memory"
+        },
+        {
+          "count": 2,
+          "name": "Counterspell"
+        },
+        {
+          "count": 4,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 4,
+          "name": "Force of Negation"
+        },
+        {
+          "count": 2,
+          "name": "Island"
+        },
+        {
+          "count": 2,
+          "name": "Kaito, Bane of Nightmares"
+        },
+        {
+          "count": 3,
+          "name": "Orcish Bowmasters"
+        },
+        {
+          "count": 1,
+          "name": "Otawara, Soaring City"
+        },
+        {
+          "count": 4,
+          "name": "Polluted Delta"
+        },
+        {
+          "count": 4,
+          "name": "Psychic Frog"
+        },
+        {
+          "count": 4,
+          "name": "Quantum Riddler"
+        },
+        {
+          "count": 1,
+          "name": "Scalding Tarn"
+        },
+        {
+          "count": 2,
+          "name": "Sheoldred's Edict"
+        },
+        {
+          "count": 2,
+          "name": "Sink into Stupor"
+        },
+        {
+          "count": 3,
+          "name": "Spell Snare"
+        },
+        {
+          "count": 3,
+          "name": "Subtlety"
+        },
+        {
+          "count": 1,
+          "name": "Swamp"
+        },
+        {
+          "count": 2,
+          "name": "Tamiyo, Inquisitive Student"
+        },
+        {
+          "count": 4,
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 2,
+          "name": "Undercity Sewers"
+        },
+        {
+          "count": 3,
+          "name": "Watery Grave"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 3,
+          "name": "Break the Ice"
+        },
+        {
+          "count": 2,
+          "name": "Consign to Memory"
+        },
+        {
+          "count": 2,
+          "name": "Engineered Explosives"
+        },
+        {
+          "count": 3,
+          "name": "Mystical Dispute"
+        },
+        {
+          "count": 2,
+          "name": "Nihil Spellbomb"
+        },
+        {
+          "count": 1,
+          "name": "Requiting Hex"
+        },
+        {
+          "count": 2,
+          "name": "Toxic Deluge"
         }
       ]
     },

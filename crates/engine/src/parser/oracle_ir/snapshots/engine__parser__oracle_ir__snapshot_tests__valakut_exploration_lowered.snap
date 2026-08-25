@@ -27,17 +27,16 @@ expression: "&lowered"
         "sub_ability": {
           "kind": "Spell",
           "effect": {
-            "type": "CastFromZone",
-            "target": {
-              "type": "TrackedSetFiltered",
-              "id": 0,
-              "filter": {
-                "type": "Any"
-              },
-              "caused_by": "Exiled"
+            "type": "GrantCastingPermission",
+            "permission": {
+              "type": "PlayFromExile",
+              "duration": "Permanent",
+              "granted_to": 0
             },
-            "without_paying_mana_cost": false,
-            "mode": "Play"
+            "target": {
+              "type": "TrackedSet",
+              "id": 0
+            }
           },
           "cost": null,
           "sub_ability": null,
@@ -53,7 +52,7 @@ expression: "&lowered"
           "target_prompt": null,
           "condition": null,
           "optional_targeting": false,
-          "optional": true,
+          "optional": false,
           "forward_result": false,
           "sub_link": "SequentialSibling"
         },

@@ -1981,8 +1981,9 @@ pub(crate) fn with_clause_duration(
     clause
 }
 
-fn normalize_play_from_exile_duration(duration: Duration) -> Duration {
-    match duration {
+pub(crate) fn is_play_from_exile_lifetime_duration(duration: &Duration) -> bool {
+    matches!(
+        duration,
         Duration::ForAsLongAs {
             condition: StaticCondition::Unrecognized { text },
         } if matches!(
@@ -1991,8 +1992,13 @@ fn normalize_play_from_exile_duration(duration: Duration) -> Duration {
                 | "that card remains exiled"
                 | "those cards remain exiled"
                 | "they remain exiled"
-        ) =>
-        {
+        )
+    )
+}
+
+fn normalize_play_from_exile_duration(duration: Duration) -> Duration {
+    match duration {
+        duration if is_play_from_exile_lifetime_duration(&duration) => {
             // CR 400.7i + CR 611.2a: exile-play permissions persist until the
             // referenced object leaves exile; zone-exit cleanup removes the
             // object-tagged permission.

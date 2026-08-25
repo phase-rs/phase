@@ -77,6 +77,7 @@ use super::oracle_effect::conditions::{
     strip_leading_general_conditional, strip_unrecognized_conditional_head_when_body_optional,
 };
 use super::oracle_effect::strip_trailing_duration;
+use super::oracle_ir::ast::is_play_from_exile_lifetime_duration;
 use super::oracle_ir::context::ParseContext;
 use super::oracle_nom::bridge::nom_on_lower;
 use crate::types::ability::{
@@ -415,6 +416,14 @@ fn is_specialized_duration_carrier(text_lower: &str) -> bool {
     use nom::branch::alt;
     use nom::bytes::complete::tag;
     use nom::combinator::value;
+    let (body, duration) = strip_trailing_duration(text_lower);
+    let bare_tracked_exile_grant = duration
+        .as_ref()
+        .is_some_and(is_play_from_exile_lifetime_duration)
+        && tag::<_, _, OracleError<'_>>("cast spells from among ")
+            .parse(body)
+            .is_ok();
+
     let head: nom::IResult<&str, (), OracleError<'_>> = alt((
         // CR 400.7i — impulse-draw bare form (post strip_optional_effect_prefix
         // in the chunk loop). `try_parse_play_from_exile` requires the
@@ -455,7 +464,7 @@ fn is_specialized_duration_carrier(text_lower: &str) -> bool {
         parse_additional_land_head,
     ))
     .parse(text_lower);
-    head.is_ok()
+    bare_tracked_exile_grant || head.is_ok()
 }
 
 /// CR 305.2: Head matcher for the turn-scoped additional-land grant, used by

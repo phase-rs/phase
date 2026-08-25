@@ -10662,6 +10662,25 @@ pub(crate) fn face_down_cast_is_permitted(
     .is_ok()
 }
 
+/// CR 702.37c / CR 702.168b + CR 601.2b: Whether the fixed-{3} face-down cast is
+/// FEASIBLE right now: keyword scope, castability of the blanked 2/2 profile
+/// (zone, timing, prohibitions — `face_down_cast_is_permitted`), and payability
+/// of the {3} after cost modification (`can_afford_face_down_cast`). Offer-side
+/// twin of the dispatch gate in `handle_cast_spell_with_payment_mode`'s
+/// face-down block, which asks the same three questions before it offers the
+/// choice or auto-routes to the face-down cast — a cast the reducer would
+/// accept must also be offered.
+fn face_down_cast_is_feasible(state: &GameState, player: PlayerId, object_id: ObjectId) -> bool {
+    object_has_effective_face_down_keyword(state, object_id)
+        && face_down_cast_is_permitted(state, player, object_id)
+        && can_afford_face_down_cast(
+            state,
+            player,
+            object_id,
+            &crate::types::mana::ManaCost::generic(3),
+        )
+}
+
 fn continue_cast_face_down(
     state: &mut GameState,
     player: PlayerId,
@@ -14307,18 +14326,8 @@ fn castable_spell_verdict_with_probe(
         // may still be legal — CR 708.4 applies prohibitions to the face-down
         // characteristics (no name / no mana value); CR 601.3a lets a player ignore a
         // qualities-conditional prohibition when a proposal choice (here, casting face
-        // down) changes the qualities it reads. Feasibility twin of the dispatch offer
-        // gate: same keyword scope + {3} affordability + castability against the blanked
-        // profile (which also enforces creature-spell sorcery-speed timing, CR 302.1).
-        if object_has_effective_face_down_keyword(state, object_id)
-            && can_afford_face_down_cast(
-                state,
-                player,
-                object_id,
-                &crate::types::mana::ManaCost::generic(3),
-            )
-            && face_down_cast_is_permitted(state, player, object_id)
-        {
+        // down) changes the qualities it reads.
+        if face_down_cast_is_feasible(state, player, object_id) {
             return Some(CastableSpellVerdict {
                 payment_state: None,
                 prepared_cost: None,
@@ -14330,14 +14339,30 @@ fn castable_spell_verdict_with_probe(
             prepared_cost: None,
         });
     };
-    let is_castable = can_cast_prepared_now_with_probe(state, player, &prepared, probe)
+    if can_cast_prepared_now_with_probe(state, player, &prepared, probe)
         || !casting_variant_choice_set(state, player, object_id, probe)
             .options
-            .is_empty();
-    is_castable.then_some(CastableSpellVerdict {
-        payment_state: None,
-        prepared_cost: Some(prepared.mana_cost),
-    })
+            .is_empty()
+    {
+        return Some(CastableSpellVerdict {
+            payment_state: None,
+            prepared_cost: Some(prepared.mana_cost),
+        });
+    }
+    // CR 702.37c / CR 702.168b + CR 601.2b: the printed cast prepared fine but is
+    // not payable (and no variant option exists). The {3} face-down cast may still
+    // be — the dispatch path auto-routes exactly this case to the face-down cast,
+    // so the offer must say yes whenever the reducer would accept. `prepared_cost`
+    // stays `None`: the printed cost is not the cost this cast will pay, and the
+    // face-down auto-route carries `CastPaymentMode::Auto` (parity with the
+    // prepare-failure rescue above).
+    if face_down_cast_is_feasible(state, player, object_id) {
+        return Some(CastableSpellVerdict {
+            payment_state: None,
+            prepared_cost: None,
+        });
+    }
+    None
 }
 
 /// CR 702.180a (issue #1550): Harmonize may tap up to one untapped creature

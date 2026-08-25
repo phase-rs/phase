@@ -61,7 +61,7 @@ fn entries_to_count_map(entries: &[DeckEntry]) -> HashMap<String, u32> {
 /// `current_main`/`current_sideboard` and only the revealed companion copy is
 /// returned (CR 400.11a).
 fn restore_revealed_sideboard_companions(state: &mut GameState) {
-    if state.format_config.format.uses_commander() {
+    if state.format_config.uses_commander {
         return;
     }
 
@@ -354,7 +354,7 @@ pub(crate) fn sideboard_submission_bounds(
     // CR 100.4a: the sideboard cap is per-format. `Forbidden` formats (the
     // Commander family) have no sideboard at all, which bounds it at zero and
     // therefore pins the whole pool in the main deck.
-    let max_sideboard_size = match state.format_config.format.sideboard_policy() {
+    let max_sideboard_size = match state.format_config.sideboard_policy {
         SideboardPolicy::Forbidden => Some(0),
         SideboardPolicy::Limited(max) => Some(max),
         SideboardPolicy::Unlimited => None,

@@ -13327,6 +13327,17 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
 /// `mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor)`,
 /// matching the wire-up used by `try_parse_exile_play_grant_with_any_mana`.
 fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    let (permission_text, explicit_duration) = strip_trailing_duration(tp.original);
+    let permission_lower = permission_text.to_lowercase();
+    let owns_exile_lifetime = explicit_duration
+        .as_ref()
+        .is_some_and(is_play_from_exile_lifetime_duration);
+    let permission_tp = if owns_exile_lifetime {
+        TextPair::new(permission_text, &permission_lower)
+    } else {
+        tp
+    };
+
     // CR 601.2a: Two grant shapes share the "...from among [those|the] exiled
     // cards" anaphor:
     //   * Plural unbounded — "you may cast spells from among those exiled cards"
@@ -13336,45 +13347,53 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
     //     restricted to the typed filter.
     // The singular determiner ("a"/"an"/"one") encodes the single-use cap; the
     // optional type phrase encodes the card filter.
-    let ((card_filter, single_use), rest_orig) = nom_on_lower(tp.original, tp.lower, |i| {
-        let (i, _) = tag("you may cast ").parse(i)?;
-        // Singular bounded: a[n]/one [type-phrase] spell → single-use + filter.
-        let singular = |i| {
-            let (i, _) = alt((tag("an "), tag("a "), tag("one "))).parse(i)?;
-            // CR 601.2a: the printed type-phrase ("instant or sorcery", a bare
-            // "spell") restricts WHICH exiled cards this single-use grant
-            // authorizes. `parse_type_phrase` maps a bare "spell" → `Card`; a
-            // typed phrase ("instant or sorcery") → the `AnyOf` type filter.
-            let (i, filter) = super::oracle_nom::target::parse_type_phrase.parse(i)?;
-            // A typed phrase ("instant or sorcery") is followed by the " spell"
-            // noun; a bare "spell" already consumed it. The card filter is a
-            // printed quality (no stack pin) so the exile object matches it.
-            let is_bare_card = matches!(
-                &filter,
-                TargetFilter::Typed(TypedFilter { type_filters, .. })
-                    if type_filters.as_slice() == [TypeFilter::Card]
-            );
-            let (i, card_filter) = match tag::<_, _, OracleError<'_>>(" spell").parse(i) {
-                Ok((i, _)) => (i, Some(filter)),
-                Err(e) => {
-                    if is_bare_card {
-                        // "a spell" — single-use but no type restriction.
-                        (i, None)
-                    } else {
-                        return Err(e);
+    let ((card_filter, single_use, explicit_permission), rest_orig) =
+        nom_on_lower(permission_tp.original, permission_tp.lower, |i| {
+            let (i, explicit_permission) = alt((
+                value(true, tag("you may cast ")),
+                value(false, tag("cast ")),
+            ))
+            .parse(i)?;
+            // Singular bounded: a[n]/one [type-phrase] spell → single-use + filter.
+            let singular = |i| {
+                let (i, _) = alt((tag("an "), tag("a "), tag("one "))).parse(i)?;
+                // CR 601.2a: the printed type-phrase ("instant or sorcery", a bare
+                // "spell") restricts WHICH exiled cards this single-use grant
+                // authorizes. `parse_type_phrase` maps a bare "spell" → `Card`; a
+                // typed phrase ("instant or sorcery") → the `AnyOf` type filter.
+                let (i, filter) = super::oracle_nom::target::parse_type_phrase.parse(i)?;
+                // A typed phrase ("instant or sorcery") is followed by the " spell"
+                // noun; a bare "spell" already consumed it. The card filter is a
+                // printed quality (no stack pin) so the exile object matches it.
+                let is_bare_card = matches!(
+                    &filter,
+                    TargetFilter::Typed(TypedFilter { type_filters, .. })
+                        if type_filters.as_slice() == [TypeFilter::Card]
+                );
+                let (i, card_filter) = match tag::<_, _, OracleError<'_>>(" spell").parse(i) {
+                    Ok((i, _)) => (i, Some(filter)),
+                    Err(e) => {
+                        if is_bare_card {
+                            // "a spell" — single-use but no type restriction.
+                            (i, None)
+                        } else {
+                            return Err(e);
+                        }
                     }
-                }
+                };
+                Ok((i, (card_filter, true)))
             };
-            Ok((i, (card_filter, true)))
-        };
-        // Plural unbounded: "spells" → unlimited within the window, any type.
-        let plural = value((None, false), tag("spells"));
-        let (i, parsed) = alt((singular, plural)).parse(i)?;
-        let (i, _) = tag(" from among ").parse(i)?;
-        let (i, _) = alt((tag("those exiled cards"), tag("the exiled cards"))).parse(i)?;
-        Ok((i, parsed))
-    })?;
-    let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
+            // Plural unbounded: "spells" → unlimited within the window, any type.
+            let plural = value((None, false), tag("spells"));
+            let (i, parsed) = alt((singular, plural)).parse(i)?;
+            let (i, _) = tag(" from among ").parse(i)?;
+            let (i, _) = alt((tag("those exiled cards"), tag("the exiled cards"))).parse(i)?;
+            Ok((i, (parsed.0, parsed.1, explicit_permission)))
+        })?;
+    if !explicit_permission && !owns_exile_lifetime {
+        return None;
+    }
+    let rest_lower = &permission_tp.lower[permission_tp.lower.len() - rest_orig.len()..];
 
     // Optional any-color mana conjunct: ", and you may spend mana as though
     // it were mana of any color to cast those spells" (or "...any type...").
@@ -13394,7 +13413,7 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
         Some(ManaSpendPermission::AnyTypeOrColor)
     };
 
-    Some(parsed_clause(Effect::GrantCastingPermission {
+    let clause = parsed_clause(Effect::GrantCastingPermission {
         permission: CastingPermission::PlayFromExile {
             // Duration is a placeholder; `with_clause_duration` patches this
             // when a leading "Until end of turn, " or trailing "... this turn"
@@ -13424,7 +13443,13 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
             id: TrackedSetId(0),
         },
         grantee: Default::default(),
-    }))
+    });
+
+    Some(if owns_exile_lifetime {
+        with_clause_duration(clause, explicit_duration.expect("checked above"))
+    } else {
+        clause
+    })
 }
 
 fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
@@ -13545,6 +13570,25 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
         return Some(clause);
     }
 
+    // Parse the duration as part of this permission clause before classifying
+    // the remaining grammar. Keeping the extracted typed duration lets
+    // `with_clause_duration` apply the exact exile-lifetime normalization in
+    // `oracle_ir::ast`, without a clause-wide phrase scan that could bind an
+    // unrelated "remain(s) exiled" instruction to this permission.
+    let invalidation = scan_until_next_same_source_exile_invalidation(tp.lower)
+        .then_some(PlayPermissionInvalidation::UntilNextGrantFromSameSource);
+    let original_tp = tp;
+    let (permission_text, explicit_duration) = strip_trailing_duration(tp.original);
+    let permission_lower = permission_text.to_lowercase();
+    let owns_exile_lifetime = explicit_duration
+        .as_ref()
+        .is_some_and(is_play_from_exile_lifetime_duration);
+    let tp = if owns_exile_lifetime {
+        TextPair::new(permission_text, &permission_lower)
+    } else {
+        original_tp
+    };
+
     // Try full forms first: "you may play/cast that card/it/those cards ..."
     // Then bare forms (after "you may" has been stripped): "play that card ..."
     // CR 406.6 + CR 400.7i: "you may look at and play those cards for as long as
@@ -13634,10 +13678,12 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
         if look_at_play_anaphor_form || mass_anaphor_form {
             // fall through to the grant builder.
         } else {
-            // Only match when temporal context exists ("this turn", "until"),
-            // otherwise it's a CastFromZone, not impulse draw permission.
+            // Preserve the legacy turn/until disambiguation while admitting an
+            // exile lifetime only when this permission grammar consumed it.
             let has_temporal = scan_contains_phrase(tp.lower, "this turn")
-                || scan_contains_phrase(tp.lower, "until ");
+                || scan_contains_phrase(tp.lower, "until ")
+                || owns_exile_lifetime
+                || invalidation.is_some();
             if !has_temporal {
                 return None;
             }
@@ -13680,23 +13726,16 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
         return None;
     }
 
-    // Duration: extract from trailing text, defaulting to UntilEndOfTurn for impulse draw.
-    // CR 400.7i + CR 611.2a: "for as long as ... remain[s] exiled" persists until
-    // zone-exit cleanup clears the exile-scoped permission, matching the existing
-    // any-mana remains-exiled grant path.
-    let invalidation = scan_until_next_same_source_exile_invalidation(tp.lower)
-        .then_some(PlayPermissionInvalidation::UntilNextGrantFromSameSource);
-    let (_, dur) = strip_trailing_duration(tp.original);
-    let duration = if invalidation.is_some()
-        || scan_contains_phrase(tp.lower, "remain exiled")
-        || scan_contains_phrase(tp.lower, "remains exiled")
-    {
+    let duration = if invalidation.is_some() {
         Duration::Permanent
     } else {
-        dur.unwrap_or(Duration::UntilEndOfTurn)
+        explicit_duration
+            .clone()
+            .unwrap_or(Duration::UntilEndOfTurn)
     };
+    let has_source_invalidation = invalidation.is_some();
 
-    Some(parsed_clause(Effect::GrantCastingPermission {
+    let clause = parsed_clause(Effect::GrantCastingPermission {
         permission: CastingPermission::PlayFromExile {
             duration,
             // Placeholder — `grant_permission::resolve` rewrites this to the
@@ -13720,7 +13759,18 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
         // impulse-draw chains like Act on Impulse, Light Up the Stage, etc.
         target: tracked_set_filter(),
         grantee: Default::default(),
-    }))
+    });
+
+    Some(match explicit_duration {
+        // Source invalidation is represented separately on the permission. Keep
+        // its established permanent embedded duration so the source event, not
+        // a duplicate duration patch, owns revocation.
+        Some(duration) if owns_exile_lifetime && !has_source_invalidation => {
+            with_clause_duration(clause, duration)
+        }
+        None => clause,
+        Some(_) => clause,
+    })
 }
 
 fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClause> {

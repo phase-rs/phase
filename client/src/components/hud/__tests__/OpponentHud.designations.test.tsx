@@ -58,6 +58,7 @@ function createTwoPlayerState(overrides: Partial<GameState> = {}): GameState {
       commander_damage_threshold: null,
       range_of_influence: null,
       team_based: false,
+      sideboard_policy: { type: "Limited", data: 15 },
       uses_commander: false,
 
       allow_debug_actions: false,
@@ -229,6 +230,7 @@ describe("OpponentHud designations (multiplayer tab path)", () => {
         commander_damage_threshold: 21,
         range_of_influence: null,
         team_based: false,
+        sideboard_policy: { type: "Forbidden" },
         uses_commander: true,
 
         allow_debug_actions: false,
