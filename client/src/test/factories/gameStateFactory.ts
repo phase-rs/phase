@@ -134,6 +134,7 @@ export const formatConfigFactory = Factory.define<FormatConfig>(() => ({
   commander_damage_threshold: null,
   range_of_influence: null,
   team_based: false,
+  sideboard_policy: { type: "Limited", data: 15 },
   uses_commander: false,
   allow_debug_actions: false,
 }));
