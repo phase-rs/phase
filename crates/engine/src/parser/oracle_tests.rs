@@ -26732,6 +26732,10 @@ fn loot_dispute_initiative_predicate_is_unchanged() {
         &["Artifact"],
         &[],
     );
+    assert!(
+        !parsed.triggers.is_empty(),
+        "Loot Dispute must retain an honest trigger gap rather than disappear: {parsed:#?}"
+    );
     for trigger in &parsed.triggers {
         assert_eq!(trigger.attack_target_filter, None);
         assert_eq!(trigger.valid_target, None);

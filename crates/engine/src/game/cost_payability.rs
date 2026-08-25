@@ -56,7 +56,7 @@ pub(crate) fn target_filter_has_x_mana_value_constraint(filter: &TargetFilter) -
         TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
             target_filter_has_x_mana_value_constraint(filter)
         }
-        // CR 109.4: a recursive carrier, not a leaf — see
+        // A recursive carrier, not a leaf — see
         // `player_filter_has_x_mana_value_constraint`.
         TargetFilter::PlayerMatching { player } => {
             player_filter_has_x_mana_value_constraint(player)
@@ -115,7 +115,7 @@ pub(crate) fn target_filter_has_x_mana_value_constraint(filter: &TargetFilter) -
     }
 }
 
-/// CR 109.4: `TargetFilter::PlayerMatching` is a recursive carrier, not a leaf —
+/// `TargetFilter::PlayerMatching` is a recursive carrier, not a leaf —
 /// its nested `PlayerFilter` graph can hold object populations that themselves
 /// carry an `X` mana-value constraint ("a player who controls a permanent with
 /// mana value X"). Treating it as a leaf let such a constraint survive
@@ -237,7 +237,7 @@ pub(crate) fn relax_x_mana_value_constraint(filter: &TargetFilter) -> TargetFilt
             filter: Box::new(relax_x_mana_value_constraint(filter)),
             caused_by: *caused_by,
         },
-        // CR 109.4: relax the nested populations too, or an `X` constraint
+        // Relax the nested populations too, or an `X` constraint
         // inside "a player who controls ..." survives cost pre-announcement.
         TargetFilter::PlayerMatching { player } => TargetFilter::PlayerMatching {
             player: Box::new(relax_x_mana_value_constraint_player(player)),
@@ -1113,7 +1113,7 @@ mod tests {
 
     const P0: PlayerId = PlayerId(0);
 
-    /// CR 109.4: `TargetFilter::PlayerMatching` is a recursive carrier. Each of
+    /// `TargetFilter::PlayerMatching` is a recursive carrier. Each of
     /// the three nested-object-population payloads must be reached by BOTH the
     /// detector and the relaxer, or an `X` mana-value constraint survives cost
     /// pre-announcement (when `X` is not yet chosen) inside a player predicate.

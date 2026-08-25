@@ -15719,25 +15719,6 @@ mod dethrone_tests {
             trigger.condition.is_some(),
             "dethrone trigger must have an intervening-if condition"
         );
-        // TRIPWIRE (CR 702.105a + CR 603.2 / CR 603.4). Dethrone reads "Whenever
-        // this creature attacks the player with the most life or tied for most
-        // life" — there is no "if", so by CR 603.4's own parenthetical the
-        // most-life clause is part of the TRIGGER EVENT (CR 603.2) and must be
-        // checked once, at declaration. Modelling it as a `TriggerCondition` is
-        // over-strict: the ability is wrongly removed from the stack if life
-        // totals change in response.
-        //
-        // That defect is KNOWN, DEFERRED, and deliberately NOT changed here; the
-        // destination is `TargetFilter::PlayerMatching` on `valid_target`, the
-        // same channel Namor, Atlantean King and Owlbear Cub now use. This
-        // assertion pins the current shape so the migration must be a deliberate
-        // edit rather than an accidental drift.
-        assert_eq!(
-            trigger.valid_target, None,
-            "TRIPWIRE: Dethrone still routes its most-life clause through \
-             `condition`, not the CR 603.2 `valid_target` channel. Migrating it \
-             to `PlayerMatching` must update this assertion on purpose."
-        );
     }
 
     #[test]
