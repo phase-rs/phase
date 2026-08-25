@@ -1399,7 +1399,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     // the seat disconnected and eligible for a later retry.
     reconnect.simulateClose();
     pendingSnapshot.resolve({
-      state: { players: [], objects: {}, waiting_for: { type: "Priority", data: { player: 1 } } } as GameState,
+      state: { players: [], objects: {}, waiting_for: { type: "Priority", data: { player: 1 } } } as unknown as GameState,
       actions: [{ type: "PassPriority" }],
       autoPassRecommended: false,
     });
