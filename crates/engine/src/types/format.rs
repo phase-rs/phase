@@ -288,6 +288,13 @@ where
     })
 }
 
+/// Fail-closed default for `FormatConfig.sideboard_policy` on a payload
+/// serialized before that field existed: understating a sideboard
+/// allowance is safer than overstating one.
+fn default_sideboard_policy_fallback() -> SideboardPolicy {
+    SideboardPolicy::Forbidden
+}
+
 /// Configuration for a game format, describing player counts, starting life, deck rules, etc.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(remote = "Self")]
@@ -327,6 +334,18 @@ pub struct FormatConfig {
     /// gates — it must never re-list fixed-deck formats client-side.
     #[serde(default)]
     pub supplies_fixed_deck: bool,
+    /// Engine-derived, stored per-format sideboard policy (CR 100.4/100.4a).
+    /// Mirrors `uses_commander`/`supplies_fixed_deck`'s stored-field
+    /// pattern — real consumers (`deck_loading.rs`, `match_flow.rs`,
+    /// `companion.rs`) read this field, never `GameFormat::sideboard_policy()`
+    /// directly: for a built-in format the two always agree, but for
+    /// `GameFormat::Custom` the bare method has no way to see the real
+    /// declared policy sitting in `custom_rules.structural.sideboard_policy`
+    /// and would silently discard it, which is exactly the bug this field
+    /// exists to prevent. `#[serde(default)]` fails closed (`Forbidden`) for
+    /// any payload serialized before this field existed.
+    #[serde(default = "default_sideboard_policy_fallback")]
+    pub sideboard_policy: SideboardPolicy,
     /// Capability flag: when true, the server (and other transport gates)
     /// permit `GameAction::Debug(_)` from any player in this session. Off by
     /// default. Orthogonal to format — a sandbox Commander game plays
@@ -380,7 +399,7 @@ impl<'de> Deserialize<'de> for FormatConfig {
     {
         let config = Self::deserialize(deserializer)?;
         // `command_zone`/`commander_damage_threshold`/`uses_commander`/
-        // `singleton` etc. are this struct's own independently-serialized
+        // `singleton`/`sideboard_policy` etc. are this struct's own independently-serialized
         // runtime fields — for a built-in format they're always consistent
         // because a `FormatConfig::x()` builder derived them together. For
         // `Custom` there is no such builder yet: `custom_rules.structural`
@@ -403,7 +422,7 @@ impl<'de> Deserialize<'de> for FormatConfig {
                 "GameFormat::Custom cannot be activated via external FormatConfig \
                  deserialization yet — no resolver exists to derive/validate this struct's \
                  runtime fields (command_zone, uses_commander, commander_damage_threshold, \
-                 singleton, ...) from custom_rules.structural, so two independently-writable \
+                 singleton, sideboard_policy, ...) from custom_rules.structural, so two independently-writable \
                  representations of the same state could disagree; this lands in a later phase",
             ));
         }
@@ -1016,6 +1035,7 @@ impl FormatConfig {
             team_based: false,
             archenemy_player: None,
             uses_commander: false,
+            sideboard_policy: GameFormat::Standard.sideboard_policy(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1036,6 +1056,7 @@ impl FormatConfig {
             team_based: false,
             archenemy_player: None,
             uses_commander: true,
+            sideboard_policy: GameFormat::Commander.sideboard_policy(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1128,6 +1149,7 @@ impl FormatConfig {
             team_based: false,
             archenemy_player: None,
             uses_commander: false,
+            sideboard_policy: GameFormat::TinyLeaders.sideboard_policy(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1152,6 +1174,7 @@ impl FormatConfig {
             team_based: false,
             archenemy_player: None,
             uses_commander: false,
+            sideboard_policy: GameFormat::Oathbreaker.sideboard_policy(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1189,6 +1212,7 @@ impl FormatConfig {
             team_based: false,
             archenemy_player: None,
             uses_commander: true,
+            sideboard_policy: GameFormat::Brawl.sideboard_policy(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1220,6 +1244,7 @@ impl FormatConfig {
             team_based: false,
             archenemy_player: None,
             uses_commander: false,
+            sideboard_policy: GameFormat::FreeForAll.sideboard_policy(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1242,6 +1267,7 @@ impl FormatConfig {
             team_based: false,
             archenemy_player: None,
             uses_commander: false,
+            sideboard_policy: GameFormat::Limited.sideboard_policy(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1267,6 +1293,7 @@ impl FormatConfig {
             team_based: false,
             archenemy_player: None,
             uses_commander: false,
+            sideboard_policy: GameFormat::Momir.sideboard_policy(),
             supplies_fixed_deck: true,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1287,6 +1314,7 @@ impl FormatConfig {
             team_based: true,
             archenemy_player: None,
             uses_commander: false,
+            sideboard_policy: GameFormat::TwoHeadedGiant.sideboard_policy(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1310,6 +1338,7 @@ impl FormatConfig {
             team_based: false,
             archenemy_player: None,
             uses_commander: false,
+            sideboard_policy: GameFormat::Planechase.sideboard_policy(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1332,6 +1361,7 @@ impl FormatConfig {
             team_based: false,
             archenemy_player: Some(PlayerId(0)),
             uses_commander: false,
+            sideboard_policy: GameFormat::Archenemy.sideboard_policy(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1820,12 +1850,23 @@ mod tests {
                 "{:?}: registry default disagrees with supplies_fixed_deck predicate",
                 meta.format
             );
+            // The stored `sideboard_policy` field must agree with the bare
+            // method for every built-in — real consumers read the stored
+            // field precisely so it can diverge safely for Custom, which
+            // means it must never silently diverge for a built-in.
+            assert_eq!(
+                meta.default_config.sideboard_policy,
+                meta.format.sideboard_policy(),
+                "{:?}: registry default disagrees with sideboard_policy predicate",
+                meta.format
+            );
         }
         // Variants not in the user-facing registry still respect the invariant.
         for format in [GameFormat::TwoHeadedGiant, GameFormat::Limited] {
             let config = FormatConfig::for_format(format).unwrap();
             assert_eq!(config.uses_commander, format.uses_commander().unwrap());
             assert_eq!(config.supplies_fixed_deck, format.supplies_fixed_deck());
+            assert_eq!(config.sideboard_policy, format.sideboard_policy());
         }
     }
 

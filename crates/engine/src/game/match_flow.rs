@@ -354,7 +354,7 @@ pub(crate) fn sideboard_submission_bounds(
     // CR 100.4a: the sideboard cap is per-format. `Forbidden` formats (the
     // Commander family) have no sideboard at all, which bounds it at zero and
     // therefore pins the whole pool in the main deck.
-    let max_sideboard_size = match state.format_config.format.sideboard_policy() {
+    let max_sideboard_size = match state.format_config.sideboard_policy {
         SideboardPolicy::Forbidden => Some(0),
         SideboardPolicy::Limited(max) => Some(max),
         SideboardPolicy::Unlimited => None,

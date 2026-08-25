@@ -678,7 +678,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     // `deck_validation.rs`) accepts the entries; this is the rule-enforcement
     // boundary.
     let drop_sideboard = matches!(
-        state.format_config.format.sideboard_policy(),
+        state.format_config.sideboard_policy,
         crate::types::format::SideboardPolicy::Forbidden
     );
     let sideboard_for = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {

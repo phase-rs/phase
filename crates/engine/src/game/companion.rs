@@ -249,15 +249,16 @@ pub fn is_eligible_companion(
         && commander_allows_companion(companion, starting_deck, commanders, uses_commander)
 }
 
-/// `format` is still needed here (only for `sideboard_policy()`, which has a
-/// disclosed non-panicking fallback for every `GameFormat` including
-/// `Custom`); `uses_commander` is passed separately because
-/// `GameFormat::uses_commander()` panics for `Custom` and the resolved
-/// `FormatConfig.uses_commander` field is the caller's only safe source of
-/// truth for it.
+/// Both facts are passed as already-resolved values rather than a bare
+/// `GameFormat`: `GameFormat::uses_commander()` panics for `Custom`, and
+/// `GameFormat::sideboard_policy()`'s disclosed `Custom` fallback
+/// (`Forbidden`) would silently discard a Custom format's real declared
+/// policy sitting in `custom_rules.structural.sideboard_policy` — the
+/// resolved `FormatConfig.uses_commander`/`.sideboard_policy` fields are the
+/// caller's only safe source of truth for either.
 fn companion_offers(
     pool: &PlayerDeckPool,
-    format: GameFormat,
+    sideboard_policy: SideboardPolicy,
     uses_commander: bool,
 ) -> Vec<CompanionRevealChoice> {
     let starting =
@@ -268,7 +269,7 @@ fn companion_offers(
             .map(|entry| (CompanionChoiceSource::Dedicated, entry))
             .into_iter()
             .collect()
-    } else if !matches!(format.sideboard_policy(), SideboardPolicy::Forbidden) {
+    } else if !matches!(sideboard_policy, SideboardPolicy::Forbidden) {
         pool.current_sideboard
             .iter()
             .enumerate()
@@ -298,7 +299,7 @@ pub fn check_companion_reveal(state: &GameState, player: PlayerId) -> Option<Wai
     let pool = state.deck_pools.iter().find(|p| p.player == player)?;
     let mut eligible = companion_offers(
         pool,
-        state.format_config.format,
+        state.format_config.sideboard_policy,
         state.format_config.uses_commander,
     );
     if state.format_config.format == GameFormat::TinyLeaders {

@@ -528,6 +528,17 @@ fn companion_candidates_returns_empty_for_custom_format_without_panicking() {
 // way to exercise FormatConfig's real Deserialize impl without hand-guessing
 // its full field set.
 
+/// Asserts the deserialization error came from this Deserialize impl's own
+/// rejection, not from some unrelated deserialization failure (a malformed
+/// field, a type mismatch) that would also make `.is_err()` pass vacuously.
+fn assert_rejected_as_unsupported_custom<T: std::fmt::Debug>(result: Result<T, serde_json::Error>) {
+    let error = result.expect_err("expected deserialization to be rejected");
+    assert!(
+        error.to_string().contains("cannot be activated"),
+        "expected the Custom-activation rejection message, got: {error}"
+    );
+}
+
 #[test]
 fn format_config_deserialization_rejects_custom_without_matching_rules() {
     let invalid = FormatConfig {
@@ -536,10 +547,7 @@ fn format_config_deserialization_rejects_custom_without_matching_rules() {
         ..FormatConfig::standard()
     };
     let json = serde_json::to_value(&invalid).unwrap();
-    assert!(
-        serde_json::from_value::<FormatConfig>(json).is_err(),
-        "Custom format with no custom_rules must be rejected at deserialization"
-    );
+    assert_rejected_as_unsupported_custom(serde_json::from_value::<FormatConfig>(json));
 }
 
 #[test]
@@ -550,10 +558,7 @@ fn format_config_deserialization_rejects_custom_with_mismatched_rules_id() {
         ..FormatConfig::standard()
     };
     let json = serde_json::to_value(&invalid).unwrap();
-    assert!(
-        serde_json::from_value::<FormatConfig>(json).is_err(),
-        "Custom format with mismatched custom_rules.id must be rejected at deserialization"
-    );
+    assert_rejected_as_unsupported_custom(serde_json::from_value::<FormatConfig>(json));
 }
 
 #[test]
@@ -570,11 +575,7 @@ fn format_config_deserialization_rejects_even_a_fully_consistent_custom_config()
         ..FormatConfig::standard()
     };
     let json = serde_json::to_value(&looks_fine).unwrap();
-    assert!(
-        serde_json::from_value::<FormatConfig>(json).is_err(),
-        "Custom format activation must be rejected until a resolver exists, even when \
-         custom_rules is internally consistent and its id matches"
-    );
+    assert_rejected_as_unsupported_custom(serde_json::from_value::<FormatConfig>(json));
 }
 
 #[test]
@@ -596,10 +597,22 @@ fn format_config_deserialization_rejects_matching_id_but_structurally_contradict
         ..FormatConfig::standard()
     };
     let json = serde_json::to_value(&contradictory).unwrap();
+    assert_rejected_as_unsupported_custom(serde_json::from_value::<FormatConfig>(json));
+}
+
+#[test]
+fn persisted_game_state_restore_accepts_a_normal_built_in_game() {
+    // Paired positive control for the rejection test below: a normal
+    // built-in game's persisted state must still round-trip successfully,
+    // so the rejection test can't be passing because *nothing* deserializes.
+    use engine::types::game_state::{GameState, PersistedGameState};
+
+    let state = GameState::new(FormatConfig::standard(), 2, 42);
+    let persisted = PersistedGameState::capture(state);
+    let json = serde_json::to_value(&persisted).unwrap();
     assert!(
-        serde_json::from_value::<FormatConfig>(json).is_err(),
-        "a matching-id Custom payload whose runtime fields contradict custom_rules.structural \
-         must still be rejected"
+        serde_json::from_value::<PersistedGameState>(json).is_ok(),
+        "restoring a persisted built-in-format GameState must succeed"
     );
 }
 
@@ -669,4 +682,68 @@ fn companion_reveal_check_does_not_panic_for_an_in_memory_custom_format_config()
     // uses_commander() inside companion_offers/companion_starting_deck.
     let result = engine::game::companion::check_all_companion_reveals(&state);
     assert!(result.is_none());
+}
+
+#[test]
+fn custom_format_unlimited_sideboard_survives_deck_loading() {
+    // The maintainer's review found GameFormat::sideboard_policy()'s
+    // disclosed Forbidden fallback for Custom silently discarded a real,
+    // already-known declared policy sitting in
+    // custom_rules.structural.sideboard_policy — deck_loading.rs trusted the
+    // bare-GameFormat fallback and emptied the sideboard even for a Custom
+    // format whose real policy is Unlimited. FormatConfig now stores its own
+    // sideboard_policy field (mirroring uses_commander/supplies_fixed_deck),
+    // and deck_loading.rs reads that instead. This proves the fix through
+    // the real production entry point, load_deck_into_state: builds an
+    // in-memory Custom FormatConfig with sideboard_policy: Unlimited, loads
+    // a deck payload with a nonempty sideboard, and confirms the sideboard
+    // actually survives into the resulting deck pool rather than being
+    // silently dropped to empty.
+    use engine::game::deck_loading::{
+        load_deck_into_state, DeckEntry, DeckPayload, PlayerDeckPayload,
+    };
+    use engine::types::card::CardFace;
+    use engine::types::game_state::GameState;
+
+    let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+    let rules = sample_rules(5);
+    state.format_config = FormatConfig {
+        format: GameFormat::Custom(rules.id),
+        custom_rules: Some(Box::new(rules)),
+        sideboard_policy: SideboardPolicy::Unlimited,
+        ..FormatConfig::standard()
+    };
+
+    let sideboard_card = DeckEntry {
+        card: CardFace {
+            name: "Test Sideboard Card".to_string(),
+            ..Default::default()
+        },
+        count: 1,
+    };
+    let payload = DeckPayload {
+        player: PlayerDeckPayload {
+            sideboard: vec![sideboard_card.clone()],
+            ..Default::default()
+        },
+        opponent: PlayerDeckPayload {
+            sideboard: vec![sideboard_card],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    load_deck_into_state(&mut state, &payload);
+
+    let p0 = state
+        .deck_pools
+        .iter()
+        .find(|pool| pool.player == engine::types::PlayerId(0))
+        .expect("player 0 deck pool must exist after loading");
+    assert_eq!(
+        p0.current_sideboard.len(),
+        1,
+        "a Custom format with sideboard_policy: Unlimited must not have its sideboard dropped"
+    );
+    assert_eq!(p0.current_sideboard[0].card.name, "Test Sideboard Card");
 }
