@@ -1,10 +1,12 @@
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { PausedBanner } from "../PausedBanner";
 
 describe("PausedBanner", () => {
+  afterEach(cleanup);
+
   it("shows an accessible Resume control only when the host supplies a handler", async () => {
     const onResume = vi.fn();
     const user = userEvent.setup();
