@@ -1030,8 +1030,8 @@ fn every_write_of_the_pinned_file_routes_through_splice() {
 /// bound, and this one is "not reached today", not "cannot be reached".
 #[test]
 #[cfg_attr(
-    windows,
-    ignore = "creates a symlink; Windows needs Developer Mode or an elevated shell"
+    not(unix),
+    ignore = "creates a symlink; off Unix that needs Developer Mode (Windows) or has no API at all"
 )]
 fn workspace_root_is_canonical() {
     let root = target::workspace_root().expect("workspace root");
@@ -2230,8 +2230,8 @@ fn manifest_outside_the_workspace_is_refused() {
 /// this replaced.
 #[test]
 #[cfg_attr(
-    windows,
-    ignore = "creates a symlink; Windows needs Developer Mode or an elevated shell"
+    not(unix),
+    ignore = "creates a symlink; off Unix that needs Developer Mode (Windows) or has no API at all"
 )]
 fn manifest_rel_compares_realpaths() {
     let base = tempfile::tempdir().unwrap();
@@ -2684,8 +2684,8 @@ fn env_surface_refuses_probe_pin_owned_keys() {
 /// the scratch dir in `mutant_destination_cannot_escape_the_scratch_dir`.
 #[test]
 #[cfg_attr(
-    windows,
-    ignore = "creates symlinks; Windows needs Developer Mode or an elevated shell"
+    not(unix),
+    ignore = "creates symlinks; off Unix that needs Developer Mode (Windows) or has no API at all"
 )]
 fn path_surface_is_realpath_containment() {
     let base = tempfile::tempdir().unwrap();
@@ -2772,8 +2772,8 @@ fn path_surface_is_realpath_containment() {
 /// dir named as a plain probe id — writing a mutant straight into the measured workspace.
 #[test]
 #[cfg_attr(
-    windows,
-    ignore = "creates a symlink; Windows needs Developer Mode or an elevated shell"
+    not(unix),
+    ignore = "creates a symlink; off Unix that needs Developer Mode (Windows) or has no API at all"
 )]
 fn mutant_destination_cannot_escape_the_scratch_dir() {
     let base = tempfile::tempdir().unwrap();

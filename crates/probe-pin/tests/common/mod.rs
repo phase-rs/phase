@@ -12,12 +12,13 @@ use std::path::Path;
 /// `cargo check --workspace --all-targets` on a Windows checkout — an error at every one of
 /// them, before any test could report anything at all.
 ///
-/// Compiling is not running. Windows creates symlinks only with Developer Mode on or from an
-/// elevated shell, so the Tier-1 callers carry `#[cfg_attr(windows, ignore = …)]` and report as
-/// IGNORED there — the same vocabulary this suite already uses for `spawns GNU timeout(1)`, and
-/// the reason it uses it: a test that vanishes from the report is indistinguishable from one
-/// that passed. (Every Tier-2 test is `#[ignore]`d unconditionally already, so those need
-/// nothing added.)
+/// Compiling is not running. No target off Unix creates a symlink the way these suites need —
+/// Windows wants Developer Mode or an elevated shell, and a third target has no such call at
+/// all — so the Tier-1 callers carry `#[cfg_attr(not(unix), ignore = …)]` and report as IGNORED
+/// there, the same vocabulary this suite already uses for `spawns GNU timeout(1)` and for the
+/// reason it uses it: a test that vanishes from the report is indistinguishable from one that
+/// passed. (Every Tier-2 test is `#[ignore]`d unconditionally already, so those need nothing
+/// added.)
 #[cfg(unix)]
 pub fn symlink(target: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
     std::os::unix::fs::symlink(target, link)
@@ -37,4 +38,26 @@ pub fn symlink(target: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<(
     } else {
         std::os::windows::fs::symlink_file(target, link)
     }
+}
+
+/// Every remaining target — `rust-toolchain.toml` installs `wasm32-unknown-unknown`, so
+/// "remaining" is not hypothetical — gets a binding that COMPILES and refuses at run time.
+/// The two halves of the problem have different answers: the binding must EXIST everywhere the
+/// test binaries do, because both suites call it unconditionally and an `#[ignore]`d test is
+/// still type-checked; but no third platform has a symlink call to bind it to.
+///
+/// So the refusal is a value, not a compile error. Callers are `#[cfg_attr(not(unix), ignore)]`,
+/// which makes this body unreachable unless someone runs the suite with `--ignored` on such a
+/// target — and there, an `Unsupported` error naming the platform is the honest answer. A
+/// compile error would have been the unhelpful one, and compiling out the helper would take the
+/// four tests off the report entirely, which is what the `#[ignore]`s exist to prevent.
+#[cfg(not(any(unix, windows)))]
+pub fn symlink(_target: impl AsRef<Path>, _link: impl AsRef<Path>) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "{} has no symlink API; this test is #[ignore]d off Unix",
+            std::env::consts::OS
+        ),
+    ))
 }
