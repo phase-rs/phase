@@ -171,6 +171,23 @@ settings (starting life, player count, singleton, command zone, sideboard
 policy, etc.) and persists it client-side. This is the first phase where
 `GameFormat::Custom` becomes constructible through any real UI action.
 
+**Owns replacing Phase 1a's temporary blanket rejection with the design's
+real resolver.** `FormatConfig`'s deserialization boundary currently
+rejects every external `GameFormat::Custom` unconditionally (see Phase 1a
+above) because no resolver exists yet to derive its runtime fields
+(`command_zone`/`uses_commander`/`commander_damage_threshold`/`singleton`)
+from `custom_rules.structural` — a stopgap, not the design's actual
+end-state. `PLAN.md`'s own architecture (§1; `CONTEXT.md` open item 1)
+calls for exactly one validated construction path: `from_lobby_config`
+builds a `FormatConfig` whose runtime fields are *derived from*
+`custom_rules.structural` (not independently supplied), then calls
+`validate_custom_rules_consistency` before the result is ever serialized or
+activated. Once that resolver exists, the deserialization boundary's
+blanket rejection is replaced by the real `validate_custom_rules_consistency`
+check it already runs today for built-in formats — a `Custom` payload is
+accepted exactly when it round-trips through the same resolver, not
+whenever any string happens to parse.
+
 ## Phase 1d — Deck-validation dispatch + first registry preset
 
 Real `evaluate_custom_format`/`quick_custom_format_check` bodies, mirroring
@@ -179,7 +196,23 @@ the existing `evaluate_constructed`/`quick_constructed_check` pipeline
 `custom_format_registry()` gate (rejects a preset that declares a
 `LegacyRuleSet` axis the engine doesn't implement yet, or whose
 `reprint_policy`/`printing_fidelity` pairing disagrees) goes live here, with
-its first real entry, `swedish_old_school()`.
+its first real entry, `swedish_old_school()`. Registry preset constructors
+(`swedish_old_school()` here; `old_school_93_94()`/`old_school_95()` in
+Phase 2a) are the second of `PLAN.md`'s three named construction points —
+each calls `validate_custom_rules_consistency` on its own output before
+adding it to the registry, the same discipline Phase 1c's `from_lobby_config`
+uses for Axis A.
+
+**Owns widening `DeckCompatibilityRequest.selected_format`.** Today it's a
+bare `Option<GameFormat>` — confirmed to have no `FormatConfig`/
+`custom_rules` field at all (`CONTEXT.md` open item 1), so `Custom` reaches
+`companion_candidates` and both selected-format dispatch functions with
+nothing for `evaluate_custom_format` to read `legal_sets`/`banned`/
+`restricted` from. This phase widens the request to carry the resolved
+`FormatConfig`/`CustomFormatRules` before Custom dispatch, covering both
+the summary and full compatibility paths — paired with the evaluator that
+first needs it, rather than split across an earlier phase that has no use
+for it yet.
 
 ## Phase 2a — Eternal Central presets: Old School 93/94, Old School 95
 
