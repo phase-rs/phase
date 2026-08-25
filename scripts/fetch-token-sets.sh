@@ -20,7 +20,10 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 1
 fi
 
-mapfile -t CODES < <(
+CODES=()
+while IFS= read -r code; do
+  CODES+=("$code")
+done < <(
   # tokenSetCode can name a legacy token pseudo-set that MTGJSON no longer
   # publishes as its own file; the parent set file already carries data.tokens.
   # tr strips the \r that Windows jq appends to every line — a code with a

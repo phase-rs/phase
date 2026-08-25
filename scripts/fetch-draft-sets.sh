@@ -52,7 +52,10 @@ else
     if command -v jq &>/dev/null; then
         # tr strips Windows jq's trailing \r, which otherwise malforms every
         # per-set download URL (see fetch-token-sets.sh).
-        mapfile -t CODES < <(jq -r '.data[]
+        CODES=()
+        while IFS= read -r code; do
+            CODES+=("$code")
+        done < <(jq -r '.data[]
             | select(.type | IN("core", "expansion", "draft_innovation", "masters", "masterpiece", "eternal", "funny"))
             | .code' "$SET_LIST" 2>/dev/null | tr -d '\r')
     else
