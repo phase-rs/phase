@@ -15,6 +15,10 @@ use super::match_config::DeckCardCount;
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
 use super::zones::Zone;
+use crate::analysis::decision_template::{
+    AnnouncementSubject, DecisionSlot, DecisionTemplate, PinnedDecision, Ranking, TargetPin,
+    TargetSchedule,
+};
 use crate::game::combat::AttackTarget;
 use crate::game::game_object::AttachTarget;
 
@@ -1649,8 +1653,87 @@ fn push_target_refs(ids: &mut Vec<ObjectId>, targets: &[TargetRef]) {
 }
 
 fn push_attack_target(ids: &mut Vec<ObjectId>, target: &AttackTarget) {
-    if let AttackTarget::Planeswalker(object_id) = target {
-        push_related_object_id(ids, *object_id);
+    match target {
+        AttackTarget::Player(_) => {}
+        AttackTarget::Planeswalker(object_id) | AttackTarget::Battle(object_id) => {
+            push_related_object_id(ids, *object_id);
+        }
+    }
+}
+
+fn push_yield_target(ids: &mut Vec<ObjectId>, target: &YieldTarget) {
+    match target {
+        YieldTarget::ThisObject { source_id, .. } => push_related_object_id(ids, *source_id),
+        YieldTarget::AllCopies { .. } => {}
+    }
+}
+
+fn push_decision_slot(ids: &mut Vec<ObjectId>, slot: &DecisionSlot) {
+    push_yield_target(ids, &slot.source);
+}
+
+fn push_ranking(ids: &mut Vec<ObjectId>, ranking: &Ranking) {
+    for subject in ranking.iter() {
+        match subject {
+            AnnouncementSubject::Object(source) => push_yield_target(ids, source),
+            AnnouncementSubject::Seat(_) => {}
+        }
+    }
+}
+
+fn push_target_schedule(ids: &mut Vec<ObjectId>, schedule: &TargetSchedule) {
+    match schedule {
+        TargetSchedule::Constant(ranking) => {
+            push_ranking(ids, ranking);
+        }
+        TargetSchedule::RoundRobin(rankings) => {
+            for ranking in rankings {
+                push_ranking(ids, ranking);
+            }
+        }
+        TargetSchedule::Piecewise(steps) => {
+            for (_, ranking) in steps {
+                push_ranking(ids, ranking);
+            }
+        }
+    }
+}
+
+fn push_target_pin(ids: &mut Vec<ObjectId>, pin: &TargetPin) {
+    match pin {
+        TargetPin::ByIdentity(source) => {
+            push_yield_target(ids, source);
+        }
+        TargetPin::Player(_) => {}
+        TargetPin::Scheduled(schedule) => {
+            push_target_schedule(ids, schedule);
+        }
+    }
+}
+
+fn push_decision_template(ids: &mut Vec<ObjectId>, template: &DecisionTemplate) {
+    for (source, _) in &template.key.sources {
+        push_yield_target(ids, source);
+    }
+    for decision in &template.decisions {
+        match decision {
+            PinnedDecision::Order { source, .. } => {
+                push_yield_target(ids, source);
+            }
+            PinnedDecision::Targets { slot, targets } => {
+                push_decision_slot(ids, slot);
+                for target in targets {
+                    push_target_pin(ids, target);
+                }
+            }
+            PinnedDecision::Mode { slot, .. }
+            | PinnedDecision::MayChoice { slot, .. }
+            | PinnedDecision::UnlessBreak { slot, .. }
+            | PinnedDecision::ConvokeTaps { slot }
+            | PinnedDecision::ManaColor { slot, .. } => {
+                push_decision_slot(ids, slot);
+            }
+        }
     }
 }
 
@@ -1784,7 +1867,6 @@ impl GameAction {
             | Self::CancelAutoPass
             | Self::SetPhaseStops { .. }
             | Self::SetPriorityPassingMode { .. }
-            | Self::SetMayTriggerAutoChoice { .. }
             | Self::SetTriggerOrderTemplate { .. }
             | Self::ChooseCountersToRemove { .. }
             | Self::SubmitPayAmount { .. }
@@ -1797,7 +1879,6 @@ impl GameAction {
             | Self::GrantDebugPermission { .. }
             | Self::RevokeDebugPermission { .. }
             | Self::Concede { .. }
-            | Self::DeclareShortcut { .. }
             | Self::RespondToShortcut { .. }
             | Self::DeclineShortcut
             | Self::PrecastCopyShortcut { .. }
@@ -1831,7 +1912,9 @@ impl GameAction {
                 object_id, targets, ..
             } => {
                 push_related_object_id(&mut ids, *object_id);
-                push_target_refs(&mut ids, targets);
+                for target in targets {
+                    push_related_object_id(&mut ids, *target);
+                }
             }
             Self::ActivateAbility { source_id, .. }
             | Self::ChooseDamageSource { source: source_id }
@@ -1960,9 +2043,25 @@ impl GameAction {
                 push_related_object_id(&mut ids, *object_id);
                 push_related_object_id(&mut ids, *source_id);
             }
-            Self::SetPriorityYield { op } => {
-                if let PriorityYieldOp::Add { source_id, .. } = op {
+            Self::SetPriorityYield { op } => match op {
+                PriorityYieldOp::Add { source_id, .. } => {
                     push_related_object_id(&mut ids, *source_id);
+                }
+                PriorityYieldOp::Remove { target } => push_yield_target(&mut ids, target),
+                PriorityYieldOp::ClearAll => {}
+            },
+            Self::SetMayTriggerAutoChoice { op } => match op {
+                MayTriggerAutoChoiceOp::Remove { selector } => match selector {
+                    MayTriggerAutoChoiceSelector::ExactInstance { source_id, .. } => {
+                        push_related_object_id(&mut ids, *source_id);
+                    }
+                    MayTriggerAutoChoiceSelector::SameCard { .. } => {}
+                },
+                MayTriggerAutoChoiceOp::ClearAll => {}
+            },
+            Self::DeclareShortcut { template, .. } => {
+                if let Some(template) = template {
+                    push_decision_template(&mut ids, template);
                 }
             }
             Self::AssignCombatDamage { assignments, .. }
