@@ -97,7 +97,7 @@ fn legal_sets_none_and_some_are_distinguishable() {
 fn validate_custom_rules_consistency_accepts_matching_id() {
     let rules = sample_rules(5);
     let config = FormatConfig {
-        custom_rules: Some(rules.clone()),
+        custom_rules: Some(Box::new(rules.clone())),
         ..FormatConfig {
             format: GameFormat::Custom(rules.id),
             ..FormatConfig::standard()
@@ -110,7 +110,7 @@ fn validate_custom_rules_consistency_accepts_matching_id() {
 fn validate_custom_rules_consistency_rejects_mismatched_id() {
     let config = FormatConfig {
         format: GameFormat::Custom(CustomFormatId(5)),
-        custom_rules: Some(sample_rules(7)),
+        custom_rules: Some(Box::new(sample_rules(7))),
         ..FormatConfig::standard()
     };
     assert!(validate_custom_rules_consistency(&config).is_err());
@@ -130,7 +130,7 @@ fn validate_custom_rules_consistency_rejects_custom_without_rules() {
 fn validate_custom_rules_consistency_rejects_builtin_with_custom_rules() {
     let config = FormatConfig {
         format: GameFormat::Standard,
-        custom_rules: Some(sample_rules(5)),
+        custom_rules: Some(Box::new(sample_rules(5))),
         ..FormatConfig::standard()
     };
     assert!(validate_custom_rules_consistency(&config).is_err());

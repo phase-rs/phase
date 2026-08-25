@@ -334,9 +334,14 @@ pub struct FormatConfig {
     /// Present only when `format == GameFormat::Custom(id)` (and then `id`
     /// must equal `custom_rules.id` — see
     /// `custom_format::validate_custom_rules_consistency`). `None` for every
-    /// built-in format.
+    /// built-in format. Boxed because `FormatConfig` is embedded directly in
+    /// `lobby_broker::protocol::LobbyClientMessage::CreateGameWithSettings`
+    /// (and the canonical `server_core` equivalent) — an unboxed
+    /// `CustomFormatRules` pushes that enum's largest variant over clippy's
+    /// `large_enum_variant` threshold, exactly like `range_of_influence`
+    /// above is boxed for the same reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom_rules: Option<CustomFormatRules>,
+    pub custom_rules: Option<Box<CustomFormatRules>>,
 }
 
 impl FormatTopology {
