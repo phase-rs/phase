@@ -120,6 +120,17 @@ pub enum CounterAdditionPreview {
     Unsupported,
 }
 
+impl CounterAdditionPreview {
+    /// CR 614.17b: object-counter sibling of
+    /// `PlayerCounterAdditionPreview::is_prohibited`, which owns the partition's
+    /// prose. `ChoiceRequired` here means what this enum's own variant doc already
+    /// says — "Replacement ordering or an optional replacement needs this player's
+    /// choice" — and is deliberately NOT a prohibition.
+    pub fn is_prohibited(self) -> bool {
+        matches!(self, CounterAdditionPreview::Prevented)
+    }
+}
+
 /// Preview an object-counter addition through the real replacement pipeline.
 ///
 /// Returns `None` when `target` no longer identifies the same object

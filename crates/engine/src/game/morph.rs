@@ -268,6 +268,20 @@ pub fn apply_face_down_creature_characteristics(
     // `turn_face_up` → `apply_back_face_to_object`.
     obj.printed_ref = None;
     obj.base_printed_ref = None;
+    // CR 708.2a + CR 306.5b + CR 310.4b: a face-down permanent is a 2/2
+    // creature — it has no loyalty or defense characteristic. Blanking here
+    // keeps `intrinsic_etb_counters` from seeding loyalty/defense counters on
+    // a face-down entry and keeps the loyalty/defense displays dark (a badge
+    // on a face-down 2/2 would leak that the card is a planeswalker). The
+    // `base_*` twins must blank too: the layer reset writes them back into the
+    // live fields on every evaluation. The real values are preserved in
+    // `back_face` (snapshotted BEFORE this runs) and restored on turn-up.
+    obj.loyalty = None;
+    obj.base_loyalty = None;
+    obj.printed_loyalty = None;
+    obj.base_printed_loyalty = None;
+    obj.defense = None;
+    obj.base_defense = None;
 }
 
 /// CR 702.37a: A face-down permanent is a 2/2 creature with no name, mana cost, creature types, or abilities.

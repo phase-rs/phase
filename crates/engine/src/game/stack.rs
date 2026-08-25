@@ -3907,7 +3907,7 @@ fn optional_ability_is_inert_under_auto_choice(
         source_id: ability.source_id,
         origin,
     };
-    match state.may_trigger_auto_choice(&key) {
+    match state.may_trigger_auto_choice_for_live_prompt(&key) {
         Some(AutoMayChoice::Decline) => ability.sub_ability.is_none(),
         Some(AutoMayChoice::Accept) => {
             ability_has_no_legal_resolution_targets(state, ability, trigger_event)

@@ -7256,6 +7256,50 @@ fn effect_chain_unless_target_controller_pays_mana() {
 }
 
 #[test]
+fn target_player_mills_then_puts_milled_goblins_into_hand() {
+    let def = parse_effect_chain(
+        "Target player mills five cards, then puts each Goblin card milled this way into their hand.",
+        AbilityKind::Spell,
+    );
+
+    assert!(matches!(
+        def.effect.as_ref(),
+        Effect::Mill {
+            count: QuantityExpr::Fixed { value: 5 },
+            target: TargetFilter::Player,
+            ..
+        }
+    ));
+
+    let follow_up = def
+        .sub_ability
+        .as_deref()
+        .expect("Mill must chain to the Goblin return effect");
+    let Effect::ChangeZoneAll {
+        destination,
+        target:
+            TargetFilter::TrackedSetFiltered {
+                caused_by: Some(ThisWayCause::Milled),
+                filter,
+                ..
+            },
+        ..
+    } = follow_up.effect.as_ref()
+    else {
+        panic!(
+            "expected the second chain node to return milled Goblin cards, got {:?}",
+            follow_up.effect
+        );
+    };
+    assert_eq!(*destination, Zone::Hand);
+    assert!(matches!(
+        filter.as_ref(),
+        TargetFilter::Typed(TypedFilter { type_filters, .. })
+            if type_filters.contains(&TypeFilter::Subtype("Goblin".to_string()))
+    ));
+}
+
+#[test]
 fn effect_chain_unless_target_controller_pays_life() {
     let def = parse_effect_chain(
         "Tap target creature unless its controller pays 2 life",

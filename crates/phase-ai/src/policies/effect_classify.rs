@@ -671,13 +671,20 @@ pub(crate) fn aggregate_player_impact_in(effects: &[&Effect]) -> f64 {
 }
 
 pub(crate) fn targeted_player_impact(ctx: &PolicyContext<'_>, player: PlayerId) -> Option<f64> {
-    let source_controller = ctx.source_object().map(|object| object.controller);
-    targeted_player_impact_in(ctx.state, source_controller, &ctx.effects(), player)
+    let source = ctx.source_object();
+    targeted_player_impact_in(
+        ctx.state,
+        source.map(|object| object.controller),
+        source.map(|object| object.id),
+        &ctx.effects(),
+        player,
+    )
 }
 
 pub(crate) fn targeted_player_impact_in(
     state: &GameState,
     source_controller: Option<PlayerId>,
+    source_id: Option<ObjectId>,
     effects: &[&Effect],
     player: PlayerId,
 ) -> Option<f64> {
@@ -693,6 +700,7 @@ pub(crate) fn targeted_player_impact_in(
             filter,
             player,
             source_controller,
+            source_id,
         ) {
             found_targeted_effect = true;
             impact += player_impact(effect);

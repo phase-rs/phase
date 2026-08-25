@@ -373,7 +373,11 @@
     "sideboardGame": "Réserve — Partie {{number}}",
     "sideboardHint": "Effectuez vos changements de réserve, puis soumettez. Votre pool est disponible ci-dessous.",
     "submitSideboard": "Soumettre la réserve",
-    "preparingNext": "Préparation de la partie suivante..."
+    "preparingNext": "Préparation de la partie suivante...",
+    "hideOverlay": "Masquer cet écran",
+    "showOverlay": "Afficher cet écran",
+    "hiddenNotice": "La réserve est encore ouverte pour cette partie.",
+    "hiddenNoticePlayDraw": "Un choix « jouer ou piocher » est encore en attente pour cette partie."
   },
   "podComplete": {
     "title": "Draft terminé",

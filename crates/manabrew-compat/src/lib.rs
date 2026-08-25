@@ -5509,6 +5509,7 @@ mod tests {
             source_id: ObjectId(1),
             description: Some("Draw a card?".to_string()),
             may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
         });
         let json = serde_json::to_value(build_prompt(&prepared, &lookup).unwrap()).unwrap();
         assert_eq!(json["input"]["type"], "chooseBoolean");

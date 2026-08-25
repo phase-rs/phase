@@ -6,9 +6,10 @@ use engine::types::ability::{
     AbilityDefinition, Effect, SpellStackToGraveyardReplacement, TargetRef,
 };
 use engine::types::actions::GameAction;
+use engine::types::format::FormatConfig;
 use engine::types::game_state::{CastOfferKind, CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 use engine::types::PlayerId;
@@ -50,13 +51,10 @@ fn advance_to_free_cast_window(runner: &mut GameRunner) {
     panic!("Diluvian Primordial never opened its free-cast window");
 }
 
+// CR 115.10a: the per-opponent binder slots are pinned by construction and are
+// announced by the engine, so the controller submits only the card targets.
 fn choose_paired_targets(runner: &mut GameRunner, p1_card: ObjectId, p2_card: ObjectId) {
-    for target in [
-        TargetRef::Player(P1),
-        TargetRef::Object(p1_card),
-        TargetRef::Player(P2),
-        TargetRef::Object(p2_card),
-    ] {
+    for target in [TargetRef::Object(p1_card), TargetRef::Object(p2_card)] {
         runner
             .act(GameAction::ChooseTarget {
                 target: Some(target),
@@ -78,7 +76,7 @@ fn assert_no_unimplemented_effects(ability: &AbilityDefinition) {
     }
 }
 
-/// CR 115.1a + CR 608.2g + CR 614.1a: The real cast/trigger pipeline chooses
+/// CR 115.1d + CR 608.2g + CR 614.1a: The real cast/trigger pipeline chooses
 /// one card per opponent, snapshots exactly those cards into FreeCastWindow,
 /// casts one at zero mana, re-offers only the remaining approved card, then
 /// exiles the successfully cast spell while declined and unselected cards stay
@@ -194,6 +192,73 @@ fn diluvian_primordial_uses_selected_pairs_as_its_fixed_free_cast_pool() {
     assert_eq!(runner.state().objects[&p2_extra].zone, Zone::Graveyard);
 }
 
+/// CR 903.4 + CR 903.5c + CR 608.2g: Color identity constrains deck
+/// construction, not casting permissions granted during a game. A blue
+/// Commander player may therefore cast the red opponent spell selected for
+/// Diluvian Primordial's free-cast window.
+#[test]
+fn diluvian_primordial_casts_off_identity_opponent_spell_in_commander() {
+    let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        )],
+    );
+    let commander = scenario
+        .add_creature_to_hand(P0, "Blue Commander", 2, 2)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        })
+        .id();
+    scenario.with_commander(commander);
+    let primordial = scenario
+        .add_creature_to_hand_from_oracle(P0, "Diluvian Primordial", 5, 5, DILUVIAN_ORACLE)
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    let red_opponent_spell = scenario
+        .add_spell_to_graveyard(P1, "Red Opponent Spell", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        })
+        .from_oracle_text("Draw a card.")
+        .id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&primordial].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: primordial,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting Diluvian Primordial must succeed");
+    advance_to_trigger_target_selection(&mut runner);
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(red_opponent_spell)),
+        })
+        .expect("opponent red instant must be a legal Diluvian target");
+    advance_to_free_cast_window(&mut runner);
+
+    runner
+        .act(GameAction::FreeCastWindowChoice {
+            selection: Some(red_opponent_spell),
+        })
+        .expect("Diluvian must cast the selected red opponent spell despite P0's blue identity");
+    assert_eq!(
+        runner.state().objects[&red_opponent_spell].zone,
+        Zone::Stack
+    );
+}
+
 /// CR 608.2b + CR 608.2g: A paired target that leaves its graveyard before
 /// resolution is removed from the fixed pool. The still-legal paired target
 /// positively reaches the window; its same-owner extra proves the resolver did
@@ -262,7 +327,7 @@ fn diluvian_primordial_drops_removed_pair_without_graveyard_substitution() {
     }
 }
 
-/// CR 115.1a + CR 603.3d + CR 608.2g: An opponent with no legal instant or
+/// CR 115.1d + CR 603.3d + CR 608.2g: An opponent with no legal instant or
 /// sorcery target contributes no paired slots, but that omission must not
 /// suppress another opponent's independently selected target or its normal
 /// cast pipeline.
@@ -308,7 +373,11 @@ fn diluvian_primordial_skips_targetless_opponent_and_casts_other_selected_spell(
     advance_to_trigger_target_selection(&mut runner);
 
     match runner.state().waiting_for.clone() {
-        WaitingFor::TriggerTargetSelection { target_slots, .. } => {
+        WaitingFor::TriggerTargetSelection {
+            target_slots,
+            selection,
+            ..
+        } => {
             assert_eq!(
                 target_slots.len(),
                 2,
@@ -319,16 +388,21 @@ fn diluvian_primordial_skips_targetless_opponent_and_casts_other_selected_spell(
                 target_slots[1].legal_targets,
                 vec![TargetRef::Object(p2_selected), TargetRef::Object(p2_extra)]
             );
+            // CR 115.10a: the binder slot still exists, but the engine
+            // announces it — the first prompt is the card, not the opponent.
+            assert_eq!(selection.current_slot, 1);
+            assert_eq!(
+                selection.current_legal_targets,
+                vec![TargetRef::Object(p2_selected), TargetRef::Object(p2_extra)]
+            );
         }
         other => panic!("expected Diluvian target selection, got {other:?}"),
     }
-    for target in [TargetRef::Player(P2), TargetRef::Object(p2_selected)] {
-        runner
-            .act(GameAction::ChooseTarget {
-                target: Some(target),
-            })
-            .expect("P2's paired target must remain selectable when P1 has none");
-    }
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(p2_selected)),
+        })
+        .expect("P2's paired target must remain selectable when P1 has none");
     advance_to_free_cast_window(&mut runner);
     match runner.state().waiting_for.clone() {
         WaitingFor::CastOffer {
@@ -403,13 +477,11 @@ fn diluvian_primordial_defers_sibling_after_open_free_cast_window() {
         })
         .expect("casting Diluvian Primordial must succeed");
     advance_to_trigger_target_selection(&mut runner);
-    for target in [TargetRef::Player(P1), TargetRef::Object(selected)] {
-        runner
-            .act(GameAction::ChooseTarget {
-                target: Some(target),
-            })
-            .expect("Diluvian's paired target must be legal");
-    }
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(selected)),
+        })
+        .expect("Diluvian's paired target must be legal");
     advance_to_free_cast_window(&mut runner);
 
     assert_eq!(
@@ -473,13 +545,11 @@ fn diluvian_primordial_uncastable_selected_spell_stays_in_graveyard_and_runs_tai
         })
         .expect("casting Diluvian Primordial must succeed");
     advance_to_trigger_target_selection(&mut runner);
-    for target in [TargetRef::Player(P1), TargetRef::Object(selected)] {
-        runner
-            .act(GameAction::ChooseTarget {
-                target: Some(target),
-            })
-            .expect("the selected uncastable spell must still be a legal Diluvian pair");
-    }
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(selected)),
+        })
+        .expect("the selected uncastable spell must still be a legal Diluvian pair");
     runner.advance_until_stack_empty();
 
     assert!(

@@ -124,6 +124,11 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::BecomesTarget { .. }
         | GameEvent::ReplacementApplied { .. }
         | GameEvent::SpeedChanged { .. }
+        // CR 309.4c: Entering a room fires that room's ability. Most entries are
+        // automatic (single-arrow rooms, and the topmost room on entering a
+        // dungeon), so the timeline is the only place a player learns which room
+        // they landed in and what it does.
+        | GameEvent::RoomEntered { .. }
         | GameEvent::ArmyAmassed { .. } => LogImportance::Context,
         // The remaining variants are deliberately listed rather than covered by a
         // wildcard. Adding a GameEvent must require an explicit presentation policy.
@@ -194,7 +199,6 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::CoinFlipped { .. }
         | GameEvent::RingTemptsYou { .. }
         | GameEvent::CreatureExploited { .. }
-        | GameEvent::RoomEntered { .. }
         | GameEvent::RoomDoorUnlocked { .. }
         | GameEvent::DungeonCompleted { .. }
         | GameEvent::Planeswalked { .. }
@@ -1428,7 +1432,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(if *won { "wins" } else { "loses" }),
         ],
 
-        GameEvent::RingTemptsYou { player_id } => {
+        GameEvent::RingTemptsYou { player_id, .. } => {
             vec![text("The Ring tempts "), player_seg(state, *player_id)]
         }
 
@@ -1607,7 +1611,31 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             }
             segs
         }
-        GameEvent::RoomEntered { .. } => vec![text("Room entered")],
+        // CR 309.4b-c: Name the room entered and what its room ability does.
+        // Most room entries are automatic (single-arrow rooms, and the topmost
+        // room on entering a dungeon), so the log is the only place a player
+        // sees them.
+        GameEvent::RoomEntered {
+            player_id,
+            dungeon,
+            room_index,
+            room_name,
+        } => {
+            let mut segs = vec![
+                player_seg(state, *player_id),
+                text(" entered "),
+                text(room_name),
+                text(" ("),
+                text(&dungeon.to_string()),
+                text(")"),
+            ];
+            let effect = crate::game::dungeon::room_text(*dungeon, *room_index);
+            if !effect.is_empty() {
+                segs.push(text(": "));
+                segs.push(text(effect));
+            }
+            segs
+        }
         GameEvent::RoomDoorUnlocked { .. } => vec![text("Room door unlocked")],
         GameEvent::DungeonCompleted { .. } => vec![text("Dungeon completed")],
         GameEvent::Planeswalked { .. } => vec![text("Planeswalked")],
@@ -1788,6 +1816,45 @@ mod tests {
         assert!(
             has_card_name,
             "Expected CardName segment with 'Lightning Bolt'"
+        );
+    }
+
+    /// CR 309.4b-c: Most room entries are automatic, so the log is where a
+    /// player learns which room they landed in and what it does. It must also
+    /// survive the default timeline filter (`LogImportance::Context`).
+    #[test]
+    fn room_entered_log_names_the_room_and_its_effect() {
+        use crate::game::dungeon::DungeonId;
+
+        let state = GameState::new_two_player(42);
+        let entries = resolve_log_entries(
+            &[GameEvent::RoomEntered {
+                player_id: PlayerId(0),
+                dungeon: DungeonId::LostMineOfPhandelver,
+                room_index: 2,
+                room_name: "Mine Tunnels".to_string(),
+            }],
+            &state,
+            &state,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].presentation.importance, LogImportance::Context);
+        assert_eq!(
+            entries[0].segments,
+            vec![
+                LogSegment::PlayerName {
+                    name: "Player 1".to_string(),
+                    player_id: PlayerId(0),
+                },
+                LogSegment::Text(" entered ".to_string()),
+                LogSegment::Text("Mine Tunnels".to_string()),
+                LogSegment::Text(" (".to_string()),
+                LogSegment::Text("Lost Mine of Phandelver".to_string()),
+                LogSegment::Text(")".to_string()),
+                LogSegment::Text(": ".to_string()),
+                LogSegment::Text("Create a Treasure token.".to_string()),
+            ]
         );
     }
 
@@ -2148,6 +2215,7 @@ mod tests {
             },
             GameEvent::RingTemptsYou {
                 player_id: PlayerId(0),
+                chosen_bearer: None,
             },
             GameEvent::CrimeCommitted {
                 player_id: PlayerId(0),

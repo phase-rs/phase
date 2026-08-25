@@ -138,7 +138,10 @@ fn branch_room_trigger_and_venture_observer_both_resolve_after_room_choice() {
             dungeon, options, ..
         } => {
             assert_eq!(*dungeon, DungeonId::Undercity);
-            assert_eq!(options.as_slice(), &[1, 2]);
+            assert_eq!(
+                options.iter().map(|o| o.index).collect::<Vec<_>>(),
+                vec![1, 2]
+            );
         }
         other => panic!("expected Undercity branch choice, got {other:?}"),
     }

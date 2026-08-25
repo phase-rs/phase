@@ -2212,12 +2212,12 @@ pub(crate) fn spell_cast_origin(state: &GameState, object_id: ObjectId) -> Optio
     state.objects.get(&object_id).and_then(|o| o.cast_from_zone)
 }
 
-/// CR 601.2a + CR 603.4: Look up the pre-announcement zone for a spell that
+/// CR 601.2a: Look up the pre-announcement zone for a spell that
 /// is currently mid-cast. `obj.zone` stays at the origin until `finalize_cast`
 /// performs the Hand→Stack move itself, but should the ordering ever change
 /// this fallback preserves correctness for filters like "spells you cast from
 /// exile have convoke" that must evaluate against the pre-announcement zone.
-fn pending_cast_origin_zone_for(state: &GameState, object_id: ObjectId) -> Option<Zone> {
+pub(super) fn pending_cast_origin_zone_for(state: &GameState, object_id: ObjectId) -> Option<Zone> {
     if let Some(pc) = state.waiting_for.pending_cast_ref() {
         if pc.object_id == object_id {
             return Some(pc.origin_zone);
@@ -2229,6 +2229,30 @@ fn pending_cast_origin_zone_for(state: &GameState, object_id: ObjectId) -> Optio
         }
     }
     None
+}
+
+/// CR 601.2a: The cast's origin zone as grant filters must see it — the
+/// IN-FLIGHT pending-cast record first (the current cast's own truth), the
+/// persisted origin second ([`spell_cast_origin`], which owns the stack
+/// ability-context vs. permanent-object storage split and survives
+/// `finalize_cast`), the object's current zone last. Single chain shared by
+/// the keyword-grant walkers and the alternative-cost grant, so a zone-less
+/// grant (Rooftop Storm) keeps matching a hand cast — and an origin-scoped
+/// grant its exile cast — when re-asked after finalize, for permanents and
+/// instants/sorceries alike, while a NEW cast never inherits a previous
+/// cast's stamp.
+pub(super) fn spell_cast_origin_zone(
+    state: &GameState,
+    spell_obj: &crate::game::game_object::GameObject,
+) -> Zone {
+    // The IN-FLIGHT cast's record outranks the persisted stamp: the stamp is
+    // written at finalize, so during a NEW cast it can only describe a
+    // PREVIOUS cast of this object — a graveyard recast must not inherit a
+    // stale hand origin. Post-finalize the pending record is gone and the
+    // persisted authority answers.
+    pending_cast_origin_zone_for(state, spell_obj.id)
+        .or_else(|| spell_cast_origin(state, spell_obj.id))
+        .unwrap_or(spell_obj.zone)
 }
 
 /// Collect the keywords granted to `object_id` by `CastWithKeyword` statics
@@ -2247,14 +2271,8 @@ fn granted_spell_keywords_for(
         return Vec::new();
     };
 
-    // CR 601.2a: Prefer cast_from_zone (stamped during finalize_cast and persists
-    // through SpellCast event) over pending_cast_origin_zone_for (transient and
-    // cleared after finalize_cast). This ensures origin zone is available when
-    // triggers are processed for filters like "InZone { zone: Hand }".
-    let origin_zone = spell_obj
-        .cast_from_zone
-        .or_else(|| pending_cast_origin_zone_for(state, object_id))
-        .unwrap_or(spell_obj.zone);
+    // CR 601.2a: single origin-zone chain (see `spell_cast_origin_zone`).
+    let origin_zone = spell_cast_origin_zone(state, spell_obj);
 
     let mut keywords = Vec::new();
     // CR 702.26b + CR 604.1: Functioning gate owned by
@@ -2324,10 +2342,8 @@ fn granted_spell_keyword_instances_for(
         return Vec::new();
     };
 
-    let origin_zone = spell_obj
-        .cast_from_zone
-        .or_else(|| pending_cast_origin_zone_for(state, object_id))
-        .unwrap_or(spell_obj.zone);
+    // CR 601.2a: single origin-zone chain (see `spell_cast_origin_zone`).
+    let origin_zone = spell_cast_origin_zone(state, spell_obj);
 
     let mut keywords = Vec::new();
     for (source_obj, def) in super::functioning_abilities::game_active_statics(state) {
@@ -2487,7 +2503,10 @@ pub(super) fn granted_spell_alternative_cost_for(
     fused: bool,
 ) -> Option<GrantedSpellAlternativeCost> {
     let spell_obj = state.objects.get(&object_id)?;
-    let origin_zone = pending_cast_origin_zone_for(state, object_id).unwrap_or(spell_obj.zone);
+    // CR 601.2a: same origin chain as the keyword-grant walkers, so a re-ask
+    // after finalize (cast_from_zone stamped, pending cleared) still sees the
+    // true origin instead of Zone::Stack.
+    let origin_zone = spell_cast_origin_zone(state, spell_obj);
 
     // CR 604.1: Functioning gate owned by `game_active_statics`.
     for (source_obj, def) in super::functioning_abilities::game_active_statics(state) {
@@ -2510,18 +2529,39 @@ pub(super) fn granted_spell_alternative_cost_for(
             continue;
         }
 
-        let matches = def.affected.as_ref().is_none_or(|filter| {
-            super::filter::spell_object_matches_filter_from_state_for(
-                state,
-                spell_obj,
-                origin_zone,
-                caster,
-                filter,
-                source_obj.id,
-                &state.all_creature_types,
-                fused,
-            )
-        });
+        // CR 118.9 + CR 601.2a (#7575): the offer's default reach is hand
+        // casts. For a NON-hand origin the match must come THROUGH a branch
+        // that itself constrains the cast's origin zone (Warped Space's "a
+        // spell you cast from exile") — a mixed `Or` whose unscoped branch
+        // matched must not unlock the non-hand reach, and a filterless grant
+        // ("spells you cast") is zone-less by definition. Zone-less grants
+        // (Rooftop Storm class) therefore keep their hand-only reach.
+        let matches = if origin_zone == Zone::Hand {
+            def.affected.as_ref().is_none_or(|filter| {
+                super::filter::spell_object_matches_filter_from_state_for(
+                    state,
+                    spell_obj,
+                    origin_zone,
+                    caster,
+                    filter,
+                    source_obj.id,
+                    &state.all_creature_types,
+                    fused,
+                )
+            })
+        } else {
+            def.affected.as_ref().is_some_and(|filter| {
+                matches_via_origin_scoped_branch(
+                    state,
+                    spell_obj,
+                    origin_zone,
+                    caster,
+                    filter,
+                    source_obj.id,
+                    fused,
+                )
+            })
+        };
         if matches {
             return Some(GrantedSpellAlternativeCost {
                 // CR 107.3c + CR 118.9: A static's alternative cost can bind X
@@ -2538,6 +2578,149 @@ pub(super) fn granted_spell_alternative_cost_for(
     }
 
     None
+}
+
+/// CR 118.9 + CR 601.2a: Whether this cast matches the grant's `affected`
+/// filter THROUGH a branch that itself constrains the cast's ORIGIN zone
+/// (`InZone`/`InAnyZone` — Warped Space's "a spell you cast from exile").
+///
+/// This is a per-cast question, not a whole-filter presence bit:
+/// `Or(hand-scoped, Creature)` matched by an exile Creature through the
+/// unscoped branch is NOT an origin-scoped match, so the non-hand
+/// alternative-cost reach stays closed for that cast. `Not` is an exclusion,
+/// never a scope.
+///
+/// Exhaustive by design — no wildcard arm: a future filter variant that can
+/// nest a zone constraint must be classified here explicitly instead of
+/// silently falling into the hand-only default.
+fn matches_via_origin_scoped_branch(
+    state: &GameState,
+    spell_obj: &GameObject,
+    origin_zone: Zone,
+    caster: PlayerId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    fused: bool,
+) -> bool {
+    let full_match = |f: &TargetFilter| {
+        super::filter::spell_object_matches_filter_from_state_for(
+            state,
+            spell_obj,
+            origin_zone,
+            caster,
+            f,
+            source_id,
+            &state.all_creature_types,
+            fused,
+        )
+    };
+    match filter {
+        TargetFilter::Typed(typed) => {
+            typed.properties.iter().any(|prop| {
+                matches!(
+                    prop,
+                    crate::types::ability::FilterProp::InZone { .. }
+                        | crate::types::ability::FilterProp::InAnyZone { .. }
+                )
+            }) && full_match(filter)
+        }
+        // A disjunction is origin-scoped only through a branch that is.
+        TargetFilter::Or { filters } => filters.iter().any(|f| {
+            matches_via_origin_scoped_branch(
+                state,
+                spell_obj,
+                origin_zone,
+                caster,
+                f,
+                source_id,
+                fused,
+            )
+        }),
+        // A conjunction must match as a whole AND carry some leg that is an
+        // origin-scoped match in its own right (recursing keeps a mixed `Or`
+        // nested under `And` honest too).
+        TargetFilter::And { filters } => {
+            full_match(filter)
+                && filters.iter().any(|f| {
+                    matches_via_origin_scoped_branch(
+                        state,
+                        spell_obj,
+                        origin_zone,
+                        caster,
+                        f,
+                        source_id,
+                        fused,
+                    )
+                })
+        }
+        TargetFilter::TrackedSetFiltered { filter: inner, .. } => {
+            full_match(filter)
+                && matches_via_origin_scoped_branch(
+                    state,
+                    spell_obj,
+                    origin_zone,
+                    caster,
+                    inner,
+                    source_id,
+                    fused,
+                )
+        }
+        // A negated zone prop is an exclusion, not an origin scope.
+        TargetFilter::Not { .. } => false,
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        // CR 118.9: a player-identity filter selects PLAYERS, so it can never
+        // carry a constraint on a spell's ORIGIN ZONE — same as every other
+        // player variant in this group.
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
 }
 
 pub(crate) fn effective_spell_keywords(
@@ -2738,22 +2921,11 @@ pub(super) fn build_spell_meta(
         // CR 708.4 + CR 702.37c / CR 702.168b: `is_face_down` means "this spell is
         // being CAST FACE DOWN" (morph/disguise — paying {3} to cast as a 2/2
         // face-down creature spell), NOT merely "the object has `face_down = true`".
-        // Those differ: foretell (CR 702.143a), hideaway, and other exile/library
-        // concealment set `obj.face_down = true` while the card waits in exile, yet
-        // such a card is CAST FACE UP (CR 702.143c). So this must NOT be sourced from
-        // raw `obj.face_down` — a foretold face-up cast would wrongly satisfy the
-        // `OnlyForFaceDownSpell` spend restriction (Tin Street Gossip).
-        //
-        // The discriminator is `face_down && back_face.is_some()`: `continue_cast_face_down`
-        // is the ONLY path that reaches a spell payment (`PaymentContext::Spell`) with a
-        // blanked object — it turns the object face down via `apply_face_down_entry_profile`,
-        // which stashes the real card in `back_face` (CR 708.2 copiable-value blank). A
-        // foretold/hideaway object keeps `back_face = None` (its real characteristics are
-        // intact in exile — it is not blanked), so it reads `false` here. Manifest/cloak
-        // objects are face-down permanents put onto the battlefield by effects, never cast
-        // through spell payment, so they never build a `PaymentContext::Spell`. Guarded by
+        // `spell_is_cast_face_down` is the single authority for that distinction and
+        // carries the full CR argument; the spell-filter projection asks the same
+        // question there, so the two seams cannot answer it differently. Guarded by
         // `build_spell_meta_for_foretold_card_is_not_face_down` (casting_tests.rs).
-        is_face_down: obj.face_down && obj.back_face.is_some(),
+        is_face_down: obj.spell_is_cast_face_down(),
         // CR 601.2g / CR 118.3: Hogaak-style "you can't spend mana to cast this
         // spell" — the mana-payment eligibility layer makes real pool mana
         // ineligible when set, so only convoke/delve stand-ins can pay.
@@ -7100,19 +7272,6 @@ fn prepare_spell_cast_with_variant_override_inner(
             object_id,
             &obj.casting_restrictions,
         )?;
-
-        if state.format_config.command_zone
-            && !super::commander::can_cast_in_color_identity(
-                state,
-                &obj.color,
-                &obj.mana_cost,
-                player,
-            )
-        {
-            return Err(EngineError::ActionNotAllowed(
-                "Card is outside commander's color identity".to_string(),
-            ));
-        }
     }
 
     // CR 408.3 + CR 903.8: Commanders cast from the command zone incur a tax.
@@ -7559,6 +7718,28 @@ pub(super) fn apply_cost_modifiers_to_base(
     object_id: ObjectId,
     base: ManaCost,
 ) -> Option<ManaCost> {
+    // Projection callers with no committed casting method (the per-keyword offer
+    // blocks, the Bargain recompute). CR 601.2f + CR 702.102b: `None` keeps the
+    // front-half projection for split cards — the Fuse candidate routes through
+    // the real `CastingVariant::Fuse` prepare instead — and a variant-conditional
+    // modifier (`StaticCondition::CastingAsVariant`) stays inapplicable until a
+    // casting method is committed.
+    apply_cost_modifiers_to_base_for_variant(state, player, object_id, base, None, None)
+}
+
+/// Variant-aware core of [`apply_cost_modifiers_to_base`]: a projection that has
+/// already COMMITTED to a casting method threads that method and its elected
+/// permission through, so `StaticCondition::CastingAsVariant` modifiers and the
+/// elected `PlayFromExile` grant's `cast_cost_raise` apply exactly as they do in
+/// the real cast's `apply_all_cost_modifiers` call (CR 601.2b + CR 601.2f).
+pub(super) fn apply_cost_modifiers_to_base_for_variant(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    base: ManaCost,
+    casting_variant: Option<CastingVariant>,
+    casting_permission_index: Option<CastingPermissionIndex>,
+) -> Option<ManaCost> {
     let obj = state.objects.get(&object_id)?;
     let mut mana_cost = base;
     // CR 903.8: Commanders cast from the command zone incur a tax.
@@ -7579,14 +7760,14 @@ pub(super) fn apply_cost_modifiers_to_base(
             }
         }
     }
-    // CR 601.2f + CR 702.102b: This recompute path is exercised only after an
-    // *additional* cost (Bargain) is declared (`recompute_pending_cast_cost`).
-    // Fuse and Bargain never co-occur — no printed split card carries Bargain — so
-    // this path is Fuse-unreachable and `None` (front-half) is exact. Were a fused
-    // recompute ever to reach here, the `fused_split_spell` marker would already be
-    // set by finalization and `spell_cast_record_for`'s OR-gate would still yield
-    // the combined projection, so this is not a silent front-half leak either way.
-    apply_all_cost_modifiers(state, player, object_id, &mut mana_cost, None, None);
+    apply_all_cost_modifiers(
+        state,
+        player,
+        object_id,
+        &mut mana_cost,
+        casting_variant,
+        casting_permission_index,
+    );
     Some(mana_cost)
 }
 
@@ -7971,6 +8152,7 @@ fn target_ref_matches_cost_filter(
             filter,
             *player_id,
             Some(source_controller),
+            Some(static_source_id),
         ),
     }
 }
@@ -10385,7 +10567,68 @@ fn can_afford_face_down_cast(
     let mut simulated = state.clone();
     let profile = face_down_cast_profile(state, object_id);
     super::zone_pipeline::apply_face_down_entry_profile(&mut simulated, object_id, &profile);
-    can_pay_cost_after_auto_tap(&simulated, player, object_id, cost)
+    let effective = effective_face_down_cast_cost(&simulated, player, object_id, cost);
+    can_pay_cost_after_auto_tap(&simulated, player, object_id, &effective)
+}
+
+/// CR 601.2f + CR 702.37c / CR 702.168b: The {3} face-down cast cost AFTER cost
+/// modification — the single authority for what a face-down cast actually costs
+/// before payment, shared by the affordability gate and the cast offer the player
+/// is shown.
+///
+/// `prepare_spell_cast` runs the same modifier passes on the real cast, so anything
+/// that reads the raw {3} disagrees with what the player is charged. A "face-down
+/// creature spells cost {N} less" static (Kadena, Dream Chisel, Obscuring Aether)
+/// can take it to {0}, which must be both castable with an empty pool and displayed
+/// as {0} rather than {3} — the frontend renders the number the engine hands it.
+///
+/// `state` must ALREADY carry the blanked face-down object (the caller's
+/// `apply_face_down_entry_profile` clone), because that is what makes a
+/// face-down-filtered reduction match here the same way it will during the cast.
+fn effective_face_down_cast_cost(
+    blanked_state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+) -> crate::types::mana::ManaCost {
+    // CR 601.2b + CR 601.2f: elect the SAME casting permission the real
+    // face-down prepare will elect (`selected_object_cast_permission_index`
+    // with the explicit `FaceDown` variant). With no variant the election
+    // infers Foretell first for a foretold exile card, while the real cast
+    // routes through `PlayFromExile` — and only that grant carries a
+    // `cast_cost_raise`, so the projections would price different casts.
+    let casting_permission_index = blanked_state.objects.get(&object_id).and_then(|obj| {
+        selected_object_cast_permission_index(
+            blanked_state,
+            obj,
+            player,
+            Some(CastingVariant::FaceDown),
+        )
+    });
+    apply_cost_modifiers_to_base_for_variant(
+        blanked_state,
+        player,
+        object_id,
+        cost.clone(),
+        Some(CastingVariant::FaceDown),
+        casting_permission_index,
+    )
+    .unwrap_or_else(|| cost.clone())
+}
+
+/// Offer-side sibling of [`effective_face_down_cast_cost`]: takes the UNBLANKED
+/// live state, applies the same face-down profile the real cast will, and returns
+/// the cost to show in the `AlternativeCastChoice` menu.
+fn displayed_face_down_cast_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+) -> crate::types::mana::ManaCost {
+    let mut simulated = state.clone();
+    let profile = face_down_cast_profile(state, object_id);
+    super::zone_pipeline::apply_face_down_entry_profile(&mut simulated, object_id, &profile);
+    effective_face_down_cast_cost(&simulated, player, object_id, cost)
 }
 
 /// CR 708.4 + CR 708.2a: True when the {3} face-down cast is PERMITTED — castable
@@ -12462,7 +12705,16 @@ pub fn handle_cast_spell_with_payment_mode(
                         payment_mode,
                         keyword: crate::types::game_state::AlternativeCastKeyword::FaceDown,
                         normal_cost,
-                        alternative_cost: Some(face_down_cost),
+                        // CR 601.2f: show what the face-down cast will actually
+                        // cost. The client renders this number verbatim, so handing
+                        // it the unmodified {3} while charging {0} (Kadena, Dream
+                        // Chisel) would make the menu contradict the payment.
+                        alternative_cost: Some(displayed_face_down_cast_cost(
+                            state,
+                            player,
+                            object_id,
+                            &face_down_cost,
+                        )),
                         alternative_additional_cost: None,
                         alternative_additional_cost_description: None,
                     });
@@ -21193,10 +21445,12 @@ fn is_blocked_by_per_turn_cast_limit_for(
                 // shared cast-record authority so a fused split spell's mana value /
                 // colors reflect both halves for the per-turn cast-limit filter.
                 // Pre-payment (marker not yet set) the caller supplies `fused`.
-                let current_record = super::restrictions::spell_cast_record_for(
+                // Live seam: `live_spell_cast_record_for` states the face-down cast
+                // (CR 708.4) the object evidences, so this filter and the cost-modifier
+                // filter cannot answer `FilterProp::FaceDown` differently.
+                let current_record = super::restrictions::live_spell_cast_record_for(
                     spell_obj,
                     spell_obj.zone,
-                    crate::types::game_state::CastingVariant::Normal,
                     fused,
                 );
                 if !super::filter::spell_record_matches_filter(

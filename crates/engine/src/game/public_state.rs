@@ -445,7 +445,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::AttractionsRolledToVisit { player_id, .. }
             | GameEvent::AttractionVisited { player_id, .. }
             | GameEvent::ContraptionCranked { player_id, .. }
-            | GameEvent::RingTemptsYou { player_id } => {
+            | GameEvent::RingTemptsYou { player_id, .. } => {
                 mark_public_state_player_dirty(state, *player_id);
             }
             // CR 702.26: Phasing changes which objects/statics are active and

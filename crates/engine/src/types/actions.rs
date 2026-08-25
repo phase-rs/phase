@@ -5,7 +5,8 @@ use super::counter::CounterType;
 use super::game_state::{
     AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode,
     CompanionDeclaration, CounterCostChoice, CounterMoveChoice, CounterRemoveChoice,
-    MayTriggerAutoChoiceKey, PriorityPassingMode, ShardChoice, YieldScope, YieldTarget,
+    MayTriggerAutoChoiceScope, MayTriggerAutoChoiceSelector, PriorityPassingMode, ShardChoice,
+    YieldScope, YieldTarget,
 };
 use super::identifiers::{CardId, ObjectId};
 use super::keywords::Keyword;
@@ -556,6 +557,8 @@ pub enum GameAction {
     },
     DecideOptionalEffectAndRemember {
         choice: AutoMayChoice,
+        #[serde(default)]
+        scope: MayTriggerAutoChoiceScope,
     },
     /// CR 118.12: Pay or decline an "unless pays" cost (e.g., Mana Leak, No More Lies).
     PayUnlessCost {
@@ -999,12 +1002,14 @@ pub enum PriorityYieldOp {
 
 /// CR 603.5: The mutation a `GameAction::SetMayTriggerAutoChoice` performs on the
 /// acting player's stored "don't ask again" auto-choices for optional ("may")
-/// triggers. `Remove` echoes a stored key verbatim; `ClearAll` drops every stored
+/// triggers. `Remove` echoes a stored selector verbatim; `ClearAll` drops every stored
 /// auto-choice belonging to the acting player.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum MayTriggerAutoChoiceOp {
-    Remove { key: MayTriggerAutoChoiceKey },
+    Remove {
+        selector: MayTriggerAutoChoiceSelector,
+    },
     ClearAll,
 }
 

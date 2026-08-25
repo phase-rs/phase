@@ -6,6 +6,7 @@ use engine::types::ability::{Effect, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
+use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 
 use crate::cast_facts::CastFacts;
@@ -89,8 +90,15 @@ impl TacticalPolicy for HandDisruptionPolicy {
 
 fn score_reveal_hand_player_target(ctx: &PolicyContext<'_>, target_player: PlayerId) -> f64 {
     let effects = ctx.effects();
+    let source_id = ctx.source_object().map(|object| object.id);
     if !effects.iter().any(|effect| {
-        reveal_hand_matches_chosen_player_target(ctx.state, effect, target_player, ctx.ai_player)
+        reveal_hand_matches_chosen_player_target(
+            ctx.state,
+            effect,
+            target_player,
+            ctx.ai_player,
+            source_id,
+        )
     }) {
         return 0.0;
     }
@@ -123,11 +131,18 @@ fn reveal_hand_matches_chosen_player_target(
     effect: &Effect,
     target_player: PlayerId,
     source_controller: PlayerId,
+    source_id: Option<ObjectId>,
 ) -> bool {
     let Effect::RevealHand { target, .. } = effect else {
         return false;
     };
-    player_matches_target_filter_in_state(state, target, target_player, Some(source_controller))
+    player_matches_target_filter_in_state(
+        state,
+        target,
+        target_player,
+        Some(source_controller),
+        source_id,
+    )
 }
 
 pub(crate) fn disruption_window_score(
@@ -702,13 +717,15 @@ mod tests {
             &state,
             &opponent_reveal,
             PlayerId(1),
-            PlayerId(0)
+            PlayerId(0),
+            None
         ));
         assert!(!reveal_hand_matches_chosen_player_target(
             &state,
             &opponent_reveal,
             PlayerId(0),
-            PlayerId(0)
+            PlayerId(0),
+            None
         ));
 
         let creature_reveal = Effect::RevealHand {
@@ -723,7 +740,8 @@ mod tests {
             &state,
             &creature_reveal,
             PlayerId(1),
-            PlayerId(0)
+            PlayerId(0),
+            None
         ));
     }
 }

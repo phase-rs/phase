@@ -781,9 +781,12 @@ pub(crate) fn payable_spell_alternative_cost_details(
     object_id: ObjectId,
 ) -> Option<PayableSpellAlternativeCost> {
     let obj = state.objects.get(&object_id)?;
-    if obj.zone != Zone::Hand || obj.controller != player {
+    if obj.controller != player {
         return None;
     }
+    // CR 601.2a: the offer is scoped by the cast's ORIGIN zone (the object may
+    // already sit on the stack when a pending cast re-asks).
+    let origin_zone = super::casting::spell_cast_origin_zone(state, obj);
     // This prompt reuses `AdditionalCost::Choice`, so keep it to pure
     // alternative/free-cast cards until the pending-cast flow can compose
     // alternative and additional costs in one CR 601.2f total-cost pass.
@@ -799,39 +802,47 @@ pub(crate) fn payable_spell_alternative_cost_details(
     // is not a CR-mandated precedence; honoring full controller choice across a
     // self-option and one or more grants needs a multi-alternative choice
     // surface and is a known limitation tracked for follow-up.
-    let self_option = obj.casting_options.iter().find_map(|option| {
-        if option.condition.as_ref().is_some_and(|condition| {
-            !restrictions::evaluate_condition(state, player, object_id, condition)
-        }) {
-            return None;
-        }
-        let cost = match option.kind {
-            SpellCastingOptionKind::AlternativeCost => option.cost.clone()?,
-            SpellCastingOptionKind::CastWithoutManaCost => AbilityCost::Mana {
-                cost: ManaCost::NoCost,
-            },
-            SpellCastingOptionKind::AsThoughHadFlash | SpellCastingOptionKind::CastAdventure => {
+    let self_option = (origin_zone == Zone::Hand)
+        .then(|| obj.casting_options.iter())
+        .into_iter()
+        .flatten()
+        .find_map(|option| {
+            if option.condition.as_ref().is_some_and(|condition| {
+                !restrictions::evaluate_condition(state, player, object_id, condition)
+            }) {
                 return None;
             }
-        };
-        if spell_alternative_cost_is_payable(state, player, object_id, &cost) {
-            Some(PayableSpellAlternativeCost {
-                cost,
-                timing_permission: None,
-                // CR 118.9: a spell's own printed alternative cost carries no
-                // per-turn grant slot to consume.
-                once_per_turn_source: None,
-            })
-        } else {
-            None
-        }
-    });
+            let cost = match option.kind {
+                SpellCastingOptionKind::AlternativeCost => option.cost.clone()?,
+                SpellCastingOptionKind::CastWithoutManaCost => AbilityCost::Mana {
+                    cost: ManaCost::NoCost,
+                },
+                SpellCastingOptionKind::AsThoughHadFlash
+                | SpellCastingOptionKind::CastAdventure => {
+                    return None;
+                }
+            };
+            if spell_alternative_cost_is_payable(state, player, object_id, &cost) {
+                Some(PayableSpellAlternativeCost {
+                    cost,
+                    timing_permission: None,
+                    // CR 118.9: a spell's own printed alternative cost carries no
+                    // per-turn grant slot to consume.
+                    once_per_turn_source: None,
+                })
+            } else {
+                None
+            }
+        });
     if self_option.is_some() {
         return self_option;
     }
 
     // CR 118.9 + CR 601.2f: A permanent-granted alternative MANA cost (Rooftop
     // Storm, Fist of Suns, Jodah) applies when no self-referential option does.
+    // CR 118.9 + CR 601.2a (#7575): zone reach is decided INSIDE
+    // `granted_spell_alternative_cost` — hand casts match normally, a non-hand
+    // origin only through an origin-scoped filter branch.
     let granted = super::casting::granted_spell_alternative_cost(state, player, object_id)?;
     spell_alternative_cost_is_payable(state, player, object_id, &granted.cost).then_some(
         PayableSpellAlternativeCost {
@@ -23662,5 +23673,390 @@ its replicate cost was paid.)\nDraw a card.";
         assert_eq!(state.objects[&blue].zone, Zone::Hand);
         assert!(state.stack.iter().any(|entry| entry.source_id == march));
         assert_eq!(state.players[0].mana_pool.total(), 0);
+    }
+
+    /// PROBE #7575: an exile-scoped grant (InZone{Exile} on the affected
+    /// filter) must reach a card in exile.
+    #[test]
+    fn granted_alternative_cost_reaches_an_exile_scoped_cast() {
+        use crate::types::ability::{FilterProp, StaticDefinition};
+
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Warped Host".to_string(),
+            Zone::Battlefield,
+        );
+        let mut typed = TypedFilter::card().controller(ControllerRef::You);
+        typed
+            .properties
+            .push(FilterProp::InZone { zone: Zone::Exile });
+        let grant = StaticDefinition::new(StaticMode::CastWithAlternativeCost {
+            cost: AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            },
+            timing_permission: None,
+            frequency: crate::types::statics::CastFrequency::OncePerTurn,
+        })
+        .affected(TargetFilter::Typed(typed));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+
+        let exiled = create_object(
+            &mut state,
+            CardId(2),
+            caster,
+            "Exiled Bear".to_string(),
+            Zone::Exile,
+        );
+        state
+            .objects
+            .get_mut(&exiled)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        assert_eq!(
+            payable_spell_alternative_cost(&state, caster, exiled),
+            Some(AbilityCost::Mana {
+                cost: ManaCost::zero()
+            }),
+            "the exile-scoped {{0}} grant must reach a card in exile"
+        );
+    }
+
+    /// #7575 review (mixed `Or`): a cast matching only the UNSCOPED branch of
+    /// a mixed filter must not unlock the non-hand reach — while the same
+    /// branch keeps working for a hand cast (default reach).
+    #[test]
+    fn a_mixed_or_grant_stays_hand_only_for_the_unscoped_branch() {
+        use crate::types::ability::{FilterProp, StaticDefinition};
+
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Mixed Grant Host".to_string(),
+            Zone::Battlefield,
+        );
+        let mut hand_scoped = TypedFilter::card().controller(ControllerRef::You);
+        hand_scoped
+            .properties
+            .push(FilterProp::InZone { zone: Zone::Hand });
+        let grant = StaticDefinition::new(StaticMode::CastWithAlternativeCost {
+            cost: AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            },
+            timing_permission: None,
+            frequency: crate::types::statics::CastFrequency::Unlimited,
+        })
+        .affected(TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(hand_scoped),
+                TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            ],
+        });
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+
+        let exiled = create_object(
+            &mut state,
+            CardId(2),
+            caster,
+            "Exiled Creature".to_string(),
+            Zone::Exile,
+        );
+        state
+            .objects
+            .get_mut(&exiled)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        assert_eq!(
+            payable_spell_alternative_cost(&state, caster, exiled),
+            None,
+            "the exile cast matches only the unscoped creature branch — hand-only reach"
+        );
+
+        let hand = create_object(
+            &mut state,
+            CardId(3),
+            caster,
+            "Hand Creature".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&hand)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        assert_eq!(
+            payable_spell_alternative_cost(&state, caster, hand),
+            Some(AbilityCost::Mana {
+                cost: ManaCost::zero()
+            }),
+            "the same unscoped branch keeps its default hand reach"
+        );
+    }
+
+    /// #7575 review (stack origin): once the object sits ON the stack, the
+    /// pending cast's recorded origin drives the exile-scoped grant — an
+    /// exile origin receives it, a graveyard origin (zone mismatch) does not.
+    #[test]
+    fn the_pending_cast_origin_drives_the_exile_scoped_grant() {
+        use crate::types::ability::{Effect, FilterProp, ResolvedAbility, StaticDefinition};
+        use crate::types::game_state::PendingCast;
+
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Warped Host".to_string(),
+            Zone::Battlefield,
+        );
+        let mut typed = TypedFilter::card().controller(ControllerRef::You);
+        typed
+            .properties
+            .push(FilterProp::InZone { zone: Zone::Exile });
+        let grant = StaticDefinition::new(StaticMode::CastWithAlternativeCost {
+            cost: AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            },
+            timing_permission: None,
+            frequency: crate::types::statics::CastFrequency::Unlimited,
+        })
+        .affected(TargetFilter::Typed(typed));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+
+        let spell = create_object(
+            &mut state,
+            CardId(2),
+            caster,
+            "Mid-Cast Spell".to_string(),
+            Zone::Stack,
+        );
+        let card_id = state.objects[&spell].card_id;
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut pending = PendingCast::new(
+            spell,
+            card_id,
+            ResolvedAbility::new(Effect::NoOp, Vec::new(), spell, caster),
+            ManaCost::generic(4),
+        );
+        pending.origin_zone = Zone::Exile;
+        state.pending_cast = Some(Box::new(pending));
+        assert_eq!(
+            payable_spell_alternative_cost(&state, caster, spell),
+            Some(AbilityCost::Mana {
+                cost: ManaCost::zero()
+            }),
+            "an exile-origin pending cast on the stack must receive the exile-scoped grant"
+        );
+
+        state.pending_cast.as_mut().unwrap().origin_zone = Zone::Graveyard;
+        assert_eq!(
+            payable_spell_alternative_cost(&state, caster, spell),
+            None,
+            "a graveyard-origin pending cast is a zone mismatch for the exile-scoped grant"
+        );
+    }
+
+    /// #7782 round 2 (CodeRabbit): after `finalize_cast` the pending record is
+    /// gone and `cast_from_zone` is the surviving origin authority. A re-ask
+    /// must still see the true origin — a zone-less grant keeps matching the
+    /// finalized hand cast, and the exile-scoped grant the finalized exile
+    /// cast.
+    #[test]
+    fn the_stamped_cast_from_zone_survives_finalize_for_the_grant() {
+        use crate::types::ability::{FilterProp, StaticDefinition};
+
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Rooftop Host".to_string(),
+            Zone::Battlefield,
+        );
+        let grant = StaticDefinition::new(StaticMode::CastWithAlternativeCost {
+            cost: AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            },
+            timing_permission: None,
+            frequency: crate::types::statics::CastFrequency::Unlimited,
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::card().controller(ControllerRef::You),
+        ));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+
+        let finalized = create_object(
+            &mut state,
+            CardId(2),
+            caster,
+            "Finalized Hand Cast".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&finalized).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.cast_from_zone = Some(Zone::Hand);
+        }
+        assert_eq!(
+            payable_spell_alternative_cost(&state, caster, finalized),
+            Some(AbilityCost::Mana {
+                cost: ManaCost::zero()
+            }),
+            "the zone-less grant must keep matching the finalized hand cast"
+        );
+
+        let mut typed = TypedFilter::card().controller(ControllerRef::You);
+        typed
+            .properties
+            .push(FilterProp::InZone { zone: Zone::Exile });
+        let exile_grant = StaticDefinition::new(StaticMode::CastWithAlternativeCost {
+            cost: AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            },
+            timing_permission: None,
+            frequency: crate::types::statics::CastFrequency::Unlimited,
+        })
+        .affected(TargetFilter::Typed(typed));
+        let exile_source = create_object(
+            &mut state,
+            CardId(3),
+            caster,
+            "Warped Host".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&exile_source)
+            .unwrap()
+            .static_definitions
+            .push(exile_grant);
+        let exile_finalized = create_object(
+            &mut state,
+            CardId(4),
+            caster,
+            "Finalized Exile Cast".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&exile_finalized).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.cast_from_zone = Some(Zone::Exile);
+        }
+        assert_eq!(
+            payable_spell_alternative_cost(&state, caster, exile_finalized),
+            Some(AbilityCost::Mana {
+                cost: ManaCost::zero()
+            }),
+            "the exile-scoped grant must keep matching the finalized exile cast"
+        );
+    }
+
+    /// #7782 round 3 (order): during a NEW cast the pending record outranks a
+    /// stale `cast_from_zone` stamp from a PREVIOUS cast — a graveyard recast
+    /// with a leftover Hand stamp must not receive a zone-less (hand-reach)
+    /// grant. Discriminating: with the persisted stamp consulted first, the
+    /// stale Hand origin wins and the grant leaks.
+    #[test]
+    fn a_pending_recast_outranks_a_stale_cast_from_zone_stamp() {
+        use crate::types::ability::{Effect, ResolvedAbility, StaticDefinition};
+        use crate::types::game_state::PendingCast;
+
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Rooftop Host".to_string(),
+            Zone::Battlefield,
+        );
+        let grant = StaticDefinition::new(StaticMode::CastWithAlternativeCost {
+            cost: AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            },
+            timing_permission: None,
+            frequency: crate::types::statics::CastFrequency::Unlimited,
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::card().controller(ControllerRef::You),
+        ));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+
+        let recast = create_object(
+            &mut state,
+            CardId(2),
+            caster,
+            "Graveyard Recast".to_string(),
+            Zone::Graveyard,
+        );
+        let card_id = state.objects[&recast].card_id;
+        {
+            let obj = state.objects.get_mut(&recast).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            // Stale stamp from a previous hand cast (constructed directly to
+            // isolate the ordering; the zone-exit cleanup normally clears it).
+            obj.cast_from_zone = Some(Zone::Hand);
+        }
+        let mut pending = PendingCast::new(
+            recast,
+            card_id,
+            ResolvedAbility::new(Effect::NoOp, Vec::new(), recast, caster),
+            ManaCost::generic(4),
+        );
+        pending.origin_zone = Zone::Graveyard;
+        state.pending_cast = Some(Box::new(pending));
+
+        assert_eq!(
+            payable_spell_alternative_cost(&state, caster, recast),
+            None,
+            "the in-flight graveyard origin must outrank the stale Hand stamp"
+        );
     }
 }

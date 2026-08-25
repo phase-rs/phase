@@ -7,7 +7,7 @@ use crate::parser::oracle_ir::doc::{
 use crate::parser::oracle_ir::static_ir::StaticIr;
 use crate::types::ability::{
     AdditionalCostOrigin, AdditionalCostPaymentSource, CountScope, CounterAdjustment, DoorLockOp,
-    SpellStackToGraveyardReplacement,
+    PlayerRelation, SpellStackToGraveyardReplacement,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::triggers::AttackTargetFilter;
@@ -26104,4 +26104,807 @@ fn bound_delayed_recalls_are_not_demoted() {
             "{name} is expected to parse with zero Unimplemented; keys={keys:?}",
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Namor, Atlantean King — the attacked-player predicate (CR 603.2) and the
+// "attacking that player" defending-player anaphor (CR 508.5).
+// ---------------------------------------------------------------------------
+
+/// Namor, Atlantean King — verbatim Scryfall Oracle text (oracle id
+/// 171a0a09-4aee-466c-aebd-3b0d4c1f51b4).
+const NAMOR_ORACLE: &str = "Flying\nWhenever you cast a noncreature spell, create a 1/1 blue Merfolk creature token.\nWhenever Namor attacks a player who has more life than you, other creatures you control attacking that player get +2/+0 until end of turn.";
+
+fn parse_namor() -> ParsedAbilities {
+    parse(
+        NAMOR_ORACLE,
+        "Namor, Atlantean King",
+        &[Keyword::Flying],
+        &["Creature"],
+        &["Mutant", "Merfolk", "Noble"],
+    )
+}
+
+fn namor_attack_trigger(parsed: &ParsedAbilities) -> &TriggerDefinition {
+    parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Attacks)
+        .expect("Namor must have an Attacks trigger")
+}
+
+fn target_filter_has_defending_player_anaphor(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed.properties.contains(&FilterProp::Attacking {
+            defender: Some(ControllerRef::DefendingPlayer),
+        }),
+        TargetFilter::Not { filter } => target_filter_has_defending_player_anaphor(filter),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+            .iter()
+            .any(target_filter_has_defending_player_anaphor),
+        _ => false,
+    }
+}
+
+/// V2 — Namor's effect body must scope the pump to the co-attackers on the
+/// attacked player, not to `TargetFilter::Any`.
+///
+/// Revert-failing: without `parse_attacking_defender_anaphor`,
+/// `parse_type_phrase` leaves "attacking that player" unconsumed,
+/// `parse_subject_application`'s rest-empty gate fails, and the clause falls
+/// through to `parse_numeric_imperative_ast`, which emits the documented
+/// `Effect::Pump { target: TargetFilter::Any }` sentinel — a board-wide pump
+/// that hits both players' permanents, lands included.
+#[test]
+fn namor_pump_scopes_to_other_attackers_of_the_defending_player() {
+    let result = parse_namor();
+
+    // Positive reach-guard: the card parses with zero Unimplemented, so the
+    // assertions below cannot pass vacuously via a total parse failure.
+    assert!(
+        !parsed_has_unimplemented(&result),
+        "Namor must parse with zero Unimplemented effects: {result:#?}"
+    );
+
+    let attack = namor_attack_trigger(&result);
+    let execute = attack
+        .execute
+        .as_ref()
+        .expect("attack trigger should have an execute body");
+    assert_eq!(execute.duration, Some(Duration::UntilEndOfTurn));
+
+    let Effect::PumpAll {
+        power,
+        toughness,
+        target,
+    } = &*execute.effect
+    else {
+        panic!(
+            "expected a class-scoped PumpAll, got {:?} — a `Pump {{ target: Any }}` here means the \
+             \"attacking that player\" suffix was dropped and the board-wide sentinel shipped",
+            execute.effect
+        );
+    };
+    assert_eq!(*power, PtValue::Fixed(2));
+    assert_eq!(*toughness, PtValue::Fixed(0));
+
+    let TargetFilter::Typed(typed) = target else {
+        panic!("expected a Typed pump filter, got {target:?}");
+    };
+    assert_eq!(typed.controller, Some(ControllerRef::You));
+    assert!(
+        typed.type_filters.contains(&TypeFilter::Creature),
+        "type_filters={:?}",
+        typed.type_filters
+    );
+    assert!(
+        typed.properties.contains(&FilterProp::Attacking {
+            defender: Some(ControllerRef::DefendingPlayer),
+        }),
+        "pump filter must carry the CR 508.5 defending-player anaphor, got {:?}",
+        typed.properties
+    );
+    assert!(
+        typed.properties.contains(&FilterProp::Another),
+        "\"other creatures\" must exclude Namor itself, got {:?}",
+        typed.properties
+    );
+}
+
+/// V10 — the anaphor covers the CLASS, not just Namor: both printed cards that
+/// place "attacking that player" in a genuine TARGET filter must now carry the
+/// CR 508.5 property. Echoing Assault additionally exercises an EXCLUDED
+/// position in its second sentence, so one card proves both halves.
+#[test]
+fn attacking_that_player_target_filters_carry_the_defending_player_anaphor() {
+    // Verbatim Oracle text (MTGJSON); a paraphrase can take a different parser
+    // branch and go green while the real card stays broken.
+    let ordruun = parse(
+        "Mentor (Whenever this creature attacks, put a +1/+1 counter on target attacking creature with lesser power.)\nWhenever you attack a player, target creature that's attacking that player gains first strike until end of turn.",
+        "Ordruun Mentor",
+        &[Keyword::Mentor],
+        &["Creature"],
+        &["Minotaur", "Soldier"],
+    );
+    assert!(
+        ordruun
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_deref())
+            .any(definition_chain_has_defending_player_anaphor),
+        "Ordruun Mentor's target filter must scope to the attacked player: {ordruun:#?}"
+    );
+
+    let echoing = parse(
+        "Creature tokens you control have menace.\nWhenever you attack a player, choose target nontoken creature that's attacking that player. Create a token that's a copy of that creature, except it's 1/1. The token enters tapped and attacking that player. Sacrifice it at the beginning of the next end step.",
+        "Echoing Assault",
+        &[],
+        &["Enchantment"],
+        &[],
+    );
+    assert!(
+        echoing
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_deref())
+            .any(definition_chain_has_defending_player_anaphor),
+        "Echoing Assault's target filter must scope to the attacked player: {echoing:#?}"
+    );
+}
+
+fn definition_chain_has_defending_player_anaphor(def: &AbilityDefinition) -> bool {
+    def.effect
+        .target_filter()
+        .is_some_and(target_filter_has_defending_player_anaphor)
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(definition_chain_has_defending_player_anaphor)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(definition_chain_has_defending_player_anaphor)
+}
+
+/// V9 — the anaphor must not steal the token-spec / battlefield-entry /
+/// continuation / copy-token members of the 52-card "attacking that player"
+/// corpus. Many of them terminate with a bare "." right after the phrase, which
+/// SATISFIES the clause boundary, so the boundary guard is not what protects
+/// them — the excluded positions never route the phrase through
+/// `parse_type_phrase`'s suffix chain at all.
+#[test]
+fn excluded_attacking_that_player_positions_are_not_stolen() {
+    // Inline token spec, bare "." terminator. Verbatim Oracle text (MTGJSON) —
+    // the real card wraps the token spec in a "for each opponent" distributive,
+    // which a paraphrase without it would not exercise.
+    let ainok = parse(
+        "Whenever you attack with this creature and/or your commander, for each opponent, create a 1/1 red Goblin creature token that's tapped and attacking that player.\n\
+         Sacrifice this creature: Creature tokens you control gain indestructible until end of turn.",
+        "Ainok Strike Leader",
+        &[],
+        &["Creature"],
+        &["Dog", "Warrior"],
+    );
+    assert!(
+        !parsed_has_unimplemented(&ainok),
+        "reach guard: Ainok Strike Leader must parse: {ainok:#?}"
+    );
+    assert!(
+        ainok
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_deref())
+            .any(|d| matches!(
+                &*d.effect,
+                Effect::Token {
+                    enters_attacking: true,
+                    tapped: true,
+                    ..
+                }
+            )),
+        "inline token specs must still lower to an attacking token: {ainok:#?}"
+    );
+    assert!(
+        !ainok
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_deref())
+            .any(definition_chain_has_defending_player_anaphor),
+        "a token spec's entry flag must not become a target-filter suffix: {ainok:#?}"
+    );
+
+    // Battlefield-entry tail. Verbatim Oracle text (MTGJSON), including the
+    // "Soldier, Warrior, or Wizard" restriction and both trailing sentences —
+    // the paraphrase this row used to carry dropped all three.
+    let vast_scrier = parse(
+        "Flying\n\
+         Whenever The Vast Scrier attacks a player, you may put a Soldier, Warrior, or Wizard creature card from your hand onto the battlefield tapped and attacking that player. If it has any \"Whenever this creature attacks\" triggers, those trigger. If you don't put a card onto the battlefield this way, scry 2.",
+        "The Vast Scrier",
+        &[Keyword::Flying],
+        &["Creature"],
+        &["Human", "Cleric"],
+    );
+    // Positive reach-guard: the battlefield-entry tail was consumed as ENTRY
+    // FLAGS on the `ChangeZone`, which is the whole point of the exclusion.
+    let entry = vast_scrier
+        .triggers
+        .iter()
+        .filter_map(|t| t.execute.as_deref())
+        .find(|d| matches!(&*d.effect, Effect::ChangeZone { .. }))
+        .unwrap_or_else(|| {
+            panic!("The Vast Scrier keeps its battlefield-entry effect: {vast_scrier:#?}")
+        });
+    let Effect::ChangeZone {
+        enter_tapped,
+        enters_attacking,
+        target,
+        ..
+    } = &*entry.effect
+    else {
+        unreachable!("matched above");
+    };
+    assert!(
+        matches!(enter_tapped, crate::types::zones::EtbTapState::Tapped) && *enters_attacking,
+        "\"tapped and attacking that player\" must land as entry flags: {entry:#?}"
+    );
+    assert!(
+        !target_filter_has_defending_player_anaphor(target),
+        "battlefield-entry tails must not become filter suffixes: {entry:#?}"
+    );
+    // The two trailing sentences the engine cannot model stay honestly RED
+    // (`Effect::Unimplemented`), so this row is not asserting coverage the card
+    // does not have.
+    assert!(
+        parsed_has_unimplemented(&vast_scrier),
+        "the \"those trigger\" rider is unmodelled and must remain honestly red: {vast_scrier:#?}"
+    );
+
+    // Predicative state-change sentence — a copula, not a filter suffix.
+    // Verbatim Oracle text (MTGJSON): the real card is a Creature with an ETB
+    // trigger, so its content lands in `triggers`, not `abilities`.
+    let portal = parse(
+        "Flash\n\
+         When this creature enters during the declare attackers step, choose target player and any number of target attacking creatures their opponents control. Those creatures are now attacking that player.",
+        "Portal Manipulator",
+        &[Keyword::Flash],
+        &["Creature"],
+        &["Human", "Wizard"],
+    );
+    // Positive reach-guard: the sentence really did reach the parser and
+    // produced a live trigger with a body. Without this the negative below
+    // passes for the wrong reason on a total parse failure.
+    let portal_chain: Vec<&AbilityDefinition> = portal
+        .triggers
+        .iter()
+        .filter_map(|t| t.execute.as_deref())
+        .collect();
+    assert!(
+        !portal_chain.is_empty(),
+        "reach guard: Portal Manipulator's ETB trigger must parse to a body: {portal:#?}"
+    );
+    // The negative, over BOTH axes and through the full sub/else chain (the
+    // shallow `abilities`-only, top-level-effect-only traversal this row used to
+    // carry could not see a `sub_ability`).
+    assert!(
+        !portal_chain
+            .iter()
+            .copied()
+            .any(definition_chain_has_defending_player_anaphor)
+            && !portal
+                .abilities
+                .iter()
+                .any(definition_chain_has_defending_player_anaphor),
+        "predicative state-change sentences must not become filter suffixes: {portal:#?}"
+    );
+    // And the sentence the engine cannot model stays honestly RED rather than
+    // silently degrading into a wrong filter.
+    assert!(
+        portal_chain
+            .iter()
+            .copied()
+            .any(def_chain_has_unimplemented),
+        "the unmodelled copula sentence must remain honestly red: {portal:#?}"
+    );
+}
+
+/// V1 — Namor's *event clause* must carry the attacked-player predicate on
+/// `valid_target` (CR 603.2, checked once at declaration) and NOT on `condition`
+/// (CR 603.4, re-checked at resolution). Namor's text has no "if", so the
+/// relative clause is part of the trigger event, not an intervening-if.
+///
+/// Revert-failing: before the fix `parse_attack_target`'s remainder was
+/// discarded, leaving `valid_target: None` — the trigger fired on every player
+/// attack regardless of life totals.
+#[test]
+fn namor_attack_trigger_binds_the_more_life_predicate_to_the_event_clause() {
+    let result = parse_namor();
+    assert!(
+        !parsed_has_unimplemented(&result),
+        "Namor must parse with zero Unimplemented effects: {result:#?}"
+    );
+
+    let attack = namor_attack_trigger(&result);
+    assert_eq!(
+        attack.attack_target_filter,
+        Some(AttackTargetFilter::Player),
+        "base attacked-player scope must survive the relative clause"
+    );
+    assert_eq!(attack.valid_card, Some(TargetFilter::SelfRef));
+
+    assert_eq!(
+        attack.valid_target,
+        Some(TargetFilter::PlayerMatching {
+            player: Box::new(PlayerFilter::PlayerAttribute {
+                relation: PlayerRelation::All,
+                attr: Box::new(QuantityRef::LifeTotal {
+                    player: PlayerScope::ScopedPlayer,
+                }),
+                comparator: Comparator::GT,
+                value: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller,
+                    },
+                }),
+            }),
+        }),
+        "\"who has more life than you\" belongs on the CR 603.2 event channel"
+    );
+
+    // CR 603.4 does not apply: no "if" immediately follows the trigger event, so
+    // the predicate must NOT be re-checked at resolution.
+    assert_eq!(
+        attack.condition, None,
+        "a CR 603.2 event clause must not become a CR 603.4 intervening-if"
+    );
+}
+
+/// Class coverage for the "who controls N or more <type>" axis (Owlbear Cub).
+/// Without the numeric-threshold arm this card would fall to the fail-closed
+/// guard and land honestly RED; with it, the predicate is modelled. Verbatim
+/// Oracle text (MTGJSON).
+#[test]
+fn owlbear_cub_attacked_player_land_threshold_predicate_is_bound() {
+    let parsed = parse(
+        "Mama's Coming — Whenever this creature attacks a player who controls eight or more lands, look at the top eight cards of your library. You may put a creature card from among them onto the battlefield tapped and attacking that player. Put the rest on the bottom of your library in a random order.",
+        "Owlbear Cub",
+        &[],
+        &["Creature"],
+        &["Owlbear"],
+    );
+    let attack = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Attacks)
+        .expect("Owlbear Cub keeps its attack trigger");
+    let Some(TargetFilter::PlayerMatching { player }) = &attack.valid_target else {
+        panic!(
+            "Owlbear Cub's land-count predicate must bind to valid_target, got {:?}",
+            attack.valid_target
+        );
+    };
+    let PlayerFilter::ControlsCount {
+        relation,
+        filter,
+        comparator,
+        count,
+    } = player.as_ref()
+    else {
+        panic!("expected a ControlsCount predicate, got {player:?}");
+    };
+    assert_eq!(*relation, PlayerRelation::All);
+    assert_eq!(*comparator, Comparator::GE);
+    assert_eq!(**count, QuantityExpr::Fixed { value: 8 });
+    let TargetFilter::Typed(typed) = filter else {
+        panic!("expected a typed land filter, got {filter:?}");
+    };
+    assert!(typed.type_filters.contains(&TypeFilter::Land));
+    assert_eq!(attack.condition, None);
+}
+
+/// V11 — consume-on-success: a `who`-headed clause the predicate grammar cannot
+/// model must fall to `Effect::Unimplemented`, never silently leave the broad
+/// `Player` scope behind (that is precisely the bug being fixed).
+///
+/// This is the direct regression test for the guard's SLICE: every
+/// `parse_attack_target` tag carries a leading space, so a guard aimed at the
+/// raw remainder could never fire. The comma control proves the post-noun
+/// fallback binding does not mis-fire when no space follows the noun.
+#[test]
+fn unmodelled_attacked_player_predicate_fails_closed() {
+    let declined = parse(
+        "Whenever ~ attacks a player who has drawn three cards this turn, draw a card.",
+        "Fail Closed Test",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    // The honest-red marker for an unparsed trigger EVENT is
+    // `TriggerMode::Unknown` (which `game::coverage` counts as a gap), not an
+    // `Unimplemented` effect — the body ("draw a card") parses fine; it is the
+    // event clause that could not be modelled.
+    assert!(
+        declined
+            .triggers
+            .iter()
+            .all(|t| matches!(t.mode, TriggerMode::Unknown(_))),
+        "an unmodelled `who` predicate must fail closed to TriggerMode::Unknown, got {declined:#?}"
+    );
+    assert!(
+        !declined.triggers.iter().any(|t| t.attack_target_filter
+            == Some(AttackTargetFilter::Player)
+            && t.valid_target.is_none()),
+        "declining must not leave a broad attacked-player scope behind: {:?}",
+        declined.triggers
+    );
+
+    // Paired positive reach-guard: the same sentence shape with a MODELLED
+    // predicate parses, so the negative above cannot pass vacuously.
+    let accepted = parse(
+        "Whenever ~ attacks a player who has more life than you, draw a card.",
+        "Fail Closed Reach Guard",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    assert!(
+        !parsed_has_unimplemented(&accepted),
+        "the modelled predicate must still parse: {accepted:#?}"
+    );
+    assert!(
+        matches!(
+            accepted
+                .triggers
+                .iter()
+                .find(|t| t.mode == TriggerMode::Attacks)
+                .and_then(|t| t.valid_target.as_ref()),
+            Some(TargetFilter::PlayerMatching { .. })
+        ),
+        "reach guard must bind the predicate: {:?}",
+        accepted.triggers
+    );
+
+    // Comma control: no relative clause at all, so the post-noun fallback
+    // binding must leave the plain attacked-player scope untouched.
+    let comma = parse(
+        "Whenever ~ attacks a player, draw a card.",
+        "Comma Control",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    let plain = comma
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Attacks)
+        .expect("plain attack trigger");
+    assert_eq!(plain.attack_target_filter, Some(AttackTargetFilter::Player));
+    assert_eq!(plain.valid_target, None);
+    assert!(!parsed_has_unimplemented(&comma));
+}
+
+/// V8 — sibling grammar is not stolen. A `with `-headed tail modifies the
+/// ATTACK, not the attacked player, so it must not become a `PlayerMatching`
+/// predicate. The Vast Scrier additionally proves a bare `attacks a player`
+/// clause with an "attacking that player" BODY keeps its plain event scope.
+#[test]
+fn attack_trigger_tails_that_are_not_player_predicates_are_untouched() {
+    // Real cards carry their VERBATIM MTGJSON Oracle text; the one synthetic row
+    // is named as such because it probes a grammar fragment (Goad's reminder
+    // clause) rather than standing in for a printed card.
+    for (name, text, keywords, subtypes) in [
+        (
+            "Akiri, Fearless Voyager",
+            "Whenever you attack a player with one or more equipped creatures, draw a card.\n\
+             {W}: You may unattach an Equipment from a creature you control. If you do, tap that creature and it gains indestructible until end of turn.",
+            &[][..],
+            &["Kor", "Warrior"][..],
+        ),
+        (
+            "Goad Reminder (synthetic grammar probe)",
+            "Whenever ~ attacks a player other than you if able, draw a card.",
+            &[][..],
+            &[][..],
+        ),
+        (
+            "The Vast Scrier",
+            "Flying\n\
+             Whenever The Vast Scrier attacks a player, you may put a Soldier, Warrior, or Wizard creature card from your hand onto the battlefield tapped and attacking that player. If it has any \"Whenever this creature attacks\" triggers, those trigger. If you don't put a card onto the battlefield this way, scry 2.",
+            &[Keyword::Flying][..],
+            &["Human", "Cleric"][..],
+        ),
+    ] {
+        let parsed = parse(text, name, keywords, &["Creature"], subtypes);
+        // Positive reach-guard: the attack sentence reached the attack-trigger
+        // parser and produced a live trigger with a body. A total parse failure
+        // (or a `TriggerMode::Unknown` decline) would make the negative below
+        // pass for the wrong reason.
+        assert!(
+            parsed.triggers.iter().any(|t| matches!(
+                t.mode,
+                TriggerMode::Attacks | TriggerMode::YouAttack
+            ) && t.execute.is_some()),
+            "{name}: reach guard — the attack trigger must parse: {parsed:#?}"
+        );
+        for trigger in &parsed.triggers {
+            assert!(
+                !matches!(
+                    trigger.valid_target,
+                    Some(TargetFilter::PlayerMatching { .. })
+                ),
+                "{name}: non-`who` tails are not player predicates, got {:?}",
+                trigger.valid_target
+            );
+        }
+    }
+}
+
+/// V11b — CR 608.2c consume-on-success on the REMAINDER. An arm that models
+/// only a PREFIX of the relative clause must decline, exactly like an arm that
+/// cannot match at all: binding the prefix would leave an UNDER-restricted
+/// `valid_target` and silently drop the rest of the printed restriction, which
+/// is the same silent-drop failure mode this change was written to eliminate.
+///
+/// Revert-failing: delete the `peek_clause_terminator` filter in
+/// `oracle_trigger`'s predicate hook (and/or the one inside
+/// `parse_has_more_life_than_you`) and both rows below bind
+/// `PlayerMatching { PlayerAttribute { .. } }` while the conjunct / trailing
+/// verb vanishes.
+#[test]
+fn attacked_player_predicate_requires_a_clause_boundary() {
+    for (name, text) in [
+        // Conjunct the predicate grammar cannot model: the life half alone is a
+        // strictly weaker restriction than the printed text.
+        (
+            "Partial Predicate Conjunct",
+            "Whenever ~ attacks a player who has more life than you and controls a Forest, draw a card.",
+        ),
+        // A different phrasing whose PREFIX coincides with the modelled one.
+        // "…more life than you do" is the corpus's other comparative form
+        // (Keeper of the Flame / Keeper of the Light), so this is a real
+        // grammar collision, not an invented one.
+        (
+            "Partial Predicate Trailing Verb",
+            "Whenever ~ attacks a player who has more life than you do, draw a card.",
+        ),
+    ] {
+        let parsed = parse(text, name, &[], &["Creature"], &[]);
+        assert!(
+            parsed
+                .triggers
+                .iter()
+                .all(|t| matches!(t.mode, TriggerMode::Unknown(_))),
+            "{name}: a partially-modelled `who` clause must fail closed to \
+             TriggerMode::Unknown, got {parsed:#?}"
+        );
+        assert!(
+            !parsed.triggers.iter().any(|t| matches!(
+                t.valid_target,
+                Some(TargetFilter::PlayerMatching { .. })
+            )),
+            "{name}: binding the PREFIX is an under-restricted scope, not coverage: {:?}",
+            parsed.triggers
+        );
+        assert!(
+            !parsed.triggers.iter().any(|t| t.attack_target_filter
+                == Some(AttackTargetFilter::Player)
+                && t.valid_target.is_none()),
+            "{name}: declining must not leave a broad attacked-player scope behind: {:?}",
+            parsed.triggers
+        );
+    }
+
+    // Paired positive reach-guard: the clause that DOES end at a boundary still
+    // binds, so the negatives above cannot pass vacuously.
+    let accepted = parse(
+        "Whenever ~ attacks a player who has more life than you, draw a card.",
+        "Boundary Reach Guard",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    assert!(
+        matches!(
+            accepted
+                .triggers
+                .iter()
+                .find(|t| t.mode == TriggerMode::Attacks)
+                .and_then(|t| t.valid_target.as_ref()),
+            Some(TargetFilter::PlayerMatching { .. })
+        ),
+        "reach guard must still bind the boundary-terminated predicate: {:?}",
+        accepted.triggers
+    );
+}
+
+/// V17 — Loot Dispute is untouched, not silently absorbed. `parse_attack_target`
+/// has no `" the player"` arm, so the definite-article base noun never produces
+/// an attacked-player scope and the fail-closed guard's precondition is never
+/// met; `PlayerFilter` also has no initiative-designation variant.
+///
+/// TRIPWIRE: adding `" the player"` to `parse_attack_target` later must
+/// consciously decide whether Loot Dispute flips to honestly RED.
+#[test]
+fn loot_dispute_initiative_predicate_is_unchanged() {
+    let parsed = parse(
+        "Whenever you attack the player who has the initiative, create a Treasure token.",
+        "Loot Dispute",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+    assert!(
+        !parsed.triggers.is_empty(),
+        "Loot Dispute must retain an honest trigger gap rather than disappear: {parsed:#?}"
+    );
+    for trigger in &parsed.triggers {
+        assert_eq!(trigger.attack_target_filter, None);
+        assert_eq!(trigger.valid_target, None);
+    }
+}
+
+/// CR 508.3e vs CR 508.3d — the attacked-player OBJECT of a "you attack"
+/// trigger is what separates the two rules, and it must land on
+/// `attack_target_filter` for the whole class rather than for one card.
+///
+/// Two independent things ride on this one field, so the row asserts the field
+/// rather than any single card's downstream behaviour:
+///
+/// 1. **Restriction (CR 508.3e).** "It won't trigger ... if a creature attacks
+///    a planeswalker or a battle." With `None`, a planeswalker-only declaration
+///    fires the trigger.
+/// 2. **Per-firing binding (CR 508.3e).** The engine splits the declaration
+///    into one firing per attacked player only when this field names a player;
+///    that is what makes "that player" resolve per firing instead of collapsing
+///    to the batch-global defender.
+///
+/// The bare "you attack" row is the discriminating negative: CR 508.3d fires
+/// once for the whole declaration against any defender, so a change that set
+/// the filter unconditionally would both over-restrict it and silently multiply
+/// how many times it fires.
+#[test]
+fn you_attack_trigger_binds_its_attacked_player_object() {
+    use crate::types::triggers::AttackTargetFilter;
+
+    // Every printed "Whenever you attack a player" card, verbatim trigger line.
+    // One card would prove nothing about the arm; the class is the unit.
+    let attacks_a_player: &[(&str, &str, &[&str])] = &[
+        (
+            "Ordruun Mentor",
+            "Whenever you attack a player, target creature that's attacking that player gains first strike until end of turn.",
+            &["Creature"],
+        ),
+        (
+            "Echoing Assault",
+            "Whenever you attack a player, choose target nontoken creature that's attacking that player. Create a token that's a copy of that creature, except it's 1/1.",
+            &["Enchantment"],
+        ),
+        (
+            "Horizon Explorer",
+            "Whenever you attack a player, create a Lander token.",
+            &["Creature"],
+        ),
+        (
+            "Soaring Lightbringer",
+            "Whenever you attack a player, create a 1/1 white Glimmer enchantment creature token that's tapped and attacking that player.",
+            &["Creature"],
+        ),
+        (
+            "Karazikar, the Eye Tyrant",
+            "Whenever you attack a player, tap target creature that player controls and goad it.",
+            &["Creature"],
+        ),
+        (
+            "Seifer, Balamb Rival",
+            "Whenever you attack a player, goad target creature that player controls.",
+            &["Creature"],
+        ),
+        (
+            "Long-Range Sensor",
+            "Whenever you attack a player, put a charge counter on this artifact.",
+            &["Artifact"],
+        ),
+    ];
+    for (name, text, types) in attacks_a_player {
+        let parsed = parse(text, name, &[], types, &[]);
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| t.mode == TriggerMode::YouAttack)
+            .unwrap_or_else(|| panic!("{name} keeps its YouAttack trigger: {parsed:#?}"));
+        assert_eq!(
+            trigger.attack_target_filter,
+            Some(AttackTargetFilter::Player),
+            "{name}: CR 508.3e names [another player], so the attacked-player \
+             object must bind — without it the trigger fires on a \
+             planeswalker-only attack and cannot split per attacked player"
+        );
+    }
+
+    // CR 508.3d: a bare "you attack" names no object — any defender, one firing.
+    let bare = parse(
+        "Whenever you attack, draw a card.",
+        "BareYouAttack",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    let bare_trigger = bare
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::YouAttack)
+        .expect("bare \"you attack\" stays a YouAttack trigger");
+    assert_eq!(
+        bare_trigger.attack_target_filter, None,
+        "CR 508.3d: a bare \"you attack\" must NOT gain an attacked-player \
+         object — that would both restrict it to player attacks and multiply \
+         its firings per attacked player"
+    );
+
+    // A trailing qualifier is a different, unmodelled grammar. Declining leaves
+    // the pre-existing shape rather than claiming the CR 508.3e restriction
+    // while dropping the qualifier's meaning.
+    let qualified = parse(
+        "Whenever you attack a player with one or more equipped creatures, draw a card.",
+        "Akiri, Fearless Voyager",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    // Positive reach-guard: `.all()` over an empty iterator is vacuously true,
+    // so a parse regression that drops the trigger entirely would pass the
+    // assertion below for the wrong reason.
+    let qualified_you_attack: Vec<_> = qualified
+        .triggers
+        .iter()
+        .filter(|t| t.mode == TriggerMode::YouAttack)
+        .collect();
+    assert!(
+        !qualified_you_attack.is_empty(),
+        "the qualified phrase must still produce a YouAttack trigger — an empty \
+         set would make the next assertion vacuous: {qualified:#?}"
+    );
+    assert!(
+        qualified_you_attack
+            .iter()
+            .all(|t| t.attack_target_filter.is_none()),
+        "a qualified attacked-player phrase must not be read as the bare \
+         CR 508.3e object: {qualified:#?}"
+    );
+}
+
+/// CR 201.5a: `scrub_modification_descriptions`'s `GrantReplacement` arm must
+/// reach the nested `ReplacementDefinition`'s description, the same as its
+/// `GrantAbility`/`GrantTrigger`/`GrantStaticAbility` siblings. The production
+/// `GrantReplacement` producer (`leave_battlefield_exile_replacement`) never
+/// carries a description today, so this is a direct unit test of the scrub
+/// function itself rather than an end-to-end parse, proving the sweep is
+/// complete for the day a producer does attach one (or a self-referencing
+/// granted "would leave the battlefield" rider is added).
+///
+/// Revert-to-red: removing the `GrantReplacement` arm (falling through to the
+/// wildcard `_ => {}`) leaves the raw placeholder character in the nested
+/// definition's description, flipping the assertion below to a failure.
+#[test]
+fn scrub_modification_descriptions_reaches_grant_replacement() {
+    let mut replacement = ReplacementDefinition::new(ReplacementEvent::Moved);
+    replacement.description = Some(format!(
+        "If {GRANTING_SELF_PLACEHOLDER} would leave the battlefield, exile it instead."
+    ));
+    let mut modification = ContinuousModification::GrantReplacement {
+        replacement: Box::new(replacement),
+    };
+    scrub_modification_descriptions(&mut modification);
+    let ContinuousModification::GrantReplacement { replacement } = &modification else {
+        panic!("expected GrantReplacement to survive scrubbing unchanged in shape");
+    };
+    assert!(
+        !replacement
+            .description
+            .as_deref()
+            .unwrap()
+            .contains(GRANTING_SELF_PLACEHOLDER),
+        "the scrub loop must remove the raw placeholder char from a granted \
+         replacement's description, got {:?}",
+        replacement.description
+    );
 }

@@ -3600,14 +3600,16 @@ fn condition_reads_filter_population(
 /// selection result object* — the found/revealed card that a `SearchLibrary`
 /// injects as the continuation target only after the player responds
 /// (`engine_resolution_choices.rs`, `cont.chain.targets = continuation_targets`).
-/// A `TargetMatchesFilter` gate on "that card" ("the revealed card is the chosen
-/// type") cannot be evaluated until then, so it must be deferred WITH its
-/// condition rather than eagerly read against absent targets. Recurses And/Or/Not
-/// like the sibling `condition_depends_on_effect_performed` predicate. Predicate
-/// helper, not rule-implementing code — the CR annotation lives at the gate.
+/// A `TargetMatchesFilter` or `RevealedHasCardType` gate on "that card" ("the
+/// revealed card is the chosen type" / "if it's a land card") cannot be evaluated
+/// until then, so it must be deferred WITH its condition rather than eagerly read
+/// against an absent result. Recurses And/Or/Not like the sibling
+/// `condition_depends_on_effect_performed` predicate. Predicate helper, not
+/// rule-implementing code — the CR annotation lives at the gate.
 fn condition_depends_on_result_object(condition: &AbilityCondition) -> bool {
     match condition {
-        AbilityCondition::TargetMatchesFilter { .. } => true,
+        AbilityCondition::TargetMatchesFilter { .. }
+        | AbilityCondition::RevealedHasCardType { .. } => true,
         AbilityCondition::Not { condition } => condition_depends_on_result_object(condition),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
             conditions.iter().any(condition_depends_on_result_object)
@@ -7243,7 +7245,8 @@ pub(crate) fn stored_may_answer(
     ability: &ResolvedAbility,
 ) -> Option<AutoMayChoice> {
     let gate = upfront_optional_gate(state, ability, OptionalFeasibility::Probe)?;
-    state.may_trigger_auto_choice(gate.key.as_ref()?)
+    let key = gate.key.as_ref()?;
+    state.may_trigger_auto_choice_for_live_prompt(key)
 }
 
 /// CR 603.12a + CR 608.2c: True when this ability is a "you may pay {cost} up to
@@ -7358,6 +7361,7 @@ fn drive_sequential_repeated_optional_payment(
         source_id: ability.source_id,
         description: ability.description.clone(),
         may_trigger_key: None,
+        same_card_may_trigger_choice_available: false,
     };
     Ok(())
 }
@@ -7435,6 +7439,7 @@ pub(super) fn resolve_repeated_optional_payment_choice(
                     source_id,
                     description,
                     may_trigger_key: None,
+                    same_card_may_trigger_choice_available: false,
                 };
                 return Ok(());
             }
@@ -11238,8 +11243,11 @@ fn resolve_chain_body(
         // authority with `Probe` and run the feasibility clone a second time, which is the
         // exact defect `OptionalFeasibility` exists to prevent. Same key, same store, same
         // answer, one probe.
+        let same_card_may_trigger_choice_available = may_trigger_key
+            .as_ref()
+            .is_some_and(|key| state.may_trigger_same_card_choice_available(key));
         if let Some(ref key) = may_trigger_key {
-            if let Some(choice) = state.may_trigger_auto_choice(key) {
+            if let Some(choice) = state.may_trigger_auto_choice_for_live_prompt(key) {
                 resolve_optional_effect_decision(
                     state,
                     ability.clone(),
@@ -11275,6 +11283,7 @@ fn resolve_chain_body(
                     source_id: ability.source_id,
                     description,
                     may_trigger_key,
+                    same_card_may_trigger_choice_available,
                 },
             )
             .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
@@ -11314,7 +11323,7 @@ fn resolve_chain_body(
         // rest ride along in `WaitingFor::UnlessPayment.remaining`.
         let unless_payers =
             resolve_unless_payers(state, ability_for_unless.as_ref(), &unless_pay.payer);
-        if let Some((&payer, remaining_payers)) = unless_payers.split_first() {
+        if !unless_payers.is_empty() {
             // CR 118.4 + CR 107.3c: Resolve a dynamic-generic mana cost into a
             // fixed `Mana { cost }` BEFORE entering the prompt — the runtime
             // payment site only handles static AbilityCost variants.
@@ -11419,7 +11428,29 @@ fn resolve_chain_body(
                 }
                 // Non-counter unless-modified effects: pre-fold behavior was
                 // to fall through and execute the effect.
-            } else {
+                // CR 614.17b: "If an event can't happen, a player can't choose to pay a cost
+                // that includes that event." The CR 118.12a poll's HEAD is the first payer for
+                // whom paying this cost does NOT require an impossible event; when nobody
+                // qualifies, control falls out of this chain and the unless-effect resolves,
+                // exactly as the CR 118.6 unpayable-cost branch in this same chain already does.
+                //
+                // CR 614.17a: only the HEAD is filtered. `remaining` receives the untouched
+                // POSITIONAL tail from the head onward, never a re-derived list, so a
+                // prohibition that lifts mid-window cannot have silently removed a LATER payer
+                // from the poll — `finish_unless_payment` re-asks the question live at each
+                // re-emit. (Payers ahead of the head were asked and could not choose to pay.)
+            } else if let Some((&payer, remaining_payers)) = unless_payers
+                .iter()
+                .position(|p| {
+                    !crate::game::costs::resolution_cost_includes_impossible_event(
+                        state,
+                        *p,
+                        &resolved_cost,
+                        ability,
+                    )
+                })
+                .and_then(|head| unless_payers[head..].split_first())
+            {
                 let mut pending = ability.clone();
                 pending.unless_pay = None;
                 // CR 118.12a: A disjunctive unless-cost (`OneOf`) surfaces a
@@ -14842,9 +14873,9 @@ mod tests {
         ChosenCounterCountCondition, Comparator, ContinuousModification, ControllerRef,
         DamageChannel, DelayedTriggerCondition, Duration, EffectKind, EffectScope, FilterProp,
         ManaSpendPermission, ObjectProperty, PermissionGrantee, PlayerFilter, PlayerScope, PtValue,
-        QuantityExpr, QuantityRef, SpellContext, StaticDefinition, TapStateChange, TargetFilter,
-        TargetRef, TargetSelectionMode, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
-        ZoneOwner,
+        QuantityExpr, QuantityRef, SpellContext, StaticDefinition, SubAbilityLink, TapStateChange,
+        TargetFilter, TargetRef, TargetSelectionMode, TriggerDefinition, TypeFilter, TypedFilter,
+        UnlessPayModifier, UntilCondition, ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::CardFace;
@@ -14853,17 +14884,19 @@ mod tests {
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
         AutoMayChoice, CastingVariant, ExileLink, ExileLinkKind, LKISnapshot, LinkedExileSnapshot,
-        MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry, StackEntryKind, ZoneChangeRecord,
+        MayTriggerAutoChoiceKey, MayTriggerAutoChoiceScope, MayTriggerOrigin, StackEntry,
+        StackEntryKind, ZoneChangeRecord,
     };
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ObjectId,
         TrackedSetId, TriggerFiring,
     };
     use crate::types::keywords::Keyword;
+    use crate::types::keywords::KeywordKind;
     use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
     use crate::types::phase::Phase;
     use crate::types::player::{PlayerCounterKind, PlayerId};
-    use crate::types::resolution::ResolutionStateWire;
+    use crate::types::resolution::{OptionalEffectFrame, ResolutionStateWire};
     use crate::types::statics::CastFrequency;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
@@ -16801,6 +16834,150 @@ mod tests {
 
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert_eq!(state.players[0].life, 20);
+    }
+
+    #[test]
+    fn same_card_remembered_may_choice_uses_live_printed_identity_and_continues() {
+        let printed_ref = crate::types::card::PrintedCardRef {
+            oracle_id: "same-card-may-trigger".to_string(),
+            face_name: "Shared Trigger".to_string(),
+        };
+        let mut state = GameState::new_two_player(42);
+        let add_source = |state: &mut GameState, card_id: CardId| {
+            let source_id = create_object(
+                state,
+                card_id,
+                PlayerId(0),
+                "Shared Trigger".to_string(),
+                Zone::Battlefield,
+            );
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.printed_ref = Some(printed_ref.clone());
+            source.base_printed_ref = Some(printed_ref.clone());
+            source.push_printed_trigger(TriggerDefinition::new(TriggerMode::ChangesZone));
+            let definition_ref = source.trigger_definition_ref(&source.trigger_definitions[0]);
+            MayTriggerAutoChoiceKey {
+                player: PlayerId(0),
+                source_id,
+                origin: MayTriggerOrigin::Definition { definition_ref },
+            }
+        };
+        let first_key = add_source(&mut state, CardId(101));
+        let second_key = add_source(&mut state, CardId(202));
+
+        let continuation = |source_id| {
+            let mut ability = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                source_id,
+                PlayerId(0),
+            );
+            ability.sub_link = SubAbilityLink::ContinuationStep;
+            ability
+        };
+        let mut first = optional_gain_life(first_key.source_id, PlayerId(0), 1);
+        first.sub_ability = Some(Box::new(continuation(first_key.source_id)));
+        state.push_optional_effect_frame(OptionalEffectFrame {
+            ability: Box::new(first),
+            trigger_event: None,
+            trigger_events: Vec::new(),
+            trigger_match_count: None,
+        });
+        state.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: PlayerId(0),
+            source_id: first_key.source_id,
+            description: None,
+            may_trigger_key: Some(first_key.clone()),
+            same_card_may_trigger_choice_available: true,
+        };
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffectAndRemember {
+                choice: AutoMayChoice::Accept,
+                scope: MayTriggerAutoChoiceScope::SameCard,
+            },
+        )
+        .expect("a live direct printed trigger accepts same-card remembering");
+        assert_eq!(state.players[0].life, 23, "first continuation resolves");
+        assert!(matches!(
+            state.may_trigger_auto_choices.as_slice(),
+            [crate::types::game_state::MayTriggerAutoChoiceRecord {
+                selector: crate::types::game_state::MayTriggerAutoChoiceSelector::SameCard { .. },
+                choice: AutoMayChoice::Accept,
+            }]
+        ));
+
+        let mut second = optional_gain_life(second_key.source_id, PlayerId(0), 1);
+        second.sub_ability = Some(Box::new(continuation(second_key.source_id)));
+        second.set_may_trigger_origin_recursive(second_key.origin.clone());
+        resolve_ability_chain(&mut state, &second, &mut Vec::new(), 0)
+            .expect("same-card answer resolves the second physical card automatically");
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(
+            state.players[0].life, 26,
+            "automatic second continuation resolves"
+        );
+
+        let reject_forged_same_card = |state: &mut GameState, key: MayTriggerAutoChoiceKey| {
+            state.push_optional_effect_frame(OptionalEffectFrame {
+                ability: Box::new(optional_gain_life(key.source_id, PlayerId(0), 1)),
+                trigger_event: None,
+                trigger_events: Vec::new(),
+                trigger_match_count: None,
+            });
+            state.waiting_for = WaitingFor::OptionalEffectChoice {
+                player: PlayerId(0),
+                source_id: key.source_id,
+                description: None,
+                may_trigger_key: Some(key),
+                same_card_may_trigger_choice_available: true,
+            };
+            assert!(
+                crate::game::engine::apply(
+                    state,
+                    PlayerId(0),
+                    GameAction::DecideOptionalEffectAndRemember {
+                        choice: AutoMayChoice::Accept,
+                        scope: MayTriggerAutoChoiceScope::SameCard,
+                    },
+                )
+                .is_err(),
+                "the engine must re-derive same-card eligibility rather than trust the prompt flag"
+            );
+        };
+
+        let mut keyword_state = state.clone();
+        reject_forged_same_card(
+            &mut keyword_state,
+            MayTriggerAutoChoiceKey {
+                player: PlayerId(0),
+                source_id: first_key.source_id,
+                origin: MayTriggerOrigin::Keyword {
+                    keyword: KeywordKind::Flying,
+                },
+            },
+        );
+
+        let mut copied_state = state.clone();
+        copied_state
+            .objects
+            .get_mut(&second_key.source_id)
+            .unwrap()
+            .is_copy = true;
+        reject_forged_same_card(&mut copied_state, second_key.clone());
+
+        let mut stale_state = state;
+        stale_state
+            .objects
+            .get_mut(&first_key.source_id)
+            .unwrap()
+            .incarnation += 1;
+        reject_forged_same_card(&mut stale_state, first_key);
     }
 
     #[test]

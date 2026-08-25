@@ -1042,6 +1042,7 @@ fn target_ref_matches_resolved_filter_with_context(
             target_filter,
             *player,
             ctx.source_controller,
+            Some(ctx.source_id),
         ),
     }
 }
@@ -2199,6 +2200,7 @@ fn stack_spell_entry_matches_filter(
                     constraint,
                     *pid,
                     source_controller_opt,
+                    Some(source_id),
                 ),
             })
         {
@@ -2218,6 +2220,7 @@ fn stack_spell_entry_matches_filter(
                     constraint,
                     *pid,
                     source_controller_opt,
+                    Some(source_id),
                 ),
             })
         {

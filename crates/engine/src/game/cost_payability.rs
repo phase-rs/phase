@@ -21,8 +21,8 @@
 
 use crate::types::ability::{
     is_variable_remove_counter_cost_count, AbilityCost, Comparator, CounterCostSelection,
-    FilterProp, QuantityExpr, QuantityRef, TapCreaturesAggregateStat, TapCreaturesRequirement,
-    TargetFilter, TypedFilter, EXILE_COST_X,
+    FilterProp, PlayerFilter, QuantityExpr, QuantityRef, TapCreaturesAggregateStat,
+    TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X,
 };
 use crate::types::card_type::CoreType;
 use crate::types::identifiers::ObjectId;
@@ -55,6 +55,11 @@ pub(crate) fn target_filter_has_x_mana_value_constraint(filter: &TargetFilter) -
         }
         TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
             target_filter_has_x_mana_value_constraint(filter)
+        }
+        // A recursive carrier, not a leaf — see
+        // `player_filter_has_x_mana_value_constraint`.
+        TargetFilter::PlayerMatching { player } => {
+            player_filter_has_x_mana_value_constraint(player)
         }
         TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::None
@@ -110,6 +115,98 @@ pub(crate) fn target_filter_has_x_mana_value_constraint(filter: &TargetFilter) -
     }
 }
 
+/// `TargetFilter::PlayerMatching` is a recursive carrier, not a leaf —
+/// its nested `PlayerFilter` graph can hold object populations that themselves
+/// carry an `X` mana-value constraint ("a player who controls a permanent with
+/// mana value X"). Treating it as a leaf let such a constraint survive
+/// pre-announcement, when `X` is not yet chosen.
+///
+/// `ability_scan::scan_player_filter` is the reference traversal. This mirrors
+/// its reach over nested `TargetFilter`s and the `AllExcept` chain, and stops
+/// where the enclosing walker stops — neither descends into `QuantityExpr`.
+fn player_filter_has_x_mana_value_constraint(player: &PlayerFilter) -> bool {
+    match player {
+        PlayerFilter::AllExcept { exclude } => player_filter_has_x_mana_value_constraint(exclude),
+        PlayerFilter::OpponentDealtDamage { source, .. } => source
+            .as_deref()
+            .is_some_and(target_filter_has_x_mana_value_constraint),
+        PlayerFilter::ControlsCount { filter, .. }
+        | PlayerFilter::TrackedSetPossessor { filter, .. } => {
+            target_filter_has_x_mana_value_constraint(filter)
+        }
+        // Player-identity roles, ledger reads, and the quantity-comparison axis
+        // name no object population this walker descends into.
+        PlayerFilter::Controller
+        | PlayerFilter::Opponent
+        | PlayerFilter::DefendingPlayer
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::All
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::PerformedActionThisWay { .. }
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::PlayerAttribute { .. }
+        | PlayerFilter::ChosenPlayer { .. } => false,
+    }
+}
+
+/// Relaxation counterpart of [`player_filter_has_x_mana_value_constraint`]:
+/// rebuilds the nested populations with their `X` mana-value constraints
+/// stripped, leaving every other axis untouched.
+fn relax_x_mana_value_constraint_player(player: &PlayerFilter) -> PlayerFilter {
+    match player {
+        PlayerFilter::AllExcept { exclude } => PlayerFilter::AllExcept {
+            exclude: Box::new(relax_x_mana_value_constraint_player(exclude)),
+        },
+        PlayerFilter::OpponentDealtDamage {
+            source,
+            kind,
+            min_sources,
+        } => PlayerFilter::OpponentDealtDamage {
+            source: source
+                .as_deref()
+                .map(|s| Box::new(relax_x_mana_value_constraint(s))),
+            kind: *kind,
+            min_sources: *min_sources,
+        },
+        PlayerFilter::ControlsCount {
+            filter,
+            count,
+            relation,
+            comparator,
+        } => PlayerFilter::ControlsCount {
+            filter: relax_x_mana_value_constraint(filter),
+            count: count.clone(),
+            relation: *relation,
+            comparator: *comparator,
+        },
+        PlayerFilter::TrackedSetPossessor {
+            filter,
+            relation,
+            possession,
+            caused_by,
+        } => PlayerFilter::TrackedSetPossessor {
+            filter: relax_x_mana_value_constraint(filter),
+            relation: *relation,
+            possession: *possession,
+            caused_by: *caused_by,
+        },
+        // No nested object population to relax.
+        other => other.clone(),
+    }
+}
+
 pub(crate) fn relax_x_mana_value_constraint(filter: &TargetFilter) -> TargetFilter {
     match filter {
         TargetFilter::Typed(tf) => TargetFilter::Typed(TypedFilter {
@@ -139,6 +236,11 @@ pub(crate) fn relax_x_mana_value_constraint(filter: &TargetFilter) -> TargetFilt
             id: *id,
             filter: Box::new(relax_x_mana_value_constraint(filter)),
             caused_by: *caused_by,
+        },
+        // Relax the nested populations too, or an `X` constraint
+        // inside "a player who controls ..." survives cost pre-announcement.
+        TargetFilter::PlayerMatching { player } => TargetFilter::PlayerMatching {
+            player: Box::new(relax_x_mana_value_constraint_player(player)),
         },
         TargetFilter::None
         | TargetFilter::Any
@@ -1004,12 +1106,108 @@ mod tests {
     use super::*;
     use crate::game::scenario::GameScenario;
     use crate::types::ability::{
-        ControllerRef, FilterProp, QuantityExpr, SacrificeCost, TargetFilter, TypeFilter,
-        TypedFilter,
+        ControllerRef, DamageKindFilter, FilterProp, PlayerRelation, PossessionAxis, QuantityExpr,
+        SacrificeCost, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::mana::ManaCost;
 
     const P0: PlayerId = PlayerId(0);
+
+    /// `TargetFilter::PlayerMatching` is a recursive carrier. Each of
+    /// the three nested-object-population payloads must be reached by BOTH the
+    /// detector and the relaxer, or an `X` mana-value constraint survives cost
+    /// pre-announcement (when `X` is not yet chosen) inside a player predicate.
+    ///
+    /// Discriminating by construction: every row is `PlayerMatching` wrapping a
+    /// nested filter that carries `Cmc == X`. Treating the wrapper as a leaf —
+    /// the previous behaviour — returns `false` for detection and returns the
+    /// filter unchanged from relaxation, failing both halves of each row.
+    #[test]
+    fn player_matching_x_mana_value_reaches_every_nested_population() {
+        fn cmc_x() -> TargetFilter {
+            TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                }],
+                ..Default::default()
+            })
+        }
+        fn wrap(player: PlayerFilter) -> TargetFilter {
+            TargetFilter::PlayerMatching {
+                player: Box::new(player),
+            }
+        }
+
+        let controls_count = wrap(PlayerFilter::ControlsCount {
+            filter: cmc_x(),
+            count: Box::new(QuantityExpr::Fixed { value: 1 }),
+            relation: PlayerRelation::All,
+            comparator: Comparator::GE,
+        });
+        let dealt_damage = wrap(PlayerFilter::OpponentDealtDamage {
+            source: Some(Box::new(cmc_x())),
+            kind: DamageKindFilter::Any,
+            min_sources: 1,
+        });
+        let tracked_set = wrap(PlayerFilter::TrackedSetPossessor {
+            filter: cmc_x(),
+            relation: PlayerRelation::All,
+            possession: PossessionAxis::Controller,
+            caused_by: None,
+        });
+        // The `AllExcept` chain must not hide a nested population either.
+        let nested_all_except = wrap(PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::ControlsCount {
+                filter: cmc_x(),
+                count: Box::new(QuantityExpr::Fixed { value: 1 }),
+                relation: PlayerRelation::All,
+                comparator: Comparator::GE,
+            }),
+        });
+
+        for (label, filter) in [
+            ("ControlsCount.filter", &controls_count),
+            ("OpponentDealtDamage.source", &dealt_damage),
+            ("TrackedSetPossessor.filter", &tracked_set),
+            ("AllExcept -> ControlsCount.filter", &nested_all_except),
+        ] {
+            assert!(
+                target_filter_has_x_mana_value_constraint(filter),
+                "{label}: the nested `Cmc == X` must be detected through the \
+                 PlayerMatching wrapper"
+            );
+            let relaxed = relax_x_mana_value_constraint(filter);
+            assert!(
+                !target_filter_has_x_mana_value_constraint(&relaxed),
+                "{label}: relaxation must strip the nested `Cmc == X`, got \
+                 {relaxed:?}"
+            );
+            assert_ne!(
+                &relaxed, filter,
+                "{label}: relaxation must actually rebuild the nested payload"
+            );
+        }
+
+        // Negative: a player predicate with no `X` constraint is untouched, so
+        // the rows above cannot pass by relaxing everything unconditionally.
+        let no_x = wrap(PlayerFilter::ControlsCount {
+            filter: TargetFilter::Typed(TypedFilter::default()),
+            count: Box::new(QuantityExpr::Fixed { value: 1 }),
+            relation: PlayerRelation::All,
+            comparator: Comparator::GE,
+        });
+        assert!(!target_filter_has_x_mana_value_constraint(&no_x));
+        assert_eq!(
+            relax_x_mana_value_constraint(&no_x),
+            no_x,
+            "a predicate with no X constraint must round-trip unchanged"
+        );
+    }
 
     fn new_state() -> GameState {
         GameScenario::new().state

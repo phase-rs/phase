@@ -338,6 +338,8 @@ pub(crate) fn apply_zone_exit_cleanup(
         // restored into the graveyard.
         crate::game::flip::revert_flip_on_zone_exit(obj_mut);
 
+        clear_cast_origin_off_provenance_zones(obj_mut, to);
+
         // CR 400.7 + CR 113.6e: Clear exile-based casting permissions when leaving exile
         // (prevents re-casting if the card returns to exile via a different effect).
         if from == Zone::Exile {
@@ -345,7 +347,16 @@ pub(crate) fn apply_zone_exit_cleanup(
             // while it remains in exile. Once it changes zones, the new object
             // is no longer a foretold card.
             obj_mut.foretold = false;
-            obj_mut.face_down = false;
+            // CR 708.4: a spell CAST face down (morph/disguise via an exile
+            // permission) is turned face down as part of the cast and keeps
+            // that status on the stack. Only the exile-zone face-down
+            // designation ends here (foretold/hideaway cards, which stash no
+            // identity in `back_face`); the cast is the one exile exit whose
+            // destination is the stack and whose object carries the cast
+            // stash (`spell_is_cast_face_down`, #5171's discriminator).
+            if !(to == Zone::Stack && obj_mut.spell_is_cast_face_down()) {
+                obj_mut.face_down = false;
+            }
             obj_mut.casting_permissions.retain(|p| {
                 !matches!(
                     p,
@@ -849,6 +860,24 @@ pub fn resolve_and_apply_zone_change(
 
 /// Installs one recorded transition core without a replacement consult, query,
 /// timestamp allocation, or incarnation allocation.
+/// CR 400.7: the narrow `cast_from_zone` lifetime — the stamp survives only
+/// onto the STACK (the cast itself) and onto the BATTLEFIELD (whose entry
+/// reset + `CastLinkSnapshot` restore own it there,
+/// `reset_for_battlefield_entry`/`_exit`). Every other destination clears it,
+/// so a spell leaving the stack countered/fizzled/resolved-to-graveyard
+/// cannot hand a stale origin to a later recast. ONE primitive shared by the
+/// live transition cleanup and the resolved-zone-change replay applier, so
+/// replay equivalence holds by construction rather than by two hand-kept
+/// conditions.
+pub(crate) fn clear_cast_origin_off_provenance_zones(
+    obj: &mut crate::game::game_object::GameObject,
+    to: Zone,
+) {
+    if to != Zone::Stack && to != Zone::Battlefield {
+        obj.cast_from_zone = None;
+    }
+}
+
 pub fn apply_resolved_zone_change(
     state: &mut GameState,
     command: &ResolvedZoneChangeCommand,
@@ -932,6 +961,8 @@ pub fn apply_resolved_zone_change(
         );
     } else {
         object.incarnation = command.resulting_incarnation;
+        // CR 400.7: same cast-origin lifetime as the live transition cleanup.
+        clear_cast_origin_off_provenance_zones(object, command.to);
     }
     if object.incarnation != command.resulting_incarnation {
         return Err(
@@ -4352,6 +4383,75 @@ mod tests {
         assert_eq!(obj.name, "Front Face", "must show front face in graveyard");
         assert_eq!(obj.power, Some(1), "power must revert to front face");
         assert_eq!(obj.card_types.core_types, vec![CoreType::Creature]);
+    }
+
+    /// #7782 round 4: the REPLAY applier must install the same cast-origin
+    /// lifetime as the live path — a replayed stamped Stack → Graveyard
+    /// command clears the stamp exactly like the live transition did.
+    #[test]
+    fn a_replayed_stack_exit_clears_the_stamp_like_the_live_one() {
+        let mut live = setup();
+        let id = create_object(
+            &mut live,
+            CardId(7783),
+            PlayerId(0),
+            "Replayed Spell".to_string(),
+            Zone::Stack,
+        );
+        live.objects.get_mut(&id).unwrap().cast_from_zone = Some(Zone::Hand);
+        let mut replayed = live.clone();
+
+        let record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            id,
+            Some(Zone::Stack),
+            Zone::Graveyard,
+        );
+        let command = resolve_and_apply_zone_change(
+            &mut live,
+            id,
+            Zone::Stack,
+            Zone::Graveyard,
+            PlayerId(0),
+            record,
+        )
+        .expect("live transition must resolve");
+        assert_eq!(
+            live.objects[&id].cast_from_zone, None,
+            "reach-guard: the live transition clears the stamp"
+        );
+
+        apply_resolved_zone_change(&mut replayed, &command)
+            .expect("replaying the recorded command must succeed");
+        assert_eq!(
+            replayed.objects[&id].cast_from_zone, None,
+            "the replayed transition must clear the stamp exactly like the live one"
+        );
+    }
+
+    /// #7782 round 3: a spell leaving the STACK for a non-battlefield zone
+    /// (countered / fizzled / instant to the graveyard) must lose its
+    /// `cast_from_zone` stamp (CR 400.7 — a new object has no memory of its
+    /// cast), so a later recast from another zone cannot inherit the stale
+    /// origin. The battlefield legs are owned by `reset_for_battlefield_entry`
+    /// / `_exit` and their `CastLinkSnapshot` restore.
+    #[test]
+    fn the_cast_from_zone_stamp_dies_off_stack_and_battlefield() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(7782),
+            PlayerId(0),
+            "Stamped Spell".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&id).unwrap().cast_from_zone = Some(Zone::Hand);
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
+        assert_eq!(
+            state.objects[&id].cast_from_zone, None,
+            "a spell leaving the stack for the graveyard must lose the stamp (CR 400.7)"
+        );
     }
 
     /// CR 708.9: A face-down permanent is revealed when it leaves the battlefield.

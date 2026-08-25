@@ -2027,6 +2027,7 @@ fn legal_aura_attachment_targets(
             enchant_filter,
             player.id,
             Some(controller),
+            Some(aura_id),
         ) {
             Some(TargetRef::Player(player.id))
         } else {
@@ -4279,7 +4280,24 @@ fn execute_zone_move_with_applied_terminal(
     // counters" replacement when a planeswalker or battle enters the
     // battlefield from any source (effect-driven entry — bounce-return,
     // reanimate, blink, etc.). Spell-cast entry is handled in stack.rs.
-    if dest_zone == Zone::Battlefield {
+    //
+    // CR 708.2a + CR 708.3: the INTRINSIC seeding below is skipped for a
+    // face-down entry — the object enters as the profile's body (a 2/2
+    // creature) with no loyalty/defense characteristic, so a manifested
+    // planeswalker card must not enter with loyalty counters (issue #7822).
+    // Only the intrinsic half is gated: an effect explicitly instructing entry
+    // counters on a face-down entrant (`effect_enter_with_counters` below) is
+    // a separate instruction whose counters are markers on the resulting
+    // object (CR 122.1) and must survive. The gate reads the proposed event,
+    // on which the profile was just stamped above.
+    let enters_face_down = matches!(
+        &proposed,
+        ProposedEvent::ZoneChange {
+            face_down_profile: Some(_),
+            ..
+        }
+    );
+    if dest_zone == Zone::Battlefield && !enters_face_down {
         if let Some(obj) = state
             .liminal_entries
             .get(&obj_id)
@@ -4319,6 +4337,11 @@ fn execute_zone_move_with_applied_terminal(
                 }
             }
         }
+    }
+    // CR 122.1 + CR 614.1c: effect-driven enter-with-counters apply to EVERY
+    // battlefield entry, face-down included — the explicit instruction is
+    // independent of the intrinsic loyalty/defense seeding gated above.
+    if dest_zone == Zone::Battlefield {
         // CR 122.1 + CR 614.1c: Seed effect-driven enter-with-counters from
         // `Effect::ChangeZone.enter_with_counters` (Darkness Crystal class:
         // "put target creature card ... onto the battlefield with two

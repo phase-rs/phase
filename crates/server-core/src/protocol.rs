@@ -14,7 +14,7 @@ use engine::types::player::PlayerId;
 use phase_ai::config::AiDifficulty;
 use serde::{Deserialize, Serialize};
 
-use crate::session::FullSessionKey;
+use crate::session::{AiDriverFault, FullSessionKey};
 use crate::takeback::{RewindOption, RewindTarget};
 
 /// Full game wire protocol version. Kept numerically aligned with the lobby
@@ -570,6 +570,12 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ranked_result: Option<Vec<RankedPlayerResult>>,
     },
+    /// A durable native AI driver failure. The referenced revision is the
+    /// final authoritative state frame that must be delivered before clients
+    /// surface the fault.
+    AiDriverFault {
+        fault: AiDriverFault,
+    },
     /// Terminal-only bootstrap response. `None` means the exact keyed Full
     /// session has no prepared terminal artifact, so the caller may attempt
     /// its ordinary reconnect path on a separate socket.
@@ -737,6 +743,7 @@ impl ServerMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::AiDriverFailure;
     use engine::types::ability::{TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef};
     use engine::types::format::GameFormat;
     use engine::types::game_state::ProductionOverride;
@@ -949,6 +956,37 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn server_message_ai_driver_fault_roundtrips_with_client_wire_keys() {
+        let msg = ServerMessage::AiDriverFault {
+            fault: AiDriverFault {
+                id: 7,
+                after_state_revision: 3,
+                cause: AiDriverFailure::ActionSafetyCapReached { limit: 200 },
+            },
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "AiDriverFault");
+        assert_eq!(json["data"]["fault"]["id"], 7);
+        assert_eq!(json["data"]["fault"]["after_state_revision"], 3);
+        assert_eq!(
+            json["data"]["fault"]["cause"]["ActionSafetyCapReached"]["limit"],
+            200
+        );
+
+        let parsed: ServerMessage = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            parsed,
+            ServerMessage::AiDriverFault {
+                fault: AiDriverFault {
+                    id: 7,
+                    after_state_revision: 3,
+                    cause: AiDriverFailure::ActionSafetyCapReached { limit: 200 },
+                },
+            }
+        ));
     }
 
     #[test]
@@ -2360,8 +2398,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_33() {
-        assert_eq!(PROTOCOL_VERSION, 33);
+    fn protocol_version_is_36() {
+        assert_eq!(PROTOCOL_VERSION, 36);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -2371,7 +2409,7 @@ mod tests {
     /// understand.
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
-    /// this guards — and this test reds while `protocol_version_is_33` stays
+    /// this guards — and this test reds while `protocol_version_is_36` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

@@ -31,6 +31,38 @@ export type DungeonId =
   | "Undercity"
   | "BaldursGateWilderness";
 
+// Mirrors `engine::game::dungeon::RoomPreview`. The engine is the single
+// authority for room names (CR 309.4b) and room-ability text (CR 309.4c) — the
+// client renders these strings and never carries its own room table.
+export interface RoomPreview {
+  /** Index within the dungeon; the value `ChooseDungeonRoom` carries. */
+  index: number;
+  name: string;
+  /** The room ability's printed effect, e.g. "Create a Treasure token." */
+  text: string;
+}
+
+// Mirrors `engine::game::dungeon::DungeonPreview`. `entry_room` is the topmost
+// room (CR 309.4a) — the room the venturing player enters immediately on
+// choosing this dungeon.
+export interface DungeonPreview {
+  dungeon: DungeonId;
+  name: string;
+  entry_room: RoomPreview;
+}
+
+// Mirrors `engine::game::derived_views::DungeonRoomView` — where one player's
+// venture marker currently sits, named. Delivered on
+// `GameState.derived.dungeon_rooms`, not on `dungeon_progress`, which carries
+// only the raw room index.
+export interface DungeonRoomView {
+  dungeon: DungeonId;
+  dungeon_name: string;
+  room: RoomPreview;
+  /** Total rooms on the dungeon card, for "room 3 of 7". */
+  room_count: number;
+}
+
 // ── Game Format ─────────────────────────────────────────────────────────
 
 export type GameFormat =
@@ -831,6 +863,8 @@ export type CastChoice = { type: "Cast" } | { type: "Decline" };
 
 export type AutoMayChoice = { type: "Accept" } | { type: "Decline" };
 
+export type MayTriggerAutoChoiceScope = { type: "ExactInstance" } | { type: "SameCard" };
+
 export type MayTriggerOrigin =
   | { type: "Definition"; definition_ref: TriggerDefinitionRef }
   | { type: "Printed"; trigger_index: number }
@@ -842,17 +876,32 @@ export interface MayTriggerAutoChoiceKey {
   origin: MayTriggerOrigin;
 }
 
+export interface PrintedCardRef {
+  oracle_id: string;
+  face_name: string;
+}
+
+export type MayTriggerAutoChoiceSelector =
+  | {
+      type: "ExactInstance";
+      data: { player: PlayerId; source_id: ObjectId; origin: MayTriggerOrigin };
+    }
+  | {
+      type: "SameCard";
+      data: { player: PlayerId; printed_ref: PrintedCardRef; printed_occurrence: number };
+    };
+
 export interface MayTriggerAutoChoiceRecord {
-  key: MayTriggerAutoChoiceKey;
+  selector: MayTriggerAutoChoiceSelector;
   choice: AutoMayChoice;
 }
 
 // CR 603.5: The mutation a `SetMayTriggerAutoChoice` action performs on the
 // acting player's stored "don't ask again" auto-choices for optional ("may")
-// triggers. `Remove` echoes a stored key verbatim; `ClearAll` drops every
+// triggers. `Remove` echoes a stored selector verbatim; `ClearAll` drops every
 // stored auto-choice belonging to the acting player.
 export type MayTriggerAutoChoiceOp =
-  | { type: "Remove"; data: { key: MayTriggerAutoChoiceKey } }
+  | { type: "Remove"; data: { selector: MayTriggerAutoChoiceSelector } }
   | { type: "ClearAll" };
 
 // CR 603.3b: A live `OrderTriggers` answer is the only way to save a
@@ -1029,9 +1078,10 @@ export interface GameObject {
   damage_marked: number;
   dealt_deathtouch_damage: boolean;
   /** Mirrors engine `Option<AttachTarget>`: null when unattached, otherwise
-   *  a tagged-union pointing at either an Object host (Equipment/most Auras)
-   *  or a Player host (Curse cycle, Faith's Fetters-class). FE consumers must
-   *  inspect `.type` before reading `.data`; do not treat as a bare ObjectId. */
+   *  a tagged-union pointing at either an Object host (Equipment, Faith's
+   *  Fetters, most Auras) or a Player host (Curse cycle, Paradox Haze — the
+   *  `Enchant player` class). FE consumers must inspect `.type` before
+   *  reading `.data`; do not treat as a bare ObjectId. */
   attached_to: AttachTarget | null;
   attachments: ObjectId[];
   paired_with?: ObjectId | null;
@@ -1811,7 +1861,7 @@ export type WaitingFor =
         resume: CostResume;
       };
     }
-  | { type: "BlightChoice"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_cast: PendingCast } }
+  | { type: "BlightChoice"; data: { player: PlayerId; counters: number; creatures: ObjectId[]; pending_cast: PendingCast } }
   | { type: "PayManaAbilityMana"; data: { player: PlayerId; options: ManaType[][]; pending_mana_ability: unknown } }
   | {
       type: "ChooseManaColor";
@@ -1828,7 +1878,7 @@ export type WaitingFor =
     }
   | { type: "CollectEvidenceChoice"; data: { player: PlayerId; minimum_mana_value: number; cards: ObjectId[]; resume: unknown } }
   | { type: "HarmonizeTapChoice"; data: { player: PlayerId; eligible_creatures: ObjectId[]; pending_cast: PendingCast } }
-  | { type: "OptionalEffectChoice"; data: { player: PlayerId; source_id: ObjectId; description?: string; may_trigger_key?: MayTriggerAutoChoiceKey } }
+  | { type: "OptionalEffectChoice"; data: { player: PlayerId; source_id: ObjectId; description?: string; may_trigger_key?: MayTriggerAutoChoiceKey; same_card_may_trigger_choice_available?: boolean } }
   | { type: "PairChoice"; data: { player: PlayerId; source_id: ObjectId; choices: ObjectId[] } }
   | { type: "OpponentMayChoice"; data: { player: PlayerId; source_id: ObjectId; description?: string; remaining: PlayerId[] } }
   | { type: "LoopShortcut"; data: { proposer: PlayerId; predicted_winner: PlayerId | null; certificate: LoopCertificate; schema: ShortcutDecisionSchema } }
@@ -1935,8 +1985,8 @@ export type WaitingFor =
       // (index into this array) instead of `ChooseOption`.
       candidate_objects: ObjectId[];
     } }
-  | { type: "ChooseDungeon"; data: { player: PlayerId; options: DungeonId[] } }
-  | { type: "ChooseDungeonRoom"; data: { player: PlayerId; dungeon: DungeonId; options: number[]; option_names: string[] } }
+  | { type: "ChooseDungeon"; data: { player: PlayerId; options: DungeonPreview[] } }
+  | { type: "ChooseDungeonRoom"; data: { player: PlayerId; dungeon: DungeonId; dungeon_name: string; options: RoomPreview[] } }
   | { type: "SpecializeColor"; data: { player: PlayerId; object_id: ObjectId; options: ManaColor[] } }
   // CR 709.5f-g: Resolving lock/unlock-door effect needs the player to choose
   // which door (half) of the targeted Room to act on. `options` is the engine's
@@ -2340,7 +2390,7 @@ export type GameAction =
   | { type: "CastSpellAsWebSlinging"; data: { hand_object: ObjectId; card_id: CardId; creature_to_return: ObjectId; payment_mode?: CastPaymentMode } }
   | { type: "ActivateNinjutsu"; data: { ninjutsu_object_id: ObjectId; creature_to_return: ObjectId } }
   | { type: "DecideOptionalEffect"; data: { accept: boolean } }
-  | { type: "DecideOptionalEffectAndRemember"; data: { choice: AutoMayChoice } }
+  | { type: "DecideOptionalEffectAndRemember"; data: { choice: AutoMayChoice; scope?: MayTriggerAutoChoiceScope } }
   | { type: "PayUnlessCost"; data: { pay: boolean } }
   // CR 118.12a: Choose a branch of a disjunctive unless-cost. The
   // discriminant is `Decline` (effect happens) or `Pay { index }` (the
@@ -2995,6 +3045,33 @@ export interface DebugLibraryCardView {
 export type LegendCandidateIdentity = "Original" | "Copy" | "TokenCopy" | "Unknown";
 
 /**
+ * CR 109.1 + CR 205.2a: the narrowest category of the CR object taxonomy true
+ * of EVERY object in one announcement's offered choice set. Mirrors
+ * `engine::game::derived_views::TargetObjectCategory` (plain unit variants, so
+ * each reaches the wire as a bare PascalCase string).
+ */
+export type TargetObjectCategory =
+  | "Spell"
+  | "Creature"
+  | "Planeswalker"
+  | "NonlandPermanent"
+  | "Permanent"
+  | "Object";
+
+/**
+ * CR 115.1: the engine's classification of the LIVE target announcement's
+ * offered choice set, over the object/player axis. Mirrors
+ * `engine::game::derived_views::TargetChoiceKind` (serde tag="type",
+ * content="data", so the payload sits under a nested `data` key). The FE maps
+ * each kind to an i18n noun and NEVER re-derives it from `objects` — that
+ * inference is exactly what issue #7692 removed.
+ */
+export type TargetChoiceKind =
+  | { type: "Players" }
+  | { type: "Objects"; data: { category: TargetObjectCategory } }
+  | { type: "ObjectsAndPlayers"; data: { category: TargetObjectCategory } };
+
+/**
  * Engine-authored projections computed at each state snapshot. Rides
  * alongside GameState through every adapter path. Frontend components
  * consume this shape directly and never compute grouping/filtering
@@ -3046,8 +3123,25 @@ export interface DerivedViews {
    * Keyed by ObjectId-as-string and omitted when no legend choice is pending.
    */
   legend_candidate_identities?: Record<string, LegendCandidateIdentity>;
+  /**
+   * CR 115.1: the engine's classification of the live target announcement, or
+   * absent when no `TargetSelection`/`TriggerTargetSelection` prompt is live.
+   * Optional (not nullable): the engine omits the key under
+   * `skip_serializing_if = "Option::is_none"`. The FE names the offer from
+   * this and never re-derives it from `objects` (issue #7692).
+   */
+  current_target_kind?: TargetChoiceKind;
   /** Keyed by attacking commander's current controller (PlayerId as string). */
   commander_damage_by_attacker?: Record<string, CommanderDamageView[]>;
+  /**
+   * CR 309.4a-c: the named room each venturing player's marker sits on, keyed
+   * by PlayerId-as-string. `dungeon_progress` carries only the room index; the
+   * room's printed name and effect live in the engine's dungeon definitions,
+   * so this is the FE's only legitimate channel for them. Omitted when nobody
+   * is venturing. Mirrors
+   * `engine::game::derived_views::DerivedViews::dungeon_rooms`.
+   */
+  dungeon_rooms?: Record<string, DungeonRoomView>;
   /**
    * Engine-authored coalesced view of the stack. Empty (and omitted from
    * the wire payload) when the stack is empty. StackDisplay consumes this

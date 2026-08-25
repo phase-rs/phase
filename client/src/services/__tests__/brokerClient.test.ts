@@ -7,6 +7,7 @@ import {
   subscribeLobbyOver,
 } from "../brokerClient";
 import type { LobbyGame } from "../../adapter/types";
+import { PROTOCOL_VERSION, type ServerInfo } from "../../adapter/ws-adapter";
 
 class MockWebSocket extends EventTarget {
   static OPEN = 1;
@@ -28,7 +29,10 @@ class MockWebSocket extends EventTarget {
   }
 }
 
-function makePhaseSocket(ws: MockWebSocket): PhaseSocket {
+function makePhaseSocket(
+  ws: MockWebSocket,
+  serverInfo: Partial<ServerInfo> = {},
+): PhaseSocket {
   return {
     ws: ws as unknown as WebSocket,
     serverInfo: {
@@ -36,6 +40,7 @@ function makePhaseSocket(ws: MockWebSocket): PhaseSocket {
       buildCommit: "test",
       protocolVersion: 1,
       mode: "LobbyOnly",
+      ...serverInfo,
     },
     close: () => ws.close(),
   };
@@ -51,6 +56,54 @@ beforeEach(() => {
       }
     });
   }
+});
+
+describe("resolveGuestOver full-game surface guard", () => {
+  // This resolver asks for `PeerInfo`. A `Full` server never publishes a P2P
+  // row — both of its lobby registrations hardcode `host_peer_id:
+  // String::new()` — so it has no peer id to return, and it answers this frame
+  // off its server-run join path instead: `SessionAttached` + `StateUpdate`,
+  // neither of which the listener handles. Sending would seat the guest
+  // server-side and then time out as `connection_lost`. Refusing is
+  // unconditional on mode so a relaxed lobby handshake can never carry a
+  // full-game join.
+  it.each([
+    ["version-mismatched", PROTOCOL_VERSION - 2],
+    ["version-compatible", PROTOCOL_VERSION],
+  ])("refuses to send to a %s Full server", async (_label, protocolVersion) => {
+    const ws = new MockWebSocket();
+    const socket = makePhaseSocket(ws, { mode: "Full", protocolVersion });
+
+    const result = await resolveGuestOver(socket, "ABC123");
+
+    expect(result.ok).toBe(false);
+    // The assertion that matters: nothing reached the wire, so no session can
+    // have been attached and no game state can have been streamed back.
+    expect(ws.send).not.toHaveBeenCalled();
+  });
+
+  it("still sends to a LobbyOnly broker whose full-game protocol is stale", async () => {
+    // The broker cannot run a game, so its full-game number says nothing about
+    // this frame and it is the one server kind that can answer with `PeerInfo`.
+    // Guarding it would break the P2P join path this PR exists to keep working.
+    const ws = new MockWebSocket();
+    const socket = makePhaseSocket(ws, {
+      mode: "LobbyOnly",
+      protocolVersion: PROTOCOL_VERSION - 9,
+    });
+
+    const result = resolveGuestOver(socket, "ABC123");
+
+    expect(ws.send).toHaveBeenCalledWith(
+      expect.stringContaining('"type":"JoinGameWithPassword"'),
+    );
+
+    ws.fireClose();
+    await expect(result).resolves.toMatchObject({
+      ok: false,
+      reason: "connection_lost",
+    });
+  });
 });
 
 describe("resolveGuestOver", () => {

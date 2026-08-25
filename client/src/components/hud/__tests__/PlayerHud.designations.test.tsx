@@ -150,19 +150,42 @@ describe("PlayerHud designations", () => {
     });
   });
 
+  // CR 309.4b-c: the dungeon badge is driven ONLY by the engine projection
+  // `derived.dungeon_rooms` — the FE has no room table, so it derives neither
+  // the room's name nor what that room's ability does.
   describe("Dungeon", () => {
-    it("renders the dungeon badge when the local player is venturing", () => {
+    it("renders the dungeon badge naming the room the marker is on", () => {
       act(() => {
         useGameStore.setState({
           gameState: buildGameState({
             dungeon_progress: {
               "0": { current_dungeon: "LostMineOfPhandelver", current_room: 1, completed: [] },
             },
+            derived: {
+              dungeon_rooms: {
+                "0": {
+                  dungeon: "LostMineOfPhandelver",
+                  dungeon_name: "Lost Mine of Phandelver",
+                  room: {
+                    index: 1,
+                    name: "Goblin Lair",
+                    text: "Create a 1/1 red Goblin creature token.",
+                  },
+                  room_count: 7,
+                },
+              },
+            },
           }),
         });
       });
       render(<PlayerHud />);
-      expect(screen.getByLabelText("Venturing in Lost Mine, room 2")).toBeInTheDocument();
+      expect(
+        screen.getByLabelText("Venturing in Lost Mine of Phandelver, Goblin Lair, room 2 of 7"),
+      ).toBeInTheDocument();
+      expect(screen.getByText("Lost Mine of Phandelver")).toBeInTheDocument();
+      // CR 309.4b-c: the tooltip names the room and repeats what it did.
+      expect(screen.getByText("Goblin Lair — room 2 of 7")).toBeInTheDocument();
+      expect(screen.getByText("Create a 1/1 red Goblin creature token.")).toBeInTheDocument();
     });
 
     it("does not render when the player has progress but no active dungeon", () => {
@@ -185,6 +208,16 @@ describe("PlayerHud designations", () => {
           gameState: buildGameState({
             dungeon_progress: {
               "1": { current_dungeon: "Undercity", current_room: 0, completed: [] },
+            },
+            derived: {
+              dungeon_rooms: {
+                "1": {
+                  dungeon: "Undercity",
+                  dungeon_name: "Undercity",
+                  room: { index: 0, name: "Secret Entrance", text: "Scry 1." },
+                  room_count: 9,
+                },
+              },
             },
           }),
         });

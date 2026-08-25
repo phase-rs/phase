@@ -369,7 +369,7 @@ export function ActionButton() {
           </>
         )}
 
-        {mode === "priority-stack" && !isEndingTurn && (
+        {mode === "priority-stack" && !isResolvingStack && (
           <>
             {canCompanionToHand && (
               <button

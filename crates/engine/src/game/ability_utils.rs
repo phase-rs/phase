@@ -3377,6 +3377,101 @@ fn target_filter_needs_ability_context(filter: &TargetFilter) -> bool {
     target_filter_contains_chosen_x_ref(filter)
         || target_filter_contains_amassed_army_ref(filter)
         || target_filter_contains_scoped_player_ref(filter)
+        || filter_needs_trigger_source(filter)
+}
+
+/// CR 508.5 + CR 508.5a + CR 603.3d: a filter whose evaluation asks
+/// `combat::defending_player_cr508_5` for the attacked-player anaphor needs the
+/// resolving ability's `trigger_source`, because that authority's binding rule is
+/// `trigger_source.and_then(|_| detection.or(state.current_trigger_event))` — with
+/// no `trigger_source` the binding is `DefenderBinding::None`, which skips the
+/// attack-entry tiers entirely and leaves only `resolve_defending_player`. That
+/// tail resolves a non-attacking source through `extract_source_from_event`,
+/// whose `AttackersDeclared` arm is gated on `attacker_ids.len() == 1`, so ANY
+/// declaration with two or more attackers yields `None`,
+/// `filter::attacking_defender_matches`'s `is_some_and` is false for every
+/// candidate, the target slot is empty, and CR 603.3d removes the triggered
+/// ability from the stack ("If a choice is required when the triggered ability
+/// goes on the stack but no legal choices can be made for it ... the ability is
+/// simply removed from the stack").
+///
+/// Routing these filters to `find_legal_targets_for_ability`
+/// (`FilterContext::from_ability`) supplies the `trigger_source` that
+/// `set_trigger_source_recursive` already put on every instantiated triggered
+/// ability, making SLOT-BUILD agree with the CR 608.2b re-validation door
+/// (`targeting::validate_targets_for_ability`), which has always used
+/// `from_ability`. The disagreement between those two doors is what made this
+/// failure silent.
+///
+/// SCOPE — exactly the refs that consume `trigger_source`, and no others.
+/// `filter::source_controller_ref_player` special-cases three refs:
+/// `DefendingPlayer` (reads `trigger_source`), `SourceChosenPlayer` (reads the
+/// source), and `EnchantedPlayer` (reads `source.attached_to`); everything else
+/// routes to `controller_ref_player`. Only `DefendingPlayer` needs the ability
+/// context, so only `DefendingPlayer` is matched here — leaving the existing
+/// corpus producers of `Attacking { defender: Some(You | Opponent |
+/// SourceChosenPlayer | EnchantedPlayer) }` on their existing door, unchanged.
+///
+/// `FilterProp::CombatRelation` is deliberately EXCLUDED: it is evaluated by
+/// `filter::matches_combat_relation`, which reads `source.id` and
+/// `source.ability` and never calls `source_defending_player`.
+///
+/// `TypedFilter { controller: Some(ControllerRef::DefendingPlayer) }` is ALSO
+/// deliberately excluded despite having the identical door bug (Greatsword of
+/// Tyr class). The deferral is SCOPED AND MEASURED, not open-ended — measured
+/// against `data/card-data.json`, the exported engine corpus:
+///
+/// | population | cards |
+/// |---|---|
+/// | reference `ControllerRef::DefendingPlayer` anywhere | 116 |
+/// | …of those, inside a TRIGGER's definition chain | 104 |
+/// | …of those, inside a trigger's TARGET slot (the door this predicate gates) | 97 |
+/// | the `FilterProp::Attacking { defender: DefendingPlayer }` shape fixed here | 3 |
+///
+/// So the follow-up's exact enumeration delta is 97 cards (Greatsword of Tyr,
+/// Thraximundar, Kogla, Warkite Marauder, …) moving from the bare
+/// `find_legal_targets` door to `find_legal_targets_for_ability`. It is a
+/// separate change because 97 re-routed target enumerations need their own
+/// multi-attacker fixtures and their own blast-radius measurement — not because
+/// the size is unknown. The tripwire test
+/// `filter_needs_trigger_source_does_not_widen_to_defending_player_controller`
+/// keeps the omission a decision rather than an oversight.
+///
+/// STRUCTURAL TRAVERSAL IS NOT RE-IMPLEMENTED HERE. The "does this filter
+/// mention X anywhere" question has exactly one authority — `filter::
+/// filter_contains` and its `filter_prop_contains` / `player_filter_contains`
+/// halves, whose matches are exhaustive (no `_` arm) precisely so a future
+/// nesting variant cannot be silently classified as a leaf. A hand-rolled
+/// `Typed` / `And` / `Or` / `Not` walk with a `_ => false` tail would miss the
+/// prop under `TrackedSetFiltered`, `ChosenDamageSource`, `PlayerMatching {
+/// ControlsCount { filter } }`, or any of the six `TargetFilter`-boxing props
+/// (`Targets`, `TargetsOnly`, `SharesQuality`, `DistinctFrom`,
+/// `DifferentNameFrom`, `CanEnchant`) — each of which would keep the bare
+/// `find_legal_targets` door and reproduce the CR 603.3d removal above.
+///
+/// What remains local is a pure LEAF-VALUE test ("is this prop the
+/// defending-player anaphor?"), including the two prop-level combinators
+/// (`AnyOf` / `Not`) that can wrap it. Its `_ => false` is a value verdict on a
+/// prop that carries no `defender` axis, not a containment claim about nesting.
+fn filter_needs_trigger_source(filter: &TargetFilter) -> bool {
+    fn prop_needs(prop: &FilterProp) -> bool {
+        match prop {
+            FilterProp::Attacking {
+                defender: Some(ControllerRef::DefendingPlayer),
+            }
+            | FilterProp::AttackedThisTurn {
+                defender: Some(ControllerRef::DefendingPlayer),
+            } => true,
+            FilterProp::AnyOf { props } => props.iter().any(prop_needs),
+            FilterProp::Not { prop } => prop_needs(prop),
+            _ => false,
+        }
+    }
+
+    crate::game::filter::filter_contains(
+        filter,
+        &|inner| matches!(inner, TargetFilter::Typed(typed) if typed.properties.iter().any(prop_needs)),
+    )
 }
 
 // CR 102.1 + CR 608.2c: "that player controls" filters lowered to
@@ -5675,6 +5770,7 @@ fn legal_targets_for_selected_slot(
                 &enchant_filter,
                 *pid,
                 Some(aura_controller),
+                Some(aura_id),
             ),
         });
     }
@@ -6077,6 +6173,52 @@ fn build_target_selection_progress_for_ability(
             current_slot + 1,
             skipped_slots,
         );
+    }
+
+    // CR 115.10a: "Just because an object or player is being affected by a spell or
+    // ability doesn't make that object or player a target … Unless that object or
+    // player is identified by the word 'target'…". The `SpecificPlayer` half of a
+    // per-opponent target fanout (`collect_per_opponent_target_fanout_specs`) is a
+    // BINDER: it is pinned to one player by construction so the following object
+    // slot's `ControllerRef::TargetPlayer` scope resolves ("that player's
+    // graveyard"). The opponent is affected but never identified by "target" —
+    // Diluvian Primordial's "target" attaches to the card. CR 115.1d: only the card
+    // slot is an announced target. Announce the pinned player on the controller's
+    // behalf and advance, so the first prompt they see is the real choice.
+    //
+    // Same conjunction `legal_targets_for_selected_slot` already uses to identify a
+    // binder (fanout predicate + `SpecificPlayer` filter) — not a looser
+    // filter-shape test, so an ordinary pinned-player slot on a non-fanout ability
+    // still prompts.
+    //
+    // CR 115.6: `!slot.optional` — declining an optional slot is a real choice the
+    // controller owns ("may allow zero targets to be chosen"), so an optional slot
+    // is never a non-choice even with a singleton legal set.
+    // CR 601.2c + CR 115.1: `chooser.is_none()` — a slot announced by another player
+    // is not the controller's to auto-resolve.
+    if is_per_opponent_target_fanout(ability) && !slot.optional && slot.chooser.is_none() {
+        if let Some(TargetSlotSpec {
+            filter: TargetFilter::SpecificPlayer { id },
+            ..
+        }) = specs.get(current_slot)
+        {
+            // `TargetRef` is NOT `Copy`, so `== [pinned]` would MOVE `pinned` into
+            // the array literal and make the `push` below E0382. `from_ref`
+            // borrows instead, and allocates nothing.
+            let pinned = TargetRef::Player(*id);
+            if current_legal_targets == std::slice::from_ref(&pinned) {
+                let mut bound_slots = selected_slots;
+                bound_slots.push(Some(pinned));
+                return build_target_selection_progress_for_ability(
+                    state,
+                    ability,
+                    target_slots,
+                    constraints,
+                    current_slot + 1,
+                    bound_slots,
+                );
+            }
+        }
     }
 
     Ok(TargetSelectionProgress {
@@ -7856,6 +7998,199 @@ fn build_mode_sequences(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::{CombatRelation, CombatRelationSubject};
+
+    fn typed_with(props: Vec<FilterProp>) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            properties: props,
+            ..Default::default()
+        })
+    }
+
+    fn attacking(defender: ControllerRef) -> FilterProp {
+        FilterProp::Attacking {
+            defender: Some(defender),
+        }
+    }
+
+    /// V18 — `filter_needs_trigger_source` is PRECISE: it routes the CR 508.5
+    /// defending-player anaphor to the context-carrying enumeration door and
+    /// leaves every other value on the existing bare door.
+    ///
+    /// This is the zero-blast-radius proof. `filter::source_controller_ref_player`
+    /// resolves `Opponent` via `source.controller`, `EnchantedPlayer` via
+    /// `source.attached_to`, and `SourceChosenPlayer` via the source object —
+    /// none of them reads `trigger_source` — so leaving the existing corpus
+    /// producers on the bare door is behaviour-preserving by construction, not
+    /// by luck. Only `DefendingPlayer` reaches
+    /// `combat::defending_player_cr508_5`, whose binding rule requires a
+    /// `trigger_source` to consult the attack entries at all.
+    #[test]
+    fn filter_needs_trigger_source_routes_only_the_defending_player_anaphor() {
+        // Positive: the new value, bare and under every recursive shape.
+        let bare = typed_with(vec![attacking(ControllerRef::DefendingPlayer)]);
+        assert!(filter_needs_trigger_source(&bare));
+        assert!(filter_needs_trigger_source(&TargetFilter::Or {
+            filters: vec![typed_with(vec![]), bare.clone()],
+        }));
+        assert!(filter_needs_trigger_source(&TargetFilter::And {
+            filters: vec![typed_with(vec![]), bare.clone()],
+        }));
+        assert!(filter_needs_trigger_source(&TargetFilter::Not {
+            filter: Box::new(bare.clone()),
+        }));
+        assert!(filter_needs_trigger_source(&typed_with(vec![
+            FilterProp::AnyOf {
+                props: vec![FilterProp::Token, attacking(ControllerRef::DefendingPlayer)],
+            }
+        ])));
+        assert!(filter_needs_trigger_source(&typed_with(vec![
+            FilterProp::Not {
+                prop: Box::new(attacking(ControllerRef::DefendingPlayer)),
+            }
+        ])));
+        // Sibling prop that shares the same `attacking_defender_matches` door.
+        assert!(filter_needs_trigger_source(&typed_with(vec![
+            FilterProp::AttackedThisTurn {
+                defender: Some(ControllerRef::DefendingPlayer),
+            }
+        ])));
+
+        // Negative: every `Attacking`/`AttackedThisTurn` value that exists in the
+        // corpus today must stay on the bare door, unchanged.
+        for prop in [
+            FilterProp::Attacking { defender: None },
+            attacking(ControllerRef::You),
+            attacking(ControllerRef::Opponent),
+            attacking(ControllerRef::SourceChosenPlayer),
+            attacking(ControllerRef::EnchantedPlayer),
+            FilterProp::AttackedThisTurn { defender: None },
+            FilterProp::AttackedThisTurn {
+                defender: Some(ControllerRef::You),
+            },
+            FilterProp::CombatRelation {
+                relation: CombatRelation::BlockingOrBlockedBy,
+                subject: CombatRelationSubject::Source,
+            },
+        ] {
+            assert!(
+                !filter_needs_trigger_source(&typed_with(vec![prop.clone()])),
+                "{prop:?} does not consume trigger_source and must stay on the bare door"
+            );
+        }
+
+        // And the predicate composes into the existing routing disjunction.
+        assert!(target_filter_needs_ability_context(&bare));
+    }
+
+    /// V18b — the traversal is DELEGATED, so the anaphor is found at every
+    /// nesting depth `filter::filter_contains` knows about, not only at the top
+    /// level where the three unlocked cards happen to put it today.
+    ///
+    /// Revert-failing: restore the hand-rolled `Typed`/`And`/`Or`/`Not` match
+    /// with a `_ => false` tail and every row below flips to `false` — each one
+    /// then keeps the bare `find_legal_targets` door with `trigger_source:
+    /// None`, which is the empty-slot / CR 603.3d removal this predicate exists
+    /// to prevent.
+    #[test]
+    fn filter_needs_trigger_source_descends_every_nesting_variant() {
+        use crate::types::ability::PlayerRelation;
+
+        let bare = typed_with(vec![attacking(ControllerRef::DefendingPlayer)]);
+        let controls_bare = PlayerFilter::ControlsCount {
+            relation: PlayerRelation::All,
+            filter: bare.clone(),
+            comparator: Comparator::GE,
+            count: Box::new(QuantityExpr::Fixed { value: 1 }),
+        };
+
+        // The six `TargetFilter`-boxing props, plus the two player-axis
+        // crossings. Each is a nesting site `filter_prop_contains` /
+        // `player_filter_contains` enumerate exhaustively and the hand-rolled
+        // walk skipped entirely.
+        for prop in [
+            FilterProp::Targets {
+                filter: Box::new(bare.clone()),
+            },
+            FilterProp::TargetsOnly {
+                filter: Box::new(bare.clone()),
+            },
+            FilterProp::CanEnchant {
+                target: Box::new(bare.clone()),
+            },
+            FilterProp::DistinctFrom {
+                reference: Box::new(bare.clone()),
+            },
+            FilterProp::DifferentNameFrom {
+                filter: Box::new(bare.clone()),
+            },
+            FilterProp::SharesQuality {
+                quality: SharedQuality::CreatureType,
+                reference: Some(Box::new(bare.clone())),
+                relation: SharedQualityRelation::default(),
+            },
+            FilterProp::ControllerMatches {
+                player: Box::new(controls_bare.clone()),
+            },
+        ] {
+            assert!(
+                filter_needs_trigger_source(&typed_with(vec![prop.clone()])),
+                "{prop:?} nests a defending-player anaphor and must route to the \
+                 ability-context door"
+            );
+        }
+
+        // Filter-level nesting variants outside `Typed`/`And`/`Or`/`Not`.
+        assert!(filter_needs_trigger_source(
+            &TargetFilter::TrackedSetFiltered {
+                id: TrackedSetId(1),
+                filter: Box::new(bare.clone()),
+                caused_by: None,
+            }
+        ));
+        assert!(filter_needs_trigger_source(
+            &TargetFilter::ChosenDamageSource {
+                filter: Some(Box::new(bare.clone())),
+            }
+        ));
+        assert!(filter_needs_trigger_source(&TargetFilter::PlayerMatching {
+            player: Box::new(controls_bare),
+        }));
+
+        // Negative control at the same depths: nesting alone does not route.
+        assert!(!filter_needs_trigger_source(
+            &TargetFilter::ChosenDamageSource {
+                filter: Some(Box::new(typed_with(vec![attacking(
+                    ControllerRef::Opponent
+                )]))),
+            }
+        ));
+    }
+
+    /// V19 — TRIPWIRE. `TypedFilter { controller: Some(DefendingPlayer) }`
+    /// (Greatsword of Tyr class) has the IDENTICAL slot-build door bug, and is
+    /// deliberately NOT covered here. The deferral is measured, not open-ended:
+    /// 97 corpus cards put that shape in a triggered ability's TARGET slot
+    /// (versus 3 for the shape fixed here) — see the table on
+    /// `filter_needs_trigger_source`. Widening the predicate re-routes all 97
+    /// enumerations at once and needs its own multi-attacker fixtures.
+    ///
+    /// A future pass that widens the predicate must delete this assertion on
+    /// purpose — that is the point. It exists so the omission reads as a
+    /// decision, not an oversight.
+    #[test]
+    fn filter_needs_trigger_source_does_not_widen_to_defending_player_controller() {
+        let controller_scoped = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: Some(ControllerRef::DefendingPlayer),
+            ..Default::default()
+        });
+        assert!(
+            !filter_needs_trigger_source(&controller_scoped),
+            "deliberately out of scope; see the doc comment on filter_needs_trigger_source"
+        );
+    }
 
     /// CR 700.2a / CR 700.2e: `modal_chooser_candidates` is the one authority
     /// both spell announcement and trigger construction read.
@@ -12108,23 +12443,15 @@ mod tests {
             .legal_targets
             .contains(&TargetRef::Object(caster_creature)));
 
+        // CR 115.10a: the pinned binder is announced by the engine, so the walk
+        // opens on the first object slot with the binder already bound.
         let progress =
             begin_target_selection_for_ability(&state, &ability, &slots, &[]).expect("selection");
+        assert_eq!(progress.current_slot, 1);
         assert_eq!(
-            progress.current_legal_targets,
-            vec![TargetRef::Player(PlayerId(1))]
+            progress.selected_slots,
+            vec![Some(TargetRef::Player(PlayerId(1)))]
         );
-        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
-            &state,
-            &ability,
-            &slots,
-            &[],
-            &progress,
-            Some(TargetRef::Player(PlayerId(1))),
-        )
-        .expect("forced first player target should be accepted") else {
-            panic!("expected first object slot");
-        };
         assert_eq!(
             progress.current_legal_targets,
             vec![TargetRef::Object(opponent_one_creature)]
@@ -12173,17 +12500,11 @@ mod tests {
 
         let progress =
             begin_target_selection_for_ability(&state, &ability, &slots, &[]).expect("selection");
-        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
-            &state,
-            &ability,
-            &slots,
-            &[],
-            &progress,
-            Some(TargetRef::Player(PlayerId(1))),
-        )
-        .expect("hidden player constraint should bypass player targeting protection") else {
-            panic!("expected first object slot");
-        };
+        assert_eq!(
+            progress.selected_slots,
+            vec![Some(TargetRef::Player(PlayerId(1)))],
+            "the auto-announced binder still bypasses player targeting protection"
+        );
         assert_eq!(
             progress.current_legal_targets,
             vec![TargetRef::Object(opponent_creature)]
@@ -12229,17 +12550,6 @@ mod tests {
 
         let progress =
             begin_target_selection_for_ability(&state, &ability, &slots, &[]).expect("selection");
-        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
-            &state,
-            &ability,
-            &slots,
-            &[],
-            &progress,
-            Some(TargetRef::Player(PlayerId(1))),
-        )
-        .expect("hidden player slot should be accepted") else {
-            panic!("expected object slot");
-        };
         assert_eq!(
             progress.current_legal_targets,
             vec![TargetRef::Object(unprotected_enchantment)]
@@ -12384,31 +12694,9 @@ mod tests {
             &slots,
             &[],
             &progress,
-            Some(TargetRef::Player(PlayerId(1))),
-        )
-        .expect("first hidden player slot should be accepted") else {
-            panic!("expected first object slot");
-        };
-        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
-            &state,
-            &ability,
-            &slots,
-            &[],
-            &progress,
             Some(TargetRef::Object(opponent_one_creature)),
         )
         .expect("first object slot should be accepted") else {
-            panic!("expected second hidden player slot");
-        };
-        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
-            &state,
-            &ability,
-            &slots,
-            &[],
-            &progress,
-            Some(TargetRef::Player(PlayerId(2))),
-        )
-        .expect("second hidden player slot should be accepted") else {
             panic!("expected second object slot");
         };
         let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
@@ -12429,6 +12717,202 @@ mod tests {
                 .current_legal_targets
                 .contains(&TargetRef::Player(PlayerId(1))),
             "trailing non-fanout target slot should fall through to normal target recompute"
+        );
+    }
+
+    /// Shared board for the two `chooser` rows: a MANDATORY per-opponent fanout
+    /// with exactly one opponent, who controls exactly one legal permanent. The
+    /// two rows are separate `#[test]` functions with their own verdicts and
+    /// differ only in the binder slot's `chooser`.
+    fn per_opponent_binder_chooser_fixture() -> (
+        GameState,
+        ResolvedAbility,
+        Vec<TargetSelectionSlot>,
+        ObjectId,
+    ) {
+        let mut state = GameState::new_two_player(42);
+        let opponent_creature = create_creature(&mut state, PlayerId(1), CardId(1), "Opp One");
+        let ability = per_opponent_gain_control_ability();
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        (state, ability, slots, opponent_creature)
+    }
+
+    /// CR 601.2c + CR 115.1: a slot another player announces is never the
+    /// controller's to auto-resolve, even when it is a structurally pinned
+    /// per-opponent binder. Paired negative for
+    /// `binder_slot_without_a_chooser_is_autofilled`.
+    #[test]
+    fn binder_slot_with_a_foreign_chooser_is_not_autofilled() {
+        let (state, ability, mut slots, _) = per_opponent_binder_chooser_fixture();
+        assert!(is_per_opponent_target_fanout(&ability));
+        assert_eq!(slots.len(), 2);
+        assert_eq!(slots[0].legal_targets, vec![TargetRef::Player(PlayerId(1))]);
+        assert!(
+            !slots[0].optional,
+            "the fixture must satisfy every conjunct except `chooser`"
+        );
+
+        slots[0].chooser = Some(PlayerId(1));
+        let progress =
+            begin_target_selection_for_ability(&state, &ability, &slots, &[]).expect("selection");
+        assert_eq!(
+            progress.current_slot, 0,
+            "a chooser-stamped binder remains an announced step for that player"
+        );
+        assert_eq!(
+            progress.current_legal_targets,
+            vec![TargetRef::Player(PlayerId(1))]
+        );
+    }
+
+    /// CR 115.10a: the same fixture with no foreign chooser — the pinned
+    /// opponent is announced by the engine and the walk opens on the object
+    /// slot. Sibling positive for
+    /// `binder_slot_with_a_foreign_chooser_is_not_autofilled`.
+    #[test]
+    fn binder_slot_without_a_chooser_is_autofilled() {
+        let (state, ability, slots, opponent_creature) = per_opponent_binder_chooser_fixture();
+        assert_eq!(slots.len(), 2);
+        assert!(slots[0].chooser.is_none());
+        assert_eq!(slots[0].legal_targets, vec![TargetRef::Player(PlayerId(1))]);
+
+        let progress =
+            begin_target_selection_for_ability(&state, &ability, &slots, &[]).expect("selection");
+        assert_eq!(
+            progress.current_slot, 1,
+            "the pinned binder is announced on the controller's behalf"
+        );
+        assert_eq!(
+            progress.selected_slots,
+            vec![Some(TargetRef::Player(PlayerId(1)))]
+        );
+        assert_eq!(
+            progress.current_legal_targets,
+            vec![TargetRef::Object(opponent_creature)]
+        );
+    }
+
+    /// CR 603.3d: a REQUIRED binder with no legal player still removes the
+    /// ability from the stack. The auto-fill block is deliberately ordered
+    /// after the empty-legal-set block, so this path is byte-identical to its
+    /// pre-auto-fill behavior.
+    #[test]
+    fn binder_with_no_legal_player_still_reports_no_legal_combinations() {
+        let mut state = GameState::new_two_player(42);
+        create_creature(&mut state, PlayerId(1), CardId(1), "Opp One");
+        let ability = per_opponent_gain_control_ability();
+
+        let mut slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(slots.len(), 2);
+        assert_eq!(slots[0].legal_targets, vec![TargetRef::Player(PlayerId(1))]);
+        assert!(!slots[0].optional);
+
+        // CR 800.4: the sole opponent leaves the game after the slots were
+        // built. The fanout then yields no spec at all, and the stale required
+        // binder slot has no legal player left.
+        state
+            .players
+            .iter_mut()
+            .find(|player| player.id == PlayerId(1))
+            .expect("opponent seat")
+            .is_eliminated = true;
+        slots[0].legal_targets.clear();
+
+        let error = begin_target_selection_for_ability(&state, &ability, &slots, &[])
+            .expect_err("a required binder with no legal player must not be auto-filled");
+        assert!(
+            matches!(&error, EngineError::ActionNotAllowed(message)
+                if message == "No legal target combinations available"),
+            "expected the CR 603.3d no-legal-combination error, got {error:?}"
+        );
+    }
+
+    /// CR 115.10a does NOT apply to an ordinary singleton target: "destroy
+    /// target creature" identifies the creature by the word "target", so the
+    /// controller still announces it even when exactly one is legal. Negative
+    /// control for the class boundary — the general "any mandatory singleton
+    /// auto-fills" rule is explicitly not implemented.
+    #[test]
+    fn a_lone_legal_creature_for_destroy_target_creature_still_prompts() {
+        let mut state = GameState::new_two_player(42);
+        let lone_creature = create_creature(&mut state, PlayerId(1), CardId(1), "Lone Creature");
+        let ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        assert!(!is_per_opponent_target_fanout(&ability));
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(slots.len(), 1);
+        assert!(!slots[0].optional);
+        assert!(slots[0].chooser.is_none());
+        let progress =
+            begin_target_selection_for_ability(&state, &ability, &slots, &[]).expect("selection");
+        assert_eq!(
+            progress.current_slot, 0,
+            "the word `target` attaches to the creature, so the controller announces it"
+        );
+        assert_eq!(
+            progress.current_legal_targets,
+            vec![TargetRef::Object(lone_creature)]
+        );
+
+        // Reach guard: the same shape with a genuine choice also prompts at
+        // slot 0, so the singleton assertion above is not the only branch.
+        let second_creature =
+            create_creature(&mut state, PlayerId(1), CardId(2), "Second Creature");
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        let progress =
+            begin_target_selection_for_ability(&state, &ability, &slots, &[]).expect("selection");
+        assert_eq!(progress.current_slot, 0);
+        assert!(progress
+            .current_legal_targets
+            .contains(&TargetRef::Object(second_creature)));
+    }
+
+    /// CR 115.10a is scoped to the per-opponent fanout BINDER, not to every
+    /// pinned-player slot. A mandatory `SpecificPlayer` slot on a NON-fanout
+    /// ability is a real announced target and still prompts — this is the row
+    /// that separates the adopted `is_per_opponent_target_fanout` gate from a
+    /// filter-shape-only predicate.
+    #[test]
+    fn mandatory_specific_player_slot_on_a_non_fanout_ability_still_prompts() {
+        let state = GameState::new(FormatConfig::standard(), 3, 42);
+        let pinned = PlayerId(1);
+        let ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::SpecificPlayer { id: pinned },
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        assert!(!ability.optional_targeting);
+        assert!(ability.multi_target.is_none());
+        assert!(!is_per_opponent_target_fanout(&ability));
+
+        // Reach guard: the fixture satisfies every conjunct of the auto-fill
+        // guard EXCEPT the fanout gate — mandatory, unchoosered, singleton.
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(slots.len(), 1);
+        assert!(!slots[0].optional);
+        assert!(slots[0].chooser.is_none());
+        assert_eq!(slots[0].legal_targets, vec![TargetRef::Player(pinned)]);
+
+        let progress =
+            begin_target_selection_for_ability(&state, &ability, &slots, &[]).expect("selection");
+        assert_eq!(
+            progress.current_slot, 0,
+            "a pinned-player slot outside the fanout class is still announced by the controller"
+        );
+        assert_eq!(
+            progress.current_legal_targets,
+            vec![TargetRef::Player(pinned)]
         );
     }
 

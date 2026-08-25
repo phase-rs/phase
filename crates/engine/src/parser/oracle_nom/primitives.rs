@@ -1005,6 +1005,31 @@ pub fn parse_phrase_fragment(input: &str) -> OracleResult<'_, &str> {
     )))
 }
 
+/// CR 608.2c consume-on-success: a subordinate clause has genuinely ENDED here.
+///
+/// A relative-clause combinator that succeeds while leaving unconsumed words
+/// behind has not modelled the sentence — it has modelled a PREFIX of it, and
+/// the caller that discards that remainder silently drops the rest of the
+/// restriction. ("attacks a player who has more life than you AND CONTROLS A
+/// FOREST" binding only the life half is strictly wrong; "…more life than YOU
+/// HAVE" is a different phrasing entirely.) The honest answer for both is to
+/// decline the clause, not to bind an under-restricted filter.
+///
+/// The clause ends when the remainder is exhausted, or when the next character
+/// opens a new clause (`,`) or ends the sentence (`.`). Non-consuming (`peek`),
+/// so callers use it purely as a guard. Object-axis sibling:
+/// `oracle_target::parse_attacking_status_clause_boundary`, which adds
+/// conjunction/conditional lookahead specific to that suffix chain.
+pub fn peek_clause_terminator(input: &str) -> OracleResult<'_, ()> {
+    peek(alt((
+        value((), tag(",")),
+        value((), tag(".")),
+        // `space0` makes this cover both "" and a trailing-whitespace tail.
+        value((), (space0, eof)),
+    )))
+    .parse(input)
+}
+
 // ── Word-boundary scanning primitives ─────────────────────────────────
 //
 // These are the shared building blocks for scanning Oracle text at word

@@ -2012,6 +2012,37 @@ impl GameObject {
         }
     }
 
+    /// CR 708.4 + CR 702.37c / CR 702.168b: Whether the SPELL this object
+    /// represents is being cast FACE DOWN — a morph/megamorph/disguise card put
+    /// on the stack as a blank 2/2 creature spell for {3} — as opposed to merely
+    /// carrying `face_down = true`.
+    ///
+    /// Those differ, and the difference is why this must not read raw
+    /// `face_down`: CR 702.143a exiles a foretold card "from their hand face
+    /// down" and then lets its owner cast it — hideaway and other exile/library
+    /// concealment work the same way — so `face_down` is set while the card
+    /// waits in exile, yet nothing grants that cast the CR 708.4 permission to
+    /// be turned face down, and the spell goes on the stack face up. The
+    /// discriminator is
+    /// `face_down && back_face.is_some()`: `continue_cast_face_down` is the only
+    /// path that presents a spell with a blanked object, because it turns the
+    /// object face down through `apply_face_down_entry_profile`, which stashes
+    /// the real card in `back_face` (CR 708.2 copiable-value blank). A
+    /// foretold/hideaway object keeps `back_face = None` — its characteristics
+    /// are intact in exile, it is not blanked — and a DFC / adventure / transform
+    /// object carries `back_face` with `face_down = false`, so neither side
+    /// reads `true` here. Manifest and cloak objects are face-down permanents put
+    /// onto the battlefield by effects, never cast, so they never reach a spell
+    /// seam at all.
+    ///
+    /// Single authority for that question: the restricted-mana payment seam
+    /// (`build_spell_meta` → `SpellMeta::is_face_down`, CR 106.6) and the
+    /// spell-filter projection (`spell_cast_record_from_object_for`) both ask
+    /// here rather than each re-deriving it.
+    pub fn spell_is_cast_face_down(&self) -> bool {
+        self.face_down && self.back_face.is_some()
+    }
+
     /// CR 702.102b + CR 709.4d: Restore the combined card types and colors of
     /// a fused split spell after a characteristic reset. The fusion marker is
     /// cast-state, while the union is a derived stack characteristic and must

@@ -7528,6 +7528,29 @@ fn oracle_corroborated_keywords(raw_oracle_text: &str) -> Vec<Keyword> {
     keywords
 }
 
+/// Lowercased alphanumeric words of one reminder-stripped Oracle line.
+fn counter_scan_words(line: &str) -> Vec<String> {
+    strip_reminder_text(line)
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Does `words` contain `phrase`'s words as one contiguous run?
+fn words_contain_phrase(words: &[String], phrase: &str) -> bool {
+    let phrase_words: Vec<&str> = phrase.split_whitespace().collect();
+    if phrase_words.is_empty() {
+        return false;
+    }
+    words.windows(phrase_words.len()).any(|run| {
+        run.iter()
+            .map(String::as_str)
+            .eq(phrase_words.iter().copied())
+    })
+}
+
 fn backup_keyword_modifications(granted_text: &str) -> Vec<ContinuousModification> {
     let mut modifications = Vec::new();
     for line in granted_text.lines() {
@@ -10122,6 +10145,33 @@ fn build_oracle_face_inner(
         !name_words.contains(&token) || oracle_corroborated.iter().any(|e| e == kw)
     });
 
+    // CR 122.1b: a keyword counter grants its keyword only while the counter sits
+    // on the object — the card itself does not HAVE the ability. MTGJSON still
+    // stamps such cards' `keywords` with the counter's name (Reluctant Role Model
+    // gets "Lifelink" from "put a flying, lifelink, or +1/+1 counter on it";
+    // Grimdancer and Aragorn, Company Leader get their choose-a-counter options).
+    // Drop a counter-capable keyword (the closed CR 122.1b list mirrored in
+    // `KEYWORD_COUNTERS`) that no Oracle keyword line corroborates when its word
+    // appears in a line that also says "counter"/"counters"; a real keyword line
+    // beside counter text stays corroborated and is kept.
+    keywords.retain(|kw| {
+        let counter_token = crate::types::counter::KEYWORD_COUNTERS
+            .iter()
+            .find(|(_, kind)| Keyword::promote_keyword_kind(*kind).as_ref() == Some(kw))
+            .map(|(name, _)| *name);
+        let Some(token) = counter_token else {
+            return true;
+        };
+        if oracle_corroborated.iter().any(|entry| entry == kw) {
+            return true;
+        }
+        !raw_oracle_text.lines().any(|line| {
+            let words = counter_scan_words(line);
+            words_contain_phrase(&words, token)
+                && words.iter().any(|w| w == "counter" || w == "counters")
+        })
+    });
+
     // Merge keywords extracted from Oracle text with MTGJSON keywords via the
     // shared `merge_extracted_keywords` authority (also used by the scenario test
     // harness so the two pipelines cannot diverge). It reconciles parameterized
@@ -11074,6 +11124,102 @@ mod cycling_synthesis_tests {
             // allow-raw-authority: test asserts build-time CardFace intrinsic keywords; no GameState/live object at synthesis time
             face.keywords.contains(&Keyword::Flying),
             "name-colliding Flying corroborated by a standalone Oracle line must be kept"
+        );
+    }
+
+    fn counter_phrase_card(name: &str, oracle: &str, mtgjson_keywords: &[&str]) -> AtomicCard {
+        use crate::database::mtgjson::AtomicIdentifiers;
+        AtomicCard {
+            name: name.to_string(),
+            mana_cost: Some("{1}{W}".to_string()),
+            colors: vec!["W".to_string()],
+            color_identity: vec!["W".to_string()],
+            text: Some(oracle.to_string()),
+            power: Some("2".to_string()),
+            toughness: Some("2".to_string()),
+            loyalty: None,
+            defense: None,
+            layout: "normal".to_string(),
+            type_line: Some("Creature — Human".to_string()),
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Human".to_string()],
+            supertypes: vec![],
+            keywords: Some(mtgjson_keywords.iter().map(|s| s.to_string()).collect()),
+            side: None,
+            face_name: None,
+            mana_value: 2.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: AtomicIdentifiers {
+                scryfall_oracle_id: Some(format!("{name}-test")),
+                scryfall_id: Some(format!("{name}-test-face")),
+            },
+            foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
+        }
+    }
+
+    /// CR 122.1b: a keyword counter grants its keyword only while the counter is
+    /// on the object — the card itself does not have the ability. MTGJSON still
+    /// phantom-tags Reluctant Role Model with "Lifelink" because its Survival
+    /// trigger names a lifelink counter ("put a flying, lifelink, or +1/+1
+    /// counter on it"). The counter-phrase guard must drop it.
+    #[test]
+    fn synthesis_drops_counter_phrase_only_mtgjson_keyword() {
+        let card = counter_phrase_card(
+            "Reluctant Role Model",
+            "Survival — At the beginning of your second main phase, if this creature is tapped, put a flying, lifelink, or +1/+1 counter on it.\nWhenever this creature or another creature you control dies, if it had counters on it, put those counters on up to one target creature.",
+            &["Lifelink", "Survival"],
+        );
+        let face = build_oracle_face(&card, None);
+        assert!(
+            // allow-raw-authority: test asserts build-time CardFace intrinsic keywords; no GameState/live object at synthesis time
+            !face.keywords.iter().any(|k| matches!(k, Keyword::Lifelink)),
+            "counter-phrase-only Lifelink must be dropped, got {:?}",
+            face.keywords
+        );
+    }
+
+    /// CR 122.1b list form AFTER the word "counter" (Aragorn, Company Leader /
+    /// Grimdancer): "a counter from among first strike, vigilance, deathtouch,
+    /// and lifelink" — the stamped choices must all be dropped.
+    #[test]
+    fn synthesis_drops_choose_a_counter_from_among_keywords() {
+        let card = counter_phrase_card(
+            "Aragorn, Company Leader",
+            "This creature enters with your choice of a counter from among first strike, vigilance, deathtouch, and lifelink on it.",
+            &["Deathtouch", "Vigilance"],
+        );
+        let face = build_oracle_face(&card, None);
+        assert!(
+            // allow-raw-authority: test asserts build-time CardFace intrinsic keywords; no GameState/live object at synthesis time
+            !face
+                .keywords
+                .iter()
+                .any(|k| matches!(k, Keyword::Deathtouch | Keyword::Vigilance)),
+            "choose-a-counter keywords must be dropped, got {:?}",
+            face.keywords
+        );
+    }
+
+    /// Negative control — a PIN, green with and without the counter-phrase guard:
+    /// a real standalone "Lifelink" line beside lifelink-counter text is
+    /// corroborated and must survive.
+    #[test]
+    fn synthesis_keeps_corroborated_keyword_beside_counter_phrase() {
+        let card = counter_phrase_card(
+            "Gilraen Test",
+            "Lifelink\nWhen this creature enters, put a lifelink counter on another target creature you control.",
+            &["Lifelink"],
+        );
+        let face = build_oracle_face(&card, None);
+        assert!(
+            // allow-raw-authority: test asserts build-time CardFace intrinsic keywords; no GameState/live object at synthesis time
+            face.keywords.contains(&Keyword::Lifelink),
+            "corroborated Lifelink beside counter text must be kept"
         );
     }
 }

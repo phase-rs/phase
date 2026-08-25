@@ -640,8 +640,14 @@ fn predicted_root_player_recipient(
     let mut opponent_accepted = false;
 
     for player in state.players.iter().filter(|player| !player.is_eliminated) {
-        let impact = targeted_player_impact_in(state, source_controller, effects, player.id)
-            .unwrap_or(aggregate);
+        let impact = targeted_player_impact_in(
+            state,
+            source_controller,
+            Some(source_id),
+            effects,
+            player.id,
+        )
+        .unwrap_or(aggregate);
         let prefers_self = if impact > PLAYER_IMPACT_PREFERENCE_BAND {
             true
         } else if impact < -PLAYER_IMPACT_PREFERENCE_BAND {
@@ -687,6 +693,7 @@ fn recipient_class_for_filter(
         filter,
         ai_player,
         source_controller,
+        Some(source_id),
     );
     let mut opponent_matches = false;
     for player in state.players.iter().filter(|player| !player.is_eliminated) {
@@ -698,6 +705,7 @@ fn recipient_class_for_filter(
             filter,
             player.id,
             source_controller,
+            Some(source_id),
         ) {
             continue;
         }

@@ -510,6 +510,7 @@ impl EventObjectSnapshot {
             | TargetFilter::ScopedPlayer
             | TargetFilter::SpecificPlayer { .. }
             | TargetFilter::PlayerWhoChoseLabel { .. }
+            | TargetFilter::PlayerMatching { .. }
             | TargetFilter::Neighbor { .. }
             | TargetFilter::DefendingPlayer
             | TargetFilter::SourceChosenPlayer
@@ -1493,6 +1494,15 @@ pub enum GameEvent {
     /// CR 701.54: The Ring tempted a player.
     RingTemptsYou {
         player_id: PlayerId,
+        /// CR 701.54a + CR 701.54d: the Ring-bearer chosen as part of THIS
+        /// temptation (None when the player controlled no creatures, so no
+        /// choice happened). The temptation's actions complete before the
+        /// "whenever the Ring tempts you" event occurs, so the event carries
+        /// the completed choice and both CR 603.4 checks of a bearer-dependent
+        /// intervening-if read this immutable record, never the mutable
+        /// `state.ring_bearer` designation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chosen_bearer: Option<ObjectId>,
     },
     /// CR 309.4c: A player moved their venture marker into a dungeon room.
     RoomEntered {

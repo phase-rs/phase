@@ -630,6 +630,11 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::SpecificObject { id } => format!("object #{}", id.0),
         TargetFilter::SpecificPlayer { id } => format!("player #{}", id.0),
         TargetFilter::PlayerWhoChoseLabel { label } => format!("player who last chose {label}"),
+        // CR 102.1: render the nested player predicate through the existing
+        // PlayerFilter formatter rather than emitting an opaque placeholder.
+        TargetFilter::PlayerMatching { player } => {
+            format!("player matching {}", fmt_player_filter(player))
+        }
         TargetFilter::Neighbor { direction } => match direction {
             SeatDirection::Left => "player to your left".into(),
             SeatDirection::Right => "player to your right".into(),
@@ -679,6 +684,14 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 None => parts.push("attacking".into()),
                 Some(ControllerRef::You) => parts.push("attacking you".into()),
                 Some(ControllerRef::Opponent) => parts.push("attacking your opponents".into()),
+                // CR 508.5: the defending-player anaphor ("attacking that
+                // player"). Rendering it through the `scoped player` catch-all
+                // below would name a DIFFERENT concept — `ControllerRef::
+                // ScopedPlayer` is the resolution-iteration player, not the
+                // player this creature is attacking.
+                Some(ControllerRef::DefendingPlayer) => {
+                    parts.push("attacking defending player".into())
+                }
                 Some(_) => parts.push("attacking scoped player".into()),
             },
             FilterProp::Blocking => parts.push("blocking".into()),
@@ -1883,14 +1896,34 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::OpponentLostLife => "each opponent who lost life this turn",
         PlayerFilter::OpponentGainedLife => "each opponent who gained life this turn",
         PlayerFilter::HasLostTheGame => "each player who has lost the game",
-        // CR 120.2a/120.2b: human string reflects the damage-kind selector.
-        PlayerFilter::OpponentDealtDamage { kind, .. } => match kind {
-            DamageKindFilter::CombatOnly => "each opponent who was dealt combat damage this turn",
-            DamageKindFilter::NoncombatOnly => {
-                "each opponent who was dealt noncombat damage this turn"
+        // CR 120.2a/120.2b + CR 120.9: every field here is behavior-bearing —
+        // `opponent_dealt_damage_matches` consumes the damage-source filter and
+        // the distinct-source threshold alongside the kind selector. Rendering
+        // only `kind` collapsed "any qualifying damage", "damage from a Dragon",
+        // and "damage from three distinct Pirates" into one signature, which
+        // makes a real semantic change invisible in the coverage receipt.
+        PlayerFilter::OpponentDealtDamage {
+            kind,
+            source,
+            min_sources,
+        } => {
+            let kind_text = match kind {
+                DamageKindFilter::CombatOnly => "combat damage",
+                DamageKindFilter::NoncombatOnly => "noncombat damage",
+                DamageKindFilter::Any => "damage",
+            };
+            let mut rendered = format!("each opponent who was dealt {kind_text}");
+            if let Some(source) = source.as_deref() {
+                rendered.push_str(&format!(" from {}", fmt_target(source)));
             }
-            DamageKindFilter::Any => "each opponent who was dealt damage this turn",
-        },
+            // CR 120.9: the default of 1 is "any matching source" and carries no
+            // information, so only a raised threshold is rendered.
+            if *min_sources > 1 {
+                rendered.push_str(&format!(" by {min_sources} distinct sources"));
+            }
+            rendered.push_str(" this turn");
+            return rendered;
+        }
         PlayerFilter::OpponentAttacked { subject, scope } => match (subject, scope) {
             (AttackSubject::You, AttackScope::ThisTurn) => "each opponent you attacked this turn",
             (AttackSubject::Source, AttackScope::ThisTurn) => {
@@ -1907,10 +1940,24 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
             "each opponent attacking the enchanted player"
         }
         PlayerFilter::All => "each player",
-        PlayerFilter::AllExcept { .. } => "each player other than the excluded player",
+        // CR 109.4: `AllExcept` is a recursive carrier — the excluded player is
+        // itself a `PlayerFilter`, so two different exclusions must not render
+        // identically.
+        PlayerFilter::AllExcept { exclude } => {
+            return format!("each player other than {}", fmt_player_filter(exclude));
+        }
         PlayerFilter::HighestSpeed => "each player with the highest speed",
         PlayerFilter::ZoneChangedThisWay => "each player who changed a card this way",
-        PlayerFilter::PerformedActionThisWay { .. } => "players who performed an action this way",
+        // CR 608.2c: the player scope and the action kind both select — "each
+        // opponent who discarded this way" is not "you who sacrificed this way".
+        PlayerFilter::PerformedActionThisWay { relation, action } => {
+            let who = match relation {
+                PlayerRelation::Controller => "you",
+                PlayerRelation::Opponent => "each opponent",
+                PlayerRelation::All => "each player",
+            };
+            return format!("{who} who performed {action:?} this way");
+        }
         PlayerFilter::OwnersOfCardsExiledBySource => "owners of cards exiled with source",
         PlayerFilter::TriggeringPlayer => "the triggering player",
         PlayerFilter::OpponentOtherThanTriggering => "each other opponent",
@@ -1918,9 +1965,15 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => {
             "opponents of the attacking player who aren't being attacked"
         }
-        PlayerFilter::VotedFor { .. } => "each player who voted for this option",
+        // CR 701.38: distinct ballots are distinct predicates.
+        PlayerFilter::VotedFor { choice_index } => {
+            return format!("each player who voted for choice {choice_index}");
+        }
         PlayerFilter::ParentObjectTargetController => "the parent target's controller",
-        PlayerFilter::ChosenPlayer { .. } => "the chosen player",
+        // CR 607.2d: the slot index selects WHICH stored choice is read.
+        PlayerFilter::ChosenPlayer { index } => {
+            return format!("the chosen player {index}");
+        }
         PlayerFilter::ParentObjectTargetOwner => "the parent target's owner",
         // CR 109.4 + CR 109.5: "each [player class] who controls [comparator]
         // [count] matching permanents"
@@ -1928,14 +1981,21 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
             relation,
             comparator,
             count,
-            ..
+            filter,
         } => {
             let who = match relation {
                 PlayerRelation::Controller => "you",
                 PlayerRelation::Opponent => "each opponent",
                 PlayerRelation::All => "each player",
             };
-            return format!("{who} who controls {comparator:?} {count:?} matching permanents");
+            // Render the nested population. Dropping it made "a player who
+            // controls eight or more LANDS" (Owlbear Cub) and "... artifacts"
+            // render identically as "matching permanents", so a real parse
+            // change between them showed as NO diff in the coverage receipt.
+            return format!(
+                "{who} who controls {comparator:?} {count:?} {}",
+                fmt_target(filter)
+            );
         }
         // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class] whose [scalar
         // attr] [comparator] [value]"
@@ -1958,7 +2018,7 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
             relation,
             possession,
             filter,
-            ..
+            caused_by,
         } => {
             let who = match relation {
                 PlayerRelation::Controller => "you",
@@ -1969,7 +2029,15 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
                 PossessionAxis::Controller => "controlled",
                 PossessionAxis::Owner => "owned",
             };
-            return format!("{who} who {verb} a {filter:?} this way");
+            // `fmt_target`, not raw `Debug` — the sibling `ControlsCount` arm
+            // renders its nested population the same way, and a Debug dump is
+            // both unreadable and unstable as a signature.
+            let mut rendered = format!("{who} who {verb} a {} this way", fmt_target(filter));
+            // CR 608.2c: the cause stamp narrows WHICH "this way" set is read.
+            if let Some(cause) = caused_by {
+                rendered.push_str(&format!(" via {cause:?}"));
+            }
+            return rendered;
         }
     }
     .into()
@@ -4060,6 +4128,22 @@ fn trigger_details(trig: &TriggerDefinition) -> Vec<(String, String)> {
     if let Some(vs) = &trig.valid_source {
         d.push(("valid source".into(), fmt_target(vs)));
     }
+    // CR 508.3a + CR 508.3e: the attacked-target scope of an "attacks" trigger.
+    //
+    // Rules-load-bearing on two axes, so it belongs in the signature: it decides
+    // whether a "Whenever you attack a player" trigger fires at all when the
+    // declaration was planeswalker- or battle-only (CR 508.3e), and it filters
+    // which (attacker, attacked target) pairs survive into the narrowed trigger
+    // event in `matching_you_attack_pairs`. A change to the field therefore moves
+    // cards between "fires" and "doesn't fire" and changes how many instances a
+    // firing produces — exactly the blast radius the parse-diff exists to show.
+    //
+    // The key is "attack target", NOT "target": `effect_details` already emits
+    // "target" for the executed effect's own target, and this is a different axis
+    // (CR 508.3a narrowing of the attack declaration, not CR 115.1 targeting).
+    if let Some(atf) = &trig.attack_target_filter {
+        d.push(("attack target".into(), fmt_attack_target_filter(atf).into()));
+    }
     if let Some(constraint) = &trig.constraint {
         d.push(("constraint".into(), fmt_trigger_constraint(constraint)));
     }
@@ -4262,6 +4346,7 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
         TC::GainedLife { minimum } => format!("gained {minimum}+ life this turn"),
         TC::LostLife => "lost life this turn".into(),
         TC::Descended => "descended this turn".into(),
+        TC::ChoseOtherRingBearer => "chose a creature other than this as your Ring-bearer".into(),
         TC::ControlsType { filter } => format!("you control {}", fmt_target(filter)),
         TC::NoSpellsCastLastTurn => "no spells cast last turn".into(),
         TC::TwoOrMoreSpellsCastLastTurn => "two or more spells cast last turn".into(),
@@ -4454,6 +4539,42 @@ fn fmt_trigger_constraint(c: &crate::types::ability::TriggerConstraint) -> Strin
         TC::EventSourceControlledBy { controller } => {
             format!("event source controlled by {}", fmt_controller(controller))
         }
+    }
+}
+
+/// Format an `AttackTargetFilter` — the attacked-target scope shared by
+/// "attacks [a player/planeswalker/battle]" triggers (CR 508.3a) and can't-attack
+/// restrictions, which are checked against the declaration in CR 508.1c. The
+/// space of legal attacked targets is CR 506.2: the defending player, the
+/// planeswalkers they control, and the battles they protect.
+///
+/// Every variant is a DISTINCT predicate and earns its own label. Collapsing
+/// `Player` into `PlayerOrPlaneswalker` would print a strictly wider predicate
+/// than the card (CR 508.3e: a player-attacks-player trigger must not fire on a
+/// planeswalker- or battle-only declaration), and `Owner`/`OwnerOrPlaneswalker`
+/// name the OWNER (CR 108.3 — the player who started the game with the card),
+/// not the controller (CR 109.4); a donated or stolen permanent has different
+/// players in those two roles. The parse-details / Alt-hover overlay is what bug
+/// triage reads, so a label weaker than the predicate reads there as an engine bug.
+fn fmt_attack_target_filter(filter: &crate::types::triggers::AttackTargetFilter) -> &'static str {
+    use crate::types::triggers::AttackTargetFilter as ATF;
+    match filter {
+        ATF::Player => "a player",
+        ATF::Planeswalker => "a planeswalker",
+        ATF::PlayerOrPlaneswalker => "a player or planeswalker",
+        ATF::Battle => "a battle",
+        // CR 108.3 vs CR 109.4: the OWNER (who started the game with the card),
+        // which need not be the current controller.
+        ATF::Owner => "its owner",
+        // CR 108.3 + CR 109.4: the owning player, plus the planeswalkers that
+        // same player controls.
+        ATF::OwnerOrPlaneswalker => "its owner or planeswalkers its owner controls",
+        // CR 310.5 + CR 506.2: battles may be attacked, so this scope covers them
+        // as well as planeswalkers — unlike `PlayerOrPlaneswalker`.
+        ATF::PlayerOrPermanents => "a player or permanents they control",
+        // CR 725.1: the monarch is a player designation, and no player is the
+        // monarch until an effect creates one.
+        ATF::Monarch => "the monarch",
     }
 }
 
@@ -11593,6 +11714,92 @@ pub fn format_semantic_audit_markdown(summary: &SemanticAuditSummary) -> String 
 #[cfg(test)]
 mod tests {
 
+    /// The coverage receipt exists so a reviewer can see a parser/semantic
+    /// change at card granularity. A formatter that drops a behavior-bearing
+    /// field silently defeats that: two predicates the runtime treats
+    /// differently render as one signature, and a real change shows as NO diff.
+    ///
+    /// Every field asserted here is consumed at runtime —
+    /// `opponent_dealt_damage_matches` takes `source` and `min_sources`
+    /// alongside `kind`, and `AllExcept` carries a nested `PlayerFilter`.
+    ///
+    /// Discriminating by construction: each group varies exactly ONE field and
+    /// asserts all renderings are pairwise distinct, so restoring any `..` that
+    /// drops that field collapses the group and fails.
+    #[test]
+    fn player_filter_signatures_keep_every_behavior_bearing_field() {
+        use crate::types::ability::{
+            DamageKindFilter, PlayerFilter, TargetFilter, TypeFilter, TypedFilter,
+        };
+
+        fn typed(t: TypeFilter) -> TargetFilter {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![t],
+                ..Default::default()
+            })
+        }
+        fn dealt(
+            kind: DamageKindFilter,
+            source: Option<TargetFilter>,
+            min_sources: u32,
+        ) -> PlayerFilter {
+            PlayerFilter::OpponentDealtDamage {
+                kind,
+                source: source.map(Box::new),
+                min_sources,
+            }
+        }
+
+        // The exact three forms that previously collapsed into one signature.
+        let any_damage = dealt(DamageKindFilter::Any, None, 1);
+        let from_creature = dealt(DamageKindFilter::Any, Some(typed(TypeFilter::Creature)), 1);
+        let three_distinct = dealt(DamageKindFilter::Any, None, 3);
+        // The source filter must be rendered by CONTENT, not merely "present".
+        let from_artifact = dealt(DamageKindFilter::Any, Some(typed(TypeFilter::Artifact)), 1);
+        // The kind selector still discriminates.
+        let combat_only = dealt(DamageKindFilter::CombatOnly, None, 1);
+
+        assert_all_distinct(&[
+            ("any damage", &any_damage),
+            ("from a creature", &from_creature),
+            ("from an artifact", &from_artifact),
+            ("3 distinct sources", &three_distinct),
+            ("combat only", &combat_only),
+        ]);
+
+        // `AllExcept` is a recursive carrier: different exclusions must differ.
+        assert_all_distinct(&[
+            (
+                "except controller",
+                &PlayerFilter::AllExcept {
+                    exclude: Box::new(PlayerFilter::Controller),
+                },
+            ),
+            (
+                "except defending player",
+                &PlayerFilter::AllExcept {
+                    exclude: Box::new(PlayerFilter::DefendingPlayer),
+                },
+            ),
+        ]);
+    }
+
+    /// Assert every rendering in `cases` is pairwise distinct, naming the pair
+    /// that collapsed. A collapsed pair is exactly the defect this guards.
+    fn assert_all_distinct(cases: &[(&str, &crate::types::ability::PlayerFilter)]) {
+        for (i, (label_a, a)) in cases.iter().enumerate() {
+            for (label_b, b) in cases.iter().skip(i + 1) {
+                let (rendered_a, rendered_b) = (fmt_player_filter(a), fmt_player_filter(b));
+                assert_ne!(
+                    rendered_a, rendered_b,
+                    "{label_a:?} and {label_b:?} are behaviorally different but \
+                     render identically as {rendered_a:?} — a real change \
+                     between them would be invisible in the coverage receipt"
+                );
+            }
+        }
+    }
+
     /// CR 113.3b / CR 113.3c + CR 109.4: the ability-kind and controller axes
     /// are independent, so `fmt_target` must render BOTH. Enumerated per-product
     /// arms could not: the trailing kind-only catch-all swallowed
@@ -11732,6 +11939,82 @@ mod tests {
             details(Some(Zone::Exile)),
             "two activation zones on the same effect are different parses and \
              must not collapse to the same sticky signature"
+        );
+    }
+
+    /// #7406 — a trigger's `attack_target_filter` must reach the parse-diff
+    /// signature.
+    ///
+    /// The field is rules-load-bearing on two axes: CR 508.3e (a "Whenever you
+    /// attack a player" trigger must NOT fire on a planeswalker- or battle-only
+    /// declaration) and the (attacker, attacked target) pair narrowing in
+    /// `matching_you_attack_pairs`. While the signature was blind to it, any
+    /// change to the field produced ZERO parse-diff rows, so reviewers got no
+    /// blast-radius visibility on exactly the cards it moves between "fires"
+    /// and "doesn't fire".
+    ///
+    /// The `None` row is #5507's requirement restated: a trigger carrying no
+    /// attacked-target scope must emit no key at all, so this addition churns
+    /// only the triggers that actually have one.
+    #[test]
+    fn attack_target_filter_reaches_parse_details() {
+        use crate::types::triggers::AttackTargetFilter;
+
+        let details = |filter: Option<AttackTargetFilter>| -> Vec<(String, String)> {
+            let mut trig = TriggerDefinition::new(TriggerMode::YouAttack);
+            trig.attack_target_filter = filter;
+            trigger_details(&trig)
+        };
+
+        // (1) `None` — no attacked-target narrowing, so no key emitted.
+        assert!(
+            !details(None).iter().any(|(k, _)| k == "attack target"),
+            "a trigger with no attacked-target scope must emit no key, so \
+             unscoped signatures stay byte-identical (#5507's requirement)"
+        );
+
+        // (2) `Some(..)` renders under its own key — distinct from the `target`
+        // that `effect_details` emits for the executed effect (CR 115.1), which
+        // is a different axis entirely.
+        let player = details(Some(AttackTargetFilter::Player));
+        assert!(
+            player
+                .iter()
+                .any(|(k, v)| k == "attack target" && v == "a player"),
+            "the attacked-target scope must render under its own key: {player:?}"
+        );
+
+        // (3) CR 508.3e: `Player` and `PlayerOrPlaneswalker` are DIFFERENT
+        // predicates — the first must not fire on a planeswalker-only
+        // declaration. Collapsing them into one signature is precisely the
+        // blindness this test exists to prevent.
+        assert_ne!(
+            player,
+            details(Some(AttackTargetFilter::PlayerOrPlaneswalker)),
+            "two attacked-target scopes are different parses and must not \
+             collapse to the same sticky signature"
+        );
+
+        // (4) Every variant earns its own label. A formatter arm that aliased
+        // two scopes would print a predicate the card does not have, and the
+        // parse-details / Alt-hover overlay is what bug triage reads.
+        let labels: std::collections::HashSet<&'static str> = [
+            AttackTargetFilter::Player,
+            AttackTargetFilter::Planeswalker,
+            AttackTargetFilter::PlayerOrPlaneswalker,
+            AttackTargetFilter::Battle,
+            AttackTargetFilter::Owner,
+            AttackTargetFilter::OwnerOrPlaneswalker,
+            AttackTargetFilter::PlayerOrPermanents,
+            AttackTargetFilter::Monarch,
+        ]
+        .iter()
+        .map(fmt_attack_target_filter)
+        .collect();
+        assert_eq!(
+            labels.len(),
+            8,
+            "every AttackTargetFilter variant must map to a distinct label: {labels:?}"
         );
     }
 

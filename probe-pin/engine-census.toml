@@ -54,7 +54,9 @@
 #   run directory and is not committed, so a reader will not find it here): FOUR of its rows (seat-pin assert
 #   hash, the `WaitingFor` variant set, the CR 603.5 producer pin, clear-site counts) are still
 #   uncovered here. This pins the INTEGRATION-venue census; the lib-venue CR 603.5 producer
-#   census is NOT pinned and remains covered by the shell drift-gate.
+#   census is NOT pinned here and anchors each producer by its enclosing function plus the
+#   construction that function mints, not by a line coordinate, and proves that discrimination
+#   in-venue against synthetic sources rather than against the tree.
 # ============================================================================================
 version = 1
 

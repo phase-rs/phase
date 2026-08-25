@@ -110,6 +110,26 @@ pub enum PlayerCounterAdditionPreview {
     Unsupported,
 }
 
+impl PlayerCounterAdditionPreview {
+    /// CR 614.17b + CR 614.17: `true` only for an actual can't-effect — a
+    /// MANDATORY `QuantityModification::Prevent` on the governing
+    /// `ReplacementEvent::AddCounter`, which `replacement::pipeline_loop`
+    /// short-circuits per CR 614.17c ahead of any replacement choice.
+    /// A player can't CHOOSE to pay a cost that includes such an event.
+    ///
+    /// Deliberately `false` for every other variant. `ChoiceRequired` (a single
+    /// optional candidate, or a CR 616.1 ordering), `Transformed` and
+    /// `Unsupported` are replacements that merely MODIFY an otherwise chosen
+    /// payment (CR 118.11: "the cost has still been paid"), so they stay
+    /// payable, park, and settle PAID via
+    /// `engine_payment_choices::resume_counter_addition_unless_payment`
+    /// (CR 118.12). Inside the engine this accessor is the single place
+    /// `PlayerCounterAdditionPreview`'s prohibition partition is decided.
+    pub fn is_prohibited(self) -> bool {
+        matches!(self, PlayerCounterAdditionPreview::Prevented)
+    }
+}
+
 /// Preview a player-counter addition through the real replacement pipeline,
 /// without mutating live game state.
 ///

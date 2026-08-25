@@ -1100,6 +1100,22 @@ fn parse_search_filter_disjunction(text: &str, ctx: &mut ParseContext) -> Option
         // Distribute that trailing predicate back onto the earlier `Typed`
         // legs via the shared leg-locality authority, which keeps inherently
         // leg-local props (keyword/name/adjective) on their originating leg.
+        //
+        // Deliberately NOT `finalize_or_disjunction`. Every segment here is
+        // parsed as a standalone filter phrase, so a type-open segment surfaces
+        // as `[TypeFilter::Card]` ("a green card", "a legendary card"),
+        // `[TypeFilter::Permanent]` ("a permanent card"), or no type filters at
+        // all ("a card named X") — see `parse_search_specialized_type_word`.
+        // `distribute_core_type_to_or` rewrites only an exactly-`[TypeFilter::
+        // Any]` leg, so on those shapes it is a no-op. What it CAN do is project
+        // one segment's core type onto another's, narrowing a standalone
+        // article-led segment to a type its own text never named.
+        //
+        // CR 208.1 + CR 208.3 correctness for those type-open legs comes from
+        // the gate itself: `leg_admits_creature_pt` fails closed on a leg that
+        // names no card type, so "a green card or a creature card with power 4
+        // or greater" leaves the green-card leg unrestricted without this
+        // grammar needing scope repair of its own.
         distribute_properties_to_or(filter)
     })
 }
@@ -5483,5 +5499,264 @@ mod tests {
             )),
             "Cmc<=N must distribute to the earlier (Creature) leg, got {first:?}"
         );
+    }
+
+    /// Assert the CR 208.3 binding on a filter produced by the REAL search
+    /// grammar: every leg is named, the P/T-bearing leg is identified by its
+    /// type filter, and every other leg must be P/T-free.
+    fn assert_pt_binds_to_creature_leg_only(filter: &TargetFilter, label: &str) {
+        let TargetFilter::Or { filters } = filter else {
+            panic!("{label}: expected an Or filter, got {filter:?}");
+        };
+        for leg in filters {
+            let TargetFilter::Typed(typed) = leg else {
+                panic!("{label}: expected every leg Typed, got {leg:?}");
+            };
+            let has_pt = typed
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::PtComparison { .. }));
+            let is_creature_leg = typed.type_filters.contains(&TypeFilter::Creature);
+            assert_eq!(
+                has_pt, is_creature_leg,
+                "{label}: CR 208.3 — only the creature leg may carry the power \
+                 restriction, got {typed:?}"
+            );
+        }
+        assert!(
+            filters.iter().any(|leg| matches!(
+                leg,
+                TargetFilter::Typed(typed) if typed.type_filters.contains(&TypeFilter::Creature)
+            )),
+            "{label}: reach-guard — a creature leg must exist, else the \
+             assertion above is vacuous: {filters:?}"
+        );
+    }
+
+    /// CR 208.1 + CR 208.3 + CR 701.23a: the search-filter disjunction grammar
+    /// inherits the type-conditional power/toughness gate with no code of its
+    /// own, because `parse_search_filter_disjunction` finishes every multi-
+    /// segment filter through the shared `distribute_properties_to_or`.
+    ///
+    /// Driven end to end from Oracle-shaped text through `parse_search_filter`
+    /// and `parse_search_library_details` — NOT by calling the shared
+    /// distributor on a hand-built filter, which would only re-test
+    /// `oracle_target`'s own unit rows and would leave this grammar's segment
+    /// splitting (`split_filter_disjunctions`) unexercised.
+    ///
+    /// Both control axes are present so the test cannot pass on a grammar that
+    /// simply stopped distributing:
+    /// * CR 202.3 (every object has a mana value): the `Cmc` shape must still
+    ///   reach every leg.
+    /// * CR 205.3d/205.3g: the `Vehicle` leg is a noncreature subtype leg, which
+    ///   the search grammar resolves to `[Artifact, Subtype("Vehicle")]`; it must
+    ///   be gated like the spelled-out artifact leg.
+    ///
+    /// The one search path that pushes props onto every `Or` branch WITHOUT the
+    /// gate — `apply_search_suffix_constraints` via
+    /// `apply_shared_leading_search_properties` — cannot carry a P/T prop:
+    /// its props come from `parse_search_leading_filter_property`, whose whole
+    /// output set is `HasSupertype`/`NotSupertype`/`HasColor`, and it is reached
+    /// only when `search_filter_all_land_subtype_branches` holds.
+    #[test]
+    fn search_disjunction_binds_pt_suffix_to_creature_leg_only() {
+        let mut ctx = ParseContext::default();
+        let filter = parse_search_filter(
+            "an artifact, enchantment, or creature card with power 4 or greater",
+            &mut ctx,
+        );
+        assert_pt_binds_to_creature_leg_only(&filter, "three-segment comma list");
+
+        // Same grammar reached through the full effect entry point, so the
+        // binding is proven where card text actually enters the parser.
+        let mut ctx = ParseContext::default();
+        let details = parse_search_library_details(
+            "search your library for an artifact, enchantment, or creature card with power 4 \
+             or greater, put it onto the battlefield, then shuffle",
+            &mut ctx,
+        );
+        assert_pt_binds_to_creature_leg_only(&details.filter, "parse_search_library_details");
+
+        // CR 205.3d + CR 205.3g: a leg named by an artifact subtype is gated too.
+        let mut ctx = ParseContext::default();
+        let filter = parse_search_filter(
+            "a creature or Vehicle card with power 4 or greater",
+            &mut ctx,
+        );
+        assert_pt_binds_to_creature_leg_only(&filter, "Vehicle subtype leg");
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("expected an Or filter, got {filter:?}");
+        };
+        assert!(
+            filters.iter().any(|leg| matches!(
+                leg,
+                TargetFilter::Typed(typed)
+                    if typed.type_filters.contains(&TypeFilter::Subtype("Vehicle".to_string()))
+            )),
+            "reach-guard: the Vehicle leg must actually be present: {filters:?}"
+        );
+
+        // CR 202.3 positive control, same grammar and same text shape.
+        let mut ctx = ParseContext::default();
+        let filter = parse_search_filter(
+            "an artifact, enchantment, or creature card with mana value 3 or less",
+            &mut ctx,
+        );
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("expected an Or filter, got {filter:?}");
+        };
+        for leg in filters {
+            let TargetFilter::Typed(typed) = leg else {
+                panic!("expected every leg Typed, got {leg:?}");
+            };
+            assert!(
+                typed.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        ..
+                    }
+                )),
+                "CR 202.3: mana value must distribute to EVERY leg, got {typed:?}"
+            );
+        }
+    }
+
+    /// The type-OPEN half of the CR 208.3 binding, which the explicit-type rows
+    /// above cannot reach.
+    ///
+    /// `parse_search_filter_disjunction` composes its `Or` from independently
+    /// parsed segments and runs no type backfill, so a segment whose text names
+    /// no card type keeps a type-open scope: "a green card" and "a legendary
+    /// card" resolve to `[TypeFilter::Card]`, "a permanent card" to
+    /// `[TypeFilter::Permanent]`, and "a card named X" to no type filters at all
+    /// (`parse_search_specialized_type_word`'s `"card"` arm returns
+    /// `TypedFilter::default()`). Under a gate keyed only on "pins a NONCREATURE
+    /// core type" every one of those legs is accepted, so the trailing "with
+    /// power 4 or greater" — printed on the *creature* noun — silently narrowed
+    /// a disjunct whose own text never mentioned creatures (CR 208.1: the
+    /// postnominal modifier binds to the noun it follows).
+    ///
+    /// Both halves of the reviewer-requested claim are asserted per row:
+    /// 1. the creature-scoped leg RETAINS the power predicate, and
+    /// 2. the generic leg acquires NEITHER the power predicate NOR a type
+    ///    restriction it did not print — the second half is what would break if
+    ///    this grammar were "fixed" by routing through `finalize_or_disjunction`,
+    ///    whose `distribute_core_type_to_or` projects one segment's core type
+    ///    onto type-open siblings.
+    ///
+    /// The `Cmc` row at the end is the discriminator in the other direction: a
+    /// gate that simply refused to distribute anything to a type-open leg would
+    /// pass rows 1-2 and fail it (CR 202.3 — every object has a mana value, so a
+    /// generic leg MUST inherit that suffix).
+    #[test]
+    fn search_disjunction_leaves_type_open_legs_unbound_by_pt_suffix() {
+        /// Locate the one leg whose `type_filters` contain `Creature`, and the
+        /// one leg that names no card type at all.
+        fn split_legs<'a>(
+            filter: &'a TargetFilter,
+            label: &str,
+        ) -> (&'a TypedFilter, &'a TypedFilter) {
+            let TargetFilter::Or { filters } = filter else {
+                panic!("{label}: expected an Or filter, got {filter:?}");
+            };
+            let mut creature = None;
+            let mut generic = None;
+            for leg in filters {
+                let TargetFilter::Typed(typed) = leg else {
+                    panic!("{label}: expected every leg Typed, got {leg:?}");
+                };
+                if typed.type_filters.contains(&TypeFilter::Creature) {
+                    creature = Some(typed);
+                } else {
+                    generic = Some(typed);
+                }
+            }
+            (
+                creature.unwrap_or_else(|| panic!("{label}: no creature leg: {filter:?}")),
+                generic.unwrap_or_else(|| panic!("{label}: no type-open leg: {filter:?}")),
+            )
+        }
+
+        let has_pt = |typed: &TypedFilter| {
+            typed
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::PtComparison { .. }))
+        };
+
+        // Each row pairs a type-open segment with the creature segment that
+        // actually carries the printed restriction. The expected type scope is
+        // spelled out so a future backfill that narrows the generic leg fails
+        // here rather than passing silently.
+        for (text, expected_open_scope) in [
+            (
+                "a green card or a creature card with power 4 or greater",
+                &[TypeFilter::Card][..],
+            ),
+            (
+                "a legendary card or a creature card with power 4 or greater",
+                &[TypeFilter::Card][..],
+            ),
+            (
+                "a permanent card or a creature card with power 4 or greater",
+                &[TypeFilter::Permanent][..],
+            ),
+            (
+                "a card named Llanowar Elves or a creature card with power 4 or greater",
+                &[][..],
+            ),
+            // Three segments, so the type-open leg sits between a pinned
+            // noncreature leg and the creature leg rather than first.
+            (
+                "an artifact, a green card, or a creature card with power 4 or greater",
+                &[TypeFilter::Card][..],
+            ),
+        ] {
+            let mut ctx = ParseContext::default();
+            let filter = parse_search_filter(text, &mut ctx);
+            let (creature, generic) = split_legs(&filter, text);
+
+            // (1) The creature leg keeps the restriction — without this the row
+            // would pass on a grammar that dropped the suffix entirely.
+            assert!(
+                has_pt(creature),
+                "{text}: the creature leg must retain the power restriction: {creature:?}"
+            );
+            // (2a) The type-open leg did not acquire it.
+            assert!(
+                !has_pt(generic),
+                "{text}: CR 208.1 — 'with power 4 or greater' binds to the creature \
+                 noun, so the type-open leg must stay unrestricted: {generic:?}"
+            );
+            // (2b) ...and did not acquire a type restriction either.
+            assert_eq!(
+                generic.type_filters, expected_open_scope,
+                "{text}: the type-open leg must keep exactly the scope its own \
+                 text named: {generic:?}"
+            );
+        }
+
+        // CR 202.3 discriminator: a type-open leg MUST still inherit a mana
+        // value suffix, so the gate above is P/T-specific and not a blanket
+        // "never distribute to a generic leg".
+        let mut ctx = ParseContext::default();
+        let filter = parse_search_filter(
+            "a green card or a creature card with mana value 3 or less",
+            &mut ctx,
+        );
+        let (creature, generic) = split_legs(&filter, "cmc control");
+        for (label, typed) in [("creature", creature), ("type-open", generic)] {
+            assert!(
+                typed.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        ..
+                    }
+                )),
+                "CR 202.3: the {label} leg must inherit the mana value suffix: {typed:?}"
+            );
+        }
     }
 }

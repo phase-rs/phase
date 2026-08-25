@@ -29,7 +29,7 @@ use crate::types::ability::{
     FaceDownProfile, FilterProp, ForEachCategoryAction, LibraryPosition, ManaSpendRestriction,
     MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter, PtValue, QuantityExpr,
     QuantityRef, RevealUntilDisposition, SpellStackToGraveyardReplacement, StaticDefinition,
-    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    TargetChoiceTiming, TargetFilter, ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -4300,6 +4300,7 @@ pub(super) fn apply_clause_continuation(
             enter_tapped,
             enters_attacking,
             reveal_verb,
+            caused_by,
         } => {
             // CR 608.2c: the "from among those cards" continuation patches the
             // earlier "look at the top N" instruction. When a transparent
@@ -4550,7 +4551,7 @@ pub(super) fn apply_clause_continuation(
                                     // selection anaphor over a single-producer
                                     // set — zone-agnostic (every member is in the
                                     // mill destination already).
-                                    caused_by: None,
+                                    caused_by,
                                 },
                                 enters_under,
                                 enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(
@@ -4585,7 +4586,7 @@ pub(super) fn apply_clause_continuation(
                                     filter: Box::new(card_filter),
                                     // Selection anaphor over the single milled
                                     // set — zone-agnostic (see the `All` arm).
-                                    caused_by: None,
+                                    caused_by,
                                 },
                                 owner_library: false,
                                 enter_transformed: false,
@@ -5679,6 +5680,7 @@ pub(super) fn parse_dig_from_among(
             (rest, true, is_reveal)
         } else if let Ok((rest, is_reveal)) = alt((
             value(false, tag::<_, _, OracleError<'_>>("put ")),
+            value(false, tag("puts ")),
             value(true, tag("reveal ")),
             value(false, tag("return ")),
         ))
@@ -5773,6 +5775,7 @@ pub(super) fn parse_dig_from_among(
             enter_tapped,
             enters_attacking,
             reveal_verb,
+            caused_by: Some(ThisWayCause::Milled),
         });
     }
 
@@ -5793,6 +5796,7 @@ pub(super) fn parse_dig_from_among(
             value(false, tag("you may put ")),
             value(false, tag("you may return ")),
             value(false, tag("put ")),
+            value(false, tag("puts ")),
             value(true, tag("reveal ")),
             value(false, tag("return ")),
         ))
@@ -5878,6 +5882,7 @@ pub(super) fn parse_dig_from_among(
             enter_tapped,
             enters_attacking,
             reveal_verb,
+            caused_by: None,
         });
     }
 
@@ -5942,6 +5947,7 @@ pub(super) fn parse_dig_from_among(
                 enter_tapped,
                 enters_attacking,
                 reveal_verb: false,
+                caused_by: None,
             });
         }
     }
@@ -7024,6 +7030,7 @@ pub(super) fn parse_followup_continuation_ast(
                 enters_attacking: false,
                 // "put one of those cards onto the battlefield" — a put, not a reveal.
                 reveal_verb: false,
+                caused_by: None,
             })
         }
         // "You may put one of those cards back on top of your library" after
@@ -7047,6 +7054,7 @@ pub(super) fn parse_followup_continuation_ast(
                 enters_attacking: false,
                 // "put one ... back on top" — a put, not a reveal.
                 reveal_verb: false,
+                caused_by: None,
             })
         }
         // "put them back in any order" after Dig means all looked-at cards
@@ -10244,6 +10252,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             })
         );
     }
@@ -10270,6 +10279,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             })
         );
     }
@@ -10301,6 +10311,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             })
         );
     }
@@ -10326,6 +10337,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             })
         );
     }
@@ -10351,6 +10363,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             })
         );
     }
@@ -10378,6 +10391,7 @@ mod tests {
                     enter_tapped: false,
                     enters_attacking: false,
                     reveal_verb: false,
+                    caused_by: None,
                 }),
                 "{text}"
             );
@@ -10629,6 +10643,30 @@ mod tests {
     }
 
     #[test]
+    fn conjugated_puts_from_among_preserves_selection_cause() {
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast(
+            "Puts each creature card from among them into your hand.",
+            &dig,
+            &mut ParseContext::default(),
+        );
+        let Some(ContinuationAst::DigFromAmong {
+            quantity,
+            filter,
+            destination,
+            caused_by,
+            ..
+        }) = result
+        else {
+            panic!("expected DigFromAmong continuation, got {result:?}");
+        };
+        assert_eq!(quantity, PutCount::All);
+        assert!(matches!(filter, TargetFilter::Typed(_)), "got {filter:?}");
+        assert_eq!(destination, Some(Zone::Hand));
+        assert_eq!(caused_by, None);
+    }
+
+    #[test]
     fn dig_any_number_from_among_lowers_to_up_to_all_seen_cards() {
         let mut defs = vec![AbilityDefinition::new(
             AbilityKind::Spell,
@@ -10653,6 +10691,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             },
             AbilityKind::Spell,
             &env,
@@ -10927,6 +10966,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             },
             AbilityKind::Spell,
             &env,
@@ -10977,6 +11017,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             },
             AbilityKind::Spell,
             &env,
@@ -11045,6 +11086,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             },
             AbilityKind::Spell,
             &env,
@@ -12074,6 +12116,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 reveal_verb: false,
+                caused_by: None,
             })
         );
     }

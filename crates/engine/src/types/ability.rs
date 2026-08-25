@@ -4277,7 +4277,7 @@ pub enum TypeFilter {
     Permanent,
     Card,
     Any,
-    /// CR 205.4b: Negation — matches objects whose type does NOT match the inner filter.
+    /// CR 205.2a + CR 205.3: Negation — matches objects whose type does NOT match the inner filter.
     /// "noncreature" → `Non(Box::new(Creature))`, "non-Human" → `Non(Box::new(Subtype("Human")))`
     Non(Box<TypeFilter>),
     /// CR 205.3: Matches objects with a specific subtype (creature type, land type, etc.).
@@ -5020,7 +5020,7 @@ pub enum FilterProp {
     /// stack object's static printed modality (`obj.modal.is_some()`), a printed
     /// characteristic present from object creation.
     Modal,
-    /// CR 205.4b: Matches objects that do NOT have a specific color.
+    /// CR 105.2: Matches objects that do NOT have a specific color.
     /// Parallel to `HasColor` — used for "nonblack", "nonwhite" in negation stacks.
     NotColor {
         color: ManaColor,
@@ -5818,6 +5818,48 @@ pub enum TargetFilter {
     /// `SpecificPlayer` vs `SpecificObject` separation.
     PlayerWhoChoseLabel {
         label: String,
+    },
+    /// CR 102.1 + CR 102.2 / CR 102.3 + CR 109.5: the player(s) satisfying an
+    /// arbitrary [`PlayerFilter`] predicate. CR 102.1 supplies the population
+    /// (the people in the game) this selects from, CR 102.2 / CR 102.3 the
+    /// `relation` axis's opponent semantics, and CR 109.5 the controller-relative
+    /// "you" every relation is measured against. (Deliberately NOT CR 109.4:
+    /// that rule governs an OBJECT's controller, which is the object-axis
+    /// mirror's business, not this variant's.)
+    ///
+    /// The PLAYER-axis mirror of [`FilterProp::ControllerMatches`], which is
+    /// itself documented as the object-axis mirror of `PlayerFilter`; this
+    /// variant completes the pair.
+    ///
+    /// Evaluated by the single-authority `game::effects::matches_player_scope`,
+    /// so every predicate `PlayerFilter` already expresses — life total
+    /// (CR 119.1), hand size (CR 402.1), controlled-permanent counts (CR 109.4),
+    /// counters (CR 122.1), attack history (CR 508.6) — becomes usable anywhere
+    /// a `TargetFilter` names a player, with no further variants.
+    ///
+    /// First consumer: `TriggerDefinition::valid_target` on a CR 508.1a attack
+    /// trigger whose attacked player carries a relative-clause predicate
+    /// ("attacks a player who has more life than you"). Per CR 603.2 that clause
+    /// is part of the TRIGGER EVENT and is checked once at declaration — which
+    /// is exactly `valid_target`'s contract
+    /// (`trigger_matchers::attack_target_matches`) and exactly why it is NOT
+    /// modelled as a `TriggerCondition`, which CR 603.4 re-checks at resolution.
+    ///
+    /// The `PlayerFilter`'s `relation` is evaluated against the TRIGGER SOURCE's
+    /// CONTROLLER, which is not always the attacking player — a player-subject
+    /// attack trigger routes the attacker into `valid_source` instead. Producers
+    /// must not assume the two coincide.
+    ///
+    /// `Box` breaks the `TargetFilter -> PlayerFilter -> ControlsCount { filter:
+    /// TargetFilter }` size cycle (same rationale as
+    /// `FilterProp::ControllerMatches` and `PlayerFilter::AllExcept`).
+    ///
+    /// FOLLOW-UP (not this change): [`TargetFilter::PlayerWhoChoseLabel`] is the
+    /// hard-coded single-predicate sibling this variant supersedes. Retiring it
+    /// needs a `PlayerFilter::ChoseLabel { label }` backed by the existing single
+    /// authority `game::players::player_last_chose_label`.
+    PlayerMatching {
+        player: Box<PlayerFilter>,
     },
     /// CR 102.1 + CR 103.1: living player seated immediately to controller's
     /// left/right; clockwise turn order, right = previous seat; resolved
@@ -16312,6 +16354,15 @@ impl TargetFilter {
                 controller: Some(_),
                 properties,
             }) => type_filters.is_empty() && properties.is_empty(),
+            // CR 102.1: PlayerMatching denotes a PLAYER population by
+            // construction — its payload is a `PlayerFilter`, evaluated only on
+            // the player axis. Decided, not defaulted: this method gates the
+            // player-subject attack branch in
+            // `trigger_matchers::matching_attack_events` and the attack anaphor
+            // rebind gate in `oracle_trigger`, and `false` here would
+            // misclassify a future "Whenever a player who … attacks"
+            // `valid_source` as an OBJECT filter, with no compile error.
+            TargetFilter::PlayerMatching { .. } => true,
             _ => false,
         }
     }
@@ -22633,6 +22684,13 @@ pub enum TriggerCondition {
     /// CR 400.7 + CR 508.1 + CR 603.4: True only when this exact source
     /// incarnation attacked during the current combat.
     SourceAttackedThisCombat,
+    /// CR 701.54a/d + CR 603.4: "if you chose a creature other than ~ as your
+    /// Ring-bearer" (Aragorn, Company Leader). True when the triggering
+    /// `GameEvent::RingTemptsYou` event's immutable `chosen_bearer` snapshot
+    /// exists and is NOT the trigger source, rather than consulting the
+    /// controller's mutable `state.ring_bearer`. This retains the trigger-time
+    /// choice if a later Ring temptation changes the current Ring-bearer.
+    ChoseOtherRingBearer,
     /// CR 702.30a: Echo intervening-if for a permanent that has not yet had
     /// its next-controller-upkeep echo payment handled.
     EchoDue,
@@ -23092,6 +23150,7 @@ impl TriggerCondition {
             TriggerCondition::GainedLife { .. }
             | TriggerCondition::LostLife
             | TriggerCondition::Descended
+            | TriggerCondition::ChoseOtherRingBearer
             | TriggerCondition::ControlsType { .. }
             | TriggerCondition::NoSpellsCastLastTurn
             | TriggerCondition::TwoOrMoreSpellsCastLastTurn
@@ -26300,8 +26359,8 @@ pub enum ContinuousModification {
     /// CR 205.4 + CR 707.9d: Add a supertype to the affected object's
     /// supertypes (e.g., Sarkhan, Soul Aflame: "it's legendary in addition
     /// to its other types"). Idempotent: pushing an already-present supertype
-    /// is a no-op. Applied at Layer 4 (CR 613.1d) because supertypes are
-    /// types per CR 205.4b.
+    /// is a no-op. Applied at Layer 4 (CR 613.1d), which covers card type,
+    /// subtype, and supertype changes alike.
     AddSupertype {
         supertype: Supertype,
     },
@@ -28042,6 +28101,72 @@ mod tests {
     use super::*;
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    /// CR 102.1 — `TargetFilter::PlayerMatching::is_player_scope()` is a DECIDED
+    /// arm, not a wildcard default.
+    ///
+    /// Adding the variant produced no compile error here (the match ends in
+    /// `_ => false`), so this pin is the only thing that records the decision.
+    /// `is_player_scope` gates the player-subject attack branch in
+    /// `trigger_matchers::matching_attack_events` and the attack-anaphor rebind
+    /// gate in `oracle_trigger`; classifying a player predicate as an OBJECT
+    /// filter there would silently mis-route a future "Whenever a player who …
+    /// attacks" `valid_source`.
+    #[test]
+    fn player_matching_is_classified_as_a_player_scope() {
+        let filter = TargetFilter::PlayerMatching {
+            player: Box::new(PlayerFilter::PlayerAttribute {
+                relation: PlayerRelation::All,
+                attr: Box::new(QuantityRef::LifeTotal {
+                    player: PlayerScope::ScopedPlayer,
+                }),
+                comparator: Comparator::GT,
+                value: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller,
+                    },
+                }),
+            }),
+        };
+        assert!(
+            filter.is_player_scope(),
+            "a PlayerFilter payload denotes a PLAYER population by construction"
+        );
+        // Contrast: a genuine object filter must stay object-scoped, so the
+        // assertion above is about PlayerMatching and not about the method
+        // answering `true` for everything.
+        assert!(!TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            ..Default::default()
+        })
+        .is_player_scope());
+    }
+
+    /// Serialization pin (no CR governs wire format): the serialized shape is
+    /// purely ADDITIVE under the existing `#[serde(tag = "type")]`, so no
+    /// existing `card-data.json` row changes and no migration is needed.
+    /// Round-trips through the boxed payload.
+    #[test]
+    fn player_matching_round_trips_through_serde() {
+        let filter = TargetFilter::PlayerMatching {
+            player: Box::new(PlayerFilter::ControlsCount {
+                relation: PlayerRelation::All,
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Land],
+                    ..Default::default()
+                }),
+                comparator: Comparator::GE,
+                count: Box::new(QuantityExpr::Fixed { value: 8 }),
+            }),
+        };
+        let json = serde_json::to_string(&filter).expect("serialize PlayerMatching");
+        assert!(
+            json.contains("\"type\":\"PlayerMatching\""),
+            "additive tagged variant, got {json}"
+        );
+        let back: TargetFilter = serde_json::from_str(&json).expect("deserialize PlayerMatching");
+        assert_eq!(back, filter);
+    }
 
     /// Row 14, degenerate `AnyOf` cases. CR 109.2: a 0- or 1-member union is not
     /// a union, and an EMPTY one is actively unsound — `characteristic_source_read`

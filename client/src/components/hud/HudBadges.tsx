@@ -5,7 +5,7 @@ import { RingBenefitsPopover } from "./RingBenefitsPopover.tsx";
 import { ManaFontIcon } from "../icons/ManaFontIcon.tsx";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 import type {
-  DungeonId,
+  DungeonRoomView,
   FamilyCollapseState,
   NextSpellModifier,
   PendingNextSpellModifier,
@@ -127,32 +127,42 @@ export function EnduringStoryBadge() {
 }
 
 interface DungeonBadgeProps {
-  dungeonName: DungeonId;
-  roomIndex: number;
+  /** Engine projection of where the venture marker sits
+   *  (`DerivedViews.dungeon_rooms`). The room's name and printed effect are
+   *  engine-authored; this component only lays them out. */
+  room: DungeonRoomView;
 }
 
-const DUNGEON_DISPLAY_NAMES: Record<DungeonId, string> = {
-  LostMineOfPhandelver: "Lost Mine",
-  DungeonOfTheMadMage: "Mad Mage",
-  TombOfAnnihilation: "Tomb",
-  Undercity: "Undercity",
-  BaldursGateWilderness: "Baldur's Gate",
-};
-
-export function DungeonBadge({ dungeonName, roomIndex }: DungeonBadgeProps) {
+export function DungeonBadge({ room }: DungeonBadgeProps) {
   const { t } = useTranslation("game");
-  const display = DUNGEON_DISPLAY_NAMES[dungeonName];
-  const room = roomIndex + 1;
+  // CR 309.4a: the marker starts on room index 0; players count from 1.
+  const position = room.room.index + 1;
+  const labelArgs = {
+    name: room.dungeon_name,
+    roomName: room.room.name,
+    room: position,
+    total: room.room_count,
+  };
+  // CR 309.4b-c: name the room and say what its room ability did. The chip has
+  // no space for either, and most rooms are entered without a prompt, so the
+  // tooltip is where a player reads them back.
+  const tooltip = [
+    t("badges.dungeonTooltip", labelArgs),
+    t("badges.dungeonRoomTooltip", labelArgs),
+    room.room.text,
+  ]
+    .filter(Boolean)
+    .join("\n");
   return (
-    <BadgeTip text={t("badges.dungeonTooltip", { name: display, room })}>
+    <BadgeTip text={tooltip}>
       <span
         role="img"
-        aria-label={t("badges.dungeonAriaLabel", { name: display, room })}
+        aria-label={t("badges.dungeonAriaLabel", labelArgs)}
         className="relative inline-flex h-6 shrink-0 items-center gap-1 overflow-hidden rounded-full bg-violet-500/85 px-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-violet-50 ring-1 ring-violet-300/70 shadow-[0_0_12px_rgba(139,92,246,0.45)]"
       >
         <span aria-hidden className="text-[12px] leading-none drop-shadow-[0_1px_1px_rgba(0,0,0,0.5)]">🏰</span>
-        <span className="relative truncate">{display}</span>
-        <span className="relative tabular-nums text-white">{room}</span>
+        <span className="relative truncate">{room.dungeon_name}</span>
+        <span className="relative tabular-nums text-white">{position}/{room.room_count}</span>
       </span>
     </BadgeTip>
   );

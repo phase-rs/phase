@@ -29,6 +29,8 @@ use probe_pin::{
     Abort, CheckOutcome, DriftCause, HarnessMarker, Instrument, InstrumentChange, NothingRan,
 };
 
+mod common;
+
 // ------------------------------------------------------------------ helpers
 
 fn fixtures() -> PathBuf {
@@ -1027,6 +1029,10 @@ fn every_write_of_the_pinned_file_routes_through_splice() {
 /// GUARD's shape measured on a synthetic pair, not a live escape — a found hole is a lower
 /// bound, and this one is "not reached today", not "cannot be reached".
 #[test]
+#[cfg_attr(
+    not(unix),
+    ignore = "creates a symlink; off Unix that needs Developer Mode (Windows) or has no API at all"
+)]
 fn workspace_root_is_canonical() {
     let root = target::workspace_root().expect("workspace root");
     assert_eq!(
@@ -1041,7 +1047,7 @@ fn workspace_root_is_canonical() {
     std::fs::create_dir_all(real.join("crates")).unwrap();
     std::fs::write(real.join("crates/m.toml"), "version = 1\n").unwrap();
     let link = base.path().join("link");
-    std::os::unix::fs::symlink(&real, &link).unwrap();
+    common::symlink(&real, &link).unwrap();
 
     let manifest_real = link.join("crates/m.toml").canonicalize().unwrap();
     assert!(
@@ -2223,13 +2229,17 @@ fn manifest_outside_the_workspace_is_refused() {
 /// where a test can drive it: arm 1 below is the escaping pair, and it is refused by the shape
 /// this replaced.
 #[test]
+#[cfg_attr(
+    not(unix),
+    ignore = "creates a symlink; off Unix that needs Developer Mode (Windows) or has no API at all"
+)]
 fn manifest_rel_compares_realpaths() {
     let base = tempfile::tempdir().unwrap();
     let real = base.path().join("real");
     std::fs::create_dir_all(real.join("crates")).unwrap();
     std::fs::write(real.join("crates/m.toml"), "version = 1\n").unwrap();
     let link = base.path().join("link");
-    std::os::unix::fs::symlink(&real, &link).unwrap();
+    common::symlink(&real, &link).unwrap();
 
     // arm 1 — the phenomenon: a canonicalized manifest path shares no prefix with a root
     // reached through a symlink, so the lexical comparison rejects a manifest that is inside it
@@ -2673,6 +2683,10 @@ fn env_surface_refuses_probe_pin_owned_keys() {
 /// is the in-tree pattern this reuses, in both directions — into the workspace here, and into
 /// the scratch dir in `mutant_destination_cannot_escape_the_scratch_dir`.
 #[test]
+#[cfg_attr(
+    not(unix),
+    ignore = "creates symlinks; off Unix that needs Developer Mode (Windows) or has no API at all"
+)]
 fn path_surface_is_realpath_containment() {
     let base = tempfile::tempdir().unwrap();
     let ws = base.path().join("ws");
@@ -2680,8 +2694,8 @@ fn path_surface_is_realpath_containment() {
     std::fs::create_dir_all(ws.join("crates")).unwrap();
     std::fs::create_dir_all(&outside).unwrap();
     std::fs::write(outside.join("victim.rs"), "OUTSIDE\n").unwrap();
-    std::os::unix::fs::symlink(&outside, ws.join("crates/link")).unwrap();
-    std::os::unix::fs::symlink(outside.join("does_not_exist"), ws.join("crates/dangling")).unwrap();
+    common::symlink(&outside, ws.join("crates/link")).unwrap();
+    common::symlink(outside.join("does_not_exist"), ws.join("crates/dangling")).unwrap();
 
     // arm 1 — the phenomenon: every escaping key below passes the LEXICAL check
     for key in [
@@ -2757,6 +2771,10 @@ fn path_surface_is_realpath_containment() {
 /// neither says what the join resolves to. Arm 1 exhibits the escape — a symlink in the scratch
 /// dir named as a plain probe id — writing a mutant straight into the measured workspace.
 #[test]
+#[cfg_attr(
+    not(unix),
+    ignore = "creates a symlink; off Unix that needs Developer Mode (Windows) or has no API at all"
+)]
 fn mutant_destination_cannot_escape_the_scratch_dir() {
     let base = tempfile::tempdir().unwrap();
     let ws = base.path().join("ws");
@@ -2771,7 +2789,7 @@ fn mutant_destination_cannot_escape_the_scratch_dir() {
     assert!(manifest::is_plain_name(&p.id) && manifest::is_workspace_relative("f.txt"));
 
     // arm 1 — the phenomenon, with the guard's own base symlinked into the workspace
-    std::os::unix::fs::symlink(&ws, scratch.join("P1_plain_name")).unwrap();
+    common::symlink(&ws, scratch.join("P1_plain_name")).unwrap();
     let e = mutate::apply(&p, &ws, &scratch).unwrap_err();
     assert!(
         e.to_string()

@@ -9302,7 +9302,7 @@ fn trigger_you_cast_legendary_creature_spell() {
     );
 }
 
-/// CR 205.2a + CR 205.4b + CR 601.2: "whenever you cast a noncreature
+/// CR 205.2a + CR 601.2: "whenever you cast a noncreature
 /// artifact spell" — Non(Creature) + Artifact conjunction.
 #[test]
 fn trigger_you_cast_noncreature_artifact_spell() {
@@ -27250,7 +27250,7 @@ fn assert_reanimator_chain(oracle: &str, card_name: &str, expect_tapped: bool) {
         "{card_name}: enter_tapped state ({enter_tapped:?})",
     );
 
-    // Node 2: GenericEffect keyword swap referencing OriginalSource, no duration.
+    // Node 2: GenericEffect keyword swap referencing OriginalSource, stamped to Duration::Permanent (CR 611.2a).
     let generic = root
         .sub_ability
         .as_deref()
@@ -27267,8 +27267,9 @@ fn assert_reanimator_chain(oracle: &str, card_name: &str, expect_tapped: bool) {
         );
     };
     assert_eq!(
-        *duration, None,
-        "{card_name}: keyword-swap grant has no stated duration"
+        *duration,
+        Some(Duration::Permanent),
+        "{card_name}: keyword-swap grant is stamped to Duration::Permanent (CR 611.2a)"
     );
     assert_eq!(
         static_abilities.len(),
@@ -27469,7 +27470,7 @@ fn necromancy_etb_lowers_to_reanimator_grant_chain_640() {
     );
 
     // Node 2: GenericEffect grants (not swaps) — AddSubtype{Aura} + AddKeyword,
-    // referencing OriginalSource, no duration.
+    // referencing OriginalSource, stamped to Duration::Permanent (CR 611.2a).
     let generic = root
         .sub_ability
         .as_deref()
@@ -27485,7 +27486,11 @@ fn necromancy_etb_lowers_to_reanimator_grant_chain_640() {
             generic.effect
         );
     };
-    assert_eq!(*duration, None, "Necromancy: grant has no stated duration");
+    assert_eq!(
+        *duration,
+        Some(Duration::Permanent),
+        "Necromancy: grant is stamped to Duration::Permanent (CR 611.2a)"
+    );
     assert_eq!(static_abilities.len(), 1, "Necromancy: one grant static");
     let sd = &static_abilities[0];
     assert_eq!(
@@ -29878,4 +29883,75 @@ fn whole_event_threshold_effect_does_not_read_event_context_amount() {
         execute_reads_event_context_amount(&reads_amount),
         "detector must fire on an effect that DOES read the event amount"
     );
+}
+
+/// Issue #7795 (Aragorn, Company Leader): the Ring-tempts trigger's effect —
+/// "put your choice of a counter from among first strike, vigilance,
+/// deathtouch, and lifelink on ~" — must lower to the counter-kind choice, not
+/// to `Unimplemented`. The standalone effect parser already handles this
+/// clause (`choose_one_of_detects_from_among_counter_choice`); this pins the
+/// TRIGGER path reaching the same reader.
+#[test]
+fn ring_tempts_put_choice_from_among_lowers_to_counter_choice() {
+    use crate::types::counter::CounterType;
+    use crate::types::keywords::KeywordKind;
+
+    const ORACLE: &str = "Whenever the Ring tempts you, if you chose a creature other than Aragorn as your Ring-bearer, put your choice of a counter from among first strike, vigilance, deathtouch, and lifelink on Aragorn.";
+
+    let parsed = parse_oracle_text(
+        ORACLE,
+        "Aragorn, Company Leader",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Noble".to_string()],
+    );
+    assert_eq!(
+        parsed.triggers.len(),
+        1,
+        "parsed triggers: {:?}",
+        parsed.triggers
+    );
+    let trigger = &parsed.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::RingTemptsYou);
+    // CR 603.4: the intervening "if you chose a creature other than ~ as your
+    // Ring-bearer" must survive as a trigger-level condition — dropping it
+    // would fire the counter choice even when Aragorn himself is chosen.
+    assert_eq!(
+        trigger.condition,
+        Some(TriggerCondition::ChoseOtherRingBearer),
+        "intervening-if must lower to ChoseOtherRingBearer"
+    );
+
+    fn find_choice(def: &AbilityDefinition) -> Option<&Vec<AbilityDefinition>> {
+        if let Effect::ChooseOneOf { branches, .. } = &*def.effect {
+            return Some(branches);
+        }
+        if let Some(sub) = def.sub_ability.as_deref() {
+            return find_choice(sub);
+        }
+        None
+    }
+
+    let execute = trigger.execute.as_ref().expect("trigger execute");
+    let branches = find_choice(execute).unwrap_or_else(|| {
+        panic!(
+            "expected a ChooseOneOf in the trigger effect chain, got {:?}",
+            execute
+        )
+    });
+    let expected = [
+        KeywordKind::FirstStrike,
+        KeywordKind::Vigilance,
+        KeywordKind::Deathtouch,
+        KeywordKind::Lifelink,
+    ];
+    assert_eq!(branches.len(), expected.len());
+    for (branch, kind) in branches.iter().zip(expected) {
+        match &*branch.effect {
+            Effect::PutCounter { counter_type, .. } => {
+                assert_eq!(counter_type, &CounterType::Keyword(kind));
+            }
+            other => panic!("expected PutCounter branch, got {other:?}"),
+        }
+    }
 }

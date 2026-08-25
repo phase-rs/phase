@@ -373,7 +373,11 @@
     "sideboardGame": "Banquillo — Partida {{number}}",
     "sideboardHint": "Haz cambios en el banquillo y luego envía los datos. Tu selección está disponible a continuación.",
     "submitSideboard": "Enviar banquillo",
-    "preparingNext": "Preparando la siguiente partida..."
+    "preparingNext": "Preparando la siguiente partida...",
+    "hideOverlay": "Ocultar esta pantalla",
+    "showOverlay": "Mostrar esta pantalla",
+    "hiddenNotice": "El banquillo sigue abierto para esta partida.",
+    "hiddenNoticePlayDraw": "Aún queda por elegir entre jugar o robar en esta partida."
   },
   "podComplete": {
     "title": "Draft completado",

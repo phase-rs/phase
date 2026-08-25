@@ -291,8 +291,8 @@ export function OpponentHud({
               {opponentDesignations.hasInitiative ? <InitiativeBadge /> : null}
               {opponentDesignations.hasCityBlessing ? <CityBlessingBadge /> : null}
               {opponentDesignations.hasEnduringStory ? <EnduringStoryBadge /> : null}
-              {opponentDesignations.activeDungeon ? (
-                <DungeonBadge dungeonName={opponentDesignations.activeDungeon} roomIndex={opponentDesignations.currentRoom} />
+              {opponentDesignations.dungeonRoom ? (
+                <DungeonBadge room={opponentDesignations.dungeonRoom} />
               ) : null}
               {isOpponentPhasedOut ? <StatusBadge label={t("player.phasedOut")} tone="neutral" /> : null}
               {opponentDesignations.ringLevel > 0 ? (
@@ -628,7 +628,7 @@ function OpponentTab({
   // Hoisted above the early return (rules-of-hooks).
   const designations = usePlayerDesignations(playerId);
 
-  // Player-attached Auras (Curses, Faith's Fetters, Dictate of Kruphix…).
+  // Player-attached Auras (Curses, Paradox Haze — anything with `Enchant player`).
   // Surfaced as a corner badge so it stays visible in both density modes and
   // never competes with the inline `statusCluster` for width on 3-4 player
   // rails. Hover → portaled `AurasHoverPreview`
@@ -748,8 +748,8 @@ function OpponentTab({
       {designations.hasInitiative ? <InitiativeBadge /> : null}
       {designations.hasCityBlessing ? <CityBlessingBadge /> : null}
       {designations.hasEnduringStory ? <EnduringStoryBadge /> : null}
-      {designations.activeDungeon ? (
-        <DungeonBadge dungeonName={designations.activeDungeon} roomIndex={designations.currentRoom} />
+      {designations.dungeonRoom ? (
+        <DungeonBadge room={designations.dungeonRoom} />
       ) : null}
       {designations.ringLevel > 0 ? (
         <CounterBadge
