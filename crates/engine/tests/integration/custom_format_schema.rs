@@ -189,6 +189,27 @@ fn custom_format_registry_is_empty_in_phase_1a() {
 }
 
 #[test]
+fn wish_outside_game_scope_default_is_the_deck_construction_policy_not_a_cr_mandate() {
+    // Pins the intended policy this axis encodes: PostM10SideboardOnly is
+    // the default (modern deck-construction/tournament restriction, CR
+    // 100.4), distinct from PreM10ReachesExile (the historical templating
+    // difference). Neither CR 400.11 nor CR 400.11a themselves restrict
+    // "outside the game" to only the sideboard — see the type's doc
+    // comment — so this test exists to catch a future change accidentally
+    // flipping which variant is the default, since nothing else enforces
+    // it yet (Phase 2cd wires the real behavior).
+    use engine::types::custom_format::WishOutsideGameScope;
+    assert_eq!(
+        WishOutsideGameScope::default(),
+        WishOutsideGameScope::PostM10SideboardOnly
+    );
+    assert_ne!(
+        WishOutsideGameScope::default(),
+        WishOutsideGameScope::PreM10ReachesExile
+    );
+}
+
+#[test]
 fn game_format_from_str_display_roundtrip_builtins() {
     let all = [
         GameFormat::Standard,

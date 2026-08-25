@@ -74,13 +74,22 @@ pub enum CombatDamageTiming {
 /// Scope for "Wish"-style effects that fetch a card from outside the game.
 /// No single Comprehensive Rules number governs this generically — each
 /// Wish-effect card's own Oracle text defines its behavior, against the
-/// general "outside the game" zone concept (CR 100.4, CR 108.3). Variant
-/// names match `docs/proposals/custom-format-engine/PLAN.md`'s canonical
-/// schema exactly. Schema only in this phase.
+/// general "outside the game" zone concept (CR 400.11: an object is outside
+/// the game if it isn't in any of the game's zones; CR 400.11a: sideboard
+/// cards are outside the game — one instance of that general concept, not
+/// an exhaustive list of every way to be outside the game). Variant names
+/// match `docs/proposals/custom-format-engine/PLAN.md`'s canonical schema
+/// exactly. Schema only in this phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum WishOutsideGameScope {
-    /// Modern CR 400.11/400.11a: "outside the game" is not a zone; only the
-    /// sideboard is reachable.
+    /// Modern deck-construction/tournament policy (CR 100.4: sideboard
+    /// rules and restrictions are set by the Magic: The Gathering
+    /// Tournament Rules), not a Comprehensive Rules mandate: in a modern,
+    /// sanctioned constructed deck the registered sideboard is the only
+    /// legitimate "outside the game" zone a Wish effect can retrieve from,
+    /// because no current card creates any other one — older templating
+    /// that removed cards from the game (see `PreM10ReachesExile`) has been
+    /// replaced by exile.
     #[default]
     PostM10SideboardOnly,
     /// Pre-M10: a Wish could retrieve an owned card that had been removed
