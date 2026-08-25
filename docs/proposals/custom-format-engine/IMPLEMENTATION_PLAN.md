@@ -63,24 +63,37 @@ the charter:
   dispatch functions) that an earlier pass of this charter didn't carry
   forward into Phase 1a's file list. They're compiler-forced the moment the
   `Custom` variant exists, so they had to land in the same commit.
-- **`sideboard_policy()` and `default_deck_copy_limit()` do not panic for
-  `Custom`.** The original sketch had them (along with `uses_commander()`
-  and `for_format()`) permanently `unreachable!()`, on the assumption that a
-  bare `GameFormat` genuinely can't answer them without the resolved
-  `FormatConfig`. That's true, but both are directly reachable from
-  already-shipped `engine-wasm` exports with attacker-controlled input the
-  moment `GameFormat::Custom` deserializes — before any legitimate UI to
-  construct one exists. Both now return a disclosed, fail-closed fallback
-  (`Forbidden` / `UpTo(1)`) instead. `for_format()` needed the same
-  treatment once review on #7818 pointed out it's a public factory
-  reachable with any parsed `GameFormat` — it now returns `Result` instead
-  of panicking. `uses_commander()` alone stays permanently `unreachable!()`
-  — but only after every caller that could reach it with a bare `Custom`
-  value was found and migrated to a resolved boolean instead (see below);
-  the earlier claim here that this was already true "once the
-  deck-validation dispatch functions honestly reject Custom up front" was
-  wrong — three ordinary game-flow files reached it by a different path
-  entirely, unrelated to deck validation.
+- **None of the seven exhaustive-match methods panic for `Custom` anymore.**
+  The original sketch had `sideboard_policy()`/`default_deck_copy_limit()`
+  return a disclosed, fail-closed fallback (`Forbidden` / `UpTo(1)`), and
+  `uses_commander()`/`for_format()` permanently `unreachable!()`, on the
+  assumption that a bare `GameFormat` genuinely can't answer any of them
+  without the resolved `FormatConfig` — true, but `sideboard_policy()` and
+  `default_deck_copy_limit()` are directly reachable from already-shipped
+  `engine-wasm` exports with attacker-controlled input the moment
+  `GameFormat::Custom` deserializes, before any legitimate UI to construct
+  one exists, so a disclosed fallback was the right call for those two.
+  `for_format()` and `uses_commander()` are different: both are public
+  queries a caller could hold any `GameFormat` for (including one parsed
+  straight from untrusted input via `FromStr`), and neither has a safe
+  fallback value to disclose — a Custom format can legitimately resolve to
+  a commander-using configuration or genuinely different structural rules,
+  so guessing `false`/a default `FormatConfig` would be silently wrong, not
+  safe. Both now return `Result` instead of panicking, matching each
+  other's pattern. `uses_commander()` additionally needed every real-world
+  caller found and migrated to the resolved `FormatConfig.uses_commander`
+  boolean first (see below) — the earlier claim here that "nothing
+  reachable can call it with Custom once deck-validation rejects Custom up
+  front" was wrong; three ordinary game-flow files reached it by a
+  different path entirely, unrelated to deck validation. Once those
+  callers were fixed, the method itself was made fallible too, since being
+  safe for *today's* callers doesn't make it a safe *public* contract for
+  the next one. `CommanderEligibilityRule::from_source_format()` had the
+  identical problem (no production caller yet, but still a `pub fn`
+  `unreachable!()` for `Custom`) and got the same fix — it now returns
+  `Result<Option<Self>, FormatConfigError>`, keeping `Ok(None)` ("this
+  built-in has no commander-eligibility concept") distinct from `Err`
+  ("Custom has no source format to read").
 
 Review on #7818 also caught that this schema's `LegacyRuleSet` axis enums
 had drifted from `PLAN.md`'s canonical variant names (an artifact of this
