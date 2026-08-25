@@ -127,17 +127,22 @@ pub enum CommanderEligibilityRule {
 impl CommanderEligibilityRule {
     /// Maps a BUILT-IN source `GameFormat` (the format a custom format is
     /// being modeled after) to the eligibility rule it should reuse.
-    /// Exhaustive over every `GameFormat` variant. `Custom` panics: this
-    /// function's contract is that `format` names a built-in — a bare
-    /// `GameFormat::Custom(id)` has no "source format" of its own to read.
-    pub fn from_source_format(format: GameFormat) -> Option<Self> {
+    /// `Ok(None)` means the built-in genuinely has no commander-eligibility
+    /// concept (e.g. Standard, Limited); `Ok(Some(rule))` names the rule a
+    /// commander-style built-in uses. `Err` for `GameFormat::Custom`: this
+    /// function's contract is that `format` names a built-in a custom format
+    /// is modeled after, and a bare `Custom(id)` has no "source format" of
+    /// its own to read — that is a distinct condition from "this built-in
+    /// has no commander concept," so it is not collapsed into the same
+    /// `None` a caller would otherwise have to disambiguate from context.
+    pub fn from_source_format(format: GameFormat) -> Result<Option<Self>, FormatConfigError> {
         match format {
             GameFormat::Commander | GameFormat::DuelCommander | GameFormat::PauperCommander => {
-                Some(Self::Standard)
+                Ok(Some(Self::Standard))
             }
-            GameFormat::TinyLeaders => Some(Self::TinyLeaders),
-            GameFormat::Oathbreaker => Some(Self::OathbreakerSignatureSpell),
-            GameFormat::Brawl | GameFormat::HistoricBrawl => Some(Self::BrawlColorIdentity),
+            GameFormat::TinyLeaders => Ok(Some(Self::TinyLeaders)),
+            GameFormat::Oathbreaker => Ok(Some(Self::OathbreakerSignatureSpell)),
+            GameFormat::Brawl | GameFormat::HistoricBrawl => Ok(Some(Self::BrawlColorIdentity)),
             GameFormat::Standard
             | GameFormat::Limited
             | GameFormat::Pioneer
@@ -152,12 +157,11 @@ impl CommanderEligibilityRule {
             | GameFormat::TwoHeadedGiant
             | GameFormat::Archenemy
             | GameFormat::Planechase
-            | GameFormat::Momir => None,
-            GameFormat::Custom(_) => {
-                unreachable!(
-                    "from_source_format: source must be a built-in GameFormat, never Custom"
-                )
-            }
+            | GameFormat::Momir => Ok(None),
+            GameFormat::Custom(id) => Err(FormatConfigError(format!(
+                "from_source_format: source must be a built-in GameFormat, never Custom({})",
+                id.0
+            ))),
         }
     }
 }

@@ -93,16 +93,17 @@ pub fn signature_spell_selection_policy(
 /// the main deck into the dedicated companion slot. Candidate evaluation uses
 /// the same typed predicate as pregame reveal validation.
 pub fn companion_candidates(db: &CardDatabase, request: &DeckCompatibilityRequest) -> Vec<String> {
-    // `GameFormat::uses_commander()` deliberately panics for `Custom` (a bare
+    // `GameFormat::uses_commander()` returns `Err` for `Custom` (a bare
     // GameFormat cannot resolve it — see types::format). `selected_format`
     // arrives from an untrusted request (this function is exposed directly
-    // via engine-wasm's `companion_candidates_js`), so Custom must be
-    // excluded before `uses_commander()` can run. No companion-candidate
-    // resolution exists for Custom formats yet, so treating it the same as
-    // any other non-commander format (empty result) is the honest answer.
+    // via engine-wasm's `companion_candidates_js`). No companion-candidate
+    // resolution exists for Custom formats yet, so treating an `Err`/absent
+    // format the same as any other non-commander format (empty result) is
+    // the honest answer.
     let uses_commander = request
         .selected_format
-        .is_some_and(|format| !matches!(format, GameFormat::Custom(_)) && format.uses_commander());
+        .and_then(|format| format.uses_commander().ok())
+        .unwrap_or(false);
     if !uses_commander {
         return Vec::new();
     }
@@ -833,10 +834,13 @@ fn validate_commander_companion(
     // `format` here is always a real Commander/Brawl-family built-in — this
     // function is only ever dispatched from evaluate_commander_with_format,
     // evaluate_brawl, and quick_commander_check, each already gated to a
-    // guaranteed non-Custom format — so calling .uses_commander() directly
-    // is safe.
-    let starting = companion_starting_deck(&main, &commanders, format.uses_commander());
-    if !is_eligible_companion(&companion, &starting, &commanders, format.uses_commander()) {
+    // guaranteed non-Custom format — so `.uses_commander()` is guaranteed
+    // `Ok` here.
+    let uses_commander = format
+        .uses_commander()
+        .expect("validate_commander_companion is only dispatched for a built-in format");
+    let starting = companion_starting_deck(&main, &commanders, uses_commander);
+    if !is_eligible_companion(&companion, &starting, &commanders, uses_commander) {
         reasons.push(format!(
             "{companion_name}: not a legal companion for this starting deck"
         ));
@@ -1900,7 +1904,7 @@ fn evaluate_selected_format_summary(
         return (None, Vec::new(), BTreeSet::new());
     };
 
-    // `GameFormat::uses_commander()` deliberately panics for `Custom` (a bare
+    // `GameFormat::uses_commander()` returns `Err` for `Custom` (a bare
     // GameFormat cannot resolve it — see types::format), and the companion /
     // signature-spell pre-guards below call it. `selected_format` arrives from
     // an untrusted request, so Custom must be answered before those guards run.
@@ -1911,8 +1915,11 @@ fn evaluate_selected_format_summary(
             BTreeSet::new(),
         );
     }
+    let uses_commander = format
+        .uses_commander()
+        .expect("format is guaranteed non-Custom by the preceding check");
 
-    if !format.uses_commander() && !request.companion.is_empty() {
+    if !uses_commander && !request.companion.is_empty() {
         return (
             Some(false),
             vec![format!(
@@ -1997,7 +2004,7 @@ fn evaluate_selected_format_summary(
         // let an unvalidated custom deck reach game-init) or an
         // incompatible() framed as if the deck failed a real rules check.
         // Reached only for exhaustiveness — the early guard above answers
-        // Custom before `uses_commander()` can panic on it.
+        // Custom before `uses_commander()` would return `Err` for it.
         GameFormat::Custom(_) => {
             QuickCheckResult::incompatible(CUSTOM_FORMAT_UNSUPPORTED.to_string())
         }
@@ -2318,12 +2325,15 @@ fn evaluate_selected_format(
     };
 
     // See `evaluate_selected_format_summary`: Custom must be answered before
-    // the `uses_commander()`-calling pre-guards, which panic for Custom.
+    // the `uses_commander()`-calling pre-guards, which return `Err` for it.
     if matches!(format, GameFormat::Custom(_)) {
         return (Some(false), vec![CUSTOM_FORMAT_UNSUPPORTED.to_string()]);
     }
+    let uses_commander = format
+        .uses_commander()
+        .expect("format is guaranteed non-Custom by the preceding check");
 
-    if !format.uses_commander() && !request.companion.is_empty() {
+    if !uses_commander && !request.companion.is_empty() {
         return (
             Some(false),
             vec![format!(

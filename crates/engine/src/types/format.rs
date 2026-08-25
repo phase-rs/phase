@@ -586,13 +586,25 @@ impl GameFormat {
     /// `commander_damage_threshold`. The frontend consumes the derived
     /// `FormatConfig::uses_commander` field rather than re-listing the
     /// commander-style variants client-side.
-    pub fn uses_commander(self) -> bool {
+    ///
+    /// Returns `Err` for `GameFormat::Custom` rather than panicking or
+    /// guessing `false`: this is a public query, callable with any
+    /// `GameFormat` a caller holds — including one parsed straight from
+    /// untrusted input, since `GameFormat::from_str` accepts any
+    /// `"Custom:<u16>"` string. A bare `GameFormat` carries no
+    /// `CustomFormatRules` to answer this from, and a Custom format can
+    /// legitimately resolve to a commander-using configuration, so `false`
+    /// would be a silently wrong answer, not a safe default. Callers that
+    /// might see a Custom format from an external source must handle the
+    /// rejection; callers with a resolved `FormatConfig` should read its
+    /// `uses_commander` field instead of calling this at all.
+    pub fn uses_commander(self) -> Result<bool, FormatConfigError> {
         match self {
             GameFormat::Commander
             | GameFormat::DuelCommander
             | GameFormat::PauperCommander
             | GameFormat::Brawl
-            | GameFormat::HistoricBrawl => true,
+            | GameFormat::HistoricBrawl => Ok(true),
             GameFormat::Standard
             | GameFormat::Limited
             | GameFormat::Pioneer
@@ -609,10 +621,12 @@ impl GameFormat {
             | GameFormat::TwoHeadedGiant
             | GameFormat::Archenemy
             | GameFormat::Planechase
-            | GameFormat::Momir => false,
-            GameFormat::Custom(_) => unreachable!(
-                "uses_commander: read FormatConfig.uses_commander instead — GameFormat alone cannot resolve this for Custom"
-            ),
+            | GameFormat::Momir => Ok(false),
+            GameFormat::Custom(id) => Err(FormatConfigError(format!(
+                "uses_commander cannot resolve ad-hoc Custom format {} — read \
+                 FormatConfig.uses_commander from the resolved config instead",
+                id.0
+            ))),
         }
     }
 
@@ -1602,7 +1616,7 @@ mod tests {
             SideboardPolicy::Forbidden
         );
         assert!(GameFormat::Oathbreaker.grants_free_first_mulligan());
-        assert!(!GameFormat::Oathbreaker.uses_commander());
+        assert!(!GameFormat::Oathbreaker.uses_commander().unwrap());
         assert_eq!(GameFormat::Oathbreaker.legality_format(), None);
     }
 
@@ -1785,7 +1799,7 @@ mod tests {
         // `FormatConfig::uses_commander` field, and the existence of a
         // commander-damage threshold must all agree for every variant.
         for meta in GameFormat::registry() {
-            let expected = meta.format.uses_commander();
+            let expected = meta.format.uses_commander().unwrap();
             assert_eq!(
                 meta.default_config.uses_commander, expected,
                 "{:?}: registry default disagrees with predicate",
@@ -1810,7 +1824,7 @@ mod tests {
         // Variants not in the user-facing registry still respect the invariant.
         for format in [GameFormat::TwoHeadedGiant, GameFormat::Limited] {
             let config = FormatConfig::for_format(format).unwrap();
-            assert_eq!(config.uses_commander, format.uses_commander());
+            assert_eq!(config.uses_commander, format.uses_commander().unwrap());
             assert_eq!(config.supplies_fixed_deck, format.supplies_fixed_deck());
         }
     }

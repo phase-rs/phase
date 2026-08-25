@@ -302,10 +302,21 @@ fn commander_eligibility_rule_from_source_format_covers_every_builtin() {
     for (format, expected) in cases {
         assert_eq!(
             CommanderEligibilityRule::from_source_format(format),
-            expected,
+            Ok(expected),
             "{format:?}"
         );
     }
+}
+
+#[test]
+fn commander_eligibility_rule_from_source_format_rejects_custom_without_panicking() {
+    // The maintainer's review found this public function still panicked on
+    // GameFormat::Custom, a value any external caller can hold. Confirms it
+    // now returns a typed error instead of terminating.
+    assert!(
+        CommanderEligibilityRule::from_source_format(GameFormat::Custom(CustomFormatId(1)))
+            .is_err()
+    );
 }
 
 #[test]
@@ -366,6 +377,20 @@ fn custom_format_sideboard_policy_returns_disclosed_fallback_not_panic() {
         GameFormat::Custom(CustomFormatId(1)).sideboard_policy(),
         SideboardPolicy::Forbidden
     );
+}
+
+#[test]
+fn custom_format_uses_commander_rejects_without_panicking() {
+    // Unlike sideboard_policy/default_deck_copy_limit, uses_commander has no
+    // safe disclosed-fallback value: a Custom format can legitimately
+    // resolve to a commander-using configuration, so `false` would be a
+    // silently wrong answer rather than a safe default. This is a public
+    // query callable with any GameFormat, including one parsed straight
+    // from untrusted input (GameFormat::from_str accepts any
+    // "Custom:<u16>" string) — it must return a typed error, not panic.
+    assert!(GameFormat::Custom(CustomFormatId(1))
+        .uses_commander()
+        .is_err());
 }
 
 #[test]
