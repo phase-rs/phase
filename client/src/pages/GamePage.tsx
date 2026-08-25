@@ -147,7 +147,7 @@ import { DisconnectChoiceDialog } from "../components/hud/DisconnectChoiceDialog
 import { PlayerEnchantmentsDialog } from "../components/hud/PlayerEnchantmentsDialog.tsx";
 import { AttachmentFan } from "../components/board/AttachmentFan.tsx";
 import { PausedBanner } from "../components/chrome/PausedBanner.tsx";
-import type { P2PAdapterEvent } from "../adapter/p2p-adapter.ts";
+import { P2PHostAdapter, type P2PAdapterEvent } from "../adapter/p2p-adapter.ts";
 import { WebSocketAdapter } from "../adapter/ws-adapter.ts";
 import type { WsAdapterEvent } from "../adapter/ws-adapter.ts";
 import { MANA_PAYMENT_WAITING_FOR_TYPES } from "../game/waitingForRegistry.ts";
@@ -1037,6 +1037,9 @@ function GamePageContent({
       | null;
     void adapter?.kickPlayer?.(pid);
   }, []);
+  const handleResumeP2P = useCallback(() => {
+    if (adapter instanceof P2PHostAdapter) adapter.requestResume();
+  }, [adapter]);
 
   // Memoize the HUD elements passed to GameBoard. GameBoard is wrapped in
   // React.memo, which shallow-compares props; without stable element
@@ -1733,7 +1736,11 @@ function GamePageContent({
       )}
 
       {/* P2P pause banner — visible to everyone while paused. */}
-      <PausedBanner isVisible={pauseReason !== null} reason={pauseReason ?? ""} />
+      <PausedBanner
+        isVisible={pauseReason !== null}
+        reason={pauseReason ?? ""}
+        onResume={isP2PHost && adapter instanceof P2PHostAdapter ? handleResumeP2P : undefined}
+      />
 
       {/* P2P host-only disconnect decision modal. */}
       {isP2PHost && disconnectChoice !== null && (

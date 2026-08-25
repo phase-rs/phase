@@ -1350,6 +1350,96 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(mockSubmitAction).not.toHaveBeenCalled();
   });
 
+  it("reserves a reconnect seat through its ACK and ignores duplicate or pending actions", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    const setup = (await guest.getSentMessages()).find(
+      (message): message is { type: "game_setup"; playerToken: string } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: string }).type === "game_setup",
+    );
+    const pendingSnapshot = deferred<{
+      state: GameState;
+      actions: GameAction[];
+      autoPassRecommended: boolean;
+    }>();
+    (mockGetViewerSnapshot as unknown as {
+      mockImplementationOnce: (implementation: () => Promise<unknown>) => void;
+    }).mockImplementationOnce(() => pendingSnapshot.promise);
+    guest.simulateClose();
+
+    const reconnect = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: setup!.playerToken,
+    });
+    await reconnect.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+    const duplicate = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: setup!.playerToken,
+    });
+    await flushPromises();
+
+    expect(mockSubmitAction).not.toHaveBeenCalled();
+    expect((await duplicate.getSentMessages()).some(
+      (message) => (message as { type?: string }).type === "reconnect_rejected",
+    )).toBe(true);
+
+    // Closing the reserved channel must release only its reservation, leaving
+    // the seat disconnected and eligible for a later retry.
+    reconnect.simulateClose();
+    pendingSnapshot.resolve({
+      state: { players: [], objects: {}, waiting_for: { type: "Priority", data: { player: 1 } } } as GameState,
+      actions: [{ type: "PassPriority" }],
+      autoPassRecommended: false,
+    });
+    await flushPromises();
+
+    const retry = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: setup!.playerToken,
+    });
+    await flushPromises();
+    const messages = await retry.getSentMessages();
+    expect(messages.map((message) => (message as { type?: string }).type)).toContain("reconnect_ack");
+    const action = retry.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+    await action;
+    expect(mockSubmitAction).toHaveBeenCalledWith({ type: "PassPriority" }, 1);
+  });
+
+  it("resumes a manual pause only after the last disconnected seat is resolved", async () => {
+    const { adapter } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const events: P2PAdapterEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    adapter.requestPause();
+    adapter.requestResume();
+
+    expect(events.map((event) => event.type)).toEqual(["gamePaused", "gameResumed"]);
+
+    const host = adapter as unknown as {
+      disconnectedSeats: Map<number, { disconnectedAt: number; timer: null }>;
+    };
+    host.disconnectedSeats.set(1, { disconnectedAt: Date.now(), timer: null });
+    adapter.requestPause();
+    adapter.requestResume();
+
+    expect(events.filter((event) => event.type === "gameResumed")).toHaveLength(1);
+  });
+
   it("replays a native AI driver fault after reconnecting guest's snapshot", async () => {
     const { adapter, emitConnection } = makeHost(2, 5_000);
     await adapter.initialize();

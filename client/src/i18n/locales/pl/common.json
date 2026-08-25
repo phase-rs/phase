@@ -19,7 +19,8 @@
     "defaultEyebrow": "Narzędzie warsztatu"
   },
   "pausedBanner": {
-    "message": "Gra wstrzymana — {{reason}}"
+    "message": "Gra wstrzymana — {{reason}}",
+    "resume": "Wznów"
   },
   "fullscreen": {
     "enter": "Włącz pełny ekran",
