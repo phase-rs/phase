@@ -204,9 +204,11 @@ pub struct StructuralRules {
     #[serde(default)]
     pub range_of_influence: Option<Box<RangeOfInfluenceConfig>>,
     pub team_based: bool,
-    /// The DECLARED sideboard policy for this custom format. Not yet mirrored
-    /// by a RESOLVED `FormatConfig.sideboard_policy` field — that's a later
-    /// phase's widening.
+    /// The DECLARED sideboard policy for this custom format.
+    /// `FormatConfig.sideboard_policy` (Phase 1a) is the RESOLVED mirror for
+    /// built-in formats today; deriving it for `Custom` from this field via
+    /// the real resolver is Phase 1c's widening (see
+    /// `docs/proposals/custom-format-engine/IMPLEMENTATION_PLAN.md`).
     pub sideboard_policy: SideboardPolicy,
 }
 

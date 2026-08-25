@@ -43,11 +43,9 @@ depend only on 1a directly and could in principle land before or after
 
 ## Phase 1a — General engine schema
 
-**Status: in review, [#7818](https://github.com/phase-rs/phase/pull/7818)
-(open, not yet merged) — code is written and has been through two rounds of
-maintainer/CodeRabbit feedback, addressed on the current head. Per this
-charter's own review-before-merge rule, this phase is not "done" until that
-PR actually merges; update this line then, not before.**
+**Status: merged, [#7818](https://github.com/phase-rs/phase/pull/7818)
+(merge commit `315e4950124f2e006d3edaed0c64b04a159e601d`) — this phase is
+complete.**
 
 Adds `GameFormat::Custom(CustomFormatId)` and its supporting schema
 (`crates/engine/src/types/custom_format.rs`, new), threaded through every
@@ -192,9 +190,9 @@ saving/defining it, with no owner in earlier passes of this charter. This
 phase builds that one shared resolver (name/signature is this phase's own
 implementation decision): given a `CustomFormatRules`, it derives every
 runtime field (`command_zone`/`uses_commander`/`commander_damage_threshold`/
-`singleton`) from `custom_rules.structural` rather than accepting them
-independently, sets `format`/`custom_rules` consistently, and is the one
-place `PLAN.md`'s validated-construction requirement (§1; `CONTEXT.md` open
+`singleton`/`sideboard_policy`) from `custom_rules.structural` rather than
+accepting them independently, sets `format`/`custom_rules` consistently, and
+is the one place `PLAN.md`'s validated-construction requirement (§1; `CONTEXT.md` open
 item 1) is actually satisfiable — `from_lobby_config`'s own output has no
 `format` field to validate that invariant against. The resolver's callers:
 Axis-A saved-definition selection (this phase) and Axis-B registry-preset
