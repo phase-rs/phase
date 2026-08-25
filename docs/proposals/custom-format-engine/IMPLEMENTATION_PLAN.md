@@ -166,27 +166,36 @@ this phase's remaining scope is narrower than originally charted:
 ## Phase 1c — Axis A: save-as-custom-format
 
 The lobby host's "save the current settings as a custom format" action.
-Builds a `CustomFormatDef` from a lobby's live `FormatConfig`-shaped
-settings (starting life, player count, singleton, command zone, sideboard
-policy, etc.) and persists it client-side. This is the first phase where
-`GameFormat::Custom` becomes constructible through any real UI action.
+`CustomFormatDef::from_lobby_config(name, config: &FormatConfig) ->
+CustomFormatDef` (`PLAN.md`'s canonical constructor contract) captures a
+lobby's live built-in `FormatConfig` into a `CustomFormatDef` **definition**
+— it produces a definition, not an active `FormatConfig`, and stays scoped
+to exactly that; this is the first phase where `GameFormat::Custom` becomes
+constructible through any real UI action, but only as a saved definition,
+not yet as something a game can start with.
 
-**Owns replacing Phase 1a's temporary blanket rejection with the design's
-real resolver.** `FormatConfig`'s deserialization boundary currently
-rejects every external `GameFormat::Custom` unconditionally (see Phase 1a
-above) because no resolver exists yet to derive its runtime fields
-(`command_zone`/`uses_commander`/`commander_damage_threshold`/`singleton`)
-from `custom_rules.structural` — a stopgap, not the design's actual
-end-state. `PLAN.md`'s own architecture (§1; `CONTEXT.md` open item 1)
-calls for exactly one validated construction path: `from_lobby_config`
-builds a `FormatConfig` whose runtime fields are *derived from*
-`custom_rules.structural` (not independently supplied), then calls
-`validate_custom_rules_consistency` before the result is ever serialized or
-activated. Once that resolver exists, the deserialization boundary's
-blanket rejection is replaced by the real `validate_custom_rules_consistency`
-check it already runs today for built-in formats — a `Custom` payload is
-accepted exactly when it round-trips through the same resolver, not
-whenever any string happens to parse.
+**Owns building the shared active-`FormatConfig` resolver, separate from
+`from_lobby_config`.** A saved definition (or a registry preset — see Phase
+1d) is only useful once something turns it into a real, active `FormatConfig`
+at the moment a player *selects* it to start a game — a distinct step from
+saving/defining it, with no owner in earlier passes of this charter. This
+phase builds that one shared resolver (name/signature is this phase's own
+implementation decision): given a `CustomFormatRules`, it derives every
+runtime field (`command_zone`/`uses_commander`/`commander_damage_threshold`/
+`singleton`) from `custom_rules.structural` rather than accepting them
+independently, sets `format`/`custom_rules` consistently, and is the one
+place `PLAN.md`'s validated-construction requirement (§1; `CONTEXT.md` open
+item 1) is actually satisfiable — `from_lobby_config`'s own output has no
+`format` field to validate that invariant against. The resolver's callers:
+Axis-A saved-definition selection (this phase) and Axis-B registry-preset
+selection (Phase 1d, reusing this same resolver — no separate one built
+there). Phase 1a's `FormatConfig` deserialization boundary currently rejects
+every external `GameFormat::Custom` unconditionally because no resolver
+exists yet to derive its duplicate runtime fields — this phase also revises
+that boundary to use the resolver's own derivation logic for a full
+consistency re-check (not just the `custom_rules.id` match Phase 1a already
+does), since that's the same piece of work as building the resolver, not a
+separate one.
 
 ## Phase 1d — Deck-validation dispatch + first registry preset
 
@@ -198,10 +207,9 @@ the existing `evaluate_constructed`/`quick_constructed_check` pipeline
 `reprint_policy`/`printing_fidelity` pairing disagrees) goes live here, with
 its first real entry, `swedish_old_school()`. Registry preset constructors
 (`swedish_old_school()` here; `old_school_93_94()`/`old_school_95()` in
-Phase 2a) are the second of `PLAN.md`'s three named construction points —
-each calls `validate_custom_rules_consistency` on its own output before
-adding it to the registry, the same discipline Phase 1c's `from_lobby_config`
-uses for Axis A.
+Phase 2a) produce `CustomFormatDef` values the same way `from_lobby_config`
+does — a definition, not an active `FormatConfig` — and reuse Phase 1c's
+shared resolver when a preset is actually selected to start a game.
 
 **Owns widening `DeckCompatibilityRequest.selected_format`.** Today it's a
 bare `Option<GameFormat>` — confirmed to have no `FormatConfig`/
