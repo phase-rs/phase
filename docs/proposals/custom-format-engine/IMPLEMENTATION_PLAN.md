@@ -27,17 +27,22 @@ separate, later, larger sub-project.
 | **1b** | Consumption-site audit: migrates every bare-`GameFormat` reader that needs full format context (`companion.rs`, `deck_loading.rs`, `match_flow.rs`, three `engine-wasm` exports) to read the resolved `FormatConfig` instead. | 1a |
 | **1c** | Axis A — "save the current lobby setup as a custom format," an ad-hoc, client-persisted format built from a lobby's live settings. | 1a, 1b |
 | **1d** | Real deck-legality evaluation for `Custom` formats (mirroring the existing constructed/commander evaluators), the `custom_format_registry()` gate, and the first registry preset, `swedish_old_school()`. | 1a, 1b, 1c |
-| **2a** | Axis B presets: `old_school_93_94()` and `old_school_95()`. | 1d |
+| **2a** | Axis B presets: `old_school_93_94()` and `old_school_95()`. Constructors + preset-integrity tests only depend on 1d; **registration** (making them selectable via `custom_format_registry()`) additionally depends on 2b — see below. | 1d (construction); 1d + 2b (registration) |
 | **2b** | Mana burn (`ManaExpiry::EndOfPhaseGroup`) — the first `LegacyRuleSet` axis to get real engine behavior. | 1a |
 | **2cd** | Pre-M10 Wish exile access and legend-rule scope — the remaining two `LegacyRuleSet` axes short of combat-damage timing. | 1a |
 
-1a and 1b are both prerequisites for everything after them; 2a/2b/2cd have no
-dependency on each other and could in principle land in any order relative
-to one another, but are listed in the order they're expected to ship.
+1a is a prerequisite for every later phase — it's the schema everything else
+is built on. 1b is additionally required before 1c/1d specifically, since
+both flow through the exact WASM/consumption-site call paths 1b migrates.
+2b and 2cd are independent `LegacyRuleSet` axis implementations that never
+touch the commander-eligibility/consumption-site code 1b changes, so they
+depend only on 1a directly and could in principle land before or after
+1b/1c/1d. 2a is the one phase with a split dependency: see its own row above.
 
 ## Phase 1a — General engine schema
 
-**Status: implemented, [#7818](https://github.com/phase-rs/phase/pull/7818).**
+**Status: implemented, [#7818](https://github.com/phase-rs/phase/pull/7818),
+addressing maintainer/CodeRabbit review.**
 
 Adds `GameFormat::Custom(CustomFormatId)` and its supporting schema
 (`crates/engine/src/types/custom_format.rs`, new), threaded through every
@@ -64,7 +69,25 @@ the charter:
   (`Forbidden` / `UpTo(1)`) instead. `uses_commander()` and `for_format()`
   remain permanently `unreachable!()` — nothing reachable can call them with
   a bare `Custom` value once the deck-validation dispatch functions honestly
-  reject `Custom` up front.
+  reject `Custom` up front. (Review on #7818 found `for_format()` needed the
+  same treatment as a public factory reachable with any parsed `GameFormat`
+  — it now returns `Result` instead.)
+
+Review on #7818 also caught that this schema's `LegacyRuleSet` axis enums
+had drifted from `PLAN.md`'s canonical variant names (an artifact of this
+charter's own planning rounds using placeholder names that were never
+cross-checked against the merged design). Both the code and this document
+now use the real names throughout: `ManaBurnPolicy::{Modern,Obsolete}`,
+`CombatDamageTiming::{Modern,OnStack}`, `WishOutsideGameScope::
+{PostM10SideboardOnly,PreM10ReachesExile}`,
+`LegendRuleScope::{Modern,PreM14AnyController}`. It also caught two
+unvalidated-input gaps: `StructuralRules`' `command_zone`/
+`commander_damage_threshold`/`commander_eligibility_rule` were three
+independently-settable fields that could represent an incoherent state
+(command zone off with a commander-damage threshold set) — replaced with
+one discriminated `CommandZoneMode` enum. And `validate_custom_rules_
+consistency` existed but nothing called it — `FormatConfig`'s deserialization
+now enforces it as the single authoritative ingress.
 
 ## Phase 1b — Consumption-site audit + caller migration
 
@@ -111,6 +134,17 @@ Two more registry presets, reusing the schema and evaluator built in 1a–1d.
 No new engine mechanism — these formats need no `LegacyRuleSet` axis beyond
 what 2b/2cd add.
 
+**Construction and registration are separate steps here, per `PLAN.md`'s own
+sequencing (§8, step 4/5).** Both presets declare `mana_burn:
+ManaBurnPolicy::Obsolete` (a non-default `LegacyRuleSet` axis), so
+`custom_format_registry()`'s `IMPLEMENTED_LEGACY_AXES` gate — built in Phase
+1a specifically to keep an unimplemented axis from being declarable —
+rejects them until `LegacyAxis::ManaBurn` is added to that list. That
+addition is Phase 2b's own work. The two `CustomFormatDef` constructors and
+their preset-integrity tests can land as soon as 1d does; actually
+registering them as selectable formats cannot happen before 2b lands too,
+regardless of which phase's code merges first.
+
 ## Phase 2b — Mana burn
 
 The first `LegacyRuleSet` axis with real runtime behavior: a
@@ -123,8 +157,8 @@ behavior is unaffected.
 
 The remaining two `LegacyRuleSet` axes short of `CombatDamageTiming`: widen
 Wish-effect exile access to include face-up exile piles under
-`WishOutsideGameScope::AnyCardOutsideGame`, and add a
-`LegendRuleScope::Global` (choiceless, cross-controller) branch to the
-legend-rule state-based action. Independent of each other and of 2a/2b;
-merged into one phase for delivery efficiency, not because of a shared
-dependency.
+`WishOutsideGameScope::PreM10ReachesExile`, and add a
+`LegendRuleScope::PreM14AnyController` (choiceless, cross-controller) branch
+to the legend-rule state-based action. Independent of each other and of
+2a/2b; merged into one phase for delivery efficiency, not because of a
+shared dependency.
