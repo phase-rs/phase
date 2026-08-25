@@ -795,6 +795,10 @@ export function GameProvider({
 
         try {
           if (mode === "p2p-host") {
+            // Browser P2P hosts always own seat zero. Do this before claiming
+            // a pre-game adapter: its one-shot identity event may already have
+            // fired while the lobby was starting the game.
+            useMultiplayerStore.getState().setActivePlayerId(0);
             const adapter = useMultiplayerStore.getState().takeActiveP2PHost(gameId);
             if (adapter) {
               p2pAdapter = adapter;

@@ -347,7 +347,7 @@ afterEach(() => {
 interface FakePeer {
   on(event: string, handler: (conn: DataConnection) => void): void;
   off(event: string, handler: (conn: DataConnection) => void): void;
-  connect(): never;
+  connect(): DataConnection;
   destroy(): void;
 }
 
@@ -2205,6 +2205,18 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     );
     await adapter.initialize();
 
+    await conn.simulateData({
+      type: "game_setup",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      playerToken: "seat-token",
+      state: remoteState("setup"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+
     /** One inbound host update carrying a state and the legal actions derived from it. */
     const pushUpdate = (label: string, actions: GameAction[]) =>
       conn.simulateData({
@@ -2244,6 +2256,250 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
 
     // Strictly increasing stamps let the store's gate order these commits.
     expect(second.seq).toBeGreaterThan(first.seq);
+  });
+
+  it("accepts guest state and outbound actions only from the current authenticated session", async () => {
+    const { peer } = createFakePeer();
+    const firstConn = new FakeDataConnection();
+    const adapter = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      peer as unknown as Peer,
+      "host-peer",
+      firstConn as unknown as DataConnection,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    const emitted = vi.fn();
+    adapter.onEvent(emitted);
+    await adapter.initialize();
+    await firstConn.simulateData({
+      type: "game_setup",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      playerToken: "seat-token",
+      state: remoteState("first-session"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    await adapter.initializeGame();
+
+    const pendingFirstSessionAction = adapter.submitAction({ type: "PassPriority" }, 1);
+
+    const secondConn = new FakeDataConnection();
+    (adapter as unknown as { attachSession(conn: DataConnection): void }).attachSession(
+      secondConn as unknown as DataConnection,
+    );
+    await expect(pendingFirstSessionAction).rejects.toThrow(
+      "Host disconnected while submitting an action",
+    );
+    emitted.mockClear();
+
+    await firstConn.simulateData({
+      type: "state_update",
+      state: remoteState("stale-state"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    await firstConn.simulateData({
+      type: "reconnect_ack",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 2,
+      state: remoteState("stale-ack"),
+      playerNames: {},
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    firstConn.simulateClose();
+    await secondConn.simulateData({
+      type: "state_update",
+      state: remoteState("pre-ack"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    await secondConn.simulateData({ type: "action_noop" });
+    await secondConn.simulateData({ type: "action_rejected", reason: "stale response" });
+    await secondConn.simulateData({ type: "mana_payment_preview", requestId: 1, sourceIds: [] });
+    await secondConn.simulateData({ type: "terminal_result" } as never);
+    await secondConn.simulateData({ type: "player_disconnected", playerId: 1 });
+
+    expect(((await adapter.getState()) as unknown as { label: string }).label).toBe("first-session");
+    expect(emitted).not.toHaveBeenCalled();
+    await expect(adapter.submitAction({ type: "PassPriority" }, 1)).rejects.toThrow(
+      "Not yet assigned a player ID",
+    );
+    await expect(adapter.submitInteraction({} as never, 1)).rejects.toThrow(
+      "Not yet assigned a player ID",
+    );
+    await expect(adapter.previewManaPayment({ type: "PassPriority" }, 1)).rejects.toThrow(
+      "Not yet assigned a player ID",
+    );
+    adapter.sendConcede();
+    adapter.sendMatchConcede();
+    expect(await secondConn.getSentMessages()).toEqual([]);
+
+    await secondConn.simulateData({
+      type: "reconnect_ack",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 3,
+      state: remoteState("second-session"),
+      playerNames: {},
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    expect(((await adapter.getState()) as unknown as { label: string }).label).toBe("second-session");
+
+    const action = adapter.submitAction({ type: "PassPriority" }, 3);
+    await flushPromises();
+    expect((await secondConn.getSentMessages()).some(
+      (message) => (message as { type?: string; senderPlayerId?: number }).type === "action"
+        && (message as { senderPlayerId?: number }).senderPlayerId === 3,
+    )).toBe(true);
+    await secondConn.simulateData({ type: "action_noop" });
+    await expect(action).resolves.toEqual({ events: [], log_entries: [] });
+
+    const interaction = adapter.submitInteraction({} as never, 3);
+    await flushPromises();
+    expect((await secondConn.getSentMessages()).some(
+      (message) => (message as { type?: string; senderPlayerId?: number }).type === "interaction"
+        && (message as { senderPlayerId?: number }).senderPlayerId === 3,
+    )).toBe(true);
+    await secondConn.simulateData({ type: "action_noop" });
+    await expect(interaction).resolves.toEqual({ events: [], log_entries: [] });
+
+    const preview = adapter.previewManaPayment({ type: "PassPriority" }, 3);
+    await flushPromises();
+    expect((await secondConn.getSentMessages()).some(
+      (message) => (message as { type?: string; requestId?: number }).type === "preview_mana_payment"
+        && (message as { requestId?: number }).requestId === 1,
+    )).toBe(true);
+    await secondConn.simulateData({ type: "mana_payment_preview", requestId: 1, sourceIds: [] });
+    await expect(preview).resolves.toEqual([]);
+
+    adapter.sendConcede();
+    adapter.sendMatchConcede();
+    adapter.sendMatchConcede();
+    await flushPromises();
+    const messages = await secondConn.getSentMessages();
+    expect(messages.map((message) => (message as { type?: string }).type)).toEqual(
+      expect.arrayContaining(["action", "interaction", "preview_mana_payment"]),
+    );
+    expect(messages.filter((message) => (message as { type?: string }).type === "concede"))
+      .toHaveLength(1);
+    expect(messages.filter((message) => (message as { type?: string }).type === "match_concede"))
+      .toHaveLength(1);
+
+    secondConn.simulateClose();
+    const thirdConn = new FakeDataConnection();
+    (adapter as unknown as { attachSession(conn: DataConnection): void }).attachSession(
+      thirdConn as unknown as DataConnection,
+    );
+    await thirdConn.simulateData({
+      type: "reconnect_ack",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 3,
+      state: remoteState("third-session"),
+      playerNames: {},
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    adapter.sendMatchConcede();
+    await flushPromises();
+    expect((await thirdConn.getSentMessages()).some(
+      (message) => (message as { type?: string }).type === "match_concede",
+    )).toBe(true);
+  });
+
+  it("stops guest reconnect attempts when disposed during backoff", async () => {
+    const { peer } = createFakePeer();
+    const connect = vi.fn();
+    const reconnectPeer = { ...peer, connect };
+    const conn = new FakeDataConnection();
+    const adapter = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      reconnectPeer as unknown as Peer,
+      "host-peer",
+      conn as unknown as DataConnection,
+    );
+    await adapter.initialize();
+
+    conn.simulateClose();
+    adapter.dispose();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(connect).not.toHaveBeenCalled();
+  });
+
+  it("stops an unauthenticated guest reconnecting after host_left", async () => {
+    const { peer } = createFakePeer();
+    const connect = vi.fn();
+    const reconnectPeer = { ...peer, connect };
+    const conn = new FakeDataConnection();
+    const adapter = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      reconnectPeer as unknown as Peer,
+      "host-peer",
+      conn as unknown as DataConnection,
+    );
+    const emitted = vi.fn();
+    adapter.onEvent(emitted);
+    await adapter.initialize();
+    const setupRejection = expect(adapter.initializeGame()).rejects.toMatchObject({
+      code: "P2P_REJECTED",
+      message: "Host left",
+    });
+
+    await conn.simulateData({ type: "host_left", reason: "Host left" });
+    await setupRejection;
+    expect(conn.open).toBe(false);
+    expect(emitted).toHaveBeenCalledWith({ type: "gameOver", winner: null, reason: "Host left" });
+    adapter.sendConcede();
+    const sentAfterTerminal = await conn.getSentMessages();
+    expect(sentAfterTerminal.some((message) =>
+      (message as { type?: string }).type === "concede"
+      || (message as { type?: string }).type === "match_concede",
+    )).toBe(false);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(connect).not.toHaveBeenCalled();
+  });
+
+  it("closes a reconnect transport if disposed before its open continuation", async () => {
+    const { peer } = createFakePeer();
+    const reconnectConn = new FakeOpenableConnection();
+    const connect = vi.fn(() => reconnectConn as unknown as DataConnection);
+    const reconnectPeer = { ...peer, connect };
+    const conn = new FakeDataConnection();
+    const adapter = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      reconnectPeer as unknown as Peer,
+      "host-peer",
+      conn as unknown as DataConnection,
+    );
+    await adapter.initialize();
+
+    conn.simulateClose();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(connect).toHaveBeenCalledOnce();
+
+    adapter.dispose();
+    reconnectConn.fireOpen();
+    await flushPromises();
+
+    expect(reconnectConn.open).toBe(false);
+    expect(await reconnectConn.getSentMessages()).toEqual([]);
   });
 
   it("commits each terminal result to the recipient's filtered final state", async () => {

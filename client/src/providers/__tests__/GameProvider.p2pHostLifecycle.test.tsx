@@ -295,4 +295,24 @@ describe("GameProvider P2P host lifecycle", () => {
     expect(resumedAdapter.initialize).toHaveBeenCalledOnce();
     expect(firstAdapter.initialize).toHaveBeenCalledOnce();
   });
+
+  it("claims seat zero before a pre-game host can replay an identity event", async () => {
+    let observedSeat: number | null = 2;
+    multiplayerStore.setActivePlayerId.mockImplementation((playerId: number) => {
+      observedSeat = playerId;
+    });
+    takeActiveP2PHost.mockImplementationOnce(() => {
+      expect(observedSeat).toBe(0);
+      return createAdapter();
+    });
+
+    render(
+      <GameProvider gameId="p2p-game" mode="p2p-host">
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => expect(gameStore.resumeP2PHost).toHaveBeenCalled());
+    expect(multiplayerStore.setActivePlayerId).toHaveBeenCalledWith(0);
+  });
 });

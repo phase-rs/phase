@@ -484,6 +484,8 @@ describe("GamePage — multiplayer board layout during board choices", () => {
     renderGamePage();
 
     expect(screen.getByTestId("game-board-layout")).toHaveAttribute("data-layout", "split");
+    expect(capturedGameMenuProps?.multiplayerBoardLayout).toBeUndefined();
+    expect(capturedGameMenuProps?.showMultiplayerSplitLayoutNudge).toBe(false);
   });
 
   it("retains the persisted focused layout for a non-untap waiting state", () => {
@@ -506,7 +508,7 @@ describe("GamePage — multiplayer board layout during board choices", () => {
     expect(screen.getByTestId("game-board-layout")).toHaveAttribute("data-layout", "focused");
   });
 
-  it("resolves a raw split preference to focused on mobile outside an untap choice", () => {
+  it("honors an explicit split preference on mobile outside an untap choice", () => {
     mockIsMobile.mockReturnValue(true);
     usePreferencesStore.setState({ multiplayerBoardLayout: "split" });
     const permanent = gameObjectFactory
@@ -525,8 +527,44 @@ describe("GamePage — multiplayer board layout during board choices", () => {
 
     renderGamePage();
 
-    expect(screen.getByTestId("game-board-layout")).toHaveAttribute("data-layout", "focused");
+    expect(screen.getByTestId("game-board-layout")).toHaveAttribute("data-layout", "split");
   });
+
+  it.each([
+    ["mobile", true, "focused"],
+    ["desktop", false, "split"],
+  ] as const)("resolves the auto layout for a %s viewport", (_viewport, isMobile, layout) => {
+    mockIsMobile.mockReturnValue(isMobile);
+    usePreferencesStore.setState({ multiplayerBoardLayout: "auto" });
+    const gameState = gameStateFactory.withPlayers(0, 1, 2).priority(0).build();
+    storeOverrides.gameState = gameState;
+    storeOverrides.waitingFor = gameState.waiting_for;
+
+    renderGamePage();
+
+    expect(screen.getByTestId("game-board-layout")).toHaveAttribute("data-layout", layout);
+    expect(capturedGameMenuProps?.multiplayerBoardLayout).toBe(layout);
+  });
+
+  it.each([
+    ["mobile", true, "focused", "split"],
+    ["desktop", false, "split", "focused"],
+  ] as const)(
+    "writes the opposite explicit choice when toggling auto on %s",
+    (_viewport, isMobile, displayedLayout, expectedPreference) => {
+      mockIsMobile.mockReturnValue(isMobile);
+      usePreferencesStore.setState({ multiplayerBoardLayout: "auto" });
+      const gameState = gameStateFactory.withPlayers(0, 1, 2).priority(0).build();
+      storeOverrides.gameState = gameState;
+      storeOverrides.waitingFor = gameState.waiting_for;
+
+      renderGamePage();
+
+      expect(capturedGameMenuProps?.multiplayerBoardLayout).toBe(displayedLayout);
+      act(() => (capturedGameMenuProps?.onToggleMultiplayerBoardLayout as () => void)());
+      expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe(expectedPreference);
+    },
+  );
 
   it("offers the wide focused-layout nudge without writing preferences on render", () => {
     const permanent = gameObjectFactory

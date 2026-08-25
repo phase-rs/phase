@@ -145,6 +145,9 @@ impl ContinuousModification {
             | ContinuousModification::RemoveAllAbilities
             | ContinuousModification::AddStaticMode { .. }
             | ContinuousModification::GrantStaticAbility { .. } => Layer::Ability,
+            // CR 613.1d (Layer 4): type-changing effects cover an object's card
+            // type, subtype, and/or supertype alike. Every arm below changes one
+            // of those three, so they all resolve in the same layer.
             ContinuousModification::AddType { .. }
             | ContinuousModification::RemoveType { .. }
             | ContinuousModification::SetCardTypes { .. }
@@ -158,7 +161,7 @@ impl ContinuousModification {
             | ContinuousModification::AddAllLandTypes
             | ContinuousModification::AddChosenSubtype { .. }
             | ContinuousModification::SetBasicLandType { .. }
-            | ContinuousModification::SetChosenBasicLandType => Layer::Type, // CR 613.1d + CR 205.4b
+            | ContinuousModification::SetChosenBasicLandType => Layer::Type,
             // CR 122.1 + CR 614.1c: One-shot counter placement at copy
             // resolution. Consumed by the BecomeCopy / CopyTokenOf resolvers
             // before any continuous-effect machinery is reached. Reaching this

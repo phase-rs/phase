@@ -219,6 +219,13 @@ pub(crate) fn handle_optional_decision(
     accept: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<bool, EffectError> {
+    // CR 608.2c: A regular optional effect owns its direct-choice frame until
+    // its answer is consumed. The scoped protocol has no such frame, so it
+    // must not claim a coincidentally matching player/source prompt and leave
+    // that ordinary frame orphaned.
+    if state.active_optional_effect_frame().is_some() {
+        return Ok(false);
+    }
     let Some(pending) = state.pending_scoped_library_search.as_ref() else {
         return Ok(false);
     };
@@ -903,6 +910,7 @@ mod tests {
     use crate::types::actions::GameAction;
     use crate::types::game_state::GameState;
     use crate::types::identifiers::CardId;
+    use crate::types::resolution::OptionalEffectFrame;
 
     fn three_player_scoped_search(reveal: bool) -> (GameState, ResolvedAbility, Vec<ObjectId>) {
         let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
@@ -960,6 +968,40 @@ mod tests {
         )
         .sub_ability(delivery);
         (state, search, cards)
+    }
+
+    #[test]
+    fn ordinary_optional_frame_prevents_scoped_protocol_prompt_collision() {
+        let (mut state, mut scoped_search, _) = three_player_scoped_search(true);
+        scoped_search.optional = true;
+        let mut events = Vec::new();
+        start(
+            &mut state,
+            &scoped_search,
+            &[PlayerId(0)],
+            None,
+            &mut events,
+        )
+        .expect("scoped search starts its acceptance prompt");
+
+        let mut ordinary_optional = scoped_search.clone();
+        ordinary_optional.optional = true;
+        ordinary_optional.set_controller_recursive(PlayerId(0));
+        state.push_optional_effect_frame(OptionalEffectFrame {
+            ability: Box::new(ordinary_optional),
+            trigger_event: None,
+            trigger_events: Vec::new(),
+            trigger_match_count: None,
+        });
+
+        apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("the ordinary optional effect owns the player action");
+
+        assert!(state.pending_scoped_library_search.is_some());
+        assert!(state.active_optional_effect_frame().is_none());
     }
 
     /// The batch shortcut is deliberately limited to the two delivery shapes

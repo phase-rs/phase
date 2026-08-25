@@ -155,7 +155,7 @@ describe("Discard cost modal", () => {
         type: "BlightChoice",
         data: {
           player: 0,
-          count: 1,
+          counters: 1,
           creatures: [],
           pending_cast: buildPendingCast(),
         },

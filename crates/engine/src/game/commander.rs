@@ -153,8 +153,7 @@ pub fn commander_eligible_for_zone_return(state: &GameState) -> Option<(ObjectId
 /// Color identity is the union of every commander's color (indicator/CDA)
 /// plus every color symbol in its mana cost (derived via
 /// `derive_colors_from_mana_cost`). Rules-text mana symbols are not yet
-/// parsed into structured data — same limitation as
-/// [`can_cast_in_color_identity`].
+/// parsed into structured data.
 ///
 /// Returns an empty vector if the player has no commander. Callers must
 /// interpret that per CR 903.4f: "If an ability refers to the colors or
@@ -279,40 +278,6 @@ fn push_creature_type(types: &mut Vec<String>, subtype: &str) {
     {
         types.push(subtype.to_string());
     }
-}
-
-/// CR 903.4: Each card must be within the commander's color identity.
-///
-/// Color identity includes colors from mana cost symbols (CR 903.4) plus the card's
-/// color indicator / color-defining ability. Rules-text mana symbols (e.g., Alesha's
-/// {W/B} activated ability) are not yet parsed into structured data — that is a
-/// separate, larger undertaking (CR 903.4d).
-///
-/// Returns true if the cast is legal under color identity rules.
-pub fn can_cast_in_color_identity(
-    state: &GameState,
-    card_colors: &[ManaColor],
-    card_mana_cost: &ManaCost,
-    player: PlayerId,
-) -> bool {
-    use super::printed_cards::derive_colors_from_mana_cost;
-
-    // CR 903.4: Commander's color identity = color + mana cost colors.
-    let commander_identity = commander_color_identity(state, player);
-
-    // If no commander found (non-Commander format), allow everything
-    if commander_identity.is_empty() {
-        return true;
-    }
-
-    // CR 903.4: Card's color identity = color + mana cost colors.
-    let card_identity_from_cost = derive_colors_from_mana_cost(card_mana_cost);
-
-    // Every color in the card's identity must be in the commander's identity
-    card_colors
-        .iter()
-        .chain(card_identity_from_cost.iter())
-        .all(|c| commander_identity.contains(c))
 }
 
 /// CR 903.5a: Commander deck must have exactly 100 cards. CR 903.5b: Singleton except basic lands.
@@ -624,38 +589,6 @@ mod tests {
         assert!(!controls_own_commander(&state, PlayerId(0)));
     }
 
-    // --- Color Identity Tests ---
-
-    #[test]
-    fn color_identity_allows_subset() {
-        let mut state = setup_commander_game();
-        create_commander_in_command_zone(
-            &mut state,
-            PlayerId(0),
-            "Niv-Mizzet",
-            vec![ManaColor::Blue, ManaColor::Red],
-        );
-
-        assert!(can_cast_in_color_identity(
-            &state,
-            &[ManaColor::Blue],
-            &ManaCost::NoCost,
-            PlayerId(0)
-        ));
-        assert!(can_cast_in_color_identity(
-            &state,
-            &[ManaColor::Red],
-            &ManaCost::NoCost,
-            PlayerId(0)
-        ));
-        assert!(can_cast_in_color_identity(
-            &state,
-            &[ManaColor::Blue, ManaColor::Red],
-            &ManaCost::NoCost,
-            PlayerId(0)
-        ));
-    }
-
     // --- Commander Color Identity Helper Tests ---
 
     #[test]
@@ -798,120 +731,6 @@ mod tests {
         obj.card_types.subtypes = vec!["Vehicle".to_string()];
 
         assert!(commander_creature_types(&state, PlayerId(0)).is_empty());
-    }
-
-    #[test]
-    fn color_identity_blocks_off_identity() {
-        let mut state = setup_commander_game();
-        create_commander_in_command_zone(&mut state, PlayerId(0), "Krenko", vec![ManaColor::Red]);
-
-        assert!(!can_cast_in_color_identity(
-            &state,
-            &[ManaColor::Blue],
-            &ManaCost::NoCost,
-            PlayerId(0)
-        ));
-        assert!(!can_cast_in_color_identity(
-            &state,
-            &[ManaColor::Green],
-            &ManaCost::NoCost,
-            PlayerId(0)
-        ));
-    }
-
-    #[test]
-    fn color_identity_allows_colorless() {
-        let mut state = setup_commander_game();
-        create_commander_in_command_zone(&mut state, PlayerId(0), "Krenko", vec![ManaColor::Red]);
-
-        // Colorless cards (empty color array) are always allowed
-        assert!(can_cast_in_color_identity(
-            &state,
-            &[],
-            &ManaCost::NoCost,
-            PlayerId(0)
-        ));
-    }
-
-    #[test]
-    fn color_identity_allows_all_when_no_commander() {
-        let state = setup_commander_game();
-
-        // No commanders created -- should allow any color
-        assert!(can_cast_in_color_identity(
-            &state,
-            &[ManaColor::Blue],
-            &ManaCost::NoCost,
-            PlayerId(0)
-        ));
-    }
-
-    #[test]
-    fn color_identity_includes_mana_cost_colors() {
-        // CR 903.4: A commander's identity includes colors from its mana cost.
-        let mut state = setup_commander_game();
-        let cmd_id = create_commander_in_command_zone(
-            &mut state,
-            PlayerId(0),
-            "Colorless Commander",
-            vec![], // No color indicator
-        );
-        // Give it a {R} mana cost so its identity includes Red
-        state.objects.get_mut(&cmd_id).unwrap().mana_cost = ManaCost::Cost {
-            shards: vec![ManaCostShard::Red],
-            generic: 2,
-        };
-
-        // A Red card should be allowed (commander has Red in identity via mana cost)
-        assert!(can_cast_in_color_identity(
-            &state,
-            &[ManaColor::Red],
-            &ManaCost::NoCost,
-            PlayerId(0)
-        ));
-        // Blue should still be blocked
-        assert!(!can_cast_in_color_identity(
-            &state,
-            &[ManaColor::Blue],
-            &ManaCost::NoCost,
-            PlayerId(0)
-        ));
-    }
-
-    #[test]
-    fn color_identity_card_mana_cost_checked() {
-        // CR 903.4: A card with {R} in its mana cost has Red identity even if colorless.
-        let mut state = setup_commander_game();
-        create_commander_in_command_zone(
-            &mut state,
-            PlayerId(0),
-            "Mono-Green Commander",
-            vec![ManaColor::Green],
-        );
-
-        // Colorless card with {R} in mana cost → Red identity → blocked by Green commander
-        let red_cost = ManaCost::Cost {
-            shards: vec![ManaCostShard::Red],
-            generic: 1,
-        };
-        assert!(!can_cast_in_color_identity(
-            &state,
-            &[], // colorless card
-            &red_cost,
-            PlayerId(0)
-        ));
-
-        // Colorless card with {G} in mana cost → Green identity → allowed
-        let green_cost = ManaCost::Cost {
-            shards: vec![ManaCostShard::Green],
-            generic: 1,
-        };
-        assert!(can_cast_in_color_identity(
-            &state,
-            &[],
-            &green_cost,
-            PlayerId(0)
-        ));
     }
 
     // --- Deck Validation Tests ---

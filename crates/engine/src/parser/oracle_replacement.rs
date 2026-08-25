@@ -7732,7 +7732,7 @@ fn apply_damage_source_qualifier(
     if let Some(color) = parse_color_word(qualifier) {
         props.push(FilterProp::HasColor { color });
     } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("non").parse(qualifier) {
-        // CR 205.4b: "noncreature" qualifier — negation via TypeFilter::Non.
+        // CR 205.2a: "noncreature" qualifier — card-type negation via TypeFilter::Non.
         if tag::<_, _, OracleError<'_>>("token")
             .parse(rest)
             .is_ok_and(|(after, _)| after.is_empty())

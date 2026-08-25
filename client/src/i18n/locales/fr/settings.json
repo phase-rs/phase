@@ -70,6 +70,7 @@
     "showOpponentBoard": "Afficher le plateau de l'adversaire au survol du HUD",
     "multiplayerBoardLayout": "Disposition du plateau multijoueur",
     "multiplayerBoardLayoutOptions": {
+      "auto": "Automatique",
       "focused": "Adversaire ciblé",
       "split": "Table divisée"
     },

@@ -1001,18 +1001,23 @@ function GamePageContent({
     seatCount,
     isMobile,
   );
-  const effectiveMultiplayerBoardLayout =
-    seatCount > 2 && canActForWaitingState && getBoardChoiceView(waitingFor, objects)?.intent === "untap"
-      ? "split"
-      : resolvedMultiplayerBoardLayout;
+  const untapForcedSplit =
+    seatCount > 2 &&
+    canActForWaitingState &&
+    getBoardChoiceView(waitingFor, objects)?.intent === "untap";
+  const effectiveMultiplayerBoardLayout = untapForcedSplit
+    ? "split"
+    : resolvedMultiplayerBoardLayout;
   const splitBoardActive = isSplitBoardActive(effectiveMultiplayerBoardLayout, seatCount);
   const renderFocusedOpponentTopRow = shouldRenderFocusedOpponentTopRow(
     effectiveMultiplayerBoardLayout,
     seatCount,
   );
   const handleToggleMultiplayerBoardLayout = useCallback(() => {
-    setMultiplayerBoardLayout(multiplayerBoardLayout === "split" ? "focused" : "split");
-  }, [multiplayerBoardLayout, setMultiplayerBoardLayout]);
+    setMultiplayerBoardLayout(
+      resolvedMultiplayerBoardLayout === "split" ? "focused" : "split",
+    );
+  }, [resolvedMultiplayerBoardLayout, setMultiplayerBoardLayout]);
   const handleTryMultiplayerSplitLayout = useCallback(() => {
     setMultiplayerBoardLayout("split");
   }, [setMultiplayerBoardLayout]);
@@ -1023,6 +1028,7 @@ function GamePageContent({
     seatCount > 2 &&
     !isMobile &&
     multiplayerBoardLayout === "focused" &&
+    !untapForcedSplit &&
     !multiplayerSplitLayoutNudgeDismissed;
   const gridTemplateRows = splitBoardActive ? splitGridTemplateRows : focusedGridTemplateRows;
   const handleKickPlayer = useCallback((pid: number) => {
@@ -1646,8 +1652,12 @@ function GamePageContent({
         isOnlineMode={isOnlineMode}
         showAiHand={showAiHand}
         onToggleAiHand={() => setShowAiHand((v) => !v)}
-        multiplayerBoardLayout={seatCount > 2 ? multiplayerBoardLayout : undefined}
-        onToggleMultiplayerBoardLayout={seatCount > 2 ? handleToggleMultiplayerBoardLayout : undefined}
+        multiplayerBoardLayout={
+          seatCount > 2 && !untapForcedSplit ? resolvedMultiplayerBoardLayout : undefined
+        }
+        onToggleMultiplayerBoardLayout={
+          seatCount > 2 && !untapForcedSplit ? handleToggleMultiplayerBoardLayout : undefined
+        }
         showMultiplayerSplitLayoutNudge={showMultiplayerSplitLayoutNudge}
         onTryMultiplayerSplitLayout={
           showMultiplayerSplitLayoutNudge ? handleTryMultiplayerSplitLayout : undefined
