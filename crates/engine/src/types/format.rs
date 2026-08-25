@@ -360,8 +360,10 @@ pub struct FormatConfig {
 /// needs no validation (an in-memory `FormatConfig` is already guaranteed
 /// consistent) and is a pure passthrough; `Deserialize` is the single
 /// authoritative `FormatConfig` ingress — every deserialization path (WASM
-/// boundary, lobby-broker/server-core protocol payloads, replay/save files)
-/// goes through it.
+/// boundary, lobby-broker/server-core protocol payloads, replay/save/restore
+/// files) goes through it, since every such path ultimately deserializes a
+/// `GameState`/`PersistedGameState` whose own `format_config: FormatConfig`
+/// field is a plain derived field with no bypass.
 impl Serialize for FormatConfig {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -377,6 +379,34 @@ impl<'de> Deserialize<'de> for FormatConfig {
         D: Deserializer<'de>,
     {
         let config = Self::deserialize(deserializer)?;
+        // `command_zone`/`commander_damage_threshold`/`uses_commander`/
+        // `singleton` etc. are this struct's own independently-serialized
+        // runtime fields — for a built-in format they're always consistent
+        // because a `FormatConfig::x()` builder derived them together. For
+        // `Custom` there is no such builder yet: `custom_rules.structural`
+        // (a `CommandZoneMode`-discriminated declaration) and these bare
+        // runtime fields are two independently-writable representations of
+        // the same thing, and nothing here cross-checks them — a
+        // matching-`custom_rules.id` payload could still declare
+        // `CommandZoneMode::Disabled` while separately setting
+        // `command_zone: true`. Rather than accept that inconsistency (or
+        // partially validate it in a way a later phase would have to widen
+        // anyway), reject `Custom` outright at this single boundary until a
+        // real resolver — landing with Axis A/Axis B registration — can
+        // derive every runtime field FROM `custom_rules.structural` instead
+        // of accepting them independently. `GameFormat::Custom` remains
+        // fully constructible in-memory (for schema tests, and for that
+        // future resolver to build) — only external deserialization of an
+        // ACTIVE `FormatConfig` is refused.
+        if matches!(config.format, GameFormat::Custom(_)) {
+            return Err(serde::de::Error::custom(
+                "GameFormat::Custom cannot be activated via external FormatConfig \
+                 deserialization yet — no resolver exists to derive/validate this struct's \
+                 runtime fields (command_zone, uses_commander, commander_damage_threshold, \
+                 singleton, ...) from custom_rules.structural, so two independently-writable \
+                 representations of the same state could disagree; this lands in a later phase",
+            ));
+        }
         crate::types::custom_format::validate_custom_rules_consistency(&config)
             .map_err(serde::de::Error::custom)?;
         Ok(config)

@@ -469,13 +469,18 @@ fn companion_candidates_returns_empty_for_custom_format_without_panicking() {
     assert_eq!(companion_candidates(&db, &request), Vec::<String>::new());
 }
 
-// The authoritative FormatConfig ingress: a malformed Custom payload (no
-// custom_rules, or a mismatched id) must be rejected at deserialization
-// time, not merely by a validator nothing calls. Each invalid value is
-// constructed directly in Rust (bypassing Deserialize, which has no reason
-// to reject it going the other way) and round-tripped through
-// `serde_json` — the only way to exercise `FormatConfig`'s real `Deserialize`
-// impl without hand-guessing its full field set.
+// The authoritative FormatConfig ingress. Phase 1a has no resolver that
+// derives this struct's own runtime fields (command_zone,
+// commander_damage_threshold, uses_commander, singleton, ...) FROM
+// custom_rules.structural — they're two independently-writable
+// representations of the same state with nothing cross-checking them, so
+// EVERY externally-deserialized Custom FormatConfig is rejected outright for
+// now, not just id-inconsistent ones (see the Deserialize impl's doc comment
+// in format.rs). Each invalid/valid-looking value below is constructed
+// directly in Rust (bypassing Deserialize, which has no reason to reject it
+// going the other way) and round-tripped through `serde_json` — the only
+// way to exercise FormatConfig's real Deserialize impl without hand-guessing
+// its full field set.
 
 #[test]
 fn format_config_deserialization_rejects_custom_without_matching_rules() {
@@ -506,16 +511,75 @@ fn format_config_deserialization_rejects_custom_with_mismatched_rules_id() {
 }
 
 #[test]
-fn format_config_deserialization_accepts_consistent_custom_config() {
+fn format_config_deserialization_rejects_even_a_fully_consistent_custom_config() {
+    // Not just an id mismatch: custom_rules.id matches, and
+    // custom_rules.structural is entirely self-consistent — this is
+    // rejected purely because no resolver exists yet to make FormatConfig's
+    // OWN runtime fields trustworthy for Custom. This is the discriminating
+    // case that would have silently passed under an id-only check.
     let rules = sample_rules(5);
-    let valid = FormatConfig {
+    let looks_fine = FormatConfig {
         format: GameFormat::Custom(rules.id),
         custom_rules: Some(Box::new(rules)),
         ..FormatConfig::standard()
     };
-    let json = serde_json::to_value(&valid).unwrap();
+    let json = serde_json::to_value(&looks_fine).unwrap();
     assert!(
-        serde_json::from_value::<FormatConfig>(json).is_ok(),
-        "a consistent Custom FormatConfig must still deserialize successfully"
+        serde_json::from_value::<FormatConfig>(json).is_err(),
+        "Custom format activation must be rejected until a resolver exists, even when \
+         custom_rules is internally consistent and its id matches"
+    );
+}
+
+#[test]
+fn format_config_deserialization_rejects_matching_id_but_structurally_contradictory_payload() {
+    // The specific hostile case the maintainer's review named: a
+    // matching-id Custom payload whose CommandZoneMode declares Disabled in
+    // custom_rules.structural while FormatConfig's own independent
+    // command_zone/uses_commander/commander_damage_threshold fields claim
+    // the format DOES use a command zone. An id-only consistency check
+    // would accept this; the categorical Custom rejection does not.
+    let mut rules = sample_rules(5);
+    rules.structural.command_zone_mode = CommandZoneMode::Disabled;
+    let contradictory = FormatConfig {
+        format: GameFormat::Custom(rules.id),
+        custom_rules: Some(Box::new(rules)),
+        command_zone: true,
+        uses_commander: true,
+        commander_damage_threshold: Some(21),
+        ..FormatConfig::standard()
+    };
+    let json = serde_json::to_value(&contradictory).unwrap();
+    assert!(
+        serde_json::from_value::<FormatConfig>(json).is_err(),
+        "a matching-id Custom payload whose runtime fields contradict custom_rules.structural \
+         must still be rejected"
+    );
+}
+
+#[test]
+fn persisted_game_state_restore_rejects_custom_format_config() {
+    // Empirically proves the rejection reaches the real restore/resume
+    // chokepoint engine-wasm's decode_restored_game_state calls
+    // (serde_json::from_value::<PersistedGameState>), not just a
+    // FormatConfig-in-isolation unit test. Builds a normal, valid
+    // two-player GameState, swaps in a Custom format_config the same way an
+    // attacker-controlled restore payload would, then round-trips the whole
+    // persisted envelope.
+    use engine::types::game_state::{GameState, PersistedGameState};
+
+    let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+    let rules = sample_rules(5);
+    state.format_config = FormatConfig {
+        format: GameFormat::Custom(rules.id),
+        custom_rules: Some(Box::new(rules)),
+        ..FormatConfig::standard()
+    };
+    let persisted = PersistedGameState::capture(state);
+    let json = serde_json::to_value(&persisted).unwrap();
+    assert!(
+        serde_json::from_value::<PersistedGameState>(json).is_err(),
+        "restoring a persisted GameState with a Custom format_config must be rejected, \
+         mirroring engine-wasm's decode_restored_game_state chokepoint"
     );
 }
