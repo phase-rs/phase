@@ -21,6 +21,7 @@ use crate::types::ability::{
     DoorLockOp, EffectKind, ObjectProperty, SearchSelectionConstraint, TapCreaturesAggregateStat,
     TapCreaturesSelectionMode, TargetRef,
 };
+use crate::types::action_rejection::{ActionRejection, ActionRejectionCode};
 use crate::types::actions::{
     AlternativeCastDecision, CastChoice, GameAction, MulliganChoice, OutsideGameSelection,
     PrecastCopyShortcutResponse, UnlessCostBranch,
@@ -67,7 +68,8 @@ use super::combat::AttackTarget;
 use super::derived_views::{family_of, payload_seat, UnboundedFamily};
 use super::dungeon::DungeonId;
 use super::engine::{
-    apply_interaction, apply_interaction_for_simulation, EngineError, MAX_SHORTCUT_CYCLES,
+    action_rejection_for_engine_error, apply_interaction, apply_interaction_for_simulation,
+    EngineError, MAX_SHORTCUT_CYCLES,
 };
 use super::game_object::{AttachTarget, RoomDoor};
 use super::merge::MergeSide;
@@ -76,6 +78,29 @@ use super::{mana_sources, turn_control, visibility};
 pub const MAX_INTERACTION_STRING_LEN: usize = 256;
 const MAX_INTERACTION_SESSION_ID_LEN: usize = 128;
 const MAX_INTERACTION_SERIAL_LEN: usize = 32;
+
+fn action_rejection_for_interaction_reason(reason: InteractionReasonCode) -> ActionRejection {
+    let code = match reason {
+        InteractionReasonCode::AuthorityUnbound | InteractionReasonCode::InvalidAuthorityState => {
+            ActionRejectionCode::InteractionUnavailable
+        }
+        InteractionReasonCode::NotAuthorized => ActionRejectionCode::InteractionNotAuthorized,
+        InteractionReasonCode::StaleInteraction => ActionRejectionCode::StaleInteraction,
+        InteractionReasonCode::UnknownChoice | InteractionReasonCode::MalformedResponse => {
+            ActionRejectionCode::InvalidInteractionResponse
+        }
+        InteractionReasonCode::PayloadTooLarge => ActionRejectionCode::InteractionPayloadTooLarge,
+        InteractionReasonCode::ConstraintUnsatisfied | InteractionReasonCode::NoLegalResponse => {
+            ActionRejectionCode::InteractionConstraintUnsatisfied
+        }
+        InteractionReasonCode::CancelOnly => ActionRejectionCode::InteractionCancelOnly,
+        InteractionReasonCode::ReducerRejected => ActionRejectionCode::InteractionReducerRejected,
+        InteractionReasonCode::UnsupportedResponse => {
+            ActionRejectionCode::UnsupportedInteractionResponse
+        }
+    };
+    ActionRejection::from_code(code, vec![])
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WaitingClassification {
@@ -9864,6 +9889,52 @@ pub fn preview_interaction(
     }
 }
 
+/// Preview an opaque interaction while returning the same safe rejection DTO
+/// used by ordinary actions. Failures before an interaction response has been
+/// materialized intentionally carry no object ids; the capability itself is
+/// opaque and must not reveal the rejected opportunity's contents.
+pub fn preview_interaction_with_rejection(
+    state: &GameState,
+    actor: PlayerId,
+    request: &InteractionPreviewRequest,
+) -> Result<InteractionPreview, ActionRejection> {
+    bound_string(request.request_id.as_str())
+        .and_then(|_| bound_string(request.interaction_id.as_str()))
+        .and_then(|_| validate_response_bounds(&request.response))
+        .map_err(action_rejection_for_interaction_reason)?;
+    let semantic_owner = slot_for_submission(state, actor, &request.interaction_id)
+        .map_err(action_rejection_for_interaction_reason)?
+        .semantic_owner;
+    let filtered = visibility::filter_state_for_viewer(state, actor);
+    let (action, progress) =
+        materialize_response(state, &filtered, &request.interaction_id, &request.response)
+            .map_err(action_rejection_for_interaction_reason)?;
+    let related_object_ids = action.related_object_ids();
+    let mut projected = state.clone();
+    apply_interaction_for_simulation(&mut projected, actor, PlayerId(semantic_owner), action)
+        .map_err(|error| {
+            visibility::filter_action_rejection_for_viewer(
+                state,
+                actor,
+                &action_rejection_for_engine_error(&error, related_object_ids),
+            )
+        })?;
+    Ok(InteractionPreview {
+        request_id: request.request_id.clone(),
+        interaction_id: request.interaction_id.clone(),
+        status: InteractionPreviewStatus::Confirmable,
+        progress: InteractionProgress {
+            confirmable: true,
+            ..progress
+        },
+        outcome: preview_outcome(state, &projected, &request.interaction_id),
+        summaries: vec![
+            InteractionSummaryCode::ConfirmAvailable,
+            InteractionSummaryCode::Progress,
+        ],
+    })
+}
+
 /// Materialize the `GameAction` an interaction response denotes, **without**
 /// applying it.
 ///
@@ -9919,6 +9990,32 @@ pub fn submit_interaction(
             code: InteractionReasonCode::ReducerRejected,
         },
     )?;
+    Ok(AppliedInteraction { action, result })
+}
+
+/// Submits an opaque interaction with stable rejection metadata. The legacy
+/// [`submit_interaction`] result remains unchanged for existing transports.
+pub fn submit_interaction_with_rejection(
+    state: &mut GameState,
+    actor: PlayerId,
+    submission: InteractionSubmission,
+) -> Result<AppliedInteraction, ActionRejection> {
+    let action = resolve_interaction_response(state, actor, &submission)
+        .map_err(|error| action_rejection_for_interaction_reason(error.code))?;
+    let related_object_ids = action.related_object_ids();
+    let semantic_owner = PlayerId(
+        slot_for_submission(state, actor, &submission.interaction_id)
+            .map_err(action_rejection_for_interaction_reason)?
+            .semantic_owner,
+    );
+    let result =
+        apply_interaction(state, actor, semantic_owner, action.clone()).map_err(|error| {
+            visibility::filter_action_rejection_for_viewer(
+                state,
+                actor,
+                &action_rejection_for_engine_error(&error, related_object_ids),
+            )
+        })?;
     Ok(AppliedInteraction { action, result })
 }
 

@@ -9,6 +9,7 @@ mod source_census;
 
 mod abigale_integration;
 mod abundance_optional_draw_replacement;
+mod action_rejection;
 mod ad_nauseam_repeat;
 mod adamant_enters_with_leading_if_gate;
 mod adapter_contract_fixtures;

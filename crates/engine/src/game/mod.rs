@@ -217,7 +217,8 @@ pub use deck_validation::{
     DeckCompatibilityResult, DeckCoverage, SignatureSpellSelectionPolicy, UnsupportedCard,
 };
 pub use engine::{
-    apply, apply_as_current, new_game, preflight_debug_action, start_game,
+    apply, apply_as_current, apply_with_rejection, new_game, preflight_debug_action,
+    preflight_debug_action_with_rejection, resolve_all_ready_prefix_with_rejection, start_game,
     start_game_skip_mulligan, start_game_with_starting_player, EngineError,
 };
 pub use engine_debug::{

@@ -1294,6 +1294,49 @@ impl DebugTokenRequest {
 }
 
 impl DebugAction {
+    fn related_object_ids(&self, ids: &mut Vec<ObjectId>) {
+        match self {
+            Self::MoveToZone { object_id, .. }
+            | Self::RemoveObject { object_id }
+            | Self::Sacrifice { object_id }
+            | Self::SetBasePowerToughness { object_id, .. }
+            | Self::ModifyCounters { object_id, .. }
+            | Self::SetTapped { object_id, .. }
+            | Self::SetPrepared { object_id, .. }
+            | Self::SetController { object_id, .. }
+            | Self::SetSummoningSickness { object_id, .. }
+            | Self::SetFaceState { object_id, .. }
+            | Self::Detach { object_id }
+            | Self::GrantKeyword { object_id, .. }
+            | Self::RemoveKeyword { object_id, .. } => push_related_object_id(ids, *object_id),
+            Self::CreateCard { attach_to, .. } => {
+                if let Some(AttachTarget::Object(object_id)) = attach_to {
+                    push_related_object_id(ids, *object_id);
+                }
+            }
+            Self::Attach { object_id, target } => {
+                push_related_object_id(ids, *object_id);
+                if let AttachTarget::Object(target_id) = target {
+                    push_related_object_id(ids, *target_id);
+                }
+            }
+            Self::CreateTokenCopy { source_id, .. } => push_related_object_id(ids, *source_id),
+            Self::DrawCards { .. }
+            | Self::Mill { .. }
+            | Self::Reveal { .. }
+            | Self::ShuffleLibrary { .. }
+            | Self::Proliferate { .. }
+            | Self::SetLife { .. }
+            | Self::ModifyPlayerCounters { .. }
+            | Self::ModifyEnergy { .. }
+            | Self::AddMana { .. }
+            | Self::SetInfiniteMana { .. }
+            | Self::SetPhase { .. }
+            | Self::RunStateBasedActions
+            | Self::CreateToken { .. } => {}
+        }
+    }
+
     /// A zero-count create request is an authorized, state-preserving no-op.
     /// The action boundary recognizes it before lifecycle/finalization work so
     /// UI count controls can submit zero without invalidating replays.
@@ -1587,6 +1630,30 @@ fn default_one() -> u32 {
     1
 }
 
+fn push_related_object_id(ids: &mut Vec<ObjectId>, object_id: ObjectId) {
+    if !ids.contains(&object_id) {
+        ids.push(object_id);
+    }
+}
+
+fn push_target_ref(ids: &mut Vec<ObjectId>, target: &TargetRef) {
+    if let TargetRef::Object(object_id) = target {
+        push_related_object_id(ids, *object_id);
+    }
+}
+
+fn push_target_refs(ids: &mut Vec<ObjectId>, targets: &[TargetRef]) {
+    for target in targets {
+        push_target_ref(ids, target);
+    }
+}
+
+fn push_attack_target(ids: &mut Vec<ObjectId>, target: &AttackTarget) {
+    if let AttackTarget::Planeswalker(object_id) = target {
+        push_related_object_id(ids, *object_id);
+    }
+}
+
 impl GameAction {
     /// Returns the enum variant name as a static string (e.g., `"CastSpell"`, `"PassPriority"`).
     /// Useful for structured logging without the full `Debug` representation.
@@ -1654,6 +1721,280 @@ impl GameAction {
             | GameAction::CastSpellAsWebSlinging { payment_mode, .. } => Some(payment_mode),
             _ => None,
         }
+    }
+
+    /// Object identities explicitly named by this action, in first-seen payload
+    /// order with duplicates removed. This is deliberately exhaustive so a new
+    /// action variant cannot silently omit identities from a rejection.
+    pub fn related_object_ids(&self) -> Vec<ObjectId> {
+        let mut ids = Vec::new();
+        match self {
+            Self::PassPriority
+            | Self::ChooseExert { .. }
+            | Self::ChooseClashOpponent { .. }
+            | Self::ChooseZoneOpponentChooser { .. }
+            | Self::ChoosePileOpponent { .. }
+            | Self::ChooseAnnouncingOpponent { .. }
+            | Self::ChooseGiftRecipient { .. }
+            | Self::ChooseAssistPlayer { .. }
+            | Self::CommitAssistPayment { .. }
+            | Self::BackToManaPayment
+            | Self::SpendPoolMana { .. }
+            | Self::UnspendPoolMana { .. }
+            | Self::SelectCoinFlips { .. }
+            | Self::ChooseReplacement { .. }
+            | Self::ChooseEntryController { .. }
+            | Self::OrderTriggers { .. }
+            | Self::CancelCast
+            | Self::SubmitSideboard { .. }
+            | Self::ChoosePlayDraw { .. }
+            | Self::ChooseOption { .. }
+            | Self::SubmitVoteCandidate { .. }
+            | Self::SubmitSpellbookDraft { .. }
+            | Self::ChoosePile { .. }
+            | Self::ChooseBranch { .. }
+            | Self::SubmitLifeRedistribution { .. }
+            | Self::SelectModes { .. }
+            | Self::DecideOptionalCost { .. }
+            | Self::ChooseAdventureFace { .. }
+            | Self::ChooseModalFace { .. }
+            | Self::ChooseAlternativeCast { .. }
+            | Self::ChooseCastingVariant { .. }
+            | Self::KeepAllCopyTargets
+            | Self::ChoosePermanentTypeSlot { .. }
+            | Self::DecideOptionalEffect { .. }
+            | Self::DecideOptionalEffectAndRemember { .. }
+            | Self::PayUnlessCost { .. }
+            | Self::ChooseUnlessCostBranch { .. }
+            | Self::ChooseActivationCostBranch { .. }
+            | Self::PayCombatTax { .. }
+            | Self::ChooseDungeon { .. }
+            | Self::ChooseDungeonRoom { .. }
+            | Self::RollPlanarDie
+            | Self::DeclareCompanion { .. }
+            | Self::CompanionToHand
+            | Self::DiscoverChoice { .. }
+            | Self::GraveyardPaidCastChoice { .. }
+            | Self::CascadeChoice { .. }
+            | Self::RippleChoice { .. }
+            | Self::ChooseTopOrBottom { .. }
+            | Self::ChooseMutateMergeSide { .. }
+            | Self::ChooseBattleProtector { .. }
+            | Self::SetAutoPass { .. }
+            | Self::CancelAutoPass
+            | Self::SetPhaseStops { .. }
+            | Self::SetPriorityPassingMode { .. }
+            | Self::SetMayTriggerAutoChoice { .. }
+            | Self::SetTriggerOrderTemplate { .. }
+            | Self::ChooseCountersToRemove { .. }
+            | Self::SubmitPayAmount { .. }
+            | Self::ChooseX { .. }
+            | Self::SubmitPhyrexianChoices { .. }
+            | Self::ChooseManaColor { .. }
+            | Self::PayManaAbilityMana { .. }
+            | Self::ChooseSpecializeColor { .. }
+            | Self::PassParadigmOffer
+            | Self::GrantDebugPermission { .. }
+            | Self::RevokeDebugPermission { .. }
+            | Self::Concede { .. }
+            | Self::DeclareShortcut { .. }
+            | Self::RespondToShortcut { .. }
+            | Self::DeclineShortcut
+            | Self::PrecastCopyShortcut { .. }
+            | Self::EndContinuousEffect { .. }
+            | Self::BeginResolveAll { .. }
+            | Self::RespondResolveAllConsent { .. }
+            | Self::RevokeResolveAllConsent { .. } => {}
+            Self::ChooseMeldPair {
+                source_id,
+                partner_id,
+            } => {
+                push_related_object_id(&mut ids, *source_id);
+                push_related_object_id(&mut ids, *partner_id);
+            }
+            Self::ChooseEntryAttackTarget { target } => push_attack_target(&mut ids, target),
+            Self::PlayLand { object_id, .. }
+            | Self::Foretell { object_id, .. }
+            | Self::ChooseUntap { object_id, .. }
+            | Self::UntapLandForMana { object_id }
+            | Self::Transform { object_id }
+            | Self::PlayFaceDown { object_id, .. }
+            | Self::TurnFaceUp { object_id, .. }
+            | Self::UnlockRoomDoor { object_id, .. }
+            | Self::ChooseRoomDoor { object_id, .. }
+            | Self::TapForConvoke { object_id, .. }
+            | Self::CastSpellAsMiracle { object_id, .. }
+            | Self::CastSpellAsMadness { object_id, .. } => {
+                push_related_object_id(&mut ids, *object_id)
+            }
+            Self::CastSpell {
+                object_id, targets, ..
+            } => {
+                push_related_object_id(&mut ids, *object_id);
+                push_target_refs(&mut ids, targets);
+            }
+            Self::ActivateAbility { source_id, .. }
+            | Self::ChooseDamageSource { source: source_id }
+            | Self::CastPreparedCopy { source: source_id }
+            | Self::CastParadigmCopy { source: source_id } => {
+                push_related_object_id(&mut ids, *source_id)
+            }
+            Self::DeclareAttackers { attacks, bands } => {
+                for (attacker, target) in attacks {
+                    push_related_object_id(&mut ids, *attacker);
+                    push_attack_target(&mut ids, target);
+                }
+                for band in bands {
+                    for object_id in band {
+                        push_related_object_id(&mut ids, *object_id);
+                    }
+                }
+            }
+            Self::DeclareBlockers { assignments } => {
+                for (blocker, attacker) in assignments {
+                    push_related_object_id(&mut ids, *blocker);
+                    push_related_object_id(&mut ids, *attacker);
+                }
+            }
+            Self::ChooseEnlist { target }
+            | Self::ChoosePair { partner: target }
+            | Self::RespondToSpliceOffer { card: target }
+            | Self::HarmonizeTap {
+                creature_id: target,
+            }
+            | Self::FreeCastWindowChoice { selection: target }
+            | Self::CipherEncode { creature: target } => {
+                if let Some(object_id) = target {
+                    push_related_object_id(&mut ids, *object_id);
+                }
+            }
+            Self::MulliganDecision { choice } => {
+                if let MulliganChoice::UseSerumPowder { object_id } = choice {
+                    push_related_object_id(&mut ids, *object_id);
+                }
+            }
+            Self::ReorderHand { order }
+            | Self::SelectCards { cards: order }
+            | Self::SubmitPilePartition { pile_a: order }
+            | Self::ChooseKeptCreatures { kept: order }
+            | Self::ChooseKeptPermanents { kept: order } => {
+                for object_id in order {
+                    push_related_object_id(&mut ids, *object_id);
+                }
+            }
+            Self::TapLandForMana { selection } | Self::ActivateManaSource { selection } => {
+                push_related_object_id(&mut ids, selection.source.object_id);
+            }
+            Self::ChooseRemoveCounterCostDistribution { distribution } => {
+                for choice in distribution {
+                    push_related_object_id(&mut ids, choice.object_id);
+                }
+            }
+            Self::ChooseOutsideGameCards { selections } => {
+                for selection in selections {
+                    if let OutsideGameSelection::FaceUpExile { object_id } = selection {
+                        push_related_object_id(&mut ids, *object_id);
+                    }
+                }
+            }
+            Self::SelectTargets { targets } => push_target_refs(&mut ids, targets),
+            Self::ChooseTarget { target } => {
+                if let Some(target) = target {
+                    push_target_ref(&mut ids, target);
+                }
+            }
+            Self::Equip {
+                equipment_id,
+                target_id,
+            } => {
+                push_related_object_id(&mut ids, *equipment_id);
+                push_related_object_id(&mut ids, *target_id);
+            }
+            Self::CrewVehicle {
+                vehicle_id,
+                creature_ids,
+            }
+            | Self::SaddleMount {
+                mount_id: vehicle_id,
+                creature_ids,
+            } => {
+                push_related_object_id(&mut ids, *vehicle_id);
+                for object_id in creature_ids {
+                    push_related_object_id(&mut ids, *object_id);
+                }
+            }
+            Self::ActivateStation {
+                spacecraft_id,
+                creature_id,
+            } => {
+                push_related_object_id(&mut ids, *spacecraft_id);
+                if let Some(object_id) = creature_id {
+                    push_related_object_id(&mut ids, *object_id);
+                }
+            }
+            Self::ChooseRingBearer { target } | Self::ChooseLegend { keep: target } => {
+                push_related_object_id(&mut ids, *target);
+            }
+            Self::ActivateNinjutsu {
+                ninjutsu_object_id,
+                creature_to_return,
+            }
+            | Self::CastSpellAsSneak {
+                hand_object: ninjutsu_object_id,
+                creature_to_return,
+                ..
+            }
+            | Self::CastSpellAsWebSlinging {
+                hand_object: ninjutsu_object_id,
+                creature_to_return,
+                ..
+            } => {
+                push_related_object_id(&mut ids, *ninjutsu_object_id);
+                push_related_object_id(&mut ids, *creature_to_return);
+            }
+            Self::CastSpellForFree {
+                object_id,
+                source_id,
+                ..
+            } => {
+                push_related_object_id(&mut ids, *object_id);
+                push_related_object_id(&mut ids, *source_id);
+            }
+            Self::SetPriorityYield { op } => {
+                if let PriorityYieldOp::Add { source_id, .. } = op {
+                    push_related_object_id(&mut ids, *source_id);
+                }
+            }
+            Self::AssignCombatDamage { assignments, .. }
+            | Self::AssignBlockerDamage { assignments } => {
+                for (object_id, _) in assignments {
+                    push_related_object_id(&mut ids, *object_id);
+                }
+            }
+            Self::DistributeAmong { distribution } => {
+                for (target, _) in distribution {
+                    push_target_ref(&mut ids, target);
+                }
+            }
+            Self::ChooseCounterMoveDistribution { selections } => {
+                for selection in selections {
+                    push_related_object_id(&mut ids, selection.destination_id);
+                }
+            }
+            Self::RetargetSpell { new_targets } => push_target_refs(&mut ids, new_targets),
+            Self::LearnDecision { choice } => {
+                if let LearnOption::Rummage { card_id } = choice {
+                    push_related_object_id(&mut ids, *card_id);
+                }
+            }
+            Self::SelectCategoryPermanents { choices } => {
+                for object_id in choices.iter().flatten() {
+                    push_related_object_id(&mut ids, *object_id);
+                }
+            }
+            Self::Debug(action) => action.related_object_ids(&mut ids),
+        }
+        ids
     }
 
     /// Engine-side authoritative mapping from action → permanent it acts on.

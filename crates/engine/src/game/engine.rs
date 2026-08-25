@@ -5,6 +5,7 @@ use thiserror::Error;
 use crate::types::ability::{DurationEvent, EffectKind, KeywordAction, TargetRef};
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
+use crate::types::action_rejection::{ActionRejection, ActionRejectionCode};
 use crate::types::actions::{
     DebugAction, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp, ResolveAllConsentDecision,
     TriggerOrderTemplateOp,
@@ -92,6 +93,21 @@ pub enum EngineError {
     NotYourPriority,
     #[error("Action not allowed: {0}")]
     ActionNotAllowed(String),
+}
+
+/// Converts an engine error into stable client-facing metadata without ever
+/// copying its diagnostic payload into the serialized response.
+pub(crate) fn action_rejection_for_engine_error(
+    error: &EngineError,
+    related_object_ids: Vec<ObjectId>,
+) -> ActionRejection {
+    let code = match error {
+        EngineError::InvalidAction(_) => ActionRejectionCode::InvalidAction,
+        EngineError::WrongPlayer => ActionRejectionCode::WrongPlayer,
+        EngineError::NotYourPriority => ActionRejectionCode::NotYourPriority,
+        EngineError::ActionNotAllowed(_) => ActionRejectionCode::ActionNotAllowed,
+    };
+    ActionRejection::from_code(code, related_object_ids)
 }
 
 /// The three non-interchangeable authorities carried by a live Priority
@@ -861,6 +877,57 @@ pub fn apply(
     action: GameAction,
 ) -> Result<ActionResult, EngineError> {
     apply_action_boundary(state, actor, action, PublicFinalizeMode::Immediate)
+}
+
+/// Applies an action while returning stable, safe rejection metadata instead
+/// of a diagnostic engine error. The legacy [`apply`] API remains the raw
+/// engine-error authority for callers that need internal diagnostics.
+pub fn apply_with_rejection(
+    state: &mut GameState,
+    actor: PlayerId,
+    action: GameAction,
+) -> Result<ActionResult, ActionRejection> {
+    let related_object_ids = action.related_object_ids();
+    apply(state, actor, action).map_err(|error| {
+        super::visibility::filter_action_rejection_for_viewer(
+            state,
+            actor,
+            &action_rejection_for_engine_error(&error, related_object_ids),
+        )
+    })
+}
+
+/// Checks a debug action without exposing diagnostic preflight errors.
+pub fn preflight_debug_action_with_rejection(
+    state: &GameState,
+    actor: PlayerId,
+    action: &DebugAction,
+) -> Result<(), ActionRejection> {
+    let related_object_ids = GameAction::Debug(action.clone()).related_object_ids();
+    preflight_debug_action(state, actor, action).map_err(|error| {
+        super::visibility::filter_action_rejection_for_viewer(
+            state,
+            actor,
+            &action_rejection_for_engine_error(&error, related_object_ids),
+        )
+    })
+}
+
+/// Runs a Ready Resolve All batch only for an admitted requester.
+pub fn resolve_all_ready_prefix_with_rejection(
+    state: &mut GameState,
+    requester: PlayerId,
+) -> Result<ResolveAllFastForwardResult, ActionRejection> {
+    if !matches!(
+        resolve_all_ready_access(state, requester),
+        ResolveAllReadyAccess::Admitted
+    ) {
+        return Err(ActionRejection::from_code(
+            ActionRejectionCode::ResolveAllNotReady,
+            vec![],
+        ));
+    }
+    Ok(resolve_all_ready_prefix(state, requester))
 }
 
 /// Explicit-actor simulation apply: [`apply`] for throwaway forward-projection

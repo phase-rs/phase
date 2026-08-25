@@ -1,5 +1,6 @@
 pub mod ability;
 pub mod ability_visit;
+pub mod action_rejection;
 pub mod action_stable_order;
 pub mod actions;
 pub mod attribution;
@@ -39,6 +40,7 @@ pub use ability::{
     ReplacementDefinition, ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter,
     TargetRef, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
+pub use action_rejection::{ActionRejection, ActionRejectionCode, ActionRejectionDisposition};
 pub use actions::GameAction;
 pub use attribution::{EffectRef, ObjectAttribution};
 pub use card::{CardFace, CardLayout, CardRules, Rarity};
