@@ -2356,19 +2356,23 @@ pub fn candidate_actions_broad_with_probe(
         } => bounded_select_card_candidates(*player, legal_targets, *min_targets..=*max_targets),
         WaitingFor::CastOffer {
             player,
-            kind: CastOfferKind::Adventure { .. },
-        } => vec![
-            candidate(
-                GameAction::ChooseAdventureFace { creature: true },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-            candidate(
-                GameAction::ChooseAdventureFace { creature: false },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-        ],
+            kind: CastOfferKind::Adventure { object_id, .. },
+        } => [true, false]
+            .into_iter()
+            // CR 715.3a: A cast offer may expose only faces whose own
+            // characteristics make them castable. This matters for land-front
+            // Adventure cards, whose normal face cannot be cast as a spell.
+            .filter(|&creature| {
+                casting::can_cast_adventure_face_now(state, *player, *object_id, creature)
+            })
+            .map(|creature| {
+                candidate(
+                    GameAction::ChooseAdventureFace { creature },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 712.12: Both MDFC land faces are playable — offer front or back
         WaitingFor::ModalFaceChoice { player, .. } => vec![
             candidate(

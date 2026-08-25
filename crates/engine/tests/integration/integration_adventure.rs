@@ -7,6 +7,7 @@
 //! - Damage prevention restriction (AddRestriction effect)
 //! - Full Bonecrusher Giant lifecycle
 
+use engine::ai_support::legal_actions;
 use engine::game::game_object::BackFaceData;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones;
@@ -15,6 +16,7 @@ use engine::types::ability::{
     RestrictionExpiry, TargetFilter, TargetRef, TriggerDefinition,
 };
 use engine::types::actions::GameAction;
+use engine::types::card::LayoutKind;
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::game_state::{CastOfferKind, CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -173,6 +175,64 @@ fn adventure_cast_stomp_from_hand() {
         "Expected AdventureCastChoice, got {:?}",
         result.waiting_for
     );
+}
+
+/// CR 715.3a + CR 118.6a: A land-front Adventure card can be cast as its
+/// instant/sorcery face even though the land itself has no mana cost. Lindblum,
+/// Industrial Regency // Mage Siege represents the Final Fantasy Town cycle.
+#[test]
+fn land_front_adventure_offers_only_its_castable_spell_face() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let object_id = scenario
+        .add_land_to_hand(P0, "Lindblum, Industrial Regency")
+        .id();
+    let mut runner = scenario.build();
+
+    let mut mage_siege = stomp_back_face();
+    mage_siege.name = "Mage Siege".to_string();
+    mage_siege.card_types.subtypes.push("Adventure".to_string());
+    mage_siege.layout_kind = Some(LayoutKind::Adventure);
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&object_id)
+        .unwrap()
+        .back_face = Some(mage_siege);
+    add_mana(&mut runner, P0, ManaType::Red, 2);
+
+    let card_id = runner.state().objects[&object_id].card_id;
+    let cast = GameAction::CastSpell {
+        object_id,
+        card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    };
+    assert!(
+        legal_actions(runner.state()).contains(&cast),
+        "a land-front Adventure's castable spell face must reach legal actions"
+    );
+
+    runner
+        .act(cast)
+        .expect("Mage Siege should reach its Adventure cast offer");
+    let offered_faces: Vec<bool> = legal_actions(runner.state())
+        .into_iter()
+        .filter_map(|action| match action {
+            GameAction::ChooseAdventureFace { creature } => Some(creature),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        offered_faces,
+        vec![false],
+        "the uncastable land face must not be offered as a spell"
+    );
+
+    let result = runner
+        .act(GameAction::ChooseAdventureFace { creature: false })
+        .expect("Mage Siege should cast as the Adventure face");
+    assert!(matches!(result.waiting_for, WaitingFor::Priority { player } if player == P0));
 }
 
 // ---------------------------------------------------------------------------

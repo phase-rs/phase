@@ -11683,6 +11683,11 @@ pub fn handle_cast_spell_with_payment_mode(
             // rejection stands (nothing downstream re-guards NoCost).
             if matches!(obj.mana_cost, ManaCost::NoCost)
                 && !unlimited_hand_cast_free_applies(state, player, obj, CastingVariant::Normal)
+                // CR 715.3a + CR 118.6a: A land-front Adventure card has no
+                // payable normal-face cost, but its instant/sorcery Adventure
+                // face may be cast for its own mana cost.
+                && !(alternative_spell_layout(obj).is_some()
+                    && can_cast_adventure_face_now(state, player, object_id, false))
                 && !(object_has_effective_face_down_keyword(state, object_id)
                     && can_afford_face_down_cast(
                         state,
