@@ -100,12 +100,12 @@ pub fn companion_candidates(db: &CardDatabase, request: &DeckCompatibilityReques
     // excluded before `uses_commander()` can run. No companion-candidate
     // resolution exists for Custom formats yet, so treating it the same as
     // any other non-commander format (empty result) is the honest answer.
-    let Some(format) = request
+    let uses_commander = request
         .selected_format
-        .filter(|format| !matches!(format, GameFormat::Custom(_)) && format.uses_commander())
-    else {
+        .is_some_and(|format| !matches!(format, GameFormat::Custom(_)) && format.uses_commander());
+    if !uses_commander {
         return Vec::new();
-    };
+    }
 
     request
         .main_deck
@@ -118,8 +118,8 @@ pub fn companion_candidates(db: &CardDatabase, request: &DeckCompatibilityReques
             let companion = DeckEntry::from_resolved_face(db, face, 1);
             let main = deck_entries_for_names(db, &remaining_main);
             let commanders = deck_entries_for_names(db, &request.commander);
-            let starting = companion_starting_deck(&main, &commanders, format);
-            is_eligible_companion(&companion, &starting, &commanders, format)
+            let starting = companion_starting_deck(&main, &commanders, uses_commander);
+            is_eligible_companion(&companion, &starting, &commanders, uses_commander)
                 .then(|| face.name.clone())
         })
         .collect::<BTreeSet<_>>()
@@ -830,8 +830,13 @@ fn validate_commander_companion(
     let companion = DeckEntry::from_resolved_face(db, face, 1);
     let main = deck_entries_for_names(db, &request.main_deck);
     let commanders = deck_entries_for_names(db, &request.commander);
-    let starting = companion_starting_deck(&main, &commanders, format);
-    if !is_eligible_companion(&companion, &starting, &commanders, format) {
+    // `format` here is always a real Commander/Brawl-family built-in — this
+    // function is only ever dispatched from evaluate_commander_with_format,
+    // evaluate_brawl, and quick_commander_check, each already gated to a
+    // guaranteed non-Custom format — so calling .uses_commander() directly
+    // is safe.
+    let starting = companion_starting_deck(&main, &commanders, format.uses_commander());
+    if !is_eligible_companion(&companion, &starting, &commanders, format.uses_commander()) {
         reasons.push(format!(
             "{companion_name}: not a legal companion for this starting deck"
         ));

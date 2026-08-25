@@ -583,3 +583,44 @@ fn persisted_game_state_restore_rejects_custom_format_config() {
          mirroring engine-wasm's decode_restored_game_state chokepoint"
     );
 }
+
+#[test]
+fn companion_reveal_check_does_not_panic_for_an_in_memory_custom_format_config() {
+    // The maintainer's review found that rejecting Custom at the external
+    // deserialization boundary doesn't make GameFormat::Custom safe
+    // in-memory: game/companion.rs's check_companion_reveal reads
+    // state.format_config on ANY live GameState (built-in or Custom,
+    // constructed directly in Rust, never through Deserialize), and used to
+    // call the bare GameFormat's uses_commander() internally — which
+    // panics for Custom. This proves the fix (reading the resolved
+    // FormatConfig.uses_commander field instead) reaches the real
+    // production entry point rather than just the unit-level helpers.
+    use engine::types::game_state::{GameState, PlayerDeckPool};
+    use engine::types::PlayerId;
+
+    let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+    let rules = sample_rules(5);
+    state.format_config = FormatConfig {
+        format: GameFormat::Custom(rules.id),
+        custom_rules: Some(Box::new(rules)),
+        uses_commander: true,
+        ..FormatConfig::standard()
+    };
+    state.deck_pools = vec![
+        PlayerDeckPool {
+            player: PlayerId(0),
+            ..Default::default()
+        },
+        PlayerDeckPool {
+            player: PlayerId(1),
+            ..Default::default()
+        },
+    ];
+
+    // No companion is registered in either empty pool, so the honest answer
+    // is "no reveal offer" — the discriminating claim is that this returns
+    // a defined result at all, rather than panicking on GameFormat::Custom's
+    // uses_commander() inside companion_offers/companion_starting_deck.
+    let result = engine::game::companion::check_all_companion_reveals(&state);
+    assert!(result.is_none());
+}

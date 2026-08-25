@@ -61,7 +61,7 @@ fn entries_to_count_map(entries: &[DeckEntry]) -> HashMap<String, u32> {
 /// `current_main`/`current_sideboard` and only the revealed companion copy is
 /// returned (CR 400.11a).
 fn restore_revealed_sideboard_companions(state: &mut GameState) {
-    if state.format_config.format.uses_commander() {
+    if state.format_config.uses_commander {
         return;
     }
 
