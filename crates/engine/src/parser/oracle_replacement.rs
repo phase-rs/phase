@@ -21860,6 +21860,14 @@ mod tests {
             "nor a trigger, got {:?}",
             parsed.triggers
         );
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .any(|ability| matches!(&*ability.effect, Effect::Unimplemented { .. })),
+            "the unsupported rider must remain an explicit Effect::Unimplemented residual, got {:?}",
+            parsed.abilities
+        );
 
         // Positive control: the same clause WITHOUT the rider still reaches the
         // dedicated cast-enters trigger authority end-to-end.
