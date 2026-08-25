@@ -329,15 +329,22 @@ fn opaque_interaction_rejection_before_materialization_has_no_object_ids() {
 fn rich_action_preview_does_not_mutate_state() {
     let state = GameState::new_two_player(1);
     let before = state.clone();
-    let _ = preview_action_with_rejection(
-        &state,
-        P0,
-        &GameAction::PlayLand {
-            object_id: ObjectId(999),
-            card_id: CardId(1),
-        },
-    );
+    let action = GameAction::PlayLand {
+        object_id: ObjectId(999),
+        card_id: CardId(1),
+    };
+    let rejection = preview_action_with_rejection(&state, P0, &action)
+        .expect_err("an invalid action cannot produce a preview");
 
+    assert_eq!(rejection.code, ActionRejectionCode::InvalidAction);
+    assert_eq!(
+        rejection.message,
+        "That action is not valid in the current game state."
+    );
+    assert!(
+        rejection.related_object_ids.is_empty(),
+        "the unknown object identity must be filtered from the viewer projection"
+    );
     assert_eq!(state, before);
 }
 
