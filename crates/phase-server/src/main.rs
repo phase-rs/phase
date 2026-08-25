@@ -11389,12 +11389,16 @@ mod metrics_tests {
                     Err(other) => panic!("expected an HTTP 503, got {other:?}"),
                 }
             }
-            (admitted.len() as u64, refused)
+            (admitted, refused)
         })
         .await;
 
         let (admitted, refused) = outcome.expect("connection race timed out");
-        assert_eq!(admitted, 1, "more than one racer took the single slot");
+        assert_eq!(
+            admitted.len(),
+            1,
+            "more than one racer took the single slot"
+        );
         assert_eq!(refused, RACERS - 1);
         assert_eq!(
             player_count.load(std::sync::atomic::Ordering::Relaxed),
