@@ -7532,6 +7532,9 @@ mod tests {
     fn ai_land_front_adventure_generates_only_spell_face_choice() {
         let mut state = GameState::new_two_player(42);
         let player = PlayerId(0);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = player;
+        state.priority_player = player;
         let object_id = create_object(
             &mut state,
             CardId(70),
