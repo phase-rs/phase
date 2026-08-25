@@ -2462,6 +2462,20 @@ pub fn matches_target_filter_for_zone(
     }
 }
 
+/// The object a battlefield entry is about to deliver, as currently staged:
+/// the liminal projection when one exists, otherwise the live object. Shared
+/// by every entry-projection arm below so the resolution logic cannot drift.
+fn entering_object_projection(
+    state: &GameState,
+    object_id: &ObjectId,
+) -> Option<crate::game::game_object::GameObject> {
+    state
+        .liminal_entries
+        .get(object_id)
+        .map(|entry| entry.object.projected().clone())
+        .or_else(|| state.objects.get(object_id).cloned())
+}
+
 pub fn matches_target_filter_on_battlefield_entry(
     state: &GameState,
     event: &ProposedEvent,
@@ -2473,15 +2487,37 @@ pub fn matches_target_filter_on_battlefield_entry(
             object_id,
             to,
             enter_as_copy,
+            face_down_profile,
             ..
         } if *to == Zone::Battlefield => {
+            if let Some(profile) = face_down_profile {
+                // CR 708.2a + CR 708.3 + CR 708.10 + CR 614.12: an object
+                // entering face down IS the profile's body (a colorless 2/2
+                // creature for manifest/morph/cloak) — checked BEFORE the copy
+                // arm, because a face-down permanent that becomes a copy keeps
+                // the face-down characteristics (CR 708.10): only its copiable
+                // underside changes, and the observable entry characteristics
+                // stay the face-down profile.
+                let Some(mut obj) = entering_object_projection(state, object_id) else {
+                    return false;
+                };
+                crate::game::morph::apply_face_down_creature_characteristics(&mut obj, profile);
+                return filter_inner_for_object(
+                    state,
+                    &obj,
+                    *object_id,
+                    filter,
+                    ctx.source_id,
+                    ctx.source_controller,
+                    ctx.ability,
+                    ctx.trigger_source,
+                    ctx.recipient_id,
+                    ctx.scoped_iteration_player,
+                    ControllerLookup::LiveOrLki,
+                );
+            }
             if let Some(copy) = enter_as_copy {
-                let Some(mut obj) = state
-                    .liminal_entries
-                    .get(object_id)
-                    .map(|entry| entry.object.projected().clone())
-                    .or_else(|| state.objects.get(object_id).cloned())
-                else {
+                let Some(mut obj) = entering_object_projection(state, object_id) else {
                     return false;
                 };
                 crate::game::effects::token::apply_copiable_values_to_liminal_object(
@@ -14751,6 +14787,96 @@ mod tests {
                 FaceControllerScope::AssumeOwn
             ),
             "a definitely-matching alternative admits even beside an unknown"
+        );
+    }
+
+    /// CR 708.10 + CR 708.2a: a `ZoneChange` carrying BOTH `enter_as_copy` AND
+    /// `face_down_profile` matches entry filters as the face-down 2/2 — a
+    /// face-down permanent that becomes a copy keeps the face-down
+    /// characteristics; only its copiable underside changes. Discriminator for
+    /// the arm ordering in `matches_target_filter_on_battlefield_entry`:
+    /// reverse the arms and BOTH assertions flip (the green copied face would
+    /// match as face-up and the colorless face-down body would not).
+    #[test]
+    fn a_face_down_copy_entry_matches_as_the_face_down_body() {
+        use crate::types::ability::{FaceDownProfile, TypeFilter};
+        use crate::types::proposed_event::{CopyTokenSpec, ProposedEvent};
+
+        let mut state = GameState::new_two_player(42);
+        let entering = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Copying Entrant".to_string(),
+            Zone::Library,
+        );
+        let green_source = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(0),
+            "Green Original".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&green_source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.color = vec![ManaColor::Green];
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+        }
+        let values =
+            crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&green_source]);
+
+        let mut event =
+            ProposedEvent::zone_change(entering, Zone::Library, Zone::Battlefield, None);
+        if let ProposedEvent::ZoneChange {
+            enter_as_copy,
+            face_down_profile,
+            ..
+        } = &mut event
+        {
+            *enter_as_copy = Some(Box::new(CopyTokenSpec {
+                values: Box::new(values),
+                display_source: crate::game::game_object::DisplaySource::Token,
+                printed_ref: None,
+                token_image_ref: None,
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+                tapped: false,
+                enters_attacking: false,
+                sacrifice_at: None,
+                source_id: ObjectId(0),
+                controller: PlayerId(0),
+            }));
+            *face_down_profile = Some(Box::new(FaceDownProfile::vanilla_2_2()));
+        } else {
+            unreachable!();
+        }
+
+        let ctx = FilterContext::from_source(&state, entering);
+        let colorless_creatures = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature)
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::ColorCount {
+                    comparator: Comparator::EQ,
+                    count: 0,
+                }]),
+        );
+        let green_creatures = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature)
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::HasColor {
+                    color: ManaColor::Green,
+                }]),
+        );
+
+        assert!(
+            matches_target_filter_on_battlefield_entry(&state, &event, &colorless_creatures, &ctx),
+            "the face-down body (colorless 2/2 creature) must match"
+        );
+        assert!(
+            !matches_target_filter_on_battlefield_entry(&state, &event, &green_creatures, &ctx),
+            "the copied green face must NOT leak into entry matching (CR 708.10)"
         );
     }
 }

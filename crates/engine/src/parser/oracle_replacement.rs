@@ -4206,16 +4206,43 @@ fn parse_enters_with_counters(
     // parse yields a typed filter with a concrete type/subtype (not the `Any`
     // fallback). A non-type subject parses to the `[Any]` fallback and is
     // rejected, falling through to the `SelfRef` self-ETB branch.
-    let subject = parse_distributive_subject(work_text).and_then(|(subject_text, scope)| {
-        let (filter, _) = parse_type_phrase(subject_text);
-        let is_valid = matches!(
-            &filter,
-            TargetFilter::Typed(TypedFilter { type_filters, .. })
-                if !type_filters.is_empty()
-                    && type_filters.as_slice() != [TypeFilter::Any]
-        );
-        is_valid.then_some((filter, scope))
-    });
+    let subject = parse_distributive_subject(work_text)
+        .or_else(|| {
+            // CR 614.12 + issue #7821: bare-plural distributive subject —
+            // "Colorless creatures you control enter with two additional +1/+1
+            // counters on them" (Curator Beastie). Only the PLURAL verb marks a
+            // bare subject: singular lines are the self-ETB "~ enters with"
+            // shape or carry the explicit each/other prefix handled above; the
+            // type-validity gate below still rejects non-subject plurals.
+            (nom_primitives::scan_contains(work_text, "enter with")
+                || nom_primitives::scan_contains(work_text, "escape with"))
+            .then_some((work_text, SubjectScope::Distributive))
+        })
+        .and_then(|(subject_text, scope)| {
+            // CR 105.2a-105.2c: peel a leading color-quality word ("colorless "/
+            // "monocolored "/"multicolored ") so the type detector sees the
+            // noun and the quality survives as a filter property.
+            let (after_color, color_prop) =
+                crate::parser::oracle_static::peel_color_quality_prefix(subject_text);
+            let (filter, _) = parse_type_phrase(after_color);
+            let is_valid = matches!(
+                &filter,
+                TargetFilter::Typed(TypedFilter { type_filters, .. })
+                    if !type_filters.is_empty()
+                        && type_filters.as_slice() != [TypeFilter::Any]
+            );
+            if !is_valid {
+                return None;
+            }
+            let filter = match (filter, color_prop) {
+                (TargetFilter::Typed(mut tf), Some(prop)) => {
+                    tf.properties.insert(0, prop);
+                    TargetFilter::Typed(tf)
+                }
+                (other, _) => other,
+            };
+            Some((filter, scope))
+        });
     let valid_card = if let Some((filter, scope)) = subject {
         // CR 614.12: only the "other" scope excludes the source from the subset.
         let filter = match (filter, scope) {
@@ -16537,6 +16564,72 @@ mod tests {
         );
     }
 
+    /// Issue #7821 (Curator Beastie): the bare-plural distributive subject —
+    /// "Colorless creatures you control enter with two additional +1/+1
+    /// counters on them." Without the bare-plural arm the subject is silently
+    /// swallowed and the replacement anchors to the source's own entry
+    /// (valid_card AND counter target become SelfRef). CR 614.12: this is the
+    /// general-subset scope — the filter includes the source iff it matches
+    /// (Beastie is GU, so it simply doesn't), and no `Another` is injected.
+    #[test]
+    fn bare_plural_colorless_subject_scopes_the_enters_with_replacement() {
+        use crate::types::ability::Comparator;
+
+        let def = parse_replacement_line(
+            "Colorless creatures you control enter with two additional +1/+1 counters on them.",
+            "Curator Beastie",
+        )
+        .unwrap();
+
+        match def.valid_card.as_ref() {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Creature),
+                    "creature type filter, got {:?}",
+                    tf.type_filters
+                );
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(
+                    tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::ColorCount {
+                            comparator: Comparator::EQ,
+                            count: 0
+                        }
+                    )),
+                    "colorless must survive as a color property, got {:?}",
+                    tf.properties
+                );
+                assert!(
+                    !tf.properties.contains(&FilterProp::Another),
+                    "general subset includes the source (CR 614.12), got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected the typed colorless filter, got {other:?}"),
+        }
+
+        let execute = def.execute.as_ref().unwrap();
+        match &*execute.effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                ..
+            } => {
+                assert_eq!(counter_type, &CounterType::Plus1Plus1);
+                assert!(
+                    matches!(count, QuantityExpr::Fixed { value: 2 }),
+                    "two counters, got {count:?}"
+                );
+            }
+            other => panic!("expected PutCounter, got {other:?}"),
+        }
+
+        // CR 614.12: external ETB placements ride ChangeZone so tokens are
+        // covered too (mirrors the each/other forms).
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+    }
+
     /// CR 614.12a + CR 608.2d: Grimdancer — "enters with your choice of two
     /// different counters on it from among menace, deathtouch, and lifelink."
     /// Choosing two distinct kinds is the same decision as choosing one
@@ -16967,12 +17060,24 @@ mod tests {
     fn plural_subject_escape_with_counter_keeps_escape_condition() {
         // CR 702.138c: plural-subject "escape with" is still escape-gated, not
         // an unconditional battlefield-entry counter replacement.
+        //
+        // Since the #7821 bare-plural subject arm, the plural subject anchors
+        // the replacement to "creatures you control" (ChangeZone scope) instead
+        // of the source's own entry — the escape gate is the invariant pinned
+        // here and must survive that re-anchoring.
         let def = parse_replacement_line(
             "Creatures you control escape with a +1/+1 counter on them.",
             "Escape Anthem",
         )
         .unwrap();
-        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        match def.valid_card.as_ref() {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected the plural-subject filter, got {other:?}"),
+        }
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
             Effect::PutCounter {

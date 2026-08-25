@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 1334
 expression: "&lowered"
 ---
 {
@@ -214,7 +213,7 @@ expression: "&lowered"
   ],
   "replacements": [
     {
-      "event": "Moved",
+      "event": "ChangeZone",
       "execute": {
         "kind": "Spell",
         "effect": {
@@ -242,7 +241,17 @@ expression: "&lowered"
         "type": "Mandatory"
       },
       "valid_card": {
-        "type": "SelfRef"
+        "type": "Typed",
+        "type_filters": [
+          "Creature"
+        ],
+        "controller": "You",
+        "properties": [
+          {
+            "type": "HasSupertype",
+            "value": "Legendary"
+          }
+        ]
       },
       "description": "Legendary creatures you control enter with an additional +1/+1 counter on them.",
       "condition": null,
