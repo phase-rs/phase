@@ -213,6 +213,30 @@ pub fn record_spell_cast(
     );
 }
 
+/// CR 708.4: Project a spell-cast record for a LIVE per-spell filter seam, which
+/// has no announced cast variant to record.
+///
+/// The ledger writes the variant its caller announced (`record_spell_cast_from_zone`).
+/// The live seams — cost modifiers (CR 601.2f) and per-turn cast limits — filter a
+/// spell mid-cast and can only state what the object itself evidences, so they
+/// asked for `CastingVariant::Normal` and `FilterProp::FaceDown` had nothing to
+/// read. A face-down cast is the one variant the object does evidence before it
+/// is filtered: `apply_face_down_entry_profile` has already blanked it
+/// (CR 708.2), which is what [`GameObject::spell_is_cast_face_down`] reads. Every
+/// other variant stays `Normal` here — this states a fact, it does not guess one.
+pub(crate) fn live_spell_cast_record_for(
+    obj: &GameObject,
+    from_zone: Zone,
+    fused_hint: bool,
+) -> SpellCastRecord {
+    let cast_variant = if obj.spell_is_cast_face_down() {
+        crate::types::game_state::CastingVariant::FaceDown
+    } else {
+        crate::types::game_state::CastingVariant::Normal
+    };
+    spell_cast_record_for(obj, from_zone, cast_variant, fused_hint)
+}
+
 /// The single fuse-aware authority for spell-cast record projection. `fused_hint` is the caller's
 /// pre-payment determination that the projected spell is a fused split spell
 /// (CR 702.102b), for seams that know the `CastingVariant::Fuse` intent before the

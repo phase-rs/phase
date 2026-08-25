@@ -8,7 +8,10 @@ import type {
   TargetRef,
   WaitingFor,
 } from "../adapter/types";
-import type { MultiplayerBoardLayout } from "../stores/preferencesStore";
+import type {
+  MultiplayerBoardLayout,
+  ResolvedMultiplayerBoardLayout,
+} from "../stores/preferencesStore";
 import {
   groupByName,
   partitionByType,
@@ -63,15 +66,18 @@ export function isOneOnOne(gameState: GameState | null): boolean {
 
 /**
  * Resolves the display layout without mutating the persisted raw preference.
- * Split view needs at least three seats and a desktop-width viewport; a
- * focused preference is always honored.
+ * Two-player games always use the focused presentation. For multiplayer,
+ * `auto` selects focused on mobile and split elsewhere; explicit choices are
+ * honored on either viewport.
  */
 export function resolveMultiplayerBoardLayout(
   layout: MultiplayerBoardLayout,
   seatCount: number,
   isMobile: boolean,
-): MultiplayerBoardLayout {
-  return layout === "split" && seatCount > 2 && !isMobile ? "split" : "focused";
+): ResolvedMultiplayerBoardLayout {
+  if (seatCount <= 2) return "focused";
+  if (layout === "auto") return isMobile ? "focused" : "split";
+  return layout;
 }
 
 export function isSplitBoardActive(
@@ -588,7 +594,7 @@ export function getBoardChoiceView(
         player: waitingFor.data.player,
         objectIds: waitingFor.data.creatures,
         intent: "blight",
-        selection: confirmedCountSelection(waitingFor.data.count, waitingFor.data.count),
+        selection: confirmedCountSelection(1, 1),
         response: { type: "SelectCards" },
         sourceId: waitingFor.data.pending_cast.object_id,
         cancelAction: { type: "CancelCast" },

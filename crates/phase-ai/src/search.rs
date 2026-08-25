@@ -186,6 +186,45 @@ fn pick_lowest_value_sacrifices(
     scored.into_iter().take(count).map(|(id, _)| id).collect()
 }
 
+/// Rank the engine-issued sacrifice selections without leaving the decision
+/// contract's finite action domain.
+///
+/// Candidate generation bounds both its input pool and its emitted
+/// combinations. A raw greedy pick can therefore be legal but absent from the
+/// issued actions. Compare each whole selection by its sorted per-permanent
+/// sacrifice keys, then use the canonical action order to make ties stable.
+fn lowest_value_issued_sacrifice<'a>(
+    state: &GameState,
+    actions: impl IntoIterator<Item = &'a GameAction>,
+    penalties: &crate::config::PolicyPenalties,
+) -> Option<GameAction> {
+    let sacrifice_rank = |cards: &[ObjectId]| {
+        let mut keys: Vec<_> = cards
+            .iter()
+            .map(|&id| sacrifice_key(state, id, penalties))
+            .collect();
+        keys.sort_by(cmp_sacrifice);
+        keys
+    };
+
+    actions
+        .into_iter()
+        .filter_map(|action| match action {
+            GameAction::SelectCards { cards } => Some((sacrifice_rank(cards), action)),
+            _ => None,
+        })
+        .min_by(|(left_rank, left), (right_rank, right)| {
+            left_rank
+                .iter()
+                .zip(right_rank)
+                .map(|(left, right)| cmp_sacrifice(left, right))
+                .find(|ordering| !ordering.is_eq())
+                .unwrap_or_else(|| left_rank.len().cmp(&right_rank.len()))
+                .then_with(|| left.cmp_stable(right))
+        })
+        .map(|(_, action)| action.clone())
+}
+
 /// Choose the best action for the AI player given the current game state.
 ///
 /// - For 0 or 1 legal actions, returns immediately.
@@ -1384,9 +1423,14 @@ pub fn fallback_action(
             up_to,
             effect_kind: engine::types::ability::EffectKind::Sacrifice,
             ..
-        } if !cards.is_empty() && !*up_to && *count > 0 => Some(GameAction::SelectCards {
-            cards: pick_lowest_value_sacrifices(state, cards, *count, &config.policy_penalties),
-        }),
+        } if !cards.is_empty() && !*up_to && *count > 0 => lowest_value_issued_sacrifice(
+            state,
+            contract
+                .candidates
+                .iter()
+                .map(|candidate| &candidate.action),
+            &config.policy_penalties,
+        ),
 
         // CR 608.2d: a selection prompt's legal cardinality is a RUNTIME
         // property, not a property of the variant — "the player can't choose an
@@ -3681,6 +3725,12 @@ pub(crate) fn deterministic_choice(
             && !*up_to
             && *count > 0
         {
+            if let Some(action) =
+                lowest_value_issued_sacrifice(state, actions, &config.policy_penalties)
+            {
+                return Some(action);
+            }
+
             return Some(GameAction::SelectCards {
                 cards: pick_lowest_value_sacrifices(state, cards, *count, &config.policy_penalties),
             });
@@ -11693,13 +11743,13 @@ mod tests {
         id
     }
 
-    /// Park a mandatory 1-of-N `EffectZoneChoice { Sacrifice }` over `cards`.
+    /// Park a mandatory `EffectZoneChoice { Sacrifice }` over `cards`.
     ///
     /// The order of `cards` is load-bearing: `pick_lowest_value_sacrifices`
     /// sorts *stably*, so at equal scores the first entry is the one given up.
     /// Every tie-boundary fixture below therefore lists the permanent it must
     /// NOT lose first.
-    fn park_forced_sacrifice(state: &mut GameState, cards: Vec<ObjectId>) {
+    fn park_forced_sacrifice_count(state: &mut GameState, cards: Vec<ObjectId>, count: usize) {
         let ai = PlayerId(0);
         let source_card = CardId(state.next_object_id);
         let source = create_object(
@@ -11712,8 +11762,8 @@ mod tests {
         state.waiting_for = WaitingFor::EffectZoneChoice {
             player: ai,
             cards,
-            count: 1,
-            min_count: 1,
+            count,
+            min_count: count,
             up_to: false,
             source_id: source,
             effect_kind: EffectKind::Sacrifice,
@@ -11734,6 +11784,10 @@ mod tests {
             enters_modified_if: None,
             duration: None,
         };
+    }
+
+    fn park_forced_sacrifice(state: &mut GameState, cards: Vec<ObjectId>) {
+        park_forced_sacrifice_count(state, cards, 1);
     }
 
     /// Build a mandatory `EffectZoneChoice { Sacrifice }` over an artifact land
@@ -11992,6 +12046,121 @@ mod tests {
                 cards: vec![creature]
             }),
             "the fallback sacrifice escape must use the land-aware authority"
+        );
+    }
+
+    /// A 13-permanent, mandatory 4-of-N sacrifice. Candidate generation emits
+    /// only the first 64 of C(12, 4) selections; every one includes cards[0],
+    /// while the greedy ideal deliberately does not.
+    fn out_of_contract_sacrifice_state() -> (GameState, Vec<ObjectId>) {
+        let mut state = commander_discard_state();
+        let ai = PlayerId(0);
+        let mut cards = vec![add_creature(&mut state, ai, 10, 10)];
+        cards.extend((0..4).map(|_| add_creature(&mut state, ai, 1, 1)));
+        cards.extend((0..8).map(|_| add_creature(&mut state, ai, 10, 10)));
+        park_forced_sacrifice_count(&mut state, cards.clone(), 4);
+        (state, cards)
+    }
+
+    /// The direct cause behind Ulamog/Kozilek Annihilator prompts: the greedy
+    /// 4-permanent sacrifice was legal but outside the capped decision contract,
+    /// so final proposal gating returned no action. Rank only issued choices;
+    /// retain raw selection for the empty-action quiescence caller.
+    #[test]
+    fn mandatory_sacrifice_ranks_issued_combinations_before_proposal_gating() {
+        let (state, cards) = out_of_contract_sacrifice_state();
+        let ai = PlayerId(0);
+        let config = create_config(AiDifficulty::VeryEasy, Platform::Native);
+        let contract = AiDecisionContract::issue(&state, ai);
+        let raw_ideal = GameAction::SelectCards {
+            cards: cards[1..5].to_vec(),
+        };
+
+        assert_eq!(
+            contract.candidates.len(),
+            64,
+            "fixture premise: the selection output cap must be reached"
+        );
+        assert!(
+            !contract.contains_action(&state, &raw_ideal),
+            "fixture premise: the raw greedy ideal must be excluded by the output cap"
+        );
+
+        let actions: Vec<_> = contract
+            .candidates
+            .iter()
+            .map(|candidate| candidate.action.clone())
+            .collect();
+        let raw_without_contract = deterministic_choice(&state, ai, &config, &[], None);
+        assert_eq!(
+            raw_without_contract,
+            Some(raw_ideal.clone()),
+            "the quiescence caller with no issued actions retains the raw greedy pick"
+        );
+
+        let assert_best_issued = |action: &GameAction| match action {
+            GameAction::SelectCards { cards: chosen } => {
+                assert_eq!(chosen.len(), 4, "the prompt owes exactly four sacrifices");
+                assert!(
+                    chosen.contains(&cards[0]),
+                    "all first 64 four-card combinations contain cards[0]; choosing without it would escape the issued domain"
+                );
+                assert_eq!(
+                    chosen.iter().filter(|id| cards[1..5].contains(id)).count(),
+                    3,
+                    "the best issued choice keeps the forced expensive creature and sacrifices three of the four cheap creatures"
+                );
+            }
+            other => panic!("expected SelectCards, got {other:?}"),
+        };
+
+        let deterministic = deterministic_choice(&state, ai, &config, &actions, None)
+            .expect("the issued sacrifice prompt is answerable");
+        assert!(
+            contract.contains_action(&state, &deterministic),
+            "the deterministic choice must survive exact contract gating"
+        );
+        assert_best_issued(&deterministic);
+
+        let fallback = fallback_action(&state, &config, &contract)
+            .expect("the fallback must choose an issued sacrifice selection");
+        assert!(
+            contract.contains_action(&state, &fallback),
+            "the fallback must never synthesize an unissued selection"
+        );
+        assert_best_issued(&fallback);
+
+        let scored = score_candidates_for_parallel_worker(&state, ai, &config, None);
+        assert!(
+            !scored.is_empty(),
+            "the scoring path must emit an action instead of degrading to no proposal"
+        );
+        assert!(
+            scored
+                .iter()
+                .all(|(action, _)| contract.contains_action(&state, action)),
+            "every scored action must belong to the decision contract"
+        );
+
+        let mut rng = SmallRng::seed_from_u64(17);
+        let action = choose_action(&state, ai, &config, &mut rng)
+            .expect("the public proposal must exist for a mandatory sacrifice");
+        assert!(
+            contract.contains_action(&state, &action),
+            "the public proposal must survive final contract gating"
+        );
+        assert_best_issued(&action);
+
+        let selected = match &action {
+            GameAction::SelectCards { cards } => cards.clone(),
+            _ => unreachable!("assert_best_issued already established SelectCards"),
+        };
+        let mut applied = state.clone();
+        engine::game::engine::apply_as_current(&mut applied, action)
+            .expect("the engine must accept the selected mandatory sacrifices");
+        assert!(
+            selected.iter().all(|id| !applied.battlefield.contains(id)),
+            "the selected permanents must leave the battlefield"
         );
     }
 

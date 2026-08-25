@@ -70,6 +70,7 @@
     "showOpponentBoard": "Pokaż pole bitwy przeciwnika po najechaniu na HUD",
     "multiplayerBoardLayout": "Układ planszy wieloosobowej",
     "multiplayerBoardLayoutOptions": {
+      "auto": "Automatyczny",
       "focused": "Skupiony przeciwnik",
       "split": "Podzielony stół"
     },

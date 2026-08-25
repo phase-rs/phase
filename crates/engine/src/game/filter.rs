@@ -4423,12 +4423,7 @@ fn spell_cast_record_from_object(spell_obj: &GameObject) -> SpellCastRecord {
 /// split spell whose `fused_split_spell` marker is not yet set; the non-`_for`
 /// entry delegates with `fused = false`.
 fn spell_cast_record_from_object_for(spell_obj: &GameObject, fused: bool) -> SpellCastRecord {
-    crate::game::restrictions::spell_cast_record_for(
-        spell_obj,
-        spell_obj.zone,
-        crate::types::game_state::CastingVariant::Normal,
-        fused,
-    )
+    crate::game::restrictions::live_spell_cast_record_for(spell_obj, spell_obj.zone, fused)
 }
 
 #[derive(Clone, Copy)]
@@ -4813,6 +4808,16 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // cost contained an `{X}` shard at cast time.
         FilterProp::HasXInManaCost => record.has_x_in_cost,
         FilterProp::WasKicked => record.was_kicked,
+        // CR 708.4: A face-down spell is a real spell on the stack, not a
+        // battlefield-only state — a morph/megamorph/disguise card cast face down
+        // IS a face-down 2/2 creature spell (CR 702.37c / CR 702.168b). The record
+        // states that as the cast variant, both in the ledger (announced by
+        // `record_spell_cast_from_zone`) and at the live seams
+        // (`live_spell_cast_record_for`), so "face-down creature spells you cast"
+        // resolves here instead of failing closed.
+        FilterProp::FaceDown => {
+            record.cast_variant == crate::types::game_state::CastingVariant::FaceDown
+        }
         FilterProp::HasXInActivationCost => false,
         // CR 605.1: Spell-cast records snapshot the spell object, not the
         // object's ability list. Fail closed for history predicates.
@@ -4916,7 +4921,6 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // CR 122.6: A spell on the stack hasn't received counters as a
         // permanent — fail closed against the spell-cast snapshot.
         | FilterProp::CountersPutOnThisTurn { .. }
-        | FilterProp::FaceDown
         | FilterProp::Transformed
         | FilterProp::TargetsOnly { .. }
         | FilterProp::Targets { .. }

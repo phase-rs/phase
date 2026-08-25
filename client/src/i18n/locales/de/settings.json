@@ -70,6 +70,7 @@
     "showOpponentBoard": "Spielfeld des Gegners beim Hovern über das HUD anzeigen",
     "multiplayerBoardLayout": "Mehrspieler-Boardlayout",
     "multiplayerBoardLayoutOptions": {
+      "auto": "Automatisch",
       "focused": "Fokussierter Gegner",
       "split": "Geteilter Tisch"
     },

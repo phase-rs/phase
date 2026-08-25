@@ -10,7 +10,7 @@ import { clearGame } from "../../stores/gameStore.ts";
 import { useDraftStore } from "../../stores/draftStore.ts";
 import { useCardDataMeta } from "../../hooks/useCardDataMeta.ts";
 import { useConcedeHandler } from "../../hooks/useConcedeHandler.ts";
-import type { MultiplayerBoardLayout } from "../../stores/preferencesStore.ts";
+import type { ResolvedMultiplayerBoardLayout } from "../../stores/preferencesStore.ts";
 
 /**
  * Who a rollback request is addressed to. A string union rather than a boolean
@@ -27,7 +27,8 @@ interface GameMenuProps {
   isOnlineMode: boolean;
   showAiHand: boolean;
   onToggleAiHand: () => void;
-  multiplayerBoardLayout?: MultiplayerBoardLayout;
+  /** The currently displayed layout, already resolved from the raw preference. */
+  multiplayerBoardLayout?: ResolvedMultiplayerBoardLayout;
   onToggleMultiplayerBoardLayout?: () => void;
   showMultiplayerSplitLayoutNudge?: boolean;
   onTryMultiplayerSplitLayout?: () => void;

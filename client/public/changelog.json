@@ -1,6 +1,22 @@
 {
   "entries": [
     {
+      "id": 197,
+      "date": "2026-08-24",
+      "title": "Dungeon rooms explain themselves",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "localization",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Dungeon choices, stack, game log, and HUD now show every room’s printed effect — see exactly what happens when you venture\n• Warped Space and similar cards now grant their alternative cost for spells cast from exile\n• Grimdancer now offers its real choice of two different counters as it enters\n\n🛠️ Cards That Now Work Right\n• Search effects now evaluate a found card after it is revealed\n• Grub’s Command keeps the filter for the Goblins it found, and Make Your Move keeps a power/toughness restriction attached only to the creature branch that printed it\n• Reanimation Auras keep their permanent self-granted ability, optional effects keep their choice with the correct player, and Best-of-three draft sideboarding stays open through pod updates\n• Cards printed in an off-color identity are no longer incorrectly blocked from being cast during play\n\n⚔️ Combat & Gameplay\n• Repeat-position detection can now correctly confirm the draw in a mandatory loop instead of missing it because of leftover resolution bookkeeping\n• Auto-pass leaves your priority controls available, Resolve All remains cancel-only while active, and remembered “may” choices apply consistently to copies\n\n🖥️ Interface\n• Targeting prompts now say what you are choosing, show clear player-seat controls, and use the engine’s exact target classification instead of guessing\n• Multiplayer boards adapt to the viewport so the table remains usable across more screen sizes\n\n🌍 Localization\n• Targeting prompts are written as complete, grammatically correct phrases in every supported language instead of assembling an article and noun at runtime\n\n🤖 AI\n• The AI no longer wastes Auras buffing an opponent’s creatures\n\n🌐 Multiplayer\n• P2P guests are bound to their authenticated session, report version mismatch instead of hanging, and handle a host leaving during setup cleanly",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1541530534201532456"
+    },
+    {
       "id": 196,
       "date": "2026-08-23",
       "title": "Kozilek manifests from every hand",

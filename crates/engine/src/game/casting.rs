@@ -2921,22 +2921,11 @@ pub(super) fn build_spell_meta(
         // CR 708.4 + CR 702.37c / CR 702.168b: `is_face_down` means "this spell is
         // being CAST FACE DOWN" (morph/disguise — paying {3} to cast as a 2/2
         // face-down creature spell), NOT merely "the object has `face_down = true`".
-        // Those differ: foretell (CR 702.143a), hideaway, and other exile/library
-        // concealment set `obj.face_down = true` while the card waits in exile, yet
-        // such a card is CAST FACE UP (CR 702.143c). So this must NOT be sourced from
-        // raw `obj.face_down` — a foretold face-up cast would wrongly satisfy the
-        // `OnlyForFaceDownSpell` spend restriction (Tin Street Gossip).
-        //
-        // The discriminator is `face_down && back_face.is_some()`: `continue_cast_face_down`
-        // is the ONLY path that reaches a spell payment (`PaymentContext::Spell`) with a
-        // blanked object — it turns the object face down via `apply_face_down_entry_profile`,
-        // which stashes the real card in `back_face` (CR 708.2 copiable-value blank). A
-        // foretold/hideaway object keeps `back_face = None` (its real characteristics are
-        // intact in exile — it is not blanked), so it reads `false` here. Manifest/cloak
-        // objects are face-down permanents put onto the battlefield by effects, never cast
-        // through spell payment, so they never build a `PaymentContext::Spell`. Guarded by
+        // `spell_is_cast_face_down` is the single authority for that distinction and
+        // carries the full CR argument; the spell-filter projection asks the same
+        // question there, so the two seams cannot answer it differently. Guarded by
         // `build_spell_meta_for_foretold_card_is_not_face_down` (casting_tests.rs).
-        is_face_down: obj.face_down && obj.back_face.is_some(),
+        is_face_down: obj.spell_is_cast_face_down(),
         // CR 601.2g / CR 118.3: Hogaak-style "you can't spend mana to cast this
         // spell" — the mana-payment eligibility layer makes real pool mana
         // ineligible when set, so only convoke/delve stand-ins can pay.
@@ -7729,6 +7718,28 @@ pub(super) fn apply_cost_modifiers_to_base(
     object_id: ObjectId,
     base: ManaCost,
 ) -> Option<ManaCost> {
+    // Projection callers with no committed casting method (the per-keyword offer
+    // blocks, the Bargain recompute). CR 601.2f + CR 702.102b: `None` keeps the
+    // front-half projection for split cards — the Fuse candidate routes through
+    // the real `CastingVariant::Fuse` prepare instead — and a variant-conditional
+    // modifier (`StaticCondition::CastingAsVariant`) stays inapplicable until a
+    // casting method is committed.
+    apply_cost_modifiers_to_base_for_variant(state, player, object_id, base, None, None)
+}
+
+/// Variant-aware core of [`apply_cost_modifiers_to_base`]: a projection that has
+/// already COMMITTED to a casting method threads that method and its elected
+/// permission through, so `StaticCondition::CastingAsVariant` modifiers and the
+/// elected `PlayFromExile` grant's `cast_cost_raise` apply exactly as they do in
+/// the real cast's `apply_all_cost_modifiers` call (CR 601.2b + CR 601.2f).
+pub(super) fn apply_cost_modifiers_to_base_for_variant(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    base: ManaCost,
+    casting_variant: Option<CastingVariant>,
+    casting_permission_index: Option<CastingPermissionIndex>,
+) -> Option<ManaCost> {
     let obj = state.objects.get(&object_id)?;
     let mut mana_cost = base;
     // CR 903.8: Commanders cast from the command zone incur a tax.
@@ -7749,14 +7760,14 @@ pub(super) fn apply_cost_modifiers_to_base(
             }
         }
     }
-    // CR 601.2f + CR 702.102b: This recompute path is exercised only after an
-    // *additional* cost (Bargain) is declared (`recompute_pending_cast_cost`).
-    // Fuse and Bargain never co-occur — no printed split card carries Bargain — so
-    // this path is Fuse-unreachable and `None` (front-half) is exact. Were a fused
-    // recompute ever to reach here, the `fused_split_spell` marker would already be
-    // set by finalization and `spell_cast_record_for`'s OR-gate would still yield
-    // the combined projection, so this is not a silent front-half leak either way.
-    apply_all_cost_modifiers(state, player, object_id, &mut mana_cost, None, None);
+    apply_all_cost_modifiers(
+        state,
+        player,
+        object_id,
+        &mut mana_cost,
+        casting_variant,
+        casting_permission_index,
+    );
     Some(mana_cost)
 }
 
@@ -10556,7 +10567,68 @@ fn can_afford_face_down_cast(
     let mut simulated = state.clone();
     let profile = face_down_cast_profile(state, object_id);
     super::zone_pipeline::apply_face_down_entry_profile(&mut simulated, object_id, &profile);
-    can_pay_cost_after_auto_tap(&simulated, player, object_id, cost)
+    let effective = effective_face_down_cast_cost(&simulated, player, object_id, cost);
+    can_pay_cost_after_auto_tap(&simulated, player, object_id, &effective)
+}
+
+/// CR 601.2f + CR 702.37c / CR 702.168b: The {3} face-down cast cost AFTER cost
+/// modification — the single authority for what a face-down cast actually costs
+/// before payment, shared by the affordability gate and the cast offer the player
+/// is shown.
+///
+/// `prepare_spell_cast` runs the same modifier passes on the real cast, so anything
+/// that reads the raw {3} disagrees with what the player is charged. A "face-down
+/// creature spells cost {N} less" static (Kadena, Dream Chisel, Obscuring Aether)
+/// can take it to {0}, which must be both castable with an empty pool and displayed
+/// as {0} rather than {3} — the frontend renders the number the engine hands it.
+///
+/// `state` must ALREADY carry the blanked face-down object (the caller's
+/// `apply_face_down_entry_profile` clone), because that is what makes a
+/// face-down-filtered reduction match here the same way it will during the cast.
+fn effective_face_down_cast_cost(
+    blanked_state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+) -> crate::types::mana::ManaCost {
+    // CR 601.2b + CR 601.2f: elect the SAME casting permission the real
+    // face-down prepare will elect (`selected_object_cast_permission_index`
+    // with the explicit `FaceDown` variant). With no variant the election
+    // infers Foretell first for a foretold exile card, while the real cast
+    // routes through `PlayFromExile` — and only that grant carries a
+    // `cast_cost_raise`, so the projections would price different casts.
+    let casting_permission_index = blanked_state.objects.get(&object_id).and_then(|obj| {
+        selected_object_cast_permission_index(
+            blanked_state,
+            obj,
+            player,
+            Some(CastingVariant::FaceDown),
+        )
+    });
+    apply_cost_modifiers_to_base_for_variant(
+        blanked_state,
+        player,
+        object_id,
+        cost.clone(),
+        Some(CastingVariant::FaceDown),
+        casting_permission_index,
+    )
+    .unwrap_or_else(|| cost.clone())
+}
+
+/// Offer-side sibling of [`effective_face_down_cast_cost`]: takes the UNBLANKED
+/// live state, applies the same face-down profile the real cast will, and returns
+/// the cost to show in the `AlternativeCastChoice` menu.
+fn displayed_face_down_cast_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+) -> crate::types::mana::ManaCost {
+    let mut simulated = state.clone();
+    let profile = face_down_cast_profile(state, object_id);
+    super::zone_pipeline::apply_face_down_entry_profile(&mut simulated, object_id, &profile);
+    effective_face_down_cast_cost(&simulated, player, object_id, cost)
 }
 
 /// CR 708.4 + CR 708.2a: True when the {3} face-down cast is PERMITTED — castable
@@ -12633,7 +12705,16 @@ pub fn handle_cast_spell_with_payment_mode(
                         payment_mode,
                         keyword: crate::types::game_state::AlternativeCastKeyword::FaceDown,
                         normal_cost,
-                        alternative_cost: Some(face_down_cost),
+                        // CR 601.2f: show what the face-down cast will actually
+                        // cost. The client renders this number verbatim, so handing
+                        // it the unmodified {3} while charging {0} (Kadena, Dream
+                        // Chisel) would make the menu contradict the payment.
+                        alternative_cost: Some(displayed_face_down_cast_cost(
+                            state,
+                            player,
+                            object_id,
+                            &face_down_cost,
+                        )),
                         alternative_additional_cost: None,
                         alternative_additional_cost_description: None,
                     });
@@ -21364,10 +21445,12 @@ fn is_blocked_by_per_turn_cast_limit_for(
                 // shared cast-record authority so a fused split spell's mana value /
                 // colors reflect both halves for the per-turn cast-limit filter.
                 // Pre-payment (marker not yet set) the caller supplies `fused`.
-                let current_record = super::restrictions::spell_cast_record_for(
+                // Live seam: `live_spell_cast_record_for` states the face-down cast
+                // (CR 708.4) the object evidences, so this filter and the cost-modifier
+                // filter cannot answer `FilterProp::FaceDown` differently.
+                let current_record = super::restrictions::live_spell_cast_record_for(
                     spell_obj,
                     spell_obj.zone,
-                    crate::types::game_state::CastingVariant::Normal,
                     fused,
                 );
                 if !super::filter::spell_record_matches_filter(

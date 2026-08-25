@@ -17,6 +17,7 @@ import {
   buildCopyTargetSlot,
   buildGameState,
   buildGameStateWithoutSeatOrder,
+  buildPendingCast,
   buildPlayers,
   buildTargetSelectionProgress,
   buildTargetSelectionSlot,
@@ -154,11 +155,12 @@ describe("getVisibleBoardPlayerIds", () => {
 });
 
 describe("split board ownership helpers", () => {
-  it("resolves split only at desktop multiplayer widths", () => {
-    expect(resolveMultiplayerBoardLayout("split", 3, true)).toBe("focused");
-    expect(resolveMultiplayerBoardLayout("split", 3, false)).toBe("split");
+  it("resolves auto by viewport while honoring explicit multiplayer choices", () => {
+    expect(resolveMultiplayerBoardLayout("auto", 3, true)).toBe("focused");
+    expect(resolveMultiplayerBoardLayout("auto", 3, false)).toBe("split");
+    expect(resolveMultiplayerBoardLayout("split", 3, true)).toBe("split");
+    expect(resolveMultiplayerBoardLayout("focused", 3, false)).toBe("focused");
     expect(resolveMultiplayerBoardLayout("split", 2, false)).toBe("focused");
-    expect(resolveMultiplayerBoardLayout("focused", 4, false)).toBe("focused");
   });
 
   it("activates split layout only for 3+ player games", () => {
@@ -273,6 +275,31 @@ describe("getBattlefieldSacrificeChoice", () => {
 });
 
 describe("getBoardChoiceView", () => {
+  it("maps BlightChoice to one confirmed creature selection", () => {
+    const choice = getBoardChoiceView({
+      type: "BlightChoice",
+      data: {
+        player: 0,
+        counters: 3,
+        creatures: [10, 11],
+        pending_cast: buildPendingCast({ object_id: 99 }),
+      },
+    });
+
+    expect(choice).toMatchObject({
+      player: 0,
+      objectIds: [10, 11],
+      intent: "blight",
+      selection: { type: "exactCount", count: 1 },
+      response: { type: "SelectCards" },
+      sourceId: 99,
+      cancelAction: { type: "CancelCast" },
+    });
+    expect(choice).not.toBeNull();
+    if (!choice) return;
+    expect(canConfirmBoardChoice(choice, [10], undefined)).toBe(true);
+  });
+
   it("maps PayCost ReturnToHand to a confirmed board choice", () => {
     const choice = getBoardChoiceView(
       {

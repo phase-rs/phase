@@ -347,7 +347,16 @@ pub(crate) fn apply_zone_exit_cleanup(
             // while it remains in exile. Once it changes zones, the new object
             // is no longer a foretold card.
             obj_mut.foretold = false;
-            obj_mut.face_down = false;
+            // CR 708.4: a spell CAST face down (morph/disguise via an exile
+            // permission) is turned face down as part of the cast and keeps
+            // that status on the stack. Only the exile-zone face-down
+            // designation ends here (foretold/hideaway cards, which stash no
+            // identity in `back_face`); the cast is the one exile exit whose
+            // destination is the stack and whose object carries the cast
+            // stash (`spell_is_cast_face_down`, #5171's discriminator).
+            if !(to == Zone::Stack && obj_mut.spell_is_cast_face_down()) {
+                obj_mut.face_down = false;
+            }
             obj_mut.casting_permissions.retain(|p| {
                 !matches!(
                     p,
