@@ -7529,12 +7529,34 @@ mod tests {
     }
 
     #[test]
-    fn ai_adventure_generates_face_choice() {
+    fn ai_land_front_adventure_generates_only_spell_face_choice() {
         let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let object_id = create_object(
+            &mut state,
+            CardId(70),
+            player,
+            "Land Adventure".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&object_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.mana_cost = ManaCost::NoCost;
+
+            let mut adventure = prepare_back_face_with_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Red],
+            });
+            adventure.card_types.subtypes.push("Adventure".to_string());
+            adventure.layout_kind = Some(LayoutKind::Adventure);
+            obj.back_face = Some(adventure);
+        }
+        give_player_mana(&mut state, 0, ManaType::Red);
         state.waiting_for = WaitingFor::CastOffer {
-            player: PlayerId(0),
+            player,
             kind: CastOfferKind::Adventure {
-                object_id: crate::types::identifiers::ObjectId(1),
+                object_id,
                 card_id: CardId(70),
                 payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
@@ -7543,12 +7565,9 @@ mod tests {
         let actions = candidate_actions(&state);
         assert_eq!(
             actions.len(),
-            2,
-            "Should generate creature and adventure face options"
+            1,
+            "a land-front Adventure must offer only its castable spell face"
         );
-        assert!(actions
-            .iter()
-            .any(|a| matches!(a.action, GameAction::ChooseAdventureFace { creature: true })));
         assert!(actions.iter().any(|a| matches!(
             a.action,
             GameAction::ChooseAdventureFace { creature: false }

@@ -232,7 +232,14 @@ fn land_front_adventure_offers_only_its_castable_spell_face() {
     let result = runner
         .act(GameAction::ChooseAdventureFace { creature: false })
         .expect("Mage Siege should cast as the Adventure face");
-    assert!(matches!(result.waiting_for, WaitingFor::Priority { player } if player == P0));
+    if matches!(result.waiting_for, WaitingFor::TargetSelection { .. }) {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(P1)),
+            })
+            .expect("the chosen Adventure face should complete target selection");
+    }
+    assert!(matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0));
 }
 
 // ---------------------------------------------------------------------------
