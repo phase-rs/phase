@@ -8,7 +8,9 @@ It is not itself a design change — no line of `PLAN.md`/`CONTEXT.md`/
 
 ## Sequencing
 
-Seven phases, landing as separate PRs in order. Each phase is independently
+Seven phases, each landing as its own separate PR, in dependency order —
+not necessarily numeric order: see the table below for which phases can
+land in either order relative to each other. Each phase is independently
 planned, reviewed, implemented, and reviewed again before merge — the same
 plan → review → implement → review pipeline used for engine bug fixes, run
 per phase rather than once for the whole feature, because the full feature
@@ -41,8 +43,11 @@ depend only on 1a directly and could in principle land before or after
 
 ## Phase 1a — General engine schema
 
-**Status: implemented, [#7818](https://github.com/phase-rs/phase/pull/7818),
-addressing maintainer/CodeRabbit review.**
+**Status: in review, [#7818](https://github.com/phase-rs/phase/pull/7818)
+(open, not yet merged) — code is written and has been through two rounds of
+maintainer/CodeRabbit feedback, addressed on the current head. Per this
+charter's own review-before-merge rule, this phase is not "done" until that
+PR actually merges; update this line then, not before.**
 
 Adds `GameFormat::Custom(CustomFormatId)` and its supporting schema
 (`crates/engine/src/types/custom_format.rs`, new), threaded through every
