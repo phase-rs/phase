@@ -19,7 +19,8 @@
     "defaultEyebrow": "Workspace-Werkzeug"
   },
   "pausedBanner": {
-    "message": "Spiel pausiert — {{reason}}"
+    "message": "Spiel pausiert — {{reason}}",
+    "resume": "Fortsetzen"
   },
   "fullscreen": {
     "enter": "Vollbild starten",

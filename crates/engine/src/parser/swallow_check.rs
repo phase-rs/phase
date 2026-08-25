@@ -34,8 +34,12 @@ use crate::types::ability::{
     ContinuousModification, CopyRetargetPermission, DamageModification, DelayedTriggerCondition,
     DoubleTarget, Duration, Effect, FilterProp, ManaProduction, ModalSelectionConstraint,
     OpponentMayScope, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
-    ReplacementCondition, ReplacementMode, RestrictionExpiry, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, UnlessPayScaling,
+    ReplacementCondition, ReplacementDefinition, ReplacementMode, RestrictionExpiry,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, UnlessPayScaling,
+};
+use crate::types::ability_visit::{
+    visit_ability_def, visit_replacement, visit_static, visit_trigger,
 };
 use crate::types::game_state::RetargetScope;
 use crate::types::keywords::Keyword;
@@ -52,6 +56,7 @@ use nom::{
     combinator::{opt, value},
     Parser,
 };
+use std::ops::ControlFlow;
 
 /// Strip parenthesized reminder text. Reminder text is the parser's
 /// responsibility to ignore at the keyword level — keywords themselves are
@@ -779,6 +784,15 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
         // Veil's "you may activate one of its loyalty abilities once this turn"
         // is the permission itself; the player still decides each activation.
         | Effect::GrantExtraLoyaltyActivations { .. } => true,
+        // CR 111.3 + CR 603.5: a token's quoted text is part of its
+        // characteristics, including optional triggered abilities. The
+        // optionality therefore lives inside the Token's static-ability grant,
+        // not on the token-creation definition itself (Mole Man / Moloid class).
+        // Walk the same StaticDefinition carrier as GenericEffect below so the
+        // audit follows the runtime shape instead of card-specific wording.
+        Effect::Token {
+            static_abilities, ..
+        } => static_abilities.iter().any(static_definition_has_optional),
         // CR 601.3b + CR 702.8a + CR 609.4: a `GenericEffect` whose statics
         // encode a "you may" opt-in accounts for the marker in two ways:
         //
@@ -974,7 +988,7 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // cast an instant" is an activation-timing permission, not an
             // optional effect to execute during resolution.
             | StaticMode::ActivateAsInstant { .. }
-            // CR 117.3a: "You may play lands from your graveyard"
+            // CR 305.1 + CR 611.3d: "You may play lands from your graveyard"
             // (Crucible, Ramunap Excavator, etc.) — graveyard-as-zone
             // cast permission, structurally opt-in.
             | StaticMode::GraveyardCastPermission { .. }
@@ -1032,60 +1046,59 @@ fn any_static_has_granted_trigger_with_optional(parsed: &ParsedAbilities) -> boo
 /// original text — that is itself a coverage signal. Suppressing swallow
 /// detectors for these cards prevents double-reporting the same gap.
 fn def_tree_has_unimplemented(def: &AbilityDefinition) -> bool {
-    if matches!(*def.effect, Effect::Unimplemented { .. }) {
-        return true;
-    }
-    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
-        if def_tree_has_unimplemented(effect) {
-            return true;
+    visit_ability_def(def, &mut |effect| {
+        if matches!(effect, Effect::Unimplemented { .. }) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
         }
-    }
-    if let Some(ref sub) = def.sub_ability {
-        if def_tree_has_unimplemented(sub) {
-            return true;
-        }
-    }
-    if let Some(ref else_ab) = def.else_ability {
-        if def_tree_has_unimplemented(else_ab) {
-            return true;
-        }
-    }
-    def.mode_abilities.iter().any(def_tree_has_unimplemented)
-}
-
-fn trigger_tree_has_unimplemented(trigger: &TriggerDefinition) -> bool {
-    trigger
-        .execute
-        .as_deref()
-        .is_some_and(def_tree_has_unimplemented)
-}
-
-fn static_definition_has_unimplemented(s: &StaticDefinition) -> bool {
-    s.modifications.iter().any(|m| match m {
-        ContinuousModification::GrantTrigger { trigger } => trigger_tree_has_unimplemented(trigger),
-        ContinuousModification::GrantAbility { definition } => {
-            def_tree_has_unimplemented(definition)
-        }
-        // CR 113.3d + CR 613.1f: Parallel to static_carries_optional_modification —
-        // recurse into GrantStaticAbility so an Unimplemented-carrying granted static
-        // suppresses swallow detectors rather than double-reporting the parse gap.
-        ContinuousModification::GrantStaticAbility { definition } => {
-            static_definition_has_unimplemented(definition)
-        }
-        _ => false,
     })
+    .is_break()
+}
+
+/// Apply the authoritative nested-effect traversal to a trigger root.
+fn trigger_tree_has_unimplemented(trigger: &TriggerDefinition) -> bool {
+    visit_trigger(trigger, &mut |effect| {
+        if matches!(effect, Effect::Unimplemented { .. }) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+    .is_break()
+}
+
+/// Apply the authoritative nested-effect traversal to a replacement root.
+fn replacement_tree_has_unimplemented(replacement: &ReplacementDefinition) -> bool {
+    visit_replacement(replacement, &mut |effect| {
+        if matches!(effect, Effect::Unimplemented { .. }) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+    .is_break()
+}
+
+/// Apply the authoritative nested-effect traversal to a static root.
+fn static_definition_has_unimplemented(s: &StaticDefinition) -> bool {
+    visit_static(s, &mut |effect| {
+        if matches!(effect, Effect::Unimplemented { .. }) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+    .is_break()
 }
 
 fn any_ability_has_unimplemented(parsed: &ParsedAbilities) -> bool {
     parsed.abilities.iter().any(def_tree_has_unimplemented)
-        || parsed
-            .triggers
-            .iter()
-            .any(|t| t.execute.as_deref().is_some_and(def_tree_has_unimplemented))
+        || parsed.triggers.iter().any(trigger_tree_has_unimplemented)
         || parsed
             .replacements
             .iter()
-            .any(|r| r.execute.as_deref().is_some_and(def_tree_has_unimplemented))
+            .any(replacement_tree_has_unimplemented)
         || parsed.statics.iter().any(static_definition_has_unimplemented)
         // CR 603: A `TriggerMode::Unknown(_)` is the trigger-side equivalent
         // of `Effect::Unimplemented` — the parser preserved the original
@@ -4672,13 +4685,13 @@ mod tests {
 
     use super::{
         any_ability_has_unimplemented, def_tree_has_optional, def_tree_has_unimplemented,
-        trigger_tree_has_optional, twice_is_activation_limit,
+        effect_has_internal_optionality, trigger_tree_has_optional, twice_is_activation_limit,
     };
     use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, DamageModification, Effect, OutsideGameSourcePool,
-        QuantityExpr, TargetFilter, TriggerCondition,
+        AbilityDefinition, AbilityKind, ContinuousModification, DamageModification, Effect,
+        OutsideGameSourcePool, PlayerFilter, QuantityExpr, TargetFilter, TriggerCondition,
     };
     use crate::types::identifiers::TrackedSetId;
     use crate::types::keywords::Keyword;
@@ -5468,6 +5481,127 @@ mod tests {
             parsed.statics
         );
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn mole_man_token_trigger_accounts_for_optional_you_may() {
+        // CR 111.3: the quoted trigger is part of Moloid's token text.
+        // CR 603.5: its controller makes the "may mill" choice on resolution.
+        // Reverting the Effect::Token static-ability walk restores the exact
+        // Optional_YouMay coverage gap this production Oracle text exposed.
+        let parsed = parse_named(
+            "You may play lands from your graveyard.\n\
+             Landfall — Whenever a land you control enters, create a 1/1 green Minion creature token named Moloid with \"Whenever this token attacks, you may mill a card.\"",
+            "Mole Man, Moloid Master",
+            &["Creature"],
+        );
+
+        assert!(
+            !any_ability_has_unimplemented(&parsed),
+            "Mole Man reach guard: production parse must contain zero Unimplemented: {parsed:#?}"
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Optional_YouMay"),
+            "Moloid's granted optional trigger must account for its printed 'you may'"
+        );
+    }
+
+    #[test]
+    fn token_granted_optional_trigger_is_a_general_building_block() {
+        let parsed = parse(
+            "Create a 1/1 green Minion creature token named Moloid with \"Whenever this token attacks, you may mill a card.\"",
+            &["Sorcery"],
+        );
+        let create = parsed.abilities.first().expect("token creation ability");
+
+        assert!(
+            !def_tree_has_unimplemented(create),
+            "synthetic token-grant reach guard: {create:#?}"
+        );
+        assert!(
+            def_tree_has_optional(create),
+            "Token.static_abilities -> GrantTrigger must expose nested optionality"
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn token_granted_mandatory_trigger_is_not_optional() {
+        let parsed = parse(
+            "Create a 1/1 green Minion creature token named Moloid with \"Whenever this token attacks, mill a card.\"",
+            &["Sorcery"],
+        );
+        let create = parsed.abilities.first().expect("token creation ability");
+
+        assert!(
+            !def_tree_has_unimplemented(create),
+            "mandatory token-grant reach guard: {create:#?}"
+        );
+        assert!(
+            !effect_has_internal_optionality(create.effect.as_ref()),
+            "a mandatory granted trigger must not become optional"
+        );
+    }
+
+    #[test]
+    fn token_granted_unimplemented_trigger_is_reached_by_def_tree_walker() {
+        let parsed = parse(
+            "Create a 1/1 green Minion creature token named Moloid with \"Whenever this token attacks, perform an impossible action.\"",
+            &["Sorcery"],
+        );
+        let create = parsed.abilities.first().expect("token creation ability");
+
+        assert!(
+            def_tree_has_unimplemented(create),
+            "Token.static_abilities -> GrantTrigger -> execute must expose nested Unimplemented: {create:#?}"
+        );
+    }
+
+    #[test]
+    fn choice_branch_token_granted_unimplemented_is_reached_by_def_tree_walker() {
+        let mut parsed = parse(
+            "Create a 1/1 green Minion creature token named Moloid with \"Whenever this token attacks, perform an impossible action.\"",
+            &["Sorcery"],
+        );
+        let create = parsed.abilities.remove(0);
+        let Effect::Token {
+            static_abilities, ..
+        } = create.effect.as_ref()
+        else {
+            panic!("reach guard: expected Token, got {create:#?}");
+        };
+        let trigger = static_abilities
+            .iter()
+            .flat_map(|definition| definition.modifications.iter())
+            .find_map(|modification| match modification {
+                ContinuousModification::GrantTrigger { trigger } => Some(trigger),
+                _ => None,
+            })
+            .expect("reach guard: expected Token.static_abilities -> GrantTrigger");
+        let execute = trigger.execute.as_deref().expect("granted trigger execute");
+        assert!(
+            matches!(execute.effect.as_ref(), Effect::Unimplemented { .. }),
+            "reach guard: granted trigger must contain Unimplemented"
+        );
+
+        let modal = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![create],
+            },
+        );
+        let Effect::ChooseOneOf { branches, .. } = modal.effect.as_ref() else {
+            panic!("reach guard: expected outer ChooseOneOf, got {modal:#?}");
+        };
+        assert!(
+            matches!(branches[0].effect.as_ref(), Effect::Token { .. }),
+            "reach guard: choice branch must contain Token"
+        );
+        assert!(
+            def_tree_has_unimplemented(&modal),
+            "ChooseOneOf -> Token.static_abilities -> GrantTrigger -> Unimplemented must be visible: {modal:#?}"
+        );
     }
 
     #[test]

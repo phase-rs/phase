@@ -19,7 +19,8 @@
     "defaultEyebrow": "Outil d'espace de travail"
   },
   "pausedBanner": {
-    "message": "Partie en pause — {{reason}}"
+    "message": "Partie en pause — {{reason}}",
+    "resume": "Reprendre"
   },
   "fullscreen": {
     "enter": "Passer en plein écran",

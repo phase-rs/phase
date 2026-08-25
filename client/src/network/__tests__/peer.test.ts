@@ -67,13 +67,21 @@ describe("P2P Protocol - validateMessage", () => {
 });
 
 describe("PeerSession", () => {
-  it("send resolves immediately and bypasses encoding when connection is not open", async () => {
+  it("reports a dropped send and bypasses encoding when connection is not open", async () => {
     const { conn, session } = createTestSession();
     conn.open = false;
-    // The closed-channel sentinel is now a same-microtask resolve with no
-    // bytes recorded — equivalent to the old `false` return.
-    await session.send({ type: "concede" });
+    await expect(session.send({ type: "concede" })).resolves.toBe(false);
     expect(conn.sentRaw.length).toBe(0);
+    session.close();
+  });
+
+  it("reports a dropped queued send when the channel closes before its write", async () => {
+    const { conn, session } = createTestSession();
+    const send = session.send({ type: "concede" });
+    conn.open = false;
+
+    await expect(send).resolves.toBe(false);
+    expect(conn.sentRaw).toEqual([]);
     session.close();
   });
 
@@ -230,7 +238,7 @@ describe("PeerSession", () => {
       throw new Error("channel torn down");
     };
 
-    await session.send({ type: "concede" });
+    await expect(session.send({ type: "concede" })).resolves.toBe(false);
 
     expect(onDisconnect).toHaveBeenCalledTimes(1);
     expect(onDisconnect).toHaveBeenCalledWith("Channel send failed");

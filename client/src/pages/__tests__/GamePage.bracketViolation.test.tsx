@@ -19,6 +19,7 @@ import { GamePage } from "../GamePage";
 import type { FormatConfig } from "../../adapter/types";
 import type { WsAdapterEvent } from "../../adapter/ws-adapter";
 import type { P2PAdapterEvent } from "../../adapter/p2p-adapter";
+import { P2PHostAdapter } from "../../adapter/p2p-adapter";
 import { WebSocketAdapter } from "../../adapter/ws-adapter";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { gameObjectFactory } from "../../test/factories/gameObjectFactory";
@@ -460,6 +461,28 @@ describe("GamePage — cEDH bracket-violation blocking modal", () => {
     });
 
     expect(screen.queryByTestId("bracket-violation-modal")).toBeNull();
+  });
+});
+
+describe("GamePage — P2P pause resume control", () => {
+  it("wires Resume to a P2P host adapter", async () => {
+    const requestResume = vi.fn();
+    const host = Object.create(P2PHostAdapter.prototype) as P2PHostAdapter;
+    host.requestResume = requestResume;
+    storeOverrides.adapter = host;
+
+    renderGamePage("/game/test-game-123?mode=p2p-host");
+    act(() => { capturedOnP2PEvent?.({ type: "gamePaused", reason: "Paused by host" }); });
+
+    await userEvent.setup().click(screen.getByRole("button", { name: "Resume" }));
+    expect(requestResume).toHaveBeenCalledOnce();
+  });
+
+  it("does not expose Resume to a P2P guest", () => {
+    renderGamePage("/game/test-game-123?mode=p2p-join");
+    act(() => { capturedOnP2PEvent?.({ type: "gamePaused", reason: "Paused by host" }); });
+
+    expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
   });
 });
 

@@ -202,6 +202,7 @@ vi.mock("../ws-adapter", () => ({
 }));
 const mockSubmitAction = mocks.submitAction;
 const mockCheckDeckCompatibility = mocks.checkDeckCompatibility;
+const mockGetSnapshot = mocks.getSnapshot as unknown as AsyncMockWithResolvedValueOnce;
 const mockGetViewerSnapshot = mocks.getViewerSnapshot;
 const mockInitializeHostGame = mocks.initializeMultiplayerHostGame;
 const mockSetMultiplayerMode = mocks.setMultiplayerMode;
@@ -1348,6 +1349,339 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     mockSubmitAction.mockClear();
     await vi.advanceTimersByTimeAsync(10_000);
     expect(mockSubmitAction).not.toHaveBeenCalled();
+  });
+
+  it("reserves a reconnect seat through its ACK and ignores duplicate or pending actions", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    const setup = (await guest.getSentMessages()).find(
+      (message): message is { type: "game_setup"; playerToken: string } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: string }).type === "game_setup",
+    );
+    const pendingSnapshot = deferred<{
+      state: GameState;
+      actions: GameAction[];
+      autoPassRecommended: boolean;
+    }>();
+    (mockGetViewerSnapshot as unknown as {
+      mockImplementationOnce: (implementation: () => Promise<unknown>) => void;
+    }).mockImplementationOnce(() => pendingSnapshot.promise);
+    guest.simulateClose();
+
+    const reconnect = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: setup!.playerToken,
+    });
+    await reconnect.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+    const duplicate = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: setup!.playerToken,
+    });
+    await flushPromises();
+
+    expect(mockSubmitAction).not.toHaveBeenCalled();
+    expect((await duplicate.getSentMessages()).some(
+      (message) => (message as { type?: string }).type === "reconnect_rejected",
+    )).toBe(true);
+
+    // Closing the reserved channel must release only its reservation, leaving
+    // the seat disconnected and eligible for a later retry.
+    reconnect.simulateClose();
+    pendingSnapshot.resolve({
+      state: { players: [], objects: {}, waiting_for: { type: "Priority", data: { player: 1 } } } as unknown as GameState,
+      actions: [{ type: "PassPriority" }],
+      autoPassRecommended: false,
+    });
+    await flushPromises();
+
+    const retry = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: setup!.playerToken,
+    });
+    await flushPromises();
+    const messages = await retry.getSentMessages();
+    expect(messages.map((message) => (message as { type?: string }).type)).toContain("reconnect_ack");
+    const action = retry.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+    await action;
+    expect(mockSubmitAction).toHaveBeenCalledWith({ type: "PassPriority" }, 1);
+  });
+
+  it("keeps a seat disconnected when its reconnect ACK is dropped before the write", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    const setup = (await guest.getSentMessages()).find(
+      (message): message is { type: "game_setup"; playerToken: string } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: string }).type === "game_setup",
+    );
+    const pendingSnapshot = deferred<{
+      state: GameState;
+      actions: GameAction[];
+      autoPassRecommended: boolean;
+    }>();
+    (mockGetViewerSnapshot as unknown as {
+      mockImplementationOnce: (implementation: () => Promise<unknown>) => void;
+    }).mockImplementationOnce(() => pendingSnapshot.promise);
+    guest.simulateClose();
+
+    const reconnect = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: setup!.playerToken,
+    });
+    // The handoff is still resolving, then the data channel drops before the
+    // queued reconnect_ack can reach `conn.send`.
+    reconnect.open = false;
+    pendingSnapshot.resolve({
+      state: remoteState("dropped reconnect acknowledgement"),
+      actions: [{ type: "PassPriority" }],
+      autoPassRecommended: false,
+    });
+    await flushPromises();
+
+    const host = adapter as unknown as {
+      guestSessions: Map<number, unknown>;
+      pendingReconnectSessions: Map<number, unknown>;
+      disconnectedSeats: Map<number, unknown>;
+      gameRunState: string;
+    };
+    expect(await reconnect.getSentMessages()).toEqual([]);
+    expect(host.guestSessions.has(1)).toBe(false);
+    expect(host.pendingReconnectSessions.has(1)).toBe(false);
+    expect(host.disconnectedSeats.has(1)).toBe(true);
+    expect(host.gameRunState).toBe("paused-disconnect");
+
+    const retry = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: setup!.playerToken,
+    });
+    await flushPromises();
+    expect((await retry.getSentMessages()).some(
+      (message) => (message as { type?: string }).type === "reconnect_ack",
+    )).toBe(true);
+  });
+
+  it("rejects a reconnect when its native handoff cannot be built", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    const setup = (await guest.getSentMessages()).find(
+      (message): message is { type: "game_setup"; playerToken: string } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: string }).type === "game_setup",
+    );
+    guest.simulateClose();
+
+    const host = adapter as unknown as { nativeBridge: object | null };
+    host.nativeBridge = {};
+    const reconnect = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: setup!.playerToken,
+    });
+    await flushPromises();
+
+    expect((await reconnect.getSentMessages()).find(
+      (message) => (message as { type?: string }).type === "reconnect_rejected",
+    )).toMatchObject({
+      type: "reconnect_rejected",
+      reason: "Reconnect acknowledgement failed",
+    });
+  });
+
+  it("serializes a native reconnect behind an in-flight native revision delivery", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    const setup = (await guest.getSentMessages()).find(
+      (message): message is { type: "game_setup"; playerToken: string } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: string }).type === "game_setup",
+    );
+    guest.simulateClose();
+
+    const host = adapter as unknown as {
+      nativeBridge: object | null;
+      nativeDeliveredViews: Map<number, { revision: number; snapshot: EngineSnapshot }>;
+      authoritativeRevision: number;
+      enqueueDelivery: (operation: () => Promise<void>) => Promise<void>;
+    };
+    const oldSnapshot: EngineSnapshot = {
+      state: remoteState("native revision one"),
+      legalResult: { actions: [], autoPassRecommended: false },
+      seq: 1,
+    };
+    const currentSnapshot: EngineSnapshot = {
+      state: remoteState("native revision two"),
+      legalResult: { actions: [{ type: "PassPriority" }], autoPassRecommended: false },
+      seq: 2,
+    };
+    host.nativeBridge = {};
+    host.nativeDeliveredViews.set(1, { revision: 1, snapshot: oldSnapshot });
+    host.authoritativeRevision = 1;
+    const revisionDelivery = deferred<void>();
+    const inFlightRevision = host.enqueueDelivery(async () => {
+      host.authoritativeRevision = 2;
+      await revisionDelivery.promise;
+      host.nativeDeliveredViews.set(1, { revision: 2, snapshot: currentSnapshot });
+    });
+
+    const reconnect = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: setup!.playerToken,
+    });
+    await flushPromises();
+    expect((await reconnect.getSentMessages()).some(
+      (message) => (message as { type?: string }).type === "reconnect_ack",
+    )).toBe(false);
+
+    revisionDelivery.resolve();
+    await inFlightRevision;
+    await flushPromises();
+
+    const ack = (await reconnect.getSentMessages()).find(
+      (message): message is { type: "reconnect_ack"; revision: number; state: { label: string } } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: string }).type === "reconnect_ack",
+    );
+    expect(ack).toMatchObject({
+      revision: 2,
+      state: { label: "native revision two" },
+    });
+  });
+
+  it("serializes a WASM reconnect with a queued final state and terminal delivery", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    const setup = (await guest.getSentMessages()).find(
+      (message): message is { type: "game_setup"; playerToken: string } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: string }).type === "game_setup",
+    );
+    const oldState = remoteState("before final state");
+    const finalState = {
+      ...remoteState("final state"),
+      waiting_for: { type: "GameOver", data: { winner: 0 } },
+    } as unknown as GameState;
+    let viewerState = oldState;
+    (mockGetViewerSnapshot as unknown as {
+      mockImplementation: (implementation: () => Promise<unknown>) => void;
+    }).mockImplementation(async () => ({
+      state: viewerState,
+      actions: [],
+      autoPassRecommended: false,
+    }));
+    mockGetSnapshot.mockResolvedValueOnce({
+      state: finalState,
+      legalResult: { actions: [], autoPassRecommended: false },
+      seq: 99,
+    });
+
+    const host = adapter as unknown as {
+      enqueueDelivery: (operation: () => Promise<void>) => Promise<void>;
+      broadcastStateUpdate: (
+        events: GameEvent[],
+        logEntries?: GameLogEntry[],
+        terminalReason?: string,
+      ) => Promise<void>;
+    };
+    const releaseDelivery = deferred<void>();
+    const inFlightDelivery = host.enqueueDelivery(async () => {
+      await releaseDelivery.promise;
+    });
+
+    guest.simulateClose();
+    const reconnect = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: setup!.playerToken,
+    });
+    viewerState = finalState;
+    const finalBroadcast = host.broadcastStateUpdate([], [], "Game complete");
+
+    releaseDelivery.resolve();
+    await inFlightDelivery;
+    await finalBroadcast;
+    await flushPromises();
+
+    const messages = await reconnect.getSentMessages();
+    const ack = messages.find(
+      (message): message is { type: "reconnect_ack"; revision: number; state: { label: string } } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: string }).type === "reconnect_ack",
+    );
+    const update = messages.find(
+      (message): message is { type: "state_update"; revision: number; state: { label: string } } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: string }).type === "state_update",
+    );
+    const terminalIndex = messages.findIndex(
+      (message) => typeof message === "object"
+        && message !== null
+        && (message as { type?: string }).type === "terminal_result",
+    );
+
+    expect(ack).toMatchObject({ state: { label: "final state" } });
+    expect(update).toMatchObject({ state: { label: "final state" } });
+    expect(update!.revision).toBeGreaterThan(ack!.revision);
+    expect(terminalIndex).toBeGreaterThan(messages.indexOf(update!));
+  });
+
+  it("resumes a manual pause only after the last disconnected seat is resolved", async () => {
+    const { adapter } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const events: P2PAdapterEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    adapter.requestPause();
+    adapter.requestResume();
+
+    expect(events.map((event) => event.type)).toEqual(["gamePaused", "gameResumed"]);
+
+    const host = adapter as unknown as {
+      disconnectedSeats: Map<number, { disconnectedAt: number; timer: null }>;
+    };
+    host.disconnectedSeats.set(1, { disconnectedAt: Date.now(), timer: null });
+    adapter.requestPause();
+    adapter.requestResume();
+
+    expect(events.filter((event) => event.type === "gameResumed")).toHaveLength(1);
   });
 
   it("replays a native AI driver fault after reconnecting guest's snapshot", async () => {

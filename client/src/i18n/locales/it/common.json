@@ -19,7 +19,8 @@
     "defaultEyebrow": "Strumento dello spazio di lavoro"
   },
   "pausedBanner": {
-    "message": "Partita in pausa — {{reason}}"
+    "message": "Partita in pausa — {{reason}}",
+    "resume": "Riprendi"
   },
   "fullscreen": {
     "enter": "Attiva schermo intero",
