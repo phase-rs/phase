@@ -202,6 +202,7 @@ vi.mock("../ws-adapter", () => ({
 }));
 const mockSubmitAction = mocks.submitAction;
 const mockCheckDeckCompatibility = mocks.checkDeckCompatibility;
+const mockGetSnapshot = mocks.getSnapshot as unknown as AsyncMockWithResolvedValueOnce;
 const mockGetViewerSnapshot = mocks.getViewerSnapshot;
 const mockInitializeHostGame = mocks.initializeMultiplayerHostGame;
 const mockSetMultiplayerMode = mocks.setMultiplayerMode;
@@ -1545,6 +1546,90 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       revision: 2,
       state: { label: "native revision two" },
     });
+  });
+
+  it("serializes a WASM reconnect with a queued final state and terminal delivery", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    const setup = (await guest.getSentMessages()).find(
+      (message): message is { type: "game_setup"; playerToken: string } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: string }).type === "game_setup",
+    );
+    const oldState = remoteState("before final state");
+    const finalState = {
+      ...remoteState("final state"),
+      waiting_for: { type: "GameOver", data: { winner: 0 } },
+    } as unknown as GameState;
+    let viewerState = oldState;
+    (mockGetViewerSnapshot as unknown as {
+      mockImplementation: (implementation: () => Promise<unknown>) => void;
+    }).mockImplementation(async () => ({
+      state: viewerState,
+      actions: [],
+      autoPassRecommended: false,
+    }));
+    mockGetSnapshot.mockResolvedValueOnce({
+      state: finalState,
+      legalResult: { actions: [], autoPassRecommended: false },
+      seq: 99,
+    });
+
+    const host = adapter as unknown as {
+      enqueueDelivery: (operation: () => Promise<void>) => Promise<void>;
+      broadcastStateUpdate: (
+        events: GameEvent[],
+        logEntries?: GameLogEntry[],
+        terminalReason?: string,
+      ) => Promise<void>;
+    };
+    const releaseDelivery = deferred<void>();
+    const inFlightDelivery = host.enqueueDelivery(async () => {
+      await releaseDelivery.promise;
+    });
+
+    guest.simulateClose();
+    const reconnect = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: setup!.playerToken,
+    });
+    viewerState = finalState;
+    const finalBroadcast = host.broadcastStateUpdate([], [], "Game complete");
+
+    releaseDelivery.resolve();
+    await inFlightDelivery;
+    await finalBroadcast;
+    await flushPromises();
+
+    const messages = await reconnect.getSentMessages();
+    const ack = messages.find(
+      (message): message is { type: "reconnect_ack"; revision: number; state: { label: string } } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: string }).type === "reconnect_ack",
+    );
+    const update = messages.find(
+      (message): message is { type: "state_update"; revision: number; state: { label: string } } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: string }).type === "state_update",
+    );
+    const terminalIndex = messages.findIndex(
+      (message) => typeof message === "object"
+        && message !== null
+        && (message as { type?: string }).type === "terminal_result",
+    );
+
+    expect(ack).toMatchObject({ state: { label: "final state" } });
+    expect(update).toMatchObject({ state: { label: "final state" } });
+    expect(update!.revision).toBeGreaterThan(ack!.revision);
+    expect(terminalIndex).toBeGreaterThan(messages.indexOf(update!));
   });
 
   it("resumes a manual pause only after the last disconnected seat is resolved", async () => {

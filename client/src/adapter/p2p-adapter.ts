@@ -695,10 +695,10 @@ export class P2PHostAdapter implements EngineAdapter {
   /** Native snapshots become reconnectable only after their matching server
    * revision has completed the PeerJS fan-out. */
   private nativeDeliveredViews = new Map<PlayerId, { revision: number; snapshot: EngineSnapshot }>();
-  /** Serializes native state fan-out with reconnect promotion. A reconnect
-   * cannot acknowledge an older delivered view while a newer native revision
-   * is in flight and would otherwise miss its newly promoted session. */
-  private nativeDeliveryQueue: Promise<void> = Promise.resolve();
+  /** Serializes every state-bearing delivery with reconnect promotion. A
+   * reconnect cannot acknowledge an older view while a state fan-out is in
+   * flight and would otherwise miss that update after becoming active. */
+  private deliveryQueue: Promise<void> = Promise.resolve();
   private guestDecks = new Map<PlayerId, DeckListPayload["player"]>();
   private aiDecks = new Map<PlayerId, DeckListPayload["player"]>();
   private playerTokens = new Map<PlayerId, string>();
@@ -877,10 +877,10 @@ export class P2PHostAdapter implements EngineAdapter {
         formatConfig,
         matchConfig,
         native,
-        (revision, views) => this.enqueueNativeDelivery(
+        (revision, views) => this.enqueueDelivery(
           () => this.handleNativeRevision(revision, views),
         ),
-        (fault) => this.enqueueNativeDelivery(() => this.handleNativeAiDriverFault(fault)),
+        (fault) => this.enqueueDelivery(() => this.handleNativeAiDriverFault(fault)),
         nativeResume,
       );
     } else {
@@ -1130,13 +1130,14 @@ export class P2PHostAdapter implements EngineAdapter {
     return session.send({ ...message, authority: this.authority });
   }
 
-  /** Keep native server revisions and reconnect acknowledgement/promotion in
-   * one ordered critical section. The bridge already serializes revisions;
-   * this additionally keeps an independently arriving PeerJS reconnect from
-   * slipping between a revision's snapshot fan-out and its delivery record. */
-  private enqueueNativeDelivery<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.nativeDeliveryQueue.then(operation, operation);
-    this.nativeDeliveryQueue = result.then(
+  /** Keep state fan-out, terminal delivery, and reconnect acknowledgement /
+   * promotion in one ordered critical section. PeerJS reconnects arrive
+   * independently of both the native revision stream and browser WASM action
+   * fan-out; without this fence either path can skip a pending session while
+   * the reconnect acknowledges an older snapshot. */
+  private enqueueDelivery<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.deliveryQueue.then(operation, operation);
+    this.deliveryQueue = result.then(
       () => undefined,
       () => undefined,
     );
@@ -2181,6 +2182,14 @@ export class P2PHostAdapter implements EngineAdapter {
     logEntries?: GameLogEntry[],
     terminalReason?: string,
   ): Promise<void> {
+    return this.enqueueDelivery(() => this.broadcastStateUpdateInner(events, logEntries, terminalReason));
+  }
+
+  private async broadcastStateUpdateInner(
+    events: GameEvent[],
+    logEntries?: GameLogEntry[],
+    terminalReason?: string,
+  ): Promise<void> {
     if (!this.ownsAuthority()) return;
     if (this.nativeBridge) return;
     const revision = ++this.authoritativeRevision;
@@ -2740,11 +2749,7 @@ export class P2PHostAdapter implements EngineAdapter {
   }
 
   private async completeReconnect(pid: PlayerId, session: PeerSession): Promise<void> {
-    if (this.nativeBridge) {
-      await this.enqueueNativeDelivery(() => this.completeReconnectAfterHandoff(pid, session));
-      return;
-    }
-    await this.completeReconnectAfterHandoff(pid, session);
+    await this.enqueueDelivery(() => this.completeReconnectAfterHandoff(pid, session));
   }
 
   private async completeReconnectAfterHandoff(pid: PlayerId, session: PeerSession): Promise<void> {
