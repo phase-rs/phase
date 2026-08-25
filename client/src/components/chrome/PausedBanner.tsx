@@ -30,7 +30,7 @@ export function PausedBanner({ isVisible, reason, onResume }: PausedBannerProps)
             {onResume && (
               <button
                 type="button"
-                className="pointer-events-auto rounded bg-amber-200/15 px-2 py-1 text-xs font-bold text-amber-100 hover:bg-amber-200/25 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-100"
+                className="pointer-events-auto min-h-11 min-w-11 rounded bg-amber-200/15 px-2 py-1 text-xs font-bold text-amber-100 hover:bg-amber-200/25 active:bg-amber-200/25 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-100"
                 onClick={onResume}
               >
                 {t("pausedBanner.resume")}

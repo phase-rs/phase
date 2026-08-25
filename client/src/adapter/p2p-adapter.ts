@@ -2848,6 +2848,11 @@ export class P2PHostAdapter implements EngineAdapter {
   private failPendingReconnect(pid: PlayerId, session: PeerSession, reason: string): void {
     if (this.pendingReconnectSessions.get(pid) !== session) return;
     this.pendingReconnectSessions.delete(pid);
+    // An otherwise open guest needs an explicit terminal response; a bare
+    // close is treated as a transient transport loss and starts its retry loop.
+    // `PeerSession.close` preserves already-queued sends, so this rejection is
+    // written before the farewell close frame when the transport remains open.
+    void this.send(session, { type: "reconnect_rejected", reason });
     session.close(reason);
   }
 
