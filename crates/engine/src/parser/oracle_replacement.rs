@@ -11026,11 +11026,11 @@ const BIDIRECTIONAL_ELLIPSIS_ANCHOR: &str = "dealt to and dealt by ";
 /// SCOPE NOTE on "`expiry` is the single lifetime authority": that premise is
 /// true for definitions the runtime can ever consult, which is MODULO
 /// `object_replacement_candidate_applies`' `[Battlefield, Command]` zone gate.
-/// Seven turn-windowed printed shield defs in the corpus (Head to Head, Revealing
-/// Wind, Sex Appeal, That's No Moonmist, Torrent of Lava, Undergrowth, Winds of
-/// Qal Sisma) still emit `expiry: null` and are inert only because they are
-/// Instants/Sorceries that never reach the battlefield. The premise holds
-/// unconditionally only for PERMANENT hosts.
+/// Five turn-windowed printed shield defs in the corpus (Head to Head, Sex
+/// Appeal, That's No Moonmist, Torrent of Lava, Winds of Qal Sisma) still emit
+/// `expiry: null` and are inert only because they are Instants/Sorceries that
+/// never reach the battlefield. The premise holds unconditionally only for
+/// PERMANENT hosts.
 fn stated_clause_expiry(
     clause_lower: &str,
     window_anchor: &str,
