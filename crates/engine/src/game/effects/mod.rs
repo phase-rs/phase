@@ -2892,6 +2892,11 @@ pub(crate) fn should_propagate_parent_targets(
 pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
     sub.targets.is_empty()
         && (sub.target_choice_timing != TargetChoiceTiming::Resolution
+            // CR 608.2c: a resolution-time instruction can still consume an
+            // object selected by its parent. `ParentTarget` is not a fresh
+            // choice, so retain the already-bound target for continuations
+            // such as Cass's reattach and The Seventh Doctor's free cast.
+            || effect_refs_parent_target(&sub.effect)
             // CR 608.2c + CR 303.4f: TargetOnly → ChangeZone[+Attach ParentTarget]
             // (Necrotic Plague) stamps Resolution on the return clause, but the
             // chosen host is still the parent's bound target — propagate it so

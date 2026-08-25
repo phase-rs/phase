@@ -2742,20 +2742,25 @@ fn collect_target_slots_inner(
             });
         }
     } else if let Effect::Attach { attachment, target } = &ability.effect {
-        collect_attach_attachment_target_slots(state, ability, attachment, acc)?;
-        if attach_host_filter_needs_target_slot(target) {
-            let legal_targets =
-                legal_targets_for_ability_filter(state, ability, target, &acc.slots);
-            if legal_targets.is_empty() && !ability.optional_targeting {
-                return Err(no_legal_target_slots());
+        // CR 115.1 + CR 608.2d: an untargeted attachment choice occurs while
+        // resolving, so it must not claim a target slot when this ability is
+        // announced.
+        if ability.target_choice_timing == TargetChoiceTiming::Stack {
+            collect_attach_attachment_target_slots(state, ability, attachment, acc)?;
+            if attach_host_filter_needs_target_slot(target) {
+                let legal_targets =
+                    legal_targets_for_ability_filter(state, ability, target, &acc.slots);
+                if legal_targets.is_empty() && !ability.optional_targeting {
+                    return Err(no_legal_target_slots());
+                }
+                acc.push(TargetSelectionSlot {
+                    legal_targets,
+                    optional: ability.optional_targeting,
+                    chooser: None,
+                    effect_kind: acc.current_effect_kind,
+                    effect_detail: acc.current_effect_detail,
+                });
             }
-            acc.push(TargetSelectionSlot {
-                legal_targets,
-                optional: ability.optional_targeting,
-                chooser: None,
-                effect_kind: acc.current_effect_kind,
-                effect_detail: acc.current_effect_detail,
-            });
         }
     } else if let Effect::CreateDamageReplacement {
         recipient_object_filter,
@@ -4751,21 +4756,23 @@ fn collect_target_slot_specs(
             });
         }
     } else if let Effect::Attach { attachment, target } = &ability.effect {
-        collect_attach_attachment_target_slot_specs(
-            state,
-            ability,
-            attachment,
-            specs,
-            next_instance,
-        );
-        if attach_host_filter_needs_target_slot(target) {
-            let id = TargetInstanceId(*next_instance);
-            *next_instance += 1;
-            specs.push(TargetSlotSpec {
-                filter: target.clone(),
-                optional: ability.optional_targeting,
-                instance: id,
-            });
+        if ability.target_choice_timing == TargetChoiceTiming::Stack {
+            collect_attach_attachment_target_slot_specs(
+                state,
+                ability,
+                attachment,
+                specs,
+                next_instance,
+            );
+            if attach_host_filter_needs_target_slot(target) {
+                let id = TargetInstanceId(*next_instance);
+                *next_instance += 1;
+                specs.push(TargetSlotSpec {
+                    filter: target.clone(),
+                    optional: ability.optional_targeting,
+                    instance: id,
+                });
+            }
         }
     } else if let Effect::CreateDamageReplacement {
         recipient_object_filter,
@@ -6625,43 +6632,45 @@ fn assign_targets_recursive(
         return Ok(());
     }
 
-    if let Effect::Attach { attachment, target } = &ability.effect {
-        let attachment = attachment.clone();
-        let target = target.clone();
-        assign_attach_attachment_declared_targets(
-            state,
-            ability,
-            &attachment,
-            &target,
-            targets,
-            next_target,
-        )?;
-        if attach_host_filter_needs_target_slot(&target) {
-            if let Some(target) = targets.get(*next_target) {
-                ability.targets.push(target.clone());
-                *next_target += 1;
-            } else if !ability.optional_targeting {
-                return Err(EngineError::InvalidAction(
-                    "Missing required target".to_string(),
-                ));
-            }
-        }
-        if defers_sub_ability_target_selection(&ability.effect) {
-            assign_targets_after_deferred_effect(
+    if ability.target_choice_timing == TargetChoiceTiming::Stack {
+        if let Effect::Attach { attachment, target } = &ability.effect {
+            let attachment = attachment.clone();
+            let target = target.clone();
+            assign_attach_attachment_declared_targets(
                 state,
-                ability.sub_ability.as_deref_mut(),
+                ability,
+                &attachment,
+                &target,
                 targets,
                 next_target,
             )?;
-            return Ok(());
-        }
-        if let Some(sub_ability) = ability.sub_ability.as_mut() {
-            if defers_conditional_target_selection(sub_ability) {
+            if attach_host_filter_needs_target_slot(&target) {
+                if let Some(target) = targets.get(*next_target) {
+                    ability.targets.push(target.clone());
+                    *next_target += 1;
+                } else if !ability.optional_targeting {
+                    return Err(EngineError::InvalidAction(
+                        "Missing required target".to_string(),
+                    ));
+                }
+            }
+            if defers_sub_ability_target_selection(&ability.effect) {
+                assign_targets_after_deferred_effect(
+                    state,
+                    ability.sub_ability.as_deref_mut(),
+                    targets,
+                    next_target,
+                )?;
                 return Ok(());
             }
-            assign_targets_recursive(state, sub_ability, targets, next_target)?;
+            if let Some(sub_ability) = ability.sub_ability.as_mut() {
+                if defers_conditional_target_selection(sub_ability) {
+                    return Ok(());
+                }
+                assign_targets_recursive(state, sub_ability, targets, next_target)?;
+            }
+            return Ok(());
         }
-        return Ok(());
     }
 
     if let Effect::Fight { subject, target } = &ability.effect {
@@ -6983,49 +6992,51 @@ fn assign_selected_slots_recursive(
         return Ok(());
     }
 
-    if let Effect::Attach { attachment, target } = &ability.effect {
-        let attachment = attachment.clone();
-        let target = target.clone();
-        assign_attach_attachment_selected_slots(
-            state,
-            ability,
-            &attachment,
-            selected_slots,
-            next_slot,
-        )?;
-        if attach_host_filter_needs_target_slot(&target) {
-            let Some(selected_slot) = selected_slots.get(*next_slot) else {
-                return Err(EngineError::InvalidAction(
-                    "Missing target selection".to_string(),
-                ));
-            };
-            match selected_slot {
-                Some(target) => ability.targets.push(target.clone()),
-                None if ability.optional_targeting => {}
-                None => {
-                    return Err(EngineError::InvalidAction(
-                        "Missing required target".to_string(),
-                    ));
-                }
-            }
-            *next_slot += 1;
-        }
-        if defers_sub_ability_target_selection(&ability.effect) {
-            assign_selected_slots_after_deferred_effect(
+    if ability.target_choice_timing == TargetChoiceTiming::Stack {
+        if let Effect::Attach { attachment, target } = &ability.effect {
+            let attachment = attachment.clone();
+            let target = target.clone();
+            assign_attach_attachment_selected_slots(
                 state,
-                ability.sub_ability.as_deref_mut(),
+                ability,
+                &attachment,
                 selected_slots,
                 next_slot,
             )?;
-            return Ok(());
-        }
-        if let Some(sub_ability) = ability.sub_ability.as_mut() {
-            if defers_conditional_target_selection(sub_ability) {
+            if attach_host_filter_needs_target_slot(&target) {
+                let Some(selected_slot) = selected_slots.get(*next_slot) else {
+                    return Err(EngineError::InvalidAction(
+                        "Missing target selection".to_string(),
+                    ));
+                };
+                match selected_slot {
+                    Some(target) => ability.targets.push(target.clone()),
+                    None if ability.optional_targeting => {}
+                    None => {
+                        return Err(EngineError::InvalidAction(
+                            "Missing required target".to_string(),
+                        ));
+                    }
+                }
+                *next_slot += 1;
+            }
+            if defers_sub_ability_target_selection(&ability.effect) {
+                assign_selected_slots_after_deferred_effect(
+                    state,
+                    ability.sub_ability.as_deref_mut(),
+                    selected_slots,
+                    next_slot,
+                )?;
                 return Ok(());
             }
-            assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
+            if let Some(sub_ability) = ability.sub_ability.as_mut() {
+                if defers_conditional_target_selection(sub_ability) {
+                    return Ok(());
+                }
+                assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
+            }
+            return Ok(());
         }
-        return Ok(());
     }
 
     if let Effect::Fight { subject, target } = &ability.effect {
@@ -7439,11 +7450,13 @@ fn chain_has_target_sink(ability: &ResolvedAbility) -> bool {
         return !matches!(target, TargetFilter::SelfRef | TargetFilter::ParentTarget);
     }
 
-    if let Effect::Attach { attachment, target } = &ability.effect {
-        if attach_side_needs_target_slot(attachment, true)
-            || attach_side_needs_target_slot(target, false)
-        {
-            return true;
+    if ability.target_choice_timing == TargetChoiceTiming::Stack {
+        if let Effect::Attach { attachment, target } = &ability.effect {
+            if attach_side_needs_target_slot(attachment, true)
+                || attach_side_needs_target_slot(target, false)
+            {
+                return true;
+            }
         }
     }
 

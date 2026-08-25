@@ -312,6 +312,7 @@ expression: "&ir"
               "condition": null,
               "optional_targeting": false,
               "optional": false,
+              "target_choice_timing": "Resolution",
               "forward_result": false,
               "sub_link": "SequentialSibling"
             },
