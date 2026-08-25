@@ -10680,6 +10680,18 @@ fn resolve_chain_body(
                 })
                 .collect(),
         };
+        // CR 101.4 + CR 118.12a + CR 111.2: A scoped token instruction whose
+        // each player may avert the result by sacrificing has one aggregate
+        // outcome, not one token creation per iteration. Let its dedicated
+        // APNAP payment coordinator own the existing UnlessPayment and
+        // WardSacrificeChoice round trips before the generic fan-out clones it.
+        if crate::game::engine_payment_choices::begin_player_scope_token_unless_sacrifice(
+            state,
+            ability,
+            matching_players.clone(),
+        ) {
+            return Ok(());
+        }
         // Inspect the original child chain before splitting it. The splitter
         // intentionally detaches a final searched-this-way shuffle, but it can
         // also detach arbitrary delivery riders; only the former is explicitly

@@ -983,6 +983,7 @@ mod saruman_white_hand_amass;
 mod sba_lethal_damage_redirect_single_application;
 mod scarab_god_regression;
 mod scholarship_sponsor;
+mod scoped_unless_sacrifice_token;
 mod screaming_nemesis_combat_damage_multi_trigger;
 mod screaming_nemesis_life_lock;
 mod scroll_of_fate_manifest_from_hand;

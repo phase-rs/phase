@@ -4119,6 +4119,26 @@ pub struct PendingPlayerScopeSacrificeChoice {
     pub completion: PendingPlayerScopeSacrificeCompletion,
 }
 
+/// CR 101.4 + CR 118.12a + CR 111.2: An APNAP poll for a player-scoped
+/// token instruction whose declining players receive one aggregate token
+/// creation after every payer has answered. Kept independently of the current
+/// `UnlessPayment`/`WardSacrificeChoice`, which represent only one seat's
+/// decision and may be replaced mid-payment.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PendingPlayerScopeUnlessPayment {
+    /// The unscoped token instruction to resolve exactly once at the terminal
+    /// poll boundary. Its count is replaced with the number of decliners.
+    pub pending_effect: Box<ResolvedAbility>,
+    /// Seats still to answer in APNAP order.
+    pub remaining_players: Vec<PlayerId>,
+    /// Seats that declined the sacrifice payment.
+    pub declining_players: Vec<PlayerId>,
+    /// The seat whose `UnlessPayment` or `WardSacrificeChoice` is live.
+    pub current_player: PlayerId,
+    /// The typed sacrifice cost is retained to re-emit the next existing prompt.
+    pub cost: AbilityCost,
+}
+
 /// CR 101.4 + CR 701.21a: Accumulated terminal state for a simultaneous
 /// player-scope sacrifice action that may span one or more CR 616.1 choices.
 /// The individual choice queue can become empty while the final proposed
@@ -17406,6 +17426,10 @@ declare_game_state! {
     /// `EffectZoneChoice`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_player_scope_sacrifice_choice: Option<PendingPlayerScopeSacrificeChoice>,
+    /// CR 101.4 + CR 118.12a: player-scoped unless-payment poll retained
+    /// across one-seat sacrifice choices and replacement pauses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_player_scope_unless_payment: Option<Box<PendingPlayerScopeUnlessPayment>>,
     /// CR 608.2c + CR 701.9a: a discard instruction parked by a
     /// replacement-application choice. See [`PendingDiscardBatch`], whose doc
     /// records why CR 616.1 does not govern this path.
@@ -22200,6 +22224,7 @@ impl GameState {
             merged_card_component_route: None,
             resolution_coin_flip: None,
             pending_player_scope_sacrifice_choice: None,
+            pending_player_scope_unless_payment: None,
             pending_discard_batch: None,
             pending_mass_library_order_choice: None,
             pending_scoped_library_search: None,
@@ -24289,6 +24314,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     value is correctly not a fixed-point repeat and COMPARING it can never suppress a
         //     legitimate loop's detection.
         pending_player_scope_sacrifice_choice: _,
+        pending_player_scope_unless_payment: _,
         pending_discard_batch: _,
         pending_mass_library_order_choice: _,
         pending_scoped_library_search: _,
@@ -24503,6 +24529,8 @@ impl PartialEq for GameState {
             && self.resolution_coin_flip == other.resolution_coin_flip
             && self.pending_player_scope_sacrifice_choice
                 == other.pending_player_scope_sacrifice_choice
+            && self.pending_player_scope_unless_payment
+                == other.pending_player_scope_unless_payment
             && self.pending_discard_batch == other.pending_discard_batch
             && self.pending_combat_lifelink == other.pending_combat_lifelink
             && self.pending_mass_library_order_choice

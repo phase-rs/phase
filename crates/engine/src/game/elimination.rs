@@ -216,6 +216,66 @@ pub fn eliminate_players_simultaneously(
     // steal of a survivor's object revert instead of being over-exiled.
     end_control_effects_for_leaving_players(state, &leaving_set, events);
 
+    // CR 800.4a + CR 101.4: A player that leaves during an APNAP unless poll
+    // neither answers nor remains an eligible future chooser. Preserve the
+    // aggregate for the surviving seats, advancing past a departed current
+    // prompt instead of leaving a serialized choice owned by a non-player.
+    if let Some(mut pending) = state.pending_player_scope_unless_payment.take() {
+        let original_controller = pending
+            .pending_effect
+            .original_controller
+            .unwrap_or(pending.pending_effect.controller);
+        if leaving_set.contains(&original_controller) {
+            // CR 800.4a: The resolving instruction leaves with its original
+            // controller. A previously-recorded decline cannot create tokens
+            // for a player no longer in the game, and its per-payer prompt
+            // must not outlive the abandoned aggregate.
+            let aggregate_prompt_is_live = matches!(
+                &state.waiting_for,
+                WaitingFor::UnlessPayment { pending_effect, .. }
+                    | WaitingFor::WardSacrificeChoice { pending_effect, .. }
+                    if pending_effect.source_id == pending.pending_effect.source_id
+            );
+            if aggregate_prompt_is_live {
+                state.waiting_for = WaitingFor::Priority {
+                    player: players::next_player(state, original_controller),
+                };
+            }
+        } else {
+            pending
+                .remaining_players
+                .retain(|player| !leaving_set.contains(player));
+            if leaving_set.contains(&pending.current_player) {
+                if let Some((next, rest)) = pending.remaining_players.split_first() {
+                    pending.current_player = *next;
+                    pending.remaining_players = rest.to_vec();
+                    state.waiting_for = WaitingFor::UnlessPayment {
+                        player: pending.current_player,
+                        cost: pending.cost.clone(),
+                        pending_effect: pending.pending_effect.clone(),
+                        trigger_event: None,
+                        effect_description: None,
+                        remaining: Vec::new(),
+                    };
+                    state.pending_player_scope_unless_payment = Some(pending);
+                } else {
+                    // The departed prompt contributes no new decline, but earlier
+                    // surviving decliners still owe the source controller one
+                    // aggregate token batch. Reinstall then settle through the
+                    // regular terminal-payment authority so `waiting_for` cannot
+                    // retain this eliminated player's stale prompt.
+                    state.pending_player_scope_unless_payment = Some(pending);
+                    crate::game::engine_payment_choices::settle_eliminated_player_scope_token_unless_payment(
+                        state, events,
+                    )
+                    .expect("eliminated final payer must settle a token-unless aggregate");
+                }
+            } else {
+                state.pending_player_scope_unless_payment = Some(pending);
+            }
+        }
+    }
+
     // CR 704.3 + CR 104.4a: a SINGLE game-over check after all simultaneous
     // eliminations — so a finish where every remaining player lost at once
     // resolves to a draw (`winner: None`) rather than a spurious winner.
