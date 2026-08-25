@@ -619,8 +619,10 @@ export function PlayerHand() {
       >
         <AnimatePresence>
           {/* Exile wing (left): absolute fan positions 0 .. E-1. Cast-only —
-              never reorder targets. zIndex stays negative so exile sits beneath
-              the hand cards (whose zIndex is their 0-based hand index). */}
+              never reorder targets. Keep their stacking level non-negative:
+              a negative z-index puts the cards behind the transformed fan
+              container's hit-test layer, so they render but cannot be grabbed
+              for their flick-up-to-cast gesture. */}
           {exileCards.map((obj, j) => {
             return (
               <ZoneFanCard
@@ -634,7 +636,7 @@ export function PlayerHand() {
                 restingY={verticalMetrics.restingY}
                 hoverY={verticalMetrics.hoverY}
                 marginLeft={j === 0 ? 0 : fan.overlap}
-                zIndex={j - exileCount}
+                zIndex={j}
                 theme={ZONE_THEME.exile}
                 hasPriority={hasPriority}
                 isSelected={selectedCardId === obj.id}
@@ -1114,6 +1116,7 @@ const ZoneFanCard = memo(function ZoneFanCard({
 
   return (
     <motion.div
+      data-zone-fan-card
       // Marks the card as inspectable, which is what usePreviewDismiss's 300ms
       // `[data-card-hover]:hover` poll (and uiStore's 50ms deferred clear) test
       // for. Without it the poll saw nothing hovered and tore the preview down
@@ -1160,7 +1163,7 @@ const ZoneFanCard = memo(function ZoneFanCard({
       }}
       onMouseEnter={() => onMouseEnter(objectId)}
       onMouseLeave={onMouseLeave}
-      className="relative cursor-pointer leading-[0] select-none"
+      className="relative cursor-grab active:cursor-grabbing leading-[0] select-none"
       style={{ marginLeft, zIndex }}
       {...longPressHandlers}
     >
