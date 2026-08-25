@@ -1420,6 +1420,133 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(mockSubmitAction).toHaveBeenCalledWith({ type: "PassPriority" }, 1);
   });
 
+  it("keeps a seat disconnected when its reconnect ACK is dropped before the write", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    const setup = (await guest.getSentMessages()).find(
+      (message): message is { type: "game_setup"; playerToken: string } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: string }).type === "game_setup",
+    );
+    const pendingSnapshot = deferred<{
+      state: GameState;
+      actions: GameAction[];
+      autoPassRecommended: boolean;
+    }>();
+    (mockGetViewerSnapshot as unknown as {
+      mockImplementationOnce: (implementation: () => Promise<unknown>) => void;
+    }).mockImplementationOnce(() => pendingSnapshot.promise);
+    guest.simulateClose();
+
+    const reconnect = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: setup!.playerToken,
+    });
+    // The handoff is still resolving, then the data channel drops before the
+    // queued reconnect_ack can reach `conn.send`.
+    reconnect.open = false;
+    pendingSnapshot.resolve({
+      state: remoteState("dropped reconnect acknowledgement"),
+      actions: [{ type: "PassPriority" }],
+      autoPassRecommended: false,
+    });
+    await flushPromises();
+
+    const host = adapter as unknown as {
+      guestSessions: Map<number, unknown>;
+      pendingReconnectSessions: Map<number, unknown>;
+      disconnectedSeats: Map<number, unknown>;
+      gameRunState: string;
+    };
+    expect(await reconnect.getSentMessages()).toEqual([]);
+    expect(host.guestSessions.has(1)).toBe(false);
+    expect(host.pendingReconnectSessions.has(1)).toBe(false);
+    expect(host.disconnectedSeats.has(1)).toBe(true);
+    expect(host.gameRunState).toBe("paused-disconnect");
+
+    const retry = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: setup!.playerToken,
+    });
+    await flushPromises();
+    expect((await retry.getSentMessages()).some(
+      (message) => (message as { type?: string }).type === "reconnect_ack",
+    )).toBe(true);
+  });
+
+  it("serializes a native reconnect behind an in-flight native revision delivery", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    const setup = (await guest.getSentMessages()).find(
+      (message): message is { type: "game_setup"; playerToken: string } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: string }).type === "game_setup",
+    );
+    guest.simulateClose();
+
+    const host = adapter as unknown as {
+      nativeBridge: object | null;
+      nativeDeliveredViews: Map<number, { revision: number; snapshot: EngineSnapshot }>;
+      authoritativeRevision: number;
+      enqueueNativeDelivery: (operation: () => Promise<void>) => Promise<void>;
+    };
+    const oldSnapshot: EngineSnapshot = {
+      state: remoteState("native revision one"),
+      legalResult: { actions: [], autoPassRecommended: false },
+      seq: 1,
+    };
+    const currentSnapshot: EngineSnapshot = {
+      state: remoteState("native revision two"),
+      legalResult: { actions: [{ type: "PassPriority" }], autoPassRecommended: false },
+      seq: 2,
+    };
+    host.nativeBridge = {};
+    host.nativeDeliveredViews.set(1, { revision: 1, snapshot: oldSnapshot });
+    host.authoritativeRevision = 1;
+    const revisionDelivery = deferred<void>();
+    const inFlightRevision = host.enqueueNativeDelivery(async () => {
+      host.authoritativeRevision = 2;
+      await revisionDelivery.promise;
+      host.nativeDeliveredViews.set(1, { revision: 2, snapshot: currentSnapshot });
+    });
+
+    const reconnect = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: setup!.playerToken,
+    });
+    await flushPromises();
+    expect((await reconnect.getSentMessages()).some(
+      (message) => (message as { type?: string }).type === "reconnect_ack",
+    )).toBe(false);
+
+    revisionDelivery.resolve();
+    await inFlightRevision;
+    await flushPromises();
+
+    const ack = (await reconnect.getSentMessages()).find(
+      (message): message is { type: "reconnect_ack"; revision: number; state: { label: string } } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: string }).type === "reconnect_ack",
+    );
+    expect(ack).toMatchObject({
+      revision: 2,
+      state: { label: "native revision two" },
+    });
+  });
+
   it("resumes a manual pause only after the last disconnected seat is resolved", async () => {
     const { adapter } = makeHost(2, 5_000);
     await adapter.initialize();

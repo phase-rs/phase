@@ -695,6 +695,10 @@ export class P2PHostAdapter implements EngineAdapter {
   /** Native snapshots become reconnectable only after their matching server
    * revision has completed the PeerJS fan-out. */
   private nativeDeliveredViews = new Map<PlayerId, { revision: number; snapshot: EngineSnapshot }>();
+  /** Serializes native state fan-out with reconnect promotion. A reconnect
+   * cannot acknowledge an older delivered view while a newer native revision
+   * is in flight and would otherwise miss its newly promoted session. */
+  private nativeDeliveryQueue: Promise<void> = Promise.resolve();
   private guestDecks = new Map<PlayerId, DeckListPayload["player"]>();
   private aiDecks = new Map<PlayerId, DeckListPayload["player"]>();
   private playerTokens = new Map<PlayerId, string>();
@@ -873,8 +877,10 @@ export class P2PHostAdapter implements EngineAdapter {
         formatConfig,
         matchConfig,
         native,
-        (revision, views) => this.handleNativeRevision(revision, views),
-        (fault) => this.handleNativeAiDriverFault(fault),
+        (revision, views) => this.enqueueNativeDelivery(
+          () => this.handleNativeRevision(revision, views),
+        ),
+        (fault) => this.enqueueNativeDelivery(() => this.handleNativeAiDriverFault(fault)),
         nativeResume,
       );
     } else {
@@ -1119,9 +1125,22 @@ export class P2PHostAdapter implements EngineAdapter {
     throw new AdapterError("P2P_ERROR", `Host session disposed during ${during}`, true);
   }
 
-  private send(session: PeerSession, message: P2PMessage): Promise<void> {
-    if (!this.ownsAuthority()) return Promise.resolve();
+  private send(session: PeerSession, message: P2PMessage): Promise<boolean> {
+    if (!this.ownsAuthority()) return Promise.resolve(false);
     return session.send({ ...message, authority: this.authority });
+  }
+
+  /** Keep native server revisions and reconnect acknowledgement/promotion in
+   * one ordered critical section. The bridge already serializes revisions;
+   * this additionally keeps an independently arriving PeerJS reconnect from
+   * slipping between a revision's snapshot fan-out and its delivery record. */
+  private enqueueNativeDelivery<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.nativeDeliveryQueue.then(operation, operation);
+    this.nativeDeliveryQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   private rejectSuperseded(session: PeerSession): void {
@@ -1998,7 +2017,7 @@ export class P2PHostAdapter implements EngineAdapter {
     if (revision < this.authoritativeRevision) return;
     this.authoritativeRevision = revision;
     const allNames = this.playerNamesForSeats();
-    const sends: Array<Promise<void>> = [];
+    const sends: Array<Promise<boolean>> = [];
     for (const [pid, session] of this.guestSessions) {
       const update = views.get(pid);
       if (!update || this.disconnectedSeats.has(pid)) continue;
@@ -2165,7 +2184,7 @@ export class P2PHostAdapter implements EngineAdapter {
     if (!this.ownsAuthority()) return;
     if (this.nativeBridge) return;
     const revision = ++this.authoritativeRevision;
-    const sends: Array<Promise<void>> = [];
+    const sends: Array<Promise<boolean>> = [];
     for (const [pid, session] of this.guestSessions) {
       if (this.disconnectedSeats.has(pid)) continue;
       const snapshot = await this.wasm.getViewerSnapshot(pid);
@@ -2721,11 +2740,19 @@ export class P2PHostAdapter implements EngineAdapter {
   }
 
   private async completeReconnect(pid: PlayerId, session: PeerSession): Promise<void> {
+    if (this.nativeBridge) {
+      await this.enqueueNativeDelivery(() => this.completeReconnectAfterHandoff(pid, session));
+      return;
+    }
+    await this.completeReconnectAfterHandoff(pid, session);
+  }
+
+  private async completeReconnectAfterHandoff(pid: PlayerId, session: PeerSession): Promise<void> {
     try {
       const handoff = await this.reconnectHandoff(pid);
       if (this.pendingReconnectSessions.get(pid) !== session || !this.ownsAuthority()) return;
 
-      await this.send(session, {
+      const acknowledged = await this.send(session, {
         type: "reconnect_ack",
         wireProtocolVersion: WIRE_PROTOCOL_VERSION,
         assignedPlayerId: pid,
@@ -2734,16 +2761,32 @@ export class P2PHostAdapter implements EngineAdapter {
         playerNames: this.playerNamesForSeats(),
         ...legalActionsToWire(handoff.snapshot.legalResult),
       });
-      // Sending may race a transport close. Only the exact still-reserved
-      // channel can take the seat; a failed ACK leaves it retryable.
+      // A queued send can be dropped after the reconnect handoff was captured.
+      // Only a channel that actually accepted its ACK can take the seat; a
+      // failed ACK remains disconnected and is eligible for a later retry.
+      if (!acknowledged) {
+        this.failPendingReconnect(pid, session, "Reconnect acknowledgement could not be delivered");
+        return;
+      }
       if (this.pendingReconnectSessions.get(pid) !== session || !this.ownsAuthority()) return;
 
       if (this.deliveredNativeAiDriverFault !== null) {
-        await this.send(session, { type: "ai_driver_fault", ...this.deliveredNativeAiDriverFault });
+        const faultDelivered = await this.send(session, {
+          type: "ai_driver_fault",
+          ...this.deliveredNativeAiDriverFault,
+        });
+        if (!faultDelivered) {
+          this.failPendingReconnect(pid, session, "Reconnect fault could not be delivered");
+          return;
+        }
       }
       if (this.terminalResult !== null) {
         const result = await this.terminalResultForRecipient(pid, handoff.snapshot.state, handoff.revision);
-        await this.send(session, { type: "terminal_result", result });
+        const terminalDelivered = await this.send(session, { type: "terminal_result", result });
+        if (!terminalDelivered) {
+          this.failPendingReconnect(pid, session, "Reconnect terminal result could not be delivered");
+          return;
+        }
       }
       if (this.pendingReconnectSessions.get(pid) !== session || !this.ownsAuthority()) return;
 
@@ -2761,10 +2804,7 @@ export class P2PHostAdapter implements EngineAdapter {
       this.emit({ type: "playerReconnected", playerId: pid });
       this.resumeIfUnblocked();
     } catch (error) {
-      if (this.pendingReconnectSessions.get(pid) === session) {
-        this.pendingReconnectSessions.delete(pid);
-        session.close("Reconnect acknowledgement failed");
-      }
+      this.failPendingReconnect(pid, session, "Reconnect acknowledgement failed");
       traceAdapter("Host", "reconnect-ack-failed", {
         pid,
         error: error instanceof Error ? error.message : String(error),
@@ -2798,6 +2838,12 @@ export class P2PHostAdapter implements EngineAdapter {
         return;
       }
     }
+  }
+
+  private failPendingReconnect(pid: PlayerId, session: PeerSession, reason: string): void {
+    if (this.pendingReconnectSessions.get(pid) !== session) return;
+    this.pendingReconnectSessions.delete(pid);
+    session.close(reason);
   }
 
   private closePendingReconnect(pid: PlayerId, reason: string): void {
