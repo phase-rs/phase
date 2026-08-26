@@ -107,6 +107,7 @@ fn scoped_unless_sacrifice_creates_one_owned_batch_for_all_declines_and_none_for
         .add_spell_to_hand_from_oracle(P0, "Scoped Zombie Test", false, SCOPED_UNLESS_ZOMBIE)
         .with_mana_cost(ManaCost::zero())
         .id();
+    let _p2_creature = all_decline.add_creature(P2, "P2 Sacrifice", 1, 1).id();
     let mut decline_runner = all_decline.build();
     give_p0_sorcery_window(&mut decline_runner);
     decline_runner.cast(decline_spell).resolve();
@@ -141,6 +142,7 @@ fn scoped_unless_sacrifice_skips_an_eliminated_pending_payer() {
         .add_spell_to_hand_from_oracle(P0, "Scoped Zombie Test", false, SCOPED_UNLESS_ZOMBIE)
         .with_mana_cost(ManaCost::zero())
         .id();
+    let _p2_creature = scenario.add_creature(P2, "P2 Sacrifice", 1, 1).id();
     let mut runner = scenario.build();
     give_p0_sorcery_window(&mut runner);
     runner.cast(spell).resolve();
@@ -294,6 +296,10 @@ fn scoped_unless_sacrifice_abandons_a_payers_replacement_choice_when_controller_
     assert!(runner.state().pending_player_scope_unless_payment.is_none());
     assert!(runner.state().pending_replacement.is_none());
     assert!(!runner.state().replacement_may_cost_paused);
+    assert!(
+        !runner.state().has_active_post_replacement_drain(),
+        "the abandoned aggregate must not retain a replacement continuation"
+    );
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
