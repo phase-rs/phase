@@ -783,10 +783,12 @@ pub(crate) fn begin_player_scope_token_unless_sacrifice(
     let AbilityCost::Sacrifice(cost) = &modifier.cost else {
         return false;
     };
+    // The scoped resolver owns the actual payer. Oracle lowering can preserve
+    // an anaphoric "they" as `Player` before the outer player scope is applied.
     if !matches!(
         (&modifier.payer, &cost.requirement, &ability.effect),
         (
-            TargetFilter::ScopedPlayer,
+            TargetFilter::ScopedPlayer | TargetFilter::Player,
             SacrificeRequirement::Count { count: 1 },
             Effect::Token {
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
