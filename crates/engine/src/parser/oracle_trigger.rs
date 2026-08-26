@@ -18097,22 +18097,20 @@ fn try_parse_put_into_graveyard(
     .ok()?;
 
     let (after_gy, possessive) = parse_graveyard_possessive.parse(after_verb).ok()?;
-
-    // Parse optional "from [zone]" clause
     let after_gy = after_gy.trim_start();
-    let origin = if let Ok((after_from, ())) =
-        value((), tag::<_, _, OracleError<'_>>("from ")).parse(after_gy)
-    {
-        let after_from = after_from.trim_start();
-        parse_graveyard_origin_zone
-            .parse(after_from)
-            .ok()
-            .map(|(_, z)| z)
-            .unwrap_or(None)
-    } else {
-        // No "from" clause -- no origin restriction (any zone to graveyard)
-        None
-    };
+
+    // CR 603.6c: the origin tail may carry a richer OriginConstraint than the
+    // legacy scalar `Option<Zone>` can hold — notably "from anywhere other than
+    // the battlefield" (the Disa the Restless class: "Whenever a Lhurgoyf
+    // permanent card is put into your graveyard from anywhere other than the
+    // battlefield"). `parse_origin_constraint_tail` recognizes the negative-
+    // discriminator form ("anywhere other than <zone>") and yields
+    // `OriginConstraint::NotEquals`, which the scalar `origin` field cannot
+    // represent. Mirror the ETB path's routing: any richer-than-`Equals`/`Any`
+    // constraint goes through `zone_change_clauses` (the disjunctive matcher in
+    // `match_changes_zone`), while the plain positive/single-zone forms keep the
+    // legacy scalar field so existing card-data snapshots stay byte-identical.
+    let origin_tail = parse_origin_constraint_tail(after_gy, parse_graveyard_origin_zone).ok();
 
     let valid_card = match possessive.clone() {
         Some(ctrl) => Some(add_controller(subject.clone(), ctrl)),
@@ -18124,9 +18122,49 @@ fn try_parse_put_into_graveyard(
     let mut def = make_base();
     def.mode = TriggerMode::ChangesZone;
     def.destination = Some(Zone::Graveyard);
-    def.origin = origin;
-    def.valid_card = valid_card;
     def.valid_target = valid_target;
+
+    match origin_tail {
+        Some((_rest, OriginConstraint::Any | OriginConstraint::Equals(_))) => {
+            // Legacy scalar path — single positive zone or no restriction.
+            // `origin_tail` parsed the tail to `Any`/`Equals`; fold its scalar
+            // zone (if any) into `def.origin` exactly as before.
+            let origin = origin_tail
+                .and_then(|(_, c)| match c {
+                    OriginConstraint::Equals(z) => Some(z),
+                    _ => None,
+                });
+            def.origin = origin;
+            def.valid_card = valid_card;
+        }
+        Some((_rest, rich @ (OriginConstraint::NotEquals(_) | OriginConstraint::OneOf(_)))) => {
+            // Negative-disjunction origin: route through `zone_change_clauses`,
+            // the disjunctive matcher path that models `NotEquals`/`OneOf` —
+            // the scalar `origin` field only models a single positive zone.
+            // Superseding the scalar fields keeps the matcher from double-
+            // counting the destination via two routes (see the ETB analog at
+            // `oracle_trigger.rs:11383-11433` for the enters-from-ANYWHERE-OTHER
+            // arm). The clause path in `match_changes_zone` fully supersedes the
+            // scalar `origin`/`destination`/`valid_card` fields (it consults only
+            // `clause.origin`/`clause.destination`/`clause.valid_card`), so the
+            // JSON shape matches the ETB analog: clear the redundant scalar
+            // fields so the serialized trigger carries the clause alone, not
+            // both the clause and a mirrored scalar `destination`.
+            def.zone_change_clauses.push(ZoneChangeClause {
+                origin: rich,
+                destination: Some(Zone::Graveyard),
+                destination_constraint: DestinationConstraint::Any,
+                valid_card,
+            });
+            def.origin = None;
+            def.destination = None;
+            def.valid_card = None;
+        }
+        None => {
+            // No "from" clause at all — no origin restriction, any zone to graveyard.
+            def.valid_card = valid_card;
+        }
+    }
     Some((TriggerMode::ChangesZone, def))
 }
 
