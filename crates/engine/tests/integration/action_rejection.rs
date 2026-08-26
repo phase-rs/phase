@@ -194,7 +194,7 @@ fn related_object_ids_cover_battle_and_nested_source_carriers() {
     assert_eq!(may_remove.related_object_ids(), vec![ObjectId(4)]);
 
     let source = |object_id| YieldTarget::ThisObject {
-        source_id: Object_id,
+        source_id: object_id,
         incarnation: Some(1),
         trigger_description: None,
     };
