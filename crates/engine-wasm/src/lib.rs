@@ -1633,7 +1633,7 @@ fn handle_debug_create_card(request: DebugCreateCardRequest<'_>) -> JsValue {
         owner: request.owner,
         zone: request.zone,
         count: request.count,
-        attach_to: request.attach_to.clone(),
+        attach_to: request.attach_to,
         run_etb: request.run_etb,
         nonlegendary: request.nonlegendary,
     };

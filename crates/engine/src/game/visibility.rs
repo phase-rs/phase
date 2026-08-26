@@ -51,6 +51,9 @@ pub fn filter_action_rejection_for_viewer(
     viewer: PlayerId,
     rejection: &ActionRejection,
 ) -> ActionRejection {
+    if rejection.related_object_ids.is_empty() {
+        return rejection.clone();
+    }
     let filtered = filter_state_for_viewer(state, viewer);
     ActionRejection {
         code: rejection.code,

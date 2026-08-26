@@ -666,7 +666,12 @@ export const useGameStore = create<GameStore>()(
       try {
         result = await adapter.submitAction(submittedAction, getPlayerId());
       } catch (err) {
-        if (reportStructuredActionRejection(err) === "stale") return [];
+        if (reportStructuredActionRejection(err) === "stale") {
+          const snapshot = await adapter.getSnapshot();
+          get().commitEngineSnapshot(snapshot, { events: [], logEntries: [] });
+          if (gameId) void saveAuthoritativeGame(gameId, adapter, snapshot.state);
+          return [];
+        }
         throw err;
       }
       // ONE atomic pair — a separate getState()/getLegalActions() pair could

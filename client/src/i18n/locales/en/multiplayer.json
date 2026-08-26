@@ -81,6 +81,12 @@
   "joinErrorDialog": {
     "dismiss": "Dismiss"
   },
+  "reconnectRejected": {
+    "firstMessageInvalid": "The host rejected the connection before setup. Refresh both windows and try again.",
+    "versionRequired": "This host requires wire protocol v{{version}}. Refresh both windows and try again.",
+    "versionMismatch": "Wire protocol mismatch: your client sent v{{guestVersion}}, but the host uses v{{hostVersion}}. Refresh both windows.",
+    "malformedAuthority": "The host rejected invalid connection authority. Rejoin using a new room code."
+  },
   "serverOfflinePrompt": {
     "title": "Matchmaking unreachable",
     "message": "We couldn't reach the game server, so the public lobby is unavailable right now. You can still play by sharing a direct code with a friend.",

@@ -77,6 +77,7 @@ import {
   type P2PTerminalResult,
 } from "../services/p2pTerminalResult";
 import { NativeEngineSocket } from "../services/nativeEngineSocket";
+import i18n from "../i18n";
 
 /**
  * Adapter-level events emitted to the UI. Wire-protocol messages are
@@ -134,6 +135,28 @@ export type P2PAdapterEvent =
   | { type: "reconnectFailed"; reason: string };
 
 type P2PAdapterEventListener = (event: P2PAdapterEvent) => void;
+
+function reconnectRejectionReason(
+  message: Extract<P2PMessage, { type: "reconnect_rejected" }>,
+): string {
+  switch (message.reasonCode) {
+    case "first_message_invalid":
+      return i18n.t("multiplayer:reconnectRejected.firstMessageInvalid");
+    case "wire_protocol_version_required":
+      return i18n.t("multiplayer:reconnectRejected.versionRequired", {
+        version: message.hostWireProtocolVersion,
+      });
+    case "wire_protocol_mismatch":
+      return i18n.t("multiplayer:reconnectRejected.versionMismatch", {
+        guestVersion: message.guestWireProtocolVersion,
+        hostVersion: message.hostWireProtocolVersion,
+      });
+    case "malformed_authority":
+      return i18n.t("multiplayer:reconnectRejected.malformedAuthority");
+    case undefined:
+      return message.reason;
+  }
+}
 
 interface DeckSeatPayload {
   main_deck: string[];
@@ -1582,6 +1605,7 @@ export class P2PHostAdapter implements EngineAdapter {
         void session.send({
           type: "reconnect_rejected",
           reason: "Expected guest_deck or reconnect as first message",
+          reasonCode: "first_message_invalid",
         });
         session.close("Protocol violation");
         return;
@@ -1602,7 +1626,13 @@ export class P2PHostAdapter implements EngineAdapter {
           ? `Wire protocol version required: this host speaks v${WIRE_PROTOCOL_VERSION}. Refresh both windows.`
           : `Wire protocol mismatch: guest sent v${guestVersion}, this host speaks v${WIRE_PROTOCOL_VERSION}. Refresh both windows.`;
         traceAdapter("Host", "first-message-version-mismatch", { type: msg.type, guestVersion });
-        void session.send({ type: "reconnect_rejected", reason });
+        void session.send({
+          type: "reconnect_rejected",
+          reason,
+          reasonCode: guestVersion === undefined ? "wire_protocol_version_required" : "wire_protocol_mismatch",
+          hostWireProtocolVersion: WIRE_PROTOCOL_VERSION,
+          guestWireProtocolVersion: guestVersion,
+        });
         session.close("Wire protocol mismatch");
         return;
       }
@@ -1610,7 +1640,11 @@ export class P2PHostAdapter implements EngineAdapter {
       if (msg.type === "reconnect") {
         traceAdapter("Host", "first-message", { type: msg.type });
         if (msg.authority !== undefined && !isP2PAuthorityStamp(msg.authority)) {
-          void session.send({ type: "reconnect_rejected", reason: "Malformed P2P authority" });
+          void session.send({
+            type: "reconnect_rejected",
+            reason: "Malformed P2P authority",
+            reasonCode: "malformed_authority",
+          });
           session.close("Malformed P2P authority");
           return;
         }
@@ -3465,10 +3499,11 @@ export class P2PGuestAdapter implements EngineAdapter {
         break;
       }
       case "reconnect_rejected": {
+        const reason = reconnectRejectionReason(msg);
         this.terminate();
-        this.rejectGameSetup(msg.reason);
-        this.emit({ type: "reconnectFailed", reason: msg.reason });
-        this.emit({ type: "gameOver", winner: null, reason: msg.reason });
+        this.rejectGameSetup(reason);
+        this.emit({ type: "reconnectFailed", reason });
+        this.emit({ type: "gameOver", winner: null, reason });
         break;
       }
       case "kick": {

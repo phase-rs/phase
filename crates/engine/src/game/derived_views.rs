@@ -593,6 +593,11 @@ pub struct DerivedViews {
     /// when there is no actor or multiple distinct authorized submitters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unique_authorized_submitter: Option<PlayerId>,
+    /// Viewer-visible object ids in each player's shared exile pile. This is
+    /// projected after face-down visibility filtering so the client can anchor
+    /// rejection feedback without reimplementing private-information rules.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub visible_exile_object_ids: BTreeMap<PlayerId, Vec<ObjectId>>,
     /// Debug-only identities for the viewing player's own library. The normal
     /// `GameState` projection keeps those objects hidden; this capability is
     /// intentionally narrow so a debug browser can select a card by name.
@@ -988,16 +993,22 @@ impl<'a> ClientGameStateRef<'a> {
     /// Viewer-filtered paths must use [`Self::wrap_filtered`] so redaction cannot
     /// erase an authoritative decision projection.
     pub fn wrap(state: &'a GameState, viewer: Option<PlayerId>) -> Self {
-        let display_visible_object_ids = viewer.map(|viewer| {
-            crate::game::visibility::filter_state_for_viewer(state, viewer)
+        let filtered_state =
+            viewer.map(|viewer| crate::game::visibility::filter_state_for_viewer(state, viewer));
+        let display_visible_object_ids = filtered_state.as_ref().map(|filtered| {
+            filtered
                 .objects
                 .iter()
                 .filter_map(|(id, object)| object.display_visible_to_viewer.then_some(*id))
                 .collect()
         });
+        let mut derived = derive_views(state, viewer);
+        if let Some(filtered) = filtered_state.as_ref() {
+            derived.visible_exile_object_ids = visible_exile_object_ids(filtered);
+        }
         Self {
             state,
-            derived: derive_views(state, viewer),
+            derived,
             display_visible_object_ids,
         }
     }
@@ -1944,11 +1955,33 @@ pub fn derive_filtered_views(
     let mut views = derive_views(filtered_state, viewer);
     views.unique_authorized_submitter = unique_authorized_submitter(authoritative_state);
     views.debug_library_cards = debug_library_cards(authoritative_state, viewer);
+    views.visible_exile_object_ids = visible_exile_object_ids(filtered_state);
     // CR 509.1g: blocking relationships are public information. Preserve this
     // display projection even when a viewer-safe state intentionally omits raw
     // combat records unrelated to rendering.
     views.blocker_assignment_pairs = blocker_assignment_pairs(authoritative_state);
     views
+}
+
+fn visible_exile_object_ids(state: &GameState) -> BTreeMap<PlayerId, Vec<ObjectId>> {
+    state
+        .players
+        .iter()
+        .filter_map(|player| {
+            let object_ids: Vec<ObjectId> = state
+                .exile
+                .iter()
+                .copied()
+                .filter(|object_id| {
+                    state.objects.get(object_id).is_some_and(|object| {
+                        object.owner == player.id
+                            && (!object.face_down || object.display_visible_to_viewer)
+                    })
+                })
+                .collect();
+            (!object_ids.is_empty()).then_some((player.id, object_ids))
+        })
+        .collect()
 }
 
 fn debug_library_cards(state: &GameState, viewer: Option<PlayerId>) -> Vec<DebugLibraryCardView> {

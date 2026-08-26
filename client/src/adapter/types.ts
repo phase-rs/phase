@@ -3132,6 +3132,8 @@ export type TargetChoiceKind =
  */
 export interface DerivedViews {
   unique_authorized_submitter?: PlayerId;
+  /** Viewer-visible object ids in each player's exile pile, keyed by PlayerId. */
+  visible_exile_object_ids?: Record<string, ObjectId[]>;
   /**
    * Explicit debug-only identities for the viewing player's library. Normal
    * library objects remain hidden in `GameState.objects`; only the debug

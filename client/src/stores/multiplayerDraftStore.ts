@@ -1389,7 +1389,13 @@ export const useMultiplayerDraftStore = create<
     try {
       await adapter.submitAction(intergameAction(command.payload), actor);
     } catch (err) {
-      if (reportStructuredActionRejection(err) !== "not-structured") return;
+      if (reportStructuredActionRejection(err) !== "not-structured") {
+        const message = err instanceof Error ? err.message : String(err);
+        controller.reject(command.commandId, acknowledgement, message);
+        await saveDraftIntergameCommands(command.matchId, controller.snapshot());
+        if (command.payload.type === "SubmitSideboard") set({ sideboardSubmitted: false });
+        return;
+      }
       throw err;
     }
     const receipted = controller.receipt(command.commandId, acknowledgement, crypto.randomUUID());

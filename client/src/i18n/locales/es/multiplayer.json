@@ -81,6 +81,12 @@
   "joinErrorDialog": {
     "dismiss": "Descartar"
   },
+  "reconnectRejected": {
+    "firstMessageInvalid": "El host rechazó la conexión antes de la configuración. Actualiza ambas ventanas e inténtalo de nuevo.",
+    "versionRequired": "Este host requiere el protocolo de conexión v{{version}}. Actualiza ambas ventanas e inténtalo de nuevo.",
+    "versionMismatch": "El protocolo de conexión no coincide: tu cliente envió v{{guestVersion}}, pero el host usa v{{hostVersion}}. Actualiza ambas ventanas.",
+    "malformedAuthority": "El host rechazó una autorización de conexión no válida. Vuelve a unirte con un código de sala nuevo."
+  },
   "serverOfflinePrompt": {
     "title": "Emparejamiento inaccesible",
     "message": "No pudimos conectar con el servidor de la partida, así que la sala de espera pública no está disponible ahora mismo. Aún puedes jugar compartiendo un código directo con un amigo.",

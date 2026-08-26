@@ -237,7 +237,13 @@ export type P2PMessage = P2PAuthorityWire & (
       state: GameState;
       playerNames?: Record<number, string>;
     } & LegalActionsWire)
-  | { type: "reconnect_rejected"; reason: string }
+  | {
+      type: "reconnect_rejected";
+      reason: string;
+      reasonCode?: "first_message_invalid" | "wire_protocol_version_required" | "wire_protocol_mismatch" | "malformed_authority";
+      hostWireProtocolVersion?: number;
+      guestWireProtocolVersion?: number;
+    }
   // Kick / forced removal (host → target).
   | { type: "kick"; reason: string; format?: string }
   // Host explicitly quit the game (host → all guests). Terminal: guests set

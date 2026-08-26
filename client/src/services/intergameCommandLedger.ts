@@ -13,7 +13,8 @@ export type DraftIntergameCommandStatus =
   | "Pending"
   | "Authorized"
   | "Executing"
-  | "Receipted";
+  | "Receipted"
+  | "Rejected";
 
 export interface DraftIntergameCommand {
   commandId: string;
@@ -28,6 +29,7 @@ export interface DraftIntergameCommand {
   payloadDigest: string;
   status: DraftIntergameCommandStatus;
   receiptId?: string;
+  rejectionMessage?: string;
 }
 
 /** The immutable acknowledgement predicate echoed by the executor. */
@@ -135,6 +137,16 @@ export class IntergameCommandController {
     const receipted = { ...command, status: "Receipted" as const, receiptId };
     this.commands.set(commandId, receipted);
     return receipted;
+  }
+
+  reject(commandId: string, acknowledgement: DraftIntergameCommandAck, rejectionMessage: string): DraftIntergameCommand | null {
+    const command = this.commands.get(commandId);
+    if (!command || command.status !== "Executing" || !matchesCommandAcknowledgement(command, acknowledgement)) {
+      return null;
+    }
+    const rejected = { ...command, status: "Rejected" as const, rejectionMessage };
+    this.commands.set(commandId, rejected);
+    return rejected;
   }
 
   /** A recovered Executing command stays non-replayable until the receipt arrives. */

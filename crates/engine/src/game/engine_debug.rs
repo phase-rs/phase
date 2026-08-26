@@ -21,7 +21,10 @@ use crate::types::zones::Zone;
 
 use super::effects::attach::{attach_to as attach_object_to, attach_to_player};
 use super::effects::change_zone::shuffle_library;
-use super::engine::{action_rejection_for_engine_error, preflight_debug_action, EngineError};
+use super::engine::{
+    action_rejection_for_engine_error, explicit_debug_permission_rejection, preflight_debug_action,
+    EngineError,
+};
 use super::game_object::AttachTarget;
 use super::visibility::filter_action_rejection_for_viewer;
 use super::zones;
@@ -935,6 +938,20 @@ pub struct DebugCardCreateRequest {
     pub nonlegendary: bool,
 }
 
+impl DebugCardCreateRequest {
+    fn as_debug_action(&self) -> DebugAction {
+        DebugAction::CreateCard {
+            card_name: self.source.face.name.clone(),
+            owner: self.owner,
+            zone: self.zone,
+            count: self.count,
+            attach_to: self.attach_to,
+            run_etb: self.run_etb,
+            nonlegendary: self.nonlegendary,
+        }
+    }
+}
+
 /// Create one or more debug cards from a previously bound source. Non-
 /// battlefield creation and explicitly raw battlefield placement complete
 /// synchronously. Real battlefield entries drain serially through the private
@@ -943,15 +960,7 @@ pub fn create_debug_cards(
     state: &mut GameState,
     request: DebugCardCreateRequest,
 ) -> Result<ActionResult, EngineError> {
-    let debug_action = DebugAction::CreateCard {
-        card_name: request.source.face.name.clone(),
-        owner: request.owner,
-        zone: request.zone,
-        count: request.count,
-        attach_to: request.attach_to,
-        run_etb: request.run_etb,
-        nonlegendary: request.nonlegendary,
-    };
+    let debug_action = request.as_debug_action();
     preflight_debug_action(state, request.actor, &debug_action)?;
     if request.count == 0 {
         return Ok(ActionResult {
@@ -1039,16 +1048,12 @@ pub fn create_debug_cards_with_rejection(
     request: DebugCardCreateRequest,
 ) -> Result<ActionResult, ActionRejection> {
     let actor = request.actor;
-    let related_object_ids = GameAction::Debug(DebugAction::CreateCard {
-        card_name: request.source.face.name.clone(),
-        owner: request.owner,
-        zone: request.zone,
-        count: request.count,
-        attach_to: request.attach_to,
-        run_etb: request.run_etb,
-        nonlegendary: request.nonlegendary,
-    })
-    .related_object_ids();
+    let related_object_ids = GameAction::Debug(request.as_debug_action()).related_object_ids();
+    if let Some(rejection) =
+        explicit_debug_permission_rejection(state, actor, related_object_ids.clone())
+    {
+        return Err(rejection);
+    }
     create_debug_cards(state, request).map_err(|error| {
         filter_action_rejection_for_viewer(
             state,

@@ -2,11 +2,10 @@ import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useGameStore } from "../../stores/gameStore.ts";
-import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
+import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import {
   getPlayerZoneIds,
   getWaitingForObjectChoiceIds,
-  isFaceDownExileCardVisibleToViewer,
 } from "../../viewmodel/gameStateView.ts";
 
 interface ExilePileProps {
@@ -17,21 +16,12 @@ interface ExilePileProps {
 
 export function ExilePile({ playerId, onClick, size }: ExilePileProps) {
   const { t } = useTranslation("game");
-  const viewerId = usePlayerId();
   const gameState = useGameStore((s) => s.gameState);
   const exileObjectIds = useMemo(
     () => getPlayerZoneIds(gameState, "exile", playerId),
     [gameState, playerId],
   );
-  const visibleExileObjectIds = useMemo(
-    () => exileObjectIds.filter((id) => {
-      const obj = gameState?.objects[id];
-      return obj != null && (
-        !obj.face_down || isFaceDownExileCardVisibleToViewer(gameState, obj, viewerId)
-      );
-    }),
-    [exileObjectIds, gameState, viewerId],
-  );
+  const visibleExileObjectIds = gameState?.derived?.visible_exile_object_ids?.[playerId] ?? [];
   const count = exileObjectIds.length;
   const canActForWaitingState = useCanActForWaitingState();
   const hasSelectableCards = useGameStore((s) => {
