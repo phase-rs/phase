@@ -57,6 +57,10 @@ fn sokka_and_suki_event_context_attaches_the_selected_equipment() {
         .add_artifact_from_oracle(P0, "Swordsman's Steel", "")
         .with_subtypes(vec!["Equipment"])
         .id();
+    let other_equipment = scenario
+        .add_artifact_from_oracle(P0, "Second Equipment", "")
+        .with_subtypes(vec!["Equipment"])
+        .id();
     let entering_ally = scenario
         .add_creature_to_hand_from_oracle(P0, "Test Ally", 1, 1, "")
         .with_subtypes(vec!["Ally"])
@@ -65,11 +69,11 @@ fn sokka_and_suki_event_context_attaches_the_selected_equipment() {
     let mut runner = scenario.build();
 
     cast_for_free(&mut runner, entering_ally);
-    let mut saw_attachment_choice = false;
+    let mut saw_attachment_target = false;
     for _ in 0..32 {
         match runner.state().waiting_for.clone() {
             WaitingFor::Priority { .. } => {
-                if saw_attachment_choice && runner.state().stack.is_empty() {
+                if saw_attachment_target && runner.state().stack.is_empty() {
                     break;
                 }
                 runner
@@ -78,31 +82,30 @@ fn sokka_and_suki_event_context_attaches_the_selected_equipment() {
             }
             WaitingFor::TriggerTargetSelection { .. } => {
                 choose_trigger_target(&mut runner, swordsmans_steel);
+                saw_attachment_target = true;
             }
-            WaitingFor::EffectZoneChoice { cards, .. } => {
-                assert!(
-                    cards.contains(&swordsmans_steel),
-                    "Sokka's attachment prompt must offer the targeted Equipment"
+            WaitingFor::EffectZoneChoice { .. } => {
+                panic!(
+                    "Sokka's explicit target Equipment must be selected while placing the trigger on the stack"
                 );
-                runner
-                    .act(GameAction::SelectCards {
-                        cards: vec![swordsmans_steel],
-                    })
-                    .expect("selecting Swordsman's Steel from the attachment prompt must work");
-                saw_attachment_choice = true;
             }
             other => panic!("unexpected Sokka and Suki resolution prompt: {other:?}"),
         }
     }
 
     assert!(
-        saw_attachment_choice,
-        "Sokka's trigger must reach EffectZoneChoice"
+        saw_attachment_target,
+        "Sokka's trigger must require selecting one of the two legal Equipment targets"
     );
     assert_eq!(
         runner.state().objects[&swordsmans_steel].attached_to,
         Some(AttachTarget::Object(entering_ally)),
         "the selected Equipment attaches to the Ally carried by the trigger event"
+    );
+    assert_eq!(
+        runner.state().objects[&other_equipment].attached_to,
+        None,
+        "the unselected Equipment must remain unattached"
     );
 }
 
@@ -112,6 +115,10 @@ fn gilgamesh_dig_kept_equipment_reaches_optional_samurai_attachment() {
     scenario.at_phase(Phase::PreCombatMain);
     let samurai = scenario
         .add_creature(P0, "Test Samurai", 2, 2)
+        .with_subtypes(vec!["Samurai"])
+        .id();
+    let other_samurai = scenario
+        .add_creature(P0, "Other Samurai", 2, 2)
         .with_subtypes(vec!["Samurai"])
         .id();
     let gilgamesh = scenario
@@ -165,10 +172,19 @@ fn gilgamesh_dig_kept_equipment_reaches_optional_samurai_attachment() {
                     .expect("accepting Gilgamesh's optional attachment must work");
                 saw_optional_attach = true;
             }
+            WaitingFor::TriggerTargetSelection { .. } => {
+                panic!(
+                    "Gilgamesh says 'a Samurai', not 'target Samurai'; its Samurai choice must wait for resolution"
+                );
+            }
             WaitingFor::EffectZoneChoice { cards, .. } => {
                 assert!(
                     cards.contains(&samurai),
-                    "attachment prompt must offer the Samurai"
+                    "Gilgamesh's resolution-time attachment choice must offer the chosen Samurai"
+                );
+                assert!(
+                    cards.contains(&other_samurai),
+                    "Gilgamesh's resolution-time attachment choice must offer every legal Samurai"
                 );
                 runner
                     .act(GameAction::SelectCards {
