@@ -218,8 +218,9 @@ pub use deck_validation::{
 };
 pub use engine::{
     apply, apply_as_current, apply_with_rejection, new_game, preflight_debug_action,
-    preflight_debug_action_with_rejection, resolve_all_ready_prefix_with_rejection, start_game,
-    start_game_skip_mulligan, start_game_with_starting_player, EngineError,
+    preflight_debug_action_with_rejection, require_explicit_debug_permission,
+    resolve_all_ready_prefix_with_rejection, start_game, start_game_skip_mulligan,
+    start_game_with_starting_player, EngineError,
 };
 pub use engine_debug::{
     create_debug_cards, debug_card_entry_source, route_debug_create_to_battlefield,

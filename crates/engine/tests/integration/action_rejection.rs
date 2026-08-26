@@ -6,7 +6,7 @@ use engine::analysis::decision_template::{
 use engine::game::combat::AttackTarget;
 use engine::game::engine::{
     apply, apply_with_rejection, preflight_debug_action, preflight_debug_action_with_rejection,
-    resolve_all_ready_prefix_with_rejection,
+    require_explicit_debug_permission, resolve_all_ready_prefix_with_rejection,
 };
 use engine::game::interaction::{
     bind_interaction_authority, derive_viewer_interaction, preview_interaction,
@@ -442,6 +442,51 @@ fn rich_debug_preflight_is_safe_and_does_not_mutate_state() {
         "That action is not valid in the current game state."
     );
     assert_eq!(rejection.related_object_ids, vec![object_id]);
+    assert_eq!(state, before);
+}
+
+#[test]
+fn explicit_debug_permission_allows_an_empty_permission_list_without_mutation() {
+    let state = GameState::new_two_player(1);
+    let before = state.clone();
+
+    require_explicit_debug_permission(&state, P0)
+        .expect("an empty explicit permission list permits every player");
+
+    assert_eq!(state, before);
+}
+
+#[test]
+fn explicit_debug_permission_rejects_an_unlisted_player_without_mutation() {
+    let mut state = GameState::new_two_player(1);
+    state.debug_permitted.insert(P1);
+    let before = state.clone();
+
+    let rejection = require_explicit_debug_permission(&state, P0)
+        .expect_err("a nonempty permission list rejects an unlisted player");
+
+    assert_eq!(rejection.code, ActionRejectionCode::DebugPermissionDenied);
+    assert_eq!(
+        rejection.disposition,
+        ActionRejectionDisposition::Unauthorized
+    );
+    assert_eq!(
+        rejection.message,
+        "You are not authorized to use debug actions."
+    );
+    assert!(rejection.related_object_ids.is_empty());
+    assert_eq!(state, before);
+}
+
+#[test]
+fn explicit_debug_permission_allows_a_listed_player_without_mutation() {
+    let mut state = GameState::new_two_player(1);
+    state.debug_permitted.insert(P0);
+    let before = state.clone();
+
+    require_explicit_debug_permission(&state, P0)
+        .expect("a listed player has explicit debug permission");
+
     assert_eq!(state, before);
 }
 

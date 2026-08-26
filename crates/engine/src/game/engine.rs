@@ -913,6 +913,24 @@ pub fn preflight_debug_action_with_rejection(
     })
 }
 
+/// Checks the transport-level explicit debug permission policy without
+/// evaluating whether a particular debug action is otherwise valid.
+///
+/// An empty permission set leaves debug authority unrestricted; once the set
+/// has members, only listed players have explicit debug permission.
+pub fn require_explicit_debug_permission(
+    state: &GameState,
+    actor: PlayerId,
+) -> Result<(), ActionRejection> {
+    if state.debug_permitted.is_empty() || state.debug_permitted.contains(&actor) {
+        Ok(())
+    } else {
+        Err(ActionRejection::new(
+            ActionRejectionCode::DebugPermissionDenied,
+        ))
+    }
+}
+
 /// Runs a Ready Resolve All batch only for an admitted requester.
 pub fn resolve_all_ready_prefix_with_rejection(
     state: &mut GameState,
