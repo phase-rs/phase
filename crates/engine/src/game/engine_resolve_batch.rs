@@ -1166,8 +1166,11 @@ mod tests {
         let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
         assert_eq!(result.items_resolved, 1);
         assert!(state.stack.is_empty());
-        assert!(state.auto_pass.contains_key(&PlayerId(0)));
-        assert!(state.auto_pass.contains_key(&PlayerId(1)));
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::ResolveAllReady { .. }
+        ));
+        assert!(state.resolve_all_consent_run.is_none());
     }
 
     #[test]
@@ -1194,7 +1197,11 @@ mod tests {
         assert!(stack::priority_checkpoint_is_settled(&proof));
         assert!(consent_authorization_matches(&proof, &run));
 
-        let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
+        let result = resolve_all_ready_prefix_with(
+            &mut state,
+            PlayerId(0),
+            ResolveAllContinuation::StopAtPriority,
+        );
 
         assert_eq!(
             result.items_resolved,

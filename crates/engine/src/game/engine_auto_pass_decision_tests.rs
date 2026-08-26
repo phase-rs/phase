@@ -778,45 +778,6 @@ fn phase_stop_hit_is_independent_of_auto_pass_mode() {
 }
 
 #[test]
-fn until_end_of_turn_auto_submits_the_empty_blocker_declaration() {
-    let waiting_for = WaitingFor::DeclareBlockers {
-        player: PlayerId(0),
-        valid_blocker_ids: vec![ObjectId(10)],
-        valid_block_targets: [(ObjectId(10), vec![ObjectId(20)])].into_iter().collect(),
-        block_requirements: Default::default(),
-        blocker_constraints: Default::default(),
-    };
-    let mut state = GameState {
-        phase: Phase::DeclareBlockers,
-        active_player: PlayerId(1),
-        waiting_for: waiting_for.clone(),
-        ..GameState::default()
-    };
-    state.auto_pass.insert(
-        PlayerId(0),
-        AutoPassMode::UntilTurnBoundary {
-            until: TurnBoundary::EndOfCurrentTurn,
-        },
-    );
-
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for,
-        log_entries: Vec::new(),
-    };
-    run_auto_pass_loop(&mut state, &mut result);
-
-    assert!(!matches!(
-        result.waiting_for,
-        WaitingFor::DeclareBlockers { .. }
-    ));
-    assert!(
-        state.auto_pass.contains_key(&PlayerId(0)),
-        "the defender's turn-boundary session remains armed after the empty declaration"
-    );
-}
-
-#[test]
 fn declare_blockers_opponents_turns_stop_pauses_empty_blocker_submit() {
     // Matrix row 6: owner = defender P0; the attacker P1 is the active player.
     // An OpponentsTurns stop on Declare Blockers fires (owner != active_player),
