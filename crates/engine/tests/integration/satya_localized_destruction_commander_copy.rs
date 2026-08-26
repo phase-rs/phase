@@ -78,7 +78,7 @@ fn localized_destruction_does_not_deadlock_on_a_copied_commander_spell() {
         energy_optional.waiting_for,
         WaitingFor::OptionalEffectChoice { .. }
     ));
-    let result = destruction
+    destruction
         .act(GameAction::DecideOptionalEffect { accept: false })
         .expect("declining Localized Destruction's energy payment is valid");
     drop(destruction);
@@ -89,8 +89,27 @@ fn localized_destruction_does_not_deadlock_on_a_copied_commander_spell() {
         "declining the optional payment leaves the energy granted by the spell unspent"
     );
 
+    // The decline completes the spell at a priority boundary. Finish that
+    // priority round so the engine performs the next SBA check, whose
+    // commander-return choice is the behavior under regression.
+    for _ in 0..runner.state().players.len() {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::CommanderZoneChoice { .. }
+        ) {
+            break;
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority pass must advance the post-resolution SBA pipeline");
+    }
+
     assert!(matches!(
-        result.waiting_for,
+        runner.state().waiting_for,
         WaitingFor::CommanderZoneChoice {
             commander_id,
             current_zone: Zone::Graveyard,
