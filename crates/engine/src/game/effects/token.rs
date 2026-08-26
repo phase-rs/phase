@@ -20,14 +20,18 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     DelayedTrigger, GameState, LiminalEntry, LiminalTokenAbilityInjection, PendingCopyTokenBatch,
     PendingCounterAddition, PendingCounterPostAction, PendingEffectResolutionEvent,
-    TokenEntryEventEmission, WaitingFor,
+    PendingTokenBattlefieldEntry, TokenEntryEventEmission, WaitingFor,
 };
-use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
+use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use crate::types::keywords::{Keyword, WardCost};
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{CopyTokenSpec, ProposedEvent, TokenSpec};
+use crate::types::proposed_event::{CopyTokenSpec, ProposedEvent, TokenHostRequest, TokenSpec};
+use crate::types::resolved_commands::{
+    ResolvedCopyBodyModifications, ResolvedTokenBody, ResolvedTokenCreationCommand,
+    ResolvedTokenCreationReplayInvariantError,
+};
 use crate::types::statics::CastFrequency;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::{EtbTapState, Zone};
@@ -153,7 +157,7 @@ fn materialize_catalog_token_payload(
     materialized.source = TokenAbilitySource::CatalogRulesText;
     materialized.rules_text = Some(rules_text.to_string());
     let (static_definitions, modifications, unparsed_lines) =
-        catalog_rules_text_abilities(rules_text);
+        catalog_rules_text_abilities(rules_text, &preset.body.display_name);
     materialized.static_definitions = static_definitions;
     materialized.unparsed_rules_text_lines = unparsed_lines;
 
@@ -535,9 +539,16 @@ pub fn resolve(
     // CR 303.4 + CR 303.4i: Resolve the specified Aura/Role host once, at propose
     // time. ParentTarget reads the first Object target (the for-each loop's
     // per-iteration rebind binds it); Typed/event-context filters resolve via the
-    // shared target/event-context path. `None` for ordinary (unattached) tokens.
-    let attach_target: Option<AttachTarget> =
-        attach_to.and_then(|f| resolve_attach_host(state, ability, f));
+    // shared target/event-context path.
+    //
+    // The result keeps "the instruction named no host" apart from "it named one
+    // and nothing bound it": CR 303.4i denies the entry of an Aura token in the
+    // second case and says nothing about the first, and the seam that applies
+    // that verdict runs after the CR 614 replacement pipeline, far from here.
+    let host_request = TokenHostRequest::from_binding(
+        attach_to.is_some(),
+        attach_to.and_then(|f| resolve_attach_host(state, ability, f)),
+    );
 
     // CR 111.1 + CR 111.4: Resolve the token's characteristics into a
     // self-describing `TokenSpec`. Script-name parsing takes precedence;
@@ -575,7 +586,7 @@ pub fn resolve(
         enters_attacking,
         token_statics,
         resolved_etb_counters,
-        attach_target,
+        host_request,
         ability,
         state,
     );
@@ -651,7 +662,7 @@ fn build_token_spec(
     enters_attacking: bool,
     static_abilities: Vec<crate::types::ability::StaticDefinition>,
     enter_with_counters: Vec<(CounterType, u32)>,
-    attach_to: Option<AttachTarget>,
+    attach_to: TokenHostRequest,
     ability: &ResolvedAbility,
     state: &GameState,
 ) -> TokenSpec {
@@ -753,6 +764,60 @@ fn intrinsic_equip_abilities_from_token_statics(
 /// creation, etc.) through the same code path.
 ///
 /// `event` must be a `ProposedEvent::CreateToken`; other variants are no-ops.
+/// CR 303.4i: does the rule deny this entrant's battlefield entry?
+///
+/// > If an effect attempts to put an Aura onto the battlefield attached to
+/// > either an object or player it can't legally enchant or an object or player
+/// > that is undefined, … If the Aura is a token, it isn't created.
+///
+/// Asked per token and on the ACTUAL entrant, after the CR 614 replacement
+/// pipeline has settled its characteristics: a replacement effect may create
+/// something other than the Aura the instruction described, and CR 303.4i is a
+/// question about what is entering rather than about what was announced.
+///
+/// Both halves are answered by the authority that already owns them —
+/// [`attach::authority_is_aura`] for Aura-ness (CR 205.1a: a copy exception can
+/// add or remove the subtype, so it reads characteristics, not the effect's
+/// `types`), and [`attach::can_attach_to_object`] / [`attach::can_attach_to_player`]
+/// for "can't legally enchant". That second pair is the SAME verdict
+/// `attach::attach_to` consumes a few lines later, so the gate and the
+/// attachment can never disagree about one host.
+///
+/// [`attach::authority_is_aura`]: super::attach::authority_is_aura
+/// [`attach::can_attach_to_object`]: super::attach::can_attach_to_object
+/// [`attach::can_attach_to_player`]: super::attach::can_attach_to_player
+fn aura_token_entry_denied(state: &GameState, entrant: ObjectId, host: TokenHostRequest) -> bool {
+    // CR 303.4h: "If an effect attempts to put a permanent that isn't an Aura,
+    // Equipment, or Fortification onto the battlefield attached to an object or
+    // player, it enters the battlefield unattached." It is created either way,
+    // so CR 303.4i is not its rule.
+    if !super::attach::authority_is_aura(state, entrant, super::attach::AttachmentAuthority::Stored)
+    {
+        return false;
+    }
+    match host {
+        // CR 303.4f — an Aura entering with no effect-specified host has its
+        // controller choose one — is a different rule with a different
+        // disposition (a choice, not a denial). Its consult belongs to the entry
+        // pipeline (`zone_pipeline::entering_aura_hosts`), which the liminal and
+        // copy token seams reach and this one does not — a stated gap, not an
+        // oversight. Measured over the shipped pool: every Aura-typed token spec
+        // names a host, so no card reaches this arm today.
+        TokenHostRequest::NotRequested => false,
+        // CR 303.4i, "undefined": the instruction named a host and nothing bound
+        // it — the shape #7302 reported.
+        TokenHostRequest::Unbound => true,
+        // CR 303.4i, "can't legally enchant": the host is defined, so the
+        // question is legality, and legality is `attach`'s to answer.
+        TokenHostRequest::Bound(AttachTarget::Object(host_id)) => {
+            !super::attach::can_attach_to_object(state, entrant, host_id)
+        }
+        TokenHostRequest::Bound(AttachTarget::Player(host_player)) => {
+            !super::attach::can_attach_to_player(state, entrant, host_player)
+        }
+    }
+}
+
 pub fn apply_create_token_after_replacement(
     state: &mut GameState,
     event: ProposedEvent,
@@ -826,72 +891,66 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
         // Drawn before the `get_mut` borrow (`next_timestamp` takes `&mut self`).
         let entry_timestamp = state.next_timestamp();
 
-        if let Some(obj) = state.objects.get_mut(&obj_id) {
-            // CR 111.1: Mark as token for SBA cleanup (CR 704.5d)
-            obj.is_token = true;
-            // True token from a TokenSpec — image lives in the generic-token
-            // database (Treasure, Spirit, Saproling, Soldier, etc.).
-            obj.display_source = DisplaySource::Token;
-            obj.token_image_ref = token_image_ref;
-            let has_attrs = ch.power.is_some()
-                || ch.toughness.is_some()
-                || !ch.core_types.is_empty()
-                || !ch.subtypes.is_empty()
-                || !ch.supertypes.is_empty()
-                || !ch.colors.is_empty()
-                || !ch.keywords.is_empty();
-            if has_attrs {
-                obj.power = ch.power;
-                obj.toughness = ch.toughness;
-                obj.base_name = ch.display_name.clone();
-                obj.base_power = ch.power;
-                obj.base_toughness = ch.toughness;
-                obj.card_types = CardType {
-                    supertypes: ch.supertypes.clone(),
-                    core_types: ch.core_types.clone(),
-                    subtypes: ch.subtypes.clone(),
-                };
-                obj.base_card_types = obj.card_types.clone();
-                obj.color = ch.colors.clone();
-                obj.base_color = ch.colors.clone();
-                obj.keywords = ch.keywords.clone();
-                obj.base_keywords = ch.keywords.clone();
-            }
-            // CR 400.7 + CR 302.6: Tokens enter the battlefield as new objects
-            // and must run the same ETB-state reset as any other permanent
-            // (summoning sickness, echo, damage, loyalty-activated flags).
-            // Delegate to the single authority for summoning sickness and
-            // related transient flags rather than setting them ad-hoc.
-            obj.reset_for_battlefield_entry(state.turn_number, entry_timestamp);
-            obj.tapped = enter_tapped.resolve(spec.tapped);
+        // CR 614.1: the post-replacement tapped state, resolved once so the
+        // shared body installs the same value a CR 733 replay will.
+        let resulting_tapped = enter_tapped.resolve(spec.tapped);
+        let turn_number = state.turn_number;
+        let created_reference = state.objects.get_mut(&obj_id).map(|obj| {
+            materialize_token_spec_body(
+                obj,
+                &spec,
+                token_image_ref.clone(),
+                turn_number,
+                entry_timestamp,
+                resulting_tapped,
+            );
+            ObjectIncarnationRef::from_object(obj)
+        });
 
-            // CR 113.3d + CR 613.1: Apply static abilities from the token
-            // definition. Mirror onto `base_static_definitions` so the
-            // layers-reset (`base_*` → `*`) at the start of each layers pass
-            // doesn't wipe them before layer 7 reads dynamic P/T grants.
-            if !spec.static_abilities.is_empty() {
-                let static_abilities: Vec<_> = spec
-                    .static_abilities
-                    .iter()
-                    .cloned()
-                    .map(normalized_token_static_definition)
-                    .collect();
-                Arc::make_mut(&mut obj.base_static_definitions)
-                    .extend(static_abilities.iter().cloned());
-                for static_def in static_abilities {
-                    obj.static_definitions.push(static_def);
-                }
-                // CR 702.6a + CR 111.4: Only intrinsic Equip activated abilities
-                // (unconditional SelfRef `GrantAbility(Attach SelfRef → …)`)
-                // are copied onto the token object. Other grants stay in the
-                // static/layer path only.
-                let equip_abilities =
-                    intrinsic_equip_abilities_from_token_statics(&spec.static_abilities);
-                if !equip_abilities.is_empty() {
-                    Arc::make_mut(&mut obj.abilities).extend(equip_abilities.iter().cloned());
-                    Arc::make_mut(&mut obj.base_abilities).extend(equip_abilities);
-                }
-            }
+        // CR 303.4i: settle whether this entrant is created at all, BEFORE the
+        // CR 733 birth is journaled (the journal is append-only — a birth
+        // recorded here could not be retracted) and before anything the game can
+        // observe is emitted. Same decide/act split as the copy seam in
+        // `token_copy.rs` and the liminal seam in
+        // `commit_liminal_token_entry_with_post_actions`.
+        //
+        // Everything done so far for this token is silent: `zones::create_object`
+        // inserts and zones the object without an event, and
+        // `materialize_token_spec_body` only fills it in. `uncreate_unentered_
+        // aura_token` undoes exactly that pair, so a denied entry leaves no
+        // `TokenCreated`, no `ZoneChanged`, no birth record, no `created_ids`
+        // row, and nothing in any graveyard. The loop goes on to the next token
+        // of the count; the tail's `last_created_token_ids = created_ids` then
+        // publishes only the tokens that were actually created, so a later
+        // `TargetFilter::LastCreated` cannot read a denied one — or, when the
+        // whole batch is denied, an earlier unrelated batch.
+        if aura_token_entry_denied(state, obj_id, spec.attach_to) {
+            uncreate_unentered_aura_token(state, obj_id, owner);
+            continue;
+        }
+
+        // CR 733: journal the settled creation, after the body borrow ends.
+        // Counters, the attacking entry, and any later status change journal
+        // through their OWN families, so this command covers the birth only.
+        if let Some(object) = created_reference {
+            let cause = state.current_or_begin_rules_execution_node();
+            let command = ResolvedTokenCreationCommand {
+                object,
+                owner,
+                entry_timestamp,
+                entry_turn: turn_number,
+                body: ResolvedTokenBody::Spec {
+                    spec: spec.clone(),
+                    token_image_ref: token_image_ref.clone(),
+                },
+                resulting_tapped,
+                resulting_next_object_id: state.next_object_id,
+                cause,
+            };
+            state
+                .resolved_rules_journal
+                .record_token_creation(command)
+                .expect("resolved token creation must have a live journal cause");
         }
 
         // CR 508.4: Token enters attacking — not declared as attacker.
@@ -931,7 +990,7 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
                     PendingCounterPostAction::FinalizeTokenEntry {
                         object_id: obj_id,
                         name: spec.characteristics.display_name.clone(),
-                        attach_to: spec.attach_to,
+                        attach_to: spec.attach_to.bound(),
                         sacrifice_at: spec.sacrifice_at.clone(),
                         source_id: spec.source_id,
                         controller: spec.controller,
@@ -974,24 +1033,25 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
         // continuous effect / carries counters / etc., or if any active effect
         // reads board population.
         crate::game::layers::mark_layers_entered(state, obj_id);
-        crate::game::restrictions::record_battlefield_entry(state, obj_id);
+        // CR 608.2i battlefield-entry bookkeeping is done by `record_zone_change` inside
+        // `push_committed_token_entry_events` below — recording it here too double-counts.
         crate::game::restrictions::record_token_created(state, obj_id);
 
-        // CR 303.4 + CR 303.7: A Role/Aura token created "attached to" a host
-        // enters attached. If no legal host was bound, the token is created
-        // unattached and the SBA at CR 704.5m (an Aura not attached to an object
-        // or player is put into its owner's graveyard) removes it; for multiple
-        // same-controller Roles on one host, CR 704.5y keeps only the
-        // latest-timestamp Role. (CR 303.4i's strict "the token isn't created"
-        // outcome is approximated by this create-then-SBA path.) Single
-        // authority: effects::attach.
-        if let Some(host) = &spec.attach_to {
+        // CR 303.4: A Role/Aura token created "attached to" a host enters
+        // attached. The ACT half of the CR 303.4i split above: an Aura whose
+        // host is undefined or illegal never reaches this line, so this is an
+        // attachment that the gate has already found legal, not an attempt.
+        // CR 303.4h keeps the other class here — a non-Aura token named a host
+        // too, and if that host is illegal it simply enters unattached. For
+        // multiple same-controller Roles on one host, CR 704.5z keeps only the
+        // latest-timestamp Role. Single authority: effects::attach.
+        if let Some(host) = spec.attach_to.bound() {
             match host {
                 AttachTarget::Object(id) => {
-                    super::attach::attach_to(state, obj_id, *id);
+                    super::attach::attach_to(state, obj_id, id);
                 }
                 AttachTarget::Player(pid) => {
-                    super::attach::attach_to_player(state, obj_id, *pid);
+                    super::attach::attach_to_player(state, obj_id, pid);
                 }
             }
         }
@@ -1004,34 +1064,25 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
         // Battlefield }` so every ETB trigger matcher (Elvish Vanguard, Soul
         // Warden, Panharmonicon) fires for tokens through the same code path
         // used for normal battlefield entry. The accompanying `TokenCreated`
-        // event is preserved below for token-specific consumers (animation,
-        // logging, `LastCreated` target filters).
-        let zone_change_record = state
-            .objects
-            .get(&obj_id)
-            .expect("token just created")
-            .snapshot_for_zone_change(obj_id, None, Zone::Battlefield);
-        events.push(GameEvent::ZoneChanged {
-            object_id: obj_id,
-            from: None,
-            to: Zone::Battlefield,
-            record: Box::new(zone_change_record),
-        });
-
-        events.push(GameEvent::TokenCreated {
-            object_id: obj_id,
-            name: spec.characteristics.display_name.clone(),
-            source_id: spec.source_id,
-        });
+        // event is emitted for token-specific consumers (animation, logging,
+        // `LastCreated` target filters). Single authority for both, and for the
+        // CR 400.7 zone-change index the batched replay guard keys on.
+        push_committed_token_entry_events(
+            state,
+            obj_id,
+            spec.characteristics.display_name.clone(),
+            spec.source_id,
+            events,
+        );
 
         // CR 603.7: Tokens with a limited duration get a delayed sacrifice trigger.
         // Used by Mobilize and similar keywords that create temporary attacking tokens.
         if matches!(spec.sacrifice_at, Some(Duration::UntilEndOfCombat)) {
-            state.delayed_triggers.push(DelayedTrigger {
+            let sacrifice_token = DelayedTrigger {
                 condition: DelayedTriggerCondition::AtNextPhase {
                     phase: Phase::EndCombat,
                 },
-                ability: ResolvedAbility::new(
+                ability: Box::new(ResolvedAbility::new(
                     Effect::Sacrifice {
                         target: TargetFilter::Any,
                         count: QuantityExpr::Fixed { value: 1 },
@@ -1040,11 +1091,13 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
                     vec![TargetRef::Object(obj_id)],
                     spec.source_id,
                     spec.controller,
-                ),
+                )),
                 controller: spec.controller,
                 source_id: spec.source_id,
                 one_shot: true,
-            });
+                provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
+            };
+            crate::game::triggers::install_delayed_trigger(state, sacrifice_token, events);
         }
     }
 
@@ -1052,6 +1105,316 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
     // TargetFilter::LastCreated (e.g., Job select, suspect).
     state.last_created_token_ids = created_ids;
     true
+}
+
+/// Materializes one already-resolved CR 111.1 token creation verbatim.
+///
+/// Unlike every other resolved-command applier, this one CREATES its subject
+/// rather than verifying and installing into an existing one, so its
+/// precondition is inverted: the recorded id must be ABSENT. It re-runs none of
+/// the CR 614 replacement pipeline that decided the token would be created, its
+/// count, or its tapped state — all of that was settled when the command was
+/// recorded.
+///
+/// The body is installed through the same `materialize_token_spec_body` /
+/// `materialize_token_copy_body` the resolve paths use, so they cannot drift.
+///
+/// CR 707.9: one copy case is deliberately NOT replayable — exceptions applied
+/// after the birth by the unjournaled `apply_token_modifications` seam. That
+/// returns `UnreplayableCopyModifications` before anything is materialized,
+/// rather than installing a body that is silently missing them.
+pub fn apply_resolved_token_creation(
+    state: &mut GameState,
+    command: &ResolvedTokenCreationCommand,
+) -> Result<(), ResolvedTokenCreationReplayInvariantError> {
+    let object_id = command.object.object_id;
+    if state.objects.contains_key(&object_id) {
+        return Err(ResolvedTokenCreationReplayInvariantError::ObjectAlreadyExists(object_id));
+    }
+    if !state
+        .players
+        .iter()
+        .any(|player| player.id == command.owner)
+    {
+        return Err(ResolvedTokenCreationReplayInvariantError::UnknownOwner(
+            command.owner,
+        ));
+    }
+    if object_id.0 >= command.resulting_next_object_id {
+        return Err(
+            ResolvedTokenCreationReplayInvariantError::IdAboveHighWater {
+                id: object_id,
+                high_water: command.resulting_next_object_id,
+            },
+        );
+    }
+
+    // CR 707.9: refuse BEFORE materializing anything, so a body we cannot
+    // reproduce exactly never reaches `state.objects`.
+    if let ResolvedTokenBody::Copy {
+        modifications: ResolvedCopyBodyModifications::DeferredToUnjournaledSeam { modifications },
+        ..
+    } = &command.body
+    {
+        return Err(
+            ResolvedTokenCreationReplayInvariantError::UnreplayableCopyModifications {
+                object: object_id,
+                count: modifications.len(),
+            },
+        );
+    }
+
+    let name = match &command.body {
+        ResolvedTokenBody::Spec { spec, .. } => spec.characteristics.display_name.clone(),
+        ResolvedTokenBody::Copy { copy, .. } => copy.values.name.clone(),
+    };
+    let mut object = GameObject::new(object_id, CardId(0), command.owner, name, Zone::Battlefield);
+    match &command.body {
+        ResolvedTokenBody::Spec {
+            spec,
+            token_image_ref,
+        } => materialize_token_spec_body(
+            &mut object,
+            spec,
+            token_image_ref.clone(),
+            command.entry_turn,
+            command.entry_timestamp,
+            command.resulting_tapped,
+        ),
+        ResolvedTokenBody::Copy {
+            copy,
+            modifications,
+        } => materialize_token_copy_body(
+            &mut object,
+            copy,
+            modifications,
+            command.entry_turn,
+            command.entry_timestamp,
+            command.resulting_tapped,
+        ),
+    }
+
+    state.objects.insert(object_id, object);
+    // allow-raw-zone: replay materializes a token birth, which has no from-zone move (CR 111.1 + CR 614.12).
+    zones::add_to_zone(state, object_id, Zone::Battlefield, command.owner);
+    // CR 111.3 + CR 111.10: a token's abilities come from the creating effect
+    // and the predefined/catalog tables, NOT from the body the command carries,
+    // so the body alone materializes a Treasure with no "{T}, Sacrifice this
+    // token: Add one mana of any color." Both live paths inject after
+    // materializing and before their entry snapshot (Spec: this file, above the
+    // `push_committed_token_entry_events` call; Copy: `token_copy.rs`'s
+    // `finalize_copied_token` + `inject_predefined_token_abilities`), so replay
+    // does the same here, per body variant. The dispatch mirrors
+    // `finalize_committed_liminal_token_entry_from_action`'s
+    // `LiminalTokenAbilityInjection` match arm-for-arm — a blanket
+    // `inject_resolved_token_abilities` would be wrong for the Copy body, whose
+    // live authority uses the predefined-only injector after
+    // `finalize_copied_token`'s CR 707.2 cast-only strip.
+    match &command.body {
+        ResolvedTokenBody::Copy { copy, .. } => {
+            super::token_copy::finalize_copied_token(state, copy.source_id, object_id);
+            inject_predefined_token_abilities(state, object_id);
+        }
+        ResolvedTokenBody::Spec { .. } => inject_resolved_token_abilities(state, object_id),
+    }
+    // CR 400.7 + CR 608.2i: the resolve path records the birth through
+    // `restrictions::record_zone_change` (`push_committed_token_entry_events`),
+    // which appends to this turn's zone-change ledger and assigns the entry's
+    // index. Replay must record the same entry: the ledger length IS the index
+    // allocator, so a birth that records nothing leaves every later replayed
+    // zone change one short of its recorded `turn_zone_change_index` and
+    // `apply_resolved_zone_change` fails closed on `TurnRecordIndexMismatch`.
+    // The record is reconstructed from the materialized object rather than
+    // carried on the command: it is a projection of state this applier has
+    // already installed.
+    //
+    // KNOWN CEILING — two record-visible classes the reconstruction cannot
+    // reproduce, both because the LIVE journal point (`record_token_creation`,
+    // in the resolve path above) runs BEFORE the live mutations and before the
+    // live snapshot, so no call site inside THIS applier can close them; they
+    // would need the live journal-record point moved:
+    //   (i)  `spec.enter_with_counters` — the live snapshot's
+    //        `trigger_source_context.lki.counters` (and P/T, if the counter's
+    //        layer bump landed first) carry the entry counters. Counters replay
+    //        through their own `ObjectCounter` command, journaled AFTER this
+    //        birth, so the reconstructed record here has none.
+    //   (ii) `spec.attach_to` (Role/Aura tokens) — `record.attached_to`. Same
+    //        reason: attachment replays through the Attachment family.
+    // A third class, predefined/catalog ability injection contributing
+    // `record.trigger_definitions`, IS closed — by the injection dispatch
+    // directly above, which runs before this snapshot exactly as the live paths
+    // do. Storing the live record on the command would not close (i) or (ii)
+    // either, for the same ordering reason, so it was not done.
+    let mut entry_record = state
+        .objects
+        .get(&object_id)
+        .expect("the token was materialized above")
+        .snapshot_for_zone_change(object_id, None, Zone::Battlefield);
+    crate::game::restrictions::record_zone_change(state, &mut entry_record);
+    // CR 111.1: replay must not hand the same id out again to a later allocation.
+    state.next_object_id = state.next_object_id.max(command.resulting_next_object_id);
+    // CR 613.7d: the birth drew an entry timestamp alongside the object id, and
+    // the same reasoning applies to it — replay installs the recorded value, so
+    // the timestamp allocator must be carried past it or a later draw reissues
+    // it and the two objects are unordered within their CR 613 layer.
+    state.adopt_replayed_timestamp(command.entry_timestamp);
+    Ok(())
+}
+
+/// CR 111.1 + CR 113.3d: Installs an ordinary token's body onto `object`.
+///
+/// Single authority for the ordinary-token body, shared by the resolve path and
+/// the CR 733 replay applier so the two cannot drift. Operates on a `&mut
+/// GameObject` rather than on `GameState`, so it serves both orderings: the
+/// resolve path inserts first and mutates in place, while replay builds a
+/// detached object and inserts it afterwards.
+pub(crate) fn materialize_token_spec_body(
+    object: &mut GameObject,
+    spec: &TokenSpec,
+    token_image_ref: Option<crate::types::card::TokenImageRef>,
+    turn_number: u32,
+    entry_timestamp: u64,
+    tapped: bool,
+) {
+    let ch = &spec.characteristics;
+    // CR 111.1: Mark as token for SBA cleanup (CR 704.5d)
+    object.is_token = true;
+    // True token from a TokenSpec — image lives in the generic-token
+    // database (Treasure, Spirit, Saproling, Soldier, etc.).
+    object.display_source = DisplaySource::Token;
+    object.token_image_ref = token_image_ref;
+    let has_attrs = ch.power.is_some()
+        || ch.toughness.is_some()
+        || !ch.core_types.is_empty()
+        || !ch.subtypes.is_empty()
+        || !ch.supertypes.is_empty()
+        || !ch.colors.is_empty()
+        || !ch.keywords.is_empty();
+    if has_attrs {
+        object.power = ch.power;
+        object.toughness = ch.toughness;
+        object.base_name = ch.display_name.clone();
+        object.base_power = ch.power;
+        object.base_toughness = ch.toughness;
+        object.layer_base_power = ch.power;
+        object.layer_base_toughness = ch.toughness;
+        object.card_types = CardType {
+            supertypes: ch.supertypes.clone(),
+            core_types: ch.core_types.clone(),
+            subtypes: ch.subtypes.clone(),
+        };
+        object.base_card_types = object.card_types.clone();
+        object.color = ch.colors.clone();
+        object.base_color = ch.colors.clone();
+        object.keywords = ch.keywords.clone();
+        object.base_keywords = ch.keywords.clone();
+    }
+    // CR 400.7 + CR 302.6: Tokens enter the battlefield as new objects
+    // and must run the same ETB-state reset as any other permanent
+    // (summoning sickness, echo, damage, loyalty-activated flags).
+    // Delegate to the single authority for summoning sickness and
+    // related transient flags rather than setting them ad-hoc.
+    object.reset_for_battlefield_entry(turn_number, entry_timestamp);
+    object.tapped = tapped;
+
+    // CR 113.3d + CR 613.1: Apply static abilities from the token
+    // definition. Mirror onto `base_static_definitions` so the
+    // layers-reset (`base_*` → `*`) at the start of each layers pass
+    // doesn't wipe them before layer 7 reads dynamic P/T grants.
+    if !spec.static_abilities.is_empty() {
+        let static_abilities: Vec<_> = spec
+            .static_abilities
+            .iter()
+            .cloned()
+            .map(normalized_token_static_definition)
+            .collect();
+        Arc::make_mut(&mut object.base_static_definitions).extend(static_abilities.iter().cloned());
+        for static_def in static_abilities {
+            object.static_definitions.push(static_def);
+        }
+        // CR 702.6a + CR 111.4: Only intrinsic Equip activated abilities
+        // (unconditional SelfRef `GrantAbility(Attach SelfRef → …)`)
+        // are copied onto the token object. Other grants stay in the
+        // static/layer path only.
+        let equip_abilities = intrinsic_equip_abilities_from_token_statics(&spec.static_abilities);
+        if !equip_abilities.is_empty() {
+            Arc::make_mut(&mut object.abilities).extend(equip_abilities.iter().cloned());
+            Arc::make_mut(&mut object.base_abilities).extend(equip_abilities);
+        }
+    }
+}
+
+/// CR 707.2 + CR 707.5: Installs a copy token's body onto `object`.
+///
+/// Single authority for the copy-token body, shared by BOTH production copy
+/// seams (the liminal build in `token_copy::apply_copy_token_*` and the direct
+/// `create_object` path) and by the CR 733 replay applier, so no two of them can
+/// drift. Like `materialize_token_spec_body` it operates on a `&mut GameObject`
+/// rather than on `GameState`, which is what lets one implementation serve the
+/// liminal build-then-insert ordering and the direct insert-then-build ordering.
+///
+/// `reset_for_battlefield_entry` touches no copiable characteristic, so running
+/// it after the keyword grant (the liminal order) is equivalent to running it
+/// before (the former direct order).
+pub(crate) fn materialize_token_copy_body(
+    object: &mut GameObject,
+    copy: &CopyTokenSpec,
+    modifications: &ResolvedCopyBodyModifications,
+    turn_number: u32,
+    entry_timestamp: u64,
+    tapped: bool,
+) {
+    // CR 111.1: Mark as token for SBA cleanup (CR 704.5d)
+    object.is_token = true;
+    // CR 707.2: the copiable values, plus the display metadata that is not
+    // itself copiable. `install_copiable_values_as_base` already installs
+    // `loyalty`/`base_loyalty` from `values.loyalty` (CR 306.5b), so no separate
+    // loyalty seed is needed here.
+    apply_copiable_values_to_liminal_object(
+        object,
+        &copy.values,
+        copy.display_source,
+        copy.printed_ref.clone(),
+        copy.token_image_ref.clone(),
+    );
+
+    // CR 707.9a + CR 702: "except it has [keyword]" — grant additional keywords
+    // on top of the copied characteristics. Twinflame's haste copies are the
+    // canonical case. Idempotent under repeats.
+    for kw in &copy.extra_keywords {
+        let already_live = object.keywords.contains(kw); // allow-raw-authority: structural live keyword insertion de-dupe, not an effective keyword query
+        if !already_live {
+            object.keywords.push(kw.clone());
+        }
+        if !object.base_keywords.contains(kw) {
+            object.base_keywords.push(kw.clone());
+        }
+    }
+
+    match modifications {
+        // CR 707.2: the copiable values are the whole body.
+        ResolvedCopyBodyModifications::NoExceptions => {}
+        // CR 707.9b/9c: exceptions stamped onto the copiable values before entry.
+        ResolvedCopyBodyModifications::Folded {
+            modifications,
+            all_creature_types,
+        } => {
+            super::token_copy::apply_immediate_copy_token_modifications_to_object(
+                object,
+                modifications,
+                all_creature_types,
+            );
+        }
+        // Owned by the unjournaled `apply_token_modifications` seam and applied
+        // after the birth, so the body here is deliberately without them. Replay
+        // refuses this case up front in `apply_resolved_token_creation`.
+        ResolvedCopyBodyModifications::DeferredToUnjournaledSeam { .. } => {}
+    }
+
+    // CR 400.7 + CR 302.6: Single authority for ETB state. Haste granted via
+    // `extra_keywords` is folded in at query time by `has_summoning_sickness`.
+    object.reset_for_battlefield_entry(turn_number, entry_timestamp);
+    object.tapped = tapped;
 }
 
 pub(crate) fn reserve_liminal_token_object(
@@ -1152,7 +1515,7 @@ fn liminal_copy_token_continuation_for_event(
     let entry = state.liminal_entries.get(entry_ref)?;
     let copy = entry.copy_resume.clone()?;
     Some(LiminalCopyTokenContinuation {
-        owner: entry.object.owner,
+        owner: entry.object.projected().owner,
         copy,
         enter_tapped: entry.enter_tapped,
         enter_with_counters: entry.enter_with_counters.clone(),
@@ -1243,13 +1606,40 @@ pub(crate) fn continue_liminal_copy_token_batch_after_counter_pause(
     )
 }
 
-pub(crate) fn commit_liminal_token_entry_with_event_emission(
+/// CR 303.4g / CR 303.4i: undo a token battlefield entry the Aura-entry rules
+/// say was never created.
+///
+/// The ONLY unhosted-entry disposition the liminal seam has, because the only
+/// entrant that seam can hold is a [`crate::types::game_state::TokenProjection`]
+/// (CR 111.1). The rule's card-backed dispositions are phrased against a
+/// from-zone, so they live where a from-zone exists: the
+/// `ProposedEvent::ZoneChange` path in `zone_pipeline`, which re-proposes the
+/// owner's-graveyard placement as a fresh, replacement-consulted event.
+///
+/// The inverse of the `state.objects.insert` + `zones::add_to_zone` pair
+/// immediately above the CR 303.4f/g consult, and nothing more. In particular it
+/// does NOT roll back `state.next_object_id`: the id was drawn by
+/// `reserve_liminal_token_object` and is recorded as a high-water mark on every
+/// sibling token's CR 733 birth command (`resulting_next_object_id`), so
+/// rewinding the allocator would make a later replay reuse a burnt id.
+pub(crate) fn uncreate_unentered_aura_token(
     state: &mut GameState,
-    event: ProposedEvent,
-    events: &mut Vec<GameEvent>,
-    entry_events: TokenEntryEventEmission,
-) -> bool {
-    commit_liminal_token_entry_with_post_actions(state, event, events, entry_events, Vec::new())
+    object_id: ObjectId,
+    owner: PlayerId,
+) {
+    // The annotation has to sit on the mover line or the line directly above it
+    // (`scripts/zone_authority_census.py::census_file`), so the rationale is
+    // stated once here and the annotation itself is the one-liner below.
+    //
+    // This is the un-entry of a token that CR 303.4g or CR 303.4i says was never
+    // created, not a CR 400.7 zone change: there is no from-zone, no destination
+    // zone, and nothing may observe it — the whole point is that no `ZoneChanged`,
+    // `TokenCreated`, or CR 733 birth record is produced for an entry the rules
+    // deny. Routing it through `zone_pipeline` would manufacture exactly the
+    // observable event this arm exists to suppress.
+    // allow-raw-zone: undoes a CR 303.4g/CR 303.4i-denied token entry; not a CR 400.7 zone change, so no ZoneChanged may be emitted.
+    zones::remove_from_zone(state, object_id, Zone::Battlefield, owner);
+    state.objects.remove(&object_id);
 }
 
 pub(crate) fn commit_liminal_token_entry_with_post_actions(
@@ -1268,6 +1658,23 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
     else {
         return true;
     };
+    // CR 111.1: the entrant of a `ProposedEvent::TokenEntry` is a TOKEN
+    // projection — the marker that represents a permanent no card represents,
+    // and that therefore sits in no zone until this entry commits.
+    // `state.liminal_entries` also holds the card-backed CR 701.42 meld
+    // projection, whose components are real cards in exile and which enters
+    // through `ProposedEvent::ZoneChange` from that real prior zone. A
+    // `TokenEntry` naming one would name nothing this seam may act on, so the
+    // entry is left exactly where it is — the same no-op as an entry that has
+    // already been taken, and, unlike a raw graveyard placement, an outcome
+    // that puts no object anywhere.
+    if !state
+        .liminal_entries
+        .get(&entry_ref)
+        .is_some_and(|entry| entry.object.is_token_projection())
+    {
+        return true;
+    }
     let Some(mut entry) = state.liminal_entries.remove(&entry_ref) else {
         return true;
     };
@@ -1277,11 +1684,212 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
         .chain(entry.enter_with_counters.iter())
         .cloned()
         .collect();
-    entry.object.tapped = enter_tapped.resolve(entry.object.tapped);
-    let owner = entry.object.owner;
-    state.objects.insert(entry_ref, entry.object);
+    entry
+        .object
+        .set_tapped(enter_tapped.resolve(entry.object.projected().tapped));
+    let owner = entry.object.projected().owner;
+
+    // CR 733: the settled copy-token birth journals at the single liminal insert
+    // seam. `copy_resume` is `Some` for every production liminal entry of kind
+    // Token (`token_copy.rs` is the only production constructor), so this covers
+    // the whole liminal copy path. Counters, the attacking entry, and later
+    // status changes journal through their OWN families — this command is the
+    // birth only, exactly as the ordinary CR 111.1 birth is.
+    //
+    // The command is BUILT here, before `state.objects.insert` consumes
+    // `entry.object`, but RECORDED below, after the CR 303.4f/g consult has
+    // settled whether this token is created at all. `ResolvedRulesJournal` is
+    // append-only — `record_token_creation` has no retraction anywhere in the
+    // tree, verified against `append_command`, which only pushes — so a birth
+    // recorded for a token CR 303.4g says "isn't created" could never be taken
+    // back. Recording after the consult but BEFORE the attach is also what keeps
+    // the journal replayable: `apply_resolved_attachment` rejects an attachment
+    // whose object does not exist yet, so the birth must own the lower ordinal.
+    let birth_command = entry.copy_resume.clone().map(|copy| {
+        // CR 707.9b/9c: the liminal seam folds its immediate exceptions into the
+        // copiable values BEFORE entry, so the body is complete here and replay
+        // can reapply them from this record.
+        let modifications = if copy.additional_modifications.is_empty() {
+            ResolvedCopyBodyModifications::NoExceptions
+        } else {
+            ResolvedCopyBodyModifications::Folded {
+                modifications: copy.additional_modifications.clone(),
+                // Only the CR 614 replacement consult runs between the build and
+                // this commit, and it cannot resolve a type-changing effect, so
+                // the live list still matches the one the build folded against.
+                all_creature_types: state.all_creature_types.clone(),
+            }
+        };
+        ResolvedTokenCreationCommand {
+            object: ObjectIncarnationRef::from_object(entry.object.projected()),
+            owner,
+            entry_timestamp: entry.object.projected().timestamp,
+            // CR 302.6: the entered-turn the liminal build already stamped, read
+            // back off the object rather than re-read from the live turn.
+            entry_turn: entry
+                .object
+                .projected()
+                .entered_battlefield_turn
+                .unwrap_or(state.turn_number),
+            body: ResolvedTokenBody::Copy {
+                copy,
+                modifications,
+            },
+            resulting_tapped: entry.object.projected().tapped,
+            // `reserve_liminal_token_object` advanced the allocator to exactly
+            // one past this id when it drew it, however many were drawn since.
+            resulting_next_object_id: entry_ref.0 + 1,
+            cause: state.current_or_begin_rules_execution_node(),
+        }
+    });
+
+    state
+        .objects
+        .insert(entry_ref, entry.object.into_projected());
     // allow-raw-zone: liminal token birth has no from-zone move; TokenEntry already consults entry replacements (CR 111.2 + CR 614.12).
     zones::add_to_zone(state, entry_ref, Zone::Battlefield, owner);
+
+    // CR 303.4f: an Aura entering the battlefield by any means other than
+    // resolving as an Aura spell, where the effect doesn't specify a host, has
+    // its controller choose what it enchants as it enters. A token that is a
+    // copy of an Aura (Yenna, Redtooth Regent; Court of Vantress copying a
+    // Curse) carries no effect-specified `attach_to` — `entry.attach_to.is_some()`
+    // means the effect DID name a host (Role tokens), so CR 303.4f doesn't apply.
+    // Mirrors the `attach_to.is_none()` gate on the ZoneChange entry path.
+    //
+    // Decided before the birth is journaled and applied after, so the CR 303.4g
+    // arm can withhold the birth entirely (see `birth_command` above).
+    //
+    // WHY THE CONSULT RUNS AFTER THE INSERT, and what that costs. The insert +
+    // `add_to_zone` pair above emits nothing — no `ZoneChanged`, no
+    // `TokenCreated`, no journal command, no `last_created_token_ids` row — and
+    // the `NotCreated` arm below rewinds both, so nothing the game can observe
+    // escapes on the denied path. It is a prerequisite, not a shortcut:
+    // `entering_aura_hosts` reads the entrant's zone off `state.objects` and
+    // reports `NotApplicable` for anything not on the battlefield. It also puts
+    // this seam in agreement with the OTHER token seam
+    // (`token_copy.rs`'s non-liminal loop, which likewise consults a token it has
+    // already created on the battlefield).
+    //
+    // The residual, stated rather than papered over: an enchant filter that
+    // COUNTS a population the entrant belongs to ("enchant creature you control if
+    // you control two or more enchantments") observes the entrant as present here
+    // and as absent at the pre-entry ZoneChange seam in `zone_pipeline`. Only
+    // counting predicates diverge — CR 303.4d self-exclusion is applied
+    // explicitly by `legal_aura_attachment_targets`, and `FilterProp::Another` is
+    // source-relative to the Aura itself, so both already exclude the entrant on
+    // either side. No card in the pool carries a counting enchant ability.
+    let hosts = if entry.attach_to.is_none() {
+        crate::game::zone_pipeline::entering_aura_hosts(state, entry_ref)
+    } else {
+        crate::game::zone_pipeline::EnteringAuraHosts::NotApplicable
+    };
+
+    // CR 303.4g: "If an Aura is entering the battlefield and there is no legal
+    // object or player for it to enchant, the Aura remains in its current zone,
+    // unless that zone is the stack. In that case, the Aura is put into its
+    // owner's graveyard instead of entering the battlefield. If the Aura is a
+    // token, it isn't created."
+    //
+    // The entry is denied — there is no arm that lets the entrant stay on the
+    // battlefield unattached for the CR 704.5m state-based action to sweep,
+    // because the rule says this entry never happens. Rewound before anything
+    // observes it: no CR 733 birth record (`birth_command` is still unrecorded
+    // here), no `TokenCreated`, no battlefield `ZoneChanged`, and no
+    // `last_created_token_ids` row.
+    if matches!(
+        &hosts,
+        crate::game::zone_pipeline::EnteringAuraHosts::Hosts { legal_targets, .. }
+            if legal_targets.is_empty()
+    ) {
+        // CR 303.4g + CR 111.1: "If the Aura is a token, it isn't created" is the
+        // ONLY disposition available here, and it is available by construction:
+        // this seam's entrant is a `LiminalEntrant::Token`, whose CR 111.1
+        // token-ness is a property of the type rather than an expectation about
+        // a flag. The rule's two card-backed dispositions are phrased against
+        // the zone the Aura is entering FROM, which is why they belong to — and
+        // only exist on — the `ProposedEvent::ZoneChange` path in
+        // `zone_pipeline`, where the owner's-graveyard placement is re-proposed
+        // as a fresh event so CR 614.6 graveyard→exile redirects (Rest in Peace,
+        // Leyline of the Void) still apply to it. Nothing is placed anywhere
+        // here, so there is no placement for a replacement to miss.
+        uncreate_unentered_aura_token(state, entry_ref, owner);
+        // CR 111.1 + CR 603.7: the anaphora slot still has to be republished, or
+        // the batch continuation (which reads it back to seed the next token's
+        // `created_ids`) would carry whatever an EARLIER, unrelated effect left
+        // there. `entry.created_ids` is this batch's list up to but excluding the
+        // token that was not created — exactly what `finalize_committed_liminal_
+        // token_entry_from_action` would have assigned before appending, minus
+        // the append.
+        state.last_created_token_ids = entry.created_ids.clone();
+        // Not a pause: the batch loop must go on to the next token in the count.
+        return true;
+    }
+
+    if let Some(command) = birth_command {
+        state
+            .resolved_rules_journal
+            .record_token_creation(command)
+            .expect("resolved copy-token creation must have a live journal cause");
+    }
+
+    match crate::game::zone_pipeline::apply_entering_aura_hosts(state, entry_ref, hosts) {
+        // `NoLegalHost` is unreachable here: the empty-`legal_targets` arm above
+        // returned for every entrant, card-backed included.
+        crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
+        | crate::game::zone_pipeline::EnteringAuraAttachment::Attached
+        | crate::game::zone_pipeline::EnteringAuraAttachment::NoLegalHost => {}
+        crate::game::zone_pipeline::EnteringAuraAttachment::NeedsChoice {
+            controller: chooser,
+            legal_targets,
+        } => {
+            // CR 616.1 carrier: park the entry tail exactly like the
+            // enter-with-counters pause below, so the finalize step and any
+            // remaining batch continuation run after the host is chosen.
+            state.last_created_token_ids = entry.created_ids.clone();
+            let remaining_counters = counters_to_apply
+                .iter()
+                .filter(|(_, count)| *count > 0)
+                .map(|(counter_type, count)| PendingCounterAddition::Object {
+                    actor: owner,
+                    object_id: entry_ref,
+                    counter_type: counter_type.clone(),
+                    count: *count,
+                })
+                .collect();
+            let mut post_actions = vec![finalization];
+            post_actions.extend(post_actions_after_finalize);
+            super::counters::stash_pending_counter_additions(
+                state,
+                remaining_counters,
+                crate::types::game_state::PendingEffectResolved::with_post_actions_without_effect(
+                    if entry.copy_resume.is_some() {
+                        EffectKind::CopyTokenOf
+                    } else {
+                        EffectKind::Token
+                    },
+                    entry.source_id,
+                    post_actions,
+                ),
+            );
+            state.waiting_for = WaitingFor::ReturnAsAuraTarget {
+                player: chooser,
+                source_id: entry.source_id,
+                returned_id: entry_ref,
+                legal_targets,
+                pending_effect: Box::new(ResolvedAbility::new(
+                    Effect::Attach {
+                        attachment: TargetFilter::SelfRef,
+                        target: TargetFilter::Any,
+                    },
+                    Vec::new(),
+                    entry.source_id,
+                    chooser,
+                )),
+            };
+            return false;
+        }
+    }
 
     for (counter_index, (counter_type, counter_count)) in counters_to_apply.iter().enumerate() {
         if *counter_count > 0
@@ -1364,7 +1972,7 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
         enters_attacking,
         attach_to,
         sacrifice_at,
-        mut created_ids,
+        created_ids,
         ability_injection,
         entry_events,
     } = action
@@ -1382,7 +1990,9 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
         }
     }
     crate::game::layers::mark_layers_entered(state, object_id);
-    crate::game::restrictions::record_battlefield_entry(state, object_id);
+    // CR 608.2i battlefield-entry bookkeeping is done by `record_zone_change`, reached from the
+    // `entry_events` match below (directly on the `Emit` route, via the parked entry's flush on
+    // the `Suppress` route) — recording it here too double-counts.
     crate::game::restrictions::record_token_created(state, object_id);
 
     if enters_attacking {
@@ -1399,15 +2009,53 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
         };
     }
 
-    if matches!(entry_events, TokenEntryEventEmission::Emit) {
-        push_committed_token_entry_events(state, object_id, name, source_id, events);
+    // CR 400.7 + CR 608.2i + CR 614.12a: the entry RECORD and the entry EVENTS are one indivisible
+    // operation over one snapshot, and both wait until the object IS the thing that entered.
+    // `Emit` means it already is (nothing is deferred on that route). `Suppress` means it is not
+    // yet — `BecomeCopy` has not run and any mandatory as-enters choice is unanswered — so the
+    // whole entry is PARKED on `GameState` and realized later by
+    // `flush_pending_token_battlefield_entry`. Recording here instead would write CR 400.7's "the
+    // state at the moment of the move" from a pre-copy 0/0 Shapeshifter.
+    match entry_events {
+        TokenEntryEventEmission::Emit => {
+            push_committed_token_entry_events(state, object_id, name, source_id, events);
+        }
+        TokenEntryEventEmission::Suppress => {
+            // Overwriting a live parked entry would silently lose its CR 400.7 row AND both of its
+            // entry events — the precise failure mode this lifecycle exists to remove. A
+            // `debug_assert!` alone does not remove it: it compiles out in release, unlike the
+            // `pending_liminal_entry_resume` precedent in `engine_replacement.rs`, which returns an
+            // `Err` in every profile. So realize the outgoing entry FIRST (data preserved in every
+            // profile), and keep the assert as the debug-profile tripwire, because an entry
+            // realized here is realized from a snapshot taken at a moment nobody designed for.
+            // Exactly one liminal copy entry can be in flight today: the multi-token continuation
+            // runs only after `finish_copy_target_choice_entry` returned `Ok(None)`, i.e. after the
+            // copy-completion convergence point already flushed. Measured: zero fires across the
+            // engine suite.
+            let stranded = state
+                .pending_token_battlefield_entry
+                .as_ref()
+                .map(|pending| pending.object_id);
+            if let Some(stranded_id) = stranded {
+                flush_pending_token_battlefield_entry(state, stranded_id, events);
+            }
+            debug_assert!(
+                stranded.is_none(),
+                "CR 400.7: parking a token battlefield entry over a live pending one: {stranded:?}"
+            );
+            state.pending_token_battlefield_entry = Some(PendingTokenBattlefieldEntry {
+                object_id,
+                name,
+                source_id,
+            });
+        }
     }
     if matches!(sacrifice_at, Some(Duration::UntilEndOfCombat)) {
-        state.delayed_triggers.push(DelayedTrigger {
+        let sacrifice_token = DelayedTrigger {
             condition: DelayedTriggerCondition::AtNextPhase {
                 phase: Phase::EndCombat,
             },
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Sacrifice {
                     target: TargetFilter::Any,
                     count: QuantityExpr::Fixed { value: 1 },
@@ -1416,39 +2064,340 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
                 vec![TargetRef::Object(object_id)],
                 source_id,
                 controller,
-            ),
+            )),
             controller,
             source_id,
             one_shot: true,
-        });
+            provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
+        };
+        crate::game::triggers::install_delayed_trigger(state, sacrifice_token, events);
     }
 
-    created_ids.push(object_id);
     state.last_created_token_ids = created_ids;
+    // Publishing the anaphora slot goes through the guarded authority, so a token that vanished
+    // during the counter pause is not named by `TargetFilter::LastCreated` on the same route that
+    // withheld its `TokenCreated` and wrote no `created_tokens_this_turn` row. Appending after the
+    // assignment is the same position `created_ids.push(object_id)` produced.
+    record_last_created_token(state, object_id);
+
     true
 }
 
+/// CR 603.6a + CR 400.7 + CR 111.1: emit a token's battlefield-entry pair — the CR 400.7 zone
+/// change and the CR 111.1 token creation.
+///
+/// The zone-change half is delegated to
+/// [`crate::game::zones::record_and_emit_entry_from_no_zone`], the single authority for a
+/// `from: None → Battlefield` entry: it records the row through
+/// `restrictions::record_zone_change` (which assigns this turn's zone-change index and performs
+/// the CR 608.2i battlefield-entry bookkeeping) and emits the `ZoneChanged` carrying that index.
+/// This function adds only the token-specific `TokenCreated` (CR 111.1), which the authority must
+/// not emit because conjured cards route through it too.
+///
+/// The index matters: `GameObject::snapshot_for_zone_change` leaves
+/// `turn_zone_change_index` at its `0` placeholder for the recorder to overwrite, and the
+/// CR 603.2c batched zone-change replay guard (`triggers.rs`) dedups on
+/// `(definition_ref, turn_zone_change_index)`. A token entry that never reached the recorder
+/// therefore shipped index `0` on the wire, so a SECOND same-turn token batch collided with the
+/// first and its batched trigger fire was swallowed.
+///
+/// Callers must NOT also call `record_battlefield_entry` — the authority's `record_zone_change`
+/// does it, and a second call double-counts `battlefield_entries_this_turn`.
+///
+/// This is the `TokenEntryEventEmission::Emit` half of the lifecycle: the object is already fully
+/// realized when the finalize tail runs, so record and emit happen inline. The `Suppress` half
+/// parks the entry and realizes it through [`flush_pending_token_battlefield_entry`], which routes
+/// back through this same function.
+///
+/// THE INVARIANT, enforced here rather than at call sites: **`TokenCreated` is emitted if and only
+/// if the authority recorded the entry.** `record_and_emit_entry_from_no_zone` returns `None`
+/// exactly when `state.objects` has no row for `object_id` (its `?` is on that one lookup and
+/// nothing else — `snapshot_for_zone_change` and `record_zone_change` both return non-`Option`
+/// values), so `record.is_some()` IS the object-existence predicate, read off the authority's own
+/// verdict instead of a duplicated `contains_key`.
+///
+/// The third token-creation ledger, `last_created_token_ids`, carries the SAME predicate through
+/// [`record_last_created_token`] rather than through this function — see that doc for why the write
+/// cannot be folded in here without widening the `TargetFilter::LastCreated` slot to callers that
+/// deliberately do not claim it.
+///
+/// Why the predicate lives HERE. `restrictions::record_token_created` — which populates
+/// `created_tokens_this_turn` and `players_who_created_token_this_turn` — is itself
+/// existence-guarded, so an unconditional emit puts a live trigger event
+/// (`trigger_matchers::match_token_created`, keyed in `trigger_index`) on the wire with no ledger
+/// row behind it. The damage is a WRONG TRIGGER FIRE, not merely a self-inconsistent read:
+/// `match_token_created` applies its CR 111.2 controller filter only inside
+/// `if let Some(token_controller) = state.objects.get(object_id)`, and `valid_card_matches`
+/// short-circuits `None => true` without reading `state`, so with the object gone the filter is
+/// never applied and the matcher returns `true` for a controller it should have rejected.
+/// MEASURED: `valid_card=None, valid_target=Controller` → present `false`, gone `true`; the
+/// `valid_card=Typed{Creature}` row stays `false` on the gone path and is the negative control.
+///
+/// Guarding each CALLER instead was tried and abandoned: three successive enumerations of "the
+/// routes where a pause can separate creation from emit" each shipped incomplete (`counters.rs`
+/// x2 → then `token_copy.rs` → then the `TokenEntryEventEmission::Emit` arm reached via
+/// `PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry`), with
+/// [`flush_pending_token_battlefield_entry`] disclosed-but-unfixed the whole time. The eight
+/// callers are `apply_create_token_after_replacement_with_created_ids`, `gift_delivery.rs`,
+/// `token_copy.rs` x2, `counters.rs` x2, the `Emit` arm, and that flush; this is the ONLY
+/// production emit of `GameEvent::TokenCreated`, so one predicate inside it closes the class by
+/// construction instead of by enumeration. See
+/// `a_vanished_counter_paused_token_reports_neither_creation_event_nor_ledger_row`, which drives
+/// all five deferred routes.
+///
+/// KNOWN CLASS-WIDE FIX, deliberately NOT made here: `match_token_created` should resolve the
+/// controller from last-known information the way its sibling `valid_card_matches_with_lki` already
+/// does for the card filter. That is a change to a shared matcher affecting every gone-object
+/// event, so it is a follow-up rather than part of this authority fold.
+///
+/// NO CR settles whether a token that never successfully entered should fire a creation trigger,
+/// because the situation is unreachable in rules terms: CR 704.3 checks state-based actions only
+/// "whenever a player would get priority", so nothing can remove the token between its creation and
+/// the CR 603.6a enters-the-battlefield check. The gone arm is a defensive engine artifact of
+/// deferring the emit past a replacement pause, and the requirement on it is internal agreement,
+/// not a rules verdict.
+///
+/// Returns the recorded row (index assigned) so a caller whose object is a just-created invariant
+/// can `.expect(…)` it. The return is load-bearing through the `.expect(…)` at `gift_delivery.rs`
+/// and `token_copy.rs`'s uninterrupted copy path only; every other caller discards it. Those two
+/// panic on `None` exactly as before — the guard changes only whether an (unobservable, because the
+/// unwinding drops `events` and no engine boundary catches it) `TokenCreated` was pushed first.
 pub(crate) fn push_committed_token_entry_events(
-    state: &GameState,
+    state: &mut GameState,
     object_id: ObjectId,
     name: String,
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
-) {
-    if let Some(token) = state.objects.get(&object_id) {
-        let zone_change_record = token.snapshot_for_zone_change(object_id, None, Zone::Battlefield);
-        events.push(GameEvent::ZoneChanged {
+) -> Option<crate::types::game_state::ZoneChangeRecord> {
+    let record = crate::game::zones::record_and_emit_entry_from_no_zone(state, object_id, events);
+    if record.is_some() {
+        events.push(GameEvent::TokenCreated {
             object_id,
-            from: None,
-            to: Zone::Battlefield,
-            record: Box::new(zone_change_record),
+            name,
+            source_id,
         });
     }
-    events.push(GameEvent::TokenCreated {
-        object_id,
-        name,
-        source_id,
-    });
+    record
+}
+
+/// CR 111.1: Publish a just-created token into `state.last_created_token_ids`, the THIRD
+/// token-creation ledger, under the same object-existence predicate as the other two.
+///
+/// THE LEDGER TRIPLE, and why this exists. A token creation writes three places, and until this
+/// function they did not agree on the object-gone path:
+///
+/// 1. `created_tokens_this_turn`            — guarded, inside `restrictions::record_token_created`
+/// 2. `players_who_created_token_this_turn` — guarded, same function
+/// 3. `last_created_token_ids`              — UNGUARDED
+///
+/// THE WRITER POPULATION, NAMED BY THE QUERY THAT PRODUCED IT AND BY THE TIP IT WAS RUN AT — a
+/// count with no command behind it is unfalsifiable, and this ledger has now been mis-swept twice
+/// from a too-narrow grep. Counts below are MATCH EVENTS
+/// (`rg --pcre2 -U --json … | grep -c '"type":"match"'`), not lines, because two of the buffer
+/// writes span three lines each. With
+/// `M=(push|extend|clear|insert|append|retain|splice|truncate|remove|drain|resize|pop)`:
+///
+/// * `rg -n --pcre2 -U "state\s*\.\s*last_created_token_ids\s*(\.\s*M\s*\(|=[^=])" crates/engine/src`
+///   → 39 at THIS tip, of which 3 are prose in comments this change added (including the one four
+///   lines below), leaving 36 code hits; plus 1 more bound as `s.` (`engine.rs`'s per-turn
+///   `.clear()`) = 37 = 20 production writers and 17 inside `#[cfg(test)]`. Exactly ONE production
+///   writer publishes a single just-created id — the `push` in this function. The other 19 are
+///   clears (4) and bulk republishes (15) of a vector that is itself a clone of this ledger, a
+///   `CopyTokenApplyStatus` built one line after `.expect("token just created")`, or the copy-batch
+///   buffer below. AT `4b34e5465` the same query returned 39 hits with NO comment among them, for
+///   23 production writers, of which 5 published a single just-created id.
+/// * `rg -n --pcre2 -U "pending\s*\.\s*created_ids\s*(\.\s*M\s*\(|=[^=])" crates/engine/src`
+///   → 11 at THIS tip, of which 1 is prose in a comment this change added (`counters.rs`'s test
+///   doc), leaving 10 production writers of `PendingCopyTokenResolution::created_ids`, the
+///   copy-batch buffer that `token_copy.rs`'s drain assigns WHOLESALE back onto this ledger, and 0
+///   inside `#[cfg(test)]`. Exactly ONE is a single-id publish — the `push` in
+///   [`record_last_created_copy_batch_token`]. AT `4b34e5465` the same query returned 11 with no
+///   comment among them, for 11 production writers, of which TWO were single-id publishes; both are
+///   now that one call.
+///
+/// THOSE TOTALS ARE POSITIVE CONTROLS, NOT INVARIANTS, and they churn in a specific way worth
+/// naming: the query matches its own documentation, so writing prose ABOUT this ledger moves the
+/// number. Both raw totals were already stale when the previous revision quoted them, invalidated
+/// by the very comments that quoted them. What does NOT churn is the classification — one single-id
+/// publish per container, each inside an authority — and that half is enforced executably by
+/// `battlefield_entry_authority_census`'s THIRD anchor
+/// (`every_single_id_anaphora_publish_lives_in_an_authority`), which pins the production multiset to
+/// `{effects/token.rs: 2}` and both hits' enclosing functions to these two. Prefer running that test
+/// over trusting the numbers above.
+///
+/// The `-U` is load-bearing, not decoration: `token_copy.rs:321-323` and `:327-329` write
+/// `pending` / `.created_ids` / `.extend(…)` across three lines, so a line-oriented grep reports 9
+/// match events where there are 11 — at BOTH tips. Deriving this population from
+/// `grep 'last_created_token_ids.push('` is how round 8 found 4 of 5 sites and round 9 left the two
+/// buffer siblings unguarded.
+///
+/// Gating the `GameEvent::TokenCreated` emit in [`push_committed_token_entry_events`] made the
+/// event agree with ledgers 1 and 2, which FLIPPED which ledger it disagreed with rather than
+/// removing the disagreement: on a deferred route whose token vanished during the pause, the event
+/// was withheld and both turn ledgers stayed empty while ledger 3 still held the dead id.
+///
+/// Ledger 3 is not inert bookkeeping. It is the `TargetFilter::LastCreated` anaphora slot —
+/// `game/filter.rs`'s `LastCreated => state.last_created_token_ids.contains(&object_id)` and
+/// `game/targeting.rs`'s `LastCreated => state.last_created_token_ids.clone()` — so a dead id in it
+/// is a "the token you created" reference pointing at an object that never finished entering.
+///
+/// WHY NOT FOLD IT INTO `restrictions::record_token_created`, which is where the other two live:
+/// MEASURED, its production call sites are a strict SUPERSET of ledger 3's (it additionally runs at
+/// `incubate.rs`, `gift_delivery.rs`, `token.rs` x2, `token_copy.rs` and `counters.rs`'s
+/// `InjectPredefinedTokenAbilities` arms, none of which publishes the anaphora slot), so folding
+/// would silently widen `LastCreated` to routes that deliberately do not claim it. The predicate is
+/// therefore single-sourced here while the call-site set stays exactly what it was.
+///
+/// Not folded into [`push_committed_token_entry_events`] either, for the mirror reason: three of
+/// that emitter's eight callers do not publish ledger 3, so pulling the write inside would widen
+/// the slot the same way.
+///
+/// Returns whether the id was published, so the copy-batch mirror in
+/// [`record_last_created_copy_batch_token`] can consume the SAME verdict instead of re-deriving it.
+pub(crate) fn record_last_created_token(state: &mut GameState, object_id: ObjectId) -> bool {
+    let exists = state.objects.contains_key(&object_id);
+    if exists {
+        state.last_created_token_ids.push(object_id);
+    }
+    exists
+}
+
+/// CR 111.1 + CR 707.2: publish a just-created token into BOTH destinations the
+/// anaphora slot has while a copy batch is in flight — [`record_last_created_token`]'s ledger 3 and
+/// the in-flight `PendingCopyTokenResolution::created_ids` buffer — under ONE evaluation of the
+/// object-existence predicate.
+///
+/// WHY THIS EXISTS AS A FUNCTION rather than two adjacent statements. `token_copy.rs`'s drain ends
+/// with `state.last_created_token_ids = pending.created_ids;` — an ASSIGNMENT, not an append. So
+/// the buffer is not a secondary cache of ledger 3; it OVERWRITES it. A caller that guarded the
+/// ledger write and then pushed the same id into the buffer one line below published the withheld
+/// id anyway and destroyed the guarded list on top of it. That is exactly what shipped at
+/// `counters.rs` and `token_copy.rs` after the guard was introduced: the predicate was single-
+/// sourced but the *publish* was not, so the guard was defeated one line below itself. Fusing both
+/// writes into one call leaves no second statement to forget.
+///
+/// NOT folded into [`record_last_created_token`] itself, and the distinction is behavioural rather
+/// than stylistic: its other three callers (`counters.rs`'s `FinalizeTokenEntry` arm and
+/// `EmitCommittedCopyTokenEntry` arm, and `finalize_committed_liminal_token_entry_from_action`)
+/// deliberately do NOT mirror. Mirroring there would add a plain (or already-batched) token to a
+/// copy batch's `created_ids`, and since that buffer is assigned wholesale onto ledger 3 at the
+/// drain, it would silently widen what `TargetFilter::LastCreated` names for "the tokens created
+/// this way" — the same widening argument that keeps the predicate out of
+/// `restrictions::record_token_created`.
+pub(crate) fn record_last_created_copy_batch_token(state: &mut GameState, object_id: ObjectId) {
+    if !record_last_created_token(state, object_id) {
+        return;
+    }
+    if let Some(pending) = state.active_copy_token_mut() {
+        pending.created_ids.push(object_id);
+    }
+}
+
+/// CR 400.7 + CR 608.2i + CR 614.12a: realize a postponed token battlefield entry — record it
+/// through `record_zone_change` and emit its entry pair — at the first instant the object IS the
+/// thing that entered. Record and emit are ONE indivisible operation over ONE owned value, so no
+/// route can perform half of it. Returns `false` when no entry is parked for `object_id`.
+///
+/// Idempotence is structural: [`Option::take_if`] consumes the parked value, so a second call for
+/// the same object is a no-op and the duplicate-row class is unrepresentable rather than guarded.
+///
+/// LOOK-BACK WINDOW (owned, not hidden): between the commit and this flush the token is on the
+/// battlefield with ZERO rows on either CR 400.7 / CR 608.2i ledger, and on a paused route that
+/// window spans one or more client round-trips. `game/quantity.rs`'s zone-change scans and
+/// `restrictions::battlefield_entry_matches_filter` therefore answer "0 entered this turn" for it
+/// during the window. That is inherent to postponing, and it is the lesser error: recording early
+/// answers "1" with the WRONG object (a 0/0 pre-copy Shapeshifter), which silently mis-answers
+/// "each Zombie that entered this turn" rather than under-counting an entry that, per CR 614.12a,
+/// has not finished happening.
+///
+/// SBA SCOPE — what the rules do and do NOT guarantee about the window. CR 704.3 checks
+/// state-based actions only when a player would get priority, and CR 704.4 says they pay no
+/// attention to what happens during the resolution of a spell or ability, so nothing can remove the
+/// token while the entry is PAUSED on a replacement/choice prompt. Neither rule covers the action
+/// that finally settles: that action runs its own SBA pass inside `run_post_action_pipeline`, with
+/// the entry still parked. That is exactly why [`realize_settled_token_battlefield_entry`] is
+/// called from inside `apply_action` BEFORE that pipeline — a copy realized with toughness 0 gets
+/// its CR 400.7 row written and its pair emitted before CR 704.5f can bury it.
+/// [`crate::game::zones::record_and_emit_entry_from_no_zone`]'s `None` arm remains the fail-safe
+/// for an object that is gone by flush time: it records nothing and emits nothing, and
+/// [`push_committed_token_entry_events`] now withholds `TokenCreated` on that same verdict, so this
+/// route reports NOTHING rather than a creation event with no ledger row behind it.
+pub(crate) fn flush_pending_token_battlefield_entry(
+    state: &mut GameState,
+    object_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let Some(pending) = state
+        .pending_token_battlefield_entry
+        .take_if(|pending| pending.object_id == object_id)
+    else {
+        return false;
+    };
+    push_committed_token_entry_events(
+        state,
+        pending.object_id,
+        pending.name,
+        pending.source_id,
+        events,
+    );
+    true
+}
+
+/// CR 400.7 + CR 603.6a: realize a parked token battlefield entry once the action carrying it has
+/// SETTLED — `WaitingFor::Priority`, the complement of "any pause", so the gate is pause-shape
+/// agnostic by construction instead of enumerating prompt variants.
+///
+/// ONE gate, TWO call sites in `engine.rs`, both settled-action convergence points:
+///
+/// * inside `apply_action`, immediately before `engine_priority::run_post_action_pipeline` — so the
+///   entry pair is in the event set that action's CR 603.2 / CR 603.6a trigger scan reads. This is
+///   what makes the copy token's ETB observers ("whenever another creature enters") fire, and it
+///   also puts the CR 400.7 row on the ledger before that pipeline's SBA pass (CR 704.3) can bury a
+///   0-toughness copy under CR 704.5f.
+/// * in `apply_action_boundary_core`, after `apply_action` returned — for the handlers that build
+///   an `ActionResult` straight out of the reducer match and never reach that pipeline
+///   (`handle_tribute_choice` is the reachable one). That call site converges them onto
+///   `engine_priority::run_post_action_pipeline_from` over exactly the slice this realization
+///   appended, so the CR 603.6a check runs for them too and their ETB observers fire. For the
+///   REALIZED ENTRY the only remaining difference from the in-`apply_action` call is ordering
+///   against that action's CR 704.3 SBA pass, which is why both call sites are kept; the handler's
+///   OWN earlier events stay outside that scan window by design (`scan_from`).
+///
+/// Order between the two is irrelevant: the flush's `Option::take_if` makes the second call — and
+/// any call after the two in-resolution convergence points in `engine_replacement.rs` /
+/// `counters.rs` — a no-op.
+///
+/// CR 704.5f: when the token is no longer on the battlefield at the settling point, the parked
+/// entry is DROPPED — no row, no pair — rather than emitting a battlefield-entry event for an
+/// object that is not there, which would make ETB triggers fire for a permanent that has already
+/// left. The cost is a lost CR 400.7 row for an entry that did happen. After the in-`apply_action`
+/// call above, the only way to reach this branch is a settling action that never runs the pipeline
+/// AND removes the token within itself; no production route is known to do both.
+///
+/// Returns whether an entry pair was actually appended to `events` — `false` for an unsettled
+/// action, for nothing parked, for an entry an earlier convergence point already consumed, and
+/// for the CR 704.5f drop branch (which does consume the park but emits nothing). The boundary
+/// call site gates its CR 603.6a trigger pass on exactly that.
+pub(crate) fn realize_settled_token_battlefield_entry(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return false;
+    }
+    let Some(pending_id) = state
+        .pending_token_battlefield_entry
+        .as_ref()
+        .map(|pending| pending.object_id)
+    else {
+        return false;
+    };
+    if state.battlefield.contains(&pending_id) {
+        flush_pending_token_battlefield_entry(state, pending_id, events)
+    } else {
+        state.pending_token_battlefield_entry = None;
+        false
+    }
 }
 
 // ── Layer B: token-handler batch purity gate (Tier 3) ────────────────────
@@ -1473,10 +2422,11 @@ pub(crate) fn spec_emits_only_etb_pair(spec: &TokenSpec) -> bool {
     spec.enter_with_counters.is_empty() // no CounterAdded event / AddCounter replacement
         && !spec.enters_attacking // no combat-state mutation (CR 508.4)
         && spec.sacrifice_at.is_none() // no delayed trigger (CR 603.7)
-        && spec.attach_to.is_none() // no host attachment mutation (CR 303.4)
+        // no host attachment mutation and no CR 303.4i entry verdict to reach
+        && !spec.attach_to.is_requested()
 }
 
-/// CR 603.6a + CR 111.10: The set of event keys a single produced token EMITS as
+/// CR 603.6a + CR 111.1: The set of event keys a single produced token EMITS as
 /// it enters the battlefield, given its core types. Mirrors the event-side
 /// deriver exactly (`keys_from_event`, trigger_index.rs:462-468 for the ETB pair
 /// and :529-531 for `TokenCreated`): a token entering emits the broad
@@ -1495,7 +2445,11 @@ fn produced_token_emitted_keys(
             .iter()
             .map(|ct| TriggerEventKey::EnterBattlefield(Some(*ct))),
     );
-    // CR 111.10: a token's creation also emits `TokenCreated`.
+    // CR 111.1 ("Some effects put tokens onto the battlefield"): a token's
+    // creation also emits `TokenCreated`. NOT CR 111.10, which is the
+    // predefined-token characteristics catalog (Treasure/Food/Clue/Role) and
+    // says nothing about event emission — the ~58 other CR 111.10 citations in
+    // this file are correct for exactly that catalog.
     keys.push(TriggerEventKey::TokenCreated);
     keys
 }
@@ -1556,23 +2510,18 @@ fn token_creation_needs_choice(
         count,
         applied: HashSet::new(),
     };
-    let candidates = replacement::find_applicable_replacements(state, &proposed, registry);
-    if candidates.is_empty() {
-        return false;
-    }
-    // (1) any single optional/MayCost applicable replacement → interactive.
-    let any_optional = candidates.iter().any(|rid| {
-        state
-            .objects
-            .get(&rid.source)
-            .and_then(|o| o.replacement_definitions.get(rid.index))
-            .map(|r| replacement::replacement_mode_is_optional(&r.mode))
-            .unwrap_or(true) // unknown ⇒ conservatively interactive
-    });
-    // (2) ≥2 candidates whose ordering is material → CR 616.1 player choice.
-    let ordering_material = candidates.len() >= 2
-        && replacement::replacement_ordering_is_material(state, &candidates, &proposed);
-    any_optional || ordering_material
+    // Delegates to the ONE prompt-cause authority. Term for term HEAD's two
+    // disjuncts: `OptionalCandidate` is the `any_optional` scan (with an
+    // unresolvable def — every virtual — conservatively optional) and
+    // `OrderingMaterial` is the `len() >= 2 && ordering_is_material` conjunct.
+    //
+    // `MandatoryBodyContinuation` is deliberately NOT read here. A drained body
+    // can set a non-priority `waiting_for`, so taking it would be a real
+    // token-batching change; it is left to its own change rather than smuggled
+    // into this delegation.
+    let causes = replacement::proposed_event_prompt_cause(state, &proposed, registry);
+    causes.contains(replacement::ReplacementPromptCause::OptionalCandidate)
+        || causes.contains(replacement::ReplacementPromptCause::OrderingMaterial)
 }
 
 /// CR 205: Extract the concrete `CoreType` set a `TypeFilter` counts, for the
@@ -1981,7 +2930,7 @@ pub(crate) fn copy_probe_spec_for(
         sacrifice_at,
         source_id,
         controller,
-        attach_to: None,
+        attach_to: TokenHostRequest::NotRequested,
     }
 }
 
@@ -2062,9 +3011,12 @@ pub(crate) fn resolve_token_spec(
 
     let count = resolve_quantity_with_targets(state, count, ability).max(0) as u32;
     let token_owner = resolve_token_owner(state, ability, owner);
-    let attach_target = attach_to
-        .as_ref()
-        .and_then(|f| resolve_attach_host(state, ability, f));
+    let host_request = TokenHostRequest::from_binding(
+        attach_to.is_some(),
+        attach_to
+            .as_ref()
+            .and_then(|f| resolve_attach_host(state, ability, f)),
+    );
 
     let parsed = parse_token_script(name).or_else(|| {
         build_token_attrs_from_effect(
@@ -2089,7 +3041,7 @@ pub(crate) fn resolve_token_spec(
         *enters_attacking,
         static_abilities.clone(),
         resolved_etb_counters,
-        attach_target,
+        host_request,
         ability,
         state,
     );
@@ -2111,7 +3063,10 @@ pub(crate) fn resolve_token_spec(
 /// the chosen target out of `ability.targets`. Returns `None` when no legal
 /// host has been bound — the apply path then leaves the token unattached and
 /// the CR 704.5m SBA (an unattached Aura) moves the orphaned Aura to the
-/// graveyard.
+/// graveyard. That observed path is itself a divergence from CR 303.4i, which
+/// says an Aura token whose host is undefined is not created at all; the missing
+/// guard is tracked separately (#7302). Binding the host correctly is what keeps
+/// a card off that path, not a substitute for the guard.
 ///
 /// This does NOT duplicate attach legality: the actual attach is performed by
 /// `attach::attach_to` / `attach::attach_to_player`, the single authority for
@@ -2121,25 +3076,289 @@ fn resolve_attach_host(
     ability: &ResolvedAbility,
     filter: &TargetFilter,
 ) -> Option<AttachTarget> {
-    match filter {
+    match classify_attach_host_authority(filter) {
+        // CR 115.1a: the chosen OBJECT target carried in `ability.targets` — the
+        // single-target "attached to target creature" case. A player-valued
+        // slot never reaches this arm; `denotes_player_target` routes it to
+        // `SelectedPlayerTarget` below.
+        AttachHostAuthority::SelectedTarget => first_object_host(ability),
+        // CR 115.1a + CR 303.4: the chosen PLAYER target is the host. Curse
+        // Auras (Selenia's Curse) are the shipped shape; `attach_to_player`
+        // downstream carries the CR 303.4i legality gate, exactly as
+        // `attach_to` does for an object host.
+        AttachHostAuthority::SelectedPlayerTarget => first_player_host(ability),
+        // CR 608.2c + CR 109.4: the resolution-chosen player, read from the
+        // resolution's own chosen-player list.
+        //
+        // Read from the slot directly rather than through
+        // `resolve_player_for_context_ref`: that helper falls back to
+        // `ability.controller` when the index is unbound, which is right for a
+        // sub-effect that must still act ("the chosen player draws a card") and
+        // wrong here. An unbound slot means the sentence names nobody, and this
+        // path may not invent a host — inventing one is the whole defect this
+        // resolver exists to prevent. No host, and CR 704.5m takes it from there.
+        AttachHostAuthority::ChosenPlayer(index) => ability
+            .chosen_players
+            .get(index as usize)
+            .copied()
+            .map(AttachTarget::Player),
         // Event-context hosts ("attached to the triggering creature") resolve the
         // triggering event's subject via the shared event-context resolver.
-        TargetFilter::TriggeringSource | TargetFilter::AttachedTo => {
+        AttachHostAuthority::EventContext => {
             crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
                 .map(target_ref_to_attach_target)
         }
-        // ParentTarget and any targeting filter resolve to the chosen target
-        // carried in `ability.targets`. ParentTarget is bound per-iteration by the
-        // for-each rebind; a `Typed` targeting filter is the single-target
-        // "attached to target creature" case (CR 115.1a). Both read the first
-        // `TargetRef::Object` in `ability.targets`. Player-host Auras (CR 303.4
-        // permits a player host) are not yet implemented — no current card creates
-        // a token attached to a player, so a Player slot yields `None` here.
-        _ => ability.targets.iter().find_map(|target| match target {
-            TargetRef::Object(id) => Some(AttachTarget::Object(*id)),
-            TargetRef::Player(_) => None,
+        // The bare-pronoun host ("attached to it"). It normally reads the chosen
+        // target out of `ability.targets` — the for-each rebind binds it per
+        // iteration — but the pronoun also appears in abilities that choose no
+        // target at all, where there is no back-reference for it to make.
+        //
+        // CR 608.2k: such a pronoun names the specific untargeted object the
+        // ability's trigger condition already referred to ("When this creature
+        // enters, create a Monster Role token attached to IT").
+        //
+        // `ParentTarget` IS that anaphor, and `targeting::resolved_targets` is
+        // its authority — so the fallback asks it rather than substituting a
+        // neighbouring one. It carries referents this clause has no business
+        // re-deriving: the attack batch, the cast spell, the blocked attacker,
+        // and the Stationed / VehicleCrewed / Saddled subjects (CR 702.184a,
+        // CR 702.122, CR 702.171). On a zone change it hands back the ENTERING
+        // object only when that is not the source — Gylwain, Casting Director
+        // creates the Role for another creature that entered — and otherwise
+        // falls back to the source, which is what "When THIS creature enters …
+        // attached to it" needs. Resolving `TriggeringSource` here happened to
+        // agree on both zone-change shapes and on nothing else.
+        //
+        // The fallback is confined to this arm and to an ability that chose
+        // NOTHING. A typed targeting filter that legally selected zero targets
+        // ("attached to target creature you control" with no legal target) keeps
+        // its own no-host outcome: nothing in its text names an untargeted
+        // object, so CR 608.2k does not reach it.
+        //
+        // One host is taken from what may be a batch: the clause creates one
+        // token and its pronoun names one thing.
+        AttachHostAuthority::Pronoun => first_object_host(ability).or_else(|| {
+            ability.targets.is_empty().then(|| {
+                crate::game::targeting::resolved_targets(
+                    ability,
+                    &TargetFilter::ParentTarget,
+                    state,
+                )
+                .into_iter()
+                .next()
+                .map(target_ref_to_attach_target)
+            })?
         }),
+        // CR 608.2c: a numbered anaphor resolves against the whole resolving
+        // chain's targets, which is why it routes through the same authority
+        // `attach::resolve_object_filter` uses rather than reading this clause's
+        // nearest target.
+        AttachHostAuthority::ParentSlot(index) => {
+            crate::game::targeting::resolve_parent_slot_from_root(state, ability, index)
+                .map(target_ref_to_attach_target)
+        }
+        AttachHostAuthority::Source => Some(AttachTarget::Object(ability.source_id)),
+        AttachHostAuthority::SpecificObject(id) => Some(AttachTarget::Object(id)),
+        AttachHostAuthority::NoHost => None,
     }
+}
+
+/// CR 303.4 + CR 608.2c: which authority names the host of a token created
+/// "attached to" something.
+///
+/// Reading the enclosing ability's chosen targets is correct only for a filter
+/// that describes a target slot (CR 115.1a). Every other family names its object
+/// through its own authority, and a filter that names no object must leave the
+/// token hostless rather than inherit whatever the ability happened to select.
+enum AttachHostAuthority {
+    /// A predicate over objects, which the targeting layer used to choose a
+    /// target. The host is that chosen target.
+    SelectedTarget,
+    /// CR 115.1a + CR 303.4: a target slot that holds a PLAYER, not an object
+    /// ("… attached to target opponent"). The host is that chosen player.
+    SelectedPlayerTarget,
+    /// CR 608.2c + CR 109.4: the Nth resolution-chosen player. Fixed while the
+    /// ability resolves, never declared as a target — so it names its player
+    /// through the chosen-player list, not through `ability.targets`.
+    ChosenPlayer(u8),
+    /// An object the triggering event or the resolution context names.
+    EventContext,
+    /// The bare anaphoric pronoun, which reads the chosen target and otherwise
+    /// falls back to the untargeted object the trigger condition named.
+    Pronoun,
+    /// One numbered slot of the resolving chain's accumulated targets.
+    ParentSlot(usize),
+    /// The ability's own source object.
+    Source,
+    /// An object the ability definition names outright.
+    SpecificObject(ObjectId),
+    /// No host from this path: a player-valued filter, a filter that names no
+    /// object at all, or a reference family whose authority this path does not
+    /// resolve. The token is then left unattached (see the `resolve_attach_host`
+    /// doc comment for what happens to it).
+    NoHost,
+}
+
+/// The classification is exhaustive over [`TargetFilter`] on purpose: a new
+/// variant has to be triaged here rather than inheriting selected-target
+/// semantics from a wildcard.
+fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority {
+    let authority = match filter {
+        // CR 608.2c + CR 109.4: a reference to the resolution-chosen player is a
+        // `Typed` filter BY SHAPE, but it is a context reference — the engine
+        // says so through `chosen_player_index`, which is what
+        // `is_context_ref` itself consults. Asked ahead of the generic `Typed`
+        // arm below, which would otherwise read the ability's chosen targets and
+        // attach the token to an unrelated object.
+        TargetFilter::Typed(_) if filter.chosen_player_index().is_some() => {
+            AttachHostAuthority::ChosenPlayer(
+                filter
+                    .chosen_player_index()
+                    .expect("guarded by the arm above"),
+            )
+        }
+        // CR 115.1a: whether a target slot holds a player or an object is the
+        // targeting layer's question, and `denotes_player_target` is the single
+        // authority both it and this classification read. "… attached to target
+        // opponent" (Selenia, the Cursed Heart) parses to the property-free
+        // `Typed` shape, so without this arm its Curse would look for an object
+        // target, find none, and enter unattached.
+        TargetFilter::Typed(_) if filter.denotes_player_target() => {
+            AttachHostAuthority::SelectedPlayerTarget
+        }
+
+        // CR 601.3 + CR 608.2c: a composite can CONTAIN a context reference —
+        // the parser builds `And { ExiledBySource, Typed }` for "an exiled card
+        // that is a creature" — and `is_context_ref` reports the whole filter as
+        // one. Its object comes from the exile link, not from a target slot, so
+        // it fails closed here rather than reading `ability.targets`. Asked
+        // before the object-predicate arm below, which would otherwise claim the
+        // composite by its outer shape.
+        TargetFilter::And { .. } | TargetFilter::Or { .. } | TargetFilter::Not { .. }
+            if filter.is_context_ref() =>
+        {
+            AttachHostAuthority::NoHost
+        }
+
+        // Predicates over objects — what a target slot is chosen with.
+        TargetFilter::Any
+        | TargetFilter::Typed(_)
+        | TargetFilter::Not { .. }
+        | TargetFilter::Or { .. }
+        | TargetFilter::And { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::HasChosenName
+        | TargetFilter::StackSpell
+        | TargetFilter::StackAbility { .. } => AttachHostAuthority::SelectedTarget,
+
+        // CR 603.7c + CR 608.2c: event- and resolution-context references.
+        TargetFilter::EventTarget
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::TriggeringSource
+        | TargetFilter::AttachedTo => AttachHostAuthority::EventContext,
+
+        TargetFilter::ParentTarget => AttachHostAuthority::Pronoun,
+        TargetFilter::ParentTargetSlot { index } => AttachHostAuthority::ParentSlot(*index),
+        TargetFilter::SelfRef => AttachHostAuthority::Source,
+        TargetFilter::SpecificObject { id } => AttachHostAuthority::SpecificObject(*id),
+
+        // CR 115.1a: the remaining player-valued TARGET SLOTS, which
+        // `denotes_player_target` also claims. Kept as their own arm rather than
+        // folded into a guard so the variant list stays readable, and asserted
+        // to agree with that authority in `attach_host_authority_tests`.
+        TargetFilter::Player | TargetFilter::SpecificPlayer { .. } => {
+            AttachHostAuthority::SelectedPlayerTarget
+        }
+
+        // Player-valued filters that are NOT target slots. CR 303.4 permits a
+        // player host, but each of these names its player through a context
+        // authority this path does not resolve, so they fail closed rather than
+        // guess one.
+        TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => AttachHostAuthority::NoHost,
+
+        // Object references this path does not resolve. Each names its object
+        // through an authority of its own (an exile link, a tracked set, a
+        // recorded choice, a paid cost); none of them is the enclosing ability's
+        // selected target, so an unsupported one yields no host instead.
+        // `OriginalSource` never survives to resolution — it is concretized to
+        // `SpecificObject` beforehand.
+        // CR 702.95b: `SourceOrPaired` names the source AND the creature it is
+        // paired with — two objects, not one host — and `is_context_ref` already
+        // classifies it as an automatic context reference rather than a target
+        // slot. It fails closed here until a host authority for the pair exists.
+        TargetFilter::SourceOrPaired
+        | TargetFilter::None
+        | TargetFilter::GrantingObject
+        | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::OriginalSource => AttachHostAuthority::NoHost,
+    };
+
+    // CR 115.1a: the two authorities above are the engine's, not this function's,
+    // so the classification is checked against them rather than against a
+    // hand-kept list of filters — every filter the engine classifies anywhere is
+    // covered, including shapes nobody thought to write down. `is_context_ref`
+    // says a filter surfaces no target slot; `denotes_player_target` says the
+    // slot holds a player. Either one rules out reading the ability's chosen
+    // OBJECT targets.
+    debug_assert!(
+        !(matches!(authority, AttachHostAuthority::SelectedTarget)
+            && (filter.is_context_ref() || filter.denotes_player_target())),
+        "{filter:?} is not an object target slot, so it must not inherit the ability's \
+         chosen object targets as its attachment host"
+    );
+    authority
+}
+
+/// The first object target the ability chose, which is the host every targeting
+/// attachment filter reads. Mirrors `attach::resolve_object_filter`'s
+/// ParentTarget arm.
+fn first_object_host(ability: &ResolvedAbility) -> Option<AttachTarget> {
+    ability.targets.iter().find_map(|target| match target {
+        TargetRef::Object(id) => Some(AttachTarget::Object(*id)),
+        TargetRef::Player(_) => None,
+    })
+}
+
+/// The first player target the ability chose — the mirror of
+/// [`first_object_host`] for a host filter whose slot holds a player
+/// (CR 115.1a). Object slots are skipped rather than converted: an ability can
+/// carry both ("tap target creature, then create a Curse attached to target
+/// opponent"), and the object slot is the other clause's, not this one's.
+fn first_player_host(ability: &ResolvedAbility) -> Option<AttachTarget> {
+    ability.targets.iter().find_map(|target| match target {
+        TargetRef::Player(id) => Some(AttachTarget::Player(*id)),
+        TargetRef::Object(_) => None,
+    })
 }
 
 /// Convert a resolved `TargetRef` into an `AttachTarget` host. Player and Object
@@ -2558,6 +3777,7 @@ fn junk_ability() -> AbilityDefinition {
         Effect::ExileTop {
             player: TargetFilter::Controller,
             count: QuantityExpr::Fixed { value: 1 },
+            position: crate::types::ability::LibraryPosition::Top,
             face_down: false,
         },
     )
@@ -2600,6 +3820,7 @@ fn incubator_ability() -> AbilityDefinition {
         AbilityKind::Activated,
         Effect::Transform {
             target: TargetFilter::SelfRef,
+            scope: crate::types::ability::EffectScope::Single,
         },
     )
     .cost(AbilityCost::Mana {
@@ -2617,6 +3838,7 @@ fn incubator_phyrexian_back_face() -> BackFaceData {
         power: Some(0),
         toughness: Some(0),
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: CardType {
             supertypes: vec![],
@@ -2636,6 +3858,9 @@ fn incubator_phyrexian_back_face() -> BackFaceData {
         strive_cost: None,
         casting_restrictions: vec![],
         casting_options: vec![],
+        // Built in code from CR 111.10i, not parsed from printed text, so there is
+        // no parse to have gone wrong.
+        parse_warnings: vec![],
         layout_kind: None,
     }
 }
@@ -3140,11 +4365,19 @@ fn apply_token_ability_payload(obj: &mut GameObject, materialized: TokenAbilityM
 
 fn catalog_rules_text_abilities(
     rules_text: &str,
+    card_name: &str,
 ) -> (
     Vec<StaticDefinition>,
     Vec<ContinuousModification>,
     Vec<String>,
 ) {
+    // CR 201.5 + CR 201.5a: A card's Oracle text uses its name to refer to
+    // itself, and a granted ability that refers to its granter by name refers
+    // only to that specific granter. Token catalog rules text is parsed
+    // independently of `parse_oracle_ir`'s single entry point, so it needs its
+    // own `normalize_card_name_refs` pass here, mirroring `parse_oracle_ir`'s
+    // call in `oracle.rs`.
+    let rules_text = crate::parser::oracle_util::normalize_card_name_refs(rules_text, card_name);
     let mut static_definitions = Vec::new();
     let mut modifications = Vec::new();
     let mut unparsed_lines = Vec::new();
@@ -3168,6 +4401,16 @@ fn catalog_rules_text_abilities(
                     .map(normalized_token_static_definition),
             );
         }
+    }
+    // CR 201.5a: catch any residual `GRANTING_SELF_PLACEHOLDER` left in the
+    // parsed statics'/modifications' display `description`s, mirroring
+    // `scrub_granting_placeholder_descriptions`'s whole-tree sweep in
+    // `oracle.rs` for this independent parse entry point.
+    for def in &mut static_definitions {
+        crate::parser::oracle::scrub_static_descriptions(def);
+    }
+    for modification in &mut modifications {
+        crate::parser::oracle::scrub_modification_descriptions(modification);
     }
     (static_definitions, modifications, unparsed_lines)
 }
@@ -3381,6 +4624,343 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
         (state, events)
+    }
+
+    // ── CR 608.2i: the entry RECORD is not gated on event emission ────────
+
+    /// CR 400.7 + CR 608.2i rows for `object_id`, as `(battlefield_entry_rows, zone_change_rows)`.
+    fn ledger_rows(state: &GameState, object_id: ObjectId) -> (usize, usize) {
+        (
+            state
+                .battlefield_entries_this_turn
+                .iter()
+                .filter(|record| record.object_id == object_id)
+                .count(),
+            state
+                .zone_changes_this_turn
+                .iter()
+                .filter(|record| {
+                    record.object_id == object_id && record.to_zone == Zone::Battlefield
+                })
+                .count(),
+        )
+    }
+
+    /// Build a battlefield token and run the liminal finalize tail over it under `emission`,
+    /// returning the resulting `(state, token_id, emitted_events)` so callers can inspect the
+    /// ledgers, the parked entry, and any later flush.
+    fn finalize_liminal_entry_under(
+        emission: TokenEntryEventEmission,
+    ) -> (GameState, ObjectId, Vec<GameEvent>) {
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let source_id = ObjectId(1);
+        let object_id = create_object(
+            &mut state,
+            CardId(0),
+            controller,
+            "Record Probe".to_string(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+        assert!(finalize_committed_liminal_token_entry_from_action(
+            &mut state,
+            PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry {
+                object_id,
+                name: "Record Probe".to_string(),
+                source_id,
+                controller,
+                enters_attacking: false,
+                attach_to: None,
+                sacrifice_at: None,
+                created_ids: Vec::new(),
+                ability_injection: LiminalTokenAbilityInjection::ResolvedToken,
+                entry_events: emission,
+            },
+            &mut events,
+        ));
+        (state, object_id, events)
+    }
+
+    /// CR 400.7 + CR 614.12a: `Suppress` means the object is NOT yet the thing that entered —
+    /// `BecomeCopy` has not run and any mandatory as-enters choice is unanswered — so the record
+    /// and the events are parked TOGETHER and realized later, as one operation, from a snapshot
+    /// taken at flush. Recording here instead writes CR 400.7's "state at the moment of the move"
+    /// from a pre-copy 0/0 Shapeshifter, which is the defect this lifecycle replaces.
+    ///
+    /// REVERT-PROBE (discriminating, RUN): replace the `Suppress` park with a pre-lifecycle
+    /// RECORD-ONLY inline — take `state.objects.get(&object_id)`'s
+    /// `snapshot_for_zone_change(object_id, None, Zone::Battlefield)` and pass it straight to
+    /// `restrictions::record_zone_change`, emitting nothing — ⇒ the row counts here read `(1, 1)`
+    /// and the pending assertion fails, while `suppress_does_not_emit_the_entry_pair` below still
+    /// passes — isolating the flip to the record, not the events. The substitution is deliberately
+    /// record-only (NOT `zones::record_and_emit_entry_from_no_zone`, which also emits): emitting
+    /// would break the paired isolation claim.
+    #[test]
+    fn suppressed_liminal_entry_parks_instead_of_recording() {
+        let (state, object_id, _events) =
+            finalize_liminal_entry_under(TokenEntryEventEmission::Suppress);
+        assert_eq!(
+            ledger_rows(&state, object_id),
+            (0, 0),
+            "CR 614.12a: a Suppress-route token writes NEITHER ledger until it is realized"
+        );
+        assert_eq!(
+            state.pending_token_battlefield_entry,
+            Some(PendingTokenBattlefieldEntry {
+                object_id,
+                name: "Record Probe".to_string(),
+                source_id: ObjectId(1),
+            }),
+            "the whole entry is parked on GameState so it survives any number of round trips"
+        );
+    }
+
+    /// The other half of the pin: `Suppress` really does withhold the events, so the test above
+    /// is measuring a park with no emit rather than an emit that happened anyway.
+    #[test]
+    fn suppress_does_not_emit_the_entry_pair() {
+        let (_state, _object_id, events) =
+            finalize_liminal_entry_under(TokenEntryEventEmission::Suppress);
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::ZoneChanged { .. } | GameEvent::TokenCreated { .. }
+            )),
+            "Suppress withholds both entry events; got {events:?}"
+        );
+    }
+
+    /// CR 400.7 + CR 603.6a: the flush is the single realization authority — it records through
+    /// `record_zone_change` AND emits the pair, once. A second call is structurally a no-op
+    /// (`Option::take_if` consumed the parked value), which is what makes the duplicate-row class
+    /// unrepresentable rather than guarded.
+    ///
+    /// REVERT-PROBE (discriminating, RUN): swap `take_if` for a non-consuming
+    /// `as_ref().filter(..).cloned()` ⇒ the second flush returns `true`, appends a second row to
+    /// each ledger and a second event pair, failing the idempotence half while the first-flush
+    /// assertions stay green.
+    #[test]
+    fn flushing_a_parked_entry_records_and_emits_exactly_once() {
+        let (mut state, object_id, _events) =
+            finalize_liminal_entry_under(TokenEntryEventEmission::Suppress);
+        let mut events = Vec::new();
+        assert!(
+            flush_pending_token_battlefield_entry(&mut state, object_id, &mut events),
+            "the parked entry is realized by its first flush"
+        );
+        assert_eq!(
+            ledger_rows(&state, object_id),
+            (1, 1),
+            "realization writes exactly one row on each ledger"
+        );
+        assert_eq!(
+            (
+                events
+                    .iter()
+                    .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+                    .count(),
+                events
+                    .iter()
+                    .filter(|event| matches!(event, GameEvent::TokenCreated { .. }))
+                    .count(),
+            ),
+            (1, 1),
+            "realization emits the entry pair exactly once; got {events:?}"
+        );
+        assert!(state.pending_token_battlefield_entry.is_none());
+
+        let mut second = Vec::new();
+        assert!(
+            !flush_pending_token_battlefield_entry(&mut state, object_id, &mut second),
+            "a second flush finds nothing parked"
+        );
+        assert_eq!(
+            ledger_rows(&state, object_id),
+            (1, 1),
+            "a second flush adds no row"
+        );
+        assert!(second.is_empty(), "a second flush emits nothing");
+    }
+
+    /// The parked entry is bound to ONE object identity: a flush for a different object must not
+    /// consume it. Without this, an unrelated token's realization would emit this token's entry.
+    #[test]
+    fn flushing_a_foreign_object_id_is_a_no_op() {
+        let (mut state, object_id, _events) =
+            finalize_liminal_entry_under(TokenEntryEventEmission::Suppress);
+        let foreign = ObjectId(object_id.0 + 1_000);
+        let mut events = Vec::new();
+        assert!(!flush_pending_token_battlefield_entry(
+            &mut state,
+            foreign,
+            &mut events
+        ));
+        assert_eq!(ledger_rows(&state, object_id), (0, 0));
+        assert_eq!(ledger_rows(&state, foreign), (0, 0));
+        assert!(events.is_empty());
+        assert!(
+            state
+                .pending_token_battlefield_entry
+                .as_ref()
+                .is_some_and(|pending| pending.object_id == object_id),
+            "the binding survives a foreign flush untouched"
+        );
+    }
+
+    /// CR 704.5f fail-safe: if the object is gone when the flush runs,
+    /// `zones::record_and_emit_entry_from_no_zone` has nothing to snapshot, so no CR 400.7 row is
+    /// written and NEITHER entry event is emitted — `push_committed_token_entry_events` gates
+    /// `TokenCreated` on that same `None` verdict. The class-level coherence pin for this route
+    /// (against the `created_tokens_this_turn` ledger, driven through
+    /// `apply_pending_counter_post_action`) is `counters.rs`'s
+    /// `a_vanished_counter_paused_token_reports_neither_creation_event_nor_ledger_row`.
+    #[test]
+    fn flushing_after_the_object_left_the_battlefield_records_nothing() {
+        let (mut state, object_id, _events) =
+            finalize_liminal_entry_under(TokenEntryEventEmission::Suppress);
+        state.objects.remove(&object_id);
+        state.battlefield.retain(|id| *id != object_id);
+        let mut events = Vec::new();
+        assert!(flush_pending_token_battlefield_entry(
+            &mut state,
+            object_id,
+            &mut events
+        ));
+        assert_eq!(
+            ledger_rows(&state, object_id),
+            (0, 0),
+            "a vanished object gets no CR 400.7 row"
+        );
+        assert!(
+            events.is_empty(),
+            "neither half of the entry pair is emitted for an object that is not there; \
+             got {events:?}"
+        );
+    }
+
+    /// The settled-action GATE that both `engine.rs` convergence points share
+    /// ([`realize_settled_token_battlefield_entry`]), exercised over its three arms — including the
+    /// CR 704.5f drop branch, which no production drive reaches (see that function's doc comment).
+    /// Helper-level by construction: the two production entry points are covered by the Painter /
+    /// Fanatic / Watchdog integration drives, which measure WHERE it is called from.
+    #[test]
+    fn the_settled_gate_realizes_only_a_settled_action_and_drops_a_departed_token() {
+        // (i) Mid-prompt: the action has not settled, so nothing is realized.
+        let (mut state, object_id, _events) =
+            finalize_liminal_entry_under(TokenEntryEventEmission::Suppress);
+        state.waiting_for = WaitingFor::MeldPairChoice {
+            player: PlayerId(0),
+            choices: Vec::new(),
+        };
+        let mut events = Vec::new();
+        assert!(
+            !realize_settled_token_battlefield_entry(&mut state, &mut events),
+            "an unsettled action realizes nothing, so the boundary convergence must not run a \
+             trigger pass"
+        );
+        assert_eq!(ledger_rows(&state, object_id), (0, 0));
+        assert!(events.is_empty());
+        assert!(
+            state.pending_token_battlefield_entry.is_some(),
+            "an unsettled action leaves the entry parked for a later round trip"
+        );
+
+        // (ii) Settled with the token still on the battlefield: realized, once.
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert!(
+            realize_settled_token_battlefield_entry(&mut state, &mut events),
+            "a settled action with the token still on the battlefield realizes the pair, which is \
+             what gates the CR 603.6a pass at the action boundary"
+        );
+        assert_eq!(ledger_rows(&state, object_id), (1, 1));
+        assert!(state.pending_token_battlefield_entry.is_none());
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+                .count(),
+            1,
+            "the settled action carries the entry pair; got {events:?}"
+        );
+
+        // (iii) CR 704.5f: settled, but the token has left the battlefield ⇒ the parked entry is
+        //       DROPPED without ever reaching the flush — no row and no events. A direct flush on
+        //       a gone object now agrees; see
+        //       `flushing_after_the_object_left_the_battlefield_records_nothing`. The difference
+        //       here is only that the gate consumes the park itself and returns `false`, so there
+        //       is no slice for the boundary convergence to scan.
+        let (mut departed, departed_id, _events) =
+            finalize_liminal_entry_under(TokenEntryEventEmission::Suppress);
+        departed.battlefield.retain(|id| *id != departed_id);
+        departed.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let mut departed_events = Vec::new();
+        assert!(
+            !realize_settled_token_battlefield_entry(&mut departed, &mut departed_events),
+            "the CR 704.5f drop branch consumes the park but emits nothing, so there is no slice \
+             for the boundary convergence to scan"
+        );
+        assert_eq!(ledger_rows(&departed, departed_id), (0, 0));
+        assert!(departed_events.is_empty());
+        assert!(departed.pending_token_battlefield_entry.is_none());
+    }
+
+    /// Serde: the parked entry round-trips, and a `GameState` JSON written before this field
+    /// existed still loads (the `#[serde(default)]` save-compat claim).
+    #[test]
+    fn pending_token_battlefield_entry_round_trips() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_token_battlefield_entry = Some(PendingTokenBattlefieldEntry {
+            object_id: ObjectId(7),
+            name: "Record Probe".to_string(),
+            source_id: ObjectId(1),
+        });
+        let encoded = serde_json::to_string(&state).expect("GameState serializes");
+        let decoded: GameState = serde_json::from_str(&encoded).expect("GameState deserializes");
+        assert_eq!(
+            decoded.pending_token_battlefield_entry,
+            state.pending_token_battlefield_entry
+        );
+
+        let mut without: serde_json::Value =
+            serde_json::from_str(&encoded).expect("the encoded state is JSON");
+        assert!(
+            without
+                .as_object_mut()
+                .expect("GameState encodes as a JSON object")
+                .remove("pending_token_battlefield_entry")
+                .is_some(),
+            "the key must be present to begin with, or the removal below proves nothing"
+        );
+        let legacy: GameState =
+            serde_json::from_value(without).expect("a save without the key still loads");
+        assert!(legacy.pending_token_battlefield_entry.is_none());
+    }
+
+    /// The double-count guard for the `Emit` arm: recording in the finalize tail AND inside
+    /// `push_committed_token_entry_events` would put two rows on the ledger. Exactly one — and
+    /// nothing is parked, because that route's object is already fully realized.
+    #[test]
+    fn emitted_liminal_entry_records_exactly_one_row() {
+        let (state, object_id, events) =
+            finalize_liminal_entry_under(TokenEntryEventEmission::Emit);
+        let (entries, zone_rows) = ledger_rows(&state, object_id);
+        assert_eq!(entries, 1, "Emit records battlefield entry exactly once");
+        assert_eq!(zone_rows, 1, "Emit records the zone change exactly once");
+        assert!(
+            state.pending_token_battlefield_entry.is_none(),
+            "the Emit route parks nothing"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, GameEvent::TokenCreated { .. })),
+            "Emit still emits the entry pair; got {events:?}"
+        );
     }
 
     #[test]
@@ -3881,7 +5461,8 @@ mod tests {
         assert!(matches!(
             *abilities[0].effect,
             Effect::Transform {
-                target: TargetFilter::SelfRef
+                target: TargetFilter::SelfRef,
+                ..
             }
         ));
         assert!(matches!(
@@ -4720,7 +6301,7 @@ mod tests {
             sacrifice_at: None,
             source_id: source,
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let event = ProposedEvent::CreateToken {
             owner: PlayerId(0),
@@ -4799,7 +6380,7 @@ mod tests {
             sacrifice_at: None,
             source_id: source,
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let event = ProposedEvent::CreateToken {
             owner: PlayerId(0),
@@ -4868,7 +6449,7 @@ mod tests {
             sacrifice_at: None,
             source_id: source,
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let event = ProposedEvent::CreateToken {
             owner: PlayerId(0),
@@ -4946,7 +6527,7 @@ mod tests {
             sacrifice_at: None,
             source_id: source,
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let event = ProposedEvent::CreateToken {
             owner: PlayerId(0),
@@ -5136,7 +6717,7 @@ mod tests {
             sacrifice_at: None,
             source_id: source,
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let event = ProposedEvent::CreateToken {
             owner: PlayerId(0),
@@ -5697,7 +7278,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(100),
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
 
         let event = ProposedEvent::CreateToken {
@@ -5728,13 +7309,13 @@ mod tests {
 
     #[test]
     fn apply_create_token_materializes_intrinsic_equip_ability() {
-        use crate::parser::oracle::try_parse_equip;
+        use crate::parser::oracle::try_parse_equip_lowered;
         use crate::types::ability::{ContinuousModification, StaticDefinition};
         use crate::types::card_type::CoreType;
         use crate::types::proposed_event::TokenSpec;
         use std::collections::HashSet;
 
-        let equip = try_parse_equip("Equip {0}").expect("equip static");
+        let equip = try_parse_equip_lowered("Equip {0}").expect("equip static");
         let equip_static = StaticDefinition::continuous()
             .affected(TargetFilter::SelfRef)
             .modifications(vec![ContinuousModification::GrantAbility {
@@ -5762,7 +7343,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(100),
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
 
         let event = ProposedEvent::CreateToken {
@@ -5795,13 +7376,13 @@ mod tests {
 
     #[test]
     fn apply_create_token_does_not_materialize_conditional_grant_ability() {
-        use crate::parser::oracle::try_parse_equip;
+        use crate::parser::oracle::try_parse_equip_lowered;
         use crate::types::ability::{ContinuousModification, StaticCondition, StaticDefinition};
         use crate::types::card_type::CoreType;
         use crate::types::proposed_event::TokenSpec;
         use std::collections::HashSet;
 
-        let equip = try_parse_equip("Equip {0}").expect("equip static");
+        let equip = try_parse_equip_lowered("Equip {0}").expect("equip static");
         let conditional_equip = StaticDefinition::continuous()
             .affected(TargetFilter::SelfRef)
             .condition(StaticCondition::IsPresent { filter: None })
@@ -5830,7 +7411,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(101),
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
 
         let event = ProposedEvent::CreateToken {
@@ -5905,7 +7486,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(102),
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
 
         let event = ProposedEvent::CreateToken {
@@ -5959,7 +7540,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(100),
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
 
         let event = ProposedEvent::CreateToken {
@@ -6070,6 +7651,276 @@ mod tests {
         );
     }
 
+    /// A Rest in Peace-class board-wide `Moved` graveyard→exile redirect,
+    /// deliberately NOT a creature: a creature would be a legal host for
+    /// `enchant creature` and CR 303.4g would never be reached.
+    fn add_graveyard_to_exile_redirect(state: &mut GameState) -> ObjectId {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, ReplacementDefinition};
+        use crate::types::replacements::ReplacementEvent;
+
+        let rip = create_object(
+            state,
+            CardId(90_400),
+            PlayerId(1),
+            "Rest in Peace".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&rip)
+            .expect("just created")
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .destination_zone(Zone::Graveyard)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            origin: None,
+                            destination: Zone::Exile,
+                            target: TargetFilter::SelfRef,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
+                            face_down_profile: None,
+                            enters_modified_if: None,
+                        },
+                    )),
+            );
+        rip
+    }
+
+    /// Build the unhosted liminal Aura fixture: an Aura with `Enchant creature`
+    /// in a game with no creature anywhere, so the CR 303.4f consult finds no
+    /// legal host and CR 303.4g decides the entry.
+    fn unhosted_liminal_aura_entrant(state: &mut GameState) -> (ObjectId, GameObject) {
+        use crate::types::keywords::Keyword;
+
+        let (entry_ref, mut entrant) =
+            reserve_liminal_token_object(state, PlayerId(0), "Unhosted Aura".to_string());
+        entrant.card_types.core_types = vec![CoreType::Enchantment];
+        entrant.card_types.subtypes = vec!["Aura".to_string()];
+        entrant.base_card_types = entrant.card_types.clone();
+        let enchant = Keyword::Enchant(TargetFilter::Typed(
+            crate::types::ability::TypedFilter::new(crate::types::ability::TypeFilter::Creature),
+        ));
+        entrant.keywords = vec![enchant.clone()];
+        entrant.base_keywords = vec![enchant];
+        let timestamp = state.next_timestamp();
+        entrant.reset_for_battlefield_entry(state.turn_number, timestamp);
+        (entry_ref, entrant)
+    }
+
+    fn liminal_entry_for(
+        object: crate::types::game_state::LiminalEntrant,
+        source_id: ObjectId,
+    ) -> crate::types::game_state::LiminalEntry {
+        crate::types::game_state::LiminalEntry {
+            object,
+            name: "Unhosted Aura".to_string(),
+            source_id,
+            controller: PlayerId(0),
+            enters_attacking: false,
+            attach_to: None,
+            sacrifice_at: None,
+            remaining_count: 0,
+            created_ids: Vec::new(),
+            copy_resume: None,
+            spec_resume: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enter_with_counters: Vec::new(),
+            kind: crate::types::game_state::LiminalEntryKind::Token,
+            replacement_applied: std::collections::HashSet::new(),
+        }
+    }
+
+    /// CR 303.4g + CR 111.1 on the liminal seam: an unhosted entrant never
+    /// enters, and because this seam's entrant is a `LiminalEntrant::Token`, "if
+    /// the Aura is a token, it isn't created" is the whole disposition — nothing
+    /// is placed in any zone.
+    ///
+    /// A Rest in Peace-class graveyard→exile redirect is on the battlefield
+    /// throughout. Its only job is to be available: the seam performs no
+    /// placement for it to redirect, so both the graveyard and exile stay empty.
+    /// That is the point of the narrowing — the placement that used to bypass
+    /// this redirect does not exist any more, rather than existing and being
+    /// routed correctly.
+    #[test]
+    fn an_unhosted_liminal_aura_token_is_not_created_and_reaches_no_zone() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Maker".to_string(),
+            Zone::Battlefield,
+        );
+        let rip = add_graveyard_to_exile_redirect(&mut state);
+        // Reach guard: the anaphora slot starts non-empty, so the republish
+        // below is observable rather than vacuously equal.
+        state.last_created_token_ids = vec![ObjectId(4_242)];
+
+        let (entry_ref, entrant) = unhosted_liminal_aura_entrant(&mut state);
+        state.liminal_entries.insert(
+            entry_ref,
+            liminal_entry_for(
+                crate::types::game_state::LiminalEntrant::Token(
+                    crate::types::game_state::TokenProjection::materialize(entrant),
+                ),
+                source_id,
+            ),
+        );
+
+        let mut events = Vec::new();
+        assert!(
+            commit_liminal_token_entry_with_post_actions(
+                &mut state,
+                ProposedEvent::TokenEntry {
+                    entry_ref,
+                    enter_tapped: EtbTapState::Unspecified,
+                    enter_with_counters: Vec::new(),
+                    applied: std::collections::HashSet::new(),
+                },
+                &mut events,
+                TokenEntryEventEmission::Emit,
+                Vec::new(),
+            ),
+            "a denied entry is not a pause — the batch loop must continue"
+        );
+
+        // CR 303.4g + CR 111.1: "it isn't created" — the object does not exist.
+        assert!(
+            !state.objects.contains_key(&entry_ref),
+            "a token CR 303.4g denies is not created at all"
+        );
+        assert!(!state.battlefield.iter().any(|&id| id == entry_ref));
+        // Nothing observed the entry: no birth, no battlefield ZoneChanged.
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::TokenCreated { object_id, .. } if *object_id == entry_ref
+            )),
+            "CR 303.4g: no TokenCreated for an entry the rule denies"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::ZoneChanged { object_id, .. } if *object_id == entry_ref
+            )),
+            "CR 303.4g: no ZoneChanged at all for an entry the rule denies"
+        );
+        assert!(
+            state
+                .resolved_rules_journal
+                .entries()
+                .iter()
+                .all(|entry| !matches!(
+                    entry.command,
+                    Some(crate::types::resolved_commands::ResolvedRulesCommand::TokenCreation(_))
+                )),
+            "CR 733: no birth is journaled for a token that isn't created"
+        );
+        // CR 111.1: the anaphora slot names the tokens THIS effect created, so
+        // it is republished as this batch's list (empty here) rather than left
+        // holding the earlier, unrelated effect's tokens.
+        assert!(state.last_created_token_ids.is_empty());
+        // Nothing reached a graveyard, so the redirect that was standing by had
+        // nothing to redirect either.
+        assert!(state
+            .players
+            .iter()
+            .all(|player| player.graveyard.is_empty()));
+        assert!(
+            !state.exile.iter().any(|&id| id == entry_ref),
+            "the redirect must not have anything to redirect"
+        );
+        assert!(
+            state.objects.contains_key(&rip),
+            "reach guard: the redirect was on the battlefield the whole time"
+        );
+        assert!(state.liminal_entries.is_empty());
+    }
+
+    /// The card-backed half of the old dual-disposition test, kept as the
+    /// regression for what replaced it: a card-backed projection reaching this
+    /// seam is now inert instead of being raw-placed into a graveyard.
+    ///
+    /// `LiminalEntrant::Card` is the CR 701.42a meld result — a permanent
+    /// "represented by two cards" — which enters through
+    /// `ProposedEvent::ZoneChange` from the exile its components sit in, and
+    /// whose CR 303.4g dispositions are decided there (see
+    /// `zone_pipeline::the_stack_origin_graveyard_placement_consults_moved_redirects`
+    /// for the replacement-consulted graveyard placement on that path). A
+    /// `TokenEntry` naming one names nothing this seam may act on.
+    ///
+    /// Revert-failing assertion: `graveyard.is_empty()`. The deleted
+    /// `place_unentered_aura_in_owners_graveyard` put this entrant into its
+    /// owner's graveyard with raw `zones::` calls, past the Rest in Peace-class
+    /// redirect that is on the battlefield here — so before the change this
+    /// assertion failed, and the exile assertion below failed too.
+    #[test]
+    fn a_card_backed_liminal_projection_is_never_placed_by_the_token_entry_seam() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Maker".to_string(),
+            Zone::Battlefield,
+        );
+        add_graveyard_to_exile_redirect(&mut state);
+
+        let (entry_ref, entrant) = unhosted_liminal_aura_entrant(&mut state);
+        state.liminal_entries.insert(
+            entry_ref,
+            liminal_entry_for(
+                crate::types::game_state::LiminalEntrant::Card(entrant),
+                source_id,
+            ),
+        );
+
+        let mut events = Vec::new();
+        assert!(
+            commit_liminal_token_entry_with_post_actions(
+                &mut state,
+                ProposedEvent::TokenEntry {
+                    entry_ref,
+                    enter_tapped: EtbTapState::Unspecified,
+                    enter_with_counters: Vec::new(),
+                    applied: std::collections::HashSet::new(),
+                },
+                &mut events,
+                TokenEntryEventEmission::Emit,
+                Vec::new(),
+            ),
+            "declining an entrant that is not this seam's is not a pause"
+        );
+
+        assert!(
+            state
+                .players
+                .iter()
+                .all(|player| player.graveyard.is_empty()),
+            "no raw graveyard placement may happen on this path"
+        );
+        assert!(
+            state.exile.is_empty(),
+            "and nothing was routed to the redirect's destination either"
+        );
+        assert!(!state.objects.contains_key(&entry_ref));
+        assert!(!state.battlefield.iter().any(|&id| id == entry_ref));
+        assert!(events.is_empty(), "nothing observable happened: {events:?}");
+        assert!(
+            state.liminal_entries.contains_key(&entry_ref),
+            "the projection is left exactly where it was, not consumed"
+        );
+    }
+
     #[test]
     fn paused_liminal_copy_token_counter_finalizes_entry_after_choice() {
         use std::sync::Arc;
@@ -6120,7 +7971,6 @@ mod tests {
         let source_id = ObjectId(100);
         let (entry_ref, mut token) =
             reserve_liminal_token_object(&mut state, PlayerId(0), values.name.clone());
-        token.is_token = true;
         apply_copiable_values_to_liminal_object(
             &mut token,
             &values,
@@ -6133,7 +7983,9 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             LiminalEntry {
-                object: token,
+                object: crate::types::game_state::LiminalEntrant::Token(
+                    crate::types::game_state::TokenProjection::materialize(token),
+                ),
                 name: values.name.clone(),
                 source_id,
                 controller: PlayerId(0),
@@ -6615,6 +8467,7 @@ mod tests {
              This creature can't block.\n\
              {T}: Add {G}.\n\
              When this creature dies, you gain 1 life.",
+            "Test Card",
         );
         assert!(unparsed_lines.is_empty());
 
@@ -6647,6 +8500,102 @@ mod tests {
                 ContinuousModification::GrantTrigger { .. }
             )),
             "trigger rules text must route to GrantTrigger, got {modifications:?}"
+        );
+    }
+
+    /// Revert-to-red: removing the `card_name` threading in
+    /// `catalog_rules_text_abilities` reverts this to `TriggerMode::Unknown`
+    /// with the raw text, since the bare "galactus attacks..." subject
+    /// matches no recognized pattern and falls through to the terminal
+    /// fallback.
+    #[test]
+    fn catalog_galactus_preset_trigger_subject_normalizes() {
+        let (_statics, modifications, _unparsed_lines) = catalog_rules_text_abilities(
+            "Flying, trample\nWhenever Galactus attacks, destroy target land.",
+            "Galactus",
+        );
+
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::GrantTrigger { trigger }
+                    if trigger.mode == TriggerMode::Attacks
+                        && trigger.valid_card == Some(TargetFilter::SelfRef)
+            )),
+            "card-name subject in an attack trigger must normalize to a \
+             self-referential TriggerMode::Attacks, got {modifications:?}"
+        );
+    }
+
+    /// Revert-to-red: without normalization, no `StaticDefinition` is
+    /// produced for this line at all (`parse_self_color_subject`'s `alt()`
+    /// doesn't match the bare name "Mechtitan"), and the CDA silently
+    /// vanishes into an inert `GrantAbility` instead.
+    #[test]
+    fn catalog_mechtitan_preset_cda_subject_normalizes() {
+        let (static_definitions, _modifications, _unparsed_lines) = catalog_rules_text_abilities(
+            "Mechtitan is all colors.\nFlying, vigilance, trample, lifelink, haste",
+            "Mechtitan",
+        );
+
+        assert!(
+            static_definitions.iter().any(|def| {
+                def.characteristic_defining
+                    && def.affected == Some(TargetFilter::SelfRef)
+                    && def.modifications.iter().any(|modification| matches!(
+                        modification,
+                        ContinuousModification::SetColor { colors }
+                            if colors.len() == 5
+                    ))
+            }),
+            "card-name subject in a CDA color-setting static must normalize to a \
+             self-referential characteristic-defining SetColor{{all 5 colors}}, got {static_definitions:?}"
+        );
+    }
+
+    /// Revert-to-red: without normalization, the effect's target is
+    /// `TargetFilter::Any` (the unconsumed literal name falls through
+    /// `parse_target`'s terminal fallback), meaning the token would copy
+    /// any legal target instead of itself.
+    #[test]
+    fn catalog_council_of_reeds_preset_copy_effect_normalizes() {
+        let (_statics, modifications, _unparsed_lines) = catalog_rules_text_abilities(
+            "The \"legend rule\" doesn't apply to creatures you control.\n\
+             At the beginning of combat on your turn, if you've cast a noncreature \
+             spell this turn, create a token that's a copy of Council of Reeds.\n\
+             (This token's mana cost is {2}{U}.)",
+            "Council of Reeds",
+        );
+
+        fn ability_has_self_copy(def: &AbilityDefinition) -> bool {
+            matches!(
+                *def.effect,
+                Effect::CopyTokenOf {
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ) || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(ability_has_self_copy)
+                || def
+                    .else_ability
+                    .as_deref()
+                    .is_some_and(ability_has_self_copy)
+                || def.mode_abilities.iter().any(ability_has_self_copy)
+        }
+
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::GrantTrigger { trigger }
+                    if trigger
+                        .execute
+                        .as_deref()
+                        .is_some_and(ability_has_self_copy)
+            )),
+            "card-name copy-of subject must normalize to a self-referential \
+             CopyTokenOf, got {modifications:?}"
         );
     }
 
@@ -6909,6 +8858,206 @@ mod tests {
             .contains(&ActivationRestriction::AsSorcery));
     }
 
+    /// CR 201.5a end-to-end proof: Toggo's Rock grants the equipped creature
+    /// "{1}, {T}, Sacrifice Rock: This creature deals 2 damage to any
+    /// target." Rock (the card literally named in the cost) must be the
+    /// object sacrificed — not the host it's equipped to — and the scrub
+    /// pass (Step 1) must have removed the raw placeholder character from
+    /// the granted ability's description before it ever reaches the host.
+    ///
+    /// Revert-to-red: reverting the `card_name` threading in
+    /// `catalog_rules_text_abilities` (Step 2) does NOT bind the sacrifice
+    /// cost to the host. Verified empirically (temporarily disabling the
+    /// `normalize_card_name_refs` call and printing the resulting cost): it
+    /// produces a generic, UNBOUND
+    /// `AbilityCost::Sacrifice(SacrificeCost { target: Typed(TypedFilter {
+    /// type_filters: [], controller: None, properties: [] }), .. })` that
+    /// matches any permanent, not a host-bound `SelfRef`. Because that filter
+    /// is unconstrained, `pay_with(&[rock_id])` below still succeeds even
+    /// under the reverted code (Rock trivially satisfies "any permanent"),
+    /// and the runtime activate/pay/resolve assertions still pass — they
+    /// exercise that the grant-and-activate mechanism works end-to-end (a
+    /// real but separate property), not the granter-binding regression
+    /// itself. The pre-activation `TargetFilter` equality assertion
+    /// immediately below is the one check in this test that is actually
+    /// load-bearing for this regression.
+    ///
+    /// For the placeholder-leak assertion: Rock's granted ability is a
+    /// granted *activated* ability, routed through `parse_quoted_ability`
+    /// (`oracle_static/grammar.rs`), which already calls its own
+    /// `sanitize_granting_placeholder` independent of the two scrub loops
+    /// added to `catalog_rules_text_abilities` in this diff — so disabling
+    /// only those two loops does not reproduce a leak here. See
+    /// `catalog_synthetic_equipment_grant_trigger_scrub_removes_placeholder`
+    /// for the case (a granted TRIGGER, with no independent scrubber) that
+    /// actually exercises the new scrub loops.
+    #[test]
+    fn catalog_toggo_rock_sacrifice_cost_binds_to_rock_not_host() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::mana::{ManaType, ManaUnit};
+
+        fn sacrifice_target(cost: &AbilityCost) -> Option<&TargetFilter> {
+            match cost {
+                AbilityCost::Sacrifice(sac) => Some(&sac.target),
+                AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+                    costs.iter().find_map(sacrifice_target)
+                }
+                _ => None,
+            }
+        }
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::White, ObjectId(0), false, vec![])],
+        );
+        let host = scenario.add_creature(P0, "Bearer", 2, 2).id();
+
+        let mut runner = scenario.build();
+        let rock_id = build_catalog_token(
+            runner.state_mut(),
+            "Rock",
+            "1657233e-c9e1-54ff-aa5a-6e2e2846be42",
+        );
+        {
+            let st = runner.state_mut();
+            st.objects.get_mut(&rock_id).unwrap().attached_to = Some(AttachTarget::Object(host));
+            st.layers_dirty.mark_full();
+        }
+        crate::game::layers::evaluate_layers(runner.state_mut());
+
+        let idx = runner.state().objects[&host]
+            .abilities
+            .iter()
+            .position(|a| a.cost.as_ref().and_then(sacrifice_target).is_some())
+            .expect("host must carry Rock's granted sacrifice-cost ability after evaluate_layers");
+
+        assert_eq!(
+            runner.state().objects[&host].abilities[idx]
+                .cost
+                .as_ref()
+                .and_then(sacrifice_target),
+            Some(&TargetFilter::SpecificObject { id: rock_id }),
+            "CR 201.5a: the sacrifice cost must target Rock (the granting object), not the host"
+        );
+        assert!(
+            !runner.state().objects[&host].abilities[idx]
+                .description
+                .as_deref()
+                .unwrap_or_default()
+                .contains(crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER),
+            "granted ability description must not leak the raw placeholder char"
+        );
+
+        let outcome = runner
+            .activate(host, idx)
+            .target_player(P1)
+            .pay_with(&[rock_id])
+            .resolve();
+
+        // CR 111.7 + CR 704.5d: Rock is a token, so once it's sacrificed off the
+        // battlefield it ceases to exist as a state-based action and is purged
+        // from `state.objects` entirely — it never sits observably in the
+        // graveyard the way a card-backed permanent would (contrast
+        // `deconstruction_hammer_sacrifice_hits_the_equipment_not_the_host`,
+        // whose Hammer is a real card and persists at `zone_of == Graveyard`).
+        assert!(
+            !outcome.state().objects.contains_key(&rock_id),
+            "Rock (the object actually named in the cost) must be sacrificed and, \
+             being a token, cease to exist"
+        );
+        assert_eq!(
+            outcome.zone_of(host),
+            Zone::Battlefield,
+            "the equipped creature survives"
+        );
+    }
+
+    /// CR 201.5a: proves the two `scrub_static_descriptions` /
+    /// `scrub_modification_descriptions` loops at the end of
+    /// `catalog_rules_text_abilities` actually do something. Rock's own test
+    /// above (a granted *activated* ability, routed through
+    /// `parse_quoted_ability`) is scrubbed independently by that grammar's own
+    /// `sanitize_granting_placeholder` call and does not exercise these two
+    /// loops. A granted *trigger* has no such independent scrubber, so this
+    /// synthetic Equipment's granted "Whenever this creature attacks,
+    /// sacrifice <self>" trigger — parsed via `parse_static_line_multi` →
+    /// `classify_quoted_inner`'s `GrantTrigger` branch, never touching
+    /// `parse_quoted_ability` — is the case that actually needs the new
+    /// scrub loops.
+    ///
+    /// Revert-to-red: commenting out the two scrub loops (while leaving
+    /// `normalize_card_name_refs` intact) leaves the raw
+    /// `GRANTING_SELF_PLACEHOLDER` char in the granted trigger's
+    /// `description`, flipping the no-leak assertion below to a failure.
+    #[test]
+    fn catalog_synthetic_equipment_grant_trigger_scrub_removes_placeholder() {
+        let (static_definitions, _modifications, unparsed_lines) = catalog_rules_text_abilities(
+            "Equipped creature has \"Whenever this creature attacks, sacrifice Ember Golem.\"",
+            "Ember Golem",
+        );
+        assert!(
+            unparsed_lines.is_empty(),
+            "line must fully parse, got unparsed: {unparsed_lines:?}"
+        );
+
+        fn find_grant_trigger(def: &StaticDefinition) -> Option<&TriggerDefinition> {
+            def.modifications.iter().find_map(|m| match m {
+                ContinuousModification::GrantTrigger { trigger } => Some(trigger.as_ref()),
+                _ => None,
+            })
+        }
+
+        let trigger = static_definitions
+            .iter()
+            .find_map(find_grant_trigger)
+            .unwrap_or_else(|| {
+                panic!(
+                    "quoted \"Whenever ...\" body must parse to a GrantTrigger, \
+                     got {static_definitions:?}"
+                )
+            });
+
+        let sacrifices_granter = trigger.execute.as_deref().is_some_and(|def| {
+            matches!(
+                *def.effect,
+                Effect::Sacrifice {
+                    target: TargetFilter::GrantingObject,
+                    ..
+                }
+            )
+        });
+        assert!(
+            sacrifices_granter,
+            "the granted trigger's sacrifice effect must target the GRANTING object \
+             (the equipment itself), got {trigger:?}"
+        );
+
+        // NOTE: check the actual `description` fields directly, NOT a
+        // `{:?}`-formatted dump of the tree — `Debug` escapes the raw private-use
+        // char to the literal text `\u{e0002}`, so searching a Debug string for
+        // the real character is always false regardless of whether scrubbing ran.
+        let placeholder = crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
+        let leaked = static_definitions.iter().any(|def| {
+            def.description
+                .as_deref()
+                .is_some_and(|d| d.contains(placeholder))
+                || def.modifications.iter().any(|m| match m {
+                    ContinuousModification::GrantTrigger { trigger } => trigger
+                        .description
+                        .as_deref()
+                        .is_some_and(|d| d.contains(placeholder)),
+                    _ => false,
+                })
+        });
+        assert!(
+            !leaked,
+            "the new scrub loops must remove the raw placeholder char from the \
+             granted trigger's description, got {static_definitions:#?}"
+        );
+    }
+
     #[test]
     fn classify_quoted_inner_equip_line_is_activated_ability_static_line_unchanged() {
         use crate::parser::oracle_static::classify_quoted_inner;
@@ -7105,6 +9254,123 @@ mod tests {
             zabu_plus1_counters(&state, kazar),
             0,
             "counter must NOT land on Ka-Zar"
+        );
+    }
+}
+
+#[cfg(test)]
+mod attach_host_authority_tests {
+    use super::*;
+    use crate::types::ability::{SeatDirection, TypedFilter};
+
+    /// The selected-target class must stay disjoint from
+    /// [`TargetFilter::is_context_ref`], the engine's existing authority on which
+    /// filters never surface a chosen target slot. Anything that authority calls
+    /// a context reference has to resolve through its own authority here, or
+    /// yield no host — it may never read `ability.targets`.
+    #[test]
+    fn selected_target_filters_are_never_context_refs() {
+        for filter in [
+            TargetFilter::Any,
+            TargetFilter::Typed(TypedFilter::creature()),
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::Any),
+            },
+            TargetFilter::Or {
+                filters: vec![TargetFilter::Any],
+            },
+            TargetFilter::And {
+                filters: vec![TargetFilter::Any],
+            },
+            TargetFilter::Named {
+                name: "Grizzly Bears".to_string(),
+            },
+            TargetFilter::HasChosenName,
+            TargetFilter::StackSpell,
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None,
+                kind: None,
+            },
+        ] {
+            assert!(
+                matches!(
+                    classify_attach_host_authority(&filter),
+                    AttachHostAuthority::SelectedTarget
+                ),
+                "fixture guard: {filter:?} is meant to be a selected-target filter"
+            );
+            assert!(
+                !filter.is_context_ref(),
+                "{filter:?} is an automatic context reference and must not read the \
+                 ability's chosen targets"
+            );
+        }
+    }
+
+    /// The same disjointness read from the other side, which is the direction
+    /// that catches a misfiling: every filter the engine calls a context
+    /// reference must resolve through an authority of its own or yield no host.
+    #[test]
+    fn context_references_never_classify_as_a_selected_target() {
+        for filter in [
+            TargetFilter::SourceOrPaired,
+            TargetFilter::SelfRef,
+            TargetFilter::CostPaidObject,
+            TargetFilter::LastCreated,
+            TargetFilter::AttachedTo,
+            TargetFilter::EventTarget,
+            TargetFilter::ParentTarget,
+            TargetFilter::ParentTargetSlot { index: 0 },
+            TargetFilter::OriginalSource,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+            TargetFilter::PostReplacementDamageSource,
+            TargetFilter::Neighbor {
+                direction: SeatDirection::Left,
+            },
+        ] {
+            assert!(
+                filter.is_context_ref(),
+                "fixture guard: {filter:?} is meant to be a context reference"
+            );
+            assert!(
+                !matches!(
+                    classify_attach_host_authority(&filter),
+                    AttachHostAuthority::SelectedTarget
+                ),
+                "{filter:?} is a context reference and must not inherit the ability's \
+                 chosen targets as its attachment host"
+            );
+        }
+    }
+
+    /// CR 601.3: the case where the two ways of deciding disagree. A composite
+    /// that CONTAINS the exile anaphor is a context reference as a whole —
+    /// `is_context_ref` says so through `references_exiled_by_source`, which
+    /// recurses — while its OUTER shape is `And`, which is otherwise an object
+    /// predicate. The parser builds exactly this for "an exiled card that is a
+    /// creature", so classifying by shape would read the enclosing ability's
+    /// chosen targets for an object the exile link already names.
+    #[test]
+    fn a_composite_carrying_the_exile_anaphor_is_not_a_selected_target() {
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::ExiledBySource,
+                TargetFilter::Typed(TypedFilter::creature()),
+            ],
+        };
+        assert!(
+            filter.is_context_ref(),
+            "fixture guard: the composite must be a context reference"
+        );
+        assert!(
+            matches!(
+                classify_attach_host_authority(&filter),
+                AttachHostAuthority::NoHost
+            ),
+            "a composite naming an exile-linked object has no host authority here"
         );
     }
 }

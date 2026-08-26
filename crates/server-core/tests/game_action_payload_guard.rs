@@ -2,13 +2,14 @@
 //! `server_core::game_action_payload_guard`).
 
 use engine::analysis::decision_template::{
-    DecisionGroupKey, DecisionKind, DecisionSlot, DecisionTemplate, IterationCount,
-    MayChoiceOption, PinnedDecision, ReplayMode, TargetPin, TargetSchedule,
+    AnnouncementSubject, DecisionGroupKey, DecisionKind, DecisionSlot, DecisionTemplate,
+    IterationCount, MayChoiceOption, PinnedDecision, Ranking, ReplayMode, TargetPin,
+    TargetSchedule,
 };
 use engine::types::ability::{
     Comparator, TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef,
 };
-use engine::types::actions::{DebugAction, DebugTokenRequest};
+use engine::types::actions::{DebugAction, DebugTokenRequest, MAX_DEBUG_CREATE_COUNT};
 use engine::types::counter::CounterType;
 use engine::types::game_state::{ManaChoice, ProductionOverride, ShardChoice, YieldTarget};
 use engine::types::identifiers::{CardId, ObjectIncarnationRef};
@@ -20,6 +21,7 @@ use engine::types::mana::{
 use engine::types::match_config::DeckCardCount;
 use engine::types::player::PlayerId;
 use engine::types::proposed_event::TokenCharacteristics;
+use engine::types::zones::Zone;
 use engine::types::{GameAction, ObjectId};
 use server_core::game_action_payload_guard::{
     guard_game_action_payload, MAX_ACTION_LIST_LEN, MAX_CHOICE_LEN, MAX_DEBUG_AST_JSON_LEN,
@@ -31,6 +33,7 @@ fn mana_source_selection() -> ManaSourceSelection {
         source: ObjectIncarnationRef::of(ObjectId(1), 1),
         ability_index: Some(0),
         mana_type: ManaType::Green,
+        output: engine::types::mana::ManaSourceOutput::Concrete(ManaType::Green),
         atomic_combination: None,
         restrictions: Vec::new(),
         penalty: ManaSourcePenalty::None,
@@ -83,6 +86,7 @@ fn accepts_realistic_tap_land_semantic_selection() {
     selection.atomic_combination = Some(vec![ManaType::Green, ManaType::Blue]);
     selection.restrictions = vec![
         ManaRestriction::OnlyForSpellType("Creature".to_string()),
+        ManaRestriction::CannotCastSpellFromZone(Zone::Hand),
         ManaRestriction::OnlyForAny(vec![
             ManaRestriction::OnlyForCreatureType("Elf".to_string()),
             ManaRestriction::OnlyForSpellMatchingCostCriteria {
@@ -270,6 +274,7 @@ fn rejects_oversized_debug_token_counter_name() {
             toughness_override: None,
             enter_with_counters: vec![(CounterType::Generic("x".repeat(MAX_CHOICE_LEN + 1)), 1)],
         },
+        count: 1,
         run_etb: true,
     });
 
@@ -287,10 +292,24 @@ fn accepts_debug_token_preset_pt_override_fields() {
             toughness_override: Some(5),
             enter_with_counters: Vec::new(),
         },
+        count: 1,
         run_etb: true,
     });
 
     guard_game_action_payload(&action).expect("numeric P/T overrides are semantic engine input");
+}
+
+#[test]
+fn rejects_debug_create_count_above_engine_ceiling() {
+    let action = GameAction::Debug(DebugAction::CreateTokenCopy {
+        source_id: ObjectId(1),
+        owner: PlayerId(0),
+        count: MAX_DEBUG_CREATE_COUNT + 1,
+        nonlegendary: false,
+    });
+
+    let err = guard_game_action_payload(&action).unwrap_err();
+    assert!(err.contains("Debug.CreateTokenCopy.count"));
 }
 
 #[test]
@@ -310,6 +329,7 @@ fn rejects_oversized_debug_token_keyword_ast_payload() {
             },
             enter_with_counters: Vec::new(),
         },
+        count: 1,
         run_etb: true,
     });
 
@@ -423,9 +443,9 @@ fn rejects_over_cap_shortcut_schedule() {
             decisions: vec![PinnedDecision::Targets {
                 slot,
                 targets: vec![TargetPin::Scheduled(TargetSchedule::RoundRobin(vec![
-                    src;
-                    MAX_ACTION_LIST_LEN + 1
-                ]))],
+                        Ranking::one(AnnouncementSubject::Object(src));
+                        MAX_ACTION_LIST_LEN + 1
+                    ]))],
             }],
             replay: ReplayMode::Static,
             key: DecisionGroupKey {
@@ -437,5 +457,119 @@ fn rejects_over_cap_shortcut_schedule() {
     assert!(
         guard_game_action_payload(&action).is_err(),
         "an over-cap loop-shortcut schedule vec must be rejected (nested memory bound)"
+    );
+}
+
+/// **Row R1-e — the arm the guard used to skip.** Each schedule step now carries a `Ranking`,
+/// its own `Vec<AnnouncementSubject>`, so the outer schedule bound no longer covers the whole
+/// payload — and `Constant` newly carries a vector where it previously carried none, which
+/// made it the ONE `Scheduled` arm a hostile client could send unbounded.
+///
+/// # Non-vacuity / discrimination
+///
+/// Every other list in each fixture is deliberately in-bounds (one decision, one target, and
+/// for the nested arm a schedule of exactly `MAX_ACTION_LIST_LEN` steps), so ONLY the ranking
+/// bound can reject. The paired positive is an in-bounds `Constant` ranking that must be
+/// ACCEPTED, without which a guard that refused every `DeclareShortcut` would pass.
+///
+/// REVERT-PROBES: (a) drop the `Constant` arm's `bound_ranking` ⇒ the first assertion FAILS;
+/// (b) drop the per-step `bound_ranking` loop in the `RoundRobin` arm ⇒ the nested assertion
+/// FAILS while `rejects_over_cap_shortcut_schedule` above stays green, because that row's
+/// rankings are all one element.
+#[test]
+fn rejects_over_cap_shortcut_ranking_on_every_scheduled_arm() {
+    let src = YieldTarget::AllCopies {
+        card_id: CardId(1),
+        trigger_description: None,
+    };
+    let slot = DecisionSlot {
+        source: src.clone(),
+        index: 0,
+    };
+    // `Ranking::new` refuses duplicates, so the entries must be distinct. `PlayerId` is a
+    // `u8` and the cap is 10_000, so seats cannot supply enough of them — card identities can.
+    let ranking_of = |len: usize| -> Ranking {
+        let subjects: Vec<AnnouncementSubject> = (0..len as u64)
+            .map(|i| {
+                AnnouncementSubject::Object(YieldTarget::AllCopies {
+                    card_id: CardId(i),
+                    trigger_description: None,
+                })
+            })
+            .collect();
+        Ranking::new(subjects).expect("distinct subjects are a legal ranking")
+    };
+    let declare = |targets: Vec<TargetPin>| GameAction::DeclareShortcut {
+        count: IterationCount::UntilLethal,
+        template: Some(DecisionTemplate {
+            owner: PlayerId(0),
+            decisions: vec![PinnedDecision::Targets {
+                slot: slot.clone(),
+                targets,
+            }],
+            replay: ReplayMode::Static,
+            key: DecisionGroupKey {
+                sources: vec![],
+                kind: DecisionKind::LoopChoice,
+            },
+        }),
+    };
+
+    // ── the `Constant` arm: the payload the pre-parameterization guard could not see ──
+    assert!(
+        guard_game_action_payload(&declare(vec![TargetPin::Scheduled(
+            TargetSchedule::Constant(ranking_of(MAX_ACTION_LIST_LEN + 1))
+        )]))
+        .is_err(),
+        "an over-cap `Constant` ranking must be rejected — this arm carries a Vec now"
+    );
+
+    // ── the NESTED arm on the OTHER two variants: the outer schedule is in bounds, so only
+    //    the per-step ranking bound can refuse. The over-cap step is LAST, so a guard that
+    //    inspected only the first step would accept.
+    //
+    //    The row's shape is "an in-bounds schedule of over-cap rankings"; it is not
+    //    materialized at MAX × (MAX+1) because that literal reading is 10^8 subjects (~5 GB)
+    //    and would measure the allocator, not the guard. Three steps discriminate identically.
+    for (label, sched) in [
+        (
+            "RoundRobin",
+            TargetSchedule::RoundRobin(vec![
+                ranking_of(1),
+                ranking_of(2),
+                ranking_of(MAX_ACTION_LIST_LEN + 1),
+            ]),
+        ),
+        (
+            "Piecewise",
+            TargetSchedule::Piecewise(vec![
+                (0, ranking_of(1)),
+                (5, ranking_of(MAX_ACTION_LIST_LEN + 1)),
+            ]),
+        ),
+    ] {
+        assert!(
+            guard_game_action_payload(&declare(vec![TargetPin::Scheduled(sched)])).is_err(),
+            "{label}: an over-cap ranking nested inside an in-bounds schedule must be \
+             rejected — the outer `bound_list` passes, so only the per-step bound can refuse"
+        );
+    }
+
+    // ── the paired positives: in-bounds payloads on every arm ARE accepted ──
+    assert!(
+        guard_game_action_payload(&declare(vec![TargetPin::Scheduled(
+            TargetSchedule::Constant(ranking_of(MAX_ACTION_LIST_LEN))
+        )]))
+        .is_ok(),
+        "a ranking at exactly the cap is honest traffic and must pass — without this the row \
+         would be satisfied by a guard that rejected every declaration"
+    );
+    assert!(
+        guard_game_action_payload(&declare(vec![TargetPin::Scheduled(
+            TargetSchedule::RoundRobin(vec![ranking_of(3), ranking_of(4)])
+        )]))
+        .is_ok(),
+        "and an in-bounds nested schedule passes, so the nested refusals above are the LENGTH \
+         and not the nesting"
     );
 }

@@ -123,8 +123,12 @@ fn enter_new_dungeon(
         start_dungeon_and_enter(state, player, dungeon, events);
         Ok(())
     } else {
-        // Multiple options — ask the player to choose.
-        state.waiting_for = WaitingFor::ChooseDungeon { player, options };
+        // Multiple options — ask the player to choose. CR 309.4a: each option
+        // carries its topmost room so the prompt shows what the choice does.
+        state.waiting_for = WaitingFor::ChooseDungeon {
+            player,
+            options: options.into_iter().map(dungeon::dungeon_preview).collect(),
+        };
         Ok(())
     }
 }
@@ -197,17 +201,16 @@ fn advance_to_room(
 
         Ok(())
     } else {
-        // Branch point — ask the player to choose.
-        let option_names: Vec<String> = next
-            .iter()
-            .map(|&r| room_name(dungeon, r).to_string())
-            .collect();
-
+        // Branch point — ask the player to choose. CR 309.4b-c: each option
+        // carries the room's printed name and effect.
         state.waiting_for = WaitingFor::ChooseDungeonRoom {
             player,
             dungeon,
-            options: next.to_vec(),
-            option_names,
+            dungeon_name: dungeon::get_definition(dungeon).name.to_string(),
+            options: next
+                .iter()
+                .map(|&r| dungeon::room_preview(dungeon, r))
+                .collect(),
         };
 
         Ok(())
@@ -239,7 +242,7 @@ fn queue_room_trigger(
         source_id,
         controller: player,
         condition: None,
-        ability: room_ability,
+        ability: Box::new(room_ability),
         timestamp: 0,
         target_constraints,
         distribute: None,
@@ -251,10 +254,18 @@ fn queue_room_trigger(
         }),
         modal: None,
         mode_abilities: vec![],
-        description: Some(format!("{}: {name}", dungeon::get_definition(dungeon).name)),
+        // CR 309.4c: The room ability's printed effect rides along with the
+        // room name so the stack entry says what the room does, not just where
+        // the venture marker landed.
+        description: Some(format!(
+            "{}: {name} — {}",
+            dungeon::get_definition(dungeon).name,
+            dungeon::room_text(dungeon, room)
+        )),
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        provenance: None,
     };
 
     // CR 603.2 + CR 309.4c: Dispatch through the standard
@@ -323,7 +334,15 @@ mod tests {
             WaitingFor::ChooseDungeon { player, options } => {
                 assert_eq!(*player, PlayerId(0));
                 assert_eq!(options.len(), 3);
-                assert!(!options.contains(&DungeonId::Undercity));
+                assert!(!options.iter().any(|o| o.dungeon == DungeonId::Undercity));
+                // CR 309.4a: each option previews the topmost room it enters.
+                let lost_mine = options
+                    .iter()
+                    .find(|o| o.dungeon == DungeonId::LostMineOfPhandelver)
+                    .expect("Lost Mine offered");
+                assert_eq!(lost_mine.entry_room.index, 0);
+                assert_eq!(lost_mine.entry_room.name, "Cave Entrance");
+                assert_eq!(lost_mine.entry_room.text, "Scry 1.");
             }
             other => panic!("Expected ChooseDungeon, got {other:?}"),
         }
@@ -410,13 +429,28 @@ mod tests {
             WaitingFor::ChooseDungeonRoom {
                 player: p,
                 dungeon,
+                dungeon_name,
                 options,
-                option_names,
             } => {
                 assert_eq!(*p, player);
                 assert_eq!(*dungeon, DungeonId::LostMineOfPhandelver);
-                assert_eq!(options, &[1, 2]);
-                assert_eq!(option_names, &["Goblin Lair", "Mine Tunnels"]);
+                assert_eq!(dungeon_name, "Lost Mine of Phandelver");
+                assert_eq!(
+                    options.iter().map(|o| o.index).collect::<Vec<_>>(),
+                    vec![1, 2]
+                );
+                assert_eq!(
+                    options.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(),
+                    vec!["Goblin Lair", "Mine Tunnels"]
+                );
+                // CR 309.4c: the prompt carries each room's printed effect.
+                assert_eq!(
+                    options.iter().map(|o| o.text.as_str()).collect::<Vec<_>>(),
+                    vec![
+                        "Create a 1/1 red Goblin creature token.",
+                        "Create a Treasure token."
+                    ]
+                );
             }
             other => panic!("Expected ChooseDungeonRoom, got {other:?}"),
         }

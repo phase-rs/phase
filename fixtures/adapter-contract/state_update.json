@@ -152,6 +152,21 @@
     "mana_payment_shortcut_actions": [],
     "eliminated_players": [],
     "log_entries": [],
-    "spell_costs": {}
+    "spell_costs": {},
+    "viewer_interaction": {
+      "waitingForKind": {
+        "simultaneous": null,
+        "terminal": false,
+        "code": "choose"
+      },
+      "authorizedSubmitters": [0],
+      "canSubmit": true,
+      "autoPassRecommended": false,
+      "opportunities": [],
+      "availability": {
+        "type": "unsupported",
+        "data": { "reason": "authorityUnbound" }
+      }
+    }
   }
 }

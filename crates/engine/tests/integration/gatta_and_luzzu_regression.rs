@@ -42,7 +42,7 @@ use engine::game::effects;
 use engine::game::zones::create_object;
 use engine::types::ability::{
     Effect, PreventionAmount, PreventionScope, QuantityExpr, QuantityRef, ResolvedAbility,
-    ShieldKind, TargetFilter, TargetRef,
+    RestrictionExpiry, ShieldKind, TargetFilter, TargetRef,
 };
 use engine::types::counter::CounterType;
 use engine::types::game_state::GameState;
@@ -141,16 +141,16 @@ fn gatta_and_luzzu_prevents_three_damage_events_and_accumulates_counters() {
             amount: PreventionAmount::All
         }
     ));
-    // CR 514.2 cleanup contract: every `ShieldKind != None` is pruned at the
-    // cleanup step via `ShieldKind::is_shield()` in `turns::execute_cleanup`,
-    // independently of the explicit `expiry` field. The duration plumbing on
-    // the ability is therefore advisory; the shield-kind sentinel is what
-    // guarantees EOT cleanup for prevention shields.
-    assert!(
-        chosen_obj.replacement_definitions[0]
-            .shield_kind
-            .is_shield(),
-        "prevention shield must register as a shield for EOT cleanup"
+    // CR 514.2 cleanup contract: `turns::execute_cleanup` prunes on the typed
+    // `expiry` field and ONLY on it. `shield_kind` classifies what the replacement
+    // does and carries no lifetime meaning — CR 604.2 makes a printed static's
+    // shield durable while holding this identical `ShieldKind` value. The duration
+    // plumbing on the ability is therefore load-bearing, not advisory: this
+    // ability's `Duration::UntilEndOfTurn` is what stamps the window here.
+    assert_eq!(
+        chosen_obj.replacement_definitions[0].expiry,
+        Some(RestrictionExpiry::EndOfTurn),
+        "CR 514.2: the ability's stated 'this turn' window must be stamped on the shield"
     );
 
     let gatta_obj = state.objects.get(&gatta).unwrap();

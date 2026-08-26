@@ -17,12 +17,19 @@
 // Mirrors the engine -> engine-wasm -> React-adapter pattern: the WASM owns the
 // logic, the host language is a serialization boundary with zero game logic.
 
-import wasmModule from "./broker-wasm-pkg/broker_bg.wasm";
-import { initSync, protocol_version, WasmBroker } from "./broker-wasm-pkg/broker.js";
+import wasmModule from "../broker-wasm-pkg/broker_bg.wasm";
+import {
+  initSync,
+  lobby_protocol_version,
+  min_supported_lobby_protocol,
+  protocol_version,
+  WasmBroker,
+} from "../broker-wasm-pkg/broker.js";
 import {
   classifyHelloGate,
   helloGateErrorMessage,
   type ConnAttachment,
+  type LobbyHelloPolicy,
 } from "./hello-gate";
 import { moderationErrorForLobbyFrame } from "./name-filter";
 import {
@@ -43,6 +50,14 @@ import {
 initSync({ module: wasmModule });
 
 const PROTOCOL_VERSION = protocol_version();
+// The lobby's OWN message-set version. Independent of PROTOCOL_VERSION, which
+// tracks the full-game GameState/GameAction surface this broker never parses.
+const LOBBY_PROTOCOL_VERSION = lobby_protocol_version();
+const HELLO_POLICY: LobbyHelloPolicy = {
+  serverProtocolVersion: PROTOCOL_VERSION,
+  lobbyProtocolVersion: LOBBY_PROTOCOL_VERSION,
+  minSupportedLobbyProtocol: min_supported_lobby_protocol(),
+};
 const SERVER_VERSION = "lobby-rs";
 // build_commit is cosmetic for a LobbyOnly broker — the gameplay-relevant gate
 // is each room's host_build_commit (enforced inside the Rust core), not the
@@ -123,6 +138,7 @@ export class LobbyDO {
       return Response.json({
         mode: "LobbyOnly",
         protocol_version: PROTOCOL_VERSION,
+        lobby_protocol_version: LOBBY_PROTOCOL_VERSION,
         server_version: SERVER_VERSION,
       });
     }
@@ -165,7 +181,7 @@ export class LobbyDO {
     }
 
     const attachment = conn as ConnAttachment;
-    const gate = classifyHelloGate(attachment.client_hello != null, frame, PROTOCOL_VERSION);
+    const gate = classifyHelloGate(attachment.client_hello != null, frame, HELLO_POLICY);
     const gateError = helloGateErrorMessage(gate);
     if (gateError) {
       ws.send(JSON.stringify({ type: "Error", data: { message: gateError } }));
@@ -379,6 +395,10 @@ export class LobbyDO {
           build_commit: SERVER_BUILD_COMMIT,
           protocol_version: PROTOCOL_VERSION,
           mode: "LobbyOnly",
+          // Advertised ALONGSIDE protocol_version, never instead of it:
+          // clients built before the lobby owned a version still gate on that
+          // field, so it must keep tracking the full-game constant.
+          lobby_protocol_version: LOBBY_PROTOCOL_VERSION,
         },
       }),
     );

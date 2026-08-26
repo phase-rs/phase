@@ -2,19 +2,6 @@ import { act } from "react";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// Make framer-motion's `animate` apply instantly so the displayed value is
-// deterministic in jsdom (no real animation frames to wait on).
-vi.mock("framer-motion", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("framer-motion")>();
-  return {
-    ...actual,
-    animate: (target: { set?: (v: number) => void }, value: number) => {
-      target.set?.(value);
-      return { stop: () => {} };
-    },
-  };
-});
-
 import {
   GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS,
   type AnimationStep,
@@ -101,39 +88,25 @@ describe("LifeTotal", () => {
     expect(screen.getByText("20")).toBeInTheDocument();
   });
 
-  // Issue #1560: a combat-damage step pre-advances the internal accumulator and
-  // schedules a DEFERRED (impact-synced) animation. If the animation queue is
-  // interrupted before that animation runs, the displayed number must still
-  // reconcile to the authoritative settled life — it must never get stuck.
-  it("reconciles the display when a deferred damage animation is cancelled (#1560)", () => {
+  it("always renders the snapshot life while a stale damage animation is active", () => {
     render(<LifeTotal playerId={0} />);
-    expect(screen.getByText("20")).toBeInTheDocument();
-
-    // Combat damage arrives: schedules the deferred impact animation, but it has
-    // not run yet (impact timer pending).
     act(() => {
-      useAnimationStore.setState({ activeStep: combatDamageStep(0, -3) });
+      setLife(0, 38);
     });
-    // Display still 20 — the deferred animation hasn't fired.
-    expect(screen.getByText("20")).toBeInTheDocument();
+    expect(screen.getByText("38")).toBeInTheDocument();
 
-    // Queue is interrupted (e.g. a concurrent dispatch clears it) BEFORE the
-    // impact timer fires — the deferred animation is cancelled, never runs.
+    // This models a late LifeChanged(-2) event arriving after the full snapshot
+    // has already established the authoritative value of 38.
     act(() => {
-      useAnimationStore.setState({ activeStep: null });
+      useAnimationStore.setState({ activeStep: combatDamageStep(0, -2) });
+      vi.advanceTimersByTime(900);
     });
 
-    // The engine's real life total settles in gameStore.
-    act(() => {
-      setLife(0, 17);
-    });
-
-    // Pre-fix this stayed at 20 (the desync). It must now show 17.
-    expect(screen.getByText("17")).toBeInTheDocument();
-    expect(screen.queryByText("20")).not.toBeInTheDocument();
+    expect(screen.getByText("38")).toBeInTheDocument();
+    expect(screen.queryByText("36")).not.toBeInTheDocument();
   });
 
-  it("reconciles the display for life changes with no animation step (instant speed)", () => {
+  it("updates when the snapshot life changes without an animation step", () => {
     render(<LifeTotal playerId={0} />);
     expect(screen.getByText("20")).toBeInTheDocument();
 
@@ -144,7 +117,7 @@ describe("LifeTotal", () => {
     expect(screen.getByText("15")).toBeInTheDocument();
   });
 
-  it("delays grouped flurry displayOnly life movement until the shared impact time", () => {
+  it("does not derive a grouped flurry life total from its display event", () => {
     render(<LifeTotal playerId={0} />);
     expect(screen.getByText("20")).toBeInTheDocument();
 
@@ -153,26 +126,9 @@ describe("LifeTotal", () => {
     });
 
     act(() => {
-      vi.advanceTimersByTime(GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS - 1);
+      vi.advanceTimersByTime(GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS);
     });
     expect(screen.getByText("20")).toBeInTheDocument();
-
-    act(() => {
-      vi.advanceTimersByTime(1);
-    });
-    expect(screen.getByText("17")).toBeInTheDocument();
-  });
-
-  it("reconciles grouped flurry displayOnly life movement if the impact timer is cancelled", () => {
-    render(<LifeTotal playerId={0} />);
-
-    act(() => {
-      useAnimationStore.setState({ activeStep: groupedDamageStep(0, -3) });
-      useAnimationStore.setState({ activeStep: null });
-      setLife(0, 17);
-    });
-
-    expect(screen.getByText("17")).toBeInTheDocument();
   });
 
   it("does not move life for grouped flurry without a consumed LifeChanged effect", () => {
@@ -186,7 +142,7 @@ describe("LifeTotal", () => {
     expect(screen.getByText("20")).toBeInTheDocument();
   });
 
-  it("delays grouped flurry displayOnly lifelink gain until the shared impact time", () => {
+  it("does not derive a lifelink gain from a grouped flurry display event", () => {
     render(<LifeTotal playerId={1} />);
     expect(screen.getByText("20")).toBeInTheDocument();
 
@@ -195,13 +151,8 @@ describe("LifeTotal", () => {
     });
 
     act(() => {
-      vi.advanceTimersByTime(GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS - 1);
+      vi.advanceTimersByTime(GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS);
     });
     expect(screen.getByText("20")).toBeInTheDocument();
-
-    act(() => {
-      vi.advanceTimersByTime(1);
-    });
-    expect(screen.getByText("23")).toBeInTheDocument();
   });
 });

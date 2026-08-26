@@ -129,7 +129,7 @@ fn resolve_double_counters(
 /// If life < 0: lose life equal to |current total| (new total = 2x negative).
 /// If life == 0: no change.
 ///
-/// Routes the gain/loss through `apply_life_gain` / `apply_damage_life_loss`
+/// Routes the gain/loss through `apply_life_gain` / `apply_life_loss`
 /// so the same replacement-pipeline and can't-gain / can't-lose short-circuits
 /// that govern all other life-change events apply here too (CR 119.7 + 119.8).
 fn resolve_double_life(
@@ -149,20 +149,28 @@ fn resolve_double_life(
 
     if current_life > 0 {
         // CR 701.10d: Gain life equal to current total.
-        let _ = crate::game::effects::life::apply_life_gain(
+        if crate::game::effects::life::apply_life_gain(
             state,
             player_id,
             current_life as u32,
             events,
-        );
+        )
+        .is_err()
+        {
+            return Ok(());
+        }
     } else if current_life < 0 {
         // CR 701.10d: Lose |current_life| additional life so the new total is 2x.
-        let _ = crate::game::effects::life::apply_damage_life_loss(
+        if crate::game::effects::life::apply_life_loss(
             state,
             player_id,
             (-current_life) as u32,
             events,
-        );
+        )
+        .is_err()
+        {
+            return Ok(());
+        }
     }
     // life == 0: no change.
 
@@ -310,6 +318,7 @@ mod tests {
         targets: Vec<TargetRef>,
     ) -> ResolvedAbility {
         ResolvedAbility {
+            detached_remainder: crate::types::ability::DetachedRemainder::NoProducer,
             effect: Effect::Double {
                 target_kind,
                 target,
@@ -322,6 +331,9 @@ mod tests {
             source_incarnation: None,
             trigger_source: None,
             trigger_definition_ref: None,
+            force_block_attacker: None,
+            target_incarnations: Vec::new(),
+            selected_target_incarnations: Vec::new(),
             targets,
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -333,6 +345,7 @@ mod tests {
             starting_with: None,
             chosen_x: None,
             cost_paid_object: None,
+            noted_mana_payment: None,
             cost_paid_object_ids: Vec::new(),
             effect_context_object: None,
             amassed_army_object: None,
@@ -340,12 +353,14 @@ mod tests {
             may_trigger_origin: None,
             optional_targeting: false,
             optional: false,
+            optional_player: None,
             optional_for: None,
             multi_target: None,
             target_constraints: Vec::new(),
             target_choice_timing: crate::types::ability::TargetChoiceTiming::Stack,
             description: None,
             selected_mode_labels: Vec::new(),
+            modal_instruction_ordinal: None,
             repeat_for: None,
             min_x_value: 0,
             announced_x: None,
@@ -354,11 +369,13 @@ mod tests {
             forward_result: false,
             unless_pay: None,
             distribution: None,
+            distribute: None,
             target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
             chosen_players: Vec::new(),
             repeat_until: None,
             replacement_applied: Default::default(),
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+            sibling_condition: crate::types::ability::SiblingCondition::Dependent,
             modal: None,
             mode_abilities: vec![],
             parent_target_missing_reason: None,

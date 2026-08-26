@@ -84,9 +84,9 @@ Deck
     );
     await userEvent.click(screen.getByRole("button", { name: "Import" }));
 
-    await waitFor(() => {
-      expect(screen.getByText(/couldn't find any cards/i)).toBeInTheDocument();
-    });
+    expect(
+      await screen.findByText(/couldn't find any cards/i),
+    ).toBeInTheDocument();
     expect(onImported).not.toHaveBeenCalled();
   });
 

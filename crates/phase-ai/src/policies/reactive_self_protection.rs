@@ -169,9 +169,12 @@ mod tests {
                 source_controller: None,
                 source_object: None,
                 bypass_beneficiary: None,
+                protection_does_not_remove: None,
+                room_door: None,
             }],
             target,
             duration: None,
+            end_cost: None,
         }
     }
 
@@ -275,9 +278,12 @@ mod tests {
                 source_controller: None,
                 source_object: None,
                 bypass_beneficiary: None,
+                protection_does_not_remove: None,
+                room_door: None,
             }],
             target: None,
             duration: None,
+            end_cost: None,
         }
     }
 
@@ -425,9 +431,12 @@ mod tests {
                 source_controller: None,
                 source_object: None,
                 bypass_beneficiary: None,
+                protection_does_not_remove: None,
+                room_door: None,
             }],
             target: None,
             duration: None,
+            end_cost: None,
         };
         assert!(!is_self_protection_effect(&effect));
     }
@@ -475,7 +484,7 @@ mod tests {
             controller: opp,
             kind: StackEntryKind::Spell {
                 card_id: CardId(99),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
             },
@@ -510,9 +519,12 @@ mod tests {
                 source_controller: None,
                 source_object: None,
                 bypass_beneficiary: None,
+                protection_does_not_remove: None,
+                room_door: None,
             }],
             target: None,
             duration: None,
+            end_cost: None,
         };
         assert!(is_self_protection_effect(&effect));
     }
@@ -744,7 +756,7 @@ mod tests {
             controller: opp,
             kind: StackEntryKind::Spell {
                 card_id: CardId(99),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
             },
@@ -806,7 +818,7 @@ mod tests {
             controller: opp,
             kind: StackEntryKind::Spell {
                 card_id: CardId(99),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
             },
@@ -854,7 +866,7 @@ mod tests {
             controller: opp,
             kind: StackEntryKind::Spell {
                 card_id: CardId(99),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
             },
@@ -898,7 +910,7 @@ mod tests {
             controller: opp,
             kind: StackEntryKind::Spell {
                 card_id: CardId(99),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
             },

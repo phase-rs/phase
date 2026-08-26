@@ -70,6 +70,8 @@
     "moveToSideboard": "Sposta una {{name}} nella sideboard",
     "moveToMain": "Sposta una {{name}} nel mazzo principale",
     "removeOne": "Rimuovi una {{name}}",
+    "addOne": "Aggiungi una {{name}}",
+    "copyLimit": "{{name}} ha raggiunto il limite di copie",
     "makeCommander": "Rendi {{name}} il comandante",
     "makeCommanderTitle": "Rendi questo il mio comandante",
     "chooseArtFor": "Scegli l'illustrazione per {{name}}",

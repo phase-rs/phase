@@ -14,12 +14,14 @@ use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
 /// CR 101.4 + CR 701.23i: A scoped self-library search can use the simultaneous
-/// protocol only when its immediate continuation is the ordinary parent-target
-/// library-to-battlefield delivery. Other search shapes retain the established
-/// sequential player-scope resolver rather than being coerced into a subtly
-/// different timing model.
+/// protocol only when its immediate continuation is a plain parent-target
+/// library-to-battlefield delivery without a reveal, or a plain
+/// library-to-hand delivery with a reveal. Other search shapes retain the
+/// established sequential player-scope resolver rather than being coerced into
+/// a subtly different timing model.
 pub(crate) fn supports_simultaneous_delivery(ability: &ResolvedAbility) -> bool {
     let Effect::SearchLibrary {
+        reveal,
         target_player,
         source_zones,
         ..
@@ -42,8 +44,7 @@ pub(crate) fn supports_simultaneous_delivery(ability: &ResolvedAbility) -> bool 
     if !is_plain_parent_target_delivery(delivery) {
         return false;
     }
-    matches!(
-        &delivery.effect,
+    match &delivery.effect {
         Effect::ChangeZone {
             origin: Some(Zone::Library),
             destination: Zone::Battlefield,
@@ -58,8 +59,34 @@ pub(crate) fn supports_simultaneous_delivery(ability: &ResolvedAbility) -> bool 
             face_down_profile: None,
             enters_modified_if: None,
             ..
-        } if enter_with_counters.is_empty() && conditional_enter_with_counters.is_empty()
-    )
+        } if !*reveal
+            && enter_with_counters.is_empty()
+            && conditional_enter_with_counters.is_empty() =>
+        {
+            true
+        }
+        Effect::ChangeZone {
+            origin: Some(Zone::Library),
+            destination: Zone::Hand,
+            target: TargetFilter::ParentTarget,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters,
+            conditional_enter_with_counters,
+            face_down_profile: None,
+            enters_modified_if: None,
+        } if *reveal
+            && enter_with_counters.is_empty()
+            && conditional_enter_with_counters.is_empty() =>
+        {
+            true
+        }
+        _ => false,
+    }
 }
 
 /// The player-scope splitter normally peels the once-after-all-searches shuffle
@@ -88,9 +115,12 @@ pub(crate) fn has_only_detachable_shuffle_tail(ability: &ResolvedAbility) -> boo
 /// supported `Effect::ChangeZone` fields may enter it. Every checked field
 /// would otherwise require `resolve_ability_chain` to preserve behavior.
 fn is_plain_parent_target_delivery(delivery: &ResolvedAbility) -> bool {
-    delivery.trigger_source.is_none()
-        && delivery.trigger_definition_ref.is_none()
-        && delivery.targets.is_empty()
+    // Trigger instantiation stamps source/definition provenance recursively on
+    // every continuation. The scoped protocol consumes this child as a typed
+    // `ZoneMoveRequest`, where neither provenance field changes the delivery;
+    // rejecting them would make an otherwise identical triggered search fall
+    // back to sequential resolution while the spell form batches correctly.
+    delivery.targets.is_empty()
         && delivery.sub_ability.is_none()
         && delivery.else_ability.is_none()
         && delivery.duration.is_none()
@@ -189,6 +219,13 @@ pub(crate) fn handle_optional_decision(
     accept: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<bool, EffectError> {
+    // CR 608.2c: A regular optional effect owns its direct-choice frame until
+    // its answer is consumed. The scoped protocol has no such frame, so it
+    // must not claim a coincidentally matching player/source prompt and leave
+    // that ordinary frame orphaned.
+    if state.active_optional_effect_frame().is_some() {
+        return Ok(false);
+    }
     let Some(pending) = state.pending_scoped_library_search.as_ref() else {
         return Ok(false);
     };
@@ -424,6 +461,7 @@ fn advance_acceptance(
         source_id,
         description,
         may_trigger_key: None,
+        same_card_may_trigger_choice_available: false,
     };
     Ok(())
 }
@@ -511,6 +549,9 @@ fn prepare_scoped_group(
             events.push(GameEvent::PlayerPerformedAction {
                 player_id: player,
                 action: PlayerActionKind::SearchedLibrary,
+                look_count: None,
+                scry_bottom_count: None,
+                scry_top_count: None,
             });
             state.players_who_searched_library_this_turn.insert(player);
             state
@@ -521,6 +562,12 @@ fn prepare_scoped_group(
                 .push((player, PlayerActionKind::SearchedLibrary));
         }
         if let Some(search) = prepared.active_search {
+            let looked_at = search
+                .looked_at()
+                .iter()
+                .map(|(_, _, identity)| identity.object_id)
+                .collect::<Vec<_>>();
+            state.remember_card_identities(search.learned_audience().iter().copied(), &looked_at);
             state.active_library_searches.insert(search);
         }
         if let Some(event) = prepared.hidden_event {
@@ -543,6 +590,7 @@ fn prepare_scoped_group(
                 up_to: prepared.up_to,
                 allows_partial_find: prepared.allows_partial_find,
                 constraint: prepared.constraint,
+                ordering_hint: prepared.ordering_hint,
             },
         );
         if auto_completed {
@@ -635,6 +683,7 @@ fn advance_selection(
         up_to: choice.up_to,
         allows_partial_find: choice.allows_partial_find,
         constraint: choice.constraint,
+        ordering_hint: choice.ordering_hint,
         split: None,
     };
     state.priority_player = choice.player;
@@ -861,6 +910,7 @@ mod tests {
     use crate::types::actions::GameAction;
     use crate::types::game_state::GameState;
     use crate::types::identifiers::CardId;
+    use crate::types::resolution::OptionalEffectFrame;
 
     fn three_player_scoped_search(reveal: bool) -> (GameState, ResolvedAbility, Vec<ObjectId>) {
         let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
@@ -918,6 +968,85 @@ mod tests {
         )
         .sub_ability(delivery);
         (state, search, cards)
+    }
+
+    #[test]
+    fn ordinary_optional_frame_prevents_scoped_protocol_prompt_collision() {
+        let (mut state, mut scoped_search, _) = three_player_scoped_search(true);
+        scoped_search.optional = true;
+        let mut events = Vec::new();
+        start(
+            &mut state,
+            &scoped_search,
+            &[PlayerId(0)],
+            None,
+            &mut events,
+        )
+        .expect("scoped search starts its acceptance prompt");
+
+        let mut ordinary_optional = scoped_search.clone();
+        ordinary_optional.optional = true;
+        ordinary_optional.set_controller_recursive(PlayerId(0));
+        state.push_optional_effect_frame(OptionalEffectFrame {
+            ability: Box::new(ordinary_optional),
+            trigger_event: None,
+            trigger_events: Vec::new(),
+            trigger_match_count: None,
+        });
+
+        apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("the ordinary optional effect owns the player action");
+
+        assert!(state.pending_scoped_library_search.is_some());
+        assert!(state.active_optional_effect_frame().is_none());
+    }
+
+    /// The batch shortcut is deliberately limited to the two delivery shapes
+    /// whose visible information and movement timing it implements itself.
+    #[test]
+    fn simultaneous_delivery_accepts_only_unrevealed_battlefield_or_revealed_hand() {
+        let (_, revealed_hand, _) = three_player_scoped_search(true);
+        assert!(
+            supports_simultaneous_delivery(&revealed_hand),
+            "a revealed plain library-to-hand delivery is batch-safe"
+        );
+
+        let (_, unrevealed_hand, _) = three_player_scoped_search(false);
+        assert!(
+            !supports_simultaneous_delivery(&unrevealed_hand),
+            "an unrevealed library-to-hand delivery is outside the shortcut"
+        );
+
+        let (_, mut revealed_battlefield, _) = three_player_scoped_search(true);
+        let delivery = revealed_battlefield
+            .sub_ability
+            .as_deref_mut()
+            .expect("fixture supplies a delivery child");
+        let Effect::ChangeZone { destination, .. } = &mut delivery.effect else {
+            panic!("fixture delivery must be ChangeZone");
+        };
+        *destination = Zone::Battlefield;
+        assert!(
+            !supports_simultaneous_delivery(&revealed_battlefield),
+            "a revealed library-to-battlefield delivery is outside the shortcut"
+        );
+
+        let (_, mut unrevealed_battlefield, _) = three_player_scoped_search(false);
+        let delivery = unrevealed_battlefield
+            .sub_ability
+            .as_deref_mut()
+            .expect("fixture supplies a delivery child");
+        let Effect::ChangeZone { destination, .. } = &mut delivery.effect else {
+            panic!("fixture delivery must be ChangeZone");
+        };
+        *destination = Zone::Battlefield;
+        assert!(
+            supports_simultaneous_delivery(&unrevealed_battlefield),
+            "the established plain library-to-battlefield shortcut remains valid"
+        );
     }
 
     /// A child rider cannot be represented by the typed batch move request.

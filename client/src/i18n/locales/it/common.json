@@ -5,11 +5,22 @@
     "close": "Chiudi",
     "closeNamed": "Chiudi {{name}}"
   },
+  "quantityRef": {
+    "highestNumber": "il numero più alto",
+    "lowestNumber": "il numero più basso",
+    "chosenNumber": "il numero scelto"
+  },
+  "scryOutcome": {
+    "title": "Scry completato",
+    "you": "Tu",
+    "result": "{{player}} — {{top}} in cima · {{bottom}} in fondo"
+  },
   "modal": {
     "defaultEyebrow": "Strumento dello spazio di lavoro"
   },
   "pausedBanner": {
-    "message": "Partita in pausa — {{reason}}"
+    "message": "Partita in pausa — {{reason}}",
+    "resume": "Riprendi"
   },
   "fullscreen": {
     "enter": "Attiva schermo intero",
@@ -24,6 +35,14 @@
     "spawning": "Avvio del server locale…",
     "ready": "Motore nativo pronto",
     "failed": "Impossibile preparare il motore nativo"
+  },
+  "engineBadge": {
+    "native": "Motore nativo",
+    "nativeTooltip": "Questa partita usa il motore nativo dell'app desktop.",
+    "inBrowser": "Motore del browser",
+    "inBrowserTooltip": "Motore nativo non disponibile: questa partita è in esecuzione nel browser.",
+    "versionMismatchTooltip": "Versione del motore nativo non corrispondente: questa partita è in esecuzione nel browser.",
+    "notAttemptedTooltip": "Questa partita è in esecuzione nel browser: il motore nativo non è stato usato."
   },
   "buildBadge": {
     "downloading": "download in corso… {{progress}}%",
@@ -40,7 +59,7 @@
     "updated": "aggiornato"
   },
   "comboDetector": {
-    "label": "Rilevatore di combo",
+    "label": "Rilevatore di combo (sperimentale)",
     "title": "Rileva i loop infiniti: termina automaticamente i loop obbligatori e mostra le risorse ∞ (disattivato per impostazione predefinita)",
     "on": "Attivo",
     "off": "Disattivato",
@@ -66,10 +85,16 @@
     "boardLayoutLegacy": "Legacy",
     "switchToSplitView": "Passa alla vista tavolo diviso",
     "switchToLegacyView": "Passa alla vista legacy focalizzata",
+    "multiplayerSplitLayoutNudge": {
+      "message": "Vedi tutti gli avversari insieme con la vista tavolo diviso.",
+      "trySplit": "Prova la vista divisa",
+      "dismiss": "Non ora"
+    },
     "helpShortcuts": "Aiuto e scorciatoie",
     "showAiHand": "Mostra mano IA",
     "hideAiHand": "Nascondi mano IA",
     "requestTakeback": "Richiedi ripristino",
+    "undoLastAction": "Annulla ultima azione",
     "concede": "Concedi",
     "backToDraft": "Torna al Draft",
     "mainMenu": "Menu principale",
@@ -77,6 +102,7 @@
     "cardDataTitle": "Dati carte: {{date}}"
   },
   "volume": {
+    "deviceBlocked": "Audio non disponibile — il server audio di sistema non risponde. Riavvia l'app per riprovare.",
     "mute": "Disattiva audio",
     "unmute": "Riattiva audio",
     "volume": "Volume"
@@ -257,7 +283,13 @@
     "youPlayFirst": "Giochi per primo",
     "playerPlaysFirst": "{{name}} gioca per primo",
     "heads": "Testa",
-    "tails": "Croce"
+    "tails": "Croce",
+    "coinFlip": "Lancio della moneta",
+    "wonCoinFlip": "{{name}} ha vinto il lancio",
+    "lostCoinFlip": "{{name}} ha perso il lancio",
+    "turnOrder": "Ordine dei turni",
+    "turnOrderItem": "Turno {{turn}}: {{name}}",
+    "youTakeTurn": "Giochi il turno {{turn}}"
   },
   "chrome": {
     "back": "Indietro",

@@ -19,7 +19,7 @@ name: Refresh Card Data Catalogs
 # and no PR opens. So it is safe to fire on any of the triggers below.
 #
 # Triggers:
-#   - schedule: weekly on Monday, after MTGJSON's weekly publish.
+#   - schedule: daily, after MTGJSON's publish window.
 #   - workflow_dispatch: manual run from the Actions tab.
 #   - workflow_run on "Clear Caches": clearing the mtgjson/scryfall caches only
 #     DELETES them; this workflow is the thing that re-fetches, re-processes,
@@ -27,9 +27,20 @@ name: Refresh Card Data Catalogs
 
 on:
   schedule:
-    # Monday 15:00 UTC — after the ISO-week cache key rolls (Mon 00:00) and
-    # MTGJSON has published the week's data.
-    - cron: "0 15 * * 1"
+    # Daily at 15:00 UTC, after MTGJSON's publish window.
+    #
+    # Was weekly (Mondays), which under-served the actual publish cadence:
+    # MTGJSON ships roughly daily (5.3.0+20260723 -> +20260724 on consecutive
+    # days), so for six days out of seven the committed known-tokens.toml was
+    # stale. That is not cosmetic — build.rs embeds that file, so when
+    # gen-card-data.sh regenerates it mid-run the deploy has to recompile the
+    # engine a SECOND time to embed the new catalog. Measured at 5m35s on top
+    # of the first 5m39s compile (run 30114030288), on a job that was timing
+    # out at 30m. Keeping the committed catalog fresh is what removes it.
+    #
+    # Firing daily is safe by construction: the vintage write-gate above means
+    # a run against unchanged MTGJSON rewrites nothing and opens no PR.
+    - cron: "0 15 * * *"
   workflow_dispatch:
   workflow_run:
     workflows: ["Clear Caches"]
@@ -45,10 +56,17 @@ jobs:
     # Forks inherit the schedule but not CI_PAT, so a fork run would only fail
     # and spam the owner — keep it on the canonical repo. On a workflow_run
     # trigger, only proceed if the cache clear actually succeeded (a failed or
-    # cancelled clear left the caches as-is, so there is nothing new to fetch).
+    # cancelled clear left the caches as-is, so there is nothing new to fetch)
+    # and it ran in this repo, not a fork — same provenance requirement as
+    # deploy.yml's deploy-gate, since this job holds CI_PAT and `contents:
+    # write`. No head_branch pin here: unlike a deploy, Clear Caches is
+    # workflow_dispatch-only and is legitimately dispatched from any branch.
     if: >-
       github.repository == 'phase-rs/phase' &&
-      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
+      (github.event_name != 'workflow_run' || (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_repository.full_name == github.repository
+      ))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

@@ -51,7 +51,13 @@ fn gunzip(gz: &[u8]) -> String {
 
 /// Load the realistic 4p dump's `["gameState"]` through the REAL production restore chokepoint
 /// `PersistedGameState::into_game_state` (the same path server `from_persisted` and WASM
-/// `decode_restored_game_state` funnel through). The migration drops the primed loop sequence
+/// `decode_restored_game_state` funnel through). The chokepoint now rehydrates the ChaCha20
+/// stream, which only `engine-wasm`'s `restore_game_state` used to do on its own — a load that
+/// ENDED at the chokepoint, like this one, was left with a word-0 stream under this dump's saved
+/// `rng_word_pos` of 291. WASM's own call is now an idempotent repeat. Callers may still diverge
+/// afterwards: `GameSession::from_persisted` re-seeds and zeroes `rng_word_pos` with it,
+/// discarding the saved position rather than resuming it as this load does.
+/// The migration drops the primed loop sequence
 /// because the dump sits at empty-stack Priority (NOT a shortcut window), so the offer must be
 /// rebuilt by a live cast below.
 fn load_realistic_dump() -> GameState {
@@ -60,9 +66,13 @@ fn load_realistic_dump() -> GameState {
     ));
     let envelope: serde_json::Value =
         serde_json::from_str(&json).expect("dump envelope parses as JSON");
-    let raw: GameState = serde_json::from_value(envelope["gameState"].clone())
-        .expect("the realistic 4p gameState must deserialize into the current GameState");
-    PersistedGameState::Raw(Box::new(raw)).into_game_state()
+    // Decode AS `PersistedGameState` rather than decoding a bare `GameState` and wrapping
+    // it in `Raw`: only the former runs `reject_legacy_raw_prompt_authority` and
+    // `decode_persisted_resolution_state`, which is the rest of the production chokepoint.
+    // `.expect(..)`, not `?`: `into_game_state` returns `GameState`, not `Result`.
+    serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
+        .expect("gameState deserializes through the production decoder")
+        .into_game_state()
 }
 
 /// Count the battlefield Saprolings `who` controls (tapped or not) — the fodder reach-guard oracle.

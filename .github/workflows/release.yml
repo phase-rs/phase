@@ -78,6 +78,7 @@ jobs:
       draft_pools_hash16: ${{ steps.card-data-hash.outputs.draft_pools_hash16 }}
     env:
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
+      WRANGLER_VERSION: "4.113.0"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -97,19 +98,8 @@ jobs:
         with:
           tool: wasm-bindgen-cli@0.2.121
 
-      - name: Cache binaryen
-        id: binaryen-cache
-        uses: actions/cache@v4
-        with:
-          path: binaryen-version_123
-          key: binaryen-123-x86_64-linux
-
-      - name: Install binaryen
-        if: steps.binaryen-cache.outputs.cache-hit != 'true'
-        run: curl -L https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-linux.tar.gz | tar xz
-
-      - name: Add binaryen to PATH
-        run: echo "$PWD/binaryen-version_123/bin" >> $GITHUB_PATH
+      - name: Set up Binaryen
+        uses: ./.github/actions/binaryen
 
       - uses: pnpm/action-setup@v4
         with:
@@ -121,6 +111,11 @@ jobs:
           cache: pnpm
           cache-dependency-path: client/pnpm-lock.yaml
 
+      # Pin the R2 client. Bare `npx wrangler` follows npm's latest tag, which
+      # can briefly point at a version whose tarball is not available yet.
+      - name: Install pinned Wrangler
+        run: npm install --global "wrangler@$WRANGLER_VERSION"
+
       - name: Set cache keys
         id: cache-keys
         run: |
@@ -130,7 +125,13 @@ jobs:
         id: mtgjson-key
         uses: ./.github/actions/mtgjson-cache-key
 
-      - name: Cache MTGJSON data
+      # ── Cache restores ─────────────────────────────────────────────────────
+      # Restore-only, with explicit saves placed where each cache's data is
+      # complete — NOT the combined `actions/cache` action, whose save is a
+      # post step declared `post-if: success()` and is therefore skipped
+      # entirely when the job fails or times out. See deploy.yml's copy of this
+      # note for the 2026-07-24 incident that motivated the split.
+      - name: Restore MTGJSON data
         # Full data/mtgjson dir under the `mtgjson-full-` namespace (shared with
         # deploy.yml — both run gen-card-data.sh and populate every file). Kept
         # distinct from ci.yml's partial `mtgjson-atomic-`/`mtgjson-sets-`
@@ -142,7 +143,7 @@ jobs:
         # fresh data; a restore-keys fallback would pin the file-existence-gated
         # fetches to stale data forever.
         id: mtgjson-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: data/mtgjson
           key: mtgjson-full-${{ steps.mtgjson-key.outputs.suffix }}
@@ -152,8 +153,9 @@ jobs:
       # pin them to old data forever. Exact-key-only means a new day misses,
       # the scripts re-fetch, and same-day deploys reuse the fetch — cutting
       # Scryfall API load (and the Cloudflare-throttle flakiness it causes).
-      - name: Cache Scryfall bulk data
-        uses: actions/cache@v4
+      - name: Restore Scryfall bulk data
+        id: scryfall-cache
+        uses: actions/cache/restore@v4
         with:
           path: data/scryfall
           key: scryfall-${{ steps.cache-keys.outputs.day }}
@@ -182,21 +184,97 @@ jobs:
           # data/ itself, so downstream steps can read from data/ uniformly.
 
       - name: Download draft set data
+        id: draft-sets
         # fetch-draft-sets.sh needs SetList.json (produced by gen-card-data.sh).
         # Per-set files land in data/mtgjson/sets/ which is covered by the
-        # mtgjson cache — subsequent runs skip already-downloaded sets.
-        run: ./scripts/fetch-draft-sets.sh
+        # mtgjson cache — subsequent runs skip already-downloaded sets. Left
+        # unconditional even when the pool cache below hits: this is what keeps
+        # the mtgjson entry whole, and it is the only step that repopulates
+        # sets/ after an eviction.
+        #
+        # The script treats a failed set download as non-fatal (warn, count,
+        # exit 0), so the reported count is load-bearing for the pool cache
+        # below — see deploy.yml's copy of this note.
+        run: |
+          set -o pipefail
+          ./scripts/fetch-draft-sets.sh | tee draft-sets.log
+          failed=$(sed -n 's/^Summary: .*failed \([0-9][0-9]*\)$/\1/p' draft-sets.log | tail -1)
+          echo "failed=${failed:-0}" >> "$GITHUB_OUTPUT"
+          echo "set downloads failed: ${failed:-0}"
+
+      - name: Save MTGJSON data
+        # THE earliest point data/mtgjson is complete: fetch-draft-sets.sh is
+        # the last writer into it. Saving here rather than at job end means a
+        # later failure never re-costs the ~9m of downloads.
+        #
+        # Not `always()`: as an inline step a later failure cannot cancel it,
+        # so the only case `always()` would add is an *earlier* failure — i.e.
+        # exactly when the directory is incomplete and must not be frozen under
+        # an immutable key.
+        if: ${{ steps.mtgjson-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: data/mtgjson
+          key: mtgjson-full-${{ steps.mtgjson-key.outputs.suffix }}
+
+      - name: Restore draft pools
+        # Paired with the MTGJSON cache: same `mtgjson-` prefix (so
+        # /clear-caches mtgjson sweeps both) and a suffix built from the same
+        # published-data version — see the mtgjson-cache-key action, which is
+        # the single authority for both keys, shared with deploy.yml.
+        #
+        # A separate entry rather than folding draft-pools.json into the
+        # `data/mtgjson` path above, because actions/cache writes only on a key
+        # miss: a pool-affecting draft-core change must roll the key, and the
+        # data-version key alone cannot see source changes.
+        #
+        # NO restore-keys: every input to the output is in the key, so an
+        # inexact hit is by construction a stale pool.
+        id: draft-pools-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: client/public/draft-pools.json
+          key: mtgjson-draft-pools-${{ steps.mtgjson-key.outputs.draft_pools_suffix }}
 
       - name: Generate draft pools
         # Reads data/mtgjson/sets/*.json → writes client/public/draft-pools.json.
         # Included in data-files.json manifest so it's uploaded to R2 and
         # stripped from the Pages dist automatically.
+        #
+        # ~2s of extraction behind a ~5m30s compile of engine + draft-core:
+        # draft-pool-gen never reuses the units gen-card-data.sh built (see the
+        # feature note below) and pays a full cold compile every run. Skipping
+        # that on a cache hit is the whole point of the step above.
+        #
+        # Gate on file existence, not `cache-hit` (same reasoning as "Download
+        # MTGJSON data"): a poisoned or partial entry reports a hit with no
+        # file, and skipping on that would ship a release with no pools at all.
+        # Absent file → regenerate, so the cache self-heals.
+        #
         # Profile `tool`, not `release`: this is a one-shot JSON transform, not a
         # shipped binary. `release` is the WASM-size profile (lto + codegen-units=1)
         # — the slowest compile in the repo. draft-pool-gen lives in draft-core
         # and can't take `--features cli`, so it gets its own `[tool,default]`
         # engine fingerprint regardless; `tool` just makes that compile cheap.
-        run: cargo run --profile tool --bin draft-pool-gen
+        run: |
+          if [ -f client/public/draft-pools.json ]; then
+            echo "draft-pools.json restored from cache — skipping draft-pool-gen"
+          else
+            cargo run --profile tool --bin draft-pool-gen
+          fi
+
+      - name: Save draft pools
+        # Banked the moment the file exists, so the ~5m30s compile is never
+        # paid twice for the same inputs even if the rest of the job fails.
+        #
+        # Skipped when any set download failed: a pool built from a short
+        # sets/ dir must not be frozen under a key that only rolls when MTGJSON
+        # publishes. See deploy.yml for the full reasoning.
+        if: ${{ steps.draft-pools-cache.outputs.cache-hit != 'true' && steps.draft-sets.outputs.failed == '0' }}
+        uses: actions/cache/save@v4
+        with:
+          path: client/public/draft-pools.json
+          key: mtgjson-draft-pools-${{ steps.mtgjson-key.outputs.draft_pools_suffix }}
 
       - name: Validate card-data against engine schema
         # Deploy gate — refuse to ship card-data the current engine cannot parse.
@@ -230,6 +308,58 @@ jobs:
           ./scripts/gen-scryfall-token-images.sh
           ./scripts/gen-scryfall-sets.sh
           ./scripts/gen-scryfall-printings.sh
+
+      - name: Restore locale card-art maps
+        # Caches the OUTPUT (five small JSON maps), not the ~169 MB AllSetFiles
+        # input the generator downloads to build them. Folding that input into
+        # the `data/mtgjson` entry is not an option: that cache is saved far
+        # earlier (it is complete before this step runs) and GitHub caches are
+        # immutable, so a later hit could never contain it — and the extracted
+        # set files would add ~1 GB to an entry shared with deploy.yml.
+        #
+        # Same `mtgjson-` prefix as the draft-pools pair (so /clear-caches
+        # mtgjson sweeps it) and the same published-data suffix. The generator's
+        # script hash joins the key because LOCALE_MAP lives in the script: a
+        # locale added there must rebuild, and the data-version suffix alone
+        # cannot see a source change.
+        #
+        # NO restore-keys: every input to the output is in the key, so an
+        # inexact hit is by construction a stale map.
+        id: locale-images-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: client/public/scryfall-images.*.json
+          key: mtgjson-locale-images-${{ steps.mtgjson-key.outputs.suffix }}-${{ hashFiles('scripts/gen-scryfall-locale-images.sh') }}
+
+      # Separate from the Scryfall step: this reads MTGJSON set files, not the
+      # Scryfall bulk exports, so it is not covered by the data/scryfall cache.
+      #
+      # The generator no-ops when all five maps are already present, so a cache
+      # hit skips the AllSetFiles download entirely. It gates on the files
+      # themselves rather than `cache-hit` (same reasoning as "Generate draft
+      # pools"): a poisoned or partial entry reports a hit with nothing on disk,
+      # and regenerating on an absent file lets the cache self-heal.
+      - name: Generate locale card-art maps
+        run: ./scripts/gen-scryfall-locale-images.sh
+
+      - name: Save locale card-art maps
+        # Banked the moment the maps exist, so the AllSetFiles download is never
+        # paid twice for the same inputs even if a later step fails.
+        if: ${{ steps.locale-images-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: client/public/scryfall-images.*.json
+          key: mtgjson-locale-images-${{ steps.mtgjson-key.outputs.suffix }}-${{ hashFiles('scripts/gen-scryfall-locale-images.sh') }}
+
+      - name: Save Scryfall bulk data
+        # data/scryfall is complete once the four generators have run. Banking
+        # it here keeps a later failure from re-hitting the Scryfall API on the
+        # next run — the throttle flakiness this cache exists to avoid.
+        if: ${{ steps.scryfall-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: data/scryfall
+          key: scryfall-${{ steps.cache-keys.outputs.day }}
 
       - name: Run semantic audit
         # Produces data/semantic-audit.json with structured findings for cards
@@ -273,7 +403,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           ENGINE_WASM_FILENAME: ${{ steps.engine-wasm-hash.outputs.filename }}
         run: |
-          npx wrangler r2 object put "phase-rs-data/wasm/$ENGINE_WASM_FILENAME" \
+          wrangler r2 object put "phase-rs-data/wasm/$ENGINE_WASM_FILENAME" \
             --file client/src/wasm/engine_wasm_bg.wasm \
             --remote \
             --content-type application/wasm \
@@ -328,12 +458,12 @@ jobs:
           # Content-addressed card-data: immutable, year-long cache. The hash is
           # over the uncompressed file, so the URL stays a valid content key.
           brotli -q 9 -c "client/public/$CARD_DATA_FILENAME" > "$BRDIR/card-data.br"
-          npx wrangler r2 object put "phase-rs-data/$CARD_DATA_FILENAME" --file "$BRDIR/card-data.br" --remote --content-type application/json --content-encoding br --cache-control "public, max-age=31536000, immutable"
+          wrangler r2 object put "phase-rs-data/$CARD_DATA_FILENAME" --file "$BRDIR/card-data.br" --remote --content-type application/json --content-encoding br --cache-control "public, max-age=31536000, immutable"
 
           # Native/server manifests must pin draft pools to immutable content,
           # while the mutable draft-pools.json remains in the shared-file loop.
           brotli -q 9 -c client/public/draft-pools.json > "$BRDIR/draft-pools.br"
-          npx wrangler r2 object put "phase-rs-data/$DRAFT_POOLS_FILENAME" --file "$BRDIR/draft-pools.br" --remote --content-type application/json --content-encoding br --cache-control "public, max-age=31536000, immutable"
+          wrangler r2 object put "phase-rs-data/$DRAFT_POOLS_FILENAME" --file "$BRDIR/draft-pools.br" --remote --content-type application/json --content-encoding br --cache-control "public, max-age=31536000, immutable"
 
           # Mutable shared JSONs. Loop over the manifest.
           while IFS= read -r f; do
@@ -342,7 +472,7 @@ jobs:
               exit 1
             fi
             brotli -q 9 -c "client/public/$f" > "$BRDIR/$f.br"
-            npx wrangler r2 object put "phase-rs-data/$f" --file "$BRDIR/$f.br" --remote --content-type application/json --content-encoding br --cache-control "public, max-age=60, must-revalidate"
+            wrangler r2 object put "phase-rs-data/$f" --file "$BRDIR/$f.br" --remote --content-type application/json --content-encoding br --cache-control "public, max-age=60, must-revalidate"
           done < <(jq -r '.[]' data-files.json)
 
       - name: Verify R2 uploads landed
@@ -412,20 +542,36 @@ jobs:
           retention-days: 90
 
   # ── Server binary compile (linux musl, shared) ──────────────────────────────
-  # Compiles the static musl binary ONCE per release run. Consumed by both
-  # build-server-image (prebuilt Docker image) and build-server's linux leg
-  # (slim server asset), so neither pays a redundant ~10min compile. Needs nothing
-  # the data pipeline produces, so it starts immediately.
+  # Compiles the static musl binaries ONCE per release run, one matrix leg per
+  # image architecture. Consumed by build-server-image (multi-arch prebuilt
+  # image) and build-server's linux leg (slim x86_64 asset), so neither pays a
+  # redundant ~10min compile. Needs nothing the data pipeline produces, so it
+  # starts immediately.
   build-server-binary:
-    name: Build Server Binary (linux)
+    name: Build Server Binary (linux ${{ matrix.arch }})
     needs: [resolve-release-ref]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The zig cross-compile leg does the same ~10min of work as the native one
+    # but has no history on these runners; headroom over the old 30.
+    timeout-minutes: 45
     permissions:
       contents: read
     env:
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
       PHASE_CHANNEL: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # amd64 keeps the native musl-tools build the slim release asset has
+          # always shipped from; arm64 cross-compiles with zig as the C
+          # toolchain (same mechanism as the Dockerfile's compile stage).
+          - arch: amd64
+            triple: x86_64-unknown-linux-musl
+            cargo_cmd: build
+          - arch: arm64
+            triple: aarch64-unknown-linux-musl
+            cargo_cmd: zigbuild
     steps:
       - uses: actions/checkout@v4
         with:
@@ -433,17 +579,31 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          cache-shared-key: rust-server-linux
+          cache-shared-key: rust-server-linux-${{ matrix.arch }}
           # CI owns the warning-as-error gate. Release profiles compile out
           # debug-only assertions, which can legitimately leave their inputs
           # unused in an otherwise CI-clean tagged source tree.
           rustflags: ""
 
-      - name: Install musl tools and target
+      - name: Install musl tools
+        if: matrix.cargo_cmd == 'build'
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
-          rustup target add x86_64-unknown-linux-musl
+
+      - name: Install zig cross toolchain
+        if: matrix.cargo_cmd == 'zigbuild'
+        # --break-system-packages: ubuntu-latest is 24.04, whose default
+        # Python is PEP 668 externally-managed since GitHub reverted its
+        # pip workaround (actions/runner-images#10897, 2025-05-09). Same
+        # flag the Dockerfile already passes for this identical install.
+        run: pip install --break-system-packages cargo-zigbuild==0.23.0 ziglang==0.16.0
+
+      - name: Add musl target
+        # Must be `rustup target add`, not setup-rust-toolchain's `targets:`
+        # input: rust-toolchain.toml pins its own targets list (wasm32 only),
+        # which overrides the action input.
+        run: rustup target add ${{ matrix.triple }}
 
       - name: Build phase-server (static musl)
         # No chmod here: upload-artifact strips the executable bit anyway; both
@@ -452,13 +612,13 @@ jobs:
           # -p scopes feature unification to phase-server's own graph — an
           # unscoped workspace build unifies feed-scraper's native-tls reqwest
           # features in, dragging openssl-sys into the musl cross-compile.
-          cargo build -p phase-server --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
-          cp target/x86_64-unknown-linux-musl/server-release/phase-server ./phase-server
+          cargo ${{ matrix.cargo_cmd }} -p phase-server --profile server-release --bin phase-server --target ${{ matrix.triple }}
+          cp target/${{ matrix.triple }}/server-release/phase-server ./phase-server
 
       - name: Upload server binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: server-binary-linux
+          name: server-binary-linux-${{ matrix.arch }}
           path: phase-server
           if-no-files-found: error
           retention-days: 1
@@ -480,16 +640,20 @@ jobs:
         with:
           ref: ${{ env.RELEASE_SHA }}
 
-      - name: Download server binary
+      - name: Download server binaries
         uses: actions/download-artifact@v4
         with:
-          name: server-binary-linux
-          path: .
+          pattern: server-binary-linux-*
+          path: prebuilt
 
       - name: Verify build context
+        # The Dockerfile's prebuilt stage copies ./phase-server-<arch> per platform.
         run: |
-          test -s phase-server
-          chmod +x phase-server
+          for arch in amd64 arm64; do
+            test -s "prebuilt/server-binary-linux-$arch/phase-server"
+            cp "prebuilt/server-binary-linux-$arch/phase-server" "phase-server-$arch"
+            chmod +x "phase-server-$arch"
+          done
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -498,14 +662,23 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # QEMU only runs the runtime stage's apt-get for the arm64 leg; the
+      # binaries are prebuilt, so nothing heavy is emulated.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v3
+
       - name: Build and push release image
-        # BINARY_STAGE=prebuilt: copy the musl binary from build-server-binary
+        # BINARY_STAGE=prebuilt: copy the musl binaries from build-server-binary
         # instead of compiling in-container — the build is just apt + COPY.
+        # One manifest list covers both platforms under the same tag/digest.
         uses: docker/build-push-action@v6
         env:
           DOCKER_BUILD_RECORD_UPLOAD: false
         with:
           context: .
+          platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
             BINARY_STAGE=prebuilt
@@ -595,21 +768,9 @@ jobs:
           # lobby-worker/broker-wasm/Cargo.toml (schema versions must be exact).
           tool: wasm-bindgen-cli@0.2.121
 
-      - name: Cache binaryen
-        id: binaryen-cache
+      - name: Set up Binaryen
         if: steps.lobby-worker.outputs.exists == 'true'
-        uses: actions/cache@v4
-        with:
-          path: binaryen-version_123
-          key: binaryen-123-x86_64-linux
-
-      - name: Install binaryen
-        if: steps.lobby-worker.outputs.exists == 'true' && steps.binaryen-cache.outputs.cache-hit != 'true'
-        run: curl -L https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-linux.tar.gz | tar xz
-
-      - name: Add binaryen to PATH
-        if: steps.lobby-worker.outputs.exists == 'true'
-        run: echo "$PWD/binaryen-version_123/bin" >> "$GITHUB_PATH"
+        uses: ./.github/actions/binaryen
 
       - name: Deploy lobby Worker to Cloudflare
         if: steps.lobby-worker.outputs.exists == 'true'
@@ -679,7 +840,7 @@ jobs:
         if: matrix.triple == 'x86_64-unknown-linux-musl'
         uses: actions/download-artifact@v4
         with:
-          name: server-binary-linux
+          name: server-binary-linux-amd64
           path: target/x86_64-unknown-linux-musl/server-release
 
       - name: Prepare slim server binary (Unix)
@@ -785,6 +946,7 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY: ${{ secrets.SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY }}
+      WRANGLER_VERSION: "4.113.0"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -799,6 +961,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      - name: Install pinned Wrangler
+        run: npm install --global "wrangler@$WRANGLER_VERSION"
 
       - name: Sign slim server artifacts and publish release data manifest
         # Sign in this Ubuntu finisher so all three OS binaries use one trusted
@@ -865,8 +1030,8 @@ jobs:
             }' > "$manifest"
           sign "$manifest"
 
-          npx wrangler r2 object put "phase-rs-data/desktop/$manifest.minisig" --file "$manifest.minisig" --remote --content-type application/octet-stream --cache-control "public, max-age=31536000, immutable"
-          npx wrangler r2 object put "phase-rs-data/desktop/$manifest" --file "$manifest" --remote --content-type application/json --cache-control "public, max-age=31536000, immutable"
+          wrangler r2 object put "phase-rs-data/desktop/$manifest.minisig" --file "$manifest.minisig" --remote --content-type application/octet-stream --cache-control "public, max-age=31536000, immutable"
+          wrangler r2 object put "phase-rs-data/desktop/$manifest" --file "$manifest" --remote --content-type application/json --cache-control "public, max-age=31536000, immutable"
 
       - name: Download shell updater migration bridge
         id: shell-updater-bridge
@@ -918,26 +1083,54 @@ jobs:
             | { grep -v "^- chore: update coverage" || true; } \
             >> changelog.md
 
+      - name: Build release asset list
+        id: release-assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHELL_UPDATER_BRIDGE_AVAILABLE: ${{ steps.shell-updater-bridge.outputs.available }}
+        run: |
+          set -euo pipefail
+
+          # Immutable releases cannot accept a late asset upload. Include the
+          # optional bridge in the initial create/publish request, but skip it
+          # for recovery runs targeting a release that is already published.
+          release_draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' 2>/dev/null || echo missing)
+          include_bridge=false
+          if [ "$SHELL_UPDATER_BRIDGE_AVAILABLE" = true ] && [ "$release_draft" != false ]; then
+            include_bridge=true
+          elif [ "$SHELL_UPDATER_BRIDGE_AVAILABLE" = true ]; then
+            echo "Release $RELEASE_TAG is already published; skipping optional shell updater migration bridge."
+          fi
+
+          {
+            echo "files<<EOF"
+            cat <<'EOF'
+          artifacts/phase-server-slim-x86_64-unknown-linux-musl/phase-server-slim-x86_64-unknown-linux-musl
+          artifacts/phase-server-slim-x86_64-unknown-linux-musl/phase-server-slim-x86_64-unknown-linux-musl.minisig
+          artifacts/phase-server-slim-aarch64-apple-darwin/phase-server-slim-aarch64-apple-darwin
+          artifacts/phase-server-slim-aarch64-apple-darwin/phase-server-slim-aarch64-apple-darwin.minisig
+          artifacts/phase-server-slim-x86_64-pc-windows-msvc/phase-server-slim-x86_64-pc-windows-msvc.exe
+          artifacts/phase-server-slim-x86_64-pc-windows-msvc/phase-server-slim-x86_64-pc-windows-msvc.exe.minisig
+          release-server-${{ needs.resolve-release-ref.outputs.release_tag }}.json
+          release-server-${{ needs.resolve-release-ref.outputs.release_tag }}.json.minisig
+          EOF
+            if [ "$include_bridge" = true ]; then
+              echo "artifacts/update.json"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           body_path: changelog.md
           fail_on_unmatched_files: true
-          files: |
-            artifacts/phase-server-slim-x86_64-unknown-linux-musl/phase-server-slim-x86_64-unknown-linux-musl
-            artifacts/phase-server-slim-x86_64-unknown-linux-musl/phase-server-slim-x86_64-unknown-linux-musl.minisig
-            artifacts/phase-server-slim-aarch64-apple-darwin/phase-server-slim-aarch64-apple-darwin
-            artifacts/phase-server-slim-aarch64-apple-darwin/phase-server-slim-aarch64-apple-darwin.minisig
-            artifacts/phase-server-slim-x86_64-pc-windows-msvc/phase-server-slim-x86_64-pc-windows-msvc.exe
-            artifacts/phase-server-slim-x86_64-pc-windows-msvc/phase-server-slim-x86_64-pc-windows-msvc.exe.minisig
-            release-server-${{ needs.resolve-release-ref.outputs.release_tag }}.json
-            release-server-${{ needs.resolve-release-ref.outputs.release_tag }}.json.minisig
-
-      - name: Attach shell updater migration bridge
-        if: steps.shell-updater-bridge.outputs.available == 'true'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          fail_on_unmatched_files: true
-          files: artifacts/update.json
+          # Never the "Latest" release. Every asset here is a machine artifact
+          # the desktop shell provisions for itself; the web app ships by
+          # deploy, not by download. These fire far more often than shell
+          # releases, so leaving the badge to default sends anyone visiting
+          # /releases/latest to a page of server binaries with no installer.
+          # The desktop release claims the badge instead (shell-release.yml).
+          make_latest: "false"
+          files: ${{ steps.release-assets.outputs.files }}

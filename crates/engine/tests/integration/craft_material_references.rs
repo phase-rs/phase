@@ -22,8 +22,8 @@ use engine::game::quantity::resolve_quantity;
 use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AggregateFunction, ContinuousModification, Effect, ManaProduction, ObjectProperty,
-    QuantityExpr, QuantityRef, StaticDefinition, TargetFilter,
+    AggregateFunction, CardTypeSetSource, ContinuousModification, Effect, ManaProduction,
+    ObjectProperty, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter,
 };
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{ExileLink, ExileLinkKind, GameState};
@@ -198,12 +198,15 @@ fn sunbird_effigy_pt_is_distinct_colors_of_craft_materials() {
     for (label, qty) in [("power", &power), ("toughness", &toughness)] {
         match qty {
             QuantityExpr::Ref {
-                qty: QuantityRef::DistinctColorsAmongPermanents { filter },
+                qty:
+                    QuantityRef::DistinctColorsAmong {
+                        source: CardTypeSetSource::Objects { filter },
+                    },
             } => assert!(
                 filter_reads_exiled_by_source(filter),
                 "{label} colors must read ExiledBySource, got {filter:?}"
             ),
-            other => panic!("{label}: expected DistinctColorsAmongPermanents, got {other:?}"),
+            other => panic!("{label}: expected DistinctColorsAmong(Objects), got {other:?}"),
         }
     }
 

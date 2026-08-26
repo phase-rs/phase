@@ -2,20 +2,23 @@ use rand::Rng;
 use std::collections::{HashSet, VecDeque};
 use thiserror::Error;
 
-use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
+use crate::types::ability::{DurationEvent, EffectKind, KeywordAction, TargetRef};
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::actions::{
-    GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp, TriggerOrderTemplateOp,
+    DebugAction, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp, ResolveAllConsentDecision,
+    TriggerOrderTemplateOp,
 };
-use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, PlayerActionKind};
+use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
-    ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode, ManaAbilityResume,
-    MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume, RetargetScope, StackEntry,
-    StackEntryKind, WaitingFor,
+    CastingVariant, ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode,
+    ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume,
+    PendingCounterPostAction, PendingEffectResolved, ResolveAllConsentParticipant,
+    ResolveAllConsentRun, ResolveAllPrioritySnapshot, RetargetScope, StackEntry, StackEntryKind,
+    WaitingFor,
 };
-use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -23,9 +26,9 @@ use crate::types::player::PlayerId;
 use crate::types::resolution::debug_assert_runtime_resolution_invariants;
 use crate::types::resolved_commands::{
     ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
-    ResolvedRulesCommand,
+    ResolvedOncePerTurnPermission, ResolvedRulesCommand,
 };
-use crate::types::statics::StaticMode;
+use crate::types::statics::{CastFrequency, StaticMode};
 use crate::types::zones::Zone;
 
 use super::ability_utils::{
@@ -34,7 +37,10 @@ use super::ability_utils::{
 };
 use super::casting;
 use super::casting_costs;
+use super::companion;
+use super::crew_payment;
 use super::effects;
+use super::end_continuous_effect;
 use super::engine_casting;
 use super::engine_combat;
 use super::engine_modes;
@@ -44,19 +50,24 @@ use super::engine_replacement;
 use super::engine_resolution_choices;
 use super::engine_stack;
 use super::interaction;
+use super::keywords;
 use super::mana_abilities;
 use super::mana_payment;
 use super::mana_sources;
 use super::match_flow;
+use super::morph;
 use super::mulligan;
+use super::planechase;
 use super::planeswalker;
 use super::priority;
 use super::public_state::{
     bump_state_revision, finalize_display_state, finalize_public_state, finalize_rules_state,
     mark_public_state_all_dirty, mark_public_state_from_events, sync_waiting_for,
 };
+use super::room;
 use super::sba;
 use super::splice;
+use super::transform;
 use super::triggers;
 use super::turn_control;
 use super::turns;
@@ -65,7 +76,10 @@ use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use super::zones;
 
 pub use super::engine_resolve_batch::{
-    resolve_all_fast_forward, ResolveAllCallbackDecision, ResolveAllFastForwardResult,
+    pending_resolve_all_ready_requester, recover_orphaned_resolve_all, resolve_all_fast_forward,
+    resolve_all_ready_access, resolve_all_ready_prefix, resolve_all_ready_prefix_with,
+    ResolveAllCallbackDecision, ResolveAllContinuation, ResolveAllFastForwardResult,
+    ResolveAllReadyAccess,
 };
 
 #[derive(Debug, Clone, Error)]
@@ -80,6 +94,634 @@ pub enum EngineError {
     ActionNotAllowed(String),
 }
 
+/// The three non-interchangeable authorities carried by a live Priority
+/// window. This is deliberately restricted to `game`: only engine-owned
+/// preflight providers may name it, and only this module can construct it.
+pub(in crate::game) struct PriorityPrincipal {
+    semantic_holder: PlayerId,
+    authenticated_actor: PlayerId,
+    land_resource_owner: PlayerId,
+}
+
+/// Why an actionless Priority preflight cannot safely proceed. These failures
+/// are intentionally distinct from ordinary reducer errors: no mandatory
+/// transition may turn an uncertain Priority window into a pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::game) enum PriorityPreflightIndeterminate {
+    NotPriority,
+    PriorityAuthorityMismatch,
+    SharedTeamHolderOutsideActiveTeam,
+}
+
+impl PriorityPrincipal {
+    fn from_priority_window(state: &GameState) -> Result<Self, PriorityPreflightIndeterminate> {
+        let semantic_holder = match &state.waiting_for {
+            WaitingFor::Priority { player } => *player,
+            _ => return Err(PriorityPreflightIndeterminate::NotPriority),
+        };
+        let authenticated_actor =
+            turn_control::authorized_submitter_for_player(state, semantic_holder);
+        if state.priority_player != authenticated_actor {
+            return Err(PriorityPreflightIndeterminate::PriorityAuthorityMismatch);
+        }
+        let land_resource_owner = if state.format_config.topology().has_shared_team_turns() {
+            if !super::topology::team_members(state, state.active_player).contains(&semantic_holder)
+            {
+                return Err(PriorityPreflightIndeterminate::SharedTeamHolderOutsideActiveTeam);
+            }
+            semantic_holder
+        } else {
+            turn_control::turn_resource_owner(state)
+        };
+        Ok(Self {
+            semantic_holder,
+            authenticated_actor,
+            land_resource_owner,
+        })
+    }
+
+    pub(in crate::game) fn semantic_holder(&self) -> PlayerId {
+        self.semantic_holder
+    }
+
+    pub(in crate::game) fn authenticated_actor(&self) -> PlayerId {
+        self.authenticated_actor
+    }
+
+    pub(in crate::game) fn land_resource_owner(&self) -> PlayerId {
+        self.land_resource_owner
+    }
+}
+
+/// Build the authoritative Priority principal for the private mandatory
+/// transition preflight. Callers receive no fallback identity when a Priority
+/// window is stale or absent.
+pub(in crate::game) fn priority_principal_for_preflight(
+    state: &GameState,
+) -> Result<PriorityPrincipal, PriorityPreflightIndeterminate> {
+    PriorityPrincipal::from_priority_window(state)
+}
+
+/// The closed set of ordinary Priority reducer families that can make a
+/// mandatory transition unsafe. `PassPriority` and `SetAutoPass` deliberately
+/// have no member: neither proves the holder has a meaningful action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::game) enum PriorityReducerFamily {
+    PlayLand,
+    TapLandForMana,
+    ActivateManaSource,
+    UntapLandForMana,
+    CastSpell,
+    Foretell,
+    ActivateAbility,
+    UnlockRoomDoor,
+    RollPlanarDie,
+    Equip,
+    CrewVehicle,
+    ActivateStation,
+    SaddleMount,
+    Transform,
+    ActivateNinjutsu,
+    CastSpellAsSneak,
+    CastSpellAsWebSlinging,
+    CastSpellForFree,
+    PlayFaceDown,
+    TurnFaceUp,
+    CompanionToHand,
+    EndContinuousEffect,
+    CastPreparedCopy,
+}
+
+impl PriorityReducerFamily {
+    const ALL: [Self; 23] = [
+        Self::PlayLand,
+        Self::TapLandForMana,
+        Self::ActivateManaSource,
+        Self::UntapLandForMana,
+        Self::CastSpell,
+        Self::Foretell,
+        Self::ActivateAbility,
+        Self::UnlockRoomDoor,
+        Self::RollPlanarDie,
+        Self::Equip,
+        Self::CrewVehicle,
+        Self::ActivateStation,
+        Self::SaddleMount,
+        Self::Transform,
+        Self::ActivateNinjutsu,
+        Self::CastSpellAsSneak,
+        Self::CastSpellAsWebSlinging,
+        Self::CastSpellForFree,
+        Self::PlayFaceDown,
+        Self::TurnFaceUp,
+        Self::CompanionToHand,
+        Self::EndContinuousEffect,
+        Self::CastPreparedCopy,
+    ];
+}
+
+/// The reason a Priority preflight cannot establish that passing is safe.
+/// This stays private because mandatory progression only distinguishes
+/// `Actionless` from every other outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::game) enum PriorityPreflightBlock {
+    Principal(PriorityPreflightIndeterminate),
+    RequiresChosenX,
+    ReducerRejected,
+}
+
+/// The only outcomes a mandatory transition may observe at Priority. Only
+/// `Actionless` permits a transition; every other result is an uncharged block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::game) enum PriorityPreflight {
+    Actionless,
+    Actionable {
+        family: PriorityReducerFamily,
+    },
+    NotPriorityWindow,
+    Indeterminate {
+        family: Option<PriorityReducerFamily>,
+        block: PriorityPreflightBlock,
+    },
+}
+
+/// Engine-only read capability for the eventual provider-owned announcement
+/// facades. It is non-unit and has no cloning or default construction so sibling
+/// providers can name it in a borrowed accessor without manufacturing one.
+pub(in crate::game) struct PriorityAnnouncementFacadeAccess {
+    engine_only: std::marker::PhantomData<fn() -> ()>,
+}
+
+impl PriorityAnnouncementFacadeAccess {
+    fn new() -> Self {
+        Self {
+            engine_only: std::marker::PhantomData,
+        }
+    }
+}
+
+/// One typed, engine-authored primer for a normal Priority reducer arm. The
+/// enum is intentionally private: it is neither an action protocol nor an AI
+/// candidate API, and conversion is confined to the facade below.
+enum PriorityAnnouncement {
+    PlayLand(casting::PriorityPlayLandAnnouncement),
+    TapLandForMana(mana_sources::PriorityLandManaAnnouncement),
+    ActivateManaSource(mana_sources::PriorityNonlandManaAnnouncement),
+    UntapLandForMana(mana_sources::PriorityUntapLandAnnouncement),
+    CastSpell(casting::PriorityCastSpellAnnouncement),
+    Foretell(casting::PriorityForetellAnnouncement),
+    ActivateAbility(casting::PriorityActivateAbilityAnnouncement),
+    UnlockRoomDoor(room::PriorityUnlockRoomDoorAnnouncement),
+    RollPlanarDie(planechase::PriorityPlanarDieAnnouncement),
+    Equip(effects::attach::PriorityEquipAnnouncement),
+    CrewVehicle(crew_payment::PriorityCrewAnnouncement),
+    ActivateStation(crew_payment::PriorityStationAnnouncement),
+    SaddleMount(crew_payment::PrioritySaddleAnnouncement),
+    Transform(transform::PriorityTransformAnnouncement),
+    ActivateNinjutsu(keywords::PriorityNinjutsuAnnouncement),
+    CastSpellAsSneak(casting::PrioritySneakAnnouncement),
+    CastSpellAsWebSlinging(casting::PriorityWebSlingingAnnouncement),
+    CastSpellForFree(casting::PriorityCastFreeAnnouncement),
+    PlayFaceDown(morph::PriorityPlayFaceDownAnnouncement),
+    TurnFaceUp(morph::PriorityTurnFaceUpAnnouncement),
+    CompanionToHand(companion::PriorityCompanionAnnouncement),
+    EndContinuousEffect(end_continuous_effect::PriorityEndContinuousEffectAnnouncement),
+    CastPreparedCopy(effects::prepare::PriorityPreparedCopyAnnouncement),
+}
+
+impl PriorityAnnouncement {
+    fn family(&self) -> PriorityReducerFamily {
+        match self {
+            Self::PlayLand(_) => PriorityReducerFamily::PlayLand,
+            Self::TapLandForMana(_) => PriorityReducerFamily::TapLandForMana,
+            Self::ActivateManaSource(_) => PriorityReducerFamily::ActivateManaSource,
+            Self::UntapLandForMana(_) => PriorityReducerFamily::UntapLandForMana,
+            Self::CastSpell(_) => PriorityReducerFamily::CastSpell,
+            Self::Foretell(_) => PriorityReducerFamily::Foretell,
+            Self::ActivateAbility(_) => PriorityReducerFamily::ActivateAbility,
+            Self::UnlockRoomDoor(_) => PriorityReducerFamily::UnlockRoomDoor,
+            Self::RollPlanarDie(_) => PriorityReducerFamily::RollPlanarDie,
+            Self::Equip(_) => PriorityReducerFamily::Equip,
+            Self::CrewVehicle(_) => PriorityReducerFamily::CrewVehicle,
+            Self::ActivateStation(_) => PriorityReducerFamily::ActivateStation,
+            Self::SaddleMount(_) => PriorityReducerFamily::SaddleMount,
+            Self::Transform(_) => PriorityReducerFamily::Transform,
+            Self::ActivateNinjutsu(_) => PriorityReducerFamily::ActivateNinjutsu,
+            Self::CastSpellAsSneak(_) => PriorityReducerFamily::CastSpellAsSneak,
+            Self::CastSpellAsWebSlinging(_) => PriorityReducerFamily::CastSpellAsWebSlinging,
+            Self::CastSpellForFree(_) => PriorityReducerFamily::CastSpellForFree,
+            Self::PlayFaceDown(_) => PriorityReducerFamily::PlayFaceDown,
+            Self::TurnFaceUp(_) => PriorityReducerFamily::TurnFaceUp,
+            Self::CompanionToHand(_) => PriorityReducerFamily::CompanionToHand,
+            Self::EndContinuousEffect(_) => PriorityReducerFamily::EndContinuousEffect,
+            Self::CastPreparedCopy(_) => PriorityReducerFamily::CastPreparedCopy,
+        }
+    }
+}
+
+/// The sole Priority-announcement conversion path. It creates a local access
+/// capability before exhaustively rebuilding the ordinary reducer action.
+fn priority_announcement_to_action(announcement: PriorityAnnouncement) -> GameAction {
+    let _access = PriorityAnnouncementFacadeAccess::new();
+    match announcement {
+        PriorityAnnouncement::PlayLand(announcement) => GameAction::PlayLand {
+            object_id: announcement.object_id(&_access),
+            card_id: announcement.card_id(&_access),
+        },
+        PriorityAnnouncement::TapLandForMana(announcement) => GameAction::TapLandForMana {
+            selection: announcement.selection(&_access).clone(),
+        },
+        PriorityAnnouncement::ActivateManaSource(announcement) => GameAction::ActivateManaSource {
+            selection: announcement.selection(&_access).clone(),
+        },
+        PriorityAnnouncement::UntapLandForMana(announcement) => GameAction::UntapLandForMana {
+            object_id: announcement.object_id(&_access),
+        },
+        PriorityAnnouncement::CastSpell(announcement) => GameAction::CastSpell {
+            object_id: announcement.object_id(&_access),
+            card_id: announcement.card_id(&_access),
+            targets: Vec::new(),
+            payment_mode: announcement.payment_mode(&_access),
+        },
+        PriorityAnnouncement::Foretell(announcement) => GameAction::Foretell {
+            object_id: announcement.object_id(&_access),
+            card_id: announcement.card_id(&_access),
+        },
+        PriorityAnnouncement::ActivateAbility(announcement) => GameAction::ActivateAbility {
+            source_id: announcement.source_id(&_access),
+            ability_index: announcement.ability_index(&_access),
+        },
+        PriorityAnnouncement::UnlockRoomDoor(announcement) => GameAction::UnlockRoomDoor {
+            object_id: announcement.object_id(&_access),
+            door: announcement.door(&_access),
+        },
+        PriorityAnnouncement::RollPlanarDie(_) => GameAction::RollPlanarDie,
+        PriorityAnnouncement::Equip(announcement) => {
+            let equipment_id = announcement.equipment_id(&_access);
+            GameAction::Equip {
+                equipment_id,
+                // The Priority reducer ignores this field and enters its normal
+                // target-selection flow when the choice is not forced.
+                target_id: equipment_id,
+            }
+        }
+        PriorityAnnouncement::CrewVehicle(announcement) => GameAction::CrewVehicle {
+            vehicle_id: announcement.vehicle_id(&_access),
+            creature_ids: Vec::new(),
+        },
+        PriorityAnnouncement::ActivateStation(announcement) => GameAction::ActivateStation {
+            spacecraft_id: announcement.spacecraft_id(&_access),
+            creature_id: None,
+        },
+        PriorityAnnouncement::SaddleMount(announcement) => GameAction::SaddleMount {
+            mount_id: announcement.mount_id(&_access),
+            creature_ids: Vec::new(),
+        },
+        PriorityAnnouncement::Transform(announcement) => GameAction::Transform {
+            object_id: announcement.object_id(&_access),
+        },
+        PriorityAnnouncement::ActivateNinjutsu(announcement) => GameAction::ActivateNinjutsu {
+            ninjutsu_object_id: announcement.ninjutsu_object_id(&_access),
+            creature_to_return: announcement.creature_to_return(&_access),
+        },
+        PriorityAnnouncement::CastSpellAsSneak(announcement) => GameAction::CastSpellAsSneak {
+            hand_object: announcement.hand_object(&_access),
+            card_id: announcement.card_id(&_access),
+            creature_to_return: announcement.creature_to_return(&_access),
+            payment_mode: announcement.payment_mode(&_access),
+        },
+        PriorityAnnouncement::CastSpellAsWebSlinging(announcement) => {
+            GameAction::CastSpellAsWebSlinging {
+                hand_object: announcement.hand_object(&_access),
+                card_id: announcement.card_id(&_access),
+                creature_to_return: announcement.creature_to_return(&_access),
+                payment_mode: announcement.payment_mode(&_access),
+            }
+        }
+        PriorityAnnouncement::CastSpellForFree(announcement) => GameAction::CastSpellForFree {
+            object_id: announcement.object_id(&_access),
+            card_id: announcement.card_id(&_access),
+            source_id: announcement.source_id(&_access),
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+        PriorityAnnouncement::PlayFaceDown(announcement) => GameAction::PlayFaceDown {
+            object_id: announcement.object_id(&_access),
+            card_id: announcement.card_id(&_access),
+        },
+        PriorityAnnouncement::TurnFaceUp(announcement) => GameAction::TurnFaceUp {
+            object_id: announcement.object_id(&_access),
+            x: 0,
+        },
+        PriorityAnnouncement::CompanionToHand(_) => GameAction::CompanionToHand,
+        PriorityAnnouncement::EndContinuousEffect(announcement) => {
+            GameAction::EndContinuousEffect {
+                group: announcement.group(&_access),
+                source_name: announcement.source_name(&_access).to_string(),
+                cost: announcement.cost(&_access).clone(),
+            }
+        }
+        PriorityAnnouncement::CastPreparedCopy(announcement) => GameAction::CastPreparedCopy {
+            source: announcement.source_id(&_access),
+        },
+    }
+}
+
+fn apply_priority_announcement(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+    announcement: PriorityAnnouncement,
+) -> Result<ActionResult, EngineError> {
+    let mut projected = state.clone();
+    let action = priority_announcement_to_action(announcement);
+    apply_interaction_for_simulation(
+        &mut projected,
+        principal.authenticated_actor(),
+        principal.semantic_holder(),
+        action,
+    )
+}
+
+enum PriorityPreflightCandidate {
+    Announcement(PriorityAnnouncement),
+    Indeterminate {
+        family: PriorityReducerFamily,
+        block: PriorityPreflightBlock,
+    },
+}
+
+impl PriorityPreflightCandidate {
+    fn family(&self) -> PriorityReducerFamily {
+        match self {
+            Self::Announcement(announcement) => announcement.family(),
+            Self::Indeterminate { family, .. } => *family,
+        }
+    }
+}
+
+/// Enumerate only reducer-shaped, finite Priority primers from the engine's
+/// existing legality authorities. This intentionally never reaches into
+/// `ai_support`: tactical candidates are neither complete nor an authority for
+/// mandatory progress.
+fn priority_preflight_candidates(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityPreflightCandidate> {
+    let semantic_holder = principal.semantic_holder();
+    let mut candidates = Vec::new();
+    let split_second_active = super::keywords::stack_has_split_second(state);
+    let is_active = state.active_player == semantic_holder;
+    candidates.extend(
+        casting::priority_play_land_announcements(state, principal)
+            .into_iter()
+            .map(PriorityAnnouncement::PlayLand)
+            .map(PriorityPreflightCandidate::Announcement),
+    );
+
+    let (land_mana_announcements, nonland_mana_announcements) =
+        mana_sources::priority_mana_announcements(state, principal).into_partitioned();
+    candidates.extend(
+        land_mana_announcements
+            .into_iter()
+            .map(PriorityAnnouncement::TapLandForMana)
+            .map(PriorityPreflightCandidate::Announcement),
+    );
+    candidates.extend(
+        nonland_mana_announcements
+            .into_iter()
+            .map(PriorityAnnouncement::ActivateManaSource)
+            .map(PriorityPreflightCandidate::Announcement),
+    );
+    candidates.extend(
+        mana_sources::priority_untap_land_announcements(state, principal)
+            .into_iter()
+            .map(PriorityAnnouncement::UntapLandForMana)
+            .map(PriorityPreflightCandidate::Announcement),
+    );
+
+    if !split_second_active {
+        candidates.extend(
+            casting::priority_cast_spell_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::CastSpell)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+        candidates.extend(
+            casting::priority_cast_free_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::CastSpellForFree)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+
+        candidates.extend(
+            casting::priority_activate_ability_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::ActivateAbility)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+
+        candidates.extend(
+            effects::attach::priority_equip_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::Equip)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+
+        candidates.extend(
+            transform::priority_transform_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::Transform)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+
+        candidates.extend(
+            effects::prepare::priority_prepared_copy_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::CastPreparedCopy)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+
+        let (crew_announcements, station_announcements, saddle_announcements) =
+            crew_payment::priority_tap_payment_announcements(state, principal).into_partitioned();
+        candidates.extend(
+            crew_announcements
+                .into_iter()
+                .map(PriorityAnnouncement::CrewVehicle)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+        candidates.extend(
+            station_announcements
+                .into_iter()
+                .map(PriorityAnnouncement::ActivateStation)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+        candidates.extend(
+            saddle_announcements
+                .into_iter()
+                .map(PriorityAnnouncement::SaddleMount)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+
+        candidates.extend(
+            room::priority_unlock_room_door_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::UnlockRoomDoor)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+
+        candidates.extend(
+            keywords::priority_ninjutsu_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::ActivateNinjutsu)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+
+        candidates.extend(
+            casting::priority_sneak_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::CastSpellAsSneak)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+
+        candidates.extend(
+            casting::priority_web_slinging_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::CastSpellAsWebSlinging)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+    }
+
+    if is_active {
+        candidates.extend(
+            casting::priority_foretell_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::Foretell)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+        candidates.extend(
+            morph::priority_play_face_down_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::PlayFaceDown)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+    }
+
+    candidates.extend(
+        morph::priority_turn_face_up_candidates(state, principal)
+            .into_iter()
+            .map(|candidate| match candidate {
+                morph::PriorityTurnFaceUpCandidate::Ready(announcement) => {
+                    PriorityPreflightCandidate::Announcement(PriorityAnnouncement::TurnFaceUp(
+                        announcement,
+                    ))
+                }
+                morph::PriorityTurnFaceUpCandidate::RequiresChosenX => {
+                    PriorityPreflightCandidate::Indeterminate {
+                        family: PriorityReducerFamily::TurnFaceUp,
+                        block: PriorityPreflightBlock::RequiresChosenX,
+                    }
+                }
+            }),
+    );
+
+    if let Some(announcement) = companion::priority_companion_announcement(state, principal) {
+        candidates.push(PriorityPreflightCandidate::Announcement(
+            PriorityAnnouncement::CompanionToHand(announcement),
+        ));
+    }
+    candidates.extend(
+        end_continuous_effect::priority_end_continuous_effect_announcements(state, principal)
+            .into_iter()
+            .map(PriorityAnnouncement::EndContinuousEffect)
+            .map(PriorityPreflightCandidate::Announcement),
+    );
+    if let Some(announcement) = planechase::priority_planar_die_announcement(state, principal) {
+        candidates.push(PriorityPreflightCandidate::Announcement(
+            PriorityAnnouncement::RollPlanarDie(announcement),
+        ));
+    }
+    candidates
+}
+
+/// Probe every finite Priority primer through exactly one normal interaction
+/// boundary on an isolated clone. A reducer rejection is not interpreted as a
+/// pass: it remains an indeterminate mandatory-transition block.
+pub(in crate::game) fn preflight_priority_window(state: &GameState) -> PriorityPreflight {
+    debug_assert_eq!(PriorityReducerFamily::ALL.len(), 23);
+    let principal = match priority_principal_for_preflight(state) {
+        Ok(principal) => principal,
+        Err(PriorityPreflightIndeterminate::NotPriority) => {
+            return PriorityPreflight::NotPriorityWindow;
+        }
+        Err(block) => {
+            return PriorityPreflight::Indeterminate {
+                family: None,
+                block: PriorityPreflightBlock::Principal(block),
+            };
+        }
+    };
+    let mut candidates = priority_preflight_candidates(state, &principal);
+    for family in PriorityReducerFamily::ALL {
+        let Some(index) = candidates
+            .iter()
+            .position(|candidate| candidate.family() == family)
+        else {
+            continue;
+        };
+        match candidates.remove(index) {
+            PriorityPreflightCandidate::Indeterminate { block, .. } => {
+                return PriorityPreflight::Indeterminate {
+                    family: Some(family),
+                    block,
+                };
+            }
+            PriorityPreflightCandidate::Announcement(announcement) => {
+                match apply_priority_announcement(state, &principal, announcement) {
+                    Ok(_) => return PriorityPreflight::Actionable { family },
+                    Err(_) => {
+                        return PriorityPreflight::Indeterminate {
+                            family: Some(family),
+                            block: PriorityPreflightBlock::ReducerRejected,
+                        };
+                    }
+                }
+            }
+        }
+    }
+    PriorityPreflight::Actionless
+}
+
+/// The narrow admission gate for engine-owned prospective progress. It keeps
+/// the detailed preflight result private to `game` while ensuring a caller can
+/// advance only an already-proven actionless Priority window.
+pub(crate) fn priority_window_is_actionless_for_mandatory_progress(state: &GameState) -> bool {
+    matches!(
+        preflight_priority_window(state),
+        PriorityPreflight::Actionless
+    )
+}
+
+/// Submit the sole ordinary pass for an already-proven actionless Priority
+/// window during an engine-owned prospective simulation. The caller receives
+/// no actor, semantic holder, or action-construction authority.
+pub(crate) fn apply_actionless_priority_pass_for_prospective(
+    state: &mut GameState,
+) -> Result<ProspectiveSimulationOutcome, EngineError> {
+    let principal = priority_principal_for_preflight(state).map_err(|_| {
+        EngineError::ActionNotAllowed("Priority is not safe for mandatory progress".to_string())
+    })?;
+    if !priority_window_is_actionless_for_mandatory_progress(state) {
+        return Err(EngineError::ActionNotAllowed(
+            "Priority is not actionless".to_string(),
+        ));
+    }
+    apply_interaction_for_prospective_simulation(
+        state,
+        principal.authenticated_actor(),
+        principal.semantic_holder(),
+        GameAction::PassPriority,
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublicFinalizeMode {
     Immediate,
@@ -90,11 +732,17 @@ pub enum PublicFinalizeMode {
 /// selected contribution. Once helper payment has started or completed, its
 /// resources may have changed and cancellation cannot roll that prefix back.
 fn ensure_assist_cancellation_is_allowed(state: &GameState) -> Result<(), EngineError> {
+    let pending = state
+        .pending_cast
+        .as_deref()
+        .or_else(|| state.waiting_for.pending_cast_ref());
+    if pending.is_some_and(|pending| pending.activation_cost_committed) {
+        return Err(EngineError::ActionNotAllowed(
+            "Cannot cancel an activation after a cost is paid".to_string(),
+        ));
+    }
     if matches!(
-        state
-            .pending_cast
-            .as_deref()
-            .map(|pending| pending.assist_state),
+        pending.map(|pending| pending.assist_state),
         Some(AssistState::PaymentStarted { .. } | AssistState::Paid { .. })
     ) {
         return Err(EngineError::ActionNotAllowed(
@@ -146,14 +794,20 @@ fn handle_unlock_room_door(
                 "That door is already unlocked".to_string(),
             ));
         }
+        // CR 709.5e + CR 707.2: the unlock cost is the locked HALF's mana cost,
+        // read from the EFFECTIVE halves (printed order) — the copied snapshot
+        // when a copy effect applies, else the object's own printed halves
+        // (whose orientation `room::own_room_halves` resolves through
+        // `live_face_door`, the same CR 709.5d mapping as before).
+        let halves = super::room::effective_room_halves(obj);
         match door {
-            crate::game::game_object::RoomDoor::Left => obj.mana_cost.clone(),
-            crate::game::game_object::RoomDoor::Right => obj
-                .back_face
+            crate::game::game_object::RoomDoor::Left => halves.left.mana_cost.clone(),
+            crate::game::game_object::RoomDoor::Right => halves
+                .right
                 .as_ref()
-                .map(|face| face.mana_cost.clone())
+                .map(|half| half.mana_cost.clone())
                 .ok_or_else(|| {
-                    EngineError::ActionNotAllowed("Room has no right door face".to_string())
+                    EngineError::ActionNotAllowed("Room has no second door face".to_string())
                 })?,
         }
     };
@@ -230,7 +884,7 @@ pub fn apply_for_simulation(
 /// submitting connection; `semantic_owner` is the player whose decision slot
 /// the opaque interaction capability names. They differ when another player
 /// controls that player's decisions.
-pub(crate) fn apply_interaction(
+pub fn apply_interaction(
     state: &mut GameState,
     authenticated_actor: PlayerId,
     semantic_owner: PlayerId,
@@ -258,6 +912,48 @@ pub(crate) fn apply_interaction_for_simulation(
         action,
         PublicFinalizeMode::DeferredDisplay,
     )
+}
+
+/// Apply one reducer-backed action for a prospective route and retain only the
+/// observation sidecar emitted by its successful outer action boundary.
+///
+/// Rules state, events, and ordinary simulation behavior remain identical to
+/// `apply_interaction_for_simulation`; the additional data is deliberately
+/// opaque and cannot be forged into a live action.
+pub(crate) fn apply_interaction_for_prospective_simulation(
+    state: &mut GameState,
+    authenticated_actor: PlayerId,
+    semantic_owner: PlayerId,
+    action: GameAction,
+) -> Result<ProspectiveSimulationOutcome, EngineError> {
+    let raw = apply_action_boundary_core(state, authenticated_actor, semantic_owner, action, None)?;
+    let (action, lifecycle_facts) = finish_action_boundary_with_lifecycle(
+        state,
+        raw,
+        PublicFinalizeMode::DeferredDisplay,
+        true,
+    )?;
+    Ok(ProspectiveSimulationOutcome {
+        action,
+        lifecycle_facts,
+    })
+}
+
+/// Apply exactly the reducer portion of an interaction action for the
+/// clone-local life-safety preview. The normal public/simulation entry points
+/// continue through the complete reconciliation and presentation boundary.
+pub(crate) fn apply_interaction_pre_reconciliation_for_life_safety(
+    state: &mut GameState,
+    authenticated_actor: PlayerId,
+    semantic_owner: PlayerId,
+    action: GameAction,
+) -> Result<ActionResult, EngineError> {
+    let raw = apply_action_boundary_core(state, authenticated_actor, semantic_owner, action, None)?;
+    let RawActionApplication {
+        result, lifecycle, ..
+    } = raw;
+    lifecycle.discard();
+    Ok(result)
 }
 
 pub(super) fn apply_action_boundary(
@@ -294,9 +990,149 @@ pub(super) fn apply_action_boundary_with_stack_limit(
     mode: PublicFinalizeMode,
     stack_resolution_limit: Option<u32>,
 ) -> Result<ActionResult, EngineError> {
-    mana_sources::preflight_tap_land_action(state, semantic_owner, &action)?;
+    // A zero-count debug create is intentionally a true no-op. It still passes
+    // both the ordinary action-authority check and the sandbox capability
+    // gate, but must not enter an action lifecycle frame: doing so would bump
+    // revisions, run finalization, and make the WASM adapter invalidate a
+    // replay despite no object having been requested.
+    if let GameAction::Debug(debug_action) = &action {
+        if debug_action.is_zero_count_create() {
+            check_actor_authorization(state, authenticated_actor, &action)?;
+            preflight_debug_action(state, semantic_owner, debug_action)?;
+            return Ok(ActionResult {
+                events: vec![],
+                waiting_for: state.waiting_for.clone(),
+                log_entries: vec![],
+            });
+        }
+    }
+    let raw = apply_action_boundary_core(
+        state,
+        authenticated_actor,
+        semantic_owner,
+        action,
+        stack_resolution_limit,
+    )?;
+    finish_action_boundary(state, raw, mode)
+}
+
+struct RawActionApplication {
+    result: ActionResult,
+    journal_start: usize,
+    is_actor_scoped_preference: bool,
+    boundary_snapshot: GameState,
+    previous_interaction_waiting: WaitingFor,
+    previous_interaction_slots: Vec<crate::types::interaction::ActiveInteractionSlot>,
+    submitted_interaction_owner: Option<PlayerId>,
+    preserve_interaction: bool,
+    lifecycle: super::lifecycle::ActionLifecycleGuard,
+}
+
+/// Receipt-relevant observations from one prospective action. The lifecycle
+/// frame itself remains private to `game`; consumers only receive exact,
+/// immutable delayed-trigger facts after a successful outer boundary.
+pub(crate) struct ProspectiveSimulationOutcome {
+    pub(crate) action: ActionResult,
+    lifecycle_facts: Option<super::lifecycle::ProspectiveLifecycleFacts>,
+}
+
+impl ProspectiveSimulationOutcome {
+    pub(crate) fn has_outer_lifecycle_facts(&self) -> bool {
+        self.lifecycle_facts.is_some()
+    }
+
+    pub(crate) fn delayed_installations(
+        &self,
+    ) -> impl Iterator<Item = (DelayedTriggerOrigin, ObjectId, PlayerId)> + '_ {
+        self.lifecycle_facts
+            .iter()
+            .flat_map(|facts| facts.delayed_installations())
+    }
+
+    pub(crate) fn receipt_finished_normally(&self, origin: DelayedTriggerOrigin) -> bool {
+        self.lifecycle_facts
+            .as_ref()
+            .is_some_and(|facts| facts.receipt_finished_normally(origin))
+    }
+
+    pub(crate) fn receipt_terminalized(&self, origin: DelayedTriggerOrigin) -> bool {
+        self.lifecycle_facts
+            .as_ref()
+            .is_some_and(|facts| facts.receipt_terminalized(origin))
+    }
+}
+
+fn apply_action_boundary_core(
+    state: &mut GameState,
+    authenticated_actor: PlayerId,
+    semantic_owner: PlayerId,
+    action: GameAction,
+    stack_resolution_limit: Option<u32>,
+) -> Result<RawActionApplication, EngineError> {
+    let lifecycle = super::lifecycle::enter_action_frame();
+    if let Err(error) = mana_sources::preflight_tap_land_action(state, semantic_owner, &action) {
+        lifecycle.discard();
+        return Err(error);
+    }
+    // CR 603.3 + CR 603.3b + CR 608.2c: recover an ownerless post-replacement
+    // strand on the state AS FOUND, before this action touches it.
+    //
+    // A `Dispatching` drain whose dispatcher is not on this thread's call stack
+    // has no owner and no retirement path: `begin_dispatch` refuses it,
+    // `finish_paused_dispatch` pops only `Paused`, and `finish_dispatch` needs a
+    // handle that died with its call frame. It keeps `resolution_stack`
+    // non-empty forever, so `triggers::resolution_completion_can_settle` is
+    // false forever — deferred triggered abilities can never be put on the stack
+    // the next time a player would receive priority (CR 603.3 + CR 603.3b) and
+    // the resolving carrier can never settle (CR 608.2c).
+    //
+    // WHY HERE, and not only at the priority boundary. The sweeper inside
+    // `resume_pending_continuation_if_priority` is evaluated AFTER a reducer arm
+    // has run, and only when the RESULTING state is `Priority`. It therefore
+    // repairs a strand this engine just created, and can never repair one it
+    // merely FOUND — including the reporter's saves, whose strand arrives
+    // through `PersistedGameState::into_game_state()` and is never produced by
+    // any engine write. Measured: the turn-20 capture rests at `Priority`, and
+    // its `PassPriority` advances the phase into the declare-attackers
+    // turn-based action (CR 117.3a + CR 703.1: a turn-based action doesn't use
+    // the stack, and the active player receives priority only AFTER it has been
+    // dealt with — so no player has priority during it), so the post-action
+    // sweep is not entered on that action. This is the only seam
+    // that observes the rest state the engine was parked at, and it is
+    // boundary-type agnostic: an ownerless `Dispatching` resident is not a rules
+    // state at any boundary.
+    //
+    // Live parked work is NOT ownerless and is not touched here: a continuation
+    // awaiting a player's answer (CR 614.12a) is left `Paused` by the
+    // dispatcher's cleanup, and the sweep's exhaustive match pops only
+    // `Dispatching`.
+    //
+    // This is the OUTER action funnel — `apply_action_boundary_core` has exactly
+    // three call sites: two public/simulation entry points and one internal
+    // clone-local life-safety preview. Deliberately NOT `apply_action`, which
+    // the auto-pass and shortcut loops re-enter twelve further ways.
+    //
+    // BEFORE `boundary_snapshot`, deliberately: every failure path restores that
+    // same snapshot, and removing an impossible state is not part of the action
+    // and must not be rolled back with it. CONSEQUENCE, stated so it is not
+    // later read as a bug: an action this boundary REJECTS still leaves
+    // `resolution_stack` repaired, with no `bump_state_revision` and no events,
+    // because the error paths return before `finish_action_boundary` runs. That
+    // is intended — a client that submitted one bad action before its pass must
+    // not stay wedged because of it.
+    //
+    // Re-entrancy is handled by the same live-dispatch guard the priority-
+    // boundary sweep uses: `SimulationFilter`'s clone-and-apply probe re-enters
+    // this function from inside an outer `apply`, and when that outer apply is
+    // inside a dispatch the flag is set, the sweep is suppressed, and recovery
+    // defers to the next boundary at which the flag is clear. No "outermost"
+    // depth test is added: gating on it would leave AI-probe clones unrepaired
+    // while the real state is repaired.
+    effects::sweep_ownerless_post_replacement_strand(state);
+    state.remove_empty_active_post_replacement_frame();
     let boundary_snapshot = state.clone();
     let journal_start = state.resolved_rules_journal.entries().len();
+    let is_actor_scoped_preference = action.is_actor_scoped_preference();
     interaction::ensure_interaction_authority(state);
     let previous_interaction_waiting = state.waiting_for.clone();
     let previous_interaction_slots = state.active_interaction_slots.clone();
@@ -314,19 +1150,114 @@ pub(super) fn apply_action_boundary_with_stack_limit(
     state.exiled_from_hand_this_resolution = 0;
     state.die_result_this_resolution = None;
     state.consumed_before_priority_trigger_events.clear();
-    check_actor_authorization(state, authenticated_actor, &action)?;
+    if let Err(err) = check_actor_authorization(state, authenticated_actor, &action) {
+        lifecycle.discard();
+        *state = boundary_snapshot;
+        return Err(err);
+    }
     let mut result = match apply_action(state, semantic_owner, action, stack_resolution_limit) {
         Ok(result) => result,
         Err(err) => {
-            state.consumed_before_priority_trigger_events.clear();
+            lifecycle.discard();
+            *state = boundary_snapshot;
             return Err(err);
         }
     };
+    // CR 400.7 + CR 403.3 + CR 614.12a: an as-enters choice (and any continuation it raises) can
+    // span an arbitrary number of client round-trips of ANY `WaitingFor` shape, so realization of a
+    // parked token battlefield entry is keyed on the action having SETTLED, not on prompt shape.
+    // `apply_action` realizes it itself on every route that reaches `run_post_action_pipeline`.
+    //
+    // CR 603.6a: the entry pair this realization emits IS the event that puts a permanent onto the
+    // battlefield, so every permanent must be checked for matching enters-the-battlefield triggers
+    // (CR 603.2 + CR 603.3b place them on the stack before the next player receives priority).
+    // Reaching here with something to realize means the action settled WITHOUT running
+    // `run_post_action_pipeline` — one of the reducer arms that builds an `ActionResult` straight
+    // out of the match (`handle_tribute_choice` is the reachable one). Converge those onto the same
+    // pipeline the rest of the reducer uses, scanning ONLY the slice this realization appended, so
+    // a handler that already settled its own events (`handle_opponent_may_choice`, which collects
+    // into `deferred_triggers` without recording them in `consumed_before_priority_trigger_events`)
+    // cannot have them collected a second time. Inert on every other route: the flush returns
+    // `false` when nothing was parked or an earlier convergence point already consumed it
+    // (`Option::take_if`).
+    let scan_from = result.events.len();
+    if effects::token::realize_settled_token_battlefield_entry(state, &mut result.events) {
+        let wf = match engine_priority::run_post_action_pipeline_from(
+            state,
+            &mut result.events,
+            scan_from,
+            &result.waiting_for,
+            false,
+            false,
+        ) {
+            Ok(wf) => wf,
+            Err(err) => {
+                *state = boundary_snapshot;
+                return Err(err);
+            }
+        };
+        // The pipeline's terminal return hands back `flush_pending_priority_intercepts(..)` WITHOUT
+        // writing `state.waiting_for`, and the drain can raise `OrderTriggers` (CR 603.3b; measured
+        // on the Fanatic route). BOTH writes are load-bearing: `finish_action_boundary` copies
+        // `result.waiting_for` INTO the state at `sync_waiting_for`, and
+        // `apply_interaction_pre_reconciliation_for_life_safety` returns `raw.result` without ever
+        // calling `finish_action_boundary`.
+        state.waiting_for = wf.clone();
+        result.waiting_for = wf;
+    }
+    Ok(RawActionApplication {
+        result,
+        journal_start,
+        is_actor_scoped_preference,
+        boundary_snapshot,
+        previous_interaction_waiting,
+        previous_interaction_slots,
+        submitted_interaction_owner,
+        preserve_interaction,
+        lifecycle,
+    })
+}
+
+fn finish_action_boundary(
+    state: &mut GameState,
+    raw: RawActionApplication,
+    mode: PublicFinalizeMode,
+) -> Result<ActionResult, EngineError> {
+    finish_action_boundary_with_lifecycle(state, raw, mode, false).map(|(result, _)| result)
+}
+
+fn finish_action_boundary_with_lifecycle(
+    state: &mut GameState,
+    raw: RawActionApplication,
+    mode: PublicFinalizeMode,
+    return_outer_lifecycle: bool,
+) -> Result<
+    (
+        ActionResult,
+        Option<super::lifecycle::ProspectiveLifecycleFacts>,
+    ),
+    EngineError,
+> {
     state.consumed_before_priority_trigger_events.clear();
+    let RawActionApplication {
+        mut result,
+        journal_start,
+        is_actor_scoped_preference,
+        boundary_snapshot,
+        previous_interaction_waiting,
+        previous_interaction_slots,
+        submitted_interaction_owner,
+        preserve_interaction,
+        lifecycle,
+    } = raw;
     reconcile_terminal_result(state, &mut result);
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
-    let auto_pass_advanced = run_auto_pass_loop(state, &mut result);
+    let auto_pass_advanced = if is_actor_scoped_preference {
+        false
+    } else {
+        run_auto_pass_loop(state, &mut result)
+    };
     reconcile_terminal_result(state, &mut result);
     // Debug "infinite mana" (CR 500.5 suppressed for flagged players): restore any
     // pool that a spend during this action depleted, before public state is
@@ -343,7 +1274,7 @@ pub(super) fn apply_action_boundary_with_stack_limit(
     if matches!(mode, PublicFinalizeMode::Immediate) {
         finalize_display_state(state);
     }
-    result.log_entries = super::log::resolve_log_entries(&result.events, state);
+    result.log_entries = super::log::resolve_log_entries(&result.events, &boundary_snapshot, state);
     if preserve_interaction && !auto_pass_advanced {
         interaction::preserve_interaction_slots(state, previous_interaction_slots);
     } else {
@@ -355,6 +1286,7 @@ pub(super) fn apply_action_boundary_with_stack_limit(
         )
         .is_err()
         {
+            lifecycle.discard();
             *state = boundary_snapshot;
             return Err(EngineError::InvalidAction(
                 "Unable to allocate interaction authority for the resulting decision".to_string(),
@@ -363,7 +1295,13 @@ pub(super) fn apply_action_boundary_with_stack_limit(
     }
     #[cfg(debug_assertions)]
     debug_assert_runtime_resolution_invariants(state);
-    Ok(result)
+    let lifecycle_facts = if return_outer_lifecycle {
+        lifecycle.take_outer_facts()
+    } else {
+        lifecycle.commit_into_parent();
+        None
+    };
+    Ok((result, lifecycle_facts))
 }
 
 thread_local! {
@@ -429,7 +1367,8 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
     // above (CR 704.3 ordering), so a player ALREADY at 0 life loses via the real
     // 704.5a SBA first and this never preempts or double-fires a legitimate win — it
     // only fires when the game would otherwise grind on (high victim life, or mid-drain
-    // before 0). The `!GameOver` guard makes it idempotent across the :196/:200 calls.
+    // before 0). The `!GameOver` guard makes it idempotent across the two
+    // `reconcile_terminal_result` calls in `apply` (`:326` and `:330`).
     if !matches!(state.waiting_for, WaitingFor::GameOver { .. })
         && matches!(state.waiting_for, WaitingFor::Priority { .. }) // a player would get priority (CR 704.3)
         // CR 732.2a: the mandatory-loop game-ending shortcut is gated behind the
@@ -468,7 +1407,7 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
             LoopDetectionMode::On => {
                 // Clone the Arc handles (cheap refcount bumps) to release the borrow on the
                 // ring before the GameOver mutation below.
-                let priors: Vec<std::sync::Arc<GameState>> =
+                let priors: Vec<std::sync::Arc<crate::types::LoopDetectSample>> =
                     state.loop_detect_ring.iter().cloned().collect();
                 let cur = crate::analysis::resource::ResourceVector::snapshot(state);
                 // Carry the matching cycle's `delta` out of the scan alongside the winner so
@@ -479,17 +1418,19 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
                 // fails either seam gate, continue scanning older priors (fail-safe).
                 if let Some((winner, delta)) = priors.iter().enumerate().find_map(|(k, prior)| {
                     let delta = crate::analysis::resource::ResourceVector::delta(
-                        &crate::analysis::resource::ResourceVector::snapshot(prior),
+                        &crate::analysis::resource::ResourceVector::snapshot(&prior.normalized),
                         &cur,
                     );
                     let winner = crate::analysis::loop_check::live_mandatory_loop_winner(
-                        prior, state, &delta,
+                        &prior.normalized,
+                        state,
+                        &delta,
                     )?;
                     // The matched window: the prior frame at `k`, every subsequent ring frame,
                     // then the live state — all per-resolution, no gaps (a non-sampling beat
                     // clears the ring, so a confirmed window is gap-free).
                     let mut frames: Vec<&GameState> =
-                        priors[k..].iter().map(|p| p.as_ref()).collect();
+                        priors[k..].iter().map(|p| &p.normalized).collect();
                     frames.push(state);
                     // CR 704.5a + CR 104.4a (m9): the winner (sole non-faller) must never dip
                     // across the window — a transient intra-cycle dip a net-delta check cannot
@@ -551,16 +1492,23 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
     // stack, so the sampler clears the ring at that beat and the `!stack.is_empty()` bridge
     // is structurally unreachable for it. Detect it here by driving the captured loop-action
     // sequence on a clone. Gated identically (opt-in + top-level-only) plus a cheap
-    // `last_loop_action_sequence` precondition (non-empty only on a buyback-paid token-creating
+    // `last_loop_action_sequence` precondition (armed only on a buyback-paid token-creating
     // cast or a multi-activation engine's accumulated beats — so the clone-drive runs ~never for
     // the recast class; a mana engine arms per mana activation but its drive aborts fast when
     // unsustainable). INV-2: this OFFERS the interactive shortcut (never auto-resolves — CR 732.2a).
+    //
+    // SITE A (CR 732.2a): the precondition asks whose period it is, not merely whether one exists.
+    // BEHAVIOUR-PRESERVING by construction — `try_offer_object_growth_shortcut` below applies the
+    // identical whole-period test to its own admission and returns `None` for a foreign period, so
+    // this conjunct only stops paying for a clone-drive whose answer is already known. It reads the
+    // same authority as that consumer so the two cannot drift apart.
     if !matches!(state.waiting_for, WaitingFor::GameOver { .. })
         && matches!(state.waiting_for, WaitingFor::Priority { .. })
         && state.stack.is_empty()
         && state.loop_detection.samples()
         && !in_simulation_probe()
-        && !state.last_loop_action_sequence.is_empty()
+        && matches!(state.waiting_for, WaitingFor::Priority { player }
+            if state.loop_period_controller() == Some(player))
     {
         if let Some((certificate, schema)) = try_offer_object_growth_shortcut(state) {
             let WaitingFor::Priority { player: proposer } = state.waiting_for else {
@@ -571,6 +1519,10 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
                 predicted_winner: None,
                 certificate,
                 schema,
+                // CR 732.2a: the object-growth path re-derives its pins at materialize time
+                // from the carried recast template, so this offer states no engine-side
+                // declaration of its own.
+                declaration: None,
             };
             result.waiting_for = state.waiting_for.clone();
         }
@@ -625,21 +1577,52 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
             // CR 732.2a: OPTIONAL winning drain — only the player with priority may propose
             // the shortcut. Keep that proposer distinct from the already-measured winner; a
             // loop can be detected during a different player's priority window.
-            let certificate = build_cert(prior.as_ref(), state, &delta, winner);
+            // `build_cert`'s only use of the frame is `board_delta(prior, state)`, a
+            // comparand read ⇒ the CR 104.4b `.normalized` half.
+            let certificate = build_cert(&prior.normalized, state, &delta, winner);
             // CR 732.2a: a non-targeted drain reifies no per-iteration player choice ⇒ carry an
             // empty pin list; only the `iteration_count` (from `win_kind`) is populated.
             let WaitingFor::Priority { player: proposer } = state.waiting_for else {
                 unreachable!("interactive bridge only runs during priority")
             };
-            let schema = build_shortcut_schema(&[], certificate.win_kind, state, proposer);
+            // CR 732.2a: a non-targeted drain publishes no decision points, and this path
+            // states no narrowed CR 704 count bound — `UntilLethal` is terminated by the
+            // real SBA, not by a caller-supplied count, so the ceiling stays the global
+            // safety limit.
+            let schema = build_shortcut_schema(
+                Vec::new(),
+                shortcut_iteration_count(certificate.win_kind),
+                MAX_SHORTCUT_CYCLES,
+            );
             state.waiting_for = WaitingFor::LoopShortcut {
                 proposer,
                 predicted_winner: Some(winner),
                 certificate,
                 schema,
+                // CR 732.2a: Path A publishes no decision points at all (the pin list above is
+                // empty), so there is nothing for a declaration to pin.
+                declaration: None,
             };
             result.waiting_for = state.waiting_for.clone();
         }
+        return;
+    }
+
+    // Path D: CR 732.2a BOUNDED cycle fast-forward. Only reached when Path A found no
+    // determinate winner — a drain lethal to SOME opponents leaves a second non-faller, so
+    // CR 104.2a's determinacy requirement (`loop_check`'s crown gate) refuses to crown and
+    // Path A returns `None`. This seam routes AROUND that gate rather than weakening it: it
+    // never calls `live_mandatory_loop_winner` and writes `predicted_winner: None`.
+    // Placed before Path B because Path B's CR 732.4 verdict is TERMINAL (it writes
+    // `GameOver` and returns), so a seam ordered after it could never be reached on a state
+    // Path B accepts. The two are disjoint anyway and the ordering does not paper over an
+    // overlap: Path B requires `has_no_loss_axis(&delta)`, while this seam only offers when
+    // `elimination_bounds` NARROWED below `MAX_SHORTCUT_CYCLES`, which happens only when the
+    // cycle drives some living seat toward a CR 704.5a / CR 704.5c / CR 104.3c threshold —
+    // i.e. exactly a loss axis.
+    if let Ok(offer) = try_offer_bounded_cycle_shortcut(state, mandatory) {
+        state.waiting_for = offer;
+        result.waiting_for = state.waiting_for.clone();
         return;
     }
 
@@ -647,10 +1630,11 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
     // found no determinate winner. `mandatory` gates it (CR 732.5); a loss axis or an
     // optional loop falls through to the pre-feature halt.
     if mandatory {
-        let priors: Vec<std::sync::Arc<GameState>> =
+        let priors: Vec<std::sync::Arc<crate::types::LoopDetectSample>> =
             state.loop_detect_ring.iter().cloned().collect();
         let cur = crate::analysis::resource::ResourceVector::snapshot(state);
         for prior in &priors {
+            let prior = &prior.normalized;
             let delta = crate::analysis::resource::ResourceVector::delta(
                 &crate::analysis::resource::ResourceVector::snapshot(prior),
                 &cur,
@@ -689,10 +1673,11 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
     // under their own control", the closest live realization of CR 104.4b's grant.
     if !mandatory {
         let controller = state.active_player; // sampler gate is Priority{active_player}: the driver
-        let priors: Vec<std::sync::Arc<GameState>> =
+        let priors: Vec<std::sync::Arc<crate::types::LoopDetectSample>> =
             state.loop_detect_ring.iter().cloned().collect();
         let cur = crate::analysis::resource::ResourceVector::snapshot(state);
         for prior in &priors {
+            let prior = &prior.normalized;
             let delta = crate::analysis::resource::ResourceVector::delta(
                 &crate::analysis::resource::ResourceVector::snapshot(prior),
                 &cur,
@@ -712,15 +1697,18 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
             //     arm is never even reached.
             //   - life↓ (self-burn): life is a Consumed axis (`ResourceVector::components`),
             //     so `is_net_progress` (conjunct 2) returns false on any net-negative life
-            //     (resource.rs ~:409, over all players) before conjunct 3 runs.
+            //     (`ResourceVector::is_net_progress`'s `Component::Consumed if value < 0`
+            //     arm, over all players) before conjunct 3 runs.
             //   - poison↑ (self-poison): `classify_win_kind` (conjunct 4) maps poison>0 to
             //     `WinKind::PoisonLoss`, not `Advantage`, so the `== Advantage` conjunct
             //     rejects it.
-            // CONTRAST — the Path-B DRAW gate (:512-516 = recurrence + is_net_progress +
-            // has_no_loss_axis, with NO `== Advantage` backstop) is DIFFERENT: there
+            // CONTRAST — the Path-B DRAW gate (the EARLIER draw arm in this same
+            // `interactive_loop_bridge`: recurrence + is_net_progress + has_no_loss_axis, and it is
+            // the arm carrying NO `classify_win_kind` / `== Advantage` conjunct) is DIFFERENT: there
             // `has_no_loss_axis` is the SOLE loss-axis veto and is LOAD-BEARING BY
             // CONSTRUCTION — it MUST NOT be removed. A poison loop reaching Path B satisfies
-            // recurrence (poison is projected out at resource.rs:1995) AND is_net_progress
+            // recurrence (poison is projected out by `projected_player_axes`, which destructures
+            // `poison_counters` out of the compared image) AND is_net_progress
             // (poison is a Gained axis, which cannot make is_net_progress false), so without
             // this conjunct such a loop would be WRONGLY certified a CR 732.4 draw. (Path C's
             // poison redundancy comes ENTIRELY from its extra `== Advantage` conjunct, which
@@ -731,7 +1719,8 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
             // delta at the gate → it draws as a benign lifegain loop and never exercises
             // has_no_loss_axis's poison veto. No constructible fixture carries poison>0 to the
             // Path-B gate (the 2-trigger form clears `loop_detect_ring` on its OrderTriggers
-            // beats at engine.rs:1307; the single-compound-trigger form drops the poison at
+            // beats, in `apply_action`'s `PassPriority | OrderTriggers { .. }` ring-clear arm;
+            // the single-compound-trigger form drops the poison at
             // parse). The runtime discriminator is therefore WAIVED as measured-unsatisfiable;
             // this in-code load-bearing-by-construction proof is the substitute. See the
             // `interactive_recurring_poison_is_not_drawn` Path-B behavioral test.
@@ -786,17 +1775,22 @@ fn find_live_loop_winner(
 ) -> Option<(
     PlayerId,
     crate::analysis::resource::ResourceVector,
-    std::sync::Arc<GameState>,
+    std::sync::Arc<crate::types::LoopDetectSample>,
 )> {
-    let priors: Vec<std::sync::Arc<GameState>> = state.loop_detect_ring.iter().cloned().collect();
+    let priors: Vec<std::sync::Arc<crate::types::LoopDetectSample>> =
+        state.loop_detect_ring.iter().cloned().collect();
     let cur = crate::analysis::resource::ResourceVector::snapshot(state);
     priors.iter().enumerate().find_map(|(k, prior)| {
         let delta = crate::analysis::resource::ResourceVector::delta(
-            &crate::analysis::resource::ResourceVector::snapshot(prior),
+            &crate::analysis::resource::ResourceVector::snapshot(&prior.normalized),
             &cur,
         );
-        let winner = crate::analysis::loop_check::live_mandatory_loop_winner(prior, state, &delta)?;
-        let mut frames: Vec<&GameState> = priors[k..].iter().map(|p| p.as_ref()).collect();
+        let winner = crate::analysis::loop_check::live_mandatory_loop_winner(
+            &prior.normalized,
+            state,
+            &delta,
+        )?;
+        let mut frames: Vec<&GameState> = priors[k..].iter().map(|p| &p.normalized).collect();
         frames.push(state);
         if !crate::analysis::loop_check::winner_life_never_dips(&frames, winner) {
             return None;
@@ -833,7 +1827,786 @@ fn build_cert(
         // The offer is only reached for an OPTIONAL loop.
         mandatory: false,
         residual_board_delta: crate::analysis::resource::board_delta(prior, state),
+        // CR 732.2a: only a producer that NARROWED the repetition bound states a per-period
+        // signature. The bounded-cycle offer overrides this field with functional-update
+        // syntax at its own call site; every other producer publishes none.
+        per_cycle: None,
     }
+}
+
+/// CR 732.2a: which conjunct of [`try_offer_bounded_cycle_shortcut`] refused to offer.
+///
+/// Exhaustive and typed, in the order the conjuncts run. Production ignores the value (a
+/// refusal is a refusal), but a negative test row must be able to say WHICH conjunct it is
+/// about: an assertion that merely observes "no offer" silently stops testing its own
+/// conjunct the moment an earlier one starts refusing first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundedOfferRefusal {
+    /// (1) Not a `WaitingFor::Priority` beat, so nobody may suggest a shortcut.
+    NotAtPriority,
+    /// (1b) A driving period belonging to the PROPOSER'S OWN seat is accumulating, which routes
+    /// an accepted proposal to the object-growth materializer — it would commit zero bounded
+    /// cycles. Another seat's period is not a reason to refuse (CR 732.2a): it describes no
+    /// sequence this proposer can take, and `try_offer_object_growth_shortcut` will not admit it
+    /// either. Named for the state that refuses, not for a non-emptiness test the conjunct
+    /// stopped applying when it went seat-relative.
+    ProposerHasDrivingPeriod,
+    /// (2) The priority holder is not the active player the ring sampler gates on.
+    ProposerIsNotActivePlayer,
+    /// (4) Neither certification basis matched.
+    NoCertification,
+    /// (5) `WinKind::Advantage` — no CR 704 threshold, so this is Path C's class.
+    AdvantageOnlyCycle,
+    /// (6) A per-iteration choice the cycle opens is not specified by a published slot.
+    UnspecifiedChoiceWindow,
+    /// (7) `elimination_bounds` produced no count in `1..MAX_SHORTCUT_CYCLES`.
+    NoNarrowedLegalCount,
+}
+
+/// CR 732.2a: the THIRD entry predicate into the loop-shortcut pipeline — a BOUNDED cycle
+/// fast-forward for a loop that is lethal to SOME opponents but crowns nobody.
+///
+/// Path A ([`find_live_loop_winner`]) needs a determinate single winner, which CR 104.2a
+/// makes impossible while two non-fallers live; Path B needs an all-mandatory no-loss draw.
+/// A 4-player drain that kills two seats and leaves two is neither, so both fall through
+/// and the loop grinds by hand. CR 732.2a still licenses a shortcut for it, PROVIDED the
+/// proposal names a repetition count whose results are *predictable* — which is exactly what
+/// this predicate establishes and refuses to offer without.
+///
+/// Everything downstream of the `WaitingFor::LoopShortcut` this returns is shipped and
+/// unchanged: the same offer shape Path A writes, the same declare handler, the same APNAP
+/// window, the same materializer. Two field values keep the classes apart BY CONSTRUCTION
+/// rather than by review vigilance:
+/// * `predicted_winner: None` — this seam never calls `live_mandatory_loop_winner`, so it
+///   neither consults nor weakens the CR 104.2a crown gate (`loop_check.rs`'s
+///   `nonfallers.len() != 1`); it routes around it.
+/// * no driving period of the PROPOSER'S OWN (step 1b) — the object-growth producer's class is
+///   the complement, and `materialize_fixed_shortcut` dispatches on that same discriminant.
+///   Seat-relative, not merely non-empty: a period recorded by another seat admits no
+///   object-growth offer either, so it is not the complement of anything (CR 732.2a).
+///
+/// Returns the offer to write, or the FIRST conjunct that refused. Pure: it reads `state` and
+/// writes nothing. The refusal is typed rather than a bare `None` because nine fail-closed
+/// conjuncts that all collapse to "no offer" are neither diagnosable nor testable: a negative
+/// row asserting only the absence of an offer passes for the wrong reason as soon as an
+/// upstream conjunct starts refusing first (domination), and `BoundedOfferRefusal` is what
+/// lets such a row name the conjunct it is actually about.
+/// CR 732.2a: the capability token that gates the cap-parameterised
+/// [`crate::analysis::resource::PeriodVerdicts`] constructor.
+///
+/// The unit field is PRIVATE, so the tuple constructor is nameable only inside
+/// `game::engine` — the metered seam's own module. Any other site that tried to
+/// build a fresh arbitrary-cap verdict container, whose spend the mint's meter
+/// would never see, is E0603. Derive list pinned to `#[derive(Debug)]`: a derived
+/// constructor would re-open arbitrary caps crate-wide, which is the same
+/// strength as the defect this token closes.
+#[derive(Debug)]
+pub(crate) struct CapAuthority(());
+
+/// CR 732.2a: the CLOSED cap domain the metered seam accepts.
+///
+/// The seam is `pub` because rows outside this crate ride it, and it mints its
+/// own [`CapAuthority`] for whoever calls it — so no token mechanism can gate
+/// this route. It is gated at the VALUE instead: an arbitrary raise is
+/// unrepresentable, and every image is fail-closed. Resolution is the SEAM's,
+/// never the caller's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeCap {
+    /// The shipped budget.
+    Shipped,
+    /// `min(n, PROBE_BUDGET)` — expresses every starvation arm and can never raise.
+    Lowered(u32),
+    /// Twice the board's own link count, derived from the `state` the seam
+    /// probes rather than chosen by the caller. At the seam no window has been
+    /// selected yet, so nothing is exempt and the whole current stack IS the
+    /// non-exempt population; the work is therefore proportional to the input
+    /// the caller itself supplied.
+    RaisedTwiceLinks,
+}
+
+/// CR 732.2a: the mint's meter SNAPSHOT, taken at seam exit.
+///
+/// `spent`/`denied` are the probe budget's; the three `conjunct*` counters are
+/// the verdict door's own, so an iteration claim has a surface to be asserted on
+/// rather than being inferred from charges (which are measurably not a proxy for
+/// iterations).
+#[derive(Debug, Clone, Copy)]
+pub struct MintMeter {
+    pub spent: u32,
+    pub denied: bool,
+    pub conjunct6_asks: u32,
+    pub conjunct6_frozen_skips: u32,
+    pub conjunct4_scans: u32,
+    /// CR 732.2a: WHICH certificate step 4/4b selected — `None` when the mint refused
+    /// before certification (steps 1/1b/2/2b, or no basis matched at all).
+    ///
+    /// It exists because the axis has NO other surface. Both bases now MEASURE
+    /// `frames_per_period`, so the published [`crate::analysis::loop_check::LoopCertificate`]
+    /// discriminates in neither direction (see `certified_bounded_cycle_offer`'s
+    /// attribution note), and the disjunct within basis A is invisible there entirely.
+    /// A row that must prove a real beat certified through a particular disjunct — the
+    /// frozen exemption is keyed to exactly one — would otherwise have no assert site.
+    pub certification: Option<crate::analysis::resource::PeriodCertification>,
+}
+
+/// The production entry point: delegates at the shipped cap and drops the meter,
+/// so the refusal contract and every existing caller are untouched.
+pub fn try_offer_bounded_cycle_shortcut(
+    state: &GameState,
+    mandatory: bool,
+) -> Result<WaitingFor, BoundedOfferRefusal> {
+    try_offer_bounded_cycle_shortcut_metered(state, mandatory, ProbeCap::Shipped).0
+}
+
+/// CR 732.2a: the OBSERVATION-AND-CAP seam — the same mint, with the per-mint
+/// probe cap supplied from the closed [`ProbeCap`] domain and the meter returned
+/// instead of dropped.
+///
+/// This is the only channel by which a cap other than the shipped one enters, and
+/// the only surface on which `spent` / `denied` / the conjunct counters are
+/// readable at all: the verdict container never escapes this function.
+pub fn try_offer_bounded_cycle_shortcut_metered(
+    state: &GameState,
+    mandatory: bool,
+    cap: ProbeCap,
+) -> (Result<WaitingFor, BoundedOfferRefusal>, MintMeter) {
+    let mut meter = MintMeter {
+        spent: 0,
+        denied: false,
+        conjunct6_asks: 0,
+        conjunct6_frozen_skips: 0,
+        conjunct4_scans: 0,
+        certification: None,
+    };
+    let outcome = bounded_cycle_offer(state, mandatory, cap, &mut meter);
+    (outcome, meter)
+}
+
+fn bounded_cycle_offer(
+    state: &GameState,
+    mandatory: bool,
+    cap: ProbeCap,
+    meter: &mut MintMeter,
+) -> Result<WaitingFor, BoundedOfferRefusal> {
+    use crate::analysis::resource::{PeriodVerdicts, PROBE_BUDGET};
+
+    // (1) CR 732.2a: "the player with priority may suggest a shortcut."
+    let WaitingFor::Priority { player: proposer } = state.waiting_for else {
+        return Err(BoundedOfferRefusal::NotAtPriority);
+    };
+    // (1b) The bounded drain mints nothing, so it is reachable in `materialize_fixed_shortcut`
+    // ONLY below that function's object-growth dispatch — and that dispatch is an EARLY RETURN
+    // taken when the recorded period belongs to the accepting proposal's proposer. An offer minted
+    // while THIS proposer's own period is accumulating would be accepted and routed to the
+    // object-growth materializer, committing ZERO bounded cycles and making this whole path
+    // silently dead. The two conjuncts are not disjoint — a mana activation arms a period and a
+    // same-controller on-stack activation both appends to it and leaves the stack non-empty, which
+    // is the bridge's own entry condition — so this guard is load-bearing, not a restatement of an
+    // invariant. It converts a silent misroute into an observable refusal.
+    //
+    // SITE B (CR 732.2a) — THE SEAT-RELATIVE FORM. The test is whose period is recorded, not
+    // whether one exists. CR 732.2a describes a shortcut as "a sequence of game choices … that may
+    // be legally taken based on the current game state and the predictable results of the sequence
+    // of choices": a period recorded from a DIFFERENT seat's independent activation describes no
+    // sequence this proposer can take, so it is no reason to refuse their own predictable one. One
+    // opponent activation used to refuse a proposer's certified bounded offer for the rest of the
+    // game. `loop_period_controller()` is `None` for a heterogeneous run, which also mints — and
+    // that is sound in the same direction, because `try_offer_object_growth_shortcut` fail-closes
+    // on heterogeneity too, so no object-growth offer can exist to be misrouted to.
+    //
+    // (CR 732.3's fragmented-loop rule is NOT what this guard ever enforced — the engine
+    // implements no CR 732.3 gate anywhere; see the contrast note under step (2).)
+    if state.loop_period_controller() == Some(proposer) {
+        return Err(BoundedOfferRefusal::ProposerHasDrivingPeriod);
+    }
+    // (2) The ring sampler gates on `Priority{active_player}`, so requiring the proposer to
+    // BE the active player is what establishes they held priority at every sampled frame.
+    // It deliberately does NOT claim the proposer benefits from or controls the loop:
+    // CR 732.2a is explicit that the ending point "need not be the player proposing the
+    // shortcut" and that the described sequence is "for all players" (both verbatim). That a
+    // non-benefiting BYSTANDER may therefore propose is an inference from those clauses, not
+    // a quotation of them; its in-tree precedent is `analysis::loop_check::ShortcutProposal`'s
+    // own doc — "a player may propose a shortcut whose deterministic outcome wins the game
+    // for another player." (CR 732.3's fragmented-loop rule is a CONTRAST, not support.)
+    if proposer != state.active_player {
+        return Err(BoundedOfferRefusal::ProposerIsNotActivePlayer);
+    }
+    // (2b) CR 732.2a: with fewer than two retained frames there is no window, hence no
+    // certificate is reachable at all — basis A needs `span >= 1` and basis B needs three
+    // frames. Refusing HERE, before anything is materialized or classified, is what makes
+    // "nothing spends before the ring gate" structural: the verdict container does not yet
+    // exist for a consumer to ask.
+    if state.loop_detect_ring.len() < 2 {
+        return Err(BoundedOfferRefusal::NoCertification);
+    }
+
+    // (4) CERTIFICATION — two bases, first match wins, NEVER combined.
+    //
+    // Basis A is a fifth copy of the ring `find_map` scan. The other four are NAMED, not
+    // numbered — the `On` reconcile, Path B, Path C, `find_live_loop_winner` — because the
+    // coordinates that stood here had ROTTED onto unrelated code. Grep the symbols. Recorded,
+    // not hidden: `find_live_loop_winner`'s own doc already made this call — "a deliberate,
+    // isolated copy … the `On` arm stays VERBATIM (byte-identity gate)" — and retargeting the
+    // four shipped walks would edit byte-identity-gated paths inside a feature commit. Newest
+    // prior first: the most recent recurrence is the least extrapolation.
+    //
+    // TWO PARALLEL VECS OVER ONE INDEX SPACE. They are built from the same `VecDeque` in the
+    // same order, so `ring.len() == ring_live.len()` by construction and `span`, `[idx..]`
+    // and basis B's `n - 1 - k` are unchanged expressions on both.
+    // CR 104.4b comparand half — every certification reader, unchanged in value.
+    let ring: Vec<&GameState> = state
+        .loop_detect_ring
+        .iter()
+        .map(|f| &f.normalized)
+        .collect();
+    // CR 732.2a evaluable half — the period-touch domain. A normalized frame zeroes
+    // `next_object_id` and strips trigger identity, so it is a comparand and never a board to
+    // evaluate an announcement or a resolution against.
+    let ring_live: Vec<&GameState> = state.loop_detect_ring.iter().map(|f| &f.live).collect();
+
+    // The per-mint verdict door, constructed immediately after the ring materialization and
+    // before anything asks it. It allocates an empty memo and a `u32` budget and classifies
+    // NOTHING; the seam mints its own capability token because it, not its caller, resolves
+    // the cap.
+    let cap_value = match cap {
+        ProbeCap::Shipped => PROBE_BUDGET,
+        ProbeCap::Lowered(n) => n.min(PROBE_BUDGET),
+        ProbeCap::RaisedTwiceLinks => 2 * state.stack.len() as u32,
+    };
+    let mut verdicts = PeriodVerdicts::for_period_with_cap(
+        &ring_live,
+        state,
+        proposer,
+        cap_value,
+        CapAuthority(()),
+    );
+
+    // ONE exit for the meter: everything that can ask the door lives below, and the snapshot
+    // is taken here rather than at each refusal so a future refusal arm cannot forget it.
+    // `certification` is the exception BY NECESSITY — it is not a counter the container
+    // accumulates but a choice made mid-walk, so it is written where it is decided and read
+    // back here through the same one exit.
+    let outcome = certified_bounded_cycle_offer(
+        state,
+        mandatory,
+        proposer,
+        &ring,
+        &ring_live,
+        &mut verdicts,
+        &mut meter.certification,
+    );
+    meter.spent = verdicts.spent();
+    meter.denied = verdicts.denied();
+    meter.conjunct6_asks = verdicts.conjunct6_asks();
+    meter.conjunct6_frozen_skips = verdicts.conjunct6_frozen_skips();
+    meter.conjunct4_scans = verdicts.conjunct4_scans();
+    outcome
+}
+
+/// CR 732.2a: THE candidate walk — newest-first over `idx`, one item per candidate pair,
+/// `span = live.len() - 1 - idx` in RETAINED RING FRAMES, `span >= 1`.
+///
+/// PRODUCTION'S walk, exposed so its test-side consumers CONSUME it instead of imitating it. A
+/// row that hard-codes `&live[live.len() - 2..]` is asserting `span == 1` without saying so,
+/// and reads a HALF PERIOD the moment the sampling rate moves — which is exactly what the
+/// answer-beat sampler did to two of them.
+///
+/// A span of 0 is the pair `state` against its own snapshot. It is already refused by
+/// `net_progress_for` on the resulting zero delta in every production trajectory, but it is
+/// refused HERE too, explicitly: `materialize_fixed_shortcut` DELIMITS a committed cycle by
+/// this count, and a published `0` would mean "one repetition spans no frames", which no drive
+/// can honour. Filtered BEFORE the window is yielded — `span >= 1` is `window.len() >= 2`
+/// identically — so a degenerate window never reaches a touch or a mint.
+///
+/// TWO LIFETIMES, not one. `certified_bounded_cycle_offer` carries a `PeriodTouch<'a>` OUT of
+/// the loop, so the ELEMENT lifetime must survive independently of the borrow of the slice;
+/// that is what `certified_period_touch(window: &[&'a GameState], current: &'a GameState) ->
+/// PeriodTouch<'a>` already requires.
+pub(crate) fn candidate_windows<'w, 'a>(
+    ring_live: &'w [&'a GameState],
+) -> impl Iterator<Item = (usize, u32, &'w [&'a GameState])> + 'w {
+    (0..ring_live.len())
+        .rev()
+        .map(move |idx| {
+            let span = (ring_live.len() - 1 - idx) as u32;
+            (idx, span, &ring_live[idx..])
+        })
+        .filter(|&(_, span, _)| span >= 1)
+}
+
+/// CR 732.2a: certification (step 4/4b), the choice gate and the bound — everything that can
+/// ask the verdict door, split out so its caller owns exactly one meter snapshot.
+#[allow(clippy::too_many_arguments)]
+fn certified_bounded_cycle_offer<'a>(
+    state: &'a GameState,
+    mandatory: bool,
+    proposer: PlayerId,
+    ring: &[&'a GameState],
+    ring_live: &[&'a GameState],
+    verdicts: &mut crate::analysis::resource::PeriodVerdicts<'a>,
+    cert_out: &mut Option<crate::analysis::resource::PeriodCertification>,
+) -> Result<WaitingFor, BoundedOfferRefusal> {
+    use crate::analysis::decision_template::{DecisionPoint, DecisionSlot, IterationCount};
+    use crate::analysis::resource::{
+        certified_period_touch, PeriodCertification, PeriodTouch, PeriodicDelta, ResourceVector,
+    };
+
+    let cur = ResourceVector::snapshot(state);
+    // Written as an explicit newest-first walk rather than `find_map` because the candidate
+    // body now threads `&mut verdicts` and carries an owned per-candidate `PeriodTouch` out.
+    let mut basis_a: Option<(
+        &GameState,
+        Vec<DecisionPoint>,
+        PeriodTouch<'_>,
+        PeriodicDelta,
+    )> = None;
+    // The walk itself — its ORDER, its span arithmetic and its degenerate-pair filter — lives
+    // in `candidate_windows`, so the rows that need production's candidates take THE SAME
+    // iterator rather than a copy of it. `ring` and `ring_live` are the two halves of the same
+    // frames and therefore the same length, so indexing the comparand by the walk's `idx` is
+    // the pairing it always was.
+    for (idx, span, window) in candidate_windows(ring_live) {
+        let prior = ring[idx];
+        // Built under `BoardCovered` unconditionally, because step 4 does not yet know which
+        // disjunct will match; step 4b keeps it or rebuilds it.
+        let touch_cover = certified_period_touch(window, state, PeriodCertification::BoardCovered);
+        // (3) The published per-iteration choices (5a's single authority), now enumerated
+        // over the CERTIFIED PERIOD's announced pairs rather than over the offer-beat stack.
+        let points = bounded_cycle_pin_slots_for_window(&touch_cover, proposer);
+        let slots: Vec<DecisionSlot> = points.iter().map(|p| p.slot.clone()).collect();
+        let delta = ResourceVector::delta(&ResourceVector::snapshot(prior), &cur);
+        // The existing disjunction, written as an `if / else if` that RECORDS the matching
+        // disjunct instead of discarding it. Semantics are byte-for-byte the `||` it
+        // replaces: the equality arm is still evaluated first and `_pinned` still runs only
+        // when it fails. The two disjuncts are mutually exclusive — equality compares the
+        // stack exactly (constant depth) while cover's item (2) forces strictly growing depth
+        // — so "which disjunct" is a total function with no both-matched case.
+        let cert = if crate::analysis::resource::loop_states_equal_modulo_resources(prior, state) {
+            Some(PeriodCertification::BoardEqualOnly)
+        } else if crate::analysis::resource::loop_states_cover_modulo_growth_pinned(
+            prior,
+            state,
+            proposer,
+            &slots,
+            &touch_cover,
+            verdicts,
+        ) {
+            Some(PeriodCertification::BoardCovered)
+        } else {
+            None
+        };
+        let Some(cert) = cert else {
+            continue;
+        };
+        if !delta.net_progress_for(proposer) {
+            continue;
+        }
+        // (4b) THE CERTIFIED TOUCH, keyed to the disjunct that actually matched. The cover
+        // disjunct supplies both premises the frozen subtraction rests on; the equality
+        // disjunct supplies only the depth one, so its period is rebuilt with the exemption
+        // withdrawn. `announced` is identical on both, so the mint is not re-derived.
+        let touch = match cert {
+            PeriodCertification::BoardCovered => touch_cover,
+            c => certified_period_touch(window, state, c),
+        };
+        // Recorded HERE and not at the `if / else if`: a candidate that certifies and then
+        // dies on `net_progress_for` is not the certificate the mint carries forward, and a
+        // meter that named it would attribute the offer to a pair the walk discarded.
+        *cert_out = Some(cert);
+        basis_a = Some((
+            prior,
+            points,
+            touch,
+            PeriodicDelta {
+                // MEASURED span, not the former hardcoded `1`. The walk is `.rev()`, so
+                // `idx` is usually `len - 2` and the span is 1 — but it is 1 by
+                // MEASUREMENT, not by assumption, and it is NOT always 1: the
+                // `interactive_3p_subset_lethal_does_not_crown` fixture's repetition
+                // spans TWO frames (a gain-life resolution then a lose-life one), and
+                // under the old hardcode its accepted drive committed nothing at all.
+                frames_per_period: span,
+                delta,
+                victim_slot: Vec::new(),
+            },
+        ));
+        break;
+    }
+    // Basis B consults NO board predicate: a period whose frame-deltas repeated twice in the
+    // retained ring is a signature on its own. Its certifying pair is the ring frame one
+    // period back and the ring's newest frame — the very pair `ring_delta_signature`
+    // measured, so the certificate's residual is derived from the same window as the delta.
+    //
+    // ⚠ WHAT ACTUALLY DECIDES A vs B ON A GROWING CASCADE — measured, because the intuitive
+    // answer is wrong and cost this lane a mislabelled row. It is NOT "resource-purity": a
+    // pure life↔life drain does not take basis A by recurring. BOTH known life-drain
+    // fixtures GROW their stack every period, so `loop_states_equal_modulo_resources` is
+    // FALSE on the certifying pair of each, and NEITHER certifies through the equal disjunct:
+    //
+    // * the basis-A fixture (`multiplayer_pure_life_drain_offers_at_three_and_four_players`,
+    //   Blight-Priest + Exquisite Blood) certifies through
+    //   `loop_states_cover_modulo_growth_pinned` at `ring[1]` — `stack[2->3]` at 3 players,
+    //   `stack[3->5]` at 4. The one `eq == true` pair on its ring carries a zero δ and dies on
+    //   `net_progress_for`, not on the board predicate.
+    // * the basis-B fixture (`dina_untargeted_drain_4p_offers_at_three_live_opponents`) has
+    //   that SAME disjunct vetoed at cover **gate (5)** — the off-stack fire-time condition
+    //   guard — by a `ModifyCost { Reduce, {2} }` static on a library card, gated on
+    //   `LifeGainedThisTurn { Controller } >= 1`: a projected axis read at fire time.
+    //
+    // So the discriminant is a FIRE-TIME CONDITION READING A PROJECTED AXIS, not the shape of
+    // the resources the loop moves. And the composition worth remembering: gate (5)'s
+    // `scope.cast_card_ids` relief — which exists precisely to excuse a self-cost modifier on
+    // a card the window provably never casts — CANNOT fire for this class, and the CONCLUSION is
+    // unchanged by the seat-relative (1b), but the REASON is not the one recorded here before.
+    //
+    // ⚠ STALE REASON, CORRECTED. This block used to say the relief cannot fire "because step (1b)
+    // requires `last_loop_action_sequence` to be EMPTY". Step (1b) no longer requires that: it
+    // refuses only when the recorded period is the PROPOSER'S OWN, so a bounded offer can now be
+    // minted with a FOREIGN period sitting in state. What preserves the conclusion is instead
+    // `window_cast_card_ids`, which is proposer-scoped: when the verdict container names a
+    // proposer, only that seat's own period is proof of what the window casts, so a foreign period
+    // yields `None` (no proof ⇒ scan everything) exactly as an empty one does. Without that
+    // scoping an OPPONENT'S choice of which card to activate would select which soundness relief
+    // applies to this proposer's certification — relief in the forbidden direction. This block is
+    // the reasoning record for precisely that (1b) × gate-(5) composition, which is why the reason
+    // is corrected here rather than left to be re-derived.
+    //
+    // Two individually-correct constraints still compose into a refusal neither intended.
+    //
+    // ⚠ NEVER attribute the basis from `frames_per_period`. BOTH bases now MEASURE it — basis A
+    // from the certifying prior's ring index above, basis B from `ring_delta_signature`'s
+    // derived `k` — so the two publish overlapping value ranges and NO value discriminates in
+    // either direction. (Before fix round 1 basis A published a hardcoded `1`, which made
+    // `!= 1` sufficient-but-not-necessary for "not basis A"; that inference is now dead too,
+    // since a basis-A span of 2 is exactly what the `interactive_3p_subset_lethal_does_not_crown`
+    // fixture publishes.) The only sound attribution is a discriminating probe: force
+    // `ring_delta_signature` to return `None` (basis B's sole entry point is the `None =>`
+    // arm below) — the rows that survive are basis A, the rows that fail are basis B.
+    let (cert_prior, points, touch, mut periodic) = match basis_a {
+        Some(hit) => hit,
+        None => {
+            let (k, delta) = crate::analysis::resource::ring_delta_signature(state)
+                .ok_or(BoundedOfferRefusal::NoCertification)?;
+            let n = ring.len();
+            let start = n
+                .checked_sub(1 + k as usize)
+                .ok_or(BoundedOfferRefusal::NoCertification)?;
+            let cert_prior = *ring
+                .get(start)
+                .ok_or(BoundedOfferRefusal::NoCertification)?;
+            // Basis B EXEMPTS NOTHING, and that is derived rather than cautious: its
+            // certificate consults no board predicate, so it supplies no premise that the
+            // period cannot SHRINK the stack — a stack draining from the top under a ticking
+            // monotone resource satisfies the delta signature and leaves a large frozen
+            // bottom prefix the drain will reach. `announced` is unchanged; only the
+            // subtraction is withdrawn.
+            let window = ring_live
+                .get(start..)
+                .ok_or(BoundedOfferRefusal::NoCertification)?;
+            let touch =
+                certified_period_touch(window, state, PeriodCertification::ResourceSignatureOnly);
+            *cert_out = Some(PeriodCertification::ResourceSignatureOnly);
+            let points = bounded_cycle_pin_slots_for_window(&touch, proposer);
+            (
+                cert_prior,
+                points,
+                touch,
+                PeriodicDelta {
+                    frames_per_period: k,
+                    delta,
+                    victim_slot: Vec::new(),
+                },
+            )
+        }
+    };
+
+    // (5) CR 732.2a: the conjunct that proves this class is DISJOINT from Path C's
+    // revocable-∞ advantage mark. An `Advantage` cycle drives nobody toward a CR 704
+    // threshold, so it has no bound to state and belongs to the other seam.
+    if crate::analysis::loop_check::classify_win_kind(proposer, &periodic.delta)
+        == crate::analysis::loop_check::WinKind::Advantage
+    {
+        return Err(BoundedOfferRefusal::AdvantageOnlyCycle);
+    }
+
+    // (6) CR 732.2a "predictable results": every per-iteration choice the cycle opens must be
+    // a SPECIFIED one. `stack_choices_are_all_specified` is that question's authority — it
+    // shares gates (3)/(6)'s own predicates and pin relief verbatim, so the relief here can
+    // never be coarser than the mint that published the slots.
+    //
+    // Its own conjunct, not folded into step 4: basis A's disjunction may have matched on
+    // exact recurrence (which says nothing about choices) and basis B consults no board
+    // predicate at all. And deliberately NOT a second `loop_states_cover_modulo_growth_pinned`
+    // call: on the dina 4p drain that predicate refuses 66 of the beats this seam reaches,
+    // on a BOARD fact, without ever examining a choice.
+    //
+    // ⚠ ATTRIBUTION CORRECTED, and deliberately scoped to what was RE-MEASURED. An earlier
+    // revision named the refuser as the cover predicate's item (1) `object_resource_axes_match`
+    // STRICT compare. At the MINT/OFFER beat that is FALSE: instrumenting the cover gates on
+    // dina's offer beat shows `object_resource_axes_match == true` at every gate-(1) refusal
+    // observed (187 of 187 across the dina and the ≥3p life-drain drives); the actual refusals
+    // are gate (5) (an off-stack fire-time condition reading a projected axis) and, on older
+    // ring pairs, gate (1)'s `loop_states_equal` on the stack-cleared projected board. The 66
+    // NON-OFFERING beats the original count came from were NOT re-measured in that round, so
+    // the item-(1) attribution may still hold for them — it is left standing for that
+    // population rather than overwritten with an unmeasured claim. Either way the conjunct's
+    // JUSTIFICATION is unchanged: cover refuses on board facts, and this seam asks about
+    // choices.
+    let slots: Vec<DecisionSlot> = points.iter().map(|p| p.slot.clone()).collect();
+    if !crate::analysis::resource::stack_choices_are_all_specified(
+        state,
+        proposer,
+        &slots,
+        Some(&touch),
+        verdicts,
+    ) {
+        return Err(BoundedOfferRefusal::UnspecifiedChoiceWindow);
+    }
+
+    // (7) THE BOUND, derived from the ANNOUNCEMENT authority — never from `points`.
+    //
+    // ⚠ THE PUBLISHED POINT SET IS THE WRONG INPUT HERE, and reading it from there was a
+    // measured fail-OPEN. Publication answers CR 732.2a ("a sequence of game choices"), so
+    // step (6)'s mint WITHHOLDS the point for a FORCED announcement — correctly, since the
+    // announcing player makes no choice. The bound answers CR 704.5a ("if a player has 0 or
+    // less life, that player loses the game"), and a forced victim loses that life exactly as
+    // a chosen one does. Deriving the bound from `points` therefore made the CR 732.2a
+    // withhold drop the forced victim out of `declarable_victims`, charging it bare
+    // `observed_life_loss` instead of `observed_life_loss.max(0) + declared_life_magnitude` —
+    // so `max_iterations` GREW, and the offer stated more legal repetitions than are legal.
+    // Measured on an ordinary forced 2p targeted drain: 9 charged vs 19 uncharged; on a
+    // victim whose measured period NETS A LIFE GAIN the uncharged form leaves
+    // `elimination_bounds`' `narrow` guard (`magnitude > 0`) unfired and DISARMS the life
+    // axis at `MAX_SHORTCUT_CYCLES` entirely.
+    //
+    // `bounded_cycle_charged_targets_for_window` reads the SAME acceptance authority the
+    // point mint does (`entry_announces`), so the charged SLOT set is a superset of the
+    // published `Targets` slots by construction: on a board where every announcement is the
+    // proposer's own choice — every tracked dump today — this derivation is value-identical to
+    // the one it replaces. ⚠ THE SUPERSET IS OVER SLOTS ONLY. A repeated slot's per-slot LEGAL
+    // set is what `declarable_victims` below reads, and the two mints keep different frames of
+    // a repeat, so that set is made a superset separately, by the charging mint's UNION dedup
+    // (see its doc for the monotonicity proof). Claiming the per-slot legal set is a superset
+    // "by construction" from the shared acceptance authority alone is FALSE.
+    let charged_targets = bounded_cycle_charged_targets_for_window(&touch, proposer);
+    // `declarable_victims` is the union of those announcements' legal PLAYER sets — EMPTY for
+    // the untargeted class, where the victims are already in `delta.life`.
+    let declarable_victims: Vec<PlayerId> = {
+        let mut v: Vec<PlayerId> = charged_targets
+            .iter()
+            .flat_map(|(_, victims)| victims.iter().copied())
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    // CR 704.5a: what ONE repetition charges to whichever seat a slot's pin names. The
+    // max-vs-sum reasoning, the gain clamp and the fail-closed direction live on the
+    // function; `elimination_bounds` then sums the charged slots per declarable victim.
+    // Extracted rather than inlined so the fork has a callable seam. ⚠ THE "`victim_slot` IS
+    // EMPTY ON EVERY TRAJECTORY THAT OFFERS TODAY" NOTE THAT STOOD HERE IS FALSIFIED, and is
+    // replaced rather than softened: the answer-beat sampling site in `apply_action` announces
+    // the entries a FORCED pre-priority window puts on the stack, and a CR 608.2b `Targets`
+    // declaration is exactly the shape that resolves across one. On the F4 boards the
+    // announcement carries Torch's target slot, so this value is NOT dropped — it reaches
+    // `elimination_bounds` in production and `r1_the_bounded_offer_fires_on_the_real_f4_dump`
+    // re-derives the published bound with a non-zero declared term.
+    let worst_seat_life_loss: i64 = periodic.delta.worst_seat_life_loss();
+    periodic.victim_slot = charged_targets
+        .iter()
+        .map(|(slot, _)| (slot.clone(), worst_seat_life_loss))
+        .collect();
+    // `.cloned()`, not `.copied()`: `(DecisionSlot, i64)` is not `Copy`.
+    let slot_magnitude: std::collections::BTreeMap<DecisionSlot, i64> =
+        periodic.victim_slot.iter().cloned().collect();
+    let max_iterations =
+        periodic
+            .delta
+            .elimination_bounds(state, &declarable_victims, &slot_magnitude);
+    // A bound of 0 states no legal repetition. A bound AT the cap states no narrowing at all
+    // — this producer's whole claim is that it measured a CR 704.5a / CR 704.5c / CR 104.3c
+    // threshold inside the loop, so an unnarrowed result belongs to another seam. Checking
+    // the closed range here makes `schema.is_bounded()` true BY CONSTRUCTION for every offer
+    // this function mints, instead of an inference from step 5's `Advantage` rejection.
+    if !(1..MAX_SHORTCUT_CYCLES).contains(&max_iterations) {
+        return Err(BoundedOfferRefusal::NoNarrowedLegalCount);
+    }
+
+    // (8) The certificate, with the two fields the bounded class states differently from
+    // Path A's spelled out at the site rather than mutated after the fact.
+    // `cert_current` is the live `state` on both bases, exactly as before: `build_cert`'s only
+    // use of the pair is `board_delta`, a comparand read.
+    let base = build_cert(cert_prior, state, &periodic.delta, proposer);
+    let certificate = crate::analysis::loop_check::LoopCertificate {
+        per_cycle: Some(periodic),
+        // CR 732.5: honest, and currently read by nothing in production — a loop nobody can
+        // break is still not forced to end, so this records the fact without acting on it.
+        mandatory,
+        ..base
+    };
+
+    // (9) The schema. `Fixed(max_iterations)` is the SUGGESTION and `max_iterations` the
+    // CEILING; the declare handler rejects any `Fixed(n)` above it and rejects `UntilLethal`
+    // outright, both already shipped. The pre-built `points` go in directly — the bounded
+    // path never calls `pinned_decisions_to_points`, whose legal sets are derived FROM the
+    // declared pins and would let a declaration ratify itself.
+    let schema = build_shortcut_schema(
+        points,
+        IterationCount::Fixed(max_iterations),
+        max_iterations,
+    );
+    // (10) The DECLARATION the engine can already specify for this offer, read out of the
+    // answer journal the same window populated. Built AFTER the schema because `points` is
+    // moved into `build_shortcut_schema`, and taking `&schema` keeps one point list rather
+    // than two.
+    let declaration = build_bounded_declaration(state, proposer, &schema);
+    Ok(WaitingFor::LoopShortcut {
+        proposer,
+        predicted_winner: None,
+        certificate,
+        schema,
+        declaration,
+    })
+}
+
+/// CR 732.2a: the declaration THIS offer can already state, derived from what the proposer
+/// actually answered at each published point — never from a constant and never from the
+/// declaring client.
+///
+/// CR 732.2a describes a shortcut proposal as "a sequence of game choices, for all players,
+/// that may be legally taken based on the current game state and the predictable results of
+/// the sequence of choices". Every published point of `schema` is one such choice; the
+/// `(DecisionSlot, PlayerId)` journal holds the answer the proposer gave it during the
+/// detection window (CR 601.2c announcements via `record_trigger_target_answer`, CR 603.5
+/// "may" answers via the `DecideOptionalEffect` arm). This function is the single authority
+/// for turning that observation into a [`DecisionTemplate`], so the AI candidate generator and
+/// the per-viewer projection read ONE value instead of each deriving their own.
+///
+/// **Not a duplicate authority.** `game::interaction::materialize_loop_shortcut_response`
+/// builds a conformant `DecisionTemplate` of the same shape (same `owner` / `decisions` /
+/// `ReplayMode::Scheduled` / `DecisionGroupKey::from_sources` / `(!points.is_empty())` guard),
+/// but from the CLIENT'S OWN submitted pins — a human's picks. This one is built from the
+/// ENGINE'S OWN observed answers. Two inputs, one shape; a reviewer reading only the shape
+/// would otherwise see duplication.
+///
+/// # PUBLISHED IS VALIDATED — `is_some()` means "the declare handler will take this"
+///
+/// `ai_support::candidates` gates its `DeclareShortcut` candidate on `declaration.is_some()`
+/// and hands this very template to `handle_declare_shortcut`, which validates it. So the
+/// publisher must not be able to emit anything that handler would refuse: step (5) runs the
+/// SHARED [`crate::analysis::decision_template::declaration_conforms`] — the same coverage +
+/// value-legality predicate that handler and the human ingress run — rather than a third
+/// derivation of `required` alongside theirs.
+///
+/// The range is `shortcut_validated_range(&schema.iteration_count, ..)`, i.e. this offer's own
+/// ceiling, because it is the WIDEST count any declarer may name against this schema
+/// (`is_bounded()` publishers set `iteration_count == Fixed(max_iterations)` and the handler
+/// rejects anything above the cap). `validate_pins` re-checks `0..range`, so passing at the
+/// ceiling implies passing at every shorter `Fixed(n)` the handler could be given.
+///
+/// LATENT, NOT LIVE, and the distinction is not decoration: no tracked board reaches a
+/// declaration this refuses — row D1 measures both gates passing at the full range on all
+/// three dumps — because the publisher copies `legal_targets` from the same announcement the
+/// journal answer came from, and `record_trigger_target_answer` bails above one announced
+/// slot while this schema hard-codes `min/max: 1`. That agreement is an accident of two
+/// functions with two predicates; step (5) is what makes it an invariant.
+///
+/// FAIL-CLOSED on every uncertainty, because a wrong pin is worse than no offer:
+///
+/// * an empty point set publishes no declaration at all — a declaration against an empty
+///   schema would be the one shape `handle_declare_shortcut` validates neither
+///   `predictability_gate` nor `validate_pins` against (both live inside its
+///   `if !offer.schema.points.is_empty()` block);
+/// * `None` (that seat never answered this slot) and [`LoopAnswer::Conflicted`] (it answered
+///   two ways — see that type: an engine-capability refusal, NOT a CR 732.2a mandate) are the
+///   SAME disposition here, because neither names a single answer to pin;
+/// * the `(kind, value)` match is WILDCARD-FREE, so a future `DecisionPointKind` or
+///   `LoopAnswerValue` variant gets a compile-time visit here instead of a silent pin. The
+///   two kind/value MISMATCH groups return `None` rather than `unreachable!` because what
+///   makes them unreachable is a key-shape agreement between publisher and writer, not a type
+///   guarantee.
+fn build_bounded_declaration(
+    state: &GameState,
+    proposer: PlayerId,
+    schema: &crate::analysis::decision_template::ShortcutDecisionSchema,
+) -> Option<crate::analysis::decision_template::DecisionTemplate> {
+    use crate::analysis::decision_template::{
+        DecisionGroupKey, DecisionKind, DecisionPointKind, DecisionTemplate, LoopAnswer,
+        LoopAnswerValue, PinnedDecision, ReplayMode,
+    };
+    // (1) D4's grounds: an empty schema publishes no declaration.
+    if schema.points.is_empty() {
+        return None;
+    }
+    let mut decisions = Vec::with_capacity(schema.points.len());
+    for point in &schema.points {
+        // (2) The journal read, under the PROPOSER's own key — the same key
+        // `record_trigger_target_answer` and the `DecideOptionalEffect` arm write under.
+        let LoopAnswer::Uniform(value) = state.loop_answer(&point.slot, proposer)? else {
+            return None;
+        };
+        // (3) The wildcard-free (kind, value) match.
+        decisions.push(match (&point.kind, value) {
+            // CR 603.5: the "may" gate, answered Take or Decline.
+            (DecisionPointKind::MayChoice, LoopAnswerValue::May(take)) => {
+                PinnedDecision::MayChoice {
+                    slot: point.slot.clone(),
+                    take,
+                }
+            }
+            // CR 601.2c + CR 608.2b: the announced targets for this slot, in announcement
+            // order, re-checked for legality at every resolution.
+            (DecisionPointKind::Targets { .. }, LoopAnswerValue::Targets(targets)) => {
+                PinnedDecision::Targets {
+                    slot: point.slot.clone(),
+                    targets,
+                }
+            }
+            // Kind/value MISMATCH — the publisher and the journal writer disagree about what
+            // this slot is. Fail closed.
+            (DecisionPointKind::MayChoice, LoopAnswerValue::Targets(_))
+            | (DecisionPointKind::Targets { .. }, LoopAnswerValue::May(_)) => return None,
+            // CR 700.2 modal / CR 732.6 "[A] unless [B]" / CR 601.2h + CR 702.51a convoke /
+            // CR 608.2d + CR 605.3b mana color: kinds this offer's publisher
+            // (`bounded_cycle_pin_slots_for_window`, which mints only `Targets` and
+            // `MayChoice`) cannot produce today. `LoopAnswerValue` carries no answer shape for
+            // any of them, so there is nothing to pin even when the slot IS journalled.
+            (
+                DecisionPointKind::Mode { .. }
+                | DecisionPointKind::UnlessBreak
+                | DecisionPointKind::ConvokeTaps { .. }
+                | DecisionPointKind::ManaColor { .. },
+                LoopAnswerValue::May(_) | LoopAnswerValue::Targets(_),
+            ) => return None,
+        });
+    }
+    // (4) The template. `replay.count` carries the offer's own SUGGESTION; the driving count
+    // comes off `GameAction::DeclareShortcut` and nothing reads this copy (see
+    // `build_recast_template`'s note and `analysis::decision_template::resolve`'s doc).
+    let template = DecisionTemplate {
+        owner: proposer,
+        decisions,
+        replay: ReplayMode::Scheduled {
+            count: schema.iteration_count.clone(),
+        },
+        key: DecisionGroupKey::from_sources(
+            &schema
+                .points
+                .iter()
+                .map(|point| point.slot.source.clone())
+                .collect::<Vec<_>>(),
+            DecisionKind::LoopChoice,
+        ),
+    };
+    // (5) VALIDATE BEFORE PUBLISHING — the same authority `handle_declare_shortcut` accepts
+    // under. See this function's "Published is validated" doc section for why the range is the
+    // schema's OWN count and why this is not a third derivation.
+    crate::analysis::decision_template::declaration_conforms(
+        schema,
+        &template,
+        shortcut_validated_range(&schema.iteration_count, Some(&template)),
+        state,
+    )
+    .then_some(template)
 }
 
 /// CR 704.5a / CR 704.5c: a determinate lethal drain (0-or-less life / 10-poison) repeats
@@ -853,24 +2626,21 @@ fn shortcut_iteration_count(
     }
 }
 
-/// CR 732.2a: build the READ-side decision schema for a loop-shortcut offer. `pins` is the
-/// carried single-authority decision list (`build_recast_template` output for the object-growth
-/// path; `&[]` for a non-targeted drain) — never re-derived here. Legal sets come from live
-/// engine queries (`is_convoke_eligible`); the frontend computes nothing.
-fn build_shortcut_schema(
+/// CR 732.2a: reify a carried pin list into the READ-side decision points an offer publishes.
+/// `pins` is the single-authority decision list (`build_recast_template` output for the
+/// object-growth path; empty for a non-targeted drain) — never re-derived here. Legal sets come
+/// from live engine queries (`is_convoke_eligible`); the frontend computes nothing.
+fn pinned_decisions_to_points(
     pins: &[crate::analysis::decision_template::PinnedDecision],
-    win_kind: crate::analysis::loop_check::WinKind,
     state: &GameState,
     controller: PlayerId,
-) -> crate::analysis::decision_template::ShortcutDecisionSchema {
-    use crate::analysis::decision_template::{
-        DecisionPoint, DecisionPointKind, PinnedDecision, ShortcutDecisionSchema,
-    };
-    let points: Vec<DecisionPoint> = pins
-        .iter()
-        .filter_map(|pin| match pin {
+) -> Option<Vec<crate::analysis::decision_template::DecisionPoint>> {
+    use crate::analysis::decision_template::{DecisionPoint, DecisionPointKind, PinnedDecision};
+    let mut points = Vec::with_capacity(pins.len());
+    for pin in pins {
+        let point = match pin {
             // CR 603.3b: trigger ordering is not a loop-declaration choice — no read-side peer.
-            PinnedDecision::Order { .. } => None,
+            PinnedDecision::Order { .. } => continue,
             // CR 702.51a: the untapped creatures the controller may tap for convoke. Sorted by
             // the public inner id: `im::HashMap::values()` order is nondeterministic and this Vec
             // serializes to the wire (cf. `resolve_source`'s `min_by_key` for the same reason).
@@ -882,10 +2652,10 @@ fn build_shortcut_schema(
                     .map(|o| o.id)
                     .collect();
                 tappable.sort_by_key(|id| id.0);
-                Some(DecisionPoint {
+                DecisionPoint {
                     slot: slot.clone(),
                     kind: DecisionPointKind::ConvokeTaps { tappable },
-                })
+                }
             }
             // FIX-1 (B1): reify the recorded fixed in-cycle choices. The drive replays these SAME
             // pins via `decision_template::resolve` (CR 608.2b ByIdentity live re-binding), so the
@@ -893,14 +2663,23 @@ fn build_shortcut_schema(
             // CR 608.2b: resolve each pinned target to its live legal `TargetRef` — the pinned
             // identity IS the singleton legal set (a fixed declinable ∞ offer, no FE re-selection).
             PinnedDecision::Targets { slot, targets } => {
+                // CR 732.2a: a proposal must describe a sequence "that may be legally taken
+                // based on the current game state". If ANY pinned target no longer resolves,
+                // the offer must be WITHDRAWN, not published — the `?` below is that
+                // withdrawal. `filter_map`ping the failure away instead would publish a point
+                // with a short `legal_targets` under `min_targets = targets.len()`: a
+                // self-inconsistent, UNDECLARABLE point that fails downstream as
+                // `IllegalPinValue`/`UnknownChoice` rather than as "there is no offer".
+                // Dropping the point entirely is also wrong — it would let
+                // `predictability_gate`'s coverage check pass trivially.
                 let legal_targets: Vec<crate::types::ability::TargetRef> = targets
                     .iter()
-                    .filter_map(|t| {
+                    .map(|t| {
                         crate::analysis::decision_template::resolve_target_ref(t, slot, 0, state)
                     })
-                    .collect();
+                    .collect::<Option<Vec<_>>>()?;
                 let count = targets.len().min(u32::MAX as usize) as u32;
-                Some(DecisionPoint {
+                DecisionPoint {
                     slot: slot.clone(),
                     kind: DecisionPointKind::Targets {
                         legal_targets,
@@ -908,19 +2687,19 @@ fn build_shortcut_schema(
                         max_targets: count,
                         ordered: true,
                     },
-                })
+                }
             }
             // CR 608.2d: the latched mana color — a read-only fixed point (no legal set to bound).
-            PinnedDecision::ManaColor { slot, color } => Some(DecisionPoint {
+            PinnedDecision::ManaColor { slot, color } => DecisionPoint {
                 slot: slot.clone(),
                 kind: DecisionPointKind::ManaColor { color: *color },
-            }),
+            },
             PinnedDecision::Mode { slot, indices } => {
                 let mut available_modes = indices.clone();
                 available_modes.sort_unstable();
                 available_modes.dedup();
                 let count = indices.len().min(u32::MAX as usize) as u32;
-                Some(DecisionPoint {
+                DecisionPoint {
                     slot: slot.clone(),
                     kind: DecisionPointKind::Mode {
                         available_modes,
@@ -932,18 +2711,792 @@ fn build_shortcut_schema(
                                 .collect::<std::collections::HashSet<_>>()
                                 .len(),
                     },
-                })
+                }
             }
-            PinnedDecision::MayChoice { slot, .. } => Some(DecisionPoint {
+            PinnedDecision::MayChoice { slot, .. } => DecisionPoint {
                 slot: slot.clone(),
                 kind: DecisionPointKind::MayChoice,
-            }),
-            PinnedDecision::UnlessBreak { slot, .. } => Some(DecisionPoint {
+            },
+            PinnedDecision::UnlessBreak { slot, .. } => DecisionPoint {
                 slot: slot.clone(),
                 kind: DecisionPointKind::UnlessBreak,
-            }),
-        })
-        .collect();
+            },
+        };
+        points.push(point);
+    }
+    Some(points)
+}
+
+/// CR 115.2 + CR 732.2a: does the ability's HEAD effect declare the "target opponent" PLAYER
+/// filter — a `Typed` filter with no type constraints, no object properties, and
+/// `controller: Opponent`, the shape `game::targeting::find_legal_targets` collapses to
+/// players-only?
+///
+/// SHAPE ACCEPTANCE ONLY, and the `bool` return is what enforces it: the published legal
+/// set must come from the announcement authority (`ability_utils::build_target_slots`), never
+/// from here, because this predicate reads the HEAD effect's filter while the choice being
+/// announced can belong to a CHAINED sub-ability (CR 601.2c reached via CR 603.3d). Handing
+/// the filter back would re-open exactly that divergence, so it is not handed back.
+///
+/// What the `controller` conjunct contributes, and nothing else does: `controller: You` /
+/// `None` ALSO collapses to players, so an all-`Player` legal set alone would admit a single
+/// forced seat, which is not the per-opponent choice a bounded drain cycle pins. Measured on
+/// the 3p drain board: `Typed{[], You, []}` builds ONE mandatory slot whose legal set is
+/// `[Player(0)]`, and only this conjunct rejects it.
+///
+/// What the `type_filters` / `properties` conjuncts contribute (issue #2004 — "target token
+/// you control" must not collapse to a player) is the MIRROR of that chained-slot
+/// divergence: an object-shaped HEAD effect whose single announced slot is nonetheless a
+/// player choice. When the head announces its own slot, an object-shaped filter is already
+/// rejected upstream — it either enumerates OBJECTS (the caller's all-`Player` conjunct) or
+/// enumerates nothing, making `build_target_slots` return `Err` (the caller's cardinality
+/// conjunct). It is only when the head announces NOTHING
+/// (`TargetChoiceTiming::Resolution`) and a chained `target opponent` sub-ability supplies
+/// the one slot that these two conjuncts become the sole rejector — which is the board
+/// `bounded_cycle_pin_slots_conjuncts_are_each_load_bearing` measures them on.
+fn declares_opponent_player_target(ability: &crate::types::ability::ResolvedAbility) -> bool {
+    use crate::types::ability::{ControllerRef, TargetFilter};
+    let Some(TargetFilter::Typed(tf)) = ability.effect.target_filter() else {
+        return false;
+    };
+    tf.type_filters.is_empty()
+        && tf.properties.is_empty()
+        && tf.controller == Some(ControllerRef::Opponent)
+}
+
+/// What ONE accepted stack entry publishes: the slot keys, plus the legal set the
+/// ANNOUNCEMENT authority itself built for the target slot.
+pub(crate) struct EntryPinSlots {
+    /// CR 115.2 target choice — `index: 0`. `None` in TWO shapes, and both are the absence of
+    /// a CR 601.2c *choice* rather than the absence of a target: shape (B), the may-only entry,
+    /// announces NO slot at all (`targets.is_empty()` and zero built slots); shape (A′)
+    /// announces one whose assignment is FORCED (`forced_unique_targeting`), which CR 732.2a
+    /// does not count as a game choice and which the dispatcher answers itself.
+    pub(crate) target: Option<crate::analysis::decision_template::DecisionSlot>,
+    /// CR 603.5 "may" gate — `index: 1`, `Some` only if `ability.optional` — the mint
+    /// additionally refuses on recipient, stored auto-choice and prompt-cardinality grounds
+    /// (see the `may` mint below), so `None` here does NOT imply the ability is mandatory.
+    /// `DecisionSlot`'s sub-index disambiguates two choices of ONE ability instance (target
+    /// vs. may gate).
+    pub(crate) may: Option<crate::analysis::decision_template::DecisionSlot>,
+    /// The legal set of the ONE announcement slot, taken VERBATIM from
+    /// `ability_utils::build_target_slots` — the same authority that decided there is
+    /// exactly one mandatory choice. Deriving it a second time from the head effect's
+    /// filter would let the two disagree about WHICH choice is being published, which is
+    /// the same class of divergence the cardinality conjunct closes about HOW MANY.
+    /// Empty for shapes (B) and (A′), neither of which publishes a target slot to carry a
+    /// legal set for.
+    pub(crate) legal_targets: Vec<crate::types::ability::TargetRef>,
+}
+
+/// CR 601.2c (reached for a triggered ability via CR 603.3d): the ONE target an accepted
+/// entry ANNOUNCES — the slot key, the legal set the announcement authority itself built,
+/// and whether announcing it is a game CHOICE.
+///
+/// THE TWO QUESTIONS THIS TYPE KEEPS APART, because conflating them was a measured
+/// fail-OPEN. PUBLICATION answers CR 732.2a — *is this a game choice the player makes?* —
+/// and shapes the schema. CHARGING answers CR 704.5a — *which seat is charged, and how
+/// much?* — and shapes the bound. A forced announcement is not a choice, so it is withheld
+/// from the schema; its victim still loses the life, so it is still charged. Deriving the
+/// bound from the PUBLISHED point set made the CR 732.2a withhold silently drop the forced
+/// victim into `elimination_bounds`' cheaper arm and RAISE `max_iterations`.
+pub(crate) struct AnnouncedTarget {
+    /// CR 115.2 target choice — `index: 0`, the same key a published point carries, so a
+    /// charge and a publication of the same announcement can never land on different slots.
+    pub(crate) slot: crate::analysis::decision_template::DecisionSlot,
+    /// The legal set of the ONE announcement slot, taken VERBATIM from
+    /// `ability_utils::build_target_slots` — the same authority that decided there is
+    /// exactly one mandatory choice, and the same one `forced_unique_targeting` rebuilds
+    /// slots with. Never a second derivation from the head effect's filter.
+    pub(crate) legal_targets: Vec<crate::types::ability::TargetRef>,
+    pub(crate) announcement: TargetAnnouncement,
+}
+
+/// CR 732.2a: whether announcing an [`AnnouncedTarget`] is a *game choice the PROPOSER makes
+/// at a prompt of their own*.
+///
+/// Not a `bool`: the two arms name two different CR readings, and the whole defect this
+/// type exists to prevent came from a caller re-deriving "was it a choice?" from a
+/// downstream artifact instead of reading the answer.
+///
+/// ⚠ THE QUESTION IS THREE-AXIS, and this type answered ONE of them while carrying the name of
+/// all three. CR 601.2c routes an announcement by WHO announces (`target_chooser`) as well as
+/// by HOW MANY assignments are legal (`forced_unique_targeting`), and CR 115.1 is overridden
+/// outright when the game selects at random (`TargetSelectionMode`). Only the middle axis was
+/// read. The publication BEHAVIOUR that gap produced predates the commit this type ships in —
+/// what was new is a named authority claiming to answer "is announcing this a game choice the
+/// proposer makes" while covering one of its three members.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TargetAnnouncement {
+    /// The PROPOSER announces this target, at a prompt that is really raised for them:
+    /// no other seat announces it (CR 601.2c `target_chooser`), the game does not select it
+    /// (CR 115.1 vs `TargetSelectionMode`), and `forced_unique_targeting` is false — so
+    /// `triggers::prepare_trigger_targets` routes it to `NeedsPlayerChoice`, a
+    /// `WaitingFor::TriggerTargetSelection` comes up under the proposer's own seat, and
+    /// `record_trigger_target_answer` can journal an answer AT THIS SLOT AND UNDER THIS KEY.
+    ///
+    /// ⚠ NOT "two or more legal assignments". That claim stood here and is FALSE: the conjunct
+    /// the code applies is the NEGATION of `forced_unique_targeting`, i.e.
+    /// `auto_select_targets_for_ability != Ok(Some(_))`. Two-or-more is its principal member,
+    /// but `Err` ("No legal target combinations available") negates it too, so this variant
+    /// carries no assignment COUNT — only the "nobody else and nothing else announced it, and
+    /// the dispatcher did not settle it" reading above.
+    Chosen,
+    /// The proposer makes no such announcement, so CR 732.2a publishes no decision point for
+    /// it. THREE DISJOINT ROUTES, each named at the code that takes it:
+    ///
+    /// * `forced_unique_targeting` — exactly one legal assignment, so the announcement is
+    ///   determined rather than chosen and `triggers::prepare_trigger_targets` routes it to
+    ///   `AutoAssigned` without asking anyone.
+    /// * CR 601.2c `target_chooser` ("of an opponent's choice") — a prompt IS raised, but for
+    ///   ANOTHER seat. `ability_utils::auto_select_targets_for_ability` early-returns
+    ///   `Ok(None)` whenever any slot carries a chooser, so `forced_unique_targeting` is false
+    ///   even with ONE legal assignment. The writer journals under the ANNOUNCING seat while
+    ///   the consumer reads `loop_answer(slot, proposer)` — an unanswerable published point,
+    ///   which is the exact undeclarable-offer condition the bounded offer exists to remove.
+    /// * `TargetSelectionMode` other than `Chosen` — the game selects (CR 115.1 is overridden;
+    ///   `triggers::prepare_trigger_targets` calls `random_select_targets_for_ability` and
+    ///   routes to `AutoAssigned`), so no prompt is ever raised and a pin would be a
+    ///   designation the RNG contradicts at drive time.
+    ///
+    /// CHARGED ALL THE SAME: CR 704.5a asks which seat loses how much life, and nobody having
+    /// made the choice changes neither who pays nor how much. Only the CR 732.2a publication
+    /// reader acts on this value.
+    NotProposerChoice,
+}
+
+/// CR 601.2c + CR 603.5: everything ONE accepted stack entry ANNOUNCES for `proposer`,
+/// BEFORE the CR 732.2a question of how much of it is a published game choice.
+///
+/// THE SINGLE ACCEPTANCE AUTHORITY. Both [`entry_publishes_pin_slots`] (publication) and
+/// [`bounded_cycle_charged_targets_for_window`] (CR 704.5a charging) are thin readers of
+/// this one function, so the two can never disagree about WHICH entries are in the cycle —
+/// only about which of their announcements is a published choice. Two independent
+/// acceptance chains that could disagree is exactly the shape gate (3)'s single-authority
+/// rule exists to forbid.
+struct EntryAnnouncement {
+    target: Option<AnnouncedTarget>,
+    may: Option<crate::analysis::decision_template::DecisionSlot>,
+}
+
+/// CR 732.2a: the per-iteration choice slots ONE stack entry PUBLISHES for `proposer`, or
+/// `None` when it publishes none.
+///
+/// A THIN READER of [`entry_announces`], which owns every acceptance conjunct documented
+/// below; this function contributes exactly one thing on top of it — the CR 732.2a
+/// publication decision (a `Forced` announcement is not a game choice, so no point is
+/// published for it). The CR 704.5a charging reader
+/// ([`bounded_cycle_charged_targets_for_window`]) reads the SAME announcement, so the two
+/// cannot disagree about which entries are in the cycle.
+///
+/// SINGLE AUTHORITY, and that is the whole point of its existence: the MINT
+/// ([`bounded_cycle_pin_slots_for_window`]) maps it over the certified period's announced
+/// pairs, of which `state.stack` is the zero-window degenerate case, and the RELIEF
+/// (`analysis::resource`'s CR 732.2a gate-(3)/(6) pin skip) calls it for one entry. Because
+/// both sides ask the same function, the relief predicate cannot be COARSER than the mint
+/// predicate — relieving a verdict the published pin does not specify is impossible by
+/// construction rather than by convention.
+///
+/// The acceptance conjuncts, in the order the EXTENSION POINT's preconditions name them:
+/// (c) `entry.controller == proposer` — CR 732.2a leaves every OTHER player owning their own
+/// choices, so an opponent-controlled entry is never pinnable; the entry is a triggered
+/// ability (a spell / activated ability re-announces from scratch); ANNOUNCING it requires
+/// either exactly one mandatory choice over players whose head effect declares the
+/// player-target shape (shape (A): asked of the announcement authority itself,
+/// `ability_utils::build_target_slots` — the function the relief's own
+/// `forced_unique_targeting` rebuilds slots with — rather than of a proxy, plus
+/// [`declares_opponent_player_target`]), or NO announcement choice at all (shape (B):
+/// `targets.is_empty()` and zero built slots); and its source object still exists, so the
+/// slot can re-bind (CR 400.7 incarnation, fail-closed on absence).
+///
+/// Shape (A) carries one further conjunct that is a property of the BOARD rather than of the
+/// ability: the announcement must actually be a CHOICE. A slot with exactly one legal
+/// assignment is FORCED (shape (A′)) — `triggers::prepare_trigger_targets` announces it
+/// without asking anyone — so it publishes its CR 603.5 gate alone, or nothing. See the
+/// `forced_unique_targeting` call in the body for why publishing it is the undeclarable case.
+///
+/// SCOPE OF THE ANSWER: because the relief is a `continue` at gate (3), the relief
+/// predicate must be no coarser than EVERY fact `stack_entry_has_no_ordering_input`
+/// rejects on — not just the target one. Correspondence, in that function's own order:
+/// entry kind (the destructure below), `pending_trigger_entry` (the ONE state-dependent
+/// fact, enforced at the relief so this enumerator stays pure — see the block below),
+/// `multi_target` / `distribution` / `target_constraints` (the block below), and the
+/// target choice itself, which is the one fact the published slot actually answers.
+pub(crate) fn entry_publishes_pin_slots(
+    state: &GameState,
+    entry: &StackEntry,
+    proposer: PlayerId,
+) -> Option<EntryPinSlots> {
+    let announced = entry_announces(state, entry, proposer)?;
+    // CR 732.2a: a shortcut describes "a sequence of game choices", so ONLY a `Chosen`
+    // announcement earns a decision point. `NotProposerChoice` is withheld — see
+    // [`TargetAnnouncement::NotProposerChoice`] and the shape (A′) block in
+    // [`entry_announces`].
+    let published = announced
+        .target
+        .filter(|target| target.announcement == TargetAnnouncement::Chosen);
+    // An entry that publishes NOTHING publishes no slot set at all. This is the fail-closed
+    // reading shapes (B) and (A′) each carried inline as a `Some(may?)`, stated ONCE here
+    // instead of once per shape; the observable result is identical.
+    if published.is_none() && announced.may.is_none() {
+        return None;
+    }
+    let (target, legal_targets) = match published {
+        Some(target) => (Some(target.slot), target.legal_targets),
+        None => (None, vec![]),
+    };
+    Some(EntryPinSlots {
+        target,
+        may: announced.may,
+        legal_targets,
+    })
+}
+
+/// CR 601.2c + CR 603.5 (reached for a triggered ability via CR 603.3d): what ONE stack
+/// entry ANNOUNCES for `proposer`, or `None` when the entry is not one this cycle accepts.
+///
+/// Every acceptance conjunct documented on [`entry_publishes_pin_slots`] lives here. What
+/// does NOT live here is the CR 732.2a publication decision: this function reports whether
+/// the announcement is `Chosen` or `Forced` and lets its two readers apply that fact to the
+/// question each is answering — the schema (publication) or the bound (CR 704.5a charging).
+fn entry_announces(
+    state: &GameState,
+    entry: &StackEntry,
+    proposer: PlayerId,
+) -> Option<EntryAnnouncement> {
+    use crate::analysis::decision_template::DecisionSlot;
+    if entry.controller != proposer {
+        return None;
+    }
+    let StackEntryKind::TriggeredAbility { ability, .. } = &entry.kind else {
+        return None;
+    };
+    // The published slot answers ONE target (`min_targets: 1, max_targets: 1` below). A
+    // variable-count choice (CR 601.2c "if the spell has a variable number of targets, the
+    // player announces how many"), a divide/distribute assignment (CR 601.2d), or a
+    // cross-target constraint (CR 601.2c "the same target can't be chosen multiple times" /
+    // "must be chosen") — all reached for a triggered ability via CR 603.3d — is
+    // announcement-time ordering input NO published slot specifies. These are the ABILITY's
+    // own facts, so they live here, where mint and relief share them: the gate-(3) relief
+    // is a `continue` that discharges the whole of `stack_entry_has_no_ordering_input`,
+    // which rejects on each of them independently of its target check.
+    //
+    // The fourth fact that function rejects on — `pending_trigger_entry == entry.id`,
+    // CR 603.3c mid-construction — is deliberately NOT here: it is a property of the
+    // COMPARED STATE, not of the offer's schema, and reading it would break this
+    // enumerator's PROMPT-state independence (see [`bounded_cycle_pin_slots`]: it never
+    // reads `waiting_for`, nor `pending_trigger_entry`, which is set exactly while a prompt
+    // is up). NOT a claim of purity over a three-field surface: the CR 603.5 recipient
+    // conjunct below resolves a player through `optional_prompt_player` →
+    // `resolve_effect_player_ref`, which reaches ELEVEN distinct `GameState` fields —
+    // `state.players`, `state.seat_order`, `state.format_config`, `state.objects`,
+    // `state.lki_cache`, `state.stack`, `state.current_trigger_event`,
+    // `state.last_created_token_ids`, `state.last_revealed_ids`,
+    // `state.last_zone_changed_ids` and `state.resolution_stack`. The contract is narrower
+    // and exact — the mint is a function of the BOARD, never of the PROMPT — and it is what
+    // keeps the mint's verdict stable across a prompted and an unprompted beat.
+    // It is set exactly
+    // while a `TriggerTargetSelection` prompt is up, so a mint that read it would publish
+    // nothing on a prompted board — measured on dump B, where it zeroes the emblem slot.
+    // It is enforced at the relief instead (`analysis::resource::entry_target_choice_is_pinned`),
+    // which makes the relief strictly NARROWER than the mint — never coarser.
+    if ability.multi_target.is_some()
+        || ability.distribution.is_some()
+        || !ability.target_constraints.is_empty()
+    {
+        return None;
+    }
+    // THE ANNOUNCEMENT AUTHORITY, not a proxy for it. Everything above is an ability FACT;
+    // this is the only conjunct that asks the questions the published point actually
+    // answers — "how many choices does announcing this entry require, is each one
+    // mandatory, and WHICH objects or players may be chosen?" `Effect::target_filter()`
+    // (below) cannot answer any of them: it reports the head effect's filter, while
+    // CR 601.2c ("if the spell uses the word 'target' in multiple places, the same object
+    // or player can be chosen once for each instance") — reached for a triggered ability
+    // via CR 603.3d — makes a CHAINED sub-ability's own target a SECOND independent choice,
+    // with its OWN legal set. `build_target_slots` is the function
+    // `stack_entry_has_no_ordering_input` itself rebuilds slots with (via
+    // `forced_unique_targeting`), so mint and relief now measure the same quantities.
+    //
+    // Exactly one MANDATORY slot over PLAYERS, and each of the three parts is load-bearing
+    // — the first two discriminated by
+    // `bounded_cycle_pin_slots_requires_a_single_mandatory_announcement_slot`, the third by
+    // `bounded_cycle_pin_slots_legal_set_comes_from_the_announcement_authority`:
+    // * `len() == 1` — a chained second "target" (2 slots) or an effect whose filter the
+    //   SLOT BUILDER declines (0 slots: `triggers::extract_target_filter_from_effect`
+    //   carves out `Sacrifice`/`UnattachAll`/… for which `Effect::target_filter()` still
+    //   returns `Some`, and `target_choice_timing == Resolution` surfaces no stack slot at
+    //   all) would leave the published `min/max_targets: 1` contradicting the announcement.
+    // * `!optional` — `ability.optional_targeting` ("up to one target") makes the real
+    //   minimum ZERO (CR 601.2c), and its slot may legally carry an EMPTY legal set, so a
+    //   `min_targets: 1` point would over-state the choice the offer specifies.
+    // * every legal target is a PLAYER (CR 115.2) — the head effect can declare the
+    //   player shape while the ONE slot the announcement actually surfaces belongs to a
+    //   chained sub-ability targeting OBJECTS (measured: head `LoseLife` at
+    //   `TargetChoiceTiming::Resolution` contributing 0 slots + a chained
+    //   `LoseLife{Typed{[Creature]}}` contributing 1, legal set three objects). NO SEAT PIN
+    //   can specify such a choice — neither spelling: not the CR 115.10a
+    //   `TargetPin::Player`, and not the CR 601.2c
+    //   `Scheduled(Constant(Ranking::one(AnnouncementSubject::Seat(..))))` the announcement
+    //   journal now emits, since both resolve to a `ConcreteTarget::Player` and the slot
+    //   wants objects. The provenance split changes which authority judges a seat, not what
+    //   a seat can denote, so this conjunct is untouched by it. Publishing anyway would hand
+    //   gate (3)'s `continue` a slot no pin can answer.
+    //
+    // `Err` (no legal target, CR 603.3d) also yields `None` — fail-closed, matching this
+    // function's contract that the schema can only ever UNDER-publish. Purity survives:
+    // `build_target_slots` never reads `state.waiting_for` (its only hit in
+    // `ability_utils.rs` is a test at `:7722`).
+    let source = object_decision_source(state, entry.source_id)?;
+    // CR 603.5 + CR 732.2a: `entry.controller == proposer` above bounds who OWNS the entry;
+    // it does NOT bound who the resolver ASKS, nor WHETHER it asks, nor HOW MANY TIMES.
+    // Three mint-time conjunct groups, all FAIL-CLOSED pre-filters on the ONE gate a
+    // `MayChoice` pin is for — the CR 603.5 gate inside `resolve_chain_body`
+    // (`effects/mod.rs`). ⚠ GROUPS (a) AND (c) ARE NO LONGER RESTATED HERE: they, plus the
+    // `optional_for` and feasibility conjuncts this mint used to OMIT, now live in
+    // `effects::upfront_optional_gate`, which is the same function production's own branch
+    // takes. The prose below stays because it records WHY each group is load-bearing; the
+    // code below asks the authority for all of them at once.
+    // THIS IS THE ONE PLACE `may` IS MINTED, so the guards cover shape (A) and shape (B)
+    // together rather than being restated per shape. Soundness over the OTHER FOUR
+    // production producers of `WaitingFor::OptionalEffectChoice` is NOT claimed here; it is
+    // discharged at the consumption point, where the instrument is total.
+    //
+    // (a) RECIPIENT. `optional_prompt_player` is THIS gate's own recipient authority —
+    //     five of its branches route to a NON-controller and the last is EFFECT-AGNOSTIC
+    //     (CR 503.1a + CR 608.2d, the `scoped_player` class whose printed member is Braids,
+    //     Conjurer Adept — "At the beginning of each player's upkeep, that player may put an
+    //     artifact, creature, or land card from their hand onto the battlefield."), so
+    //     asking the same function the gate asks keeps THIS pair from drifting. Without
+    //     it a proposer's pin can be spent as another seat's CR 603.5 choice.
+    // (b) SECOND AUTHORITY. A stored "don't ask again" auto-choice ALREADY ANSWERS this
+    //     may and the gate returns BEFORE setting any prompt, so a pin minted here would
+    //     be silently unused — invisible even to a fail-closed inject arm. The key is
+    //     built exactly as the gate builds it; `player` is `proposer` only because `&&`
+    //     short-circuits left to right and (a) has already proved them equal. Present ⇒
+    //     refuse; `may_trigger_origin: None` ⇒ no key exists ⇒ nothing to refuse.
+    // (c) CARDINALITY. CR 732.2a: the shortcut describes THE sequence of choices, so one
+    //     published slot may stand for exactly ONE CR 603.5 prompt. Production suppresses
+    //     the single up-front gate for three `repeat_for` shapes and re-fires optionality
+    //     PER ITERATION (CR 608.2c + CR 608.2d) instead. `has_kind_driven_repeat` keys on
+    //     `repeat_for` ALONE — no `Effect` restriction — so an optional `PutCounter` /
+    //     `Draw` / `Token` of that shape would otherwise mint ONE slot for N prompts. Ask
+    //     production's own three predicates rather than re-deriving them here, which is
+    //     the same authority-sharing rule (a) follows.
+    // ADOPTION B. All four groups are `effects::upfront_optional_gate`'s, asked of the ONE
+    // function `resolve_chain_body`'s own branch is, so the mint and the gate cannot drift.
+    // `Probe` is the right mode here: this caller has NOT run the probe (production's `Known`
+    // belongs to a resolve that is not happening yet) and the authority evaluates it LAST, so the
+    // clone-bearing `CastFromZone` arm needs `optional ∧ ¬optional_for ∧ ¬repeat`. MEASURED on a
+    // full `--test integration` run: 16402 mints ⇒ 4573 probes ⇒ 0 arm entries (59 via `Known`).
+    //
+    // BEHAVIOUR CHANGE, and it is rules-correct in the fail-closed direction: this now
+    // withholds the slot for an `optional_for` ability (CR 608.2d + CR 101.4 — a fan-out is an
+    // APNAP cascade of up to one window PER LIVING PLAYER, and one published slot standing for
+    // N prompts is the cardinality defect group (c) already argues against) and for an
+    // infeasible optional (which opens no window at all, so a slot for it is a pin the gate
+    // can never spend). Direction: strictly FEWER offers, never more.
+    let may = crate::game::effects::upfront_optional_gate(
+        state,
+        ability,
+        crate::game::effects::OptionalFeasibility::Probe,
+    )
+    .filter(|gate| gate.prompt_player == proposer)
+    .filter(|gate| {
+        gate.key
+            .as_ref()
+            .is_none_or(|key| state.may_trigger_auto_choice_for_live_prompt(key).is_none())
+    })
+    .map(|_| DecisionSlot::may(source.clone()));
+    let mut slots = super::ability_utils::build_target_slots(state, ability).ok()?;
+    // SHAPE (B) — may-only. The announcement authority surfaced NO choice, so there is no
+    // CR 601.2c target for a pin to specify and the entry publishes its CR 603.5 gate
+    // alone. `ability.targets.is_empty()` is what makes "zero built slots" mean "declares
+    // nothing" rather than "declared something the builder declined"; `optional` is
+    // inherited from the `may` expression, which is `None` without it. A `may` the three
+    // conjunct groups above suppressed leaves shape (B) with NO slot at all, so the whole
+    // entry publishes `None` — the fail-closed direction, now applied by the publication
+    // reader rather than restated here. Shape (B) also charges NOTHING under CR 704.5a:
+    // there is no announced target, so there is no seat a declaration could aim at.
+    if slots.is_empty() {
+        if !ability.targets.is_empty() {
+            return None;
+        }
+        return Some(EntryAnnouncement { target: None, may });
+    }
+    if slots.len() != 1 {
+        return None;
+    }
+    let slot = slots.swap_remove(0);
+    if slot.optional
+        || !slot
+            .legal_targets
+            .iter()
+            .all(|target| matches!(target, crate::types::ability::TargetRef::Player(_)))
+    {
+        return None;
+    }
+    // SHAPE conjunct only — the legal set above is already the announcement authority's, and
+    // the predicate's `bool` return makes re-deriving one from the head filter impossible
+    // rather than merely discouraged. This rejects a head effect that is not the CR 115.2
+    // "target opponent" declaration, which an all-`Player` legal set alone does not
+    // (`controller: You` builds exactly one mandatory slot whose legal set is the
+    // controller — measured).
+    if !declares_opponent_player_target(ability) {
+        return None;
+    }
+    // SHAPE (A′) — NOT THE PROPOSER'S CHOICE, so there is no CHOICE OF THEIRS to publish.
+    // CR 732.2a describes a shortcut as "a sequence of game choices, for all players": a
+    // decision point stands for a game choice, and the proposer makes none of these three.
+    // CR 603.3d routes a trigger's announcement through CR 601.2c–d, and CR 601.2c has the
+    // player "announce their choice of an appropriate object or player for each target".
+    //
+    // WITHHOLD, never journal-an-auto-selection, and the difference is observable rather
+    // than stylistic: `triggers::prepare_trigger_targets` sends this exact predicate's
+    // `Ok(Some(..))` to `PreparedTriggerTargets::AutoAssigned`, so no
+    // `WaitingFor::TriggerTargetSelection` is ever raised, so `record_trigger_target_answer`
+    // — whose only two call sites are that prompt's reducer arms — never runs. A point
+    // published here would demand a `predictability_gate` answer no writer can produce, and
+    // one unanswerable point makes the WHOLE offer undeclarable (the gate's `required` set is
+    // every published point). Journalling the auto-selection instead would model a decision
+    // the player never made.
+    //
+    // THE SAME AUTHORITY AS THE RELIEF, exported rather than re-derived: gate (3)'s
+    // `stack_entry_has_no_ordering_input` asks `forced_unique_targeting` about this same
+    // fact, so withholding the point loses no relief — the entry passes gate (3) on the
+    // ordering-input arm instead of the pin arm. Evaluated on `state`, which for a window
+    // mint IS the pair's own carrying frame (`bounded_cycle_pin_slots_for_window` passes
+    // `frame`), the same board `build_target_slots` above enumerated the legal set from; that
+    // function's doc records why the live board would be fail-open here.
+    //
+    // Consistent with the sibling refusal one level up: a `ControllerRef::You` head is
+    // already refused as "a single forced seat, not a per-opponent choice". Forced-unique
+    // targeting is that same condition measured on the legal SET rather than on the filter.
+    // The `may` survives — a CR 603.5 take/decline is a real choice on the same source — and
+    // an entry with neither publishes nothing at all, exactly as shape (B) does.
+    //
+    // ⚠ `forced_unique_targeting` ANSWERS THE ASSIGNMENT-COUNT AXIS ONLY, and CR 601.2c has
+    // two more that decide the same question — WHO announces, and whether anybody does. The
+    // two cheap conjuncts run FIRST because each independently makes the count irrelevant:
+    //
+    // * CR 601.2c `target_chooser` ("of an opponent's choice", e.g. Volcanic Offering). The
+    //   prompt is raised for the CHOOSER, and `record_trigger_target_answer` journals under
+    //   the seat that answered it, while every consumer of a published point reads
+    //   `loop_answer(slot, proposer)`. So the point is unanswerable at the proposer's key and
+    //   one unanswerable point makes the WHOLE offer undeclarable — the same failure the
+    //   forced arm above avoids. Note the count axis CANNOT see this:
+    //   `auto_select_targets_for_ability` early-returns `Ok(None)` when ANY slot carries a
+    //   chooser (`ability_utils.rs`, whose own comment names the `TargetSelectionMode::Random`
+    //   guard as its mirror), so `forced_unique_targeting` is false here even when exactly ONE
+    //   legal assignment exists. `slots.len() == 1` is already enforced above, so this reads
+    //   the single announcement slot. The `!= proposer` half is not redundant with
+    //   `collect_target_slots`' own `player != ability.controller` filter: it keys on the seat
+    //   the CONSUMER reads, which is `entry.controller`, and those two coincide in production
+    //   but are separate fields. Same shape as the sibling `may` mint's
+    //   `.filter(|gate| gate.prompt_player == proposer)` — direction: strictly FEWER offers.
+    // * `TargetSelectionMode` other than `Chosen` — CR 115.1's "require their controller to
+    //   choose" is overridden and the GAME selects. `triggers::prepare_trigger_targets` sends
+    //   this to `random_select_targets_for_ability` and then to `AutoAssigned`, so no prompt
+    //   is raised at all; worse than merely unanswerable, a pin here also RELIEVES gate (3),
+    //   so the offer would be minted because of a designation the RNG contradicts at drive
+    //   time. Written as `!is_chosen()` rather than `is_random()` deliberately: a future
+    //   variant is withheld by DEFAULT, which is this function's documented fail-closed
+    //   contract that the schema can only ever UNDER-publish.
+    //
+    // SCOPING HONESTY: this publication behaviour PREDATES the commit these types ship in.
+    // What is new is [`TargetAnnouncement`] claiming authority over "is announcing this a game
+    // choice the proposer makes" while reading one of the three axes. This is not a repair of
+    // a defect this commit introduced.
+    //
+    // ⚠ WITHHELD FROM THE SCHEMA IS NOT UNCHARGED, and the two used to be the same act.
+    // CR 704.5a asks which seat loses how much life, and a forced victim loses it exactly as
+    // a chosen one does — nobody having made the choice changes who pays, not how much.
+    // Reporting the shape here rather than dropping the announcement is what lets
+    // [`bounded_cycle_charged_targets_for_window`] charge it while
+    // [`entry_publishes_pin_slots`] still withholds it. Before, the shape was destroyed at
+    // this line and the CR 704.5a bound — derived from the surviving PUBLISHED points — read
+    // the withhold as "no victim", charging bare `observed_life_loss` instead of
+    // `observed_life_loss.max(0) + declared_life_magnitude`, so `max_iterations` GREW: the
+    // offer stated more legal repetitions than CR 732.2a permits.
+    let announcement = if slot.chooser.is_some_and(|chooser| chooser != proposer)
+        || !ability.target_selection_mode.is_chosen()
+        || crate::analysis::resource::forced_unique_targeting(state, ability)
+    {
+        TargetAnnouncement::NotProposerChoice
+    } else {
+        TargetAnnouncement::Chosen
+    };
+    // Shape (A) / (A′) — targeted. Index 1 is kept for the may slot in BOTH shapes, so slot
+    // identity is stable across them. Both sub-indices come from `DecisionSlot`'s own
+    // constructors, which the CR 603.5 and CR 601.2c journal writers also use.
+    Some(EntryAnnouncement {
+        target: Some(AnnouncedTarget {
+            slot: DecisionSlot::target(source),
+            legal_targets: slot.legal_targets,
+            announcement,
+        }),
+        may,
+    })
+}
+
+/// CR 732.2a: the per-iteration decision points a BOUNDED cycle shortcut must publish for
+/// `proposer` — one `Targets` point per proposer-controlled triggered-ability SOURCE that
+/// declares a single *player* target (CR 115.2), plus a `MayChoice` point (CR 603.5) when
+/// that ability is optional.
+///
+/// Only a *published* slot is a "specified choice" in CR 732.2a's sense; an unpublished
+/// per-opponent choice would make the proposal a conditional action. This is the SINGLE
+/// authority for that slot set — the offer's cover call, its schema, the drive's cover call
+/// and the per-cycle `predictability_gate` all read the same list.
+///
+/// A function of the BOARD, never of the PROMPT. NOT a purity claim over a three-field
+/// `(state.stack, state.objects, proposer)` surface — that would be false: the CR 603.5
+/// recipient conjunct in the body resolves a player through `optional_prompt_player` →
+/// `resolve_effect_player_ref`, which reaches ELEVEN distinct `GameState` fields (enumerated
+/// at that conjunct). What actually holds, and what the callers rely on, is the narrower
+/// PROMPT-independence: it deliberately does **not**
+/// read `state.waiting_for`, and it cannot: both production call sites run at
+/// `WaitingFor::Priority` (`interactive_loop_bridge`'s destructure, and the drive's
+/// `Priority{active}` settle arm), where no prompt and no materialized `legal_targets`
+/// exist. The legal set is the one `ability_utils::build_target_slots` built for the
+/// accepted announcement slot, carried through verbatim — so the SAME authority answers
+/// how many choices exist and which targets each admits. That builder routes this filter
+/// shape to the native authority [`crate::game::targeting::find_legal_targets`] (via
+/// `ability_utils::legal_targets_for_ability_filter_uncapped`'s `relative_kind.is_none()`
+/// / `!needs_ability_context` arm), whose empty-`Typed` players branch already excludes
+/// departed seats — CR 800.4 (multiplayer games continue after players leave) + CR 102.1
+/// (a player is one of the people in the game): a seat that has left the game is no longer
+/// one of them, so it is not choosable by anything; player phasing per the CR 702.26b
+/// MIRROR (permanent-phasing text, NEVER authority for players). NOT CR 800.4a, which
+/// governs a departed player's objects, control effects and priority — not the legality of
+/// a choice. Never a declaration, so the offer still cannot ratify its own pin. Note the
+/// enumeration context
+/// shifts with the authority: it is now the ABILITY's own `controller`/`source_id`
+/// (CR 601.2c — the ability's controller announces its targets) rather than the offer's
+/// `proposer` and the stack entry's `source_id`.
+///
+/// Fail-closed: an entry whose source object is gone yields NO point (rather than a point
+/// with an unbindable slot), so the schema can only ever under-publish.
+///
+/// Class served: every proposer-controlled triggered ability on the stack whose declared
+/// target is a player — never a named card. Command-zone sources are included — every
+/// command-zone-functioning ability source, not emblems alone (emblem CR 114.4; plane, scheme,
+/// conspiracy CR 113.6p; a face-up phenomenon CR 901.7; an Eminence commander per its own
+/// ability's declared zones, CR 113.6b) — and [`slot_source_prompted`] is the matching half at
+/// replay time.
+///
+/// PER SOURCE, NOT PER ENTRY: N stack entries from ONE source mint N byte-identical
+/// `DecisionSlot`s (real boards reach 35 entries on one source), and the sub-index
+/// disambiguates choices WITHIN an ability instance, not instances of it
+/// ([`crate::analysis::decision_template::DecisionSlot`]'s own doc). Publishing the same
+/// slot N times would make the frontend render N identical pickers and
+/// `predictability_gate` demand N pins for a choice [`inject_pinned_answer`] answers ONCE
+/// per source (its `find_map` matches on the slot's SOURCE and is index-blind). So the
+/// offer publishes the SET of open choices; one state-independent pin ("always target
+/// P1") specifies every instance of it.
+///
+/// VISIBILITY: the `#[cfg(any(test, feature = "test-support"))]` gate this shipped behind
+/// has LIFTED, exactly as its own note said it would — [`try_offer_bounded_cycle_shortcut`]
+/// is the production caller the gate was waiting for. It stays `pub` because the
+/// integration suite that pins its behaviour links the library.
+pub fn bounded_cycle_pin_slots(
+    state: &GameState,
+    proposer: PlayerId,
+) -> Vec<crate::analysis::decision_template::DecisionPoint> {
+    // The DEGENERATE one-frame case of the window enumerator: with no window frame there is
+    // no transition to observe, so `certified_period_touch`'s `window.is_empty()` branch seeds
+    // `announced` from `state.stack` — same authority, same set, same order, same dedup, hence
+    // byte-identical to the snapshot mint this used to be. The alias holds NO certificate, so
+    // it passes `ResourceSignatureOnly`: the type is never allowed to claim one its caller
+    // does not hold (and the empty-window branch yields `frozen_ids: ∅` on any value).
+    bounded_cycle_pin_slots_for_window(
+        &crate::analysis::resource::certified_period_touch(
+            &[],
+            state,
+            crate::analysis::resource::PeriodCertification::ResourceSignatureOnly,
+        ),
+        proposer,
+    )
+}
+
+/// CR 732.2a: the per-iteration choice slots ONE CERTIFIED PERIOD publishes for `proposer`.
+///
+/// Maps the single authority [`entry_publishes_pin_slots`] over `touch.announced`, with the
+/// same per-slot dedup [`bounded_cycle_pin_slots`] applies — each pair evaluated against ITS
+/// OWN carrying frame, which is the ring sample's LIVE half and never a `normalize_for_loop`
+/// product: a normalized frame would key the stored-auto-choice refusal on `ObjectId(0)` and
+/// would make `build_target_slots` take its `trigger_source: None` fall-through and publish a
+/// WIDER legal set than the live board admits.
+///
+/// It calls the RAW mint rather than the verdict door on purpose: routing it through the door
+/// would eagerly classify (and charge for) every announced pair at slot-enumeration time,
+/// which is exactly the pre-population pass this design removes. The relief side reads the
+/// CACHED mint through the door instead.
+pub(crate) fn bounded_cycle_pin_slots_for_window(
+    touch: &crate::analysis::resource::PeriodTouch<'_>,
+    proposer: PlayerId,
+) -> Vec<crate::analysis::decision_template::DecisionPoint> {
+    use crate::analysis::decision_template::{DecisionPoint, DecisionPointKind};
+    let mut points: Vec<DecisionPoint> = Vec::new();
+    for (frame, entry) in &touch.announced {
+        let Some(pins) = entry_publishes_pin_slots(frame, entry, proposer) else {
+            continue;
+        };
+        // CR 601.2c: a `Targets` point only when the entry actually announces a choice.
+        // Shape (B) publishes `target: None` — announcing it surfaces no target at all —
+        // so a `min_targets: 1` point would over-state the sequence CR 732.2a describes.
+        if let Some(target) = pins.target.filter(|t| !points.iter().any(|p| &p.slot == t)) {
+            points.push(DecisionPoint {
+                slot: target,
+                kind: DecisionPointKind::Targets {
+                    // VERBATIM the slot `ability_utils::build_target_slots` built for this
+                    // announcement — not a second derivation. That is what makes WHICH
+                    // choice is published and HOW MANY choices are published the same
+                    // authority's answers, so they cannot disagree.
+                    legal_targets: pins.legal_targets,
+                    // Exactly one, and that cannot contradict the ANNOUNCEMENT: the
+                    // acceptance test admits an entry only when
+                    // `ability_utils::build_target_slots` — the authority that decides how
+                    // many choices announcing it actually requires (CR 601.2c via
+                    // CR 603.3d) — yields exactly one MANDATORY slot. An ability-fact
+                    // check alone (`multi_target` / CR 601.2d division) does NOT bound
+                    // the slot count: a chained sub-ability's own "target" is a second
+                    // instance of the word and a second slot.
+                    min_targets: 1,
+                    max_targets: 1,
+                    ordered: false,
+                },
+            });
+        }
+        // CR 603.5: "the choice is made when the ability resolves" — a "may" gate on the
+        // same source is a SECOND per-iteration choice, published so the declaration must
+        // pin it too.
+        if let Some(may) = pins.may {
+            if !points.iter().any(|p| p.slot == may) {
+                points.push(DecisionPoint {
+                    slot: may,
+                    kind: DecisionPointKind::MayChoice,
+                });
+            }
+        }
+    }
+    points
+}
+
+/// CR 704.5a: what ONE CERTIFIED PERIOD CHARGES — the announcement slot of every accepted
+/// entry, paired with the seats that announcement may name, whether or not CR 732.2a
+/// publishes it as a decision point.
+///
+/// DELIBERATELY NOT A FILTER OVER [`bounded_cycle_pin_slots_for_window`]'s OUTPUT, and that
+/// is the entire reason this exists as its own reader. Publication answers CR 732.2a — "a
+/// sequence of game choices, for all players" — so a FORCED announcement publishes nothing.
+/// Charging answers CR 704.5a — "if a player has 0 or less life, that player loses the
+/// game" — and the victim loses that life whether or not anybody chose it. Deriving the
+/// bound from the published set therefore let the CR 732.2a withhold silently drop a forced
+/// victim into `ResourceVector::elimination_bounds`' cheaper `observed_life_loss` arm,
+/// RAISING `max_iterations`: the offer would state more legal repetitions than CR 732.2a
+/// permits, on the very operator whose job is to prove the proposed sequence "may be legally
+/// taken based on the current game state".
+///
+/// SAME ACCEPTANCE AUTHORITY as the publication mint — both read [`entry_announces`] — so
+/// the charged SLOT set is a superset of the published `Targets` slots by construction, never
+/// an independently-derived one that could name an entry the schema does not.
+///
+/// ⚠ THE SUPERSET IS OVER SLOTS, NOT OVER EACH SLOT'S LEGAL SET, and conflating the two is
+/// what the dedup below exists to prevent. The two mints read the same announcements but keep
+/// DIFFERENT ONES of a repeated slot: publication skips a `NotProposerChoice` frame entirely,
+/// charging does not. So a first-wins charge could retain a narrow frame's legal set for a
+/// slot the schema publishes from a WIDER later frame — the schema would offer a pin the bound
+/// never charged, and `max_iterations` would GROW.
+///
+/// PER SOURCE, NOT PER ENTRY, for the reason [`bounded_cycle_pin_slots`] documents at
+/// length: one state-independent designation specifies every instance of that source's
+/// announcement, so its slot is charged ONCE however many entries carry it. On a repeat the
+/// victim lists are UNIONED rather than first-wins.
+///
+/// # Why the union is MONOTONE — it can only tighten the bound, never loosen it
+///
+/// The union changes exactly one input to
+/// [`crate::analysis::resource::ResourceVector::elimination_bounds`]:
+/// `declarable_victims` (its caller's flat union over these victim lists) can only GAIN
+/// members. It cannot change `slot_magnitude`, which is keyed by SLOT and whose value is the
+/// slot-independent `worst_seat_life_loss` — the union adds no slot. And for the one seat `p`
+/// a union adds, that function's per-seat life magnitude moves from `observed_life_loss` to
+/// `observed_life_loss.max(0) + S`, where `S = declared_life_magnitude >= 0` by construction
+/// (its initializer filters `*m > 0` and sums; the empty sum is `0`). For `observed >= 0` that
+/// is `observed + S >= observed`; for `observed < 0` it is `S >= 0 > observed`. So the
+/// magnitude never decreases, and `narrow` — `bound.min(headroom.max(0) / magnitude)` over a
+/// non-negative numerator, fired only when `magnitude > 0` — is monotone non-increasing in its
+/// divisor. Hence the bound can only SHRINK. That is this repo's fail-closed direction.
+///
+/// # Reachability of the shape this closes: NARROW, AND NOT CLOSED
+///
+/// Stated honestly in both directions, because neither the reviewer nor the orchestrator built
+/// the window. Divergent legal sets for ONE slot across a window need the legal PLAYER set to
+/// GROW between frames. ELIMINATION — the realistic mechanism, and the one every tracked dump
+/// exhibits — narrows it MONOTONICALLY (CR 800.4 + CR 102.1), which puts the widest frame
+/// FIRST and lands first-wins fail-CLOSED. The fail-open direction needs a seat's
+/// untargetability to END mid-window: a corpus census measured 14 cards granting a player
+/// untargetability mid-loop, all self-protective and predominantly "until end of turn", which
+/// does not expire mid-turn — so the path additionally needs the granting permanent to LEAVE,
+/// or a shorter duration. `a_repeated_slots_victim_lists_are_unioned_not_first_wins` builds
+/// exactly that board (CR 702.11c player hexproof whose grantor leaves between frames). It is
+/// NOT a claim that a full production trajectory reaches it, and it is NOT "unreachable".
+pub(crate) fn bounded_cycle_charged_targets_for_window(
+    touch: &crate::analysis::resource::PeriodTouch<'_>,
+    proposer: PlayerId,
+) -> Vec<(
+    crate::analysis::decision_template::DecisionSlot,
+    Vec<PlayerId>,
+)> {
+    use crate::analysis::decision_template::DecisionSlot;
+    let mut charged: Vec<(DecisionSlot, Vec<PlayerId>)> = Vec::new();
+    for (frame, entry) in &touch.announced {
+        let Some(target) = entry_announces(frame, entry, proposer).and_then(|a| a.target) else {
+            continue;
+        };
+        // CR 115.2: an object target is not a seat any CR 704 loss threshold applies to, so
+        // only players are collected — the same projection the bound always applied to the
+        // published set, moved to the authority that owns the legal set.
+        let victims: Vec<PlayerId> = target
+            .legal_targets
+            .iter()
+            .filter_map(|t| match t {
+                TargetRef::Player(p) => Some(*p),
+                _ => None,
+            })
+            .collect();
+        // UNION, NOT FIRST-WINS. `position` (not `iter_mut().find`) so the immutable probe's
+        // borrow ends before the `None` arm pushes.
+        match charged.iter().position(|(slot, _)| *slot == target.slot) {
+            Some(i) => {
+                let seats = &mut charged[i].1;
+                for victim in victims {
+                    if !seats.contains(&victim) {
+                        seats.push(victim);
+                    }
+                }
+            }
+            None => charged.push((target.slot, victims)),
+        }
+    }
+    charged
+}
+
+/// CR 732.2a: assemble a loop-shortcut offer's READ-side schema from its already-reified
+/// decision `points`, its proposed repeat mode, and its CR 704 count bound.
+///
+/// `iteration_count` and `max_iterations` are separate inputs on purpose: the first is the
+/// SUGGESTION the frontend seeds its picker with, the second is the LEGAL CEILING the
+/// declared-count check enforces. A producer that cannot compute a real bound passes
+/// `MAX_SHORTCUT_CYCLES`. The bounded-cycle producer narrows it; the drain and object-growth
+/// producers do not — so the ceiling is live for bounded offers only.
+fn build_shortcut_schema(
+    points: Vec<crate::analysis::decision_template::DecisionPoint>,
+    iteration_count: crate::analysis::decision_template::IterationCount,
+    max_iterations: u32,
+) -> crate::analysis::decision_template::ShortcutDecisionSchema {
+    use crate::analysis::decision_template::{DecisionPointKind, ShortcutDecisionSchema};
     // CR 702.51a: engine-owned total of untapped convoke-eligible creatures across every
     // ConvokeTaps point — the frontend renders this directly instead of re-deriving it from
     // `points` (display-layer purity). Identical predicate/sum to the deleted React reduce.
@@ -955,7 +3508,8 @@ fn build_shortcut_schema(
         })
         .sum();
     ShortcutDecisionSchema {
-        iteration_count: shortcut_iteration_count(win_kind),
+        iteration_count,
+        max_iterations,
         points,
         convoke_tappable_count,
     }
@@ -1020,6 +3574,19 @@ fn apply_confirmed_shortcut(
         || proposal
             .predicted_winner
             .is_some_and(|winner| !crate::game::players::is_alive(state, winner))
+        // CR 732.2a + CR 603.5: `template.owner` decides WHOSE CR 603.5 choice a pin may
+        // answer (the drive's seat guard in `inject_pinned_answer`). The two live ingresses
+        // bind it at declare; a RESTORED `WaitingFor::RespondToShortcut` is plain serde and
+        // the untrusted-restore scrubber rewrites only the two PRE-CAST waits, so it never
+        // ran that firewall. Re-validate the SAME invariant at the one point every drive
+        // passes through, so the seat guard is meaningful on every ingress and not only the
+        // two live ones. Refusing (rather than forcing `owner = proposer`) keeps the
+        // fail-closed direction every other conjunct at this seam uses: forcing would make a
+        // tampered proposal runnable under a rewritten owner.
+        || proposal
+            .template
+            .as_ref()
+            .is_some_and(|t| t.owner != proposal.proposer)
     {
         priority::reset_priority(state);
         // CR 800.4a: priority passes to the next player in turn order still in the game.
@@ -1083,7 +3650,19 @@ fn apply_until_lethal_shortcut(
     let period = shortcut_drive_period(proposal.template.as_ref());
 
     // DRIVE one representative cycle to produce the measured post-drive `work` state.
-    let work: GameState = if !committed.last_loop_action_sequence.is_empty() {
+    //
+    // SITE D (CR 732.2a): drive the recorded period ONLY when it is this proposal's proposer's
+    // own. Under `!is_empty()` a foreign seat's independent activation sitting in state would make
+    // this branch drive THAT seat's period and measure its delta as if it were the proposal's —
+    // CR 732.2a binds a shortcut to the choices its proposer can predictably take, and another
+    // seat's period is not among them. Fails closed on `None` into the ring-boundary branch below,
+    // which reads no sequence at all.
+    //
+    // ⚠ PRE-EXISTING AND INDEPENDENT OF the (1b) fix: Path A (`interactive_loop_bridge`'s
+    // ring-gated offer) never reads the sequence, so a Path-A `UntilLethal` offer accepted while a
+    // foreign period sat in state already reached here and drove the wrong seat. No fixture reaches
+    // that path today; the guard is the one-line root-cause fix through the same authority.
+    let work: GameState = if committed.loop_period_controller() == Some(proposal.proposer) {
         // Object-growth loop period (recast buyback+convoke, or a multi-activation mana engine)
         // declared `UntilLethal` by the AI (which hardcodes it for every optional offer). Drive
         // one real period on a clone under the re-entrancy guard; an inert Advantage token/mana
@@ -1102,7 +3681,7 @@ fn apply_until_lethal_shortcut(
         match drive_loop_sequence_iteration(&mut w, &seq, 0, &expected_defs) {
             Ok(()) => w,
             Err(RecastAbort) => {
-                return until_lethal_fallback(state, result, committed);
+                return until_lethal_fallback(state, result, committed, proposal.proposer);
             }
         }
     } else {
@@ -1113,8 +3692,19 @@ fn apply_until_lethal_shortcut(
         let cap = auto_pass_loop_max_iterations(&committed);
         let mut running = committed.clone();
         for i in 0..period {
-            match drive_one_shortcut_cycle(&running, &boundary, proposal.template.as_ref(), i, cap)
-            {
+            // The SAME single authority the `Fixed(N)` drive reads. Unreachably `Some` today —
+            // `handle_declare_shortcut` rejects `UntilLethal` against a bounded offer, and the
+            // bounded producer is the only one that publishes a signature — so this is
+            // behaviour-identical to the former no-delimiter call; it is threaded so the two
+            // drives cannot drift apart on what delimits a cycle.
+            match drive_one_shortcut_cycle(
+                &running,
+                &boundary,
+                proposal.template.as_ref(),
+                i,
+                cap,
+                proposal.per_cycle.as_ref().map(|pd| pd.frames_per_period),
+            ) {
                 CycleOutcome::Recurred { state: s, .. } => running = *s,
                 CycleOutcome::CrossLethal {
                     state: s,
@@ -1137,12 +3727,12 @@ fn apply_until_lethal_shortcut(
                         };
                         result.waiting_for = state.waiting_for.clone();
                     } else {
-                        until_lethal_fallback(state, result, committed);
+                        until_lethal_fallback(state, result, committed, proposal.proposer);
                     }
                     return;
                 }
                 CycleOutcome::Abort => {
-                    return until_lethal_fallback(state, result, committed);
+                    return until_lethal_fallback(state, result, committed, proposal.proposer);
                 }
             }
         }
@@ -1170,12 +3760,12 @@ fn apply_until_lethal_shortcut(
                     &fallers,
                 )
             {
-                until_lethal_fallback(state, result, committed);
+                until_lethal_fallback(state, result, committed, proposal.proposer);
             } else {
                 crown_until_lethal(state, result, proposal, winner);
             }
         }
-        _ => until_lethal_fallback(state, result, committed),
+        _ => until_lethal_fallback(state, result, committed, proposal.proposer),
     }
 }
 
@@ -1224,16 +3814,36 @@ fn crown_until_lethal(
 /// loop-detect ring so this same `apply()` does not instantly re-offer the (now-declined)
 /// loop; a later beat re-detects genuinely. Mirrors the `materialize_fixed_shortcut` abort
 /// tail.
-fn until_lethal_fallback(state: &mut GameState, result: &mut ActionResult, committed: GameState) {
+///
+/// THE SEQUENCE CLEAR IS OWNERSHIP-SCOPED (CR 732.2a) — the same authority, and for the same
+/// reason, as `handle_decline_shortcut`'s. `*state = committed` restores the PRE-DRIVE board,
+/// which since the bounded mint's step (1b) went seat-relative can carry a period belonging to a
+/// seat other than this proposal's proposer; an unconditional clear then destroyed that seat's
+/// accumulating period as a side effect of somebody else's aborted drive. Scoping costs the
+/// suppression below nothing, because `try_offer_object_growth_shortcut` returns `None` for every
+/// period that is not the priority holder's — so the only period whose survival could re-fire the
+/// offer this fallback is walking away from is the proposer's own, which this branch still clears.
+fn until_lethal_fallback(
+    state: &mut GameState,
+    result: &mut ActionResult,
+    committed: GameState,
+    proposer: PlayerId,
+) {
     *state = committed;
     // CR 732.2c: a declined shortcut must not instantly re-offer the SAME loop in this same
     // `apply()`. Clear both re-offer signals: the drain offer's `loop_detect_ring` AND the
     // object-growth offer's `last_loop_action_sequence` routing signal (a non-drain object-growth
     // loop, e.g. an AI-declared UntilLethal on an inert Advantage recast, would otherwise
     // re-fire `try_offer_object_growth_shortcut` on the next reconcile and livelock). A later
-    // real re-cast re-captures the sequence and re-detects genuinely.
+    // real re-cast re-captures the sequence and re-detects genuinely. The ring is a board-wide
+    // sampler with no seat semantics, so it clears unconditionally; the period is evidence about
+    // the seat that recorded it, so only the proposer's own is theirs to discard.
     state.loop_detect_ring.clear();
-    state.last_loop_action_sequence.clear();
+    // CR 603.5: the recorded "may" answers describe the window that just ended.
+    state.loop_answer_journal = None;
+    if state.loop_period_controller() == Some(proposer) {
+        state.last_loop_action_sequence.clear();
+    }
     priority::reset_priority(state);
     state.waiting_for = WaitingFor::Priority {
         player: living_priority_seat(state),
@@ -1242,17 +3852,36 @@ fn until_lethal_fallback(state: &mut GameState, result: &mut ActionResult, commi
 }
 
 /// CR 732.2a: how many whole cycles one shortcut drive must aggregate before the measured
-/// delta is complete. A `RoundRobin`/`Piecewise` target schedule rotates its OBJECT sources
-/// over its length, so a full period is that length; every other pin (a `Constant` target, a
+/// delta is complete. A `RoundRobin`/`Piecewise` target schedule rotates its STEPS over its
+/// length, so a full period is that length; every other pin (a `Constant` target, a
 /// `Player` pin, a non-target pin, or no template at all) settles in ONE cycle. Returns the
-/// max schedule length over the template's `Targets` pins, defaulting to 1.
+/// max schedule length over the template's `Targets` pins, defaulting to 1. A step's subject
+/// is a `Ranking`, which lives INSIDE the step and never changes the count — this seam is
+/// type-only across that parameterization.
 ///
-/// DORMANT for every Stage-2 crownable loop (Ruling B): `TargetSchedule` rotates DecisionSource
-/// objects, not players, and `live_mandatory_loop_winner` crowns on PLAYER fallers — an
-/// object-rotating loop produces no player faller, so it never crowns; the only crownable >2p
-/// player drain pins ALL opponents every cycle (`TargetPin::Player` is constant, period 1). The
-/// seam is built for generality; a multi-cycle aggregation is fail-safe (an object loop reaching
-/// the arm measures 1 cycle, finds no faller, does not crown).
+/// DORMANT for every Stage-2 crownable loop (Ruling B) — and the REASON has now been restated
+/// TWICE, because each restatement was falsified by the next commit and the history is the
+/// useful part. (i) It was "`TargetSchedule` rotates DecisionSource objects, not players";
+/// parameterizing a step's subject admitted `AnnouncementSubject::Seat` and killed that.
+/// (ii) It was then "no in-tree producer emits a `Seat` into a schedule", which is FALSE as of
+/// the provenance split: `record_trigger_target_answer` and
+/// `game::interaction::materialize_loop_shortcut_response` both mint
+/// `Scheduled(TargetSchedule::Constant(Ranking::one(AnnouncementSubject::Seat(..))))` for a
+/// CR 601.2c announced seat.
+///
+/// (iii) The property that actually holds, and the one this function's return value depends on,
+/// is about ROTATION rather than about subjects: **no in-tree producer emits a multi-STEP
+/// schedule** (`RoundRobin` / `Piecewise`) **or a multi-entry `Ranking`**. Every seat-carrying
+/// schedule the engine mints is a one-step `Constant`, which lands on the `1` arm of the match
+/// below — the same `1` a `TargetPin::Player` lands on, so the split moved the spelling and not
+/// the period. `live_mandatory_loop_winner` crowns on PLAYER fallers, and a loop whose targets
+/// do not rotate produces no NEW player faller per cycle to aggregate. The only crownable >2p
+/// player drain pins ALL opponents every cycle (constant, period 1 — via the
+/// `Scheduled(Constant(_))` arm below since the split, via `TargetPin::Player(_)` before it,
+/// and those two arms return the same `1`). The seam is built for generality and a multi-cycle
+/// aggregation is fail-safe either way (a loop reaching the arm measures 1 cycle, finds no
+/// faller, does not crown), so a future ROTATING producer changes what must be re-argued here,
+/// not what this function returns.
 ///
 /// CR 732.2a SAFETY LIMIT: the returned period is clamped to `MAX_SHORTCUT_CYCLES`. Both
 /// consumers derive their `0..period` range from this one helper (`validate_pins` and
@@ -1283,14 +3912,51 @@ fn shortcut_drive_period(
         .unwrap_or(1)
         // CR 732.2a SAFETY LIMIT: the drive period is STRUCTURALLY unbounded in the engine —
         // its length is the client template schedule's own length. On the WS transport the
-        // 8 KB inbound-frame cap (phase-server/src/main.rs:409/1420) already bounds a hostile
-        // schedule to a few hundred entries (~1-2 s stall, not a million-cycle remote DoS),
+        // inbound-frame cap (`phase-server`'s `MAX_WS_MESSAGE_BYTES`, 64 KB, applied at its
+        // `ws.max_message_size`) already bounds a hostile schedule to a finite entry count
+        // (a bounded stall, not a million-cycle remote DoS),
         // but in-process callers (WASM/Tauri/local) bypass that cap, so clamp here AT THE
         // SOURCE for every caller. Real schedules rotate over a handful of object sources
         // (period ≪ cap), so this is invisible to every legitimate loop; a clamped-shorter
         // drive measures a smaller (more conservative) delta ⇒ FEWER crowns / more manual
         // fallbacks, never a wrong crown.
         .clamp(1, MAX_SHORTCUT_CYCLES)
+}
+
+/// CR 732.2a: the index range the declare-time firewall must validate a pin over — the range
+/// the ACCEPTED COUNT will actually drive, read off the two drive loops themselves:
+/// `materialize_fixed_shortcut` drives `for i in 0..n` for a `Fixed(n)`, and
+/// `apply_until_lethal_shortcut` drives whole periods for `UntilLethal`, whose length is
+/// [`shortcut_drive_period`].
+///
+/// THIS IS NOT `shortcut_drive_period`, and the difference is the whole point of the fix.
+/// That helper answers "how many cycles must one measurement aggregate" — a schedule property
+/// with nothing to do with the declared count. Validating over it both ACCEPTED a pin whose
+/// driven image leaves the offer's PUBLISHED legal set at an index the count reaches, and
+/// REFUSED conforming declarations whose count is shorter than the schedule.
+///
+/// NO CONSERVATIVE PADDING. Widening the range with `.max(shortcut_drive_period(..))` is
+/// bug-preserving — it re-imports the schedule-derived period the invariant exists to remove,
+/// and at a count of 1 over a length-2 rotation `Ok` is the CORRECT answer. Do not re-derive
+/// and re-add that term.
+///
+/// PRECONDITION, discharged at its call site: the count is already cap-checked, because
+/// `handle_declare_shortcut` runs the `MAX_SHORTCUT_CYCLES` / `max_iterations` match ABOVE
+/// the pin-validation block. Without that ordering a hostile `Fixed(4e9)` would become a
+/// four-billion-iteration validation loop. Exactly ONE call site consumes this helper.
+///
+/// Exhaustive over `IterationCount` with no wildcard, so a future variant build-breaks here
+/// and forces a range decision instead of silently inheriting one.
+fn shortcut_validated_range(
+    count: &crate::analysis::decision_template::IterationCount,
+    template: Option<&crate::analysis::decision_template::DecisionTemplate>,
+) -> crate::analysis::decision_template::IterationIndex {
+    match count {
+        crate::analysis::decision_template::IterationCount::Fixed(n) => *n,
+        crate::analysis::decision_template::IterationCount::UntilLethal => {
+            shortcut_drive_period(template)
+        }
+    }
 }
 
 /// PR-7 Combo-UI Stage 2: the typed result of driving ONE whole loop-shortcut cycle on a
@@ -1314,6 +3980,33 @@ enum CycleOutcome {
     Abort,
 }
 
+/// CR 732.2a: THE FRAME DELIMITER — one published repetition is `k` retained ring frames.
+///
+/// The SINGLE AUTHORITY for "has the published period elapsed?". `drive_one_shortcut_cycle`
+/// has to answer that question in two arms — the active-player settle arm and the
+/// forced-window ANSWER arm — and both arms are places a frame can be recorded now that
+/// `apply_action` carries a second sampling site. Two inline copies of
+/// `frames_per_period.is_some_and(|k| frames_this_cycle >= k)` would be two places to get the
+/// comparison wrong, in a predicate whose `>=` vs `==` and whose `None` arm are both
+/// load-bearing (see `published_period_elapsed_is_total_over_the_axes_that_delimit_a_cycle`).
+///
+/// `None` ⇒ NEVER elapsed. An offer whose producer states no per-period signature publishes
+/// no frame count, and a drive must not invent one: such a cycle is delimited by board
+/// recurrence alone, exactly as it was before this delimiter existed. That is the fail-closed
+/// direction — a `true` here ends a cycle, and ending one early commits a FRACTION of the
+/// published delta, which is the conditional action CR 732.2a forbids outright.
+///
+/// `>=`, not `==`: a single beat may retain more than one frame, and a cycle that overshot `k`
+/// has still elapsed. An `==` would drive past its own boundary and only stop at the beat cap.
+///
+/// Beat-kind agnostic BY CONSTRUCTION — it reads only the counter the ring itself advanced, so
+/// it is valid at every beat where a frame can be recorded. The two board-recurrence predicates
+/// are deliberately NOT folded in: `GameState::normalize_for_loop`'s contract rests on
+/// `waiting_for` being `Priority` at the sample point, so they stay in the settle arm.
+fn published_period_elapsed(frames_this_cycle: u32, frames_per_period: Option<u32>) -> bool {
+    frames_per_period.is_some_and(|k| frames_this_cycle >= k)
+}
+
 /// PR-7 Combo-UI Stage 2: drive ONE whole cycle of a confirmed loop shortcut on a fresh clone
 /// of `committed`, seeded to the canonical settle beat (`Priority{active_player}`, the same
 /// beat the detector ring samples). Recurrence is detected against `boundary` (normalized).
@@ -1323,12 +4016,40 @@ enum CycleOutcome {
 /// Uses the INTERNAL `apply_action` path throughout (via `pass_priority_once_with_pipeline`
 /// and the injector), never the top-level reconcile boundary, so the detection hook cannot
 /// recurse mid-drive.
+///
+/// # Two cycle delimiters, and why the second one exists
+///
+/// `frames_per_period` is the published [`crate::analysis::resource::PeriodicDelta`] span, or
+/// `None` for every offer whose producer states no per-period signature. When it is `Some(k)`,
+/// a cycle ALSO completes once `k` retained ring frames have been recorded since the cycle
+/// began.
+///
+/// Board recurrence alone is not a delimiter for the class
+/// [`try_offer_bounded_cycle_shortcut`] mints on certification basis **B**: that basis consults
+/// no board predicate at all — it certifies a periodic *delta* over a ring window — so
+/// `loop_states_equal_modulo_resources` and `loop_states_cover_modulo_growth` are both FALSE at
+/// every settle beat by construction. Without the frame delimiter such a drive can only end at
+/// the beat cap (`Abort`, committing zero cycles) or by crossing lethal, and the declared `n`
+/// is inert: `Fixed(1)` and `Fixed(3)` produce byte-identical boards.
+///
+/// The frame count is the same quantity `frames_per_period` names, measured the same way: this
+/// loop steps `pass_priority_once_with_pipeline` and answers its prompts through
+/// `apply_action`, which are exactly the two functions the OBSERVED drive samples the ring in,
+/// so a driven beat samples under exactly the gates an observed beat does. ⚠ THAT IS TWO
+/// SAMPLING SITES, NOT ONE — the note that stood here named only the settle sampler, and the
+/// forced-window ANSWER site falsifies it. Which is why the frame counter is advanced in the
+/// ANSWER arm too: a period whose extra frames are recorded at answer beats would otherwise
+/// never reach `k`, and `frames_per_period` would be unreachable exactly on the boards the
+/// widening was for. A new frame is detected by `Arc` identity of the ring's back rather than
+/// by length, because the ring evicts at `LOOP_DETECT_RING_CAP` and a length delta reads 0
+/// once it is full.
 fn drive_one_shortcut_cycle(
     committed: &GameState,
     boundary: &GameState,
     template: Option<&crate::analysis::decision_template::DecisionTemplate>,
     iteration: crate::analysis::decision_template::IterationIndex,
     cycle_beat_cap: usize,
+    frames_per_period: Option<u32>,
 ) -> CycleOutcome {
     let mut work = committed.clone();
     priority::reset_priority(&mut work);
@@ -1337,12 +4058,14 @@ fn drive_one_shortcut_cycle(
     };
     let mut ev: Vec<GameEvent> = Vec::new();
     let mut beat = 0usize;
+    let mut frames_this_cycle = 0u32;
 
     loop {
         beat += 1;
         if beat > cycle_beat_cap {
             return CycleOutcome::Abort; // runaway backstop
         }
+        let ring_back_before = work.loop_detect_ring.back().map(std::sync::Arc::as_ptr);
         // A FRESH per-beat buffer (see the former inline note): reusing one growing buffer
         // would make `run_post_action_pipeline` re-scan prior beats' events and re-fire
         // already-consumed triggers.
@@ -1359,12 +4082,22 @@ fn drive_one_shortcut_cycle(
                 };
             }
             // Active-player settle beat: cycle complete iff the board recurred (constant-depth
-            // equal-modulo-resources OR ω-covering growth).
+            // equal-modulo-resources OR ω-covering growth) or the published period's worth of
+            // ring frames has elapsed. NOT the only beat kind the ring samples at — the
+            // forced-window ANSWER arm below reaches `apply_action`'s second sampling site, so
+            // it advances the same counter. Both arms key the advance on the ring's BACK
+            // ALLOCATION actually changing rather than on the beat kind, which is what keeps
+            // the drive's frame count equal to the mint's on either path.
             Ok(WaitingFor::Priority { player }) if player == work.active_player => {
                 ev.append(&mut beat_events);
+                let ring_back_after = work.loop_detect_ring.back().map(std::sync::Arc::as_ptr);
+                if ring_back_after.is_some() && ring_back_after != ring_back_before {
+                    frames_this_cycle += 1;
+                }
                 let norm = work.normalize_for_loop();
                 if crate::analysis::resource::loop_states_equal_modulo_resources(boundary, &norm)
                     || crate::analysis::resource::loop_states_cover_modulo_growth(boundary, &norm)
+                    || published_period_elapsed(frames_this_cycle, frames_per_period)
                 {
                     return CycleOutcome::Recurred {
                         state: Box::new(work),
@@ -1383,7 +4116,20 @@ fn drive_one_shortcut_cycle(
             Ok(other) => {
                 ev.append(&mut beat_events);
                 match inject_pinned_answer(&mut work, template, iteration, &other) {
-                    Ok(()) => continue,
+                    Ok(()) => {
+                        let ring_back_after =
+                            work.loop_detect_ring.back().map(std::sync::Arc::as_ptr);
+                        if ring_back_after.is_some() && ring_back_after != ring_back_before {
+                            frames_this_cycle += 1;
+                        }
+                        if published_period_elapsed(frames_this_cycle, frames_per_period) {
+                            return CycleOutcome::Recurred {
+                                state: Box::new(work),
+                                events: ev,
+                            };
+                        }
+                        continue;
+                    }
                     Err(RecastAbort) => return CycleOutcome::Abort,
                 }
             }
@@ -1400,15 +4146,17 @@ fn drive_one_shortcut_cycle(
 /// There is deliberately NO top-level `template.ok_or(...)` guard: the `OrderTriggers` arm is
 /// TEMPLATE-INDEPENDENT (the real 2p Vito drive raises OrderTriggers with a `template = None`
 /// declaration, and the forced-unique target auto-selects at dispatch), so a top guard would
-/// wrongly abort it. The template guard lives INSIDE the `TriggerTargetSelection` arm, the only
-/// arm that consumes pins.
+/// wrongly abort it. Each pin-consuming arm therefore carries its own guard: the
+/// `TriggerTargetSelection` arm is the only arm that consumes a CR 608.2b `Targets` pin, and the
+/// `OptionalEffectChoice` arm consumes the CR 603.5 `MayChoice` pin and carries its own seat +
+/// beat guards on top of the same `template.ok_or(..)`.
 fn inject_pinned_answer(
     work: &mut GameState,
     template: Option<&crate::analysis::decision_template::DecisionTemplate>,
     iteration: crate::analysis::decision_template::IterationIndex,
     prompt: &WaitingFor,
 ) -> Result<(), RecastAbort> {
-    use crate::analysis::decision_template::{ConcreteDecision, ConcreteTarget};
+    use crate::analysis::decision_template::{ConcreteDecision, ConcreteTarget, MayChoiceOption};
     match prompt {
         // CR 603.3b / CR 732.2a: auto-order the confirmed shortcut's simultaneous
         // same-controller triggers by identity order (0..len). Template-INDEPENDENT and
@@ -1438,10 +4186,7 @@ fn inject_pinned_answer(
                 .into_iter()
                 .find_map(|d| match d {
                     ConcreteDecision::Targets { slot, targets }
-                        if crate::analysis::decision_template::resolve_source(
-                            &slot.source,
-                            work,
-                        ) == Some(source_id) =>
+                        if slot_source_prompted(work, &slot.source, source_id) =>
                     {
                         Some(targets)
                     }
@@ -1464,10 +4209,88 @@ fn inject_pinned_answer(
             .map_err(|_| RecastAbort)?;
             Ok(())
         }
-        // CR 732.2a "no conditional actions": any other prompt (mode / may / unless / X) has
-        // no Stage-2 pin producer ⇒ fail-closed.
+        // CR 603.5 + CR 732.2a: answer an in-cycle "may" from the pin its owner declared.
+        //
+        // The recipient is read OFF THE PROMPT, which is the only TOTAL instrument:
+        // `WaitingFor::OptionalEffectChoice` has five production producers and exactly one
+        // consults `effects::optional_prompt_player`, so the mint's recipient conjunct is a
+        // PREDICTION over one of five producers while this comparison is an OBSERVATION of
+        // the prompt in hand. Precondition (c) of the pin extension point — "only the acting
+        // player's own choices are pinnable" (`analysis::resource`) — is what it enforces.
+        //
+        // `template.owner` is only a legitimate comparand because `handle_declare_shortcut`
+        // firewalls it to the engine-issued `LoopShortcutOffer.proposer` at declare (and
+        // `apply_confirmed_shortcut` re-validates the same invariant for the restore ingress,
+        // which never runs the declare handler). Without those two, this test compares an
+        // attacker-chosen value against itself.
+        WaitingFor::OptionalEffectChoice {
+            player, source_id, ..
+        } => {
+            let template = template.ok_or(RecastAbort)?;
+            if *player != template.owner {
+                return Err(RecastAbort);
+            }
+            // CR 603.5 vs CR 603.3c + CR 700.2b: pin the BEAT as well as the seat. A
+            // `MayChoice` pin binds the RESOLUTION-time question (CR 603.5). While a trigger
+            // is still mid-construction the engine asks a same-`source_id`
+            // ANNOUNCEMENT-time one instead — the optional-modal gate raised out of
+            // `begin_pending_trigger_target_selection`, which runs with the construction
+            // cursor (`pending_trigger`) still live. `slot_source_prompted` cannot separate
+            // them: it matches the SOURCE OBJECT and both prompts carry it. So a live cursor
+            // means the prompt in hand may be the announcement-time question the pin does not
+            // answer ⇒ fail-closed.
+            if work.pending_trigger.is_some() {
+                return Err(RecastAbort);
+            }
+            let decisions = crate::analysis::decision_template::resolve(template, iteration, work)
+                .map_err(|_| RecastAbort)?;
+            let take = decisions
+                .into_iter()
+                .find_map(|d| match d {
+                    ConcreteDecision::MayChoice { slot, take }
+                        if slot_source_prompted(work, &slot.source, *source_id) =>
+                    {
+                        Some(take)
+                    }
+                    _ => None,
+                })
+                .ok_or(RecastAbort)?;
+            apply_action(
+                work,
+                *player,
+                GameAction::DecideOptionalEffect {
+                    accept: take == MayChoiceOption::Take,
+                },
+                None,
+            )
+            .map_err(|_| RecastAbort)?;
+            Ok(())
+        }
+        // CR 732.2a "no conditional actions": any other prompt (mode / unless / X) has no
+        // Stage-2 pin producer ⇒ fail-closed. `may` left this list when the mint gained its
+        // `EntryPinSlots.may` producer and the arm above; the remainder is still unpinnable.
         _ => Err(RecastAbort),
     }
+}
+
+/// CR 608.2b + CR 114.4 + CR 113.6p: does this SLOT's source identify the ability instance
+/// that raised the prompt carrying `source_id`?
+///
+/// The zone reasoning — why a SLOT's source admits the command zone while a PIN's source is
+/// battlefield-only, and why graveyard / exile / hand still fail closed — now lives on
+/// [`crate::analysis::decision_template::resolve_ability_instance`], the single accessor for
+/// "which live ability instance is this". This call site is the identity comparison against
+/// the prompting object; a `None` there means the caller aborts to manual play.
+///
+/// FOUR production seams ask through here: `inject_pinned_answer`'s `TriggerTargetSelection`
+/// and `MayChoice` `find_map` guards, and the drive's `pinned_targets_for_source` /
+/// `pinned_mana_color_for_source`.
+fn slot_source_prompted(
+    state: &GameState,
+    src: &crate::analysis::decision_template::DecisionSource,
+    source_id: ObjectId,
+) -> bool {
+    crate::analysis::decision_template::resolve_ability_instance(src, state) == Some(source_id)
 }
 
 /// PR-7 Phase 4b: CR 732.2a finite materialization of a confirmed `Fixed(N)` loop
@@ -1494,12 +4317,80 @@ fn materialize_fixed_shortcut(
     // activation period) is the routing signal; the `seq` rides `state.last_loop_action_sequence`
     // (carried on the clone since the offer). The drain path below is byte-identical for every
     // other loop.
-    if !state.last_loop_action_sequence.is_empty() {
+    //
+    // CR 732.2c: record the count the shortcut was ACCEPTED at. "Once the last player has
+    // either accepted or shortened the shortcut proposal, the shortcut is taken" — its ending
+    // point is fixed at N, so the CR 500.5 boundary collapse prompt may only offer `0..=N`.
+    // Re-asking with a wider range would let the controller take a longer sequence than the
+    // one the table agreed to.
+    //
+    // STASH-GATED, and it must stay that way. A bound with no deferred materialization to
+    // bound is unclearable — all three clears (`take_pending_materialization`,
+    // `clear_collapsed_materializations`, `clear_unbounded_loop`) are keyed on the stash, and
+    // the field is `#[serde(default)]`-persistent — so it would outlive its accept and
+    // silently cap the NEXT accept's agreed count forever (a mana accept at `Fixed(1)`
+    // capping a later, unanimously agreed `Fixed(500)` object-growth collapse at 1). Only the
+    // object-growth route below registers anything, and even it registers CONDITIONALLY: a
+    // mana engine grows no token/counter/life axis and registers nothing at all. So the gate
+    // is a measured STASH-GREW check taken ACROSS the call — testing before it would be
+    // unconditionally false, since that call is what registers. Length-delta rather than
+    // `contains_key`, so a non-registering accept cannot `min`-shrink a bound that an
+    // earlier, larger, genuinely-registering accept owns.
+    //
+    // MINIMUM, not overwrite: `register_pending_materialization` APPENDS, so a controller who
+    // accepts twice before the CR 500.5 boundary owns ONE stash holding both accepts' items,
+    // and the boundary applies ONE submitted amount to every item in it. Overwriting the bound
+    // would let a later `Fixed(1000)` accept re-scale an earlier `Fixed(1)` accept's items
+    // 1000×, materializing growth the table never agreed to. The minimum is the only bound
+    // that no accept in the stash can exceed. Conservative on purpose: the later accept is
+    // UNDER-delivered (its agreed 1000 caps at the earlier 1) rather than the earlier one
+    // being over-delivered — divergence from the table's agreement in the safe direction.
+    //
+    // The exact fix is a per-accept bound, deferred for its WIRE-COMPATIBILITY COST — not
+    // because it is unrepresentable. A bound carried ON each item, or the accept-grouped
+    // `Vec<MaterializationBatch { n, items }>` this is tracked as, survives the boundary's
+    // pause-safety `sort_by_key` fine: the sort moves each payload along with its key. What
+    // it costs is a shape change to `pending_unbounded_materialization`, a SAVED-GAME field,
+    // plus the `cr733/authority_matrix` census fixture that pins its composition. (Only a
+    // PARALLEL per-item bound VECTOR would be positionally unsyncable across that sort; that
+    // is the shape being rejected here, not per-accept binding as such.)
+    //
+    // SITE C (CR 732.2a) — MANDATORY IN LOCKSTEP WITH SITE B. Route to the object-growth
+    // materializer only when the recorded period belongs to THIS proposal's proposer, which is
+    // exactly the admission `try_offer_object_growth_shortcut` required to mint the offer being
+    // materialized. Under `!is_empty()` the seat-relative (1b) above would let a bounded drain
+    // offer be accepted while a FOREIGN period sits in state; this early return would then fire
+    // and commit ZERO bounded cycles — the precise silent misroute (1b)'s own doc block exists to
+    // prevent, reintroduced through the back door. Fails closed on `None` into the drain path
+    // below, which is correct because a heterogeneous period cannot have minted an object-growth
+    // offer in the first place.
+    if state.loop_period_controller() == Some(proposal.proposer) {
+        let stashed_before = state
+            .pending_unbounded_materialization
+            .get(&proposal.proposer)
+            .map_or(0, Vec::len);
         materialize_object_growth_shortcut(state, result, proposal);
+        if state
+            .pending_unbounded_materialization
+            .get(&proposal.proposer)
+            .map_or(0, Vec::len)
+            > stashed_before
+        {
+            state
+                .pending_materialization_count
+                .entry(proposal.proposer)
+                .and_modify(|bound| *bound = (*bound).min(n))
+                .or_insert(n);
+        }
         return;
     }
 
     let template = proposal.template.clone();
+    // CR 732.2a: the per-period signature the offer published, carried verbatim onto the
+    // proposal. `None` for every producer that states none, and that `None` is what keeps
+    // every pre-bounded offer's drive byte-identical: no frame delimiter, no conformance
+    // check, board recurrence alone — exactly the shipped behavior.
+    let per_cycle = proposal.per_cycle.as_ref();
 
     // Last fully-completed cycle (clean owned O(1) rollback); starts at the offer state —
     // `apply_confirmed_shortcut`'s doc comment establishes the board is unchanged since the
@@ -1551,12 +4442,35 @@ fn materialize_fixed_shortcut(
         // inline beat loop for a non-targeted `Fixed(N)` drain (which raises no mid-cycle
         // prompt, so the injector is inert); a targeted drive additionally answers each
         // OrderTriggers / target prompt from the pins.
-        match drive_one_shortcut_cycle(&committed, &boundary, template.as_ref(), i, cycle_beat_cap)
-        {
+        match drive_one_shortcut_cycle(
+            &committed,
+            &boundary,
+            template.as_ref(),
+            i,
+            cycle_beat_cap,
+            per_cycle.map(|pd| pd.frames_per_period),
+        ) {
             CycleOutcome::Recurred {
                 state: s,
                 mut events,
             } => {
+                // CR 732.2a "predictable results" + CR 704.5a: the CONFORMANCE CHECK the
+                // published signature exists for. `elimination_bounds` divided the CR 704
+                // headroom by `per_cycle.delta`, so a committed cycle that moved a
+                // DIFFERENT amount invalidates the very bound the table agreed to — the
+                // remaining repetitions could carry a seat past a threshold inside the
+                // proposal. Measured before commit, on the same axes the bound reads, and
+                // fail-closed: a divergent cycle is dropped whole and the drive hands back
+                // to manual play with the last conforming cycle intact.
+                if let Some(pd) = per_cycle {
+                    let actual = crate::analysis::resource::ResourceVector::delta(
+                        &crate::analysis::resource::ResourceVector::snapshot(&committed),
+                        &crate::analysis::resource::ResourceVector::snapshot(&s),
+                    );
+                    if actual != pd.delta {
+                        break 'cycles;
+                    }
+                }
                 committed = *s; // ATOMIC: commit state ...
                 result.events.append(&mut events); // ... with its events together
                 continue 'cycles;
@@ -1576,6 +4490,25 @@ fn materialize_fixed_shortcut(
             }
             // Runaway cap / unpinned prompt / engine error ⇒ abort to manual. The aborting
             // cycle's events were already dropped (no partial-cycle event leak).
+            //
+            // ⚠ THE TWO LETHAL ARMS ARE ASYMMETRIC, and a future drive must learn that here
+            // rather than by accident. A cycle that takes EVERY remaining opponent to 0 at once
+            // reaches `WaitingFor::GameOver` and lands in the `CrossLethal` arm above: it
+            // COMMITS and the game ends. A cycle that takes ONE seat to 0 while >= 2 players
+            // survive raises no `GameOver` (CR 104.2a crowns nobody), the loop's shape changes
+            // under it as the drained seat leaves, no settle beat recurs, and it arrives HERE —
+            // THAT CYCLE rolls back whole while every PRIOR conforming cycle stays committed,
+            // `eliminated` is empty, priority is handed back. (It is not a whole-drive rollback:
+            // the `break` below falls through to `*state = committed`, which is the last WHOLE
+            // cycle, not the offer state.) Both are out of contract for a legitimately-derived
+            // bound (`elimination_bounds` reserves `life - 1` of CR 704.5a headroom, so a
+            // within-bound count crosses no threshold), so either arm means the published bound
+            // was wrong. The atomic per-cycle refusal is the designed property — NO HALF-APPLIED
+            // PERIOD, EVER — and it is why the out-of-contract cycle is dropped rather than
+            // materialized: its remaining repetitions were bounded by a delta the board stops
+            // moving the moment a drain target leaves the game. Rows:
+            // `bounded_fixed_drive_stops_at_the_first_lethal_cycle` (total wipe) and
+            // `bounded_fixed_drive_rolls_back_a_partial_crossing_cycle` (partial).
             CycleOutcome::Abort => break 'cycles,
         }
     }
@@ -1585,8 +4518,39 @@ fn materialize_fixed_shortcut(
     // partial-cycle event leak). Ring-clear BEFORE handback so this same `apply()` does
     // not instantly re-emit a fresh offer for the same (now-interrupted) loop; a later
     // beat re-detects genuinely.
+    //
+    // CR 732.2a: "The ending point of this sequence must be a place where a player has
+    // priority, though it need not be the player proposing the shortcut." THIS BLOCK IS
+    // THAT ENDING POINT, and it is the ending point for BOTH entry paths above — `n`
+    // cycles done with no cross-lethal, and `break 'cycles`.
+    //
+    // What the boundary means for a declared `Ranking`: within one accepted drive only its
+    // HEAD is ever resolved (`evaluate_schedule`), so this seam is where the NEXT episode
+    // may legitimately re-evaluate the tail. The reasoning is not restated here — it lives
+    // on `analysis::decision_template::Ranking` ("CONSUMED AT AN EPISODE BOUNDARY, NEVER
+    // MID-DRIVE"), and a second copy is the drift the R1 doc sweep exists to prevent.
+    //
+    // PROBE-PINNED (probe arm `MUT_SEAM`): the window clear here is load-bearing, not a
+    // backstop. MEASURED — skipping it on the f4 accepted drive leaves `loop_detect_ring`
+    // non-empty (12) and the journal populated (3 answers), and this same `apply()`
+    // re-emits a `LoopShortcut` offer.
+    // PROBE-PINNED: the abort entry reaches this seam ASYMMETRICALLY. MEASURED
+    // `ring=16, answers=0` on `bounded_fixed_drive_rolls_back_a_partial_crossing_cycle`: the
+    // ring is LIVE there, so the ring-clear stays load-bearing on this path, but the journal is
+    // ALREADY empty — the `loop_answer_journal = None` below is a ⚠ FORWARD TRIPWIRE on this
+    // entry path, not a co-equal half of the CR 603.5 claim. The DISCRIMINATING statement of the
+    // journal half is the f4 row
+    // `fantastic_four_bounded_loop::r3a_the_accepted_drive_ends_at_the_priority_point_with_the_window_cleared`.
+    //
+    // LABELLED INTERPRETATION, not a pinned claim: the `waiting_for` re-seat below is a
+    // NORMALIZATION whose load-bearing case no fixture in this repo exercises today. On
+    // all four fixtures measured reaching this seam the state is ALREADY
+    // `WaitingFor::Priority` on entry, and skipping the re-seat changes nothing observable
+    // (probe arm `MUT_PRIORITY`).
     *state = committed;
     state.loop_detect_ring.clear();
+    // CR 603.5: the recorded "may" answers describe the window that just ended.
+    state.loop_answer_journal = None;
     priority::reset_priority(state);
     state.waiting_for = WaitingFor::Priority {
         player: living_priority_seat(state),
@@ -1732,7 +4696,7 @@ fn pinnable_mana_color(
 /// FIX-1 (CR 400.7): a live-object identity source for a pin — `ThisObject` bound to the object's
 /// CURRENT incarnation, so a re-entered permanent (new incarnation) stops matching and the loop is
 /// correctly re-detected rather than falsely replayed. `None` if the object is absent.
-fn object_decision_source(
+pub(crate) fn object_decision_source(
     state: &GameState,
     id: ObjectId,
 ) -> Option<crate::types::game_state::YieldTarget> {
@@ -1744,23 +4708,129 @@ fn object_decision_source(
     })
 }
 
+/// CR 608.2b + CR 601.2c (reached for a triggered ability via CR 603.3d) + CR 732.2a:
+/// journal ONE seat's announced target choice for the current loop-detection window. THE
+/// SINGLE WRITE AUTHORITY for the target axis — both `WaitingFor::TriggerTargetSelection`
+/// reducer arms route through here, never inline, so the two cannot drift.
+///
+/// FAIL-CLOSED ON A DEAD IDENTITY, and this DIVERGES DELIBERATELY from the proliferate
+/// `record_loop_pin` site below, which `filter_map`s an unresolvable object away. There a
+/// short pin vector still drives; here it would be journalled as a UNIFORM answer and then
+/// fail `validate_pins` as an illegal pin value at declare time — a WRONG PIN rather than
+/// no offer. `collect::<Option<Vec<_>>>()` makes any unresolvable member abandon the whole
+/// write.
+///
+/// FAIL-CLOSED ON A MULTI-SLOT ANNOUNCEMENT, and the key is why. `DecisionSlot::target`
+/// hard-codes `index: 0` (its own doc: the sub-index disambiguates the two choices of ONE
+/// ability instance — CR 601.2c target vs. CR 603.5 may — and nothing finer), so every slot of
+/// a multi-slot announcement lands on ONE key. `LoopAnswerValue::Targets`' contract is "the
+/// announced targets for one slot, in announcement order", so what gets stored is wrong in two
+/// distinguishable ways: two slots taking DISTINCT targets latch `Conflicted` (fail-closed,
+/// harmless), while two slots taking the SAME target — which CR 601.2c expressly permits, "if
+/// the spell uses the word 'target' in multiple places, the same object or player can be chosen
+/// once for each instance" — store a `Uniform` one-pin vector that LOOKS like a valid answer to
+/// a two-choice announcement. Refusing the whole write is the only reading that cannot hand a
+/// widened publisher a wrong pin. Deriving a real per-slot sub-index is the right long-term
+/// answer and is deliberately NOT attempted here: `DecisionSlot`'s index namespace is shared
+/// with the publisher and with `record_loop_pin`'s own numbering, so widening it is a design
+/// change, not a guard.
+///
+/// The slot count is read from the PROMPT IN HAND rather than passed by the caller. Both reducer
+/// arms run BEFORE the handler replaces `waiting_for` (that is why the seat and source are only
+/// readable there), so `state.waiting_for` here IS the `TriggerTargetSelection` the announcement
+/// answers — the same value the arm matched on, since `apply_action`'s reducer matches a CLONE
+/// and nothing writes the field in between. Reading it makes the guard un-driftable by
+/// construction: a third arm cannot pass a stale or invented count, and a caller holding no
+/// prompt at all has no announcement to journal and is refused. (A `debug_assert!` on the count
+/// is deliberately NOT used: a multi-slot trigger announcement is legal and reachable in
+/// production — `triggers.rs` measures a combat-damage trigger surfacing two target slots — so
+/// asserting would panic a debug build on a correct game.)
+///
+/// Gating is inherited, not restated: `record_loop_answer` carries the
+/// `samples() && !in_simulation_probe()` gate, so this adds no second gate.
+fn record_trigger_target_answer(
+    state: &mut GameState,
+    source_id: Option<ObjectId>,
+    player: PlayerId,
+    targets: &[crate::types::ability::TargetRef],
+) {
+    use crate::analysis::decision_template::{
+        AnnouncementSubject, DecisionSlot, LoopAnswer, LoopAnswerValue, Ranking, TargetPin,
+        TargetSchedule,
+    };
+    use crate::types::ability::TargetRef;
+    let announced_slots = match &state.waiting_for {
+        WaitingFor::TriggerTargetSelection { target_slots, .. } => target_slots.len(),
+        // No announcement in hand ⇒ nothing to journal.
+        _ => return,
+    };
+    if announced_slots > 1 {
+        return;
+    }
+    let Some(source) = source_id.and_then(|id| object_decision_source(state, id)) else {
+        return;
+    };
+    let Some(pins) = targets
+        .iter()
+        .map(|t| match t {
+            // CR 400.7: bind to the CURRENT incarnation, so a re-entered permanent stops
+            // matching instead of being falsely replayed.
+            TargetRef::Object(id) => object_decision_source(state, *id).map(TargetPin::ByIdentity),
+            // CR 601.2c: THIS PRODUCER IS TARGET CLASS, and the spelling says so. This
+            // writer is gated on `WaitingFor::TriggerTargetSelection`, i.e. on a CR 601.2c
+            // announcement ("the player announces … choices … including the targets"), so
+            // the seat it journals was TARGETED, not merely chosen. It therefore emits the
+            // announcement-subject spelling, whose resolver arm applies CR 702.11c hexproof /
+            // CR 702.18a shroud / CR 702.16b protection. A merely CHOSEN seat (CR 115.10a —
+            // e.g. the CR 701.34a proliferate arm) keeps `TargetPin::Player` and its
+            // existence-only authority; see that variant's own doc. Two questions, two
+            // spellings, and the spelling IS the provenance.
+            //
+            // CR 732.2a is still satisfied: a seat is state-independent by construction — it
+            // can never denote "the newest copy" — and a one-element `Ranking` under
+            // `Constant` is answered identically at every iteration index, so no iteration
+            // can turn the pin into a conditional action.
+            TargetRef::Player(pl) => Some(TargetPin::Scheduled(TargetSchedule::Constant(
+                Ranking::one(AnnouncementSubject::Seat(*pl)),
+            ))),
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return;
+    };
+    if pins.is_empty() {
+        // A declined / empty announcement is not an answer a pin can specify.
+        return;
+    }
+    state.record_loop_answer(
+        DecisionSlot::target(source),
+        player,
+        LoopAnswer::Uniform(LoopAnswerValue::Targets(pins)),
+    );
+}
+
 /// FIX-1 (CR 608.2b): the concrete targets of the recorded `Targets` pin whose slot source
 /// re-binds LIVE to `source_id` this iteration (the beat's cost / trigger source, e.g. the Relic
 /// cost source for a tap-cost pin or the Kilo trigger source for a proliferate pin). Resolving the
 /// WHOLE `template` means ANY pin that no longer resolves to a live legal object (a target left
 /// its zone) aborts the whole beat fail-closed — a broken loop never certifies. `Err(RecastAbort)`
 /// if no `Targets` pin's source matches `source_id`.
+///
+/// "Whose slot source re-binds to `source_id`" is asked through [`slot_source_prompted`], the one
+/// spelling of that question — so the slot may name any ability instance the beat's prompt could
+/// have come from (CR 608.2b keeps the pinned TARGETS battlefield-only through `resolve_source`;
+/// the SLOT's source is a different question and admits the command zone).
 fn pinned_targets_for_source(
     template: &crate::analysis::decision_template::DecisionTemplate,
     iteration: crate::analysis::decision_template::IterationIndex,
     clone: &GameState,
     source_id: ObjectId,
 ) -> Result<Vec<crate::analysis::decision_template::ConcreteTarget>, RecastAbort> {
-    use crate::analysis::decision_template::{resolve, resolve_source, ConcreteDecision};
+    use crate::analysis::decision_template::{resolve, ConcreteDecision};
     let decisions = resolve(template, iteration, clone).map_err(|_| RecastAbort)?;
     for d in decisions {
         if let ConcreteDecision::Targets { slot, targets } = d {
-            if resolve_source(&slot.source, clone) == Some(source_id) {
+            if slot_source_prompted(clone, &slot.source, source_id) {
                 return Ok(targets);
             }
         }
@@ -1770,17 +4840,21 @@ fn pinned_targets_for_source(
 
 /// FIX-1 (CR 608.2d): the recorded mana color of the `ManaColor` pin whose slot source is
 /// `source_id` (the driving mana ability's source). `Err(RecastAbort)` if unpinned.
+///
+/// The slot-source question is [`slot_source_prompted`]'s, exactly as in
+/// [`pinned_targets_for_source`]: CR 608.2d is the choice this pin records, and which ability
+/// instance offered that choice is what the predicate answers.
 fn pinned_mana_color_for_source(
     template: &crate::analysis::decision_template::DecisionTemplate,
     iteration: crate::analysis::decision_template::IterationIndex,
     clone: &GameState,
     source_id: ObjectId,
 ) -> Result<crate::types::mana::ManaColor, RecastAbort> {
-    use crate::analysis::decision_template::{resolve, resolve_source, ConcreteDecision};
+    use crate::analysis::decision_template::{resolve, ConcreteDecision};
     let decisions = resolve(template, iteration, clone).map_err(|_| RecastAbort)?;
     for d in decisions {
         if let ConcreteDecision::ManaColor { slot, color } = d {
-            if resolve_source(&slot.source, clone) == Some(source_id) {
+            if slot_source_prompted(clone, &slot.source, source_id) {
                 return Ok(color);
             }
         }
@@ -2000,7 +5074,7 @@ fn drive_loop_action_iteration(
                 let source = match &context {
                     crate::types::game_state::ManaChoiceContext::ManaAbility(p) => p.source_id,
                     crate::types::game_state::ManaChoiceContext::ResolvingEffect(_) => {
-                        return Err(RecastAbort)
+                        return Err(RecastAbort);
                     }
                 };
                 let color = pinned_mana_color_for_source(template, iteration, clone, source)?;
@@ -2195,8 +5269,9 @@ struct PeriodFodder {
 /// CR 732.2a / CR 111.1: seed a `Priority{controller}` window and drive ONE iteration of
 /// `last_loop_action_sequence` on THROWAWAY clones, returning the `(before, after)` frames.
 /// The shared seed+drive kernel of the accept-time re-derivations — `current_period_fodder`
-/// (object-growth ∞ pile) and `current_period_counter_targets` (counter-growth ∞ targets)
-/// both diff these two frames. `None` when the sequence is empty. Mirrors the detection
+/// (object-growth ∞ pile), `current_period_counter_growth` (beneficial counter δ, feeding both
+/// the batched stash and the ∞ counter pills) and `current_period_life_growth` (life δ) all diff
+/// these two frames. `None` when the sequence is empty. Mirrors the detection
 /// drive exactly: same `SimulationProbeGuard` re-entrancy guard (HELD across the drive so
 /// the injector's internal `apply_action` never recurses into the shortcut hooks), same
 /// `drive_loop_sequence_iteration`.
@@ -2256,33 +5331,19 @@ fn current_period_fodder(state: &GameState) -> Option<PeriodFodder> {
     Some(PeriodFodder { class, taps_fodder })
 }
 
-/// CR 732.2a / CR 701.34a (proliferate): re-derive the per-object `(ObjectId, CounterType)`
-/// targets whose PRESERVED `Generic` counters strictly grew across one accepted
-/// counter-growth period — the DISPLAY-only `∞` counter channel. The offer certificate's
-/// unbounded axis is object-AGNOSTIC (`Counter(Other, Other)`), so the concrete object id /
-/// counter type is NOT recoverable from the axis; re-derive it the same way
-/// `current_period_fodder` derives the fodder class — drive ONE period on a clone (shared
-/// `drive_one_period_frames`) and diff `Generic` counters (`grown_generic_counter_targets`).
-/// Empty when the sequence is empty or the period grows no `Generic` counter (a mana / token
-/// / object-growth loop). General over the class (proliferate charge / One-Ring burden),
-/// never one card. DISPLAY-ONLY: the caller marks the pill to render `∞` without mutating the
-/// real counter count.
-fn current_period_counter_targets(
-    state: &GameState,
-) -> Vec<(ObjectId, crate::types::counter::CounterType)> {
-    let Some((before, after)) = drive_one_period_frames(state) else {
-        return Vec::new();
-    };
-    crate::analysis::resource::grown_generic_counter_targets(&before, &after)
-}
-
-/// CR 122.1 + CR 732.2a: re-derive the per-object BENEFICIAL counter growth (with per-cycle
-/// δ) of the accepted period by driving ONE iteration on a clone (`drive_one_period_frames`)
-/// and diffing beneficial-materializable counters (`grown_beneficial_counter_deltas`). The
-/// batched-collapse δ source for the whole beneficial class (+1/+1 / loyalty / defense /
-/// charge) — the widened analog of `current_period_counter_targets` (DISPLAY, Generic-only).
-/// Empty when the sequence is empty or the period grows no beneficial counter (a mana / token
-/// / life loop). Only reached in the UNOBSERVED batched route (the firewall gates it).
+/// CR 122.1 + CR 732.2a: THE SINGLE per-object counter derivation of an accepted period — drive
+/// ONE iteration on a clone (`drive_one_period_frames`) and diff beneficial-materializable
+/// counters (`grown_beneficial_counter_deltas`), yielding per-cycle δ for the whole beneficial
+/// class (+1/+1 / loyalty / defense / charge). Feeds BOTH consumers: the batched-collapse δ stash,
+/// and (projected to `(object, counter)`) the `∞` DISPLAY counter channel. The display half used
+/// to run a SECOND, `Generic`-only diff of its own, so a +1/+1 or loyalty loop collapsed correctly
+/// and never rendered an `∞` pill; one derivation is what makes that class of disagreement
+/// unrepresentable. The offer certificate's unbounded axis is object-AGNOSTIC, so the concrete
+/// object id / counter type is NOT recoverable from the axis and must be re-derived here, the same
+/// way `current_period_fodder` re-derives the fodder class. Empty when the sequence is empty or
+/// the period grows no beneficial counter (a mana / token / life loop). The batched-collapse
+/// consumer is only reached in the UNOBSERVED route (the firewall gates it); the display
+/// registration is unconditional on both routes.
 fn current_period_counter_growth(
     state: &GameState,
 ) -> Vec<crate::types::game_state::CounterGrowth> {
@@ -2319,6 +5380,42 @@ fn current_period_life_growth(state: &GameState) -> Vec<(PlayerId, u32)> {
 /// never auto-resolve, CR 732.2a). Both driven iterations run inside ONE
 /// `SimulationProbeGuard` so the injector's internal `apply_action` never recurses into
 /// this hook or any `!in_simulation_probe()`-gated shortcut logic.
+///
+/// # CR 732.1b — THIS ENGINE REPRESENTS THE LOOP INSTEAD OF PERFORMING IT
+///
+/// CR 732.1b: once the game reaches a state "in which a set of actions could be repeated
+/// indefinitely", the shortcut rules "can be used to determine how many times those actions are
+/// repeated without having to actually perform them, and how the loop is broken". Both halves of
+/// that sentence name an instrument this engine builds, and they are the two surfaces to map:
+///   • *how many times* — the `∞` capability marker and the certificate's bound. The loop is
+///     represented, never driven to exhaustion; `analysis::resource::elimination_bounds` supplies
+///     the largest count a proposal may legally contain.
+///   • *how the loop is broken* — the accept-or-shorten window (`WaitingFor::RespondToShortcut`)
+///     and the finite collapse the controller names at the ending point
+///     (`PayableResource::LoopCollapse`).
+///
+/// Representing rather than performing is the rule's own remedy, not an engine convenience.
+///
+/// CR 732.1a: "The rules for taking shortcuts are largely informal. As long as each player in the
+/// game understands the intent of each other player, any shortcut system they use is acceptable."
+/// A digital system that publishes the proposal, collects each other player's accept-or-shorten
+/// answer in turn order, and advances to the proposed ending point is such a system.
+///
+/// # WHERE THE SHORTCUT ENDS — THE SHORT VERSION
+///
+/// The loop ends by proceeding directly to the phase change, with the iterations elided by
+/// CR 732.1b ("without having to actually perform them"). At the phase change the opposing player
+/// has priority, and that priority window is the proposal's ending point. That is all this engine
+/// does, and CR 732.2a asks nothing more of it.
+///
+/// The support, for anyone checking the clause: CR 732.2a requires "the ending point of this
+/// sequence must be a place where a player has priority", which is satisfied by that window and
+/// NOT by the CR 500.5 step/phase end itself — CR 500.5 is a turn-based action and CR 117.3a puts
+/// priority at the BEGINNING of the next step. CR 732.2c then holds on its own terms: the game
+/// "advances to the last proposed ending point, with all game choices contained in the shortcut
+/// proposal having been taken", and the growth this engine lands at the CR 500.5 boundary is
+/// landed while that advance is still in progress. Stated again at `PayableResource::LoopCollapse`,
+/// which is where the count is named.
 fn try_offer_object_growth_shortcut(
     state: &GameState,
 ) -> Option<(
@@ -2335,7 +5432,14 @@ fn try_offer_object_growth_shortcut(
     // The whole PERIOD must belong to the priority holder. A multi-controller / interleaved
     // sequence is fail-closed here; the per-step drive's controller re-find is the runtime
     // backstop (T-HET). Faithful generalization of the pre-P7 `ctx.controller != caster` check.
-    if seq.iter().any(|c| c.controller != caster) {
+    //
+    // CR 732.2a: this admission test IS `loop_period_controller`, and reads it rather than
+    // re-implementing it. That is the whole point of the hoist — the ROUTING sites (the bridge
+    // precondition, the bounded mint's (1b), the two materialize/drive dispatches, the declare
+    // arm) all route to THIS consumer, so a routing signal coarser than this admission is an
+    // in-tree contradiction: it sends a foreign period down a path that then refuses it. Sharing
+    // one authority closes that by construction instead of by parallel edits.
+    if state.loop_period_controller() != Some(caster) {
         return None;
     }
     // STEP D (CR 104.4b / CR 601.2a / CR 602.2 / CR 605.3a): only OFFER a VOLUNTARILY-repeatable
@@ -2354,7 +5458,35 @@ fn try_offer_object_growth_shortcut(
         .map(|c| loop_action_expected_def(state, c))
         .collect();
     // CR 732.2a: a shortcut "can't include conditional actions, where the outcome of a game
-    // event determines the next action." A driving ability whose body bears an auto-resolved
+    // event determines the next action."
+    //
+    // THIS GATE IS WHY EVERY PROPOSAL THIS ENGINE MAKES IS LEGAL — unconditionality holds BY
+    // CONSTRUCTION, not by inspection after the fact. Nothing conditional can reach a proposal:
+    // randomness is rejected here before driving, and `analysis::resource::elimination_bounds`
+    // separately stops the count STRICTLY SHORT of every CR 704 loss threshold, because a
+    // mid-sequence death would make the remaining declared choices unmakeable — itself a
+    // conditional action and an illegal proposal. Consequence for the display layer: a family the
+    // engine cannot certify as an unconditional collapse is never proposed as one, so
+    // `FamilyCollapseState::{Unscheduled, Mixed}` render the ABSENCE of a proposal this gate would
+    // pass — never a conditional proposal, which this gate does not emit. `Scheduled(Conditional)`
+    // is a DIFFERENT claim: that proposal PASSED this gate, and only its boundary materialization
+    // can still decline or park (see `CollapseCertainty` and
+    // `engine_resolution_choices::materialization_certainty`). Certainty is a property of the
+    // boundary, not of the proposal's unconditionality — `FamilyCollapseState` has no `Committed`
+    // variant of its own; `Committed` belongs to `CollapseCertainty`.
+    //
+    // THAT DISTINCTION STRENGTHENS L2, IT DOES NOT QUALIFY IT. A proposal that passes here and can
+    // still be declined at its boundary is routes (b)/(c) of the fidelity invariant WORKING, not a
+    // conditional action leaking past this gate. CR 732.2a's clause governs whether the SEQUENCE's
+    // next action is determined by the outcome of a game event — and none of it is, because the
+    // pins fixed every free choice BEFORE the offer existed. What a boundary may still do is
+    // decline the ELISION and hand those same iterations back to manual play, which is exactly how
+    // ELISION ≡ PERFORMANCE is preserved once an observer appears mid-window. Declining an elision
+    // can never be rules-incorrect: the elision is what needs a license, its absence never does.
+    // The invariant in full, with all three materialization routes, is at `types::game_state`'s
+    // `scheduled_collapse_axes` doc.
+    //
+    // A driving ability whose body bears an auto-resolved
     // coin flip (CR 705.1) / die roll (CR 706.1a) / random selection (CR 701.9a/b) has more
     // than one equally-likely outcome ⇒ not a legal shortcut. Reject it STATICALLY, before
     // driving (cheap + compile-time exhaustive over `Effect`), scanning EVERY step of the period
@@ -2497,11 +5629,38 @@ fn try_offer_object_growth_shortcut(
     // recast, else `[]` (a multi-activation period carries no convoke pin). Legal sets are derived
     // against the live offer-time board.
     let schema_template = build_recast_template(&seq[0]);
+    // CR 732.2a: an UNBOUNDED object-growth offer is not repeated a CR 704-limited number of
+    // times — it is materialized once as an unbounded axis — so it states no narrowed count
+    // bound and keeps the global safety limit.
+    //
+    // CR 732.2a + CR 732.2c: the count this offer STATES is the count the table binds. There is
+    // no declare-time picker (the frontend echoes `iteration_count` verbatim), and once the last
+    // player accepts, "the shortcut is taken" at that count, which then caps the CR 500.5
+    // collapse prompt. An offer that narrows no bound must therefore STATE the global limit it
+    // publishes as its ceiling; stating less silently caps the controller's collapse choice.
+    // This mirrors `certified_bounded_cycle_offer`, which already states `Fixed(max_iterations)`.
+    //
+    // CR 704.5a / CR 704.5c: the `UntilLethal` arm is UNREACHABLE FROM THIS PRODUCER — `delta` is
+    // a two-`snapshot` diff, and `ResourceVector::snapshot` writes neither `damage_dealt` nor
+    // `extra_turns` and never keys a poison `counters` entry by `ObjectClass::Player`, while
+    // `has_no_loss_axis` just above forces `life >= 0`, `library_delta >= 0`, `poison <= 0` on
+    // every seat; together those negate every non-`Advantage` branch of `classify_win_kind`. The
+    // arm is kept anyway so `shortcut_iteration_count` stays the SINGLE authority for that
+    // classification, and so this wildcard-free match build-breaks on a future third
+    // `IterationCount` variant — the guard `handle_declare_shortcut` states for its own cap. The
+    // unreachability is editorial, not structural: this function already event-feeds
+    // `tokens_created` into the same delta, so feeding `damage_dealt` would make the arm live.
+    use crate::analysis::decision_template::IterationCount;
+    let iteration_count = match shortcut_iteration_count(certificate.win_kind) {
+        IterationCount::UntilLethal => IterationCount::UntilLethal,
+        IterationCount::Fixed(_) => IterationCount::Fixed(MAX_SHORTCUT_CYCLES),
+    };
     let schema = build_shortcut_schema(
-        &schema_template.decisions,
-        certificate.win_kind,
-        state,
-        caster,
+        // CR 732.2a: an unresolvable pin WITHDRAWS the offer rather than publishing an
+        // undeclarable point — see `pinned_decisions_to_points`.
+        pinned_decisions_to_points(&schema_template.decisions, state, caster)?,
+        iteration_count,
+        MAX_SHORTCUT_CYCLES,
     );
     Some((certificate, schema))
 }
@@ -2589,18 +5748,7 @@ fn materialize_object_growth_shortcut(
         } else {
             None
         };
-    // CR 732.2a / CR 701.34a: snapshot the per-object ∞ COUNTER targets for DISPLAY
-    // (DerivedViews::unbounded_counters). Distinct from the object-growth ∞ pile above: a
-    // counter-growth loop's certified unbounded axis is object-agnostic (Counter(Other,
-    // Other)), so re-derive the concrete (object, counter) pairs by driving one period on a
-    // clone and diffing Generic counters — WHILE the recast sequence is still intact (the
-    // `.clear()` below wipes it). DISPLAY-ONLY: the object's real counter count is NOT mutated
-    // (CR 701.34a already added the real counter on each live cycle; this only marks the pill
-    // to render ∞). A mana / token / object-growth loop grows no Generic counter ⇒ empty ⇒
-    // no-op writer. Runs in BOTH routes (display is unconditional).
-    let counter_targets = current_period_counter_targets(state);
-    state.register_unbounded_counter_targets(proposal.proposer, counter_targets);
-    // ROUTE the STASH element only (the DISPLAY above is unconditional). `proposal.unbounded` IS
+    // ROUTE the STASH element only (the DISPLAY below is unconditional). `proposal.unbounded` IS
     // the ∞-mark set `mark_unbounded_loop` wrote. Capture-before-clear: `last_loop_action_sequence`
     // and the δ derivations all read BEFORE the `.clear()` tail below.
     //
@@ -2613,25 +5761,60 @@ fn materialize_object_growth_shortcut(
     // carries an unrelated life/counter observer (plan §5 Note; the observedness firewall is
     // AXIS-SPECIFIC so an incidental board observer never mis-routes a disjoint-axis loop).
     let growths = current_period_counter_growth(state);
+    // CR 732.2a / CR 122.1: the ∞ counter DISPLAY targets are the SAME per-object growth the
+    // batched stash carries — ONE derivation, projected. Registering from `growths` (rather than a
+    // second, `Generic`-only diff) is what makes `clear_collapsed_materializations`'
+    // `collapsed_pairs` a superset of the registered set on the batched route, so the boundary
+    // clear is unchanged; on the `DriveSequence` route a pair whose derived axis was not collapsed
+    // survives, which is the disclosed display over-keep on `UnboundedFamilyView`. DISPLAY-ONLY:
+    // the object's real counter count is NOT mutated (CR 701.34a already added the real counter on
+    // each live cycle; this only marks the pill to render ∞). Derived WHILE the recast sequence is
+    // still intact (the `.clear()` tail below wipes it). Unconditional on both routes; a mana /
+    // token / object-growth loop grows no beneficial counter ⇒ empty ⇒ no-op writer.
+    state.register_unbounded_counter_targets(
+        proposal.proposer,
+        growths
+            .iter()
+            .map(|g| (g.object, g.counter.clone()))
+            .collect(),
+    );
     let life = current_period_life_growth(state);
     let counter_observed =
         !growths.is_empty() && crate::analysis::resource::counter_growth_is_observed(state);
     let life_observed =
         !life.is_empty() && crate::analysis::resource::life_growth_is_observed(state);
-    if counter_observed || life_observed {
+    // CR 732.2a + CR 603.6a: a life axis the board RE-EARNS on a battlefield entry also belongs on
+    // the concrete replay. Not an observedness question (the batched arithmetic is right) but a
+    // ROUTE one: the batched `Tokens` collapse mints N real tokens whose real CR 603.6a entries
+    // re-earn the same life the batched `Life` already applied, so the accept pays twice.
+    //
+    // The conjuncts are AXIS-shaped, never effect-shaped: a life axis grew (`!life.is_empty()`),
+    // the collapse will mint the tokens that re-earn it (`token_profile.is_some()` — a mana-only
+    // collapse mints nothing, so nothing re-fires), and the board has an entry trigger at all.
+    // Testing the trigger's EFFECT for `GainLife` would be under-approximate: life reaches
+    // `apply_life_gain` from four resolvers, including CR 702.15b lifelink on an ETB damage
+    // trigger (the Terror of the Peaks shape), which no effect-shape test can see.
+    let life_etb_sourced = !life.is_empty()
+        && token_profile.is_some()
+        && crate::analysis::resource::board_has_functioning_etb_trigger(state);
+    // M5: hoisted out of the branch so an empty period can never register NOTHING — a route
+    // flipped to the replay falls back to the batched arm instead of silently dropping the whole
+    // materialization. (Unreachable today: `growths`/`life` are derived from the same
+    // `drive_one_period_frames`, which returns `None` on an empty sequence, so every route
+    // predicate is already false there. Kept explicit so a future route conjunct cannot
+    // reintroduce the hole.)
+    let sequence = state.last_loop_action_sequence.clone();
+    if (counter_observed || life_observed || life_etb_sourced) && !sequence.is_empty() {
         // CR 732.2a: OBSERVED batchable growth — one DriveSequence collapses the WHOLE loop (all
         // axes); replaying the captured sequence recreates every per-cycle effect honoring
         // observers. Do NOT also register batched items (the routes are exclusive per accept).
-        let sequence = state.last_loop_action_sequence.clone();
-        if !sequence.is_empty() {
-            state.register_pending_materialization(
-                proposal.proposer,
-                crate::types::game_state::PersistentAxisMaterialization::DriveSequence {
-                    sequence,
-                    collapsed_axes: proposal.unbounded.clone(),
-                },
-            );
-        }
+        state.register_pending_materialization(
+            proposal.proposer,
+            crate::types::game_state::PersistentAxisMaterialization::DriveSequence {
+                sequence,
+                collapsed_axes: proposal.unbounded.clone(),
+            },
+        );
     } else {
         // UNOBSERVED fast path — register each grown persistent axis for the batched N×δ collapse.
         if let Some(profile) = token_profile {
@@ -2657,6 +5840,8 @@ fn materialize_object_growth_shortcut(
         }
     }
     state.loop_detect_ring.clear();
+    // CR 603.5: the recorded "may" answers describe the window that just ended.
+    state.loop_answer_journal = None;
     state.last_loop_action_sequence.clear();
     priority::reset_priority(state);
     state.waiting_for = WaitingFor::Priority {
@@ -2759,6 +5944,25 @@ struct LoopShortcutOffer<'a> {
     predicted_winner: Option<PlayerId>,
     certificate: &'a crate::analysis::loop_check::LoopCertificate,
     schema: &'a crate::analysis::decision_template::ShortcutDecisionSchema,
+    /// The engine's OWN published declaration for this offer, borrowed. Cloned only on the
+    /// fallback path in `handle_declare_shortcut`, where a `template: None` declaration
+    /// resolves against it.
+    declaration: Option<&'a crate::analysis::decision_template::DecisionTemplate>,
+}
+
+/// CR 732.2a + CR 800.4a: reject a
+/// shortcut declaration and hand priority back to the next living seat — the manual-play
+/// handback every reject path in `handle_declare_shortcut` lands on. Single
+/// authority: a SEVENTH reject path added later cannot forget to sync
+/// `result.waiting_for` — six exist today (the sixth is the `template.owner` firewall).
+/// Cited by CR number, not by `MagicCompRules.txt` line: that file is gitignored and
+/// re-fetched, so its line coordinates rot on every rules release.
+fn reject_shortcut_declaration(state: &mut GameState, result: &mut ActionResult) {
+    priority::reset_priority(state);
+    state.waiting_for = WaitingFor::Priority {
+        player: living_priority_seat(state),
+    };
+    result.waiting_for = state.waiting_for.clone();
 }
 
 /// CR 732.2a: the proposer declared the loop shortcut. Build the public proposal and open
@@ -2790,30 +5994,26 @@ fn handle_declare_shortcut(
     // any template the caller supplies is inert for the drive (the loop raises no target
     // prompt). This preserves the established `Fixed(N)` drain behavior (the resolve-firewall
     // materialize tests drive a synthetic pin against the empty drain schema).
-    if let Some(t) = &template {
-        if !offer.schema.points.is_empty() {
-            let required: Vec<crate::analysis::decision_template::DecisionSlot> =
-                offer.schema.points.iter().map(|p| p.slot.clone()).collect();
-            let period = shortcut_drive_period(Some(t));
-            if crate::analysis::decision_template::predictability_gate(t, &required).is_err()
-                || crate::analysis::decision_template::validate_pins(offer.schema, t, period, state)
-                    .is_err()
-            {
-                priority::reset_priority(state);
-                // CR 800.4a: hand priority to the next living seat.
-                state.waiting_for = WaitingFor::Priority {
-                    player: living_priority_seat(state),
-                };
-                result.waiting_for = state.waiting_for.clone();
-                return Ok(result);
-            }
-        }
-    }
-    // CR 732.2a SAFETY LIMIT (see MAX_SHORTCUT_CYCLES): reject an over-cap Fixed count at
+    // ⚠ ORDER IS LOAD-BEARING: the count cap runs BEFORE the pin validation below, because
+    // `shortcut_validated_range` derives the validated range FROM the declared count and so
+    // must not be handed an unchecked one — a `Fixed(4_000_000_000)` would otherwise become
+    // a four-billion-iteration validation loop. Observation-equivalence of the reorder is
+    // structural: all six refusal arms across the three blocks (this match, the CR 732.2a +
+    // CR 603.5 `template.owner` firewall between them, and the pin-validation block) land on
+    // the same single authority (`reject_shortcut_declaration`), and
+    // `handle_declare_shortcut` pushes NO events at all, so no row can observe which block
+    // refused first.
+    // IMPLEMENTATION BUDGET BOUND (see MAX_SHORTCUT_CYCLES) — deliberately NOT labelled as a
+    // CR 732.2a constraint: the rules place no ceiling on how many times a shortcut may be
+    // repeated (CR 732.2a's own example runs to a million), so this ceiling is ours, not the
+    // game's. The label matters because a maintainer applying the CR 732.2a iff to a branch
+    // that wears a CR number will either trust it wrongly or delete it wrongly. Reject an
+    // over-cap Fixed count at
     // the single authority — BEFORE the proposal is built — into the same fail-closed
     // manual-play handback the pin validation above uses. This is THE catastrophic remote
     // vector: `Fixed(u32)` scalar-encodes up to ~4.3e9 cycles in ~10 bytes, sailing through
-    // the 8 KB WS frame cap → one GameState clone + drive per cycle. Both confirmation paths
+    // the WS frame cap (`phase-server`'s `MAX_WS_MESSAGE_BYTES`, 64 KB) → one GameState clone +
+    // drive per cycle. Both confirmation paths
     // (solitaire-immediate below, APNAP Accept) consume this one proposal, and both drive
     // helpers (materialize_fixed_shortcut / materialize_object_growth_shortcut) read `n` from
     // it, so this one check bounds every Fixed drive on every transport. The drive helpers do
@@ -2825,18 +6025,137 @@ fn handle_declare_shortcut(
         crate::analysis::decision_template::IterationCount::Fixed(n)
             if *n > MAX_SHORTCUT_CYCLES =>
         {
-            priority::reset_priority(state);
-            // CR 800.4a: hand priority to the next living seat.
-            state.waiting_for = WaitingFor::Priority {
-                player: living_priority_seat(state),
-            };
-            result.waiting_for = state.waiting_for.clone();
+            reject_shortcut_declaration(state, &mut result);
+            return Ok(result);
+        }
+        // CR 732.2a: the per-offer CR 704 bound, enforced at the same single authority as the
+        // global cap. A `Fixed(n)` above `max_iterations` would contain a conditional action —
+        // some living player crosses a CR 704.5a / CR 704.5c / CR 104.3c loss threshold inside
+        // the proposal, and what happens next depends on that — so it is not a legal shortcut.
+        crate::analysis::decision_template::IterationCount::Fixed(n)
+            if *n > offer.schema.max_iterations =>
+        {
+            reject_shortcut_declaration(state, &mut result);
+            return Ok(result);
+        }
+        // CR 732.2a: `UntilLethal` names no count at all, so it can only be legal when the
+        // offer states no narrowed bound. An offer that DID narrow its bound is one whose
+        // producer measured a CR 704 threshold inside the loop; running it "until lethal"
+        // would run past that threshold.
+        crate::analysis::decision_template::IterationCount::UntilLethal
+            if offer.schema.is_bounded() =>
+        {
+            reject_shortcut_declaration(state, &mut result);
             return Ok(result);
         }
         // Under-cap `Fixed` and `UntilLethal` (period-bounded by `shortcut_drive_period`)
         // proceed to the proposal.
         crate::analysis::decision_template::IterationCount::Fixed(_)
         | crate::analysis::decision_template::IterationCount::UntilLethal => {}
+    }
+    // A `template: None` declaration is not "no pins" — it is "no OVERRIDE of the pins this
+    // offer already published". Resolve it against the offer's own engine-issued declaration so
+    // the manual ingress and `ai_support::candidates` (which reads the identical field) declare
+    // the SAME proposal against the SAME offer. Until this line existed the engine published a
+    // declaration on the offer and then discarded it here, so the AI — which sends
+    // `Some(declaration)` — was accepted while the browser, which sends `None`, was refused on
+    // one and the same offer. No rules citation is minted here: the block immediately below
+    // carries this handler's, and `docs/MagicCompRules.txt` is absent from this tree, so an
+    // unverified restatement would be worse than none.
+    //
+    // PLACEMENT IS LOAD-BEARING, AND MEASURED: this sits ABOVE the `template.owner` firewall
+    // below. `declaration_conforms` is `predictability_gate && validate_pins` and reads no
+    // `owner` at all — measured: a template differing from a conforming one ONLY in `owner`
+    // still conforms. That firewall is therefore the SOLE refuser of a foreign-owner
+    // declaration, and moving this statement one line down would hand the firewall a `None`
+    // (which passes) and then hand the `Some(t)` arm a foreign-owner template it accepts.
+    // Pinned by `r3_placement_a_restored_foreign_owner_declaration_is_refused`.
+    //
+    // WHAT THIS DOES TO THE `None if …loop_period_controller() != Some(proposer)` ARM BELOW,
+    // stated because it reads like a loosening and is not: that arm is BYPASSED whenever the
+    // offer published a declaration, because `&template` then takes the `Some(t)` arm instead.
+    // That is intended. The arm exists so a PINLESS drive never runs — its own doc says "with
+    // nothing this proposer can re-derive from, a pin-consuming drive would run with no pins at
+    // all" — and a resolved declaration supplies exactly those pins. The substitute gate is
+    // `declaration_conforms`, which is strictly STRONGER for this case: the arm asserts only
+    // that a re-derivation SOURCE exists, while `declaration_conforms` validates the actual
+    // pins against the actual schema over the range the accepted count will drive.
+    //
+    // THE ARM IS NOT DEAD AFTERWARDS — do not "simplify" it away. It still decides every offer
+    // that published no declaration, and that set is non-empty by construction:
+    // `build_bounded_declaration` returns `None` on a journal miss or on a kind/value mismatch
+    // even with a non-empty schema, both non-bounded mints hard-code `declaration: None`, and a
+    // restored save may carry `None`. Pinned by
+    // `a_template_free_declaration_is_admitted_only_by_the_proposers_own_period`.
+    let template = template.or_else(|| offer.declaration.cloned());
+    // CR 732.2a + CR 603.5: the declared template's `owner` is CLIENT-SUPPLIED — the
+    // `GameAction::DeclareShortcut { template }` payload arrives here verbatim — and it is
+    // the comparand `inject_pinned_answer` uses to decide WHOSE CR 603.5 choice a pin may
+    // answer. Bind it to the engine-issued seat here, at declare, or that seat guard
+    // compares an attacker-chosen value against itself. `offer.proposer` is engine state,
+    // copied from `WaitingFor::LoopShortcut { proposer }`.
+    //
+    // PLACEMENT IS LOAD-BEARING: this sits OUTSIDE the `!offer.schema.points.is_empty()`
+    // block below, so it is reached for every declaration regardless of schema emptiness —
+    // an empty-schema offer skips `predictability_gate` / `validate_pins` entirely and would
+    // otherwise reach the proposal with an unvalidated owner. It is the SIXTH sibling of the
+    // five refusal arms and lands on their single authority (`reject_shortcut_declaration`),
+    // so no row can observe which refusal fired first — the "sixth reject path added later"
+    // that authority's doc anticipates. Defence in depth for the RESTORE ingress (a persisted
+    // `WaitingFor::RespondToShortcut` never runs this handler) lives on
+    // `apply_confirmed_shortcut`'s consumption guard.
+    if template.as_ref().is_some_and(|t| t.owner != offer.proposer) {
+        reject_shortcut_declaration(state, &mut result);
+        return Ok(result);
+    }
+    if !offer.schema.points.is_empty() {
+        match &template {
+            Some(t) => {
+                // CR 732.2a: validate over the range the ACCEPTED COUNT will drive, not
+                // over the schedule's own period. `shortcut_drive_period` answers a
+                // different question (how many cycles one measurement must aggregate), and
+                // using it here both ACCEPTED a pin whose driven image leaves the published
+                // set at an index the count reaches, and REFUSED conforming declarations
+                // whose count is shorter than the schedule.
+                let validated_range = shortcut_validated_range(&count, Some(t));
+                // Coverage + value legality via the shared authority, so the predicate this
+                // handler ACCEPTS under is the same one `build_bounded_declaration` PUBLISHES
+                // under and the human ingress EMITS under. The range is this site's own.
+                if !crate::analysis::decision_template::declaration_conforms(
+                    offer.schema,
+                    t,
+                    validated_range,
+                    state,
+                ) {
+                    reject_shortcut_declaration(state, &mut result);
+                    return Ok(result);
+                }
+            }
+            // CR 732.2a: a `template: None` declaration against a NON-EMPTY schema skips the
+            // validation above entirely — the pins the offer published are never checked. That
+            // is legitimate for exactly one drive shape: the object-growth route, which
+            // re-derives its template from `state.last_loop_action_sequence` (the same routing
+            // discriminant `materialize` dispatches on) and never reads `proposal.template`.
+            // With nothing this proposer can re-derive from, a pin-consuming drive would run with
+            // no pins at all — fail closed into the same manual-play handback the validation
+            // failure above uses. Both conjuncts are required: keying on `template.is_none()`
+            // alone breaks the shipped object-growth declarations.
+            //
+            // SITE F (CR 732.2a) — THE STRICTEST LOCKSTEP CONSTRAINT ON SITE B, because it is the
+            // one direction in which relaxing (1b) would make the engine LESS safe than before.
+            // "Re-derivable" means the period is THIS offer's proposer's own — the same test
+            // `materialize` dispatches on. A merely non-empty test would let a FOREIGN period take
+            // the sibling `None => {}` arm, which performs ZERO pin validation, and open the APNAP
+            // window on a client-supplied declaration against a schema with published points. So
+            // this arm must reject unless the period is the proposer's, not merely unless one
+            // exists. `None` from a heterogeneous run also rejects, which is the fail-closed
+            // direction: nothing can be re-derived from a period that is nobody's.
+            None if state.loop_period_controller() != Some(offer.proposer) => {
+                reject_shortcut_declaration(state, &mut result);
+                return Ok(result);
+            }
+            None => {}
+        }
     }
     let proposal = crate::analysis::loop_check::ShortcutProposal {
         proposer: offer.proposer,
@@ -2845,6 +6164,9 @@ fn handle_declare_shortcut(
         unbounded: offer.certificate.unbounded.clone(),
         win_kind: offer.certificate.win_kind,
         template,
+        // CR 732.2a: the drive reads ONE authority for what a conformant cycle looks like —
+        // the confirmed certificate's own signature, copied, never re-derived.
+        per_cycle: offer.certificate.per_cycle.clone(),
     };
     // CR 732.2b: living opponents in APNAP turn order, starting after the proposer.
     let opps: Vec<PlayerId> = crate::game::players::apnap_order_from(
@@ -2879,23 +6201,42 @@ fn handle_declare_shortcut(
 /// Re-offer suppression, by seam:
 /// - Interactive bridge (Seam 1, `find_live_loop_winner` reads `loop_detect_ring`, gated by
 ///   `!stack.is_empty()`): suppressed by the GENERAL deliberate-action invariant, not by this
-///   handler. `apply_action` (engine.rs:3006-3011) invalidates `loop_detect_ring` for every
-///   deliberate (non-`PassPriority`/`OrderTriggers`) action; `DeclineShortcut` is a deliberate
-///   break, so the ring is already empty before this handler runs. Seam-1 suppression is the
+///   handler. `apply_action`'s deliberate-action ring clear invalidates `loop_detect_ring` for
+///   every action that is neither `PassPriority`/`OrderTriggers` nor the answer to a
+///   `WaitingFor::is_forced_cascade_window` window; `LoopShortcut` is in neither exemption (it
+///   is not a member of that window class — see the `forced_cascade_window_class` test), so
+///   `DeclineShortcut` is a deliberate break and the ring is already empty before this handler
+///   runs. Cited by SYMBOL, not by line: this reference named a hard coordinate that rotted
+///   twice, so a fresh number would only schedule a third rot. Seam-1 suppression is the
 ///   shared invariant every cast/activate/play-land relies on — the handler does NOT re-clear
 ///   the ring (re-clearing would special-case `DeclineShortcut` to distrust an engine-wide
 ///   invariant). The interactive e2e's "no re-offer" assertion guards this end-to-end: a future
 ///   regression excluding `DeclineShortcut` from that allowlist would fail it loudly.
-/// - Object-growth (Seam 2, gated by `!last_loop_action_sequence.is_empty()`): the deliberate-action
-///   clear does NOT touch `last_loop_action_sequence`, so `state.last_loop_action_sequence.clear()` here
-///   is the genuinely load-bearing suppressor — without it the post-return reconcile re-fires
-///   `try_offer_object_growth_shortcut` within this same `apply()`.
+/// - Object-growth (Seam 2, gated by `loop_period_controller() == Some(caster)` — the whole-period
+///   admission test, NOT mere non-emptiness): the deliberate-action clear does NOT touch
+///   `last_loop_action_sequence`, so clearing it here is the genuinely load-bearing suppressor —
+///   without it the post-return reconcile re-fires `try_offer_object_growth_shortcut` within this
+///   same `apply()`.
+///
+/// THE SEAM-2 CLEAR IS OWNERSHIP-SCOPED (CR 732.2a). Once the bounded mint's step (1b) went
+/// seat-relative, a `WaitingFor::LoopShortcut` can coexist with a period belonging to a DIFFERENT
+/// seat — and `DeclineShortcut` dispatches from any `LoopShortcut`, so an unconditional clear would
+/// let one seat's decline wipe another seat's accumulating period and suppress THAT seat's own
+/// offer until it re-armed. A recorded period is evidence about the seat that recorded it, so only
+/// the decliner's own is theirs to discard. Scoping costs the suppression NOTHING, and the reason
+/// is `try_offer_object_growth_shortcut`'s own admission test rather than an argument about who
+/// receives priority next: that producer returns `None` for every period that is not the priority
+/// holder's, so the only period whose survival could re-fire it is the one this branch still
+/// clears. A period left in place is one no reconcile in this `apply()` can turn back into an
+/// offer for anybody.
 ///
 /// A genuine re-recurrence or a fresh re-cast re-arms the offer naturally. Proposer-only
 /// authorization is enforced upstream by `check_actor_authorization`
-/// (`WaitingFor::acting_player` == `LoopShortcut.proposer`), so offer fields are unused here.
+/// (`WaitingFor::acting_player` == `LoopShortcut.proposer`), so the offer's other fields are
+/// unused here; `proposer` is threaded in solely as the ownership comparand above.
 fn handle_decline_shortcut(
     state: &mut GameState,
+    proposer: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> Result<ActionResult, EngineError> {
     let mut result = ActionResult {
@@ -2903,9 +6244,12 @@ fn handle_decline_shortcut(
         waiting_for: state.waiting_for.clone(),
         log_entries: vec![],
     };
-    // Seam 1 (loop_detect_ring) is already invalidated by apply_action's deliberate-action
-    // ring-clear (engine.rs:3006-3011) — see doc. Only Seam 2 is the handler's gap:
-    state.last_loop_action_sequence.clear(); // Seam 2: load-bearing object-growth offer-gate clear (CR 732.2a)
+    // Seam 1 (loop_detect_ring) is already invalidated by `apply_action`'s deliberate-action
+    // ring clear — see doc. Only Seam 2 is the handler's gap, and only
+    // for the decliner's OWN period (CR 732.2a):
+    if state.loop_period_controller() == Some(proposer) {
+        state.last_loop_action_sequence.clear();
+    }
     priority::reset_priority(state);
     state.waiting_for = WaitingFor::Priority {
         player: living_priority_seat(state),
@@ -2957,8 +6301,11 @@ fn handle_respond_to_shortcut(
             }
         }
         crate::analysis::loop_check::ShortcutResponse::Shorten { .. } => {
-            // CR 732.2c (Phase-3 conservative): hand this opponent a real priority window
-            // instead of taking the shortcut. Finite-K materialization is Phase 4.
+            // DEFICIENCY NOTE (realization gap vs the design at `types::game_state`'s
+            // `scheduled_collapse_axes` doc; full note on `ShortcutResponse`): CR 732.2b makes the
+            // named place the new ending point, so the shortcut should still be taken up to there.
+            // This hands the responder a real priority window instead. Tracked by the
+            // "Shortcut-system rules-correctness completion" follow-up in `.deferred-backlog.md`.
             priority::reset_priority(state);
             state.priority_player = player;
             state.waiting_for = WaitingFor::Priority { player };
@@ -3010,6 +6357,15 @@ fn remember_public_reveals(state: &mut GameState, events: &[GameEvent], journal_
                     ResolvedInformationEdit::Reveal,
                 )
                 .expect("published reveal occurrences must be live and distinct");
+            // A public reveal is durable product knowledge for every player.
+            // Keep this centralized at the event boundary so individual effect
+            // resolvers cannot publish duplicate or divergent facts.
+            let audience = state
+                .players
+                .iter()
+                .map(|player| player.id)
+                .collect::<Vec<_>>();
+            state.remember_card_identities(audience, &unpublished);
         }
     }
 }
@@ -3020,9 +6376,10 @@ fn remember_public_reveals(state: &mut GameState, events: &[GameEvent], journal_
 ///
 /// - `Concede` self-authenticates via its own `player_id` field — but we still
 ///   require it to match `actor` so a player cannot concede someone else on
-///   their behalf (CR 104.3a).
+///   their behalf (CR 104.3a). It is no longer an action after the game has
+///   ended, when there is no authorized submitter.
 /// - **Preference actions** (SetPhaseStops, SetPriorityPassingMode,
-///   CancelAutoPass) are per-player UI
+///   CancelAutoPass, ReorderHand) are per-player UI
 ///   settings. They have no CR semantics, mutate only the submitter's own
 ///   preference slot, and may legitimately fire at any time — e.g. the human
 ///   toggles a phase stop while the AI holds priority. The downstream handlers
@@ -3035,34 +6392,44 @@ fn check_actor_authorization(
     actor: PlayerId,
     action: &GameAction,
 ) -> Result<(), EngineError> {
-    if let GameAction::Concede { player_id } = action {
-        // CR 104.3a: A player may concede at any time — but only themselves.
-        if *player_id != actor {
-            return Err(EngineError::WrongPlayer);
-        }
+    if action.is_actor_scoped_preference()
+        || matches!(
+            action,
+            GameAction::Debug(_)
+                | GameAction::GrantDebugPermission { .. }
+                | GameAction::RevokeDebugPermission { .. }
+        )
+    {
         return Ok(());
     }
-    if matches!(
-        action,
-        GameAction::SetPhaseStops { .. }
-            | GameAction::SetPriorityPassingMode { .. }
-            | GameAction::SetPriorityYield { .. }
-            | GameAction::SetMayTriggerAutoChoice { .. }
-            | GameAction::SetTriggerOrderTemplate { .. }
-            | GameAction::CancelAutoPass
-            | GameAction::Debug(_)
-            | GameAction::GrantDebugPermission { .. }
-            | GameAction::RevokeDebugPermission { .. }
-            | GameAction::ReorderHand { .. }
-    ) {
-        return Ok(());
+    if let GameAction::RevokeResolveAllConsent {
+        epoch,
+        representative,
+    } = action
+    {
+        return (turn_control::resolve_all_granted_submitter(state, *epoch, *representative)
+            == Some(actor))
+        .then_some(())
+        .ok_or(EngineError::WrongPlayer);
     }
     // CR 103.5: For simultaneous-decision states (MulliganDecision,
     // OpeningHandBottomCards), authorize against the full pending set so any
     // pending player may submit in any order. Falls back to single-player
     // semantics for every other variant.
     let authorized = turn_control::authorized_submitters(state);
-    if !authorized.is_empty() && !authorized.contains(&actor) {
+    if authorized.is_empty() {
+        return Err(EngineError::WrongPlayer);
+    }
+    if let GameAction::Concede { player_id } = action {
+        // CR 104.3a: A player may concede at any time in an unfinished game —
+        // but only themselves. `GameOver` has no authorized submitter, so it
+        // cannot admit a second concession.
+        if *player_id != actor {
+            return Err(EngineError::WrongPlayer);
+        }
+        return Ok(());
+    }
+    if !authorized.contains(&actor) {
         return Err(EngineError::WrongPlayer);
     }
     Ok(())
@@ -3156,13 +6523,20 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::UnlessBouncePayment { .. }
                     | PendingCostMoveResume::DelveManaPayment { .. }
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
+                    | PendingCostMoveResume::ActivationMillPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
+                    | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+                    | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
             )
         ),
         // CR 606.4 + CR 616.1: a fully-prevented loyalty counter add (e.g. an
         // opponent's Solemnity would prevent the counters) must still complete the
         // parked activation instead of wedging, so `LoyaltyActivation` is eligible
-        // at the Prevented boundary as well.
+        // at the Prevented boundary as well. Counter-addition unless payments
+        // are eligible here too: whether a prevented placement leaves that
+        // payment paid or failed is `resume_counter_addition_unless_payment`'s
+        // call, argued in its own header; either way the pending unless branch
+        // must resolve here, not wedge.
         CostMoveDrainBoundary::ReplacementPrevented { .. } => matches!(
             state.pending_cost_move_resume,
             Some(
@@ -3175,7 +6549,10 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::UnlessBouncePayment { .. }
                     | PendingCostMoveResume::DelveManaPayment { .. }
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
+                    | PendingCostMoveResume::ActivationMillPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
+                    | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+                    | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
             )
         ),
         CostMoveDrainBoundary::PriorityBoundary => matches!(
@@ -3239,9 +6616,27 @@ pub(crate) fn drain_pending_cost_move_resume(
         mana_abilities::resume_mana_ability_cost_move(state, events)?
     } else if matches!(
         state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::ActivationMillPayment { .. })
+    ) {
+        casting_costs::resume_activation_mill_cost_payment(state, events)?
+    } else if matches!(
+        state.pending_cost_move_resume,
         Some(PendingCostMoveResume::LoyaltyActivation { .. })
     ) {
         super::planeswalker::resume_loyalty_activation(state, events)?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
+    ) {
+        engine_payment_choices::resume_counter_addition_unless_payment(state, events, boundary)?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::RandomDiscardUnlessPayment(..))
+    ) {
+        // CR 118.12: random discard pauses only after its Moved replacement
+        // returns a replacement choice; the delivered boundary resumes the
+        // payment through its already-authorized paid epilogue.
+        engine_payment_choices::resume_random_discard_unless_payment(state, events)?
     } else {
         unreachable!("eligible cost-move root must remain parked")
     };
@@ -3254,14 +6649,63 @@ pub(super) fn resume_pending_continuation_if_priority(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-        effects::drain_pending_continuation(state, events);
-        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        // CR 118.3b + CR 119.4 + CR 616.1: A life-payment replacement child
+        // drains to its recorded resolution boundary before the paid outer
+        // action resumes. Ordinary continuations then drain only if that
+        // deferred owner actually completed in this pass.
+        let deferred_life_boundary = state
+            .pending_deferred_life_cost_resume
+            .as_ref()
+            .map(crate::types::game_state::DeferredLifeCostResume::resume_at_resolution_depth);
+        if deferred_life_boundary.is_none_or(|boundary| state.resolution_stack.len() > boundary) {
+            super::life_safety::observe_boundary_carrier(state);
+            effects::drain_pending_continuation(state, events);
+        }
+        if matches!(state.waiting_for, WaitingFor::Priority { .. })
+            && deferred_life_boundary.is_none_or(|boundary| state.resolution_stack.len() > boundary)
+        {
+            super::life_safety::observe_boundary_carrier(state);
             effects::resume_resolution_frames(state, events);
+        }
+        let mut drained_deferred_life = false;
+        if matches!(state.waiting_for, WaitingFor::Priority { .. })
+            && state
+                .pending_deferred_life_cost_resume
+                .as_ref()
+                .is_some_and(|resume| {
+                    state.resolution_stack.len() <= resume.resume_at_resolution_depth()
+                })
+        {
+            super::life_safety::observe_boundary_carrier(state);
+            let waiting_for = drain_pending_deferred_life_cost_resume(state, events)?;
+            state.waiting_for = waiting_for;
+            drained_deferred_life = true;
+        }
+        if matches!(state.waiting_for, WaitingFor::Priority { .. })
+            && drained_deferred_life
+            && state.pending_deferred_life_cost_resume.is_none()
+        {
+            super::life_safety::observe_boundary_carrier(state);
+            effects::drain_pending_continuation(state, events);
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                super::life_safety::observe_boundary_carrier(state);
+                effects::resume_resolution_frames(state, events);
+            }
+        }
+        // CR 614.6 + CR 500.5: An interactive cross-event substitute may be
+        // the child that suspended the APNAP phase-transition drain. Resume
+        // that typed owner only after the post-replacement frame has
+        // terminally drained; ordinary phase-boundary prompts use other states
+        // and are intentionally unaffected.
+        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            super::life_safety::observe_boundary_carrier(state);
+            turns::resume_phase_transition_after_post_replacement(state, events);
         }
         // CR 605.3b + CR 616.1: A post-replacement prompt reaches this common
         // boundary only after ordinary continuations drain. The shared typed
         // dispatcher owns the remaining eligible payment roots.
         if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            super::life_safety::observe_boundary_carrier(state);
             let _ = drain_pending_cost_move_resume(
                 state,
                 events,
@@ -3269,7 +6713,221 @@ pub(super) fn resume_pending_continuation_if_priority(
             )?;
         }
     }
+    settle_resolving_stack_entry_after_continuation_resume(state);
     Ok(())
+}
+
+/// CR 608.2c: A paused stack object remains the active resolution owner until
+/// its continuation and every typed resolution frame have drained. Once this
+/// priority boundary proves that completion, settle the exact carrier before
+/// any deferred trigger can start its own resolution.
+pub(super) fn settle_resolving_stack_entry_after_continuation_resume(state: &mut GameState) {
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. })
+        || !resolving_stack_entry_can_settle(state)
+    {
+        return;
+    }
+    settle_finished_resolving_stack_entry(state);
+}
+
+/// CR 608.2c: Once a resolution has completed, its carrier must settle before
+/// a trigger-selection prompt created by that resolution can construct a new
+/// stack object. Unlike the priority-boundary wrapper above, this is called at
+/// the exact completion point when the prompt has already replaced Priority.
+pub(super) fn settle_resolving_stack_entry_before_trigger_selection(state: &mut GameState) {
+    if !resolving_stack_entry_can_settle(state) {
+        return;
+    }
+    settle_finished_resolving_stack_entry(state);
+}
+
+/// CR 608.2c + CR 608.2m: An object that has left the stack keeps resolving
+/// until it has finished following its instructions in the order written, so
+/// its carrier may settle only once every continuation and typed resolution
+/// frame that resolution owns has drained.
+///
+/// This predicate answers exactly one question — *has the resolution
+/// finished?* It deliberately does not also test whether the carrier is
+/// well-formed. A readiness gate that folds in a structural invariant reads a
+/// malformed carrier as "not finished", which disables the very sweep that
+/// exists to clear it. Carrier/firing parity is a separate question, answered
+/// by `resolving_carrier_parity_is_coherent` and reported on the settle path
+/// rather than gating it.
+fn resolving_stack_entry_can_settle(state: &GameState) -> bool {
+    state.resolving_stack_entry.is_some()
+        && state.active_ability_continuation().is_none()
+        && state.active_spell_resolution().is_none()
+        && state.pending_cast.is_none()
+        && state.pending_resolution_completion.is_none()
+        && triggers::resolution_completion_can_settle(state)
+}
+
+/// CR 113.3c + CR 603.7: A triggered ability is a distinct kind of stack
+/// object from a spell or an activated ability (CR 113.3c), and only that kind
+/// owns a CR 603.7 firing classification. This tests the carrier *kind* half of
+/// that pairing.
+fn resolving_carrier_is_triggered(state: &GameState) -> bool {
+    state
+        .resolving_stack_entry
+        .as_ref()
+        .is_some_and(|entry| matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. }))
+}
+
+/// CR 603.7: Answers only whether the resolving carrier and its firing
+/// classification are paired coherently. This is a well-formedness diagnostic,
+/// never a readiness input — see `resolving_stack_entry_can_settle`.
+fn resolving_carrier_parity_is_coherent(state: &GameState) -> bool {
+    state.resolving_trigger_firing.is_some() == resolving_carrier_is_triggered(state)
+}
+
+fn settle_finished_resolving_stack_entry(state: &mut GameState) {
+    debug_assert!(
+        resolving_stack_entry_can_settle(state),
+        "only a fully completed resolution carrier may settle"
+    );
+    // CR 603.7: `debug_assert!` is compiled out of the shipped build, so an
+    // incoherent pairing is reported here instead. Settle anyway: the
+    // resolution this carrier owns has finished either way, and withholding the
+    // sweep would only leave the carrier behind.
+    //
+    // Reach: this is visible in the server-hosted native build, which installs a
+    // subscriber (`phase-server/src/logging.rs`). `engine-wasm` installs none
+    // (see its own note at `engine-wasm/src/lib.rs`, "unlike server-core, which
+    // has `tracing`"), so in a single-player browser game the warn is currently
+    // emitted into a void. Reporting is still correct at this seam — the engine
+    // owns the diagnostic — but do not read this as closing the observability
+    // gap for WASM clients; that needs a subscriber on the client side.
+    if !resolving_carrier_parity_is_coherent(state) {
+        tracing::warn!(
+            "settling a resolving carrier with an incoherent trigger-firing pairing: \
+             carrier_is_triggered={}, firing_present={}",
+            resolving_carrier_is_triggered(state),
+            state.resolving_trigger_firing.is_some()
+        );
+    }
+    super::stack::finish_resolving_stack_entry(
+        state,
+        super::lifecycle::DelayedTerminalDisposition::Resolved,
+    );
+    // CR 400.7j: resolution-scoped self-move state ends with its carrier.
+    state.resolution_source_relatch = None;
+}
+
+/// CR 118.3b + CR 119.4 + CR 616.1: Resume the exact outer cost action after
+/// the life-loss replacement's post-effect has drained back to its recorded
+/// resolution-stack boundary.
+fn drain_pending_deferred_life_cost_resume(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let Some(resume) = state.pending_deferred_life_cost_resume.take() else {
+        return Ok(state.waiting_for.clone());
+    };
+    let resume_for_restore = resume.clone();
+    let result = (|| -> Result<WaitingFor, EngineError> {
+        match resume {
+            crate::types::game_state::DeferredLifeCostResume::Cast {
+                player,
+                pending,
+                remaining_life_payments,
+                resume_at_resolution_depth,
+            } => {
+                let pending = pending.ok_or_else(|| {
+                    EngineError::InvalidAction(
+                        "Deferred life payment is missing its cast or activation root".to_string(),
+                    )
+                })?;
+                let mut remaining = remaining_life_payments.into_iter();
+                while let Some(amount) = remaining.next() {
+                    match super::life_costs::pay_life_as_cast_or_activation_cost(
+                        state, player, amount, events,
+                    ) {
+                        super::life_costs::PayLifeCostResult::Paid { .. } => {}
+                        super::life_costs::PayLifeCostResult::PaidWithDeferredSubstitution {
+                            ..
+                        }
+                        | super::life_costs::PayLifeCostResult::DeferredReplacementChoice {
+                            ..
+                        } => {
+                            state.pending_deferred_life_cost_resume =
+                                Some(crate::types::game_state::DeferredLifeCostResume::Cast {
+                                    player,
+                                    pending: Some(pending),
+                                    remaining_life_payments: remaining.collect(),
+                                    resume_at_resolution_depth,
+                                });
+                            return Ok(state.waiting_for.clone());
+                        }
+                        super::life_costs::PayLifeCostResult::InsufficientLife
+                        | super::life_costs::PayLifeCostResult::Prohibited => {
+                            return Err(EngineError::ActionNotAllowed(
+                                "Cannot complete deferred life cost".to_string(),
+                            ));
+                        }
+                    }
+                }
+                if pending.prepaid_actual_mana_spent.is_some() {
+                    state.pending_cast = Some(pending);
+                    super::casting_costs::finalize_automatic_mana_payment(state, player, events)
+                } else {
+                    super::casting_costs::finish_pending_cost_or_cast(
+                        state, player, *pending, events,
+                    )
+                }
+            }
+            crate::types::game_state::DeferredLifeCostResume::PayAmount {
+                player, total, ..
+            } => Ok(super::engine_resolution_choices::finish_pay_amount_choice(
+                state, player, total, events,
+            )),
+            crate::types::game_state::DeferredLifeCostResume::ManaRoot {
+                player,
+                resume,
+                remaining_life_payments,
+                resume_at_resolution_depth,
+            } => {
+                let mut remaining = remaining_life_payments.into_iter();
+                while let Some(amount) = remaining.next() {
+                    match super::life_costs::pay_life_as_cost(state, player, amount, events) {
+                        super::life_costs::PayLifeCostResult::Paid { .. } => {}
+                        super::life_costs::PayLifeCostResult::PaidWithDeferredSubstitution {
+                            ..
+                        }
+                        | super::life_costs::PayLifeCostResult::DeferredReplacementChoice {
+                            ..
+                        } => {
+                            state.pending_deferred_life_cost_resume =
+                                Some(crate::types::game_state::DeferredLifeCostResume::ManaRoot {
+                                    player,
+                                    resume,
+                                    remaining_life_payments: remaining.collect(),
+                                    resume_at_resolution_depth,
+                                });
+                            return Ok(state.waiting_for.clone());
+                        }
+                        super::life_costs::PayLifeCostResult::InsufficientLife
+                        | super::life_costs::PayLifeCostResult::Prohibited => {
+                            return Err(EngineError::ActionNotAllowed(
+                                "Cannot complete deferred Phyrexian life payment".to_string(),
+                            ));
+                        }
+                    }
+                }
+                super::mana_abilities::finish_mana_root_after_deferred_life_payment(
+                    state, player, *resume, events,
+                )
+            }
+        }
+    })();
+    if result.is_err()
+        && !result
+            .as_ref()
+            .is_err_and(super::casting_costs::is_abandoned_cast_finalization)
+        && state.pending_deferred_life_cost_resume.is_none()
+    {
+        state.pending_deferred_life_cost_resume = Some(resume_for_restore);
+    }
+    result
 }
 
 /// CR 702.66a: Finish one Delve payment after its graveyard-to-exile cost move
@@ -3292,9 +6950,17 @@ pub(super) fn resume_delve_mana_payment(state: &mut GameState) -> WaitingFor {
             fuel_id,
         ),
     );
+    let convoke_mode = state.pending_cast.as_ref().and_then(|pending| {
+        super::casting::spell_tap_payment_mode_for(
+            state,
+            player,
+            pending.object_id,
+            pending.casting_variant == CastingVariant::Fuse,
+        )
+    });
     WaitingFor::ManaPayment {
         player,
-        convoke_mode: Some(ConvokeMode::Delve),
+        convoke_mode: convoke_mode.or(Some(ConvokeMode::Delve)),
     }
 }
 
@@ -3302,9 +6968,11 @@ pub(super) fn resume_delve_mana_payment(state: &mut GameState) -> WaitingFor {
 enum AutoPassDecision {
     /// No active auto-pass — leave the loop and let the frontend take over.
     Exit,
-    /// Auto-pass completed or was interrupted (opponent action, phase stop,
-    /// stack terminator). Clear the flag and exit.
+    /// Auto-pass completed at a terminal stop. Clear the flag and exit.
     Finish,
+    /// Pause this auto-pass run without clearing the session. The next normal
+    /// action boundary will re-enter the loop and re-evaluate the same mode.
+    Break,
     /// Continue passing priority for this iteration.
     Pass,
 }
@@ -3338,7 +7006,9 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
             let opponent_on_stack = state.stack.last().is_some_and(|top| {
                 top.controller != player && !state.is_priority_yielded(player, top)
             });
-            if opponent_on_stack || state.phase_stop_hit(player) {
+            if opponent_on_stack {
+                AutoPassDecision::Break
+            } else if state.phase_stop_hit(player) {
                 AutoPassDecision::Finish
             } else {
                 AutoPassDecision::Pass
@@ -3453,14 +7123,32 @@ fn pass_priority_once_with_pipeline(
             && matches!(wf, WaitingFor::Priority { player } if player == state.active_player)
         {
             state.record_loop_detect_sample();
-        } else if !matches!(wf, WaitingFor::OrderTriggers { .. }) {
+        } else if !wf.is_forced_cascade_window() {
             state.loop_detect_ring.clear();
+            // CR 603.5: the recorded "may" answers describe the window that just ended.
+            state.loop_answer_journal = None;
         }
-        // CR 603.3b + CR 732.2a: leave the ring intact on the mandatory trigger-ordering
-        // window — ordering simultaneous triggers is a forced step of putting them on the
-        // stack (staged in pending_trigger_order, so the stack is momentarily shrunk/empty
-        // here), not a settle or deliberate break. Preserving the Priority{active} samples
-        // across the beat lets a self-refilling multi-trigger loop reach CR 732.2a detection.
+        // CR 603.3b/603.3d/603.5/608.2/903.9a + CR 703.1/117.3a + CR 732.2a: leave the
+        // ring intact on every FORCED PRE-PRIORITY window, not just trigger ordering.
+        // `is_forced_cascade_window` is the single authority for that class (the other
+        // clear site, `apply_action`, consults the same predicate); it holds exactly the
+        // windows at which no player has priority — the forced steps of putting triggers
+        // on the stack / finishing a resolution, plus the CR 703.1 turn-based actions
+        // CR 117.3a places before the step's own grant of priority — so answering one is
+        // never a settle or a deliberate break. The stack is momentarily shrunk or empty
+        // at these windows (an ordering batch is staged in `pending_trigger_order`; a
+        // mid-resolution "may" pause has already popped its entry; a turn-based window
+        // opens between phases with the stack drained), so without this arm the
+        // accumulated `Priority{active}` samples would be discarded and a self-refilling
+        // multi-trigger loop could never reach CR 732.2a detection. The turn-based
+        // members buy RING SURVIVAL across a turn boundary — necessary but not yet
+        // sufficient for the cross-turn shortcut CR 732.2a contemplates ("may even cross
+        // multiple turns"), because `loop_states_equal` still compares `turn_number`
+        // (via `impl PartialEq for GameState`, un-neutralized by `normalize_for_loop` and
+        // `project_out_resources`), so no cross-turn pair certifies today. The measured
+        // justification is the wipe itself: without these members the Fantastic Four dump
+        // force-clears the ring once per 99-beat turn period at declare-attackers,
+        // capping it at 2 frames where the widened class reaches 13.
     }
     // No else-branch: a bare handoff or an empty-stack pass-to-advance-phase does NOT
     // touch the ring (leave-intact), so accumulation survives the inter-resolution beats.
@@ -3541,7 +7229,7 @@ fn finish_completed_or_interrupted_until_stack_empty_sessions(state: &mut GameSt
 // against an absurd/hostile count — NOT a rules constraint. It bounds both a `Fixed(n)`
 // cycle count (handle_declare_shortcut) and a template drive period (shortcut_drive_period).
 // Motivating vector: a `u32` count scalar-encodes up to ~4.3e9 cycles in ~10 JSON bytes, so
-// it sails through the 8 KB inbound WS frame cap (phase-server/src/main.rs:409/1420) yet
+// it sails through the inbound WS frame cap (`phase-server`'s `MAX_WS_MESSAGE_BYTES`, 64 KB) yet
 // would force ~4.3e9 GameState clones — a byte cap cannot see it, only this count cap can.
 // 1_000 is generous vs any honest Fixed count (~10x KCI-style loops); worst-case bounded
 // cost is 1_000 cycles x <=10_000 beats = 1e7.
@@ -3639,6 +7327,7 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                         state.auto_pass.remove(&player);
                         break;
                     }
+                    AutoPassDecision::Break => break,
                     AutoPassDecision::Pass => {}
                 }
 
@@ -3731,10 +7420,25 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                 }
             }
 
-            // UntilTurnBoundary: auto-submit empty attackers unless the user
-            // flagged this phase as a stop.
-            WaitingFor::DeclareAttackers { player, .. }
-                if end_of_turn_active(state, *player) && !state.phase_stop_hit(*player) =>
+            // CR 508.1a: "The active player chooses which creatures that they
+            // control, IF ANY, will attack." When no creature can legally attack,
+            // the empty declaration is the ONLY legal declaration — there is no
+            // choice to make. Parking on the prompt strands the game on a decision
+            // whose entire legal-action set is a single no-op submission, which the
+            // player must click through every combat (and which an automated seat
+            // may never submit at all). Mirrors the `DeclareBlockers` arm below,
+            // which already auto-submits whenever there is nothing to choose.
+            //
+            // `UntilTurnBoundary` additionally auto-submits when candidates DO
+            // exist — that is the player's standing pre-commitment to attack with
+            // nothing. A phase stop overrides both: an explicit request to pause
+            // here is honored even when the declaration is forced.
+            WaitingFor::DeclareAttackers {
+                player,
+                valid_attacker_ids,
+                ..
+            } if !state.phase_stop_hit(*player)
+                && (valid_attacker_ids.is_empty() || end_of_turn_active(state, *player)) =>
             {
                 let mut events = Vec::new();
                 match engine_combat::handle_empty_attackers(state, &mut events) {
@@ -3834,9 +7538,32 @@ fn finalize_copy_retarget(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let changed_pins = state
+        .stack
+        .iter()
+        .find(|entry| entry.id == copy_id)
+        .and_then(|entry| entry.ability())
+        .map(|ability| {
+            ability
+                .targets
+                .iter()
+                .zip(targets.iter())
+                .filter(|(old, new)| ability.retarget_target_requires_pin_refresh(old, new, state))
+                .filter_map(|(_, target)| match target {
+                    TargetRef::Object(id) => {
+                        state.objects.get(id).map(ObjectIncarnationRef::from_object)
+                    }
+                    TargetRef::Player(_) => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     if let Some(entry) = state.stack.iter_mut().find(|e| e.id == copy_id) {
         if let Some(ability) = entry.ability_mut() {
             ability.targets = targets;
+            for pin in changed_pins {
+                ability.update_selected_target_incarnation(pin);
+            }
         }
     }
     events.push(GameEvent::EffectResolved {
@@ -3867,6 +7594,268 @@ fn finalize_copy_retarget(
     state.priority_player = player;
     resume_pending_continuation_if_priority(state, events)?;
     Ok(())
+}
+
+fn begin_resolve_all_consent(
+    state: &mut GameState,
+    priority_player: PlayerId,
+    max_resolutions: u32,
+) -> Result<WaitingFor, EngineError> {
+    super::priority::pass_priority_legality(state, priority_player)?;
+    // Resolve All consent supersedes this representative's standing yield. A
+    // Ready run must be free of auto-pass state so its one-resolution proof
+    // cannot advance beyond the consented boundary.
+    state.auto_pass.remove(&priority_player);
+    let current_representative =
+        super::topology::priority_pass_representative(state, priority_player);
+    let mut representatives = super::topology::priority_pass_participants(state);
+    let Some(current_index) = representatives
+        .iter()
+        .position(|representative| *representative == current_representative)
+    else {
+        return Err(EngineError::ActionNotAllowed(
+            "Resolve All requires a live priority representative".to_string(),
+        ));
+    };
+    representatives.rotate_left(current_index);
+
+    let epoch = state.next_resolve_all_consent_epoch;
+    let next_epoch = epoch.checked_add(1).ok_or_else(|| {
+        EngineError::ActionNotAllowed("Resolve All consent epoch space exhausted".to_string())
+    })?;
+    state.next_resolve_all_consent_epoch = next_epoch;
+    // CR 117.4: a stack object resolves only after every player passes in
+    // succession. Preserve the exact current pass cycle if consent is declined
+    // or revoked before its authorized one-entry materialization begins.
+    state.resolve_all_consent_run = Some(ResolveAllConsentRun {
+        epoch,
+        max_resolutions,
+        priority_snapshot: ResolveAllPrioritySnapshot {
+            waiting_player: priority_player,
+            priority_player: state.priority_player,
+            priority_pass_count: state.priority_pass_count,
+            priority_passes: state.priority_passes.clone(),
+        },
+        participants: representatives
+            .into_iter()
+            .map(|representative| ResolveAllConsentParticipant {
+                representative,
+                authorized_submitter: turn_control::authorized_submitter_for_player(
+                    state,
+                    representative,
+                ),
+                granted: representative == current_representative,
+            })
+            .collect(),
+    });
+
+    resolve_all_consent_waiting_for(state).ok_or_else(|| {
+        EngineError::ActionNotAllowed(
+            "Resolve All requires at least one representative".to_string(),
+        )
+    })
+}
+
+fn resolve_all_consent_waiting_for(state: &GameState) -> Option<WaitingFor> {
+    let run = state.resolve_all_consent_run.as_ref()?;
+    Some(
+        run.next_pending_representative()
+            .map(|representative| WaitingFor::ResolveAllConsent {
+                epoch: run.epoch,
+                representative,
+            })
+            .unwrap_or(WaitingFor::ResolveAllReady { epoch: run.epoch }),
+    )
+}
+
+// CR 117.3d + CR 117.4: A declined optimized batch restores the exact
+// priority-pass sequence it interrupted before ordinary priority handling
+// resumes; this restoration itself resolves no stack object.
+fn restore_resolve_all_priority_snapshot(state: &mut GameState) -> Result<WaitingFor, EngineError> {
+    let run = state.resolve_all_consent_run.take().ok_or_else(|| {
+        EngineError::InvalidAction("Resolve All consent is not active".to_string())
+    })?;
+    let snapshot = run.priority_snapshot;
+    state.priority_player = snapshot.priority_player;
+    state.priority_pass_count = snapshot.priority_pass_count;
+    state.priority_passes = snapshot.priority_passes;
+    Ok(WaitingFor::Priority {
+        player: snapshot.waiting_player,
+    })
+}
+
+/// Installs one player's requested auto-pass mode and, when that player holds
+/// the current Priority window, consumes it through the ordinary pipeline.
+///
+/// `SetAutoPass` and a declined Resolve All consent share this exact reducer
+/// path: both preserve the current stack baseline and must obey the same
+/// shortened-precast-pass restriction.
+fn install_auto_pass_and_pass_priority(
+    state: &mut GameState,
+    auto_pass_owner: PlayerId,
+    mode: AutoPassRequest,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    let WaitingFor::Priority { player } = &state.waiting_for else {
+        unreachable!("auto-pass may only be installed from a Priority window");
+    };
+    let pass_immediately = *player == auto_pass_owner;
+    if pass_immediately && super::precast_copy_shortcut::blocks_pass(state, *player) {
+        return Err(EngineError::ActionNotAllowed(
+            "A shortened pre-cast shortcut requires a different meaningful action before passing"
+                .to_string(),
+        ));
+    }
+    store_auto_pass_request(state, auto_pass_owner, mode);
+    if !pass_immediately {
+        return Ok(ActionResult {
+            events: std::mem::take(events),
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        });
+    }
+    let waiting_for = pass_priority_once_with_pipeline(state, events, None)?;
+    Ok(ActionResult {
+        events: std::mem::take(events),
+        waiting_for,
+        log_entries: vec![],
+    })
+}
+
+fn store_auto_pass_request(
+    state: &mut GameState,
+    auto_pass_owner: PlayerId,
+    mode: AutoPassRequest,
+) {
+    let stored_mode = match mode {
+        AutoPassRequest::UntilStackEmpty => AutoPassMode::UntilStackEmpty {
+            initial_stack_len: state.stack.len(),
+        },
+        AutoPassRequest::UntilTurnBoundary { until } => AutoPassMode::UntilTurnBoundary { until },
+    };
+    state.auto_pass.insert(auto_pass_owner, stored_mode);
+}
+
+/// Stores Resolve All's durable "do not make me pass each frame" intent in
+/// the same engine-owned `UntilStackEmpty` flow as a direct priority request.
+pub(crate) fn install_until_stack_empty_auto_pass_and_pass_priority(
+    state: &mut GameState,
+    auto_pass_owner: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    install_auto_pass_and_pass_priority(
+        state,
+        auto_pass_owner,
+        AutoPassRequest::UntilStackEmpty,
+        events,
+    )
+}
+
+/// Retains Resolve All's durable no-manual-priority preference when a rules
+/// guard prevents its initial immediate pass. The normal auto-pass loop resumes
+/// after that required action completes.
+pub(crate) fn install_until_stack_empty_auto_pass(
+    state: &mut GameState,
+    auto_pass_owner: PlayerId,
+) {
+    store_auto_pass_request(state, auto_pass_owner, AutoPassRequest::UntilStackEmpty);
+}
+
+/// CR 117.3d + CR 117.4: Declining the optimized Resolve All batch preserves
+/// the requester's intent by switching to the ordinary engine auto-pass flow.
+fn decline_resolve_all_consent_with_auto_pass(
+    state: &mut GameState,
+    epoch: u64,
+    representative: PlayerId,
+    response_epoch: u64,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    let waiting_for = respond_resolve_all_consent(
+        state,
+        epoch,
+        representative,
+        response_epoch,
+        ResolveAllConsentDecision::Decline,
+    )?;
+    let WaitingFor::Priority { player } = waiting_for else {
+        unreachable!("declined Resolve All consent must restore Priority");
+    };
+    // `pass_priority_once_with_pipeline` derives the semantic priority seat
+    // from this state. Install the captured Priority window before reusing the
+    // normal SetAutoPass path, rather than passing from the consent prompt.
+    state.waiting_for = WaitingFor::Priority { player };
+    install_until_stack_empty_auto_pass_and_pass_priority(state, player, events)
+}
+
+fn respond_resolve_all_consent(
+    state: &mut GameState,
+    epoch: u64,
+    representative: PlayerId,
+    response_epoch: u64,
+    decision: ResolveAllConsentDecision,
+) -> Result<WaitingFor, EngineError> {
+    if epoch != response_epoch {
+        return Err(EngineError::InvalidAction(
+            "Resolve All consent epoch is stale".to_string(),
+        ));
+    }
+    {
+        let run = state.resolve_all_consent_run.as_mut().ok_or_else(|| {
+            EngineError::InvalidAction("Resolve All consent is not active".to_string())
+        })?;
+        if run.epoch != epoch || run.next_pending_representative() != Some(representative) {
+            return Err(EngineError::InvalidAction(
+                "Resolve All consent response is no longer pending".to_string(),
+            ));
+        }
+        if matches!(decision, ResolveAllConsentDecision::Grant) {
+            let participant = run
+                .participants
+                .iter_mut()
+                .find(|participant| participant.representative == representative)
+                .expect("pending Resolve All representative must be a participant");
+            participant.granted = true;
+            // A grant replaces this representative's standing auto-pass with
+            // the consented, bounded Resolve All sequence.
+            state.auto_pass.remove(&representative);
+        }
+    }
+    if matches!(decision, ResolveAllConsentDecision::Decline) {
+        return restore_resolve_all_priority_snapshot(state);
+    }
+    let waiting_for = resolve_all_consent_waiting_for(state).ok_or_else(|| {
+        EngineError::InvalidAction("Resolve All consent is not active".to_string())
+    })?;
+    // ResolveAllReady has no current actor, so the ordinary waiting-state sync
+    // deliberately leaves `priority_player` alone. Restore the saved priority
+    // cursor now; the Ready consumer validates this exact snapshot before it
+    // begins its first materialized CR 117.4 pass cycle.
+    if matches!(waiting_for, WaitingFor::ResolveAllReady { .. }) {
+        state.priority_player = state
+            .resolve_all_consent_run
+            .as_ref()
+            .expect("an active consent run produced ResolveAllReady")
+            .priority_snapshot
+            .priority_player;
+    }
+    Ok(waiting_for)
+}
+
+fn revoke_resolve_all_consent(
+    state: &mut GameState,
+    epoch: u64,
+    representative: PlayerId,
+) -> Result<WaitingFor, EngineError> {
+    let active = state
+        .resolve_all_consent_run
+        .as_ref()
+        .is_some_and(|run| run.epoch == epoch && run.is_granted(representative));
+    if !active {
+        return Err(EngineError::InvalidAction(
+            "Resolve All consent revocation is stale".to_string(),
+        ));
+    }
+    restore_resolve_all_priority_snapshot(state)
 }
 
 fn apply_action(
@@ -3910,9 +7899,29 @@ fn apply_action(
         state.private_look_player = None;
     }
 
+    // A ScryChoice has already disclosed its cards to the deciding player. The
+    // choice response is the first reducer boundary at which that private view
+    // can become durable product knowledge; this never changes the prompt or
+    // rules-visible Scry state.
+    if matches!(&action, GameAction::SelectCards { .. }) {
+        if let WaitingFor::ScryChoice { player, cards } = &state.waiting_for {
+            let player = *player;
+            let cards = cards.clone();
+            state.remember_card_identities(
+                turn_control::decision_audience_for_player(state, player),
+                &cards,
+            );
+        }
+    }
+
     let mut events = Vec::new();
     let mut triggers_processed_inline = false;
-    let mut skip_deferred_trigger_drain = false;
+    let skip_deferred_trigger_drain = false;
+    // The trigger-construction finisher runs at most once per reducer action, at
+    // the outermost handler return of its enumerated seams. Reset the witness
+    // here rather than at the outer boundary so a direct `apply_action` caller
+    // (drive loops, injector harnesses) is measured per action too.
+    state.trigger_construction_finisher_ran_this_action = false;
 
     // CancelAutoPass works from any WaitingFor state (player may cancel during
     // interactive choices). Routed by `actor` — previously used
@@ -3997,12 +8006,9 @@ fn apply_action(
     // player can only mutate their own preferences regardless of the payload.
     if let GameAction::SetMayTriggerAutoChoice { op } = &action {
         match op {
-            MayTriggerAutoChoiceOp::Remove { key } => {
-                let actor_key = MayTriggerAutoChoiceKey {
-                    player: actor,
-                    ..key.clone()
-                };
-                state.remove_may_trigger_auto_choice(&actor_key);
+            MayTriggerAutoChoiceOp::Remove { selector } => {
+                let actor_selector = selector.for_player(actor);
+                state.remove_may_trigger_auto_choice_selector(&actor_selector);
             }
             MayTriggerAutoChoiceOp::ClearAll => {
                 state.clear_may_trigger_auto_choices(actor);
@@ -4102,16 +8108,7 @@ fn apply_action(
     // a defense-in-depth invariant — a player not in `debug_permitted` should
     // never have reached `apply`.
     if let GameAction::Debug(debug_action) = action {
-        if !state.debug_mode {
-            return Err(EngineError::InvalidAction(
-                "Debug actions require debug_mode to be enabled".into(),
-            ));
-        }
-        if !state.debug_permitted.is_empty() && !state.debug_permitted.contains(&actor) {
-            return Err(EngineError::InvalidAction(
-                "Debug actions require debug permission".into(),
-            ));
-        }
+        preflight_debug_action(state, actor, &debug_action)?;
         let description = debug_action.describe(state);
         let mut result =
             super::engine_debug::apply_debug_action(state, actor, debug_action, &mut events)?;
@@ -4195,11 +8192,40 @@ fn apply_action(
     // cascade (OrderTriggers is the forced CR 603.3b placement of simultaneous triggers,
     // not a deliberate action). Every other action (cast/activate/play-land) is a
     // deliberate break and still invalidates the ring.
+    //
+    // CR 603.3d / CR 603.5 + CR 608.2 / CR 903.9a / CR 703.1 + CR 117.3a: the second
+    // conjunct keys on the
+    // WINDOW BEING ANSWERED, not on the action, because `state.waiting_for` has not been
+    // reduced yet here — the very next statement reads `state.waiting_for.acting_player()`
+    // for `semantic_actor`. Answering a forced pre-priority window is not a deliberate
+    // break of the cascade (no player had priority to break it with), so the ring must
+    // survive the answer as well as the prompt; the sampler at the other clear site
+    // consults the same `is_forced_cascade_window` authority. Keying on the window rather
+    // than the action also covers every answering variant at once — an action-keyed list
+    // would need `ChooseTarget`, `SelectTargets`, `DecideOptionalEffect` AND
+    // `DecideOptionalEffectAndRemember`, and would silently miss the next one added.
+    // Widening the class to the CR 703.1 turn-based windows makes that the decisive
+    // argument rather than a convenience one: the same conjunct picked up
+    // `DeclareAttackers`, `DeclareBlockers`, `ChooseUntap`, `ChooseExert`, `ChooseEnlist`
+    // and the `SelectCards` that answers `DiscardToHandSize` with no edit here — and
+    // `SelectCards` in particular is answer-overloaded across a dozen unrelated windows,
+    // so an action-keyed list could not have expressed the class correctly at all.
+    // `PassPriority` keeps its own action-side exemption because it is answered at a
+    // `Priority` window, which is deliberately NOT in the forced class.
+    let answering_forced_window = state.waiting_for.is_forced_cascade_window();
+    let stack_len_before_action = state.stack.len();
     if !matches!(
         action,
-        GameAction::PassPriority | GameAction::OrderTriggers { .. }
-    ) {
+        GameAction::PassPriority
+            | GameAction::OrderTriggers { .. }
+            | GameAction::BeginResolveAll { .. }
+            | GameAction::RespondResolveAllConsent { .. }
+            | GameAction::RevokeResolveAllConsent { .. }
+    ) && !answering_forced_window
+    {
         state.loop_detect_ring.clear();
+        // CR 603.5: the recorded "may" answers describe the window that just ended.
+        state.loop_answer_journal = None;
     }
 
     // Keep the semantic owner of the prompt before reducing it. Under turn
@@ -4215,7 +8241,10 @@ fn apply_action(
     match &action {
         GameAction::SetAutoPass { .. }
         | GameAction::PassPriority
-        | GameAction::ReorderHand { .. } => {}
+        | GameAction::ReorderHand { .. }
+        | GameAction::BeginResolveAll { .. }
+        | GameAction::RespondResolveAllConsent { .. }
+        | GameAction::RevokeResolveAllConsent { .. } => {}
         _ => {
             state.auto_pass.remove(&actor);
         }
@@ -4246,17 +8275,10 @@ fn apply_action(
     // Validate and process action against current WaitingFor
     let waiting_for = match (&state.waiting_for.clone(), action) {
         (WaitingFor::Priority { player }, GameAction::PassPriority) => {
-            if state.priority_player
-                != turn_control::authorized_submitter_for_player(state, *player)
-            {
-                return Err(EngineError::NotYourPriority);
-            }
-            if super::precast_copy_shortcut::blocks_pass(state, *player) {
-                return Err(EngineError::ActionNotAllowed(
-                    "A shortened pre-cast shortcut requires a different meaningful action before passing"
-                        .to_string(),
-                ));
-            }
+            // CR 117.3d + CR 723.5 + CR 732.2a-c: single authority, shared with the
+            // AI candidate-legality hatch and the projection fast path so the
+            // three cannot drift.
+            super::priority::pass_priority_legality(state, *player)?;
             let wf = pass_priority_once_with_pipeline(state, &mut events, stack_resolution_limit)?;
             return Ok(ActionResult {
                 events,
@@ -4264,6 +8286,50 @@ fn apply_action(
                 log_entries: vec![],
             });
         }
+        (WaitingFor::Priority { player }, GameAction::BeginResolveAll { max_resolutions }) => {
+            begin_resolve_all_consent(state, *player, max_resolutions)?
+        }
+        (
+            WaitingFor::ResolveAllConsent {
+                epoch,
+                representative,
+            },
+            GameAction::RespondResolveAllConsent {
+                epoch: response_epoch,
+                decision: ResolveAllConsentDecision::Decline,
+            },
+        ) => {
+            return decline_resolve_all_consent_with_auto_pass(
+                state,
+                *epoch,
+                *representative,
+                response_epoch,
+                &mut events,
+            );
+        }
+        (
+            WaitingFor::ResolveAllConsent {
+                epoch,
+                representative,
+            },
+            GameAction::RespondResolveAllConsent {
+                epoch: response_epoch,
+                decision,
+            },
+        ) => respond_resolve_all_consent(
+            state,
+            *epoch,
+            *representative,
+            response_epoch,
+            decision,
+        )?,
+        (
+            WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. },
+            GameAction::RevokeResolveAllConsent {
+                epoch,
+                representative,
+            },
+        ) => revoke_resolve_all_consent(state, epoch, representative)?,
         (WaitingFor::Priority { player }, GameAction::PlayLand { object_id, card_id }) => {
             if state.priority_player
                 != turn_control::authorized_submitter_for_player(state, *player)
@@ -4299,6 +8365,42 @@ fn apply_action(
                 selection.source.object_id,
                 crate::types::game_state::LoopAction::TapLandForMana { selection },
             );
+            waiting_for
+        }
+        (WaitingFor::Priority { player }, GameAction::ActivateManaSource { selection }) => {
+            if state.priority_player
+                != turn_control::authorized_submitter_for_player(state, *player)
+            {
+                return Err(EngineError::NotYourPriority);
+            }
+            if matches!(
+                mana_sources::priority_mana_route(state, &selection),
+                Some(mana_sources::PriorityManaRoute::LandTap)
+            ) {
+                return Err(EngineError::ActionNotAllowed(
+                    "Land mana abilities use TapLandForMana".to_string(),
+                ));
+            }
+            let events_before = events.len();
+            let waiting_for = mana_sources::activate_mana_source_selection(
+                state,
+                *player,
+                &selection,
+                &mut events,
+                ManaAbilityResume::Priority,
+            )?;
+            triggers::resolve_tap_mana_triggers_inline(state, &mut events, events_before);
+            if let Some(ability_index) = selection.ability_index {
+                record_mana_loop_action_step(
+                    state,
+                    *player,
+                    selection.source.object_id,
+                    crate::types::game_state::LoopAction::Activate {
+                        source_id: selection.source.object_id,
+                        ability_index,
+                    },
+                );
+            }
             waiting_for
         }
         (WaitingFor::Priority { player }, GameAction::UntapLandForMana { object_id }) => {
@@ -4873,7 +8975,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         (WaitingFor::TargetSelection { player, .. }, GameAction::SelectTargets { targets }) => {
             engine_casting::handle_target_selection_select_targets(
                 state,
@@ -4897,7 +8999,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         (
             WaitingFor::OptionalCostChoice {
                 player,
@@ -4921,7 +9023,15 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
+        (
+            WaitingFor::ChooseGiftRecipient {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         // CR 702.47a–e: Splice — caster reveals a card to splice onto the spell
         // (re-offering for the rest), or declines to finish and proceed to targets.
         (
@@ -4946,7 +9056,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         // CR 601.2b: Defiler cycle — player decides whether to pay life for mana reduction.
         (
             WaitingFor::DefilerPayment {
@@ -4972,7 +9082,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         // CR 118.3 + CR 601.2b + CR 605.3b: Player selected objects to pay a
         // cost. The single `PayCost` state dispatches on `kind` (which action)
         // and `resume` (spell-cast vs mana-ability pipeline) to the
@@ -5205,13 +9315,14 @@ fn apply_action(
                         &mut events,
                     )?
                 }
-                PayCostKind::TapCreatures { aggregate } => {
+                PayCostKind::TapCreatures { mode } => {
                     engine_casting::handle_tap_creatures_for_spell_cost(
                         state,
                         *player,
                         *pending_cast.clone(),
+                        *min_count,
                         *count,
-                        *aggregate,
+                        *mode,
                         choices,
                         &chosen,
                         &mut events,
@@ -5239,12 +9350,14 @@ fn apply_action(
             CostResume::ManaAbility {
                 mana_ability: pending_mana_ability,
             } => match kind {
-                // CR 605.1a: mana-ability tap costs are always fixed-count; the
-                // aggregate form never resumes a mana ability.
-                PayCostKind::TapCreatures { .. } => {
+                // CR 605.1a: the aggregate form never resumes a mana ability;
+                // fixed-count and X-sentinel forms both do.
+                PayCostKind::TapCreatures { mode } => {
                     let wf = engine_casting::handle_tap_creatures_for_mana_ability(
                         state,
+                        *min_count,
                         *count,
+                        *mode,
                         choices,
                         pending_mana_ability,
                         &chosen,
@@ -5334,11 +9447,12 @@ fn apply_action(
                 }
             },
             CostResume::Resolution => match kind {
-                PayCostKind::TapCreatures { aggregate } => {
+                PayCostKind::TapCreatures { mode } => {
                     casting_costs::pay_tap_creatures_selection(
                         state,
+                        *min_count,
                         *count,
-                        *aggregate,
+                        *mode,
                         choices,
                         &chosen,
                         &mut events,
@@ -5384,7 +9498,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         // CR 118.3: Player selected permanents to sacrifice as cost.
         (
             WaitingFor::ActivationCostOneOfChoice {
@@ -5408,7 +9522,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         // CR 601.2b + CR 701.4a: player chose the creature type for a pre-choice
         // behold cost; record it and resume behold payment.
         (
@@ -5434,7 +9548,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         // Blight: player selected creature(s) to put -1/-1 counters on as cost.
         (
             WaitingFor::BlightChoice {
@@ -5460,7 +9574,7 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         (
             WaitingFor::ChooseManaColor {
                 choice, context, ..
@@ -5471,6 +9585,17 @@ fn apply_action(
             },
         ) => {
             let events_before = events.len();
+            // CR 605.4a: which typed half of the colour seam this action is.
+            // A `ManaAbility` choice is a completed mana frame and has already
+            // recorded its exact occurrences through
+            // `mana_abilities::collect_completed_mana_frame_events` (the
+            // original source in `handle_choose_mana_color`, each sibling on its
+            // own finish path). A `ResolvingEffect` choice is not a mana frame
+            // at all and keeps its historical immediate scan.
+            let is_completed_mana_frame = matches!(
+                context,
+                crate::types::game_state::ManaChoiceContext::ManaAbility(_)
+            );
             let wf = match context {
                 crate::types::game_state::ManaChoiceContext::ManaAbility(pending_mana_ability) => {
                     // CR 605.3a: validate the requested batch size BEFORE any mana
@@ -5538,15 +9663,22 @@ fn apply_action(
                     )?
                 }
             };
-            // CR 603.2c + CR 605.4a: A mana color choice produces mana inline.
-            // Scan its events for TapsForMana mana multipliers and for
-            // cost-payment triggers HERE, because for `ManaPayment` /
-            // `UnlessPayment` resumes the post-action pipeline is skipped
-            // (it is guarded by `matches!(waiting_for, WaitingFor::Priority)`),
-            // so this is the only scan site — and CR 605.4a requires the bonus
-            // mana to enter the pool before the spell's payment step continues.
-            // Do NOT "simplify" this scan away for non-Priority resumes.
-            if events.len() > events_before {
+            // CR 603.2c + CR 605.4a: A NON-mana `ResolvingEffect` colour choice
+            // produces mana inline. Scan its events for TapsForMana mana
+            // multipliers and for cost-payment triggers HERE, because for
+            // `ManaPayment` / `UnlessPayment` resumes the post-action pipeline is
+            // skipped (it is guarded by `matches!(waiting_for,
+            // WaitingFor::Priority)`), so this is the only scan site — and
+            // CR 605.4a requires the bonus mana to enter the pool before the
+            // spell's payment step continues. Do NOT "simplify" this scan away
+            // for non-Priority resumes.
+            //
+            // The `ManaAbility` half owns no aggregate scan: every source and
+            // sibling already recorded exact occurrences through the typed
+            // completed-frame seam, so a second scan here would rediscover
+            // events the frame already claimed and dispatch an ordinary cost
+            // observer separately from that frame's synthetic reflexive.
+            if !is_completed_mana_frame && events.len() > events_before {
                 let mana_events: Vec<_> = events[events_before..].to_vec();
                 super::triggers::process_triggers(state, &mana_events);
             }
@@ -5571,7 +9703,12 @@ fn apply_action(
             // Claim the scan via `triggers_processed_inline` — the same
             // mechanism `DeclareAttackers` uses — so the pipeline runs SBAs,
             // delayed/state triggers, and layers but skips the trigger re-scan.
-            if matches!(wf, WaitingFor::Priority { .. }) {
+            //
+            // The `ManaAbility` half must NOT use this broad suppression: its
+            // occurrence journal already narrows the pipeline's scan to exactly
+            // the events the mana frames did not claim, and the pipeline's
+            // guarded deferred drain is what releases their queued contexts once.
+            if !is_completed_mana_frame && matches!(wf, WaitingFor::Priority { .. }) {
                 triggers_processed_inline = true;
             }
             wf
@@ -5636,9 +9773,38 @@ fn apply_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         // CR 608.2d: Player decided whether to perform an optional effect ("You may X").
-        (WaitingFor::OptionalEffectChoice { .. }, GameAction::DecideOptionalEffect { accept }) => {
+        (
+            WaitingFor::OptionalEffectChoice {
+                player, source_id, ..
+            },
+            GameAction::DecideOptionalEffect { accept },
+        ) => {
+            // CR 603.5 + CR 732.2a: journal the answer BEFORE the handler runs — it
+            // replaces `waiting_for`, so the prompt's own seat and source are only
+            // readable here. The key comes from `object_decision_source`, the same
+            // producer `entry_publishes_pin_slots` uses, so publish-side and record-side
+            // keys agree by construction rather than by coincidence. `record_loop_answer`
+            // carries the `samples() && !in_simulation_probe()` gate.
+            let (answering_player, may_source) = (*player, *source_id);
+            if let Some(source) = object_decision_source(state, may_source) {
+                use crate::analysis::decision_template::{
+                    DecisionSlot, LoopAnswer, LoopAnswerValue, MayChoiceOption,
+                };
+                // CR 603.5 rides sub-index 1, via `DecisionSlot::may` — the SAME
+                // constructor `entry_publishes_pin_slots` publishes the gate with, so the
+                // sub-index is a literal on neither side of the journal.
+                state.record_loop_answer(
+                    DecisionSlot::may(source),
+                    answering_player,
+                    LoopAnswer::Uniform(LoopAnswerValue::May(if accept {
+                        MayChoiceOption::Take
+                    } else {
+                        MayChoiceOption::Decline
+                    })),
+                );
+            }
             engine_payment_choices::handle_optional_effect_choice(state, accept, &mut events)?
         }
         (
@@ -5672,11 +9838,12 @@ fn apply_action(
         }
         (
             waiting_for @ WaitingFor::OptionalEffectChoice { .. },
-            GameAction::DecideOptionalEffectAndRemember { choice },
-        ) => engine_payment_choices::handle_optional_effect_choice_and_remember(
+            GameAction::DecideOptionalEffectAndRemember { choice, scope },
+        ) => engine_payment_choices::handle_optional_effect_choice_and_remember_with_scope(
             state,
             waiting_for.clone(),
             choice,
+            scope,
             &mut events,
         )?,
         // CR 608.2d: Opponent decided on "any opponent may" effect.
@@ -5700,6 +9867,13 @@ fn apply_action(
                 predicted_winner,
                 certificate,
                 schema,
+                // Threaded: `handle_declare_shortcut` resolves a `template: None` declaration
+                // against the offer's own published declaration, so the manual ingress and
+                // `ai_support::candidates` (which reads this identical field) declare the SAME
+                // proposal against the SAME offer. The hostile-fixture obligations this bind
+                // used to defer — foreign period, restore ingress — are discharged by the rows
+                // named on that handler's `or_else`.
+                declaration,
             },
             GameAction::DeclareShortcut { count, template },
         ) => {
@@ -5710,6 +9884,7 @@ fn apply_action(
                     predicted_winner: *predicted_winner,
                     certificate,
                     schema,
+                    declaration: declaration.as_ref(),
                 },
                 count,
                 template,
@@ -5717,10 +9892,11 @@ fn apply_action(
             );
         }
         // CR 732.2a: the proposer DECLINES the offered shortcut (suggesting is optional).
-        // Proposer-only authorization is enforced upstream by `check_actor_authorization`, so
-        // `proposer`/`certificate`/`schema` are unused here (`..`).
-        (WaitingFor::LoopShortcut { .. }, GameAction::DeclineShortcut) => {
-            return handle_decline_shortcut(state, &mut events);
+        // Proposer-only authorization is enforced upstream by `check_actor_authorization`;
+        // `certificate`/`schema` stay unused (`..`), but `proposer` is threaded because the
+        // handler's Seam-2 suppression clear is OWNERSHIP-SCOPED to that seat.
+        (WaitingFor::LoopShortcut { proposer, .. }, GameAction::DeclineShortcut) => {
+            return handle_decline_shortcut(state, *proposer, &mut events);
         }
         // The finite pre-cast protocol is intentionally isolated from the
         // legacy generic loop-shortcut handlers above.
@@ -5866,18 +10042,62 @@ fn apply_action(
             let player = *player;
             match state.pending_cast.take() {
                 Some(pending) => {
-                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)
+                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }
                 None => WaitingFor::Priority { player },
             }
         }
+        (
+            WaitingFor::ManaSourceSelection {
+                player,
+                options,
+                convoke_mode,
+            },
+            GameAction::BackToManaPayment,
+        ) => {
+            // The selection window never consumes mana or changes pins. Restore
+            // the exact payment state rather than re-running the planner.
+            let _ = options;
+            WaitingFor::ManaPayment {
+                player: *player,
+                convoke_mode: *convoke_mode,
+            }
+        }
+        (
+            WaitingFor::ManaSourceSelection {
+                player,
+                options,
+                convoke_mode,
+            },
+            GameAction::ActivateManaSource { selection },
+        ) => {
+            if !options.contains(&selection) {
+                return Err(EngineError::ActionNotAllowed(
+                    "Mana source was not offered for this payment".to_string(),
+                ));
+            }
+            let events_before = events.len();
+            let waiting_for = mana_sources::activate_mana_source_selection(
+                state,
+                *player,
+                &selection,
+                &mut events,
+                ManaAbilityResume::ManaPayment {
+                    outer_player: Some(*player),
+                    convoke_mode: *convoke_mode,
+                },
+            )?;
+            triggers::resolve_tap_mana_triggers_inline(state, &mut events, events_before);
+            waiting_for
+        }
         (WaitingFor::ChooseXValue { player, .. }, GameAction::CancelCast) => {
             // CR 601.2f + CR 601.2i: Caster may back out before committing to an
             // X value. Pop the stack entry placed at announcement and restore.
+            ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
             match state.pending_cast.take() {
                 Some(pending) => {
-                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)
+                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }
                 None => WaitingFor::Priority { player },
             }
@@ -5916,14 +10136,32 @@ fn apply_action(
             let player = *player;
             let convoke_mode = *convoke_mode;
             if let Some(pending) = state.pending_cast.as_ref() {
+                // CR 602.2b + CR 601.2b/h: An activation's announced X must
+                // make its full cost payable before the announcement commits,
+                // whether or not the ability has deferred targets.
+                let mut trial = pending.as_ref().clone();
+                trial.ability.set_chosen_x_recursive(value);
+                trial.cost.concretize_x(value);
+                if trial.activation_ability_index.is_some()
+                    && trial.activation_cost.as_ref().is_some_and(|cost| {
+                        !casting_costs::activation_cost_is_payable_after_x_choice(
+                            state,
+                            player,
+                            trial.object_id,
+                            cost,
+                            &trial.ability,
+                        )
+                    })
+                {
+                    return Err(EngineError::InvalidAction(format!(
+                        "X={value} cannot pay the activation cost"
+                    )));
+                }
                 if pending.deferred_target_selection {
                     // CR 601.2c: A chosen X that determines target count must
                     // have a legal target assignment before it is locked into
                     // the pending cast.
                     // CR 601.2f: The same X value then determines the total cost.
-                    let mut trial = pending.as_ref().clone();
-                    trial.ability.set_chosen_x_recursive(value);
-                    trial.cost.concretize_x(value);
                     let mut target_slots = build_target_slots(state, &trial.ability)?;
                     // CR 601.2c + CR 601.2d: clamp a divided spell's slots to the
                     // (now-known) pool so the legal-assignment probe matches what
@@ -6001,6 +10239,26 @@ fn apply_action(
             }
             casting_costs::begin_deferred_target_selection(state, caster, pending, &mut events)?
         }
+        // CR 702.174a: Caster chose which opponent receives the promised Gift.
+        (
+            WaitingFor::ChooseGiftRecipient {
+                player,
+                candidates,
+                pending_cast,
+                ..
+            },
+            GameAction::ChooseGiftRecipient { opponent },
+        ) => {
+            let caster = *player;
+            casting_costs::handle_choose_gift_recipient(
+                state,
+                caster,
+                (**pending_cast).clone(),
+                opponent,
+                candidates,
+                &mut events,
+            )?
+        }
         // CR 702.132a: Assist — caster chooses another player to help pay generic,
         // or declines. `assist_state` was set to `Offered` when the offer was made,
         // so both branches simply (re)enter the payment step from where they resume.
@@ -6036,10 +10294,11 @@ fn apply_action(
             }
         }
         (WaitingFor::AssistChoosePlayer { player, .. }, GameAction::CancelCast) => {
+            ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
             match state.pending_cast.take() {
                 Some(pending) => {
-                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)
+                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }
                 None => WaitingFor::Priority { player },
             }
@@ -6154,17 +10413,13 @@ fn apply_action(
                     .ok_or_else(|| EngineError::InvalidAction("Player not found".to_string()))?;
                 let activation_ability_index = pending_ref.activation_ability_index;
                 let current_shards = if let Some(ability_index) = activation_ability_index {
-                    let (source_types, source_subtypes) =
-                        casting::activation_source_types(state, spell_object);
-                    let activation_ctx = crate::types::mana::PaymentContext::Activation {
-                        source_types: &source_types,
-                        source_subtypes: &source_subtypes,
-                        ability_tag: casting::activation_ability_tag(
+                    let activation_context =
+                        casting::activation_payment_context(
                             state,
                             spell_object,
-                            ability_index,
-                        ),
-                    };
+                            Some(ability_index),
+                        );
+                    let activation_ctx = activation_context.as_payment_context();
                     let any_color = casting::player_can_spend_as_any_color_for_payment(
                         state,
                         player,
@@ -6244,7 +10499,7 @@ fn apply_action(
             let player = *player;
             match state.pending_cast.take() {
                 Some(pending) => {
-                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)
+                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }
                 None => WaitingFor::Priority { player },
             }
@@ -6267,7 +10522,6 @@ fn apply_action(
             if ability_index < obj.abilities.len()
                 && mana_abilities::is_mana_ability(&obj.abilities[ability_index])
             {
-                let events_before = events.len();
                 let ability_def = obj.abilities[ability_index].clone();
                 let wf = mana_abilities::activate_mana_ability(
                     state,
@@ -6282,18 +10536,14 @@ fn apply_action(
                     },
                     None,
                 )?;
-                // CR 605.1b: Process TapsForMana triggers inline during mana payment
-                // (same rationale as the TapLandForMana arm below).
-                // CR 605.3b + CR 616.1 + CR 603.3b: A paused costed mana
-                // ability serializes its unscanned events in its typed cursor.
-                // The cursor is their single settlement authority, so do not
-                // scan them here and again when the replacement choice resumes.
-                if events.len() > events_before
-                    && !casting::mana_ability_cost_payment_is_paused(state)
-                {
-                    let mana_events: Vec<_> = events[events_before..].to_vec();
-                    super::triggers::process_triggers(state, &mana_events);
-                }
+                // CR 605.4a: no outer scan. `activate_mana_ability`
+                // builds a real typed cursor here, and its completed frame has
+                // already run `collect_completed_mana_frame_events` — collecting
+                // TapsForMana multipliers and ordinary cost observers together
+                // and journaling the exact live occurrences it claimed. Rescanning
+                // the same range would rediscover them. A paused costed mana
+                // ability keeps owning its unscanned events in that cursor, and
+                // still settles them when the replacement choice resumes.
                 if let Some(order_wf) =
                     super::triggers::preserve_order_triggers_resume(state, wf.clone())
                 {
@@ -6329,21 +10579,39 @@ fn apply_action(
                 },
                 &mut events,
             )?;
-            super::triggers::resolve_tap_mana_triggers_inline(
-                state,
-                &mut events,
-                events_before,
-            );
-            // CR 605.1b: TapsForMana triggered mana abilities (Wild Growth, Vorinclex,
-            // Fertile Ground, Mana Flare class) must resolve inline when mana is
-            // produced during cost payment. The ManaPayment path does not flow through
-            // run_post_action_pipeline, so process triggers explicitly here so the
-            // bonus mana reaches the pool before the payment check.
-            if events.len() > events_before
-                && !casting::mana_ability_cost_payment_is_paused(state)
-            {
-                let mana_events: Vec<_> = events[events_before..].to_vec();
-                super::triggers::process_triggers(state, &mana_events);
+            // CR 605.1b + CR 605.4a: the manual land tap has no cursor wrapper
+            // of its own — `activate_mana_source_option`'s no-ability branch
+            // taps and produces directly — so this arm IS its completed mana
+            // frame and runs the same typed empty-ledger preparation the cursor
+            // path runs internally. It resolves the TapsForMana triggered mana
+            // abilities inline (Wild Growth, Vorinclex, Fertile Ground, Mana
+            // Flare class) so the bonus mana reaches the pool before the payment
+            // check, and collects the ordinary tap observers into the same
+            // release group instead of dispatching them separately. The
+            // `ManaPayment` path does not flow through
+            // `run_post_action_pipeline`, so this remains the only seam. Frames
+            // whose ability branch already collected are protected by the
+            // helper's own consumed-occurrence filter.
+            if !casting::mana_ability_cost_payment_is_paused(state) {
+                if let Some(pause) = mana_abilities::collect_completed_mana_frame_events(
+                    state,
+                    Vec::new(),
+                    &mut events,
+                    events_before,
+                    crate::types::game_state::ManaTriggerFixedPointResume::Root {
+                        player: *player,
+                        resume: Box::new(ManaAbilityResume::ManaPayment {
+                            outer_player: Some(*player),
+                            convoke_mode: *convoke_mode,
+                        }),
+                    },
+                ) {
+                    return Ok(ActionResult {
+                        events,
+                        waiting_for: pause,
+                        log_entries: vec![],
+                    });
+                }
             }
             if let Some(order_wf) =
                 super::triggers::preserve_order_triggers_resume(state, wf.clone())
@@ -6398,6 +10666,54 @@ fn apply_action(
             WaitingFor::ManaPayment {
                 player,
                 convoke_mode,
+            }
+        }
+        // CR 702.66a: Delve composes with a primary tap-payment keyword (for
+        // example, Hogaak's Convoke). Handle the graveyard contribution first so
+        // its object is never rejected by the battlefield-tap arm below.
+        (
+            WaitingFor::ManaPayment { player, .. },
+            GameAction::TapForConvoke {
+                object_id,
+                mana_type,
+            },
+        ) if state.objects.get(&object_id).is_some_and(|object| object.is_delve_eligible(*player))
+            && state.pending_cast.as_ref().is_some_and(|pending| {
+                super::casting::spell_has_delve_payment_for(
+                    state,
+                    *player,
+                    pending.object_id,
+                    pending.casting_variant == CastingVariant::Fuse,
+                )
+            }) => {
+            let player = *player;
+            if mana_type != crate::types::mana::ManaType::Colorless {
+                return Err(EngineError::ActionNotAllowed(
+                    "Delve can only pay generic mana".to_string(),
+                ));
+            }
+            let spell_id = state
+                .pending_cast
+                .as_ref()
+                .map(|pending| pending.object_id)
+                .ok_or_else(|| {
+                    EngineError::InvalidAction("No pending cast for delve".to_string())
+                })?;
+            state.pending_cost_move_resume = Some(PendingCostMoveResume::DelveManaPayment {
+                player,
+                fuel_id: object_id,
+            });
+            match zone_pipeline::move_object(
+                state,
+                ZoneMoveRequest::cost(object_id, Zone::Exile, spell_id)
+                    .track_exiled_by_source(),
+                &mut events,
+            ) {
+                ZoneMoveResult::Done => resume_delve_mana_payment(state),
+                ZoneMoveResult::NeedsChoice(_) => state.waiting_for.clone(),
+                ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                    unreachable!("a delve cost move to exile cannot require an Aura attachment")
+                }
             }
         }
         // CR 702.51a / Waterbend: Tap a creature or artifact to pay mana.
@@ -6517,64 +10833,6 @@ fn apply_action(
             WaitingFor::ManaPayment {
                 player: *player,
                 convoke_mode: Some(mode),
-            }
-        }
-        // CR 702.66a: Delve — exile a card from the caster's graveyard to pay one
-        // generic mana. Unlike convoke/improvise (which tap a permanent), the
-        // source is a graveyard card that is exiled. The contribution is a
-        // generic-only colorless marker (like Improvise) that can't leak into the
-        // pool.
-        (
-            WaitingFor::ManaPayment {
-                player,
-                convoke_mode: Some(ConvokeMode::Delve),
-            },
-            GameAction::TapForConvoke {
-                object_id,
-                mana_type,
-            },
-        ) => {
-            let player = *player;
-            if mana_type != crate::types::mana::ManaType::Colorless {
-                return Err(EngineError::ActionNotAllowed(
-                    "Delve can only pay generic mana".to_string(),
-                ));
-            }
-            let eligible = state
-                .objects
-                .get(&object_id)
-                .is_some_and(|o| o.is_delve_eligible(player));
-            if !eligible {
-                return Err(EngineError::ActionNotAllowed(
-                    "Can only delve a card from your own graveyard".to_string(),
-                ));
-            }
-            let spell_id = state
-                .pending_cast
-                .as_ref()
-                .map(|pending| pending.object_id)
-                .ok_or_else(|| {
-                    EngineError::InvalidAction("No pending cast for delve".to_string())
-                })?;
-            state.pending_cost_move_resume = Some(PendingCostMoveResume::DelveManaPayment {
-                player,
-                fuel_id: object_id,
-            });
-            // CR 702.66a + CR 614.1 + CR 616.1: The cost move must consult Moved
-            // replacements. `track_exiled_by_source` carries
-            // `ExileLinkSpec { duration: None, tracking: TrackBySource }`, so the
-            // delivery tail links only fuel that actually reaches exile.
-            match zone_pipeline::move_object(
-                state,
-                ZoneMoveRequest::cost(object_id, Zone::Exile, spell_id)
-                    .track_exiled_by_source(),
-                &mut events,
-            ) {
-                ZoneMoveResult::Done => resume_delve_mana_payment(state),
-                ZoneMoveResult::NeedsChoice(_) => state.waiting_for.clone(),
-                ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                    unreachable!("a delve cost move to exile cannot require an Aura attachment")
-                }
             }
         }
         (WaitingFor::MulliganDecision { .. }, GameAction::MulliganDecision { choice }) => {
@@ -6785,11 +11043,20 @@ fn apply_action(
         (WaitingFor::ReplacementChoice { .. }, GameAction::ChooseReplacement { index }) => {
             engine_replacement::handle_replacement_choice(state, index, &mut events)?
         }
+        (
+            WaitingFor::EntryControllerChoice { .. },
+            GameAction::ChooseEntryController { opponent },
+        ) => engine_replacement::handle_entry_controller_choice(state, opponent, &mut events)?,
         // CR 603.3b: Player submits the chosen order for their pending triggers.
         // `actor` is already authorized as the prompted player by
         // `check_actor_authorization` (via `WaitingFor::acting_player`).
         (WaitingFor::OrderTriggers { .. }, GameAction::OrderTriggers { order }) => {
-            triggers::handle_order_triggers(state, order)?
+            // Round-20 seam 1: this arm is the outermost handler return for the
+            // whole ordered batch, so it is where the construction finisher runs
+            // — covering the multi-group re-prompt, both early returns after
+            // `pending_trigger_order.take()`, and the terminal resume.
+            let produced = triggers::handle_order_triggers(state, order)?;
+            triggers::finish_trigger_construction_action(state, &mut events, produced)
         }
         // CR 707.9: Player chose a permanent to copy for "enter as a copy of" replacement.
         (
@@ -6865,14 +11132,13 @@ fn apply_action(
                     grants,
                 } => (enchant_filter.clone(), grants.clone()),
                 _ => {
-                    let old_target = match chosen {
-                        TargetRef::Object(chosen_id) => {
-                            super::effects::attach::attach_to(state, returned, chosen_id)
-                        }
-                        TargetRef::Player(chosen_player) => {
-                            super::effects::attach::attach_to_player(state, returned, chosen_player)
-                        }
-                    };
+                    // CR 303.4f + CR 701.3b: attach through the entering-Aura
+                    // authority, so the CR 701.3a gate judges the same entrant
+                    // the host list was offered for. Seams that park none get
+                    // the stored object, i.e. their prior behaviour exactly.
+                    let old_target = super::zone_pipeline::attach_chosen_entering_aura_host(
+                        state, returned, &chosen,
+                    );
                     if let Some(old_target) = old_target {
                         events.push(crate::types::events::GameEvent::Unattached {
                             attachment_id: returned,
@@ -7235,7 +11501,7 @@ fn apply_action(
                 source_id: source,
                 controller: p,
                 condition: None,
-                ability,
+                ability: Box::new(ability),
                 timestamp: 0,
                 target_constraints: vec![],
                 distribute: None,
@@ -7245,7 +11511,8 @@ fn apply_action(
                 description: Some("Miracle — you may cast this card".to_string()),
                 may_trigger_origin: None,
                 subject_match_count: None,
-                die_result: None,
+        die_result: None,
+            provenance: None,
             };
             super::triggers::push_pending_trigger_to_stack(state, trigger, &mut events);
 
@@ -7425,13 +11692,6 @@ fn apply_action(
                     triggers_processed_inline = true;
                     waiting_for
                 }
-                engine_resolution_choices::ResolutionChoiceOutcome::WaitingForWithParkedObservers(
-                    waiting_for,
-                ) => {
-                    triggers_processed_inline = true;
-                    skip_deferred_trigger_drain = true;
-                    waiting_for
-                }
                 engine_resolution_choices::ResolutionChoiceOutcome::ActionResult(result) => {
                     return Ok(result);
                 }
@@ -7462,109 +11722,49 @@ fn apply_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
-            let p = *player;
-            let announced_x = x;
-            // CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b + CR 106.6: turning
-            // a face-down permanent face up is a special action whose morph/disguise/
-            // manifest cost must be paid *before* the flip. `turn_face_up_prepare`
-            // validates the action and derives that cost; payment routes through
-            // `PaymentContext::SpecialAction(TurnFaceUp)` so spend-restricted mana
-            // ("only to turn permanents face up", Overgrown Zealot / Tin Street
-            // Gossip) is eligible here while other-context mana is rejected. Mirrors
-            // the `UnlockDoor` special-action handler.
-            let cost = super::morph::turn_face_up_prepare(state, object_id, p)?;
-            let mut cost = casting::apply_special_action_cost_reduction(
-                state,
-                p,
-                crate::types::mana::SpecialAction::TurnFaceUp,
-                cost,
-            );
-
-            // CR 107.3d: "If a cost associated with a special action, such as a suspend
-            // cost or a morph cost, has an {X} ... in it, the value of X is chosen by the
-            // player taking the special action immediately before they pay that cost."
-            // The announcement happens HERE — inside the action, with no priority window
-            // between choosing X and paying it, exactly as the rule describes.
-            //
-            // Warbreak Trumpeter (Morph {X}{X}{R}), Bane of the Living (Morph {X}{B}{B})
-            // and Aurelia's Vindicator (Disguise {X}{3}{W}) are the live faces.
-            let has_x = casting_costs::cost_has_x(&cost);
-            if has_x {
-                // CR 118.3: a player can't announce an X they cannot pay for. The cap is
-                // computed with `object_id: None` deliberately — this is a SPECIAL ACTION,
-                // not a cast, so cast-time cost modifiers and floors must not apply (the
-                // special-action reduction was already applied above).
-                let max_x = casting_costs::max_x_value(state, p, &cost, None);
-                if announced_x > max_x {
-                    return Err(EngineError::InvalidAction(format!(
-                        "X={announced_x} exceeds the maximum payable value of {max_x} for this \
-                         turn-face-up cost"
-                    )));
-                }
-                // CR 107.1b + CR 601.2f: each `{X}` shard becomes `announced_x` generic, so
-                // Warbreak Trumpeter's `{X}{X}{R}` costs 2X + {R}. Without this the X shards
-                // reach mana payment unresolved and are dropped — the permanent flips for
-                // its non-X remainder alone.
-                cost.concretize_x(announced_x);
-            } else if announced_x != 0 {
-                // A cost with no {X} admits no choice: CR 107.3d only grants one "if a cost
-                // ... has an {X} ... in it". Reject rather than silently ignore, so a client
-                // bug cannot masquerade as a legal flip.
-                return Err(EngineError::InvalidAction(
-                    "This permanent's turn-face-up cost has no {X}, so X must be 0".to_string(),
-                ));
-            }
-            casting::pay_special_action_mana_cost(
-                state,
-                p,
-                Some(object_id),
-                &cost,
-                crate::types::mana::SpecialAction::TurnFaceUp,
-                &mut events,
-            )?;
-
-            // CR 702.37f (morph) / CR 702.168e (disguise): "If a permanent's morph cost
-            // includes X, other abilities of that permanent may also refer to X. The value
-            // of X in those abilities is equal to the value of X chosen as the morph special
-            // action was taken." Publish the announced X on the source-keyed carrier BEFORE
-            // the flip emits `TurnedFaceUp`, so `triggers::build_triggered_ability` — the
-            // single trigger-instantiation authority — stamps it onto the turn-face-up
-            // trigger's `chosen_x`.
-            //
-            // The stamp must land at INSTANTIATION, not resolution: Aurelia's Vindicator
-            // spends its X in `multi_target.max` ("exile up to X other target creatures"),
-            // which is consumed during target selection, before the trigger ever resolves.
-            //
-            // Published only when the cost actually HAS an {X} (CR 107.3d grants a choice
-            // only then). A no-X flip leaves the carrier untouched rather than clobbering it
-            // with `Some((.., 0))`: an unrelated activated ability of ANOTHER object may be
-            // on the stack with its own announced X in flight, and that value must survive.
-            // The carrier is cleared at the start of the next `resolve_top`, so this
-            // publication cannot outlive the trigger it is for.
-            if has_x {
-                state.announced_source_x = Some((object_id, announced_x));
-            }
-
-            super::morph::turn_face_up(state, p, object_id, &mut events)?;
-            WaitingFor::Priority { player: p }
+            // CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b: the whole action —
+            // legality, the CR 106.6 spend-restricted payment, CR 107.3d's X
+            // announcement and the flip — belongs to one authority, shared with the
+            // CR 616.1 resume that finishes a payment whose mana source paused.
+            super::morph::handle_turn_face_up(state, *player, object_id, x, &mut events)?
         }
         (
             WaitingFor::TriggerTargetSelection {
                 player,
+                source_id,
                 target_slots,
                 target_constraints,
                 ..
             },
             GameAction::SelectTargets { targets },
-        ) => engine_stack::handle_trigger_target_selection_select_targets(
-            state,
-            *player,
-            target_slots,
-            target_constraints,
-            targets,
-            &mut events,
-        )?,
-        (WaitingFor::TriggerTargetSelection { .. }, GameAction::ChooseTarget { target }) => {
+        ) => {
+            // CR 608.2b + CR 732.2a: journal the announcement BEFORE the handler runs — it
+            // replaces `waiting_for`, so the prompt's own seat and source are only readable
+            // here, and the key reads the source object's CR 400.7 incarnation, which
+            // resolution can invalidate. `apply_action_boundary_core` snapshots the whole
+            // state and restores it on every `Err` return, so a write made before a handler
+            // that then errors is rolled back with everything else.
+            record_trigger_target_answer(state, *source_id, *player, targets.as_slice());
+            engine_stack::handle_trigger_target_selection_select_targets(
+                state,
+                *player,
+                target_slots,
+                target_constraints,
+                targets,
+                &mut events,
+            )?
+        }
+        (
+            WaitingFor::TriggerTargetSelection {
+                player, source_id, ..
+            },
+            GameAction::ChooseTarget { target },
+        ) => {
+            // Same write authority and same before-the-handler reason as the `SelectTargets`
+            // arm above. `target: None` yields an empty slice, which the helper's
+            // `pins.is_empty()` guard refuses — the fail-closed reading of a no-target
+            // announcement.
+            record_trigger_target_answer(state, *source_id, *player, target.as_slice());
             let waiting_for = state.waiting_for.clone();
             engine_stack::handle_trigger_target_selection_choose_target(
                 state,
@@ -7623,6 +11823,32 @@ fn apply_action(
         // CR 702.139a: Special action — pay {3} to put companion into hand (see rule 116.2g).
         (WaitingFor::Priority { player }, GameAction::CompanionToHand) => {
             super::companion::handle_companion_to_hand(state, *player, &mut events)?
+        }
+        // CR 116.2c: Special action — pay a continuous effect's printed
+        // termination cost to end it ("You may pay {W} to end this effect").
+        // CR 116.1: special actions don't use the stack, so nothing is put on
+        // the stack and no player gets a chance to respond.
+        //
+        // NO timing gate: CR 116.2c grants the action "any time they have
+        // priority, unless that effect specifies another timing restriction",
+        // and no card in the shipped class states one. This deliberately
+        // diverges from `CompanionToHand` above, whose CR 116.2g DOES carry a
+        // sorcery-speed restriction.
+        (
+            WaitingFor::Priority { player },
+            GameAction::EndContinuousEffect { group, .. },
+        ) => {
+            if state.priority_player
+                != turn_control::authorized_submitter_for_player(state, *player)
+            {
+                return Err(EngineError::NotYourPriority);
+            }
+            super::end_continuous_effect::handle_end_continuous_effect(
+                state,
+                *player,
+                group,
+                &mut events,
+            )?
         }
         // CR 722.3c / CR 601.2: Prepare (Strixhaven) — cast a copy of the
         // prepared face through the normal spell-casting pipeline (costs,
@@ -7695,28 +11921,7 @@ fn apply_action(
             GameAction::PassParadigmOffer,
         ) => WaitingFor::Priority { player: *player },
         (WaitingFor::Priority { player }, GameAction::SetAutoPass { mode }) => {
-            if super::precast_copy_shortcut::blocks_pass(state, *player) {
-                return Err(EngineError::ActionNotAllowed(
-                    "A shortened pre-cast shortcut requires a different meaningful action before passing"
-                        .to_string(),
-                ));
-            }
-            // Convert request to stored mode, capturing engine state as needed.
-            let stored_mode = match mode {
-                AutoPassRequest::UntilStackEmpty => AutoPassMode::UntilStackEmpty {
-                    initial_stack_len: state.stack.len(),
-                },
-                AutoPassRequest::UntilTurnBoundary { until } => {
-                    AutoPassMode::UntilTurnBoundary { until }
-                }
-            };
-            state.auto_pass.insert(*player, stored_mode);
-            let wf = pass_priority_once_with_pipeline(state, &mut events, None)?;
-            return Ok(ActionResult {
-                events,
-                waiting_for: wf,
-                log_entries: vec![],
-            });
+            return install_auto_pass_and_pass_priority(state, *player, mode, &mut events);
         }
         // CR 701.34a: Proliferate — player selected targets to proliferate.
         (
@@ -7733,18 +11938,14 @@ fn apply_action(
                     ));
                 }
             }
-            if !effects::proliferate::apply_proliferate(state, p, &targets, &mut events) {
-                return Ok(ActionResult {
-                    events,
-                    waiting_for: state.waiting_for.clone(),
-                    log_entries: vec![],
-                });
-            }
-            // CR 701.34a: Emit player-action event so proliferate triggers fire.
-            events.push(GameEvent::PlayerPerformedAction {
-                player_id: p,
-                action: PlayerActionKind::Proliferate,
-            });
+            // CR 701.34a + issue #7384: take the frame BEFORE applying counters.
+            // A counter-placement replacement can pause mid-application, and any
+            // path that returns while this direct-choice frame is still resident
+            // strands it on the resolution stack — every later frame transition
+            // then fails `ResolutionStack::validate` against a prompt that has
+            // long since moved on. A wrong stack top degrades to a rejected
+            // action here rather than to silent corruption, because
+            // `take_active_proliferate_frame` reports `UnexpectedTop`.
             let pending = state
                 .take_active_proliferate_frame()
                 .map_err(|error| EngineError::InvalidAction(error.to_string()))?
@@ -7757,6 +11958,15 @@ fn apply_action(
             // (Pentad's charge) — never "all eligible", which could grow an opponent's
             // counters/poison and introduce a loss axis. Slot source = the trigger source (Kilo);
             // `index: 0` (distinct source from the Relic tap-cost/color pins).
+            //
+            // Recorded BEFORE the counters are applied: a counter-placement
+            // replacement can pause `apply_proliferate`, and that path returns
+            // early. Leaving the pin below it would silently drop the pin on
+            // exactly the proliferate this fix made complete, falling back to
+            // the "all eligible" replay this comment rules out. Everything read
+            // here — `state`, `targets`, `p`, `completion_source` — is already
+            // settled, and `object_decision_source` resolves card identity,
+            // which the pending counters do not affect.
             if let Some(source) = object_decision_source(state, completion_source) {
                 let target_pins: Vec<crate::analysis::decision_template::TargetPin> = targets
                     .iter()
@@ -7784,17 +11994,37 @@ fn apply_action(
                     );
                 }
             }
-            if !effects::proliferate::resume_proliferate_actions(state, pending, &mut events) {
+            // The player-action event and any remaining actions are owed once
+            // the counters land, so they ride the completion rather than being
+            // emitted here — `continue_proliferate_actions` is the single
+            // authority for both, on the synchronous and paused paths alike.
+            let completion = PendingEffectResolved::with_post_actions_without_effect(
+                crate::types::ability::EffectKind::Proliferate,
+                completion_source,
+                vec![PendingCounterPostAction::ContinueProliferateActions {
+                    pending: pending.clone(),
+                }],
+            );
+            if !effects::proliferate::apply_proliferate(
+                state,
+                p,
+                &targets,
+                completion,
+                &mut events,
+            ) {
                 return Ok(ActionResult {
                     events,
                     waiting_for: state.waiting_for.clone(),
                     log_entries: vec![],
                 });
             }
-            events.push(GameEvent::EffectResolved {
-                kind: crate::types::ability::EffectKind::Proliferate,
-                source_id: completion_source,
-            subject: None,});
+            if !effects::proliferate::continue_proliferate_actions(state, pending, &mut events) {
+                return Ok(ActionResult {
+                    events,
+                    waiting_for: state.waiting_for.clone(),
+                    log_entries: vec![],
+                });
+            }
             state.waiting_for = WaitingFor::Priority { player: p };
             state.priority_player = p;
             resume_pending_continuation_if_priority(state, &mut events)?;
@@ -7867,6 +12097,8 @@ fn apply_action(
             WaitingFor::ChooseObjectsSelection {
                 player,
                 eligible,
+                min,
+                max,
                 trigger_event,
             },
             GameAction::SelectTargets { targets },
@@ -7874,21 +12106,39 @@ fn apply_action(
             let p = *player;
             let eligible_set = eligible.clone();
             let pending_event = trigger_event.clone();
-            // Validate all selected targets are in the eligible set.
+            let selected_count = targets.len();
+            if selected_count < *min as usize
+                || max.is_some_and(|maximum| selected_count > maximum as usize)
+            {
+                return Err(EngineError::InvalidAction(format!(
+                    "Object selection must choose at least {min}{} distinct objects, got {selected_count}",
+                    max.map_or(String::new(), |maximum| format!(" and at most {maximum}"))
+                )));
+            }
+            // Validate all selected targets are distinct objects in the eligible set.
+            let mut selected_objects = HashSet::with_capacity(selected_count);
             for t in &targets {
                 if !eligible_set.contains(t) {
                     return Err(EngineError::InvalidAction(
                         "Selected target not eligible for object selection".to_string(),
                     ));
                 }
+                let TargetRef::Object(id) = t else {
+                    return Err(EngineError::InvalidAction(
+                        "Object selection accepts battlefield objects only".to_string(),
+                    ));
+                };
+                if !selected_objects.insert(*id) {
+                    return Err(EngineError::InvalidAction(
+                        "Duplicate object in object selection".to_string(),
+                    ));
+                }
             }
-            // Map TargetRef → ObjectId. The eligible set is all battlefield
-            // permanents, so every selected target is an Object.
             let ids: Vec<ObjectId> = targets
                 .iter()
-                .filter_map(|t| match t {
-                    TargetRef::Object(id) => Some(*id),
-                    TargetRef::Player(_) => None,
+                .map(|target| match target {
+                    TargetRef::Object(id) => *id,
+                    TargetRef::Player(_) => unreachable!("validated as objects above"),
                 })
                 .collect();
             // CR 603.7: Always allocate a fresh tracked set — a player-chosen
@@ -8080,10 +12330,11 @@ fn apply_action(
         }
         // CR 601.2d: Distribute among targets (casting-time distribution).
         (WaitingFor::DistributeAmong { player, .. }, GameAction::CancelCast) => {
+            ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
             match state.pending_cast.take() {
                 Some(pending) => {
-                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)
+                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }
                 None => {
                     return Err(EngineError::InvalidAction(
@@ -8181,7 +12432,7 @@ fn apply_action(
                         state,
                         p,
                         *pending,
-                        ability,
+                        *ability,
                         cost,
                         &mut events,
                     ) {
@@ -8201,7 +12452,10 @@ fn apply_action(
                 // `pending_trigger_entry` so the resolver may now fire it.
                 pending_trigger.ability.distribution =
                     Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
-                if !triggers::finalize_pending_trigger_entry(state, &pending_trigger.ability) {
+                let produced = if !triggers::finalize_pending_trigger_entry(
+                    state,
+                    &pending_trigger.ability,
+                ) {
                     // Unexpected dangling cursor: the entry is no longer on the
                     // stack. Recover per CR 608.2b / CR 800.4a (a stack object
                     // that has left the stack does not resolve) — record the
@@ -8227,7 +12481,13 @@ fn apply_action(
                     } else {
                         WaitingFor::Priority { player: p }
                     }
-                }
+                };
+                // Round-20 seam 4: the trigger-owned division arm's produced
+                // wait — dangling recovery, deferred sibling, or success — goes
+                // through the construction finisher exactly once. The
+                // resolution-time and cast-time distribution arms below are not
+                // trigger-owned and are deliberately untouched.
+                triggers::finish_trigger_construction_action(state, &mut events, produced)
             } else {
                 // Resolution-time distribution continuation path.
                 state.waiting_for = WaitingFor::Priority { player: p };
@@ -8317,11 +12577,11 @@ fn apply_action(
                 new_targets,
             },
         )?,
-        // CR 115.7: Retarget a single-target spell via a board click. The
+        // CR 115.7a: Retarget a single-target spell via a board click. The
         // universal `ChooseTarget` action — already consumed by every other
-        // targeting state — drives single-target retargets (Bolt Bend,
-        // Redirect, Misdirection) so the player picks the new target directly
-        // on the battlefield instead of through a dialog.
+        // targeting state — drives "change the target of" retargets (Bolt Bend,
+        // Misdirection — NOT Redirect, which is "choose new targets", so CR
+        // 115.7d `All`) so the player picks the new target on the battlefield.
         (
             WaitingFor::RetargetChoice {
                 player,
@@ -8370,6 +12630,15 @@ fn apply_action(
         // the action's result, not the pre-action state (fixes stale TargetSelection
         // after CancelCast).
         state.waiting_for = waiting_for.clone();
+        // CR 704.3 + CR 704.5f: a token battlefield entry postponed by an as-enters choice is
+        // realized HERE, before the pipeline below, so the CR 400.7 row is written ahead of that
+        // pipeline's SBA pass and survives a copy that enters with 0 toughness. It also puts the
+        // entry pair into this action's `events` ahead of the CR 603.2 / CR 603.6a scan — no longer
+        // the ONLY way that check runs (the action-boundary convergence in
+        // `apply_action_boundary_core` runs the same pipeline for direct-return handlers), but
+        // still the only placement that beats the SBA pass. Same gate as that boundary call, one
+        // authority; keeping it here also avoids two full pipeline passes per settling action.
+        effects::token::realize_settled_token_battlefield_entry(state, &mut events);
         let wf = engine_priority::run_post_action_pipeline(
             state,
             &mut events,
@@ -8377,7 +12646,85 @@ fn apply_action(
             triggers_processed_inline,
             skip_deferred_trigger_drain,
         )?;
-        state.waiting_for = wf.clone();
+        // CR 732.2a: the SECOND sampling site — a stack entry announced while a player
+        // answers a FORCED pre-priority window.
+        //
+        // NOT "the settle sampler's conjuncts PLUS the window flag". The two sets are the
+        // same SIZE, one member apart: `answering_forced_window` (captured before the
+        // reducer consumed the window) REPLACES the settle sampler's `resolved_this_beat`.
+        // Everything else is shared — `!in_simulation_probe()`, `samples()`,
+        // `!stack.is_empty()`, the non-shrinking `len >= before`, and
+        // `Priority{active_player}`.
+        //
+        // The settle sampler's `else { ring.clear() }` has NO counterpart here, and that is
+        // deliberate: this site is not a settle verdict on the beat, it is an additive
+        // observation of entries a forced window announced, so a miss must leave the
+        // accumulation alone rather than wipe it. CONSEQUENCE, accepted: a forced-window
+        // answer that resolves nothing but leaves the stack non-shrinking records a frame
+        // whose stack duplicates its predecessor's. That costs one ring slot and a zero
+        // frame-delta; it cannot manufacture a period, because `ring_delta_signature` refuses
+        // a zero smallest-period delta outright, and it cannot desynchronize the count,
+        // because MINT AND DRIVE ARE SYMMETRIC — `drive_one_shortcut_cycle` answers its prompts
+        // through `inject_pinned_answer`: three of its FOUR arms dispatch `apply_action` and walk
+        // this very branch, advancing `frames_this_cycle`; the fourth `Err`s before any advance.
+        //
+        // ORDERING, NOW SYNCHRONIZED (maintainer call on PR #7005; previously carried here
+        // as a documented latent asymmetry). `game::public_state::sync_waiting_for` is the
+        // canonical synchronizer — it installs `wf`, runs the legacy-attach normalization,
+        // and recomputes `priority_player` through `turn_control`'s authorized-submitter
+        // resolver — and it now runs BEFORE the record, exactly as the settle sampler in
+        // `pass_priority_once_with_pipeline` does. So a frame minted here carries the same
+        // `waiting_for`/`priority_player` pair a settle frame carries.
+        //
+        // WHICH CONSUMER THAT HOMOGENEITY IS FOR — and it is NOT `ring_delta_signature`. The
+        // claim #7005's first commit shipped ("a heterogeneous ring breaks `ring_delta_signature`'s
+        // turn-position conjunct, because `impl PartialEq for GameState` compares both
+        // fields") is FALSE at source: that function's body reads only
+        // `ResourceVector::snapshot(&f.normalized)` and
+        // `window_scope_from_cover_frames(..).phase_invariant`, and `phase_invariant` is
+        // `turn_number` + `phase` + `extra_phases.is_empty()`. Neither field is in it.
+        //
+        // The consumer that DOES read them is BASIS A — the ring scans that call
+        // `analysis::resource::loop_states_equal_modulo_resources(prior, state)` with `prior`
+        // a ring frame's `normalized` half and `state` the LIVE board. That chains to
+        // `types::game_state::loop_states_equal` ⇒ `impl PartialEq for GameState`, which
+        // compares BOTH `waiting_for` and `priority_player`, and neither `normalize_for_loop`
+        // nor `project_out_resources` neutralizes either. An answer-beat frame carrying an
+        // un-synced pair therefore compares UNEQUAL against a live board that has been
+        // synced, and basis A silently misses the recurrence the frame was minted to certify.
+        //
+        // BLAST RADIUS. Nothing this leaves in `state` survives to a consumer unrecomputed:
+        // `finish_action_boundary` runs the SAME `sync_waiting_for` over `result.waiting_for`
+        // and copies the outcome back into the result, and the reorder
+        // never changes `ActionResult.waiting_for` itself. That is an argument about
+        // RE-DERIVATION, not reachability, because `apply_action_boundary` is not the only
+        // route: `inject_pinned_answer`'s three dispatches and `drive_loop_action_iteration`'s
+        // ten reach `apply_action` directly, and
+        // `apply_interaction_pre_reconciliation_for_life_safety` returns `raw.result` without
+        // ever calling `finish_action_boundary` (`apply_action_boundary_core`'s own comment
+        // records it). All three drive a CLONE — `drive_one_shortcut_cycle`'s `work`,
+        // the drive's `clone`, `preview_candidate_life_safety`'s `preview` — never the settled
+        // board. MEASURED pre-reorder by an instrumented `debug_assert_eq!` census over the
+        // full lib + integration corpus (per-site counts in PR #7005's history; one unit =
+        // one `record_loop_detect_sample` invocation): 0 at EITHER sampler where the sync
+        // changed either field, so this replaces a coincidence with a guarantee.
+        //
+        // ONE CONSEQUENCE OF USING THE SYNCHRONIZER RATHER THAN A RAW CLONE:
+        // `normalize_legacy_attach_waiting_for` can now edit `state.waiting_for` on this
+        // path, so it may differ from the returned `ActionResult.waiting_for`, where the raw
+        // clone made the two exactly equal. Benign — the boundary re-normalizes at `:1171`
+        // and copies back at `:1189`, and `inject_pinned_answer` fails closed on every prompt
+        // kind it has no pin producer for.
+        sync_waiting_for(state, &wf);
+        if answering_forced_window
+            && !in_simulation_probe()
+            && state.loop_detection.samples()
+            && !state.stack.is_empty()
+            && state.stack.len() >= stack_len_before_action
+            && matches!(wf, WaitingFor::Priority { player } if player == state.active_player)
+        {
+            state.record_loop_detect_sample();
+        }
         return Ok(ActionResult {
             events,
             waiting_for: wf,
@@ -8426,6 +12773,66 @@ fn apply_action(
         waiting_for,
         log_entries: vec![],
     })
+}
+
+/// Validate one debug action before any transport-specific lookup or engine
+/// mutation. Source-bound Create Card requests use this same authority again
+/// immediately before materialization.
+pub fn preflight_debug_action(
+    state: &GameState,
+    actor: PlayerId,
+    action: &DebugAction,
+) -> Result<(), EngineError> {
+    check_debug_action_access(state, actor)?;
+    action
+        .validate_create_count()
+        .map_err(EngineError::InvalidAction)?;
+
+    if let DebugAction::CreateCard {
+        owner,
+        zone,
+        count,
+        run_etb,
+        ..
+    } = action
+    {
+        if !state.players.iter().any(|player| player.id == *owner) {
+            return Err(EngineError::InvalidAction(
+                "Debug: invalid owner player id".into(),
+            ));
+        }
+        // Real entry can park a private parent frame while replacements or
+        // as-enters choices resolve. Only a settled Priority boundary can own
+        // that frame; synchronous hand/raw placements need no such boundary.
+        if *count != 0
+            && *zone == Zone::Battlefield
+            && *run_etb
+            && !matches!(state.waiting_for, WaitingFor::Priority { .. })
+        {
+            return Err(EngineError::InvalidAction(
+                "Debug::CreateCard with ETB processing requires a Priority window".into(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Sandbox capability check shared by every debug-action preflight. Keeping it
+/// at the engine boundary means transports cannot use a no-op payload to probe
+/// or bypass debug authorization.
+fn check_debug_action_access(state: &GameState, actor: PlayerId) -> Result<(), EngineError> {
+    if !state.debug_mode {
+        return Err(EngineError::InvalidAction(
+            "Debug actions require debug_mode to be enabled".into(),
+        ));
+    }
+    if !state.debug_permitted.is_empty() && !state.debug_permitted.contains(&actor) {
+        return Err(EngineError::InvalidAction(
+            "Debug actions require debug permission".into(),
+        ));
+    }
+    Ok(())
 }
 
 struct RetargetSubmission<'a> {
@@ -8496,9 +12903,62 @@ fn apply_retarget(
         }
     }
 
+    // CR 115.7a: "each target can be changed only to another legal target." The
+    // `legal_new_targets` pool checked above is flat, so for a multi-slot node it
+    // cannot tell slot 0's legal set from slot 1's. Re-check each CHANGED
+    // position against its own slot filter before mutating the stack; CR 115.7d
+    // exempts unchanged positions, which `retarget_slot_violation` applies for
+    // both this caller and the AI generator. Applies to both
+    // `Single` and `All`. It is NOT a blanket no-op for `Single`: alongside the
+    // two-surfaced-slot `Both`, `mana_multi_role` also admits the context-ref
+    // recipient `Both` (surfaced == 1, generic == 0), which is parser-reachable
+    // ("That player adds {R} for each card in target opponent's hand"). A
+    // `Single`-scope retarget (Bolt Bend) of that shape therefore does run
+    // this per-slot validation — CR 115.7a-correct, and the reason the check
+    // is wired for both scopes rather than only `All`.
+    if let Some(ability) = state
+        .stack
+        .get(stack_entry_index)
+        .and_then(|entry| entry.ability())
+    {
+        if let Some(slot) = crate::game::ability_utils::retarget_slot_violation(
+            state,
+            ability,
+            current_targets,
+            &new_targets,
+        ) {
+            return Err(EngineError::InvalidAction(format!(
+                "Retarget: chosen target is not legal for target slot {slot}"
+            )));
+        }
+    }
+
     if stack_entry_index < state.stack.len() {
+        let target_pins: Vec<_> = state
+            .stack
+            .get(stack_entry_index)
+            .and_then(|entry| entry.ability())
+            .map(|ability| {
+                current_targets
+                    .iter()
+                    .zip(new_targets.iter())
+                    .filter(|(old, new)| {
+                        ability.retarget_target_requires_pin_refresh(old, new, state)
+                    })
+                    .filter_map(|(_, target)| match target {
+                        TargetRef::Object(id) => {
+                            state.objects.get(id).map(ObjectIncarnationRef::from_object)
+                        }
+                        TargetRef::Player(_) => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         if let Some(ability) = state.stack[stack_entry_index].ability_mut() {
             ability.targets = new_targets;
+            for pin in target_pins {
+                ability.update_selected_target_incarnation(pin);
+            }
         }
     } else {
         return Err(EngineError::InvalidAction(
@@ -8521,17 +12981,30 @@ fn apply_retarget(
     Ok(state.waiting_for.clone())
 }
 
-/// CR 603.3c + CR 608.2c: Drop a mid-construction optional triggered modal that
-/// was declined before mode choice.
+/// CR 603.3c + CR 603.3d + CR 608.2c: Single authority for dropping a
+/// mid-construction triggered ability — an optional modal declined before mode
+/// choice, or CR 603.3d's "if a choice is required when the triggered ability
+/// goes on the stack but no legal choices can be made for it ... the ability is
+/// simply removed from the stack."
+///
+/// Every in-flight construction cursor must be released together. The event
+/// batch is the paused trigger's carrier: `begin_pending_trigger_target_selection`
+/// re-reads `pending_trigger_event_batch` as the event context for whichever
+/// trigger is being constructed, and the pause paths write it straight back. A
+/// drop that clears the trigger but leaks the batch therefore leaves a dead
+/// event latched in state, where it (a) poisons the event context of every
+/// later trigger that pauses for a choice, and (b) permanently fails the
+/// `inert_trigger_batch_state_is_settled` gate that lets contiguous inert
+/// trigger runs skip priority. Mirrors `triggers::abandon_ceased_pending_trigger`,
+/// which already releases all four cursors on the error-recovery path.
 pub(super) fn drop_mid_construction_pending_trigger(state: &mut GameState) {
-    if let Some(entry_id) = state.pending_trigger_entry.take() {
-        if state.stack.back().map(|e| e.id) == Some(entry_id) {
-            state.stack.pop_back();
-            state.stack_paid_facts.remove(&entry_id);
-            state.stack_trigger_event_batches.remove(&entry_id);
-        }
-    }
+    super::stack::pop_uncommitted_pending_trigger_entry(
+        state,
+        super::lifecycle::DelayedTerminalDisposition::NoLegalChoice,
+    );
     state.pending_trigger = None;
+    state.pending_trigger_firing = None;
+    state.pending_trigger_event_batch.clear();
 }
 
 /// Clear optionality after the controller accepts a "you may choose N" gate so
@@ -8625,14 +13098,7 @@ pub(super) fn begin_pending_trigger_target_selection(
                 &mode_abilities,
                 &unavailable_modes,
             ) else {
-                if let Some(entry_id) = state.pending_trigger_entry.take() {
-                    if state.stack.back().map(|e| e.id) == Some(entry_id) {
-                        state.stack.pop_back();
-                        state.stack_paid_facts.remove(&entry_id);
-                        state.stack_trigger_event_batches.remove(&entry_id);
-                    }
-                }
-                state.pending_trigger = None;
+                drop_mid_construction_pending_trigger(state);
                 return Ok(None);
             };
 
@@ -8650,14 +13116,7 @@ pub(super) fn begin_pending_trigger_target_selection(
                  dispatch_pending_trigger_context must resolve it inline",
             );
             if modal.selection.is_random() {
-                if let Some(entry_id) = state.pending_trigger_entry.take() {
-                    if state.stack.back().map(|e| e.id) == Some(entry_id) {
-                        state.stack.pop_back();
-                        state.stack_paid_facts.remove(&entry_id);
-                        state.stack_trigger_event_batches.remove(&entry_id);
-                    }
-                }
-                state.pending_trigger = None;
+                drop_mid_construction_pending_trigger(state);
                 return Ok(None);
             }
 
@@ -8670,14 +13129,7 @@ pub(super) fn begin_pending_trigger_target_selection(
             // dead branch — kept as a defensive cleanup for any
             // delayed-revalidation paths.
             if unavailable_modes.len() >= modal.mode_count {
-                if let Some(entry_id) = state.pending_trigger_entry.take() {
-                    if state.stack.back().map(|e| e.id) == Some(entry_id) {
-                        state.stack.pop_back();
-                        state.stack_paid_facts.remove(&entry_id);
-                        state.stack_trigger_event_batches.remove(&entry_id);
-                    }
-                }
-                state.pending_trigger = None;
+                drop_mid_construction_pending_trigger(state);
                 return Ok(None);
             }
 
@@ -8692,8 +13144,11 @@ pub(super) fn begin_pending_trigger_target_selection(
                     source_id,
                     origin,
                 });
+                let same_card_may_trigger_choice_available = may_trigger_key
+                    .as_ref()
+                    .is_some_and(|key| state.may_trigger_same_card_choice_available(key));
                 if let Some(ref key) = may_trigger_key {
-                    if let Some(choice) = state.may_trigger_auto_choice(key) {
+                    if let Some(choice) = state.may_trigger_auto_choice_for_live_prompt(key) {
                         match choice {
                             AutoMayChoice::Decline => {
                                 drop_mid_construction_pending_trigger(state);
@@ -8720,6 +13175,7 @@ pub(super) fn begin_pending_trigger_target_selection(
                     source_id,
                     description: trigger_description,
                     may_trigger_key,
+                    same_card_may_trigger_choice_available,
                 }));
             }
 
@@ -8791,14 +13247,7 @@ pub(super) fn begin_pending_trigger_target_selection(
         // branch above: if the "push first" dispatcher already pushed an
         // in-construction entry for this trigger, pop it before clearing the
         // cursor.
-        if let Some(entry_id) = state.pending_trigger_entry.take() {
-            if state.stack.back().map(|e| e.id) == Some(entry_id) {
-                state.stack.pop_back();
-                state.stack_paid_facts.remove(&entry_id);
-                state.stack_trigger_event_batches.remove(&entry_id);
-            }
-        }
-        state.pending_trigger = None;
+        drop_mid_construction_pending_trigger(state);
         return Ok(None);
     };
     Ok(Some(WaitingFor::TriggerTargetSelection {
@@ -8883,16 +13332,39 @@ fn record_graveyard_play_permission(
     }
 }
 
-fn record_exile_play_permission(state: &mut GameState, source: Option<ObjectId>) {
-    let Some(source_id) = source else {
-        return;
-    };
-    crate::game::ledger::consume_once_per_turn_permission(
-        state,
-        source_id,
-        crate::types::resolved_commands::ResolvedOncePerTurnPermission::ExilePlay,
-    )
-    .expect("exile play permission must have an unused ledger slot");
+fn record_exile_play_permission(
+    state: &mut GameState,
+    authorization: Option<casting::ExileLandPlayAuthorization>,
+) {
+    match authorization {
+        Some(casting::ExileLandPlayAuthorization::ObjectAttached {
+            source,
+            frequency: CastFrequency::OncePerTurn,
+        }) => crate::game::ledger::consume_once_per_turn_permission(
+            state,
+            source,
+            ResolvedOncePerTurnPermission::ExilePlay,
+        )
+        .expect("object-attached exile play permission must have an unused ledger slot"),
+        Some(casting::ExileLandPlayAuthorization::Static {
+            source,
+            frequency: CastFrequency::OncePerTurn | CastFrequency::OncePerTurnPerPermanentType,
+        }) => crate::game::ledger::consume_once_per_turn_permission(
+            state,
+            source,
+            ResolvedOncePerTurnPermission::ExileCast,
+        )
+        .expect("static exile play permission must have an unused ledger slot"),
+        Some(casting::ExileLandPlayAuthorization::ObjectAttached {
+            frequency: CastFrequency::Unlimited | CastFrequency::OncePerTurnPerPermanentType,
+            ..
+        })
+        | Some(casting::ExileLandPlayAuthorization::Static {
+            frequency: CastFrequency::Unlimited,
+            ..
+        })
+        | None => {}
+    }
 }
 
 /// CR 305.1 + CR 116.2a + CR 401.5: Consume the per-turn slot when a
@@ -8918,6 +13390,42 @@ fn record_top_of_library_land_permission(
         )
         .expect("top-of-library play permission must have an unused ledger slot");
     }
+}
+
+/// CR 305.1 + CR 116.2a: Finalize a land play once its zone change has
+/// committed. A paused delivery tail may still require a choice, but the land
+/// is already on the battlefield and no continuation retains the selected play
+/// authority, so per-play accounting must happen at this seam.
+#[allow(clippy::too_many_arguments)]
+fn finalize_committed_land_play(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    origin_zone: Zone,
+    graveyard_permission_source: Option<ObjectId>,
+    exile_play_authorization: Option<casting::ExileLandPlayAuthorization>,
+    library_permission_source: Option<(ObjectId, CastFrequency)>,
+    events: &mut Vec<GameEvent>,
+) {
+    state.lands_played_this_turn += 1;
+    record_land_played_from_zone(state, player, object_id, origin_zone);
+    record_graveyard_play_permission(state, graveyard_permission_source, object_id);
+    record_exile_play_permission(state, exile_play_authorization);
+    if let Some((source_id, frequency)) = library_permission_source {
+        record_top_of_library_land_permission(state, source_id, frequency);
+    }
+    let player_data = state
+        .players
+        .iter_mut()
+        .find(|candidate| candidate.id == player)
+        .expect("priority player exists");
+    player_data.lands_played_this_turn += 1;
+    priority::clear_priority_passes(state);
+    events.push(GameEvent::LandPlayed {
+        object_id,
+        player_id: player,
+        from_zone: origin_zone,
+    });
 }
 
 fn mark_land_played_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone) {
@@ -8956,6 +13464,13 @@ fn handle_play_land(
             ));
         }
     }
+    // CR 305.1 + CR 116.2a: A land play is a special action only during a
+    // main phase of the player's turn while the stack is empty.
+    if !state.stack.is_empty() {
+        return Err(EngineError::ActionNotAllowed(
+            "Can only play lands while the stack is empty".to_string(),
+        ));
+    }
 
     // CR 305.2 + CR 505.6b: Validate land limit.
     // Base limit is max_lands_per_turn (normally 1), plus any additional drops
@@ -8985,22 +13500,10 @@ fn handle_play_land(
             "Player is under a CantPlayLand static (CR 305.2)".to_string(),
         ));
     }
-    // CR 116.2a + CR 305.1: A `ProhibitPlayFromZone` deny covers the play-land
-    // half of "play" (a land play is a special action, not a cast), so this gate
-    // is the land-side counterpart to the cast-gate check in
-    // `casting::prepare_spell_cast` (Memory Vessel: "can't play cards from their
-    // hand"). The card's current zone is the discriminator.
+    // CR 116.2a + CR 305.1: The shared restriction gate covers both temporary
+    // play-from-zone and per-land prohibitions for every legal source zone.
     if let Some(obj) = state.objects.get(&object_id) {
-        if super::casting::is_blocked_by_prohibit_play_from_zone(state, obj, player) {
-            return Err(EngineError::ActionNotAllowed(
-                "A temporary effect prevents playing cards from this zone (CR 116.2a)".to_string(),
-            ));
-        }
-        // CR 305.1 + CR 116.2a: A `PlayLands` restriction denies playing THIS
-        // specific land (e.g. Conjurer's Ban: "lands with the chosen name can't
-        // be played") — the filter-scoped counterpart to the blanket
-        // `CantPlayLand` check above.
-        if super::casting::is_blocked_by_cant_play_lands(state, player, obj) {
+        if !super::casting::land_play_is_permitted_by_restrictions(state, player, obj) {
             return Err(EngineError::ActionNotAllowed(
                 "A temporary effect prevents playing this land (CR 305.1)".to_string(),
             ));
@@ -9082,15 +13585,12 @@ fn handle_play_land(
             Some((src_id, frequency))
         });
     let in_library_with_permission = library_permission_src.is_some();
-    let exile_permission_source = if state.exile.contains(&object_id) {
-        super::casting::exile_lands_playable_by_permission(state, player)
-            .iter()
-            .find(|(obj_id, _)| *obj_id == object_id)
-            .map(|(_, source_id)| *source_id)
+    let exile_play_authorization = if state.exile.contains(&object_id) {
+        super::casting::exile_land_play_authorization(state, player, object_id)
     } else {
         None
     };
-    let in_exile_with_permission = exile_permission_source.is_some();
+    let in_exile_with_permission = exile_play_authorization.is_some();
 
     if !in_hand
         && !in_graveyard_with_permission
@@ -9235,7 +13735,7 @@ fn handle_play_land(
     // counters" replacement for planeswalkers and battles entering the
     // battlefield via a play-from-zone action.
     if let Some(obj) = state.objects.get(&object_id) {
-        let intrinsic = super::printed_cards::intrinsic_etb_counters(obj);
+        let intrinsic = super::printed_cards::intrinsic_etb_counters(obj, None);
         if !intrinsic.is_empty() {
             if let crate::types::proposed_event::ProposedEvent::ZoneChange {
                 enter_with_counters,
@@ -9305,12 +13805,19 @@ fn handle_play_land(
                     // the battlefield (the move precedes the counter pause in the
                     // tail), so stamp the play origin now — matching the pre-token
                     // arm, which stamped before the `apply_etb_counters`
-                    // early-return — then surface the parked prompt; the land
-                    // epilogue must not run yet.
+                    // early-return — then surface the parked prompt. The land
+                    // play itself is already committed.
                     crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
-                        // CR 305.1 + CR 400.7i: stamp land-play provenance so
-                        // effects can find the permanent the played land became.
-                        mark_land_played_from_zone(state, object_id, origin_zone);
+                        finalize_committed_land_play(
+                            state,
+                            player,
+                            object_id,
+                            origin_zone,
+                            gy_permission_source,
+                            exile_play_authorization,
+                            library_permission_src,
+                            events,
+                        );
                         return Ok(state.waiting_for.clone());
                     }
                 }
@@ -9338,27 +13845,16 @@ fn handle_play_land(
                         events,
                     )
                 {
-                    state.lands_played_this_turn += 1;
-                    record_land_played_from_zone(state, player, object_id, origin_zone);
-                    record_graveyard_play_permission(state, gy_permission_source, object_id);
-                    record_exile_play_permission(state, exile_permission_source);
-                    // CR 305.1 + CR 116.2a + CR 401.5: consume the once-per-turn
-                    // library play slot using the pre-captured source (land play is
-                    // a special action per CR 305.1/116.2a; CR 401.5 top-of-library
-                    // visibility closes after the action; library.front() now points
-                    // to the next card, not the played land).
-                    if let Some((src_id, frequency)) = library_permission_src {
-                        record_top_of_library_land_permission(state, src_id, frequency);
-                    }
-                    if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
-                        p.lands_played_this_turn += 1;
-                    }
-                    priority::clear_priority_passes(state);
-                    events.push(GameEvent::LandPlayed {
+                    finalize_committed_land_play(
+                        state,
+                        player,
                         object_id,
-                        player_id: player,
-                        from_zone: origin_zone,
-                    });
+                        origin_zone,
+                        gy_permission_source,
+                        exile_play_authorization,
+                        library_permission_src,
+                        events,
+                    );
                     return Ok(next_waiting_for);
                 }
             }
@@ -9373,29 +13869,16 @@ fn handle_play_land(
             // A replacement needs player choice (e.g., shock land "pay 2 life?").
             // Increment counters now — the land play is committed, only the ETB
             // effect is pending.
-            state.lands_played_this_turn += 1;
-            record_land_played_from_zone(state, player, object_id, origin_zone);
-            // CR 604.2: Record once-per-turn graveyard play permission usage.
-            record_graveyard_play_permission(state, gy_permission_source, object_id);
-            record_exile_play_permission(state, exile_permission_source);
-            // CR 305.1 + CR 116.2a + CR 401.5: consume the once-per-turn library
-            // play slot using the pre-captured source (land play is a special
-            // action per CR 305.1/116.2a; CR 401.5 top-of-library visibility
-            // closes after the action; library.front() now points to the next
-            // card, not the played land).
-            if let Some((src_id, frequency)) = library_permission_src {
-                record_top_of_library_land_permission(state, src_id, frequency);
-            }
-            if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
-                p.lands_played_this_turn += 1;
-            }
-            priority::clear_priority_passes(state);
-
-            events.push(GameEvent::LandPlayed {
+            finalize_committed_land_play(
+                state,
+                player,
                 object_id,
-                player_id: player,
-                from_zone: origin_zone,
-            });
+                origin_zone,
+                gy_permission_source,
+                exile_play_authorization,
+                library_permission_src,
+                events,
+            );
 
             return Ok(super::replacement::replacement_choice_waiting_for(
                 player, state,
@@ -9403,35 +13886,16 @@ fn handle_play_land(
         }
     }
 
-    // Increment land counter
-    state.lands_played_this_turn += 1;
-    record_land_played_from_zone(state, player, object_id, origin_zone);
-    // CR 604.2: Record once-per-turn graveyard play permission usage.
-    record_graveyard_play_permission(state, gy_permission_source, object_id);
-    record_exile_play_permission(state, exile_permission_source);
-    // CR 305.1 + CR 116.2a + CR 401.5: consume the once-per-turn library play
-    // slot using the pre-captured source (land play is a special action per
-    // CR 305.1/116.2a; CR 401.5 top-of-library visibility closes after the
-    // action; library.front() now points to the next card, not the played
-    // land — post-delivery re-lookup would fail).
-    if let Some((src_id, frequency)) = library_permission_src {
-        record_top_of_library_land_permission(state, src_id, frequency);
-    }
-    let player_data = state
-        .players
-        .iter_mut()
-        .find(|p| p.id == player)
-        .expect("priority player exists");
-    player_data.lands_played_this_turn += 1;
-
-    // Reset priority passes (action was taken)
-    priority::clear_priority_passes(state);
-
-    events.push(GameEvent::LandPlayed {
+    finalize_committed_land_play(
+        state,
+        player,
         object_id,
-        player_id: player,
-        from_zone: origin_zone,
-    });
+        origin_zone,
+        gy_permission_source,
+        exile_play_authorization,
+        library_permission_src,
+        events,
+    );
 
     // Player retains priority after playing a land
     Ok(WaitingFor::Priority { player })
@@ -9578,19 +14042,11 @@ pub(super) fn handle_spend_pool_mana(
     // is correctly eligible to pin when it can legally pay the activation.
     // Owned holders so the context's borrowed slices outlive the eligibility check.
     let spell_meta;
-    let source_types;
-    let source_subtypes;
-    let ability_tag;
+    let activation_context;
     let ctx = if let Some(ability_index) = activation_ability_index {
-        let (types, subtypes) = super::casting::activation_source_types(state, object_id);
-        source_types = types;
-        source_subtypes = subtypes;
-        ability_tag = super::casting::activation_ability_tag(state, object_id, ability_index);
-        Some(crate::types::mana::PaymentContext::Activation {
-            source_types: &source_types,
-            source_subtypes: &source_subtypes,
-            ability_tag,
-        })
+        activation_context =
+            super::casting::activation_payment_context(state, object_id, Some(ability_index));
+        Some(activation_context.as_payment_context())
     } else {
         spell_meta = super::casting::build_spell_meta(state, player, object_id);
         spell_meta
@@ -9637,7 +14093,7 @@ fn mana_unit_eligible_for_cost(
 
     // CR 106.6: a unit whose restrictions reject this context can pay nothing here.
     if let Some(ctx) = ctx {
-        if !unit.restrictions.iter().all(|r| r.allows(ctx)) {
+        if !mana_payment::mana_unit_permits_payment_context(unit, ctx) {
             return false;
         }
     }
@@ -9779,6 +14235,24 @@ fn handle_equip_activation(
 /// CR 702.122a: Activate a Vehicle's crew ability from Priority.
 /// Unlike Equip (CR 702.6a) and Saddle (CR 702.171a), Crew has NO "Activate only as a
 /// sorcery" restriction — it can be activated any time the controller has priority.
+/// CR 702.122a + CR 702.122d: can this creature legally be tapped to pay a crew
+/// cost right now?
+///
+/// Composes the two halves the crew payment path enforces — the tappability rule
+/// in [`is_tappable_creature_for_cost`] (controlled, untapped, a creature, and
+/// not under a `CantTap` restriction) and the `CantCrew` static — into one
+/// named authority.
+///
+/// `pub` so consumers outside this module (`phase-ai`'s
+/// `VehicleDeploymentPolicy`) ask THIS question instead of assembling their own
+/// filter from the parts. A partial duplicate silently over-counts: omitting the
+/// `object_cant_tap` term alone makes a `CantTap` 3/3 look like it can pay
+/// Crew 3, which it cannot.
+pub fn creature_can_pay_crew(state: &GameState, id: ObjectId, player: PlayerId) -> bool {
+    is_tappable_creature_for_cost(state, id, player)
+        && !super::static_abilities::object_has_cant_crew(state, id)
+}
+
 fn is_tappable_creature_for_cost(state: &GameState, id: ObjectId, player: PlayerId) -> bool {
     state.objects.get(&id).is_some_and(|o| {
         o.controller == player
@@ -10474,6 +14948,7 @@ fn build_contest_rounds(
 /// `start_game_with_starting_player` directly — that path runs no contest and
 /// emits no `StartingPlayerContest` event.
 pub fn start_game(state: &mut GameState) -> ActionResult {
+    let before = state.clone();
     if state.seat_order.is_empty() {
         return start_game_with_starting_player(state, PlayerId(0));
     }
@@ -10504,6 +14979,7 @@ pub fn start_game(state: &mut GameState) -> ActionResult {
             winner: starting_player,
         },
     );
+    result.log_entries = super::log::resolve_log_entries(&result.events, &before, state);
     result
 }
 
@@ -10512,6 +14988,7 @@ pub fn start_game_with_starting_player(
     state: &mut GameState,
     starting_player: PlayerId,
 ) -> ActionResult {
+    let before = state.clone();
     let mut events = Vec::new();
     state.outside_game_cards_brought_in.clear();
     let starting_player = super::topology::archenemy(state).unwrap_or(starting_player);
@@ -10565,7 +15042,7 @@ pub fn start_game_with_starting_player(
     mark_public_state_all_dirty(state);
     finalize_public_state(state);
 
-    let log_entries = super::log::resolve_log_entries(&events, state);
+    let log_entries = super::log::resolve_log_entries(&events, &before, state);
     ActionResult {
         events,
         waiting_for,
@@ -10575,6 +15052,7 @@ pub fn start_game_with_starting_player(
 
 /// Start game without mulligan (for backward compatibility with existing tests).
 pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
+    let before = state.clone();
     let mut events = Vec::new();
     state.outside_game_cards_brought_in.clear();
     let starting_player = super::topology::archenemy(state).unwrap_or(PlayerId(0));
@@ -10599,7 +15077,7 @@ pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
     mark_public_state_all_dirty(state);
     finalize_public_state(state);
 
-    let log_entries = super::log::resolve_log_entries(&events, state);
+    let log_entries = super::log::resolve_log_entries(&events, &before, state);
     ActionResult {
         events,
         waiting_for,
@@ -10607,30 +15085,264 @@ pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
     }
 }
 
-/// CR 607.2a + CR 406.6: Check if any exile-return sources have left the battlefield.
-/// If so, move the exiled cards back — linked abilities track which cards were exiled by the source.
+/// CR 607.2a + CR 406.6 + CR 610.3: Check for event-bounded exile returns.
+/// Move linked exiled cards back through the replacement-aware zone pipeline.
+pub(crate) fn duration_event_matches(
+    state: &GameState,
+    source_id: ObjectId,
+    source_incarnation: Option<ObjectIncarnationRef>,
+    controller: PlayerId,
+    duration_event: DurationEvent,
+    event: &GameEvent,
+) -> bool {
+    match (duration_event, event) {
+        (
+            DurationEvent::SourceLeftBattlefield,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                record,
+                ..
+            },
+        ) => {
+            *object_id == source_id
+                && source_incarnation.is_none_or(|expected| {
+                    record
+                        .trigger_source_context
+                        .as_ref()
+                        .is_none_or(|observed| observed.identity.reference == expected)
+                })
+        }
+        (DurationEvent::OpponentBecameMonarch, GameEvent::MonarchChanged { player_id }) => {
+            super::players::is_opponent(state, controller, *player_id)
+        }
+        _ => false,
+    }
+}
+
 pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let mut to_return: Vec<crate::types::game_state::ExileLink> = Vec::new();
+    let mut stack_latches = Vec::new();
+    let mut resolving_latches = Vec::new();
+    let mut deferred_latches = Vec::new();
+    let mut ordered_latches = Vec::new();
 
-    for event in events.iter() {
-        if let GameEvent::ZoneChanged {
-            object_id,
-            from: Some(Zone::Battlefield),
-            ..
-        } = event
-        {
-            // Find exile links where this object was the source and the exile
-            // effect specified an automatic return when that source leaves.
-            for link in &state.exile_links {
-                if link.source_id == *object_id
-                    && matches!(
-                        &link.kind,
-                        crate::types::game_state::ExileLinkKind::UntilSourceLeaves { .. }
+    for (event_index, event) in events.iter().enumerate() {
+        for entry in &state.stack {
+            let StackEntryKind::TriggeredAbility {
+                ability,
+                trigger_event,
+                ..
+            } = &entry.kind
+            else {
+                continue;
+            };
+            let event_follows_trigger = trigger_event
+                .as_ref()
+                .and_then(|trigger| events.iter().position(|candidate| candidate == trigger))
+                .is_none_or(|trigger_index| event_index > trigger_index);
+            if !event_follows_trigger {
+                continue;
+            }
+            for duration_event in [
+                DurationEvent::SourceLeftBattlefield,
+                DurationEvent::OpponentBecameMonarch,
+            ] {
+                if ability.contains_duration_event(duration_event)
+                    && duration_event_matches(
+                        state,
+                        entry.source_id,
+                        ability
+                            .trigger_source
+                            .as_ref()
+                            .map(|source| source.identity.reference),
+                        entry.controller,
+                        duration_event,
+                        event,
                     )
                 {
-                    to_return.push(link.clone());
+                    stack_latches.push((entry.id, duration_event));
                 }
             }
+        }
+
+        if let Some(entry) = state.resolving_stack_entry.as_ref() {
+            if matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }) {
+                if let Some(ability) = entry.ability() {
+                    for duration_event in [
+                        DurationEvent::SourceLeftBattlefield,
+                        DurationEvent::OpponentBecameMonarch,
+                    ] {
+                        if ability.contains_duration_event(duration_event)
+                            && duration_event_matches(
+                                state,
+                                entry.source_id,
+                                ability
+                                    .trigger_source
+                                    .as_ref()
+                                    .map(|source| source.identity.reference),
+                                entry.controller,
+                                duration_event,
+                                event,
+                            )
+                        {
+                            resolving_latches.push(duration_event);
+                        }
+                    }
+                }
+            }
+        }
+
+        for (index, context) in state.deferred_triggers.iter().enumerate() {
+            let event_follows_trigger = context
+                .pending
+                .trigger_event
+                .as_ref()
+                .and_then(|trigger| events.iter().position(|candidate| candidate == trigger))
+                .is_none_or(|trigger_index| event_index > trigger_index);
+            if !event_follows_trigger {
+                continue;
+            }
+            for duration_event in [
+                DurationEvent::SourceLeftBattlefield,
+                DurationEvent::OpponentBecameMonarch,
+            ] {
+                if context
+                    .pending
+                    .ability
+                    .contains_duration_event(duration_event)
+                    && duration_event_matches(
+                        state,
+                        context.pending.source_id,
+                        context
+                            .pending
+                            .ability
+                            .trigger_source
+                            .as_ref()
+                            .map(|source| source.identity.reference),
+                        context.pending.controller,
+                        duration_event,
+                        event,
+                    )
+                {
+                    deferred_latches.push((index, duration_event));
+                }
+            }
+        }
+
+        if let Some(order) = state.pending_trigger_order.as_ref() {
+            for (group_index, group) in order.groups.iter().enumerate() {
+                for (trigger_index, context) in group.triggers.iter().enumerate() {
+                    let event_follows_trigger = context
+                        .pending
+                        .trigger_event
+                        .as_ref()
+                        .and_then(|trigger| {
+                            events.iter().position(|candidate| candidate == trigger)
+                        })
+                        .is_none_or(|origin_index| event_index > origin_index);
+                    if !event_follows_trigger {
+                        continue;
+                    }
+                    for duration_event in [
+                        DurationEvent::SourceLeftBattlefield,
+                        DurationEvent::OpponentBecameMonarch,
+                    ] {
+                        if context
+                            .pending
+                            .ability
+                            .contains_duration_event(duration_event)
+                            && duration_event_matches(
+                                state,
+                                context.pending.source_id,
+                                context
+                                    .pending
+                                    .ability
+                                    .trigger_source
+                                    .as_ref()
+                                    .map(|source| source.identity.reference),
+                                context.pending.controller,
+                                duration_event,
+                                event,
+                            )
+                        {
+                            ordered_latches.push((group_index, trigger_index, duration_event));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (entry_id, duration_event) in stack_latches {
+        if let Some(ability) = state
+            .stack
+            .iter_mut()
+            .find(|entry| entry.id == entry_id)
+            .and_then(StackEntry::ability_mut)
+        {
+            ability.record_duration_event_recursive(duration_event);
+        }
+    }
+    for duration_event in resolving_latches {
+        if let Some(ability) = state
+            .resolving_stack_entry
+            .as_mut()
+            .and_then(StackEntry::ability_mut)
+        {
+            ability.record_duration_event_recursive(duration_event);
+        }
+    }
+    for (index, duration_event) in deferred_latches {
+        if let Some(context) = state.deferred_triggers.get_mut(index) {
+            context.record_duration_event(duration_event);
+        }
+    }
+    for (group_index, trigger_index, duration_event) in ordered_latches {
+        if let Some(context) = state
+            .pending_trigger_order
+            .as_mut()
+            .and_then(|order| order.groups.get_mut(group_index))
+            .and_then(|group| group.triggers.get_mut(trigger_index))
+        {
+            context.record_duration_event(duration_event);
+        }
+    }
+
+    for event in events.iter() {
+        match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                ..
+            } => {
+                // Find exile links where this object was the source and the exile
+                // effect specified an automatic return when that source leaves.
+                for link in &state.exile_links {
+                    if link.source_id == *object_id
+                        && matches!(
+                            &link.kind,
+                            crate::types::game_state::ExileLinkKind::UntilSourceLeaves { .. }
+                        )
+                    {
+                        to_return.push(link.clone());
+                    }
+                }
+            }
+            GameEvent::MonarchChanged { player_id } => {
+                for link in &state.exile_links {
+                    if let crate::types::game_state::ExileLinkKind::UntilOpponentBecomesMonarch {
+                        controller,
+                        ..
+                    } = &link.kind
+                    {
+                        if super::players::is_opponent(state, *controller, *player_id) {
+                            to_return.push(link.clone());
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -10663,11 +15375,14 @@ pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEv
         if !still_in_exile {
             continue;
         }
-        let crate::types::game_state::ExileLinkKind::UntilSourceLeaves { return_zone } = &link.kind
-        else {
-            continue;
+        let return_zone = match &link.kind {
+            crate::types::game_state::ExileLinkKind::UntilSourceLeaves { return_zone }
+            | crate::types::game_state::ExileLinkKind::UntilOpponentBecomesMonarch {
+                return_zone,
+                ..
+            } => *return_zone,
+            _ => continue,
         };
-        let return_zone = *return_zone;
         let gi = match groups.iter().position(|(zone, _)| *zone == return_zone) {
             Some(i) => i,
             None => {
@@ -10761,6 +15476,598 @@ mod keyword_action_stack_tests;
 mod mdfc_land_tests;
 
 #[cfg(test)]
+mod priority_reducer_census_tests {
+    use super::PriorityReducerFamily;
+    use std::collections::BTreeSet;
+
+    /// R14–R18: Freeze the independently discovered Priority-reducer surface
+    /// before the private announcement facade is introduced. This scans the
+    /// normal reducer source rather than deriving the result from a future
+    /// facade inventory, so a new direct Priority arm cannot hide behind the
+    /// inventory it is required to update.
+    #[test]
+    fn priority_reducer_has_the_frozen_action_family_census() {
+        let source = include_str!("engine.rs");
+        let start = source
+            .find("(WaitingFor::Priority { player }, GameAction::PassPriority)")
+            .expect("Priority reducer starts at PassPriority");
+        let end_marker = "(WaitingFor::Priority { player }, GameAction::SetAutoPass { mode })";
+        let end = source[start..]
+            .find(end_marker)
+            .map(|offset| start + offset + end_marker.len())
+            .expect("Priority reducer ends at SetAutoPass");
+
+        let mut families = BTreeSet::new();
+        let mut lines_after_priority_pattern = 0usize;
+        for line in source[start..end].lines() {
+            if line.contains("WaitingFor::Priority { player }") {
+                lines_after_priority_pattern = 6;
+            }
+            if lines_after_priority_pattern > 0 {
+                if let Some(action) = line.split("GameAction::").nth(1) {
+                    let name = action
+                        .chars()
+                        .take_while(|character| {
+                            character.is_ascii_alphabetic() || *character == '_'
+                        })
+                        .collect::<String>();
+                    if !name.is_empty() {
+                        families.insert(name);
+                    }
+                }
+                lines_after_priority_pattern -= 1;
+            }
+        }
+
+        let expected = [
+            "ActivateAbility",
+            "ActivateManaSource",
+            "ActivateNinjutsu",
+            "ActivateStation",
+            "BeginResolveAll",
+            "CastPreparedCopy",
+            "CastSpell",
+            "CastSpellAsSneak",
+            "CastSpellAsWebSlinging",
+            "CastSpellForFree",
+            "CompanionToHand",
+            "CrewVehicle",
+            "EndContinuousEffect",
+            "Equip",
+            "Foretell",
+            "PassPriority",
+            "PlayFaceDown",
+            "PlayLand",
+            "RollPlanarDie",
+            "SaddleMount",
+            "SetAutoPass",
+            "TapLandForMana",
+            "Transform",
+            "TurnFaceUp",
+            "UnlockRoomDoor",
+            "UntapLandForMana",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+
+        assert_eq!(families, expected);
+        let preflight_families = PriorityReducerFamily::ALL
+            .into_iter()
+            .map(|family| format!("{family:?}"))
+            .collect::<BTreeSet<_>>();
+        let expected_preflight_families = expected
+            .iter()
+            .filter(|family| {
+                !matches!(
+                    family.as_str(),
+                    "BeginResolveAll" | "PassPriority" | "SetAutoPass"
+                )
+            })
+            .map(|family| (*family).to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(preflight_families, expected_preflight_families);
+    }
+}
+
+#[cfg(test)]
+mod priority_facade_boundary_tests {
+    /// R18: Provider announcements remain opaque until the one engine-owned
+    /// facade. This source guard is intentionally scoped to the frozen provider
+    /// set: ordinary `GameAction` producers are not part of this boundary.
+    #[test]
+    fn facade_access_is_constructed_once_and_provider_accessors_only_borrow_it() {
+        let engine_source = include_str!("engine.rs");
+        let facade_constructor = ["PriorityAnnouncementFacadeAccess::", "new()"].concat();
+        assert_eq!(
+            engine_source.matches(&facade_constructor).count(),
+            1,
+            "the facade capability must have one constructor call"
+        );
+
+        let announcement_start = engine_source
+            .find("enum PriorityAnnouncement {")
+            .map(|offset| offset + "enum PriorityAnnouncement {".len())
+            .expect("private announcement sum exists");
+        let announcement_end = engine_source[announcement_start..]
+            .find("\n}\n\nimpl PriorityAnnouncement")
+            .map(|offset| announcement_start + offset)
+            .expect("private announcement sum closes before its family match");
+        assert!(
+            !engine_source[announcement_start..announcement_end].contains('{'),
+            "Priority announcements must carry provider-owned opaque values, not raw fields"
+        );
+
+        for provider_source in [
+            include_str!("casting.rs"),
+            include_str!("mana_sources.rs"),
+            include_str!("morph.rs"),
+            include_str!("transform.rs"),
+            include_str!("keywords.rs"),
+            include_str!("room.rs"),
+            include_str!("companion.rs"),
+            include_str!("planechase.rs"),
+            include_str!("end_continuous_effect.rs"),
+            include_str!("crew_payment.rs"),
+            include_str!("effects/prepare.rs"),
+            include_str!("effects/attach.rs"),
+        ] {
+            assert!(
+                !provider_source.contains("PriorityAnnouncementFacadeAccess::"),
+                "providers may not construct or invoke the facade capability"
+            );
+            for line in provider_source
+                .lines()
+                .filter(|line| line.contains("PriorityAnnouncementFacadeAccess"))
+            {
+                assert!(
+                    line.contains("use ") || line.contains("_access: &"),
+                    "provider capability mentions must be imports or borrowed read-only accessors: {line}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod priority_principal_tests {
+    use super::{
+        apply_actionless_priority_pass_for_prospective, preflight_priority_window,
+        priority_announcement_to_action, priority_preflight_candidates,
+        priority_principal_for_preflight, PriorityPreflight, PriorityPreflightBlock,
+        PriorityPreflightCandidate, PriorityPreflightIndeterminate, PriorityReducerFamily,
+    };
+    use crate::game::game_object::BackFaceData;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::zones;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter,
+    };
+    use crate::types::card_type::{CardType, CoreType};
+    use crate::types::game_state::{GameState, WaitingFor};
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use crate::types::phase::Phase;
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    fn issue_4001_alternative_face_fixture(mana_count: usize) -> (GameState, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::DeclareAttackers);
+        let object_id = scenario
+            .add_creature_to_hand(P0, "Frolicking Familiar", 2, 2)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 2,
+            })
+            .id();
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&object_id)
+            .unwrap()
+            .back_face = Some(BackFaceData {
+            name: "Blow Off Steam".to_string(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            printed_loyalty: None,
+            defense: None,
+            card_types: {
+                let mut card_types = CardType::default();
+                card_types.core_types.push(CoreType::Instant);
+                card_types.subtypes.push("Adventure".to_string());
+                card_types
+            },
+            mana_cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            },
+            keywords: Vec::new(),
+            abilities: vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                    excess: None,
+                },
+            )],
+            trigger_definitions: Default::default(),
+            replacement_definitions: Default::default(),
+            static_definitions: Default::default(),
+            color: vec![ManaColor::Red],
+            printed_ref: None,
+            modal: None,
+            additional_cost: None,
+            strive_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            layout_kind: None,
+            parse_warnings: vec![],
+        });
+        for _ in 0..mana_count {
+            runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+                ManaType::Red,
+                ObjectId(0),
+                false,
+                Vec::new(),
+            ));
+        }
+        (runner.state().clone(), object_id)
+    }
+
+    #[test]
+    fn principal_preserves_the_controlled_priority_seat() {
+        let controlled_seat = PlayerId(0);
+        let controller = PlayerId(1);
+        let mut state = GameState::new_two_player(42);
+        state.active_player = controlled_seat;
+        state.waiting_for = WaitingFor::Priority {
+            player: controlled_seat,
+        };
+        state.turn_decision_controller = Some(controller);
+        state.priority_player = controller;
+
+        let principal = priority_principal_for_preflight(&state)
+            .expect("a synchronized controlled Priority window has a principal");
+
+        assert_eq!(principal.semantic_holder(), controlled_seat);
+        assert_eq!(principal.authenticated_actor(), controller);
+        assert_eq!(principal.land_resource_owner(), controlled_seat);
+    }
+
+    #[test]
+    fn principal_rejects_stale_priority_authority_without_mutating_the_wait() {
+        let controlled_seat = PlayerId(0);
+        let controller = PlayerId(1);
+        let mut state = GameState::new_two_player(42);
+        state.active_player = controlled_seat;
+        state.waiting_for = WaitingFor::Priority {
+            player: controlled_seat,
+        };
+        state.turn_decision_controller = Some(controller);
+        state.priority_player = controlled_seat;
+        let waiting_before = state.waiting_for.clone();
+
+        assert!(matches!(
+            priority_principal_for_preflight(&state),
+            Err(PriorityPreflightIndeterminate::PriorityAuthorityMismatch)
+        ));
+        assert_eq!(state.waiting_for, waiting_before);
+    }
+
+    #[test]
+    fn principal_rejects_non_priority_without_mutating_the_wait() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::GameOver { winner: None };
+        let waiting_before = state.waiting_for.clone();
+
+        assert!(matches!(
+            priority_principal_for_preflight(&state),
+            Err(PriorityPreflightIndeterminate::NotPriority)
+        ));
+        assert_eq!(state.waiting_for, waiting_before);
+    }
+
+    #[test]
+    fn priority_preflight_reports_an_actionless_empty_window() {
+        let player = PlayerId(0);
+        let mut state = GameState::new_two_player(42);
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+
+        assert_eq!(
+            preflight_priority_window(&state),
+            PriorityPreflight::Actionless
+        );
+    }
+
+    #[test]
+    fn priority_preflight_keeps_cast_legal_only_through_alternative_face() {
+        let (state, object_id) = issue_4001_alternative_face_fixture(2);
+        let before = state.clone();
+
+        assert!(
+            crate::game::casting::effective_spell_cost(&state, P0, object_id).is_none(),
+            "the creature front face must remain unpreparable outside a main phase"
+        );
+        assert!(
+            crate::game::casting::can_cast_object_now(&state, P0, object_id),
+            "the instant Adventure face must make the object castable"
+        );
+        assert_eq!(
+            preflight_priority_window(&state),
+            PriorityPreflight::Actionable {
+                family: PriorityReducerFamily::CastSpell,
+            }
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn priority_preflight_stays_actionless_when_neither_face_is_castable() {
+        let (state, object_id) = issue_4001_alternative_face_fixture(0);
+        let before = state.clone();
+
+        assert!(
+            !crate::game::casting::can_cast_object_now(&state, P0, object_id),
+            "neither the front face nor the Adventure face is currently castable"
+        );
+        assert_eq!(
+            preflight_priority_window(&state),
+            PriorityPreflight::Actionless
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn priority_preflight_reports_stale_authority_without_inventing_a_family() {
+        let controlled_seat = PlayerId(0);
+        let controller = PlayerId(1);
+        let mut state = GameState::new_two_player(42);
+        state.active_player = controlled_seat;
+        state.waiting_for = WaitingFor::Priority {
+            player: controlled_seat,
+        };
+        state.turn_decision_controller = Some(controller);
+        state.priority_player = controlled_seat;
+        let before = state.clone();
+
+        assert_eq!(
+            preflight_priority_window(&state),
+            PriorityPreflight::Indeterminate {
+                family: None,
+                block: PriorityPreflightBlock::Principal(
+                    PriorityPreflightIndeterminate::PriorityAuthorityMismatch,
+                ),
+            }
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn priority_preflight_clones_a_land_announcement_without_mutating_live_state() {
+        let player = PlayerId(0);
+        let mut state = GameState::new_two_player(42);
+        state.active_player = player;
+        state.priority_player = player;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.waiting_for = WaitingFor::Priority { player };
+        let land = zones::create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "Island".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .expect("new hand object exists")
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        state.players[player.0 as usize].hand.push_back(land);
+        let before = state.clone();
+
+        assert_eq!(
+            preflight_priority_window(&state),
+            PriorityPreflight::Actionable {
+                family: PriorityReducerFamily::PlayLand
+            }
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn priority_preflight_routes_basic_land_mana_through_the_mana_provider() {
+        let player = PlayerId(0);
+        let mut state = GameState::new_two_player(42);
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+        let forest = zones::create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        let forest = state
+            .objects
+            .get_mut(&forest)
+            .expect("new battlefield Forest exists");
+        forest.card_types.core_types.push(CoreType::Land);
+        forest.card_types.subtypes.push("Forest".to_string());
+        let before = state.clone();
+
+        assert_eq!(
+            preflight_priority_window(&state),
+            PriorityPreflight::Actionable {
+                family: PriorityReducerFamily::TapLandForMana,
+            }
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn priority_play_face_down_candidate_is_reachable_but_not_an_exact_legal_action_candidate() {
+        use crate::types::actions::GameAction;
+        use crate::types::keywords::Keyword;
+        use crate::types::mana::{ManaCost, ManaType, ManaUnit};
+
+        let player = PlayerId(0);
+        let mut state = GameState::new_two_player(42);
+        state.active_player = player;
+        state.priority_player = player;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.waiting_for = WaitingFor::Priority { player };
+        let morph = zones::create_object(
+            &mut state,
+            CardId(7_301),
+            player,
+            "Preflight Morph".to_string(),
+            Zone::Hand,
+        );
+        {
+            let object = state.objects.get_mut(&morph).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+            object.mana_cost = ManaCost::generic(8);
+            object.base_mana_cost = object.mana_cost.clone();
+            object.keywords = vec![Keyword::Morph(ManaCost::generic(5))];
+            object.base_keywords = object.keywords.clone();
+        }
+        let sibling_spell = zones::create_object(
+            &mut state,
+            CardId(7_303),
+            player,
+            "Preflight Sibling Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let object = state.objects.get_mut(&sibling_spell).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+            object.mana_cost = ManaCost::zero();
+            object.base_mana_cost = object.mana_cost.clone();
+        }
+        let sibling_action = GameAction::CastSpell {
+            object_id: sibling_spell,
+            card_id: state.objects[&sibling_spell].card_id,
+            targets: Vec::new(),
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        };
+        let prohibition = zones::create_object(
+            &mut state,
+            CardId(7_302),
+            PlayerId(1),
+            "Preflight Name Prohibition".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            use crate::types::ability::{ChosenAttribute, StaticDefinition, TargetFilter};
+            use crate::types::statics::{ProhibitionScope, StaticMode};
+
+            let object = state.objects.get_mut(&prohibition).unwrap();
+            object.card_types.core_types.push(CoreType::Enchantment);
+            object.base_card_types = object.card_types.clone();
+            object
+                .chosen_attributes
+                .push(ChosenAttribute::CardName("Preflight Morph".to_string()));
+            object.static_definitions.push(
+                StaticDefinition::new(StaticMode::CantBeCast {
+                    who: ProhibitionScope::AllPlayers,
+                })
+                .affected(TargetFilter::HasChosenName),
+            );
+        }
+        for _ in 0..3 {
+            state.players[0].mana_pool.add(ManaUnit::new(
+                ManaType::Colorless,
+                morph,
+                false,
+                vec![],
+            ));
+        }
+        let principal = priority_principal_for_preflight(&state)
+            .expect("the synchronized priority window has a principal");
+        let play_face_down = priority_preflight_candidates(&state, &principal)
+            .into_iter()
+            .find(|candidate| candidate.family() == PriorityReducerFamily::PlayFaceDown)
+            .expect("the family-specific face-down candidate must be reachable");
+        assert_eq!(play_face_down.family(), PriorityReducerFamily::PlayFaceDown);
+        assert_eq!(
+            preflight_priority_window(&state),
+            PriorityPreflight::Actionable {
+                family: PriorityReducerFamily::CastSpell,
+            },
+            "the unchanged first-wins aggregate must report the earlier CastSpell family"
+        );
+        let candidates = crate::ai_support::candidate_actions(&state);
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.action == sibling_action));
+        assert!(candidates
+            .iter()
+            .all(|candidate| !matches!(candidate.action, GameAction::PlayFaceDown { .. })));
+        let legal_actions = crate::ai_support::legal_actions(&state);
+        assert!(legal_actions.contains(&sibling_action));
+        assert!(legal_actions
+            .iter()
+            .all(|action| !matches!(action, GameAction::PlayFaceDown { .. })));
+
+        let PriorityPreflightCandidate::Announcement(announcement) = play_face_down else {
+            panic!("the reachable face-down family must carry a reducer announcement")
+        };
+        let action = priority_announcement_to_action(announcement);
+        assert!(matches!(
+            action,
+            GameAction::PlayFaceDown { object_id, .. } if object_id == morph
+        ));
+        let mut projected = state.clone();
+        super::apply_as_current(&mut projected, action)
+            .expect("the reconstructed face-down announcement must reduce successfully");
+        assert!(projected.waiting_for.pending_cast_ref().is_none());
+        assert!(projected.pending_cast.is_none());
+        assert_eq!(projected.objects[&morph].zone, Zone::Battlefield);
+        assert!(projected.objects[&morph].face_down);
+    }
+
+    #[test]
+    fn prospective_actionless_pass_rejects_an_actionable_window_without_mutation() {
+        let player = PlayerId(0);
+        let mut state = GameState::new_two_player(42);
+        state.active_player = player;
+        state.priority_player = player;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.waiting_for = WaitingFor::Priority { player };
+        let land = zones::create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "Island".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .expect("new hand object exists")
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        state.players[player.0 as usize].hand.push_back(land);
+        let before = state.clone();
+
+        assert!(apply_actionless_priority_pass_for_prospective(&mut state).is_err());
+        assert_eq!(state, before);
+    }
+}
+
+#[cfg(test)]
 mod shortcut_schema_tests {
     use super::shortcut_iteration_count;
     use crate::analysis::decision_template::IterationCount;
@@ -10798,13 +16105,454 @@ mod shortcut_schema_tests {
     }
 }
 
+/// item-4 C2b — `build_bounded_declaration`, the consumer that turns the window's observed
+/// answers into the offer's own CR 732.2a declaration.
+///
+/// TIER NOTE, stated because it is FORCED rather than chosen: rows D1 / D1-P / D1-P-sib drive
+/// the real F4 dump through production `apply()` and live in
+/// `crates/engine/tests/integration/fantastic_four_bounded_loop.rs`. The three rows HERE are the
+/// ones no tracked board can reach — a `Decline`d CR 603.5 answer at a certifying offer, and a
+/// point kind the bounded publisher cannot mint — so each states its own unreachability rather
+/// than implying a wire row was available and skipped.
+#[cfg(test)]
+mod bounded_declaration_tests {
+    use super::{build_bounded_declaration, build_shortcut_schema};
+    use crate::analysis::decision_template::{
+        DecisionPoint, DecisionPointKind, DecisionSlot, IterationCount, LoopAnswer,
+        LoopAnswerValue, MayChoiceOption, PinnedDecision, ShortcutDecisionSchema, TargetPin,
+    };
+    use crate::types::ability::TargetRef;
+    use crate::types::game_state::{GameState, LoopDetectionMode, YieldTarget};
+    use crate::types::identifiers::ObjectId;
+    use crate::types::mana::ManaColor;
+    use crate::types::player::PlayerId;
+
+    const PROPOSER: PlayerId = PlayerId(0);
+    const AIMED: PlayerId = PlayerId(1);
+
+    /// A CR 400.7-stable source identity, built the way `object_decision_source` builds one.
+    fn source(id: u64) -> YieldTarget {
+        YieldTarget::ThisObject {
+            source_id: ObjectId(id),
+            incarnation: Some(1),
+            trigger_description: None,
+        }
+    }
+
+    /// A board whose journal ACCEPTS writes: `record_loop_answer` is gated on
+    /// `loop_detection.samples()`, so a default board would silently record nothing and every
+    /// row below would measure the "seat never answered" path instead of its own subject.
+    fn recording_state() -> GameState {
+        let mut state = GameState::new_two_player(7);
+        state.loop_detection = LoopDetectionMode::Interactive;
+        state
+    }
+
+    fn targets_kind() -> DecisionPointKind {
+        DecisionPointKind::Targets {
+            legal_targets: vec![TargetRef::Player(AIMED)],
+            min_targets: 1,
+            max_targets: 1,
+            ordered: false,
+        }
+    }
+
+    /// The two-kind schema the bounded publisher actually mints: one CR 603.5 `may` gate and one
+    /// CR 601.2c target slot, on two distinct sources.
+    fn may_and_target_schema() -> ShortcutDecisionSchema {
+        build_shortcut_schema(
+            vec![
+                DecisionPoint {
+                    slot: DecisionSlot::may(source(100)),
+                    kind: DecisionPointKind::MayChoice,
+                },
+                DecisionPoint {
+                    slot: DecisionSlot::target(source(200)),
+                    kind: targets_kind(),
+                },
+            ],
+            IterationCount::Fixed(4),
+            4,
+        )
+    }
+
+    /// **Row D1-P-may — the `MayChoice` pin FOLLOWS THE JOURNAL, not a constant.**
+    ///
+    /// CR 603.5: an optional trigger's answer is `Take` or `Decline`, and the declaration must
+    /// state the one the proposer actually gave. A consumer that hard-codes
+    /// `MayChoiceOption::Take` is indistinguishable from this one on every tracked board, which
+    /// is exactly the vacuity this row closes.
+    ///
+    /// # Why this tier is FORCED, and not a shortcut
+    ///
+    /// A wire-tier may-provenance drive is measured UNREACHABLE: answering every CR 603.5 prompt
+    /// `Decline` on the tracked F4 board reaches NO offer at all (declining Sue's token breaks
+    /// the chain to Reed, so the loop never certifies — the drive policy's own doc records it).
+    /// The residual is filed rather than hidden: it needs a bounded board on which the proposer
+    /// DECLINES and the loop still certifies, and the lane's real-fixtures rule bars
+    /// synthesizing one.
+    ///
+    /// # Non-vacuity
+    ///
+    /// The `Take` case is asserted in the SAME test from the SAME fixture one field apart, so a
+    /// consumer that returned `None` — or that dropped the may pin entirely — fails the positive
+    /// arm rather than passing the negative one by omission.
+    ///
+    /// REVERT-PROBE: hard-code `take: MayChoiceOption::Take` in the `(MayChoice, May)` arm ⇒ the
+    /// `Decline` arm's assertion flips (`Take != Decline`) while the `Take` arm stays green.
+    /// That asymmetry is the row.
+    ///
+    /// *What wrong implementation would still pass this row?* One that reads the journal for the
+    /// may axis but pins a CONSTANT target — D1-P and D1-P-sib cover that axis on the real dump.
+    #[test]
+    fn d1p_may_the_may_pin_follows_the_journal_not_a_constant() {
+        let schema = may_and_target_schema();
+        let [may_point, target_point] = &schema.points[..] else {
+            panic!("the fixture publishes exactly two points");
+        };
+
+        for answered in [MayChoiceOption::Decline, MayChoiceOption::Take] {
+            let mut state = recording_state();
+            state.record_loop_answer(
+                may_point.slot.clone(),
+                PROPOSER,
+                LoopAnswer::Uniform(LoopAnswerValue::May(answered)),
+            );
+            state.record_loop_answer(
+                target_point.slot.clone(),
+                PROPOSER,
+                LoopAnswer::Uniform(LoopAnswerValue::Targets(vec![TargetPin::Player(AIMED)])),
+            );
+
+            // Reach-guard: the journal really holds the answer, under the PROPOSER's own key.
+            // Without this a gated-off `record_loop_answer` would make every arm below measure
+            // the "never answered" refusal instead.
+            assert_eq!(
+                state.loop_answer(&may_point.slot, PROPOSER),
+                Some(LoopAnswer::Uniform(LoopAnswerValue::May(answered))),
+                "reach-guard: the CR 603.5 answer must be journalled before the consumer runs"
+            );
+
+            let declaration = build_bounded_declaration(&state, PROPOSER, &schema)
+                .expect("both published points are answered, so the declaration is complete");
+            assert_eq!(
+                declaration.decisions[0],
+                PinnedDecision::MayChoice {
+                    slot: may_point.slot.clone(),
+                    take: answered,
+                },
+                "CR 603.5: the pinned option must be the one the proposer ANSWERED ({answered:?}), \
+                 not a constant"
+            );
+            assert_eq!(
+                declaration.owner, PROPOSER,
+                "the declaration is the proposer's own, which is what the declare-time owner \
+                 firewall compares against"
+            );
+        }
+    }
+
+    /// **Row D3 — the consumer is TOTAL and FAIL-CLOSED over the four `DecisionPointKind`s the
+    /// bounded producer cannot mint.**
+    ///
+    /// CR 700.2 (`Mode`), CR 732.6 (`UnlessBreak`), CR 601.2h + CR 702.51a (`ConvokeTaps`) and
+    /// CR 608.2d + CR 605.3b (`ManaColor`) are real choice kinds with no observation-side answer
+    /// shape in `LoopAnswerValue`, so there is nothing to pin for them and the declaration must
+    /// refuse rather than guess.
+    ///
+    /// # ⚠ THE JOURNAL ENTRY ON THE FOUR-KIND POINT IS LOAD-BEARING, NOT DECORATION
+    ///
+    /// `build_bounded_declaration`'s body order is (1) empty check, (2) `state.loop_answer(..)?`,
+    /// (3) the `(kind, value)` match. An UNJOURNALLED four-kind point exits at step (2)'s `?` —
+    /// before control ever reaches the arm this row is about — and the reddening mutation returns
+    /// `None` there too, so real and mutant AGREE and nothing can red. Each case therefore
+    /// journals its own point and ASSERTS the entry is present before the consumer runs.
+    ///
+    /// # Unreachable today, and the row says so
+    ///
+    /// `bounded_cycle_pin_slots_for_window` constructs only `Targets` and `MayChoice` points. The
+    /// other four have one producer, `pinned_decisions_to_points`, which serves the two mints that
+    /// publish `declaration: None`. The row exists so a publisher relaxation gets a red test
+    /// instead of a silent pin.
+    ///
+    /// REVERT-PROBE: replace the four-kind arm with `_ => continue` ⇒ each case builds a
+    /// `Some(template)` with the four-kind point silently dropped ⇒ every `is_none()` flips while
+    /// the control stays green.
+    ///
+    /// *What wrong implementation would still pass this row?* One that returns `None` for
+    /// EVERYTHING — which the control arm (the same fixture with only mintable kinds) refuses.
+    #[test]
+    fn d3_the_consumer_fail_closes_on_every_kind_the_bounded_publisher_cannot_mint() {
+        let unmintable = [
+            DecisionPointKind::Mode {
+                available_modes: vec![0, 1],
+                min_modes: 1,
+                max_modes: 1,
+                allow_repeats: false,
+            },
+            DecisionPointKind::UnlessBreak,
+            DecisionPointKind::ConvokeTaps {
+                tappable: vec![ObjectId(31)],
+            },
+            DecisionPointKind::ManaColor {
+                color: ManaColor::Blue,
+            },
+        ];
+
+        // ── CONTROL, first: the same shape with only MINTABLE kinds yields `Some` ──
+        let control_schema = may_and_target_schema();
+        let mut control = recording_state();
+        control.record_loop_answer(
+            control_schema.points[0].slot.clone(),
+            PROPOSER,
+            LoopAnswer::Uniform(LoopAnswerValue::May(MayChoiceOption::Take)),
+        );
+        control.record_loop_answer(
+            control_schema.points[1].slot.clone(),
+            PROPOSER,
+            LoopAnswer::Uniform(LoopAnswerValue::Targets(vec![TargetPin::Player(AIMED)])),
+        );
+        assert!(
+            build_bounded_declaration(&control, PROPOSER, &control_schema).is_some(),
+            "CONTROL: a fully-answered two-kind schema DOES publish a declaration — without this \
+             a consumer that refused everything would pass all four cases below"
+        );
+
+        for kind in unmintable {
+            let odd_slot = DecisionSlot::target(source(300));
+            let schema = build_shortcut_schema(
+                vec![
+                    DecisionPoint {
+                        slot: DecisionSlot::may(source(100)),
+                        kind: DecisionPointKind::MayChoice,
+                    },
+                    DecisionPoint {
+                        slot: odd_slot.clone(),
+                        kind: kind.clone(),
+                    },
+                ],
+                IterationCount::Fixed(4),
+                4,
+            );
+            let mut state = recording_state();
+            // The OTHER point is answered, so the refusal cannot be attributed to it.
+            state.record_loop_answer(
+                schema.points[0].slot.clone(),
+                PROPOSER,
+                LoopAnswer::Uniform(LoopAnswerValue::May(MayChoiceOption::Take)),
+            );
+            // `LoopAnswerValue` has exactly two variants and `May` pairs with NONE of the four
+            // kinds under test, so this entry is answerable and still unpinnable — which is the
+            // fail-closed disposition the row measures.
+            state.record_loop_answer(
+                odd_slot.clone(),
+                PROPOSER,
+                LoopAnswer::Uniform(LoopAnswerValue::May(MayChoiceOption::Take)),
+            );
+            assert_eq!(
+                state.loop_answer(&odd_slot, PROPOSER),
+                Some(LoopAnswer::Uniform(LoopAnswerValue::May(
+                    MayChoiceOption::Take
+                ))),
+                "⚠ VACUITY GUARD for kind {kind:?}: an UNJOURNALLED point exits at the \
+                 `loop_answer(..)?` one step EARLIER, where the reddening mutation also returns \
+                 `None` — real and mutant would agree and this row could never fire"
+            );
+
+            assert!(
+                build_bounded_declaration(&state, PROPOSER, &schema).is_none(),
+                "CR 732.2a: {kind:?} has no `LoopAnswerValue` shape, so the declaration must \
+                 refuse rather than pin a guess or silently drop the point"
+            );
+        }
+    }
+
+    /// **Row D4 — an empty schema publishes NO declaration.**
+    ///
+    /// LOAD-BEARING, not tidiness: `predictability_gate` and `validate_pins` both live inside
+    /// `handle_declare_shortcut`'s `if !offer.schema.points.is_empty()` block, so a declaration
+    /// minted against an empty schema would travel the one declare path that runs NEITHER gate.
+    /// The invariant is also staged at fixture level by
+    /// `tests/integration/loop_shortcut.rs::r28_empty_schema_offer`, which passes
+    /// `declaration: None` for this reason.
+    ///
+    /// REVERT-PROBE: delete the `schema.points.is_empty()` early return ⇒ the loop body never
+    /// runs, step (4) builds a template with ZERO decisions ⇒ `is_none()` flips.
+    ///
+    /// *What wrong implementation would still pass this row?* One that also refuses a
+    /// fully-answered NON-empty schema — which D1-P-may's positive arm and D3's control refuse.
+    #[test]
+    fn d4_an_empty_schema_publishes_no_declaration() {
+        let empty = build_shortcut_schema(Vec::new(), IterationCount::Fixed(4), 4);
+        assert!(
+            empty.points.is_empty(),
+            "reach-guard: this fixture is the empty-schema case"
+        );
+        let mut state = recording_state();
+        // Journalled anyway: the refusal must be keyed on the EMPTY POINT SET, not on an empty
+        // journal, and a populated journal is the only way to tell those two apart.
+        state.record_loop_answer(
+            DecisionSlot::may(source(100)),
+            PROPOSER,
+            LoopAnswer::Uniform(LoopAnswerValue::May(MayChoiceOption::Take)),
+        );
+        assert!(
+            state.loop_answers_recorded() > 0,
+            "reach-guard: the journal is NON-empty, so the refusal below is the point set's"
+        );
+        assert!(
+            build_bounded_declaration(&state, PROPOSER, &empty).is_none(),
+            "CR 732.2a: an offer that publishes no choice states no declaration"
+        );
+    }
+
+    /// **Row D8 — the PUBLISHER cannot publish what the HANDLER would refuse.**
+    ///
+    /// `ai_support::candidates` reads `declaration.is_some()` as *"`handle_declare_shortcut`
+    /// will accept this"* and hands the published template straight to `DeclareShortcut`. That
+    /// reading was unenforced: the publisher ran neither firewall half, and the two sides agreed
+    /// only because the publisher copies `legal_targets` from the same announcement the journal
+    /// answer came from. This row pins the implication itself.
+    ///
+    /// # The two halves are measured on DIFFERENT instruments, so this is not circular
+    ///
+    /// The "handler refuses it" half is measured by calling `validate_pins` DIRECTLY on the
+    /// template the pre-fix publisher would have emitted — the handler's own value-legality
+    /// firewall, at the range that handler validates a `Fixed(max_iterations)` declaration over.
+    /// Only then is the publisher asked. A row that asserted `is_none()` alone would pass on a
+    /// publisher that refuses for any unrelated reason.
+    ///
+    /// # Reach-guards, asserted BEFORE the claim
+    ///
+    /// The journal really holds the hostile answer (else the publisher exits one step earlier at
+    /// `loop_answer(..)?` and the refusal is not this one), and `predictability_gate` PASSES on
+    /// that template (both published slots are pinned) — so the refusal is attributable to the
+    /// VALUE half, not to coverage.
+    ///
+    /// # LATENT, not live — the row says so rather than implying a bug was shipped
+    ///
+    /// No tracked board reaches this: `record_trigger_target_answer` journals the seat it
+    /// ANNOUNCED, and the publisher's `legal_targets` come from that same announcement, so the
+    /// disagreement staged here is fixture-made. Reachability is NOT claimed.
+    ///
+    /// REVERT-PROBE: delete step (5)'s `declaration_conforms(..)` call (return `Some(template)`)
+    /// ⇒ the hostile arm's `is_none()` flips while the control stays green.
+    ///
+    /// *What wrong implementation would still pass this row?* One that validates COVERAGE only —
+    /// `predictability_gate` alone passes here, which is why the reach-guard asserts it. And one
+    /// that refuses everything, which the control arm refuses.
+    #[test]
+    fn d8_the_publisher_refuses_a_declaration_the_declare_handler_would_reject() {
+        use crate::analysis::decision_template::{
+            declaration_conforms, predictability_gate, validate_pins, DecisionGroupKey,
+            DecisionKind, DecisionTemplate, ReplayMode,
+        };
+
+        let schema = may_and_target_schema();
+        let [may_point, target_point] = &schema.points[..] else {
+            panic!("the fixture publishes exactly two points");
+        };
+        // CR 608.2b: the published legal set names AIMED only, so a pin naming PROPOSER is
+        // outside the offer's own legal set — an illegal pin VALUE at a legally exposed slot.
+        assert!(
+            !matches!(&target_point.kind, DecisionPointKind::Targets { legal_targets, .. }
+                if legal_targets.contains(&TargetRef::Player(PROPOSER))),
+            "reach-guard: PROPOSER must NOT be a published legal target, or the hostile pin \
+             below is a conforming one and this row measures nothing"
+        );
+
+        for (label, pinned, expect_published) in [
+            ("hostile", TargetPin::Player(PROPOSER), false),
+            ("control", TargetPin::Player(AIMED), true),
+        ] {
+            let mut state = recording_state();
+            state.record_loop_answer(
+                may_point.slot.clone(),
+                PROPOSER,
+                LoopAnswer::Uniform(LoopAnswerValue::May(MayChoiceOption::Take)),
+            );
+            state.record_loop_answer(
+                target_point.slot.clone(),
+                PROPOSER,
+                LoopAnswer::Uniform(LoopAnswerValue::Targets(vec![pinned.clone()])),
+            );
+            assert_eq!(
+                state.loop_answer(&target_point.slot, PROPOSER),
+                Some(LoopAnswer::Uniform(LoopAnswerValue::Targets(vec![
+                    pinned.clone()
+                ]))),
+                "[{label}] reach-guard: the answer must be journalled, or the publisher exits at \
+                 `loop_answer(..)?` and the verdict below is the 'never answered' one"
+            );
+
+            // The template the UNVALIDATED publisher would have emitted, spelled out here so the
+            // handler-side half below is measured on it rather than on whatever the publisher
+            // now returns.
+            let as_published = DecisionTemplate {
+                owner: PROPOSER,
+                decisions: vec![
+                    PinnedDecision::MayChoice {
+                        slot: may_point.slot.clone(),
+                        take: MayChoiceOption::Take,
+                    },
+                    PinnedDecision::Targets {
+                        slot: target_point.slot.clone(),
+                        targets: vec![pinned.clone()],
+                    },
+                ],
+                replay: ReplayMode::Scheduled {
+                    count: schema.iteration_count.clone(),
+                },
+                key: DecisionGroupKey::from_sources(
+                    &schema
+                        .points
+                        .iter()
+                        .map(|point| point.slot.source.clone())
+                        .collect::<Vec<_>>(),
+                    DecisionKind::LoopChoice,
+                ),
+            };
+            let required: Vec<_> = schema.points.iter().map(|p| p.slot.clone()).collect();
+            assert!(
+                predictability_gate(&as_published, &required).is_ok(),
+                "[{label}] reach-guard: COVERAGE passes on this template — every published slot \
+                 is pinned — so the handler's verdict below is the VALUE half's"
+            );
+
+            // ── HALF 1, on the handler's own instrument: would `handle_declare_shortcut` take
+            //    it, at the range it validates the AI's `Fixed(max_iterations)` candidate over?
+            let handler_accepts =
+                validate_pins(&schema, &as_published, schema.max_iterations, &state).is_ok();
+            assert_eq!(
+                handler_accepts, expect_published,
+                "[{label}] the declare-time pin firewall's verdict on the published shape"
+            );
+            assert_eq!(
+                declaration_conforms(&schema, &as_published, schema.max_iterations, &state),
+                handler_accepts,
+                "[{label}] and the shared authority agrees with its own value half — it is the \
+                 conjunction of the two gates, not a third predicate"
+            );
+
+            // ── HALF 2: the PUBLISHER's verdict must be the same one ──
+            assert_eq!(
+                build_bounded_declaration(&state, PROPOSER, &schema).is_some(),
+                handler_accepts,
+                "[{label}] CR 732.2a: `declaration.is_some()` is read as 'the declare handler \
+                 will accept this'. A template the handler refuses must NOT be published, and a \
+                 template it accepts must be"
+            );
+        }
+    }
+}
+
 /// PR-7 Combo-UI Stage 2: the mid-drive pin injector (item 4) + the drive-period seam (item 6).
 #[cfg(test)]
 mod stage2_injector_tests {
     use super::*;
     use crate::analysis::decision_template::{
-        DecisionGroupKey, DecisionKind, DecisionSlot, DecisionTemplate, IterationCount,
-        PinnedDecision, ReplayMode, TargetPin, TargetSchedule,
+        ConcreteTarget, DecisionGroupKey, DecisionKind, DecisionSlot, DecisionTemplate,
+        IterationCount, PinnedDecision, ReplayMode, TargetPin, TargetSchedule,
     };
     use crate::game::scenario::GameScenario;
     use crate::types::game_state::{LoopDetectionMode, YieldTarget};
@@ -11058,7 +16806,9 @@ mod stage2_injector_tests {
         let template = two_drainer_template(drainer_a, P1, drainer_b, P2);
         let cap = auto_pass_loop_max_iterations(&committed);
 
-        match drive_one_shortcut_cycle(&committed, &boundary, Some(&template), 0, cap) {
+        // `None`: this row is about the injector arm on a board-recurring targeted loop, so
+        // it drives under the same no-signature delimiter every pre-bounded offer uses.
+        match drive_one_shortcut_cycle(&committed, &boundary, Some(&template), 0, cap, None) {
             CycleOutcome::CrossLethal { winner, state, .. } => {
                 assert_eq!(
                     winner,
@@ -11105,31 +16855,2754 @@ mod stage2_injector_tests {
             },
             key: DecisionGroupKey::from_sources(std::slice::from_ref(&a), DecisionKind::LoopChoice),
         };
+        // A ranking lives INSIDE a schedule step; `shortcut_drive_period` still counts STEPS,
+        // which is why this migration is type-only at the seam under test.
+        let rank = |src| {
+            crate::analysis::decision_template::Ranking::one(
+                crate::analysis::decision_template::AnnouncementSubject::Object(src),
+            )
+        };
 
         let constant = mk(vec![TargetPin::Player(P1)]);
         assert_eq!(shortcut_drive_period(Some(&constant)), 1, "Player pin ⇒ 1");
 
         let rr = mk(vec![TargetPin::Scheduled(TargetSchedule::RoundRobin(
-            vec![a.clone(), b.clone(), c.clone()],
+            vec![rank(a.clone()), rank(b.clone()), rank(c.clone())],
         ))]);
         assert_eq!(shortcut_drive_period(Some(&rr)), 3, "RoundRobin(3) ⇒ 3");
 
         let pw = mk(vec![TargetPin::Scheduled(TargetSchedule::Piecewise(vec![
-            (0, a.clone()),
-            (5, b.clone()),
+            (0, rank(a.clone())),
+            (5, rank(b.clone())),
         ]))]);
         assert_eq!(shortcut_drive_period(Some(&pw)), 2, "Piecewise(2) ⇒ 2");
 
         // CR 732.2a SAFETY LIMIT: an over-cap schedule clamps to MAX_SHORTCUT_CYCLES.
         // Revert-probe: restore `.max(1)` (drop the `.clamp`) ⇒ returns MAX+5 (1005) ≠ 1000.
         let oversized = mk(vec![TargetPin::Scheduled(TargetSchedule::RoundRobin(
-            vec![a.clone(); (MAX_SHORTCUT_CYCLES + 5) as usize],
+            vec![rank(a.clone()); (MAX_SHORTCUT_CYCLES + 5) as usize],
         ))]);
         assert_eq!(
             shortcut_drive_period(Some(&oversized)),
             MAX_SHORTCUT_CYCLES,
             "RoundRobin(MAX+5) clamps to MAX_SHORTCUT_CYCLES"
         );
+    }
+
+    /// Place a bare object in `zone` without touching the zone vectors — enough for the
+    /// identity/zone predicates under test, which read `state.objects` only.
+    fn place(state: &mut GameState, id: u64, zone: crate::types::zones::Zone) -> ObjectId {
+        let oid = ObjectId(id);
+        let mut o = crate::game::game_object::GameObject::new(
+            oid,
+            CardId(0),
+            P0,
+            "Emblem".to_string(),
+            zone,
+        );
+        o.incarnation = 3;
+        state.objects.insert(oid, o);
+        oid
+    }
+
+    /// Stand up the `WaitingFor::TriggerTargetSelection` prompt an announcement answers, with
+    /// `slot_count` announcement slot(s).
+    ///
+    /// `record_trigger_target_answer` reads the slot count off the prompt IN HAND — that is
+    /// production's own instrument, because both reducer arms run before the handler replaces
+    /// `waiting_for` — so a row that drives the writer has to stand the prompt up the way
+    /// production does rather than call the writer against a bare board.
+    fn stand_up_target_prompt(
+        state: &mut GameState,
+        player: PlayerId,
+        source: ObjectId,
+        slot_count: usize,
+    ) {
+        let slot = crate::types::game_state::TargetSelectionSlot {
+            legal_targets: vec![],
+            optional: false,
+            chooser: None,
+            effect_kind: crate::types::ability::EffectKind::NoOp,
+            effect_detail: crate::types::game_state::TargetEffectDetail::None,
+        };
+        state.waiting_for = WaitingFor::TriggerTargetSelection {
+            player,
+            trigger_controller: None,
+            trigger_event: None,
+            trigger_events: vec![],
+            target_slots: vec![slot; slot_count],
+            mode_labels: vec![],
+            target_constraints: vec![],
+            selection: Default::default(),
+            source_id: Some(source),
+            description: None,
+        };
+    }
+
+    /// **Row T5.** CR 608.2b: an announcement one of whose members no longer resolves to a
+    /// live identity abandons the WHOLE journal write, rather than journalling a short
+    /// vector.
+    ///
+    /// This DIVERGES DELIBERATELY from the proliferate `record_loop_pin` site, which
+    /// `filter_map`s an unresolvable object away: there a short pin vector still drives,
+    /// while here a short vector would be journalled as a UNIFORM answer and then fail
+    /// `validate_pins` at declare time — a WRONG PIN rather than no offer.
+    ///
+    /// # Discrimination
+    ///
+    /// Replace `record_trigger_target_answer`'s `collect::<Option<Vec<_>>>()` with
+    /// `filter_map(..).collect::<Vec<_>>()` (the `record_loop_pin` shape) ⇒ the negative
+    /// arm's `loop_answers_recorded()` rises to 1 with a one-pin vector and that assertion
+    /// flips. The mutation reds on the ASSERT, not on a compile error.
+    ///
+    /// # Paired positive / reach-guards
+    ///
+    /// The negative arm alone is satisfied by ANY no-op writer, so the positive arm runs
+    /// FIRST on the same state and asserts BOTH pins are journalled under the CR 601.2c
+    /// slot. The empty-announcement arm is the third case the helper's own guard names.
+    #[test]
+    fn c2a_row_t5_an_unresolvable_target_abandons_the_whole_journal_write() {
+        use crate::analysis::decision_template::{
+            AnnouncementSubject, DecisionSlot, LoopAnswer, LoopAnswerValue, Ranking, TargetPin,
+            TargetSchedule,
+        };
+        use crate::types::ability::TargetRef;
+
+        let mut state = GameScenario::new_n_player(3, 7).build().state().clone();
+        state.loop_detection = LoopDetectionMode::Interactive;
+        assert_eq!(
+            state.loop_answers_recorded(),
+            0,
+            "reach-guard: the board starts with an EMPTY journal"
+        );
+        let src = place(&mut state, 920, crate::types::zones::Zone::Battlefield);
+        let live = place(&mut state, 921, crate::types::zones::Zone::Battlefield);
+        let dead = ObjectId(922);
+        // The single-slot announcement this row is about — the writer refuses without the
+        // prompt it answers (see `stand_up_target_prompt`).
+        stand_up_target_prompt(&mut state, P0, src, 1);
+        assert!(
+            !state.objects.contains_key(&dead),
+            "reach-guard: the unresolvable member must genuinely be absent from `objects`, \
+             else this row's negative arm tests nothing"
+        );
+        let slot = DecisionSlot::target(
+            object_decision_source(&state, src).expect("the source object is live"),
+        );
+
+        // ── PAIRED POSITIVE: every member resolves ⇒ BOTH pins are journalled ──
+        record_trigger_target_answer(
+            &mut state,
+            Some(src),
+            P0,
+            &[TargetRef::Object(live), TargetRef::Player(P1)],
+        );
+        assert_eq!(
+            state.loop_answers_recorded(),
+            1,
+            "the fully-resolvable announcement must be journalled — without this the \
+             negative arm below is satisfied by any no-op writer"
+        );
+        assert_eq!(
+            state.loop_answer(&slot, P0),
+            Some(LoopAnswer::Uniform(LoopAnswerValue::Targets(vec![
+                TargetPin::ByIdentity(
+                    object_decision_source(&state, live).expect("the live target resolves")
+                ),
+                // CR 601.2c: an ANNOUNCED seat, so the TARGET-class spelling — not
+                // `TargetPin::Player`, which is the CR 115.10a choice class.
+                TargetPin::Scheduled(TargetSchedule::Constant(Ranking::one(
+                    AnnouncementSubject::Seat(P1)
+                ))),
+            ]))),
+            "CR 601.2c: the pins are journalled in ANNOUNCEMENT ORDER, and CR 400.7 binds \
+             the object member to its current incarnation"
+        );
+
+        // ── THE ROW'S OWN CLAIM: one dead member abandons the whole write ──
+        let before = state.loop_answers_recorded();
+        record_trigger_target_answer(
+            &mut state,
+            Some(src),
+            P1,
+            &[TargetRef::Object(dead), TargetRef::Player(P1)],
+        );
+        assert_eq!(
+            state.loop_answers_recorded(),
+            before,
+            "CR 608.2b: an unresolvable member abandons the WHOLE write. Under a \
+             `filter_map` this rises by one and journals a one-pin vector, which \
+             `validate_pins` would later reject as an illegal pin value — a wrong pin \
+             instead of no offer"
+        );
+
+        // ── the empty announcement the `ChooseTarget` arm's `target: None` produces ──
+        record_trigger_target_answer(&mut state, Some(src), P1, &[]);
+        assert_eq!(
+            state.loop_answers_recorded(),
+            before,
+            "an empty announcement is not an answer a pin can specify, so nothing is \
+             journalled"
+        );
+    }
+
+    /// **Row F2.** CR 601.2c (reached for a triggered ability via CR 603.3d) + CR 608.2b: a
+    /// MULTI-SLOT announcement is refused outright, because `DecisionSlot::target` hard-codes
+    /// `index: 0` and would collapse every slot of it onto ONE journal key.
+    ///
+    /// # The value that makes this a defect rather than a rounding error
+    ///
+    /// Two slots taking DISTINCT targets latch `Conflicted` — fail-closed, harmless. Two slots
+    /// taking the SAME target — which CR 601.2c expressly permits ("if the spell uses the word
+    /// `target` in multiple places, the same object or player can be chosen once for each
+    /// instance") — stored `Uniform(Targets([one pin]))`: a TRUNCATED answer that satisfies
+    /// `LoopAnswerValue::Targets`' own contract ("the announced targets for ONE slot") only by
+    /// accident, and that a widened publisher would spend as a valid pin. Arm (c) below is that
+    /// exact shape.
+    ///
+    /// # Discrimination — and the axis it is keyed to
+    ///
+    /// Arms (a) and (b) differ in EXACTLY ONE fact, the prompt's `target_slots.len()`: the same
+    /// source, the same seat, the same single announced target. So the row cannot pass by
+    /// accident on the announcement's own shape.
+    ///
+    /// A `targets.len() > 1` guard — the plausible wrong reading, keyed to how many targets were
+    /// announced rather than how many slots were asked — passes (a) and FAILS (b) and (c),
+    /// because the `ChooseTarget` walk announces ONE target per beat no matter how many slots
+    /// the prompt carries. That is why (b)/(c) announce a single target against a two-slot
+    /// prompt rather than two targets at once.
+    ///
+    /// REVERT-PROBE (measured, in the fix report): delete the `announced_slots > 1` early return
+    /// ⇒ (b) and (c) FLIP TO FAILING, (c) with the truncated one-pin `Uniform` value named
+    /// above. Delete the `WaitingFor::TriggerTargetSelection` read instead ⇒ that is a compile
+    /// error, since `announced_slots` has no other source.
+    ///
+    /// # Reach-guard
+    ///
+    /// Arm (a) runs FIRST and asserts a POSITIVE write, so none of the refusals below is
+    /// satisfied by a writer that journals nothing at all.
+    #[test]
+    fn c2a_row_f2_a_multi_slot_announcement_is_refused_rather_than_collapsed() {
+        use crate::analysis::decision_template::{
+            AnnouncementSubject, DecisionSlot, LoopAnswer, LoopAnswerValue, Ranking, TargetPin,
+            TargetSchedule,
+        };
+        use crate::types::ability::TargetRef;
+
+        let mut state = GameScenario::new_n_player(3, 7).build().state().clone();
+        state.loop_detection = LoopDetectionMode::Interactive;
+        let src = place(&mut state, 930, crate::types::zones::Zone::Battlefield);
+        let slot = DecisionSlot::target(
+            object_decision_source(&state, src).expect("the source object is live"),
+        );
+
+        // ── (a) POSITIVE CONTROL: one announcement slot ⇒ the answer is journalled ──
+        stand_up_target_prompt(&mut state, P0, src, 1);
+        record_trigger_target_answer(&mut state, Some(src), P0, &[TargetRef::Player(P1)]);
+        assert_eq!(
+            state.loop_answer(&slot, P0),
+            Some(LoopAnswer::Uniform(LoopAnswerValue::Targets(vec![
+                // CR 601.2c TARGET class: an announced seat takes the ranked spelling.
+                TargetPin::Scheduled(TargetSchedule::Constant(Ranking::one(
+                    AnnouncementSubject::Seat(P1)
+                )))
+            ]))),
+            "a single-slot announcement is exactly what this journal key describes"
+        );
+        let after_positive = state.loop_answers_recorded();
+        assert_eq!(
+            after_positive, 1,
+            "reach-guard: exactly one key exists so far"
+        );
+
+        // ── (b) THE CLAIM: the SAME announcement under a TWO-slot prompt is refused ──
+        stand_up_target_prompt(&mut state, P1, src, 2);
+        record_trigger_target_answer(&mut state, Some(src), P1, &[TargetRef::Player(P2)]);
+        assert_eq!(
+            state.loop_answer(&slot, P1),
+            None,
+            "CR 601.2c: two announcement slots are two choices, and `DecisionSlot::target`'s \
+             `index: 0` can key only one of them — refuse rather than collapse"
+        );
+        assert_eq!(
+            state.loop_answers_recorded(),
+            after_positive,
+            "and no key is created at all: the whole write is abandoned"
+        );
+
+        // ── (c) THE DANGEROUS SHAPE: two slots, the SAME target, answered slot by slot ──
+        // Pre-fix this stored `Uniform(Targets([Player(P2)]))` — a one-pin answer to a
+        // two-choice announcement, indistinguishable from a legitimate single-slot answer.
+        for _ in 0..2 {
+            record_trigger_target_answer(&mut state, Some(src), P2, &[TargetRef::Player(P2)]);
+        }
+        assert_eq!(
+            state.loop_answer(&slot, P2),
+            None,
+            "CR 601.2c permits the same target for each instance of `target`, so repeating it \
+             must not read as a UNIFORM answer to the whole announcement"
+        );
+        assert_eq!(
+            state.loop_answers_recorded(),
+            after_positive,
+            "(c) creates no key either"
+        );
+
+        // ── (d) no prompt in hand ⇒ no announcement to journal ──
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        record_trigger_target_answer(&mut state, Some(src), P1, &[TargetRef::Player(P2)]);
+        assert_eq!(
+            state.loop_answers_recorded(),
+            after_positive,
+            "the writer is the `TriggerTargetSelection` reducer's authority; with no such \
+             prompt there is no announced choice for it to record"
+        );
+    }
+
+    /// CR 114.4 + CR 608.2b: a pinned SLOT whose source is a command-zone emblem must match
+    /// the prompt that emblem raised; a graveyard or exile source must NOT.
+    ///
+    /// This is the zone predicate `inject_pinned_answer`'s `TriggerTargetSelection` arm
+    /// dispatches on, and it now has two further production callers on the drive side:
+    /// `pinned_targets_for_source` and `pinned_mana_color_for_source` ask the same question
+    /// through the same `slot_source_prompted` predicate. The shipped BATTLEFIELD arm is
+    /// exercised end-to-end by `injector_routes_pinned_targets_per_source` above and by the
+    /// `kilo_live_offer_from_real_dump` rows, and this row asserts that arm is unchanged.
+    ///
+    /// The zone disjuncts this row pins now live one call down, in
+    /// [`crate::analysis::decision_template::resolve_ability_instance`], which
+    /// `slot_source_prompted` delegates to — so all three probes below are run THERE. That
+    /// delegation is why this row is also the maintained-invariant row for the factoring: it
+    /// stays green unmodified, and a factoring that silently widened the zone set reds here.
+    /// (Measured: dropping the `Zone::Command` filter in that accessor fails the graveyard
+    /// assertion below.)
+    ///
+    /// REVERT-PROBES: (a) delete the command-zone disjunct ⇒ the
+    /// Command assertion FAILS (and `inject_pinned_answer` would `RecastAbort` on an
+    /// emblem-pinned drive); (b) widen the disjunct to accept any zone ⇒ the graveyard and
+    /// exile assertions FAIL; (c) drop the incarnation conjunct ⇒ the CR 400.7 assertion
+    /// FAILS.
+    #[test]
+    fn command_zone_sourced_slot_matches_and_graveyard_still_aborts() {
+        use crate::types::zones::Zone;
+        let mut state = GameScenario::new_n_player(2, 7).build().state().clone();
+        let battlefield = place(&mut state, 900, Zone::Battlefield);
+        let emblem = place(&mut state, 901, Zone::Command);
+        let graveyard = place(&mut state, 902, Zone::Graveyard);
+        let exiled = place(&mut state, 903, Zone::Exile);
+
+        let pin = |id: ObjectId, inc: Option<u64>| YieldTarget::ThisObject {
+            source_id: id,
+            incarnation: inc,
+            trigger_description: None,
+        };
+
+        // Shipped behaviour, unchanged: the battlefield arm still matches.
+        assert!(
+            slot_source_prompted(&state, &pin(battlefield, Some(3)), battlefield),
+            "the shipped CR 608.2b battlefield arm must be untouched"
+        );
+        // CR 114.2 — an emblem lives in the command zone; CR 114.4 — its abilities function
+        // there, which is why the slot may prompt from there.
+        assert!(
+            slot_source_prompted(&state, &pin(emblem, Some(3)), emblem),
+            "CR 114.4: a command-zone emblem's slot must match the prompt it raised"
+        );
+        // Fail-closed: every other off-battlefield zone still misses ⇒ `RecastAbort`.
+        assert!(
+            !slot_source_prompted(&state, &pin(graveyard, Some(3)), graveyard),
+            "a graveyard-sourced slot must NOT match — the drive aborts to manual"
+        );
+        assert!(
+            !slot_source_prompted(&state, &pin(exiled, Some(3)), exiled),
+            "an exile-sourced slot must NOT match"
+        );
+        // CR 400.7: the command arm re-binds ONE incarnation, exactly like the
+        // battlefield arm — a re-created emblem does not answer the old pin.
+        assert!(
+            !slot_source_prompted(&state, &pin(emblem, Some(2)), emblem),
+            "CR 400.7: a stale incarnation must not match even in the command zone"
+        );
+        // A pin naming a DIFFERENT object never answers this prompt.
+        assert!(
+            !slot_source_prompted(&state, &pin(emblem, Some(3)), battlefield),
+            "the matcher is keyed on identity, not merely on zone"
+        );
+    }
+
+    /// **T1 — CR 608.2b + CR 114.4: the drive's tap-cost / proliferate seam matches a
+    /// COMMAND-zone slot source, and still refuses every other way of missing.**
+    ///
+    /// `pinned_targets_for_source` asks "which pinned `Targets` belongs to the ability
+    /// instance that raised this beat?" through [`slot_source_prompted`] — the predicate
+    /// `inject_pinned_answer` already used — instead of through the battlefield-only
+    /// `resolve_source`. CR 114.4 (CR 113.6p for the plane / scheme / conspiracy members of
+    /// the same class) is why an ability may prompt from the command zone at all; CR 608.2b
+    /// is why the pinned TARGETS stay battlefield-only, which row c pins.
+    ///
+    /// # Non-vacuity / discrimination
+    ///
+    /// Every row is ONE field from row b and comes out OPPOSITE it. An input that never
+    /// arrived cannot produce that table — it would answer the same way on both sides of the
+    /// field. Each negative row asserts its subject exists in the intended zone BEFORE the
+    /// negative assertion, so it provably fails for the stated reason rather than because the
+    /// object was never built.
+    ///
+    /// REVERT-PROBES: restore `resolve_source` at this seam ⇒ row **b** fails alone; widen
+    /// `resolve_source` to admit `Zone::Command` ⇒ row **c** fails; widen the accessor's
+    /// command disjunct to any zone ⇒ row **d** fails; drop the CR 400.7 incarnation
+    /// conjunct ⇒ row **e** fails; make the accessor answer "any command-zone object" ⇒ row
+    /// **f** fails.
+    #[test]
+    fn pinned_targets_for_source_matches_a_command_zone_slot_and_still_refuses_elsewhere() {
+        use crate::types::zones::Zone;
+        let mut state = GameScenario::new_n_player(2, 7).build().state().clone();
+        let battlefield = place(&mut state, 900, Zone::Battlefield);
+        let command = place(&mut state, 901, Zone::Command);
+        let graveyard = place(&mut state, 902, Zone::Graveyard);
+        let other_command = place(&mut state, 904, Zone::Command);
+        let command_target = place(&mut state, 905, Zone::Command);
+
+        let live_src = |id: ObjectId| object_decision_source(&state, id).expect("placed above");
+        let bf_src = live_src(battlefield);
+        let cmd_src = live_src(command);
+        let gy_src = live_src(graveyard);
+        let stale_cmd_src = YieldTarget::ThisObject {
+            source_id: command,
+            incarnation: Some(2),
+            trigger_description: None,
+        };
+        let bf_target = TargetPin::ByIdentity(live_src(battlefield));
+        let cmd_target = TargetPin::ByIdentity(live_src(command_target));
+
+        let template = |slot_source: &YieldTarget, target: &TargetPin| DecisionTemplate {
+            owner: P0,
+            decisions: vec![PinnedDecision::Targets {
+                slot: DecisionSlot {
+                    source: slot_source.clone(),
+                    index: 0,
+                },
+                targets: vec![target.clone()],
+            }],
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::UntilLethal,
+            },
+            key: DecisionGroupKey::from_sources(
+                std::slice::from_ref(slot_source),
+                DecisionKind::LoopChoice,
+            ),
+        };
+
+        // row a — the shipped battlefield arm, unchanged. Also the control that proves the
+        // instrument can return targets at all.
+        assert_eq!(
+            pinned_targets_for_source(&template(&bf_src, &bf_target), 0, &state, battlefield)
+                .expect("row a: a battlefield-sourced slot still answers its own beat"),
+            vec![ConcreteTarget::Object(battlefield)],
+            "row a: control"
+        );
+
+        // row b — THE FIX. One field from row a: the slot source's ZONE.
+        assert_eq!(
+            pinned_targets_for_source(&template(&cmd_src, &bf_target), 0, &state, command)
+                .expect("row b: CR 114.4 — a command-zone ability instance's slot matches"),
+            vec![ConcreteTarget::Object(battlefield)],
+            "row b: the command-zone slot source answers the beat it raised"
+        );
+
+        // row c — one field from b: the TARGET's zone. CR 608.2b is not widened.
+        assert_eq!(
+            state
+                .objects
+                .get(&command_target)
+                .expect("reach-guard: row c's target object was built")
+                .zone,
+            Zone::Command,
+            "reach-guard: row c's TARGET is in the command zone, so its Err is about the \
+             target path and not about a missing object"
+        );
+        assert!(
+            pinned_targets_for_source(&template(&cmd_src, &cmd_target), 0, &state, command)
+                .is_err(),
+            "row c: CR 608.2b — a pinned TARGET off the battlefield stays illegal; widening \
+             the SLOT question does not widen the TARGET question"
+        );
+
+        // row d — one field from b: the slot source's zone again, the other way.
+        assert_eq!(
+            state
+                .objects
+                .get(&graveyard)
+                .expect("reach-guard: row d's slot-source object was built")
+                .zone,
+            Zone::Graveyard,
+            "reach-guard: row d's slot source exists and is in the graveyard"
+        );
+        assert!(
+            pinned_targets_for_source(&template(&gy_src, &bf_target), 0, &state, graveyard)
+                .is_err(),
+            "row d: the zone set is {{Battlefield, Command}} and nothing else — a graveyard \
+             source aborts the drive to manual play"
+        );
+
+        // row e — one field from b: the pinned CR 400.7 incarnation.
+        assert_ne!(
+            state
+                .objects
+                .get(&command)
+                .expect("reach-guard: row e's slot-source object was built")
+                .incarnation,
+            2,
+            "reach-guard: the LIVE incarnation differs from the pinned one, so row e's Err \
+             is about CR 400.7 and not about an absent object"
+        );
+        assert!(
+            pinned_targets_for_source(&template(&stale_cmd_src, &bf_target), 0, &state, command)
+                .is_err(),
+            "row e: CR 400.7 — a re-created source is a new object and does not answer the \
+             old pin, in the command zone exactly as on the battlefield"
+        );
+
+        // row f — one field from b: the identity being asked about.
+        for (id, label) in [(command, "the pinned"), (other_command, "the asking")] {
+            assert_eq!(
+                state
+                    .objects
+                    .get(&id)
+                    .unwrap_or_else(|| panic!("reach-guard: {label} object was built"))
+                    .zone,
+                Zone::Command,
+                "reach-guard: BOTH command-zone objects exist, so row f cannot pass by \
+                 absence — only by identity"
+            );
+        }
+        assert!(
+            pinned_targets_for_source(&template(&cmd_src, &bf_target), 0, &state, other_command)
+                .is_err(),
+            "row f: the matcher is keyed on IDENTITY, not on 'some object in the command \
+             zone' — a second command-zone source does not inherit this slot's answer"
+        );
+    }
+
+    /// **T2 — CR 608.2d + CR 114.4: the same migration at the mana-color seam.**
+    ///
+    /// `pinned_mana_color_for_source` records the CR 608.2d color choice a mana ability
+    /// offered; which ability instance offered it is [`slot_source_prompted`]'s question, now
+    /// asked with the same spelling as at the tap-cost seam. Rows a/b/d/e/f mirror T1's; a
+    /// `ManaColor` pin carries no targets, so T1's target-legality row c has no analogue.
+    ///
+    /// # Non-vacuity / discrimination
+    ///
+    /// Same shape as T1: one field from row b, opposite verdict, every negative row reach-
+    /// guarded on its subject's existence and zone.
+    ///
+    /// REVERT-PROBES: restore `resolve_source` at this seam ⇒ row **b** fails alone; the
+    /// accessor-side probes (any-zone widening, dropped incarnation conjunct, zone-not-
+    /// identity matching) fail rows **d**, **e**, **f** respectively.
+    #[test]
+    fn pinned_mana_color_for_source_matches_a_command_zone_slot_and_still_refuses_elsewhere() {
+        use crate::types::mana::ManaColor;
+        use crate::types::zones::Zone;
+        let mut state = GameScenario::new_n_player(2, 7).build().state().clone();
+        let battlefield = place(&mut state, 900, Zone::Battlefield);
+        let command = place(&mut state, 901, Zone::Command);
+        let graveyard = place(&mut state, 902, Zone::Graveyard);
+        let other_command = place(&mut state, 904, Zone::Command);
+
+        let live_src = |id: ObjectId| object_decision_source(&state, id).expect("placed above");
+        let bf_src = live_src(battlefield);
+        let cmd_src = live_src(command);
+        let gy_src = live_src(graveyard);
+        let stale_cmd_src = YieldTarget::ThisObject {
+            source_id: command,
+            incarnation: Some(2),
+            trigger_description: None,
+        };
+
+        let template = |slot_source: &YieldTarget| DecisionTemplate {
+            owner: P0,
+            decisions: vec![PinnedDecision::ManaColor {
+                slot: DecisionSlot {
+                    source: slot_source.clone(),
+                    index: 0,
+                },
+                color: ManaColor::Blue,
+            }],
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::UntilLethal,
+            },
+            key: DecisionGroupKey::from_sources(
+                std::slice::from_ref(slot_source),
+                DecisionKind::LoopChoice,
+            ),
+        };
+
+        // row a — shipped battlefield arm + the control that the instrument returns a color.
+        assert_eq!(
+            pinned_mana_color_for_source(&template(&bf_src), 0, &state, battlefield)
+                .expect("row a: a battlefield-sourced slot still answers its own beat"),
+            ManaColor::Blue,
+            "row a: control"
+        );
+
+        // row b — THE FIX, one field from a: the slot source's zone.
+        assert_eq!(
+            pinned_mana_color_for_source(&template(&cmd_src), 0, &state, command)
+                .expect("row b: CR 114.4 — a command-zone ability instance's slot matches"),
+            ManaColor::Blue,
+            "row b: the command-zone slot source answers the CR 608.2d choice it offered"
+        );
+
+        // row d — one field from b: the slot source's zone, the other way.
+        assert_eq!(
+            state
+                .objects
+                .get(&graveyard)
+                .expect("reach-guard: row d's slot-source object was built")
+                .zone,
+            Zone::Graveyard,
+            "reach-guard: row d's slot source exists and is in the graveyard"
+        );
+        assert!(
+            pinned_mana_color_for_source(&template(&gy_src), 0, &state, graveyard).is_err(),
+            "row d: a graveyard source aborts the drive to manual play"
+        );
+
+        // row e — one field from b: the pinned CR 400.7 incarnation.
+        assert_ne!(
+            state
+                .objects
+                .get(&command)
+                .expect("reach-guard: row e's slot-source object was built")
+                .incarnation,
+            2,
+            "reach-guard: the LIVE incarnation differs from the pinned one"
+        );
+        assert!(
+            pinned_mana_color_for_source(&template(&stale_cmd_src), 0, &state, command).is_err(),
+            "row e: CR 400.7 — a stale incarnation does not match in the command zone either"
+        );
+
+        // row f — one field from b: the identity being asked about.
+        for (id, label) in [(command, "the pinned"), (other_command, "the asking")] {
+            assert_eq!(
+                state
+                    .objects
+                    .get(&id)
+                    .unwrap_or_else(|| panic!("reach-guard: {label} object was built"))
+                    .zone,
+                Zone::Command,
+                "reach-guard: BOTH command-zone objects exist, so row f cannot pass by absence"
+            );
+        }
+        assert!(
+            pinned_mana_color_for_source(&template(&cmd_src), 0, &state, other_command).is_err(),
+            "row f: identity, not zone, selects whose color this is"
+        );
+    }
+
+    /// CR 732.2a + CR 603.5: `bounded_cycle_pin_slots` publishes the per-iteration TARGET
+    /// choice for a proposer-controlled player-targeting trigger, plus a second `MayChoice`
+    /// point (disambiguated by `slot.index`) when that trigger is optional.
+    ///
+    /// MATCHED PAIRS, one variable each:
+    /// * `optional` false ⇒ 1 point; true ⇒ 2 points. REVERT-PROBE: delete the `optional`
+    ///   branch ⇒ the 2-point assertion FAILS.
+    /// * controller == proposer ⇒ published; a bystander proposer gets nothing.
+    ///   REVERT-PROBE: delete the `entry.controller != proposer` filter ⇒ the bystander
+    ///   assertion FAILS.
+    #[test]
+    fn bounded_cycle_pin_slots_publishes_the_may_gate_of_an_optional_trigger() {
+        use crate::analysis::decision_template::{DecisionPointKind, DecisionSlot};
+        use crate::types::ability::{
+            ControllerRef, Effect, QuantityExpr, ResolvedAbility, TargetFilter, TypedFilter,
+        };
+
+        let mut state = GameScenario::new_n_player(3, 7).build().state().clone();
+        let src = place(&mut state, 910, crate::types::zones::Zone::Battlefield);
+
+        let entry = |id: u64, controller: PlayerId, optional: bool| {
+            let mut ability = ResolvedAbility::new(
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: Some(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![],
+                        controller: Some(ControllerRef::Opponent),
+                        properties: vec![],
+                    })),
+                },
+                vec![],
+                src,
+                controller,
+            );
+            ability.optional = optional;
+            StackEntry {
+                id: ObjectId(id),
+                source_id: src,
+                controller,
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: src,
+                    ability: Box::new(ability),
+                    condition: None,
+                    trigger_event: None,
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            }
+        };
+        let live_source =
+            object_decision_source(&state, src).expect("the source is on the battlefield");
+        let expected_slot = |index: u8| DecisionSlot {
+            source: live_source.clone(),
+            index,
+        };
+
+        // Mandatory: exactly one point, the target choice.
+        state.stack.push_back(entry(920, P0, false));
+        let mandatory = bounded_cycle_pin_slots(&state, P0);
+        assert_eq!(
+            mandatory.len(),
+            1,
+            "a mandatory trigger publishes one point"
+        );
+        assert_eq!(mandatory[0].slot, expected_slot(0));
+        assert!(
+            matches!(
+                &mandatory[0].kind,
+                DecisionPointKind::Targets { legal_targets, .. }
+                    if *legal_targets == vec![TargetRef::Player(P1), TargetRef::Player(P2)]
+            ),
+            "the legal set comes from `find_legal_targets`, not from a declaration: {:?}",
+            mandatory[0].kind
+        );
+
+        // Bystander proposer: the same board publishes nothing for a seat that controls
+        // none of the entries (CR 732.2a — the proposer specifies their OWN choices).
+        assert!(
+            bounded_cycle_pin_slots(&state, P1).is_empty(),
+            "a bystander proposer controls none of these choices"
+        );
+
+        // Optional: the SAME entry with one field flipped publishes the CR 603.5 gate too.
+        state.stack.clear();
+        state.stack.push_back(entry(921, P0, true));
+        let optional = bounded_cycle_pin_slots(&state, P0);
+        assert_eq!(
+            optional.len(),
+            2,
+            "an optional trigger publishes two points"
+        );
+        assert_eq!(
+            optional[1].slot,
+            expected_slot(1),
+            "`slot.index` disambiguates"
+        );
+        assert_eq!(optional[1].kind, DecisionPointKind::MayChoice);
+
+        // Fail-closed: no source object ⇒ no point (never a slot that cannot re-bind).
+        state.objects.remove(&src);
+        assert!(
+            bounded_cycle_pin_slots(&state, P0).is_empty(),
+            "an absent source emits nothing rather than an unbindable slot"
+        );
+    }
+
+    /// Each of [`declares_opponent_player_target`]'s three conjuncts, discriminated
+    /// SEPARATELY. The gross "accept any `Typed`" widening is caught by the row above; this
+    /// row is what fails when ONE conjunct is dropped.
+    ///
+    /// Why each matters: `find_legal_targets` collapses a `Typed` filter to PLAYERS ONLY
+    /// when both `type_filters` and `properties` are empty (issue
+    /// #2004). A type- or property-bearing filter therefore falls through to OBJECT
+    /// enumeration — publishing it would put a point whose legal set is object refs into
+    /// player-pin machinery. `controller: You` does collapse to players, but to exactly ONE
+    /// (the controller), which is not the per-opponent choice a bounded drain cycle pins.
+    ///
+    /// THE BOARD IS LOAD-BEARING, and picking the wrong one is what hollows this row out.
+    /// On a head-announced board an object-shaped filter enumerates NOTHING, so
+    /// `build_target_slots` returns `Err` and the caller's CARDINALITY conjunct rejects
+    /// first — measured: with both arms on that board, dropping `type_filters.is_empty()` or
+    /// `properties.is_empty()` left the row GREEN. Those two arms therefore run on the
+    /// MIRROR shape, the one thing they alone reject: an object-shaped head at
+    /// `TargetChoiceTiming::Resolution` (announces nothing) chained to a `target opponent`
+    /// sub-ability (announces the one slot). Cardinality and all-`Player` both pass there.
+    /// The per-arm reach-guard asserts that announced slot verbatim, so a future change that
+    /// re-hollows an arm fails the reach-guard instead of passing silently.
+    ///
+    /// REVERT-PROBES (each measured on the boards below): drop `type_filters.is_empty()` ⇒
+    /// ONLY the Creature arm publishes; drop `properties.is_empty()` ⇒ ONLY the Token arm;
+    /// drop `controller == Some(Opponent)` ⇒ ONLY the `You` arm. The accepted shape is
+    /// asserted to publish in the SAME row, so a constant-`false` predicate cannot pass.
+    #[test]
+    fn bounded_cycle_pin_slots_conjuncts_are_each_load_bearing() {
+        use crate::types::ability::{
+            ControllerRef, Effect, FilterProp, QuantityExpr, ResolvedAbility, TargetChoiceTiming,
+            TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        };
+
+        let mut base = GameScenario::new_n_player(3, 7).build().state().clone();
+        let src = place(&mut base, 940, crate::types::zones::Zone::Battlefield);
+
+        let board = |ability: ResolvedAbility| {
+            let mut state = base.clone();
+            state.stack.push_back(StackEntry {
+                id: ObjectId(950),
+                source_id: src,
+                controller: P0,
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: src,
+                    ability: Box::new(ability),
+                    condition: None,
+                    trigger_event: None,
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+            state
+        };
+        let accepted = TypedFilter {
+            type_filters: vec![],
+            controller: Some(ControllerRef::Opponent),
+            properties: vec![],
+        };
+        let head_only = |tf: TypedFilter| {
+            ResolvedAbility::new(
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: Some(TargetFilter::Typed(tf)),
+                },
+                vec![],
+                src,
+                P0,
+            )
+        };
+        // The head's own choice is made on resolution, so CR 601.2c is never reached for it
+        // and it announces no slot; the ONE announced slot is the chained sub-ability's
+        // `target opponent` player choice (CR 603.3d). Cardinality and all-`Player` pass
+        // whatever shape the head declares — which is what leaves the head-shape conjunct
+        // alone to reject.
+        let chained = |head: TypedFilter| {
+            let mut ability = head_only(head);
+            ability.target_choice_timing = TargetChoiceTiming::Resolution;
+            ability.sub_ability = Some(Box::new(head_only(accepted.clone())));
+            ability
+        };
+
+        // POSITIVE CONTROL, same row: the accepted "target opponent" shape publishes.
+        assert_eq!(
+            bounded_cycle_pin_slots(&board(head_only(accepted.clone())), P0).len(),
+            1,
+            "the accepted CR 115.2 player shape must publish — otherwise the three zeros \
+             below are vacuous"
+        );
+
+        let opponents = vec![TargetRef::Player(P1), TargetRef::Player(P2)];
+        // Collected, not asserted per-arm: a revert-probe must show which arms flipped, and
+        // a bare `assert!` in the loop would abort at the first and hide the rest.
+        let mut still_published: Vec<&str> = Vec::new();
+        for (label, ability, announced) in [
+            (
+                "type_filters: a creature filter enumerates OBJECTS, not players",
+                chained(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    ..accepted.clone()
+                }),
+                opponents.clone(),
+            ),
+            (
+                "properties: issue #2004 — `token` is an object characteristic",
+                chained(TypedFilter {
+                    properties: vec![FilterProp::Token],
+                    ..accepted.clone()
+                }),
+                opponents.clone(),
+            ),
+            (
+                "controller: `You` is a single forced seat, not a per-opponent choice",
+                head_only(TypedFilter {
+                    controller: Some(ControllerRef::You),
+                    ..accepted.clone()
+                }),
+                vec![TargetRef::Player(P0)],
+            ),
+        ] {
+            let state = board(ability);
+            let announcement = crate::game::ability_utils::build_target_slots(
+                &state,
+                state.stack[0]
+                    .ability()
+                    .expect("the board pushes a trigger"),
+            )
+            .map(|slots| {
+                slots
+                    .iter()
+                    .map(|slot| (slot.optional, slot.legal_targets.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .ok();
+            assert_eq!(
+                announcement,
+                Some(vec![(false, announced)]),
+                "reach-guard [{label}]: exactly ONE mandatory slot and every candidate a \
+                 PLAYER — so the cardinality and all-`Player` conjuncts both PASS on this \
+                 board and the head-shape conjunct under test is the SOLE rejector"
+            );
+            if !bounded_cycle_pin_slots(&state, P0).is_empty() {
+                still_published.push(label);
+            }
+        }
+        assert!(
+            still_published.is_empty(),
+            "each conjunct must reject its own arm ALONE; these arms published anyway: \
+             {still_published:?}"
+        );
+
+        // ORDERING-INPUT CONJUNCTS. The published point declares `min/max_targets: 1`, and
+        // the gate-(3) relief is a bare `continue` that discharges the WHOLE of
+        // `stack_entry_has_no_ordering_input` (analysis/resource.rs) — which rejects on
+        // four facts, only one of which a slot answers. The three ABILITY facts must block
+        // publication outright (the state-dependent fourth, `pending_trigger_entry`, is the
+        // relief's, pinned by `a_pinned_slot_skips_gate_three_and_six`'s arm 5). Shares the
+        // positive control above.
+        {
+            use crate::types::ability::MultiTargetSpec;
+            use crate::types::game_state::TargetSelectionConstraint;
+
+            fn ability_of(state: &mut GameState) -> &mut ResolvedAbility {
+                let StackEntryKind::TriggeredAbility { ability, .. } = &mut state.stack[0].kind
+                else {
+                    unreachable!("the fixture board pushes a TriggeredAbility")
+                };
+                ability.as_mut()
+            }
+
+            type Mutate = fn(&mut GameState);
+            let ordering_input: [(&str, Mutate); 3] = [
+                ("multi_target — CR 601.2c variable target count", |s| {
+                    ability_of(s).multi_target = Some(MultiTargetSpec::fixed(1, 2))
+                }),
+                ("distribution — CR 601.2d divide-among", |s| {
+                    ability_of(s).distribution = Some(vec![(TargetRef::Player(P1), 1)])
+                }),
+                ("target_constraints — CR 601.2c cross-target", |s| {
+                    ability_of(s).target_constraints =
+                        vec![TargetSelectionConstraint::DifferentTargetPlayers]
+                }),
+            ];
+            for (label, mutate) in ordering_input {
+                let mut state = board(head_only(accepted.clone()));
+                mutate(&mut state);
+                assert!(
+                    bounded_cycle_pin_slots(&state, P0).is_empty(),
+                    "{label}: announcement-time ordering input NO published slot specifies \
+                     ⇒ the mint must not publish"
+                );
+            }
+        }
+    }
+
+    /// The real 4p acceptance board (dump B): a CR 114.2 emblem in the COMMAND zone
+    /// (obj 541, incarnation 0) whose triggered ability drains `target opponent`.
+    fn load_dellian_dump() -> GameState {
+        use crate::types::game_state::PersistedGameState;
+        use std::io::Read;
+        let gz: &[u8] = include_bytes!("../../tests/fixtures/dellian_emblem_conqueror_4p.json.gz");
+        let mut json = String::new();
+        flate2::read::GzDecoder::new(gz)
+            .read_to_string(&mut json)
+            .expect("fixture inflates");
+        let envelope: serde_json::Value = serde_json::from_str(&json).expect("envelope parses");
+        // Cross the dump through the PRODUCTION decoder rather than a bare `GameState`
+        // decode wrapped in `Raw`: `PersistedGameState`'s own `Deserialize` runs
+        // `reject_legacy_raw_prompt_authority` and `decode_persisted_resolution_state`
+        // first, so this helper exercises the chokepoint the server's `from_persisted`
+        // and WASM's `decode_restored_game_state` actually funnel through — including
+        // the CR 732.2a load-seam bound invariant.
+        // `.expect(..)`, not `?`: `into_game_state` returns `GameState`, not `Result`.
+        serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
+            .expect("gameState deserializes through the production decoder")
+            .into_game_state()
+    }
+
+    const EMBLEM: ObjectId = ObjectId(541);
+
+    /// CR 601.2c + CR 115.1: the migrated fixture's `effect_kind` is not an assertion of
+    /// taste — it is exactly what the ANNOUNCEMENT AUTHORITY builds for this ability on
+    /// this board. `scripts/migrate-dump-fixture.sh` takes the value as an explicit
+    /// argument precisely so the engine, and never a jq name→variant table, stays the
+    /// authority for it; this row is what holds the script's operator to that.
+    ///
+    /// It is also the row that would have caught upstream #6718 (`0468df1f4`, which added
+    /// `TargetSelectionSlot::effect_kind` with no `#[serde(default)]`) the day it landed:
+    /// `TargetSelectionSlot` derives `PartialEq`/`Eq`, so this compares ALL five fields,
+    /// not just the migrated one.
+    ///
+    /// REVERT-PROBE: re-run the migration script with `--effect-kind NoOp` ⇒ the stamped
+    /// slot stops matching what `build_target_slots` derives ⇒ FAILS. This assertion is
+    /// the SOLE guard on the migrated value — nothing on the drive path reads the field
+    /// (its only production readers are the two `target_intent` calls in the interaction
+    /// DTO projection), so a wrong value cannot move the game and must be caught by a
+    /// reading test instead of by a behavioural one.
+    #[test]
+    fn dellian_dump_slots_are_what_the_announcement_authority_builds() {
+        let state = load_dellian_dump();
+        let pt = state
+            .pending_trigger
+            .as_ref()
+            .expect("dellian dump pauses on a pending trigger");
+        // `let … else` rather than `if let`: it fails LOUDLY if the dump ever restores
+        // into some other prompt, which would otherwise make the assertion unreachable
+        // rather than false.
+        let WaitingFor::TriggerTargetSelection { target_slots, .. } = &state.waiting_for else {
+            panic!(
+                "dellian dump must restore into TriggerTargetSelection, got {:?}",
+                state.waiting_for
+            );
+        };
+        // Reach-guard: an empty slot vector would satisfy a total-equality assertion
+        // vacuously on both sides.
+        assert_eq!(
+            target_slots.len(),
+            1,
+            "the dellian dump publishes exactly one target slot"
+        );
+        assert_eq!(
+            &crate::game::ability_utils::build_target_slots(&state, &pt.ability)
+                .expect("the emblem's drain ability builds its announcement slots"),
+            target_slots,
+            "the restored dump's slots must equal what the announcement authority builds"
+        );
+    }
+
+    /// CR 732.2a: the offer publishes the SET of open per-iteration choices — one point per
+    /// SOURCE, not one per stack ENTRY.
+    ///
+    /// `DecisionSlot`'s sub-index disambiguates two choices of ONE ability instance, so N
+    /// entries from one source would mint N byte-identical slots: N identical frontend
+    /// pickers, and `predictability_gate` demanding N pins for a choice
+    /// `inject_pinned_answer` answers ONCE per source (its `find_map` matches on the slot's
+    /// SOURCE and is index-blind). Real boards reach this shape — this very dump carries 35
+    /// entries on source 25, 34 on 126 and 34 on 208.
+    ///
+    /// Built on the LOADED 4p board plus ONE measured mutation: a byte-copy of the real
+    /// emblem entry under a fresh stack-entry id, which is exactly what a second loop
+    /// iteration puts there.
+    ///
+    /// REVERT-PROBE: drop either `points.iter().any(|p| p.slot == ..)` dedupe guard ⇒ the
+    /// two-entry board publishes 2 points ⇒ FAILS.
+    #[test]
+    fn bounded_cycle_pin_slots_publishes_one_point_per_source_not_per_entry() {
+        let mut state = load_dellian_dump();
+        let emblem_entry = state
+            .stack
+            .iter()
+            .find(|e| e.source_id == EMBLEM)
+            .expect("reach-guard: the dump carries the emblem's trigger")
+            .clone();
+        let single = bounded_cycle_pin_slots(&state, P0);
+        // Reach-guard, re-derived from the loaded board rather than from a literal: the
+        // mint qualifies FOUR sources here — the CR 115.2 emblem target (541) plus three
+        // shape-(B) CR 603.5 may-only sources (126, 208, 274). 126 and 208 carry 34 stack
+        // entries apiece, so the shipped board ALREADY exercises the dedupe: without it
+        // this count would be 69, not 4.
+        assert_eq!(
+            single.len(),
+            4,
+            "reach-guard: the shipped board qualifies exactly four sources"
+        );
+        assert_eq!(
+            single
+                .iter()
+                .filter(|p| matches!(
+                    p.kind,
+                    crate::analysis::decision_template::DecisionPointKind::Targets { .. }
+                ))
+                .count(),
+            1,
+            "reach-guard: exactly one of them is the emblem's TARGETS point"
+        );
+
+        let mut second = emblem_entry;
+        second.id = ObjectId(9_001);
+        state.stack.push_back(second);
+        assert_eq!(
+            state.stack.iter().filter(|e| e.source_id == EMBLEM).count(),
+            2,
+            "reach-guard: two live entries now share one source"
+        );
+
+        assert_eq!(
+            bounded_cycle_pin_slots(&state, P0),
+            single,
+            "a second entry from the SAME source is the same open choice — one published \
+             point, byte-identical to the one-entry board's"
+        );
+    }
+
+    /// CR 114.4 + CR 608.2b, on a REAL restored 4p board: `inject_pinned_answer` accepts a
+    /// pin whose slot source is the COMMAND-zone emblem (obj 541) that raised the prompt.
+    ///
+    /// This is the production-path row for [`slot_source_prompted`]. The seam is live
+    /// TODAY: `inject_pinned_answer` calls it, and every pin-recording site builds its slot
+    /// source with the zone-agnostic `object_decision_source`, so a command-zone-sourced pin
+    /// already flips from `RecastAbort` (safe handback) to accepted injection.
+    ///
+    /// The dump ships AT that prompt (`TriggerTargetSelection { source_id: 541 }`), so no
+    /// synthetic placement is involved.
+    ///
+    /// REVERT-PROBES (each measured): delete the command-zone disjunct ⇒ the accept arm
+    /// raises `RecastAbort` ⇒ FAILS; drop the incarnation conjunct ⇒ the stale-pin arm is
+    /// accepted ⇒ FAILS. The negative arms are paired with a positive on the SAME board, so
+    /// neither an always-accept nor an always-abort matcher survives.
+    ///
+    /// R3 — CR 608.2b + CR 113.7a: this row is ALSO the witness that a pin's SEAT legality
+    /// does not depend on recovering the SOURCE's characteristics. The choice authority
+    /// `game::players::player_exists_for_choice` takes no source parameter at all, by
+    /// design: a command-zone emblem has no battlefield LKI to recover, and if seat
+    /// legality consulted the source, a pin raised by such a source would be invalidated
+    /// for a reason the rules do not state. The claim is STRUCTURAL — there is no source
+    /// parameter to revert — so what makes it checkable is the PAIR: this row proves a
+    /// source with no recoverable LKI still answers its prompt, and
+    /// `analysis::decision_template::tests::a_dead_player_pin_is_illegal`'s LIVE half
+    /// proves the seat check is nonetheless doing work on that same pin kind. (Contrast
+    /// `targeting::player_is_legal_target`, which DOES take a source — because targeting
+    /// exclusions are source-relative, CR 702.11c, and choice legality is not.)
+    #[test]
+    fn a_command_zone_pin_answers_a_real_restored_boards_prompt() {
+        let state = load_dellian_dump();
+
+        // ── reach guards, all read off the loaded board ──
+        let emblem = state
+            .objects
+            .get(&EMBLEM)
+            .expect("reach-guard: dump B carries the emblem object");
+        assert_eq!(
+            emblem.zone,
+            crate::types::zones::Zone::Command,
+            "reach-guard: CR 114.2 puts the emblem in the command zone"
+        );
+        let emblem_incarnation = emblem.incarnation;
+        let WaitingFor::TriggerTargetSelection {
+            source_id: Some(prompt_source),
+            ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "reach-guard: the dump ships at the emblem's target prompt; got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(
+            *prompt_source, EMBLEM,
+            "reach-guard: it is the EMBLEM's prompt that is up"
+        );
+
+        let src = object_decision_source(&state, EMBLEM).expect("the emblem object exists");
+        // The control that makes this row non-vacuous: the shipped battlefield-only
+        // `resolve_source` does NOT match this source, so an accept can only come from the
+        // CR 114.4 disjunct.
+        assert_eq!(
+            crate::analysis::decision_template::resolve_source(&src, &state),
+            None,
+            "CR 608.2b: `resolve_source` is battlefield-only and must stay so"
+        );
+
+        let template = |source: YieldTarget| DecisionTemplate {
+            owner: P0,
+            decisions: vec![PinnedDecision::Targets {
+                slot: DecisionSlot {
+                    source: source.clone(),
+                    index: 0,
+                },
+                targets: vec![TargetPin::Player(P1)],
+            }],
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::UntilLethal,
+            },
+            key: DecisionGroupKey::from_sources(&[source], DecisionKind::LoopChoice),
+        };
+        let prompt = state.waiting_for.clone();
+
+        // ── ACCEPT: the command-zone pin answers the prompt on the real board ──
+        let mut work = state.clone();
+        inject_pinned_answer(&mut work, Some(&template(src.clone())), 0, &prompt)
+            .expect("CR 114.4: the emblem's own pin must answer the prompt it raised");
+        assert_ne!(
+            work.waiting_for, prompt,
+            "the prompt was actually consumed, not silently skipped"
+        );
+        assert!(
+            !matches!(
+                &work.waiting_for,
+                WaitingFor::TriggerTargetSelection {
+                    source_id: Some(id),
+                    ..
+                } if *id == EMBLEM
+            ),
+            "the emblem's target prompt is answered; got {:?}",
+            work.waiting_for
+        );
+
+        // ── CR 400.7: a pin latched to a stale incarnation must NOT answer it ──
+        let stale = YieldTarget::ThisObject {
+            source_id: EMBLEM,
+            incarnation: Some(emblem_incarnation + 1),
+            trigger_description: None,
+        };
+        let mut stale_work = state.clone();
+        assert!(
+            inject_pinned_answer(&mut stale_work, Some(&template(stale)), 0, &prompt).is_err(),
+            "CR 400.7: a stale-incarnation pin hands back to manual play"
+        );
+
+        // ── fail-closed: a pin naming a DIFFERENT object never answers this prompt ──
+        let other = state
+            .stack
+            .iter()
+            .map(|e| e.source_id)
+            .find(|id| *id != EMBLEM)
+            .expect("the 152-deep stack carries other sources");
+        let other_src = object_decision_source(&state, other).expect("that source exists");
+        let mut other_work = state.clone();
+        assert!(
+            inject_pinned_answer(&mut other_work, Some(&template(other_src)), 0, &prompt).is_err(),
+            "a pin for another source does not answer the emblem's prompt"
+        );
+    }
+
+    /// **T3 — the slot-source VALUE is one a REAL board produces, and the migrated drive
+    /// seam accepts it** (CR 114.4 + CR 608.2b, on the restored 4p dellian board).
+    ///
+    /// Modelled on `a_command_zone_pin_answers_a_real_restored_boards_prompt` above, whose
+    /// structure — reach guards read off the loaded board, then a `resolve_source == None`
+    /// non-vacuity control, then the accept — is reused here at the OTHER consumer.
+    ///
+    /// # What this row does NOT claim
+    ///
+    /// It does not claim that a shipped card drives a command-zone-sourced tap-cost /
+    /// mana-color / proliferate beat *in a recorded loop period* today. It claims the
+    /// slot-source VALUE is one a real board produces and that `pinned_targets_for_source`
+    /// accepts it.
+    ///
+    /// # Non-vacuity / discrimination
+    ///
+    /// The control is load-bearing: `resolve_source` answers `None` for this very source on
+    /// this very board, so row a's `Ok` can only have come from the command-zone disjunct.
+    /// Rows b–e are each one field from row a and come out opposite. Every object is chosen
+    /// by PREDICATE off the loaded board (except `EMBLEM`, already a module const), so a
+    /// re-derived fixture cannot silently blank a row.
+    ///
+    /// REVERT-PROBES: restore `resolve_source` at this seam ⇒ row **a** fails; widen the
+    /// accessor to any zone ⇒ row **b** fails; drop the CR 400.7 conjunct ⇒ row **c** fails;
+    /// match on zone rather than identity ⇒ rows **d** and **e** fail.
+    #[test]
+    fn a_command_zone_slot_from_the_real_4p_board_answers_the_recast_beat() {
+        use crate::types::zones::Zone;
+        let state = load_dellian_dump();
+
+        // ── reach guards, all read off the loaded board ──
+        let emblem = state
+            .objects
+            .get(&EMBLEM)
+            .expect("reach-guard: dump B carries the emblem object");
+        assert_eq!(
+            emblem.zone,
+            Zone::Command,
+            "reach-guard: CR 114.2 puts the emblem in the command zone"
+        );
+        assert!(
+            emblem.is_emblem,
+            "reach-guard: CR 114.4 is the rule under test, so the object must really be an \
+             emblem"
+        );
+        let emblem_incarnation = emblem.incarnation;
+
+        let lowest_battlefield = state
+            .objects
+            .values()
+            .filter(|o| o.zone == Zone::Battlefield)
+            .min_by_key(|o| o.id.0)
+            .map(|o| o.id)
+            .expect("reach-guard: the board has battlefield objects to target");
+        let graveyard_object = state
+            .objects
+            .values()
+            .filter(|o| o.zone == Zone::Graveyard)
+            .min_by_key(|o| o.id.0)
+            .map(|o| o.id)
+            .expect("reach-guard: the board has a graveyard object for row b");
+
+        let src = object_decision_source(&state, EMBLEM).expect("the emblem object exists");
+        // Non-vacuity control: the shipped battlefield-only `resolve_source` does NOT match
+        // this source, so an accept can only come from the CR 114.4 disjunct.
+        assert_eq!(
+            crate::analysis::decision_template::resolve_source(&src, &state),
+            None,
+            "CR 608.2b: `resolve_source` is battlefield-only and must stay so"
+        );
+
+        let template = |slot_source: YieldTarget| DecisionTemplate {
+            owner: P0,
+            decisions: vec![PinnedDecision::Targets {
+                slot: DecisionSlot {
+                    source: slot_source.clone(),
+                    index: 0,
+                },
+                targets: vec![TargetPin::ByIdentity(object_decision_source_of(
+                    &state,
+                    lowest_battlefield,
+                ))],
+            }],
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::UntilLethal,
+            },
+            key: DecisionGroupKey::from_sources(&[slot_source], DecisionKind::LoopChoice),
+        };
+
+        // row a — positive: the real board's command-zone source answers its own beat.
+        assert_eq!(
+            pinned_targets_for_source(&template(src.clone()), 0, &state, EMBLEM)
+                .expect("CR 114.4: the emblem's own slot answers the beat it raised"),
+            vec![ConcreteTarget::Object(lowest_battlefield)],
+            "row a: the drive seam accepts a slot source a REAL board produced"
+        );
+
+        // row b — one field: a graveyard source off the same board.
+        let gy_src = object_decision_source_of(&state, graveyard_object);
+        assert!(
+            pinned_targets_for_source(&template(gy_src), 0, &state, graveyard_object).is_err(),
+            "row b: the zone set is {{Battlefield, Command}}; a graveyard source still aborts"
+        );
+
+        // row c — one field: the pinned CR 400.7 incarnation.
+        let stale = YieldTarget::ThisObject {
+            source_id: EMBLEM,
+            incarnation: Some(emblem_incarnation + 1),
+            trigger_description: None,
+        };
+        assert!(
+            pinned_targets_for_source(&template(stale), 0, &state, EMBLEM).is_err(),
+            "row c: CR 400.7 — a re-created emblem does not answer the old pin"
+        );
+
+        // row d — one field: the identity being asked about.
+        assert!(
+            pinned_targets_for_source(&template(src.clone()), 0, &state, lowest_battlefield)
+                .is_err(),
+            "row d: identity, not zone, selects whose slot this is"
+        );
+
+        // row e — MULTI-AUTHORITY hostile fixture. This board holds TWO command-zone
+        // objects, and the second is not an emblem: object 400's two TRIGGERS declare
+        // `trigger_zones == ["Battlefield"]` while its cost-reduction STATIC declares
+        // `active_zones ∋ Command`; one object, two abilities, two different zones of
+        // function (CR 113.6b). The accessor admits it by zone either way, so only identity
+        // can exclude it.
+        let commander = state
+            .objects
+            .values()
+            .filter(|o| o.zone == Zone::Command && o.id != EMBLEM)
+            .min_by_key(|o| o.id.0)
+            .map(|o| o.id)
+            .expect("reach-guard: dump B carries a SECOND command-zone object");
+        assert!(
+            !state.objects[&commander].is_emblem,
+            "reach-guard: the second command-zone object is not an emblem, so row e is a \
+             genuine multi-authority case and not a duplicate of row a"
+        );
+        let commander_src = object_decision_source_of(&state, commander);
+        assert!(
+            pinned_targets_for_source(&template(commander_src), 0, &state, EMBLEM).is_err(),
+            "row e: a DIFFERENT command-zone ability instance's slot must not answer the \
+             emblem's beat — zone admits both, identity separates them"
+        );
+    }
+
+    /// `object_decision_source` with the test's own existence guard folded in, so a row that
+    /// picks its object by predicate cannot silently degrade into `None`.
+    fn object_decision_source_of(state: &GameState, id: ObjectId) -> YieldTarget {
+        object_decision_source(state, id)
+            .unwrap_or_else(|| panic!("reach-guard: object {id:?} is on the loaded board"))
+    }
+
+    /// **T6 — the capability-neutrality pin.** Five rows on ONE board with ONE template
+    /// value each, pinning what resolving a command-zone `Order` pin does and does not buy.
+    ///
+    /// Both sides of the Order-only claim return `Err(RecastAbort)` — a unit struct — so the
+    /// two abort points are not distinguishable by return value. The instrument therefore
+    /// observes the abort point INDIRECTLY, through a second pin in the same template, using
+    /// the mechanism `resolve` is built on: it is a per-pin `Result` collect, so one failing
+    /// pin discards every other pin's answer.
+    ///
+    /// | row | template | seam | expect |
+    /// |---|---|---|---|
+    /// | **R** (delivery) | `order_only` | `decision_template::resolve` | `Ok`, carrying the `Order` element |
+    /// | **N** (neutrality, `ok_or` half) | `order_only`, the SAME value | `pinned_targets_for_source` | `Err(RecastAbort)` |
+    /// | **N2** (neutrality, `find_map` half) | `order_only`, the SAME value | `inject_pinned_answer` | `Err(RecastAbort)` |
+    /// | **P** (poisoning removed) | `mixed` | `pinned_targets_for_source` | `Ok` |
+    /// | **P-minus** (omit-the-pin equivalence) | `mixed` minus its `Order` element | `pinned_targets_for_source` | `Ok`, EQUAL to P's |
+    ///
+    /// # Why no row is vacuous
+    ///
+    /// * **P vs N** differ by exactly one field — the presence of the `Targets` pin — and
+    ///   come out OPPOSITE.
+    /// * **N and N2 are revert-INSENSITIVE on purpose, and that insensitivity IS the
+    ///   measurement**: "the beat still fails closed" is the claim that the verdict does not
+    ///   move. **R is their reach guard.** R calls the same `resolve` with the same
+    ///   `(template, 0, &state)` triple those two seams call internally, so `R == Ok` proves
+    ///   the input arrived and resolved; N's and N2's `Err` can then only be the
+    ///   post-resolve fall-through, never "the input never arrived". **This is the
+    ///   load-bearing condition of the whole test: R, N and N2 must use the byte-same
+    ///   template VALUE on the same `&state` VALUE.** If R built its own template, N and N2
+    ///   would become indistinguishable from non-delivery and this row would read as proof
+    ///   while measuring nothing.
+    /// * **P-minus** is the security row. Its discriminating assertion is the EQUALITY, not
+    ///   the `Ok`: it fails the moment an `Order` element contributes anything to the answer.
+    ///   `mixed_no_order` is `mixed` minus exactly its `Order` element, built from the same
+    ///   `targets_pin` value on the same board — if the two templates were constructed
+    ///   independently, the `assert_eq!` would measure two hand-written templates agreeing
+    ///   instead of the element contributing nothing.
+    ///
+    /// # What this does NOT measure
+    ///
+    /// ACCEPTANCE. Whether `mixed_no_order` is *submittable* is `declaration_conforms`'
+    /// question; no row here asks it, and the answer is not always yes (an `Order` pin can be
+    /// the sole cover of a required point, in which case dropping it fails
+    /// `predictability_gate` — pre-existing and zone-independent).
+    ///
+    /// REVERT-PROBES: reverting the `Order` arm to `resolve_source` ⇒ rows **R** and **P**
+    /// fail; **N**, **N2** and **P-minus** are deliberately revert-insensitive.
+    #[test]
+    fn a_command_zone_order_pin_stops_poisoning_the_template_without_gaining_capability() {
+        use crate::types::zones::Zone;
+        let mut state = GameScenario::new_n_player(2, 7).build().state().clone();
+        let battlefield = place(&mut state, 900, Zone::Battlefield);
+        let command = place(&mut state, 901, Zone::Command);
+        stand_up_target_prompt(&mut state, P0, command, 1);
+        let prompt = state.waiting_for.clone();
+
+        let order_source = object_decision_source(&state, command).expect("placed above");
+        let order_pin = PinnedDecision::Order {
+            source: order_source.clone(),
+            pos: 0,
+        };
+        // ONE template value, bound once, shared by rows R, N and N2 (the preservation
+        // condition above).
+        let order_only = DecisionTemplate {
+            owner: P0,
+            decisions: vec![order_pin.clone()],
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::UntilLethal,
+            },
+            key: DecisionGroupKey::from_sources(
+                std::slice::from_ref(&order_source),
+                DecisionKind::LoopChoice,
+            ),
+        };
+
+        // ── row R (delivery): the pin re-binds through the public `resolve`. ──
+        let resolved = crate::analysis::decision_template::resolve(&order_only, 0, &state)
+            .expect("row R: a command-zone Order pin re-binds to its live ability instance");
+        assert!(
+            resolved.iter().any(|d| matches!(
+                d,
+                crate::analysis::decision_template::ConcreteDecision::Order { source, .. }
+                    if *source == command
+            )),
+            "row R: the resolved vec carries THIS source's Order element — the delivery \
+             this row exists to prove for N and N2"
+        );
+
+        // ── row N (neutrality, the trailing-`Err` half): the SAME value, same board. ──
+        assert!(
+            pinned_targets_for_source(&order_only, 0, &state, battlefield).is_err(),
+            "row N: an ORDER-only template still fails closed at this element reader. Row R \
+             proved the internal `resolve` returned Ok on this exact value, so this Err is \
+             the post-resolve fall-through — the abort MOVED, it was not avoided"
+        );
+
+        // ── row N2 (neutrality, the `find_map` half): the SAME value, cloned board. ──
+        let mut injector_work = state.clone();
+        assert!(
+            inject_pinned_answer(&mut injector_work, Some(&order_only), 0, &prompt).is_err(),
+            "row N2: the injector beat still fails closed too — its `find_map` looks for a \
+             `Targets` element and an `Order` element is not one"
+        );
+
+        // ── the mixed pair. `mixed_no_order` is `mixed` with the FIRST element dropped and
+        // NOTHING else changed: one `targets_pin` value, cloned into both. ──
+        let targets_pin = PinnedDecision::Targets {
+            slot: DecisionSlot {
+                source: object_decision_source(&state, battlefield).expect("placed above"),
+                index: 0,
+            },
+            targets: vec![TargetPin::ByIdentity(
+                object_decision_source(&state, battlefield).expect("placed above"),
+            )],
+        };
+        let mixed = DecisionTemplate {
+            decisions: vec![order_pin.clone(), targets_pin.clone()],
+            ..order_only.clone()
+        };
+        let mixed_no_order = DecisionTemplate {
+            decisions: vec![targets_pin.clone()],
+            ..order_only.clone()
+        };
+
+        // ── row P (poisoning removed): the OTHER pin in the same template now answers. ──
+        let p = pinned_targets_for_source(&mixed, 0, &state, battlefield).expect(
+            "row P: with the Order pin re-binding and the Targets pin resolving, the seam \
+             returns the Targets pin's own answer",
+        );
+        assert_eq!(
+            p,
+            vec![ConcreteTarget::Object(battlefield)],
+            "row P: one field from row N (the second pin) and OPPOSITE it"
+        );
+
+        // ── row P-minus (omit-the-pin equivalence): the security row. ──
+        let p_minus = pinned_targets_for_source(&mixed_no_order, 0, &state, battlefield)
+            .expect("row P-minus: the Order-less template resolves at both revisions");
+        assert_eq!(
+            p, p_minus,
+            "row P-minus: a re-binding `Order` element contributes NOTHING to this \
+             consumer's answer — the equality is the discriminating assertion, and it \
+             fails the moment any consumer starts reading `ConcreteDecision::Order`"
+        );
+    }
+
+    // ───────────────────────── 5d U2 — the shape-(B) mint ─────────────────────────
+
+    use crate::types::ability::ResolvedAbility;
+
+    /// A 3-seat board plus one battlefield source object, shared by every U2 mint row so a
+    /// row's verdict cannot come from board differences.
+    fn u2_board() -> (GameState, ObjectId) {
+        let mut state = GameScenario::new_n_player(3, 7).build().state().clone();
+        let src = place(&mut state, 930, crate::types::zones::Zone::Battlefield);
+        (state, src)
+    }
+
+    /// A proposer-controlled OPTIONAL, NO-TARGET triggered ability — shape (B)'s own shape.
+    ///
+    /// `target_choice_timing: Resolution` is what makes it shape (B), and it is the class's
+    /// real rules shape rather than a test convenience: CR 601.2c announces only DECLARED
+    /// targets, so Braids, Conjurer Adept — "At the beginning of each player's upkeep, that
+    /// player may put an artifact, creature, or land card from their hand onto the
+    /// battlefield." (CR 503.1a + CR 608.2d; text verified against Scryfall) — chooses its
+    /// subject AT RESOLUTION and surfaces zero announcement slots.
+    ///
+    /// The `Effect::PutCounter` fixtures below are a SYNTHETIC STAND-IN, never Braids'
+    /// printed effect: they exercise the same CLASS (per-player-upkeep optional,
+    /// resolution-time subject, zero announcement slots) on an effect this mint's
+    /// allow-list admits. The recipient branch they ride is EFFECT-AGNOSTIC (see
+    /// `a_may_slot_is_minted_only_for_the_seat_the_cr_603_5_gate_will_ask`), which is what
+    /// makes the substitution sound rather than a convenience. Measured on `u2_board`:
+    /// `build_target_slots` returns `Ok(0)` for every fixture below (each row asserts the
+    /// consequence through its own matched positive), so each really reaches the shape-(B)
+    /// arm rather than falling out at an upstream conjunct.
+    fn shape_b(src: ObjectId, effect: crate::types::ability::Effect) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(effect, vec![], src, P0);
+        ability.optional = true;
+        ability.target_choice_timing = crate::types::ability::TargetChoiceTiming::Resolution;
+        ability
+    }
+
+    fn shape_b_entry(id: u64, src: ObjectId, ability: ResolvedAbility) -> StackEntry {
+        StackEntry {
+            id: ObjectId(id),
+            source_id: src,
+            controller: P0,
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: src,
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        }
+    }
+
+    /// `Effect::PutCounter` on a `ScopedPlayer`-scoped creature filter — inside D4.3's
+    /// six-arm scope filter, and the exact filter shape
+    /// `filter_uses_relative_controller_scoped` keys on.
+    fn scoped_put_counter() -> crate::types::ability::Effect {
+        use crate::types::ability::{
+            ControllerRef, Effect, QuantityExpr, TargetFilter, TypedFilter,
+        };
+        Effect::PutCounter {
+            target: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![crate::types::ability::TypeFilter::Creature],
+                controller: Some(ControllerRef::ScopedPlayer),
+                properties: vec![],
+            }),
+            counter_type: crate::types::counter::CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+        }
+    }
+
+    /// R23, conjuncts 1–2 — **CR 603.5: the `may` pin binds the prompt's RECIPIENT, not only
+    /// the entry's OWNER.**
+    ///
+    /// Asserted AT THE MINT SEAM, deliberately: an offer-level negative would be satisfied by
+    /// D4.3's scope filter on many boards regardless of this guard (the
+    /// upstream-conjunct-dominates trap). The mint has no such upstream.
+    ///
+    /// `entry.controller == proposer` bounds who OWNS the entry; it does not bound who the
+    /// resolver ASKS. `optional_prompt_player`'s last branch is EFFECT-AGNOSTIC — it fires on
+    /// `ability.scoped_player` plus a `ScopedPlayer`-scoped `target_filter()` (CR 503.1a +
+    /// CR 608.2d, the Braids, Conjurer Adept class — whose printed effect puts an artifact,
+    /// creature, or land card from hand onto the battlefield, NOT a counter; `PutCounter`
+    /// here is a synthetic stand-in for the class, which that branch admits precisely
+    /// BECAUSE it is effect-agnostic) — so an allow-listed `PutCounter` reaches
+    /// it. Without the conjunct, P0's pin would be spendable as P1's CR 603.5 choice.
+    ///
+    /// MATCHED POSITIVE, on the same instrument and differing in exactly `scoped_player`: it
+    /// proves the fixture reaches the mint at all, so the negative is keyed to the recipient
+    /// axis and not to one of the four upstream conjuncts.
+    ///
+    /// REVERT-PROBE: delete `&& effects::optional_prompt_player(state, ability) == proposer`
+    /// from the `may` mint ⇒ the scoped-player entry publishes a `MayChoice` slot ⇒ the
+    /// negative arm FLIPS TO FAIL.
+    #[test]
+    fn a_may_slot_is_minted_only_for_the_seat_the_cr_603_5_gate_will_ask() {
+        let (mut state, src) = u2_board();
+
+        // ── negative: the gate will ask P1, not the proposer ──
+        let mut scoped = shape_b(src, scoped_put_counter());
+        scoped.scoped_player = Some(P1);
+        assert_eq!(
+            crate::game::effects::optional_prompt_player(&state, &scoped),
+            P1,
+            "reach-guard: the recipient authority must really route this entry to the OTHER \
+             seat, or the negative below is about nothing"
+        );
+        let negative = shape_b_entry(940, src, scoped);
+        assert!(
+            entry_publishes_pin_slots(&state, &negative, P0).is_none(),
+            "CR 603.5: a `may` the resolver will ask ANOTHER seat publishes no pin slot"
+        );
+
+        // ── matched positive: byte-identical except `scoped_player` ──
+        let unscoped = shape_b(src, scoped_put_counter());
+        assert_eq!(
+            crate::game::effects::optional_prompt_player(&state, &unscoped),
+            P0,
+            "reach-guard: with no scoped player the gate asks the controller = proposer"
+        );
+        let positive = shape_b_entry(941, src, unscoped);
+        let published = entry_publishes_pin_slots(&state, &positive, P0)
+            .expect("the matched positive must reach the mint and publish");
+        assert!(
+            published.may.is_some(),
+            "the matched positive publishes the CR 603.5 gate"
+        );
+        assert!(
+            published.target.is_none(),
+            "shape (B): announcing it surfaces no CR 601.2c choice, so no target slot"
+        );
+        assert!(
+            published.legal_targets.is_empty(),
+            "no target slot carries no legal set"
+        );
+
+        // The published pair also reaches the point mint as ONE `MayChoice` point.
+        state.stack.push_back(positive);
+        let points = bounded_cycle_pin_slots(&state, P0);
+        assert_eq!(
+            points.len(),
+            1,
+            "shape (B) publishes exactly the may point: {points:?}"
+        );
+        assert_eq!(
+            points[0].kind,
+            crate::analysis::decision_template::DecisionPointKind::MayChoice
+        );
+        assert_eq!(
+            points[0].slot.index, 1,
+            "index 1 is the may slot in BOTH shapes"
+        );
+    }
+
+    /// The CR 603.5 prompt sites in ONE source text: `(producers, readers, in_test)`.
+    ///
+    /// A producer's key is `file::fn {fields}` — its enclosing column-0 `fn` plus the
+    /// whitespace-stripped field text of the construction minted there, so a REPLACEMENT
+    /// inside an already-pinned function moves the key. A reader keys as `file::fn`.
+    fn cr_603_5_sites(rel: &str, text: &str) -> (Vec<String>, Vec<String>, usize) {
+        use crate::source_census::code as code_of;
+
+        /// The `#[cfg(test)]`-attributed column-0 `mod … {` … column-0 `}` spans.
+        fn cfg_test_spans(lines: &[&str]) -> Vec<(usize, usize)> {
+            let mut spans = Vec::new();
+            let mut i = 0;
+            while i < lines.len() {
+                if lines[i].trim() == "#[cfg(test)]" {
+                    let mut j = i + 1;
+                    while j < lines.len()
+                        && (lines[j].trim_start().starts_with("#[") || lines[j].trim().is_empty())
+                    {
+                        j += 1;
+                    }
+                    let is_mod = j < lines.len()
+                        && lines[j].starts_with(['m', 'p'])
+                        && lines[j].contains("mod ")
+                        && lines[j].trim_end().ends_with('{');
+                    if is_mod {
+                        let mut k = j + 1;
+                        while k < lines.len() && lines[k] != "}" {
+                            k += 1;
+                        }
+                        spans.push((j, k));
+                        i = k;
+                    }
+                }
+                i += 1;
+            }
+            spans
+        }
+
+        /// The construction's field text, brace-matched over the CODE half from `after` —
+        /// just past its opening `{` on line `n` — to the matching `}`, with ALL whitespace
+        /// removed so re-indenting or re-breaking a field expression cannot move it.
+        /// Unbalanced input runs to EOF and yields a key nothing matches: red, never a
+        /// silent pass.
+        fn fields(lines: &[&str], n: usize, after: usize) -> String {
+            let mut body = String::new();
+            let mut depth = 1usize;
+            let mut rest = &code_of(lines[n])[after..];
+            let mut i = n;
+            loop {
+                for ch in rest.chars() {
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return body;
+                            }
+                        }
+                        _ => {}
+                    }
+                    if !ch.is_whitespace() {
+                        body.push(ch);
+                    }
+                }
+                i += 1;
+                let Some(line) = lines.get(i) else {
+                    return body;
+                };
+                rest = code_of(line);
+            }
+        }
+
+        let lines: Vec<&str> = text.lines().collect();
+        let spans = cfg_test_spans(&lines);
+        // A whole file whose stem ends `_tests` is test-only (its parent declares it under
+        // `#[cfg(test)]`).
+        let test_file = rel.trim_end_matches(".rs").ends_with("_tests");
+
+        // The needle is ASSEMBLED so this row's own source cannot be counted by its own
+        // instrument. `..` excludes multi-line READ destructures whose rest-pattern sits on
+        // a later line — the inflation the raw grep suffers from.
+        let needle = format!("WaitingFor::{}Choice {{", "OptionalEffect");
+        let (mut producers, mut readers, mut in_test) = (Vec::new(), Vec::new(), 0usize);
+        // Enclosing-function tracker for this file: `enclosing` names each site and
+        // `fn_start` bounds the qualifying look-back below, so no coordinate is minted.
+        // Column-0 `fn` headers only — a producer inside an `impl` method would take the
+        // preceding free function's name; all five producers today are free functions.
+        let (mut enclosing, mut fn_start) = (String::new(), 0usize);
+        for (n, line) in lines.iter().enumerate() {
+            let code = code_of(line);
+            if !line.starts_with([' ', '\t']) {
+                let tokens: Vec<&str> = code.split_whitespace().collect();
+                if let Some(at) = tokens.iter().position(|token| *token == "fn") {
+                    enclosing = tokens
+                        .get(at + 1)
+                        .and_then(|token| token.split(['(', '<']).next())
+                        .unwrap_or_default()
+                        .to_string();
+                    fn_start = n;
+                }
+            }
+            let Some(open) = code.find(&needle) else {
+                continue;
+            };
+            if code.contains("..") {
+                continue;
+            }
+            if test_file || spans.iter().any(|(a, b)| (*a..=*b).contains(&n)) {
+                in_test += 1;
+            } else if code.contains("waiting_for = ")
+                || code.contains("Ok(Some(")
+                // `install_direct_choice_frame` owns the actual `state.waiting_for`
+                // write, so its typed prompt argument is a mint, not a read. The
+                // window is the enclosing fn; `code_of` keeps prose out of it.
+                || lines[fn_start..n]
+                    .iter()
+                    .any(|prior| code_of(prior).contains(".install_direct_choice_frame("))
+            {
+                let body = fields(&lines, n, open + needle.len());
+                let trimmed = body.trim_end_matches(',');
+                producers.push(format!("{rel}::{enclosing} {{{trimmed}}}"));
+            } else {
+                readers.push(format!("{rel}::{enclosing}"));
+            }
+        }
+        (producers, readers, in_test)
+    }
+
+    /// R23, conjunct 3 — **the PRODUCER census, so a new producer is a COUNTED event.**
+    ///
+    /// What bounds the mint conjunct's reach is how many things PRODUCE
+    /// `WaitingFor::OptionalEffectChoice`: the conjunct is a fail-closed pre-filter on ONE of
+    /// them, and soundness over the others is discharged at the consumption point. Exactly one
+    /// of the five sits inside the CR 603.5 gate that consults the recipient authority. If a
+    /// sixth appears, this row fails and whoever added it must decide where its recipient is
+    /// bound.
+    ///
+    /// A producer is identified by its ENCLOSING FUNCTION and the CONSTRUCTION it mints
+    /// (`file::fn {fields}`, whitespace stripped), and the qualifying
+    /// `.install_direct_choice_frame(` look-back is bounded by that same function. NO line
+    /// coordinate is asserted, so movement above a producer is not an event and a REPLACEMENT
+    /// inside a pinned function is. The pin is a sorted MULTISET, so a sixth mint in one of
+    /// them still fails here; comment text is never a site (`source_census::code`).
+    #[test]
+    fn the_cr_603_5_prompt_census_is_pinned_so_a_sixth_producer_is_a_counted_event() {
+        /// Every `.rs` under the crate's `src`.
+        fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("readable source dir") {
+                let path = entry.expect("readable dir entry").path();
+                if path.is_dir() {
+                    rs_files(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rs_files(&root, &mut files);
+        files.sort();
+        assert!(files.len() > 100, "reach-guard: the walker found the crate");
+
+        let (mut producers, mut readers, mut in_test) = (Vec::new(), Vec::new(), 0usize);
+        for path in &files {
+            let text = std::fs::read_to_string(path).expect("readable source file");
+            let rel = path
+                .strip_prefix(&root)
+                .expect("under src")
+                .display()
+                .to_string()
+                // Canonicalize to forward slashes so the census pins below are
+                // platform-independent: `Path::display()` emits the OS-native
+                // separator (backslash on Windows), but the pins are written in
+                // the crate's forward-slash convention. No-op on Unix/CI.
+                .replace('\\', "/");
+            let (file_producers, file_readers, file_in_test) = cr_603_5_sites(&rel, &text);
+            producers.extend(file_producers);
+            readers.extend(file_readers);
+            in_test += file_in_test;
+        }
+        producers.sort();
+
+        assert_eq!(
+            producers.len() + readers.len() + in_test,
+            44,
+            "CR 603.5 prompt census drifted. A new PRODUCER must have its recipient bound \
+             somewhere — the mint's conjunct (a) covers exactly ONE of them. A new READER is \
+             the benign case (U4's own consumption arm was one).\n\
+             producers={producers:#?}\nreaders={readers:#?}"
+        );
+        assert_eq!(
+            (producers.len(), readers.len(), in_test),
+            (5, 9, 30),
+            "the partition, not just the total: five PRODUCTION producers, nine PRODUCTION \
+             readers (they read `state.waiting_for` and never write it), 30 `#[cfg(test)]` lines.\nproducers={producers:#?}\n\
+             readers={readers:#?}"
+        );
+        assert_eq!(
+            producers,
+            vec![
+                "game/effects/mod.rs::drive_sequential_repeated_optional_payment {player:ability.controller,source_id:ability.source_id,description:ability.description.clone(),may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
+                "game/effects/mod.rs::resolve_chain_body {player:prompt_player,source_id:ability.source_id,description,may_trigger_key,same_card_may_trigger_choice_available}".to_string(),
+                "game/effects/mod.rs::resolve_repeated_optional_payment_choice {player,source_id,description,may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
+                "game/effects/scoped_library_search.rs::advance_acceptance {player,source_id,description,may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
+                "game/engine.rs::begin_pending_trigger_target_selection {player,source_id,description:trigger_description,may_trigger_key,same_card_may_trigger_choice_available}".to_string(),
+            ],
+            "the five production producers, each keyed by its ENCLOSING FUNCTION and the \
+             CONSTRUCTION it mints, compared as a sorted MULTISET, so a sixth mint inside one \
+             of these functions still fails here. Four of the five choose `player` WITHOUT \
+             consulting the recipient authority, which is exactly why the mint conjunct is a \
+             fail-closed pre-filter and not a soundness proof. A CR 603.5 producer's \
+             construction changed — if that was intended, update this literal; if it was not, \
+             you changed who or how the optional choice is offered."
+        );
+
+        // Exactly ONE of them routes through the recipient authority: the CR 603.5 gate.
+        let effects_src = std::fs::read_to_string(root.join("game/effects/mod.rs"))
+            .expect("readable effects module");
+        let authority = format!("{}_prompt_player", "optional");
+        // Counted over the CODE HALF of each line, via `crate::source_census::code`: a prose
+        // mention of the authority is not a call. A real second call still trips this, because
+        // a call cannot live in comment text.
+        let authority_code_hits = effects_src
+            .lines()
+            .map(crate::source_census::code)
+            .filter(|l| l.contains(&authority))
+            .count();
+        assert_eq!(
+            authority_code_hits, 2,
+            "one definition + exactly one call — the CR 603.5 gate's `let prompt_player = ..`. \
+             A second call inside `effects/mod.rs` means a second producer started consulting \
+             the authority and this row's partition needs re-deriving"
+        );
+    }
+
+    /// The producer key's discrimination, on PLANTED input: the real tree cannot exhibit both
+    /// polarities at once, so a repo-scanning assertion for this property is vacuous BY
+    /// CONSTRUCTION. Each arm feeds `cr_603_5_sites` a synthetic source and states what the
+    /// key must and must not move with. The mint spelling is ASSEMBLED, so none of these
+    /// sources is itself a census site.
+    #[test]
+    fn a_producer_key_moves_with_the_construction_and_not_with_its_position() {
+        let mint = format!("WaitingFor::{}Choice {{", "OptionalEffect");
+        let rel = "game/planted.rs";
+        let keys = |lines: &[&str]| cr_603_5_sites(rel, &lines.join("\n")).0;
+        let base_key = format!(
+            "{rel}::mint_one {{player:prompt_player,source_id:ability.source_id,may_trigger_key}}"
+        );
+        let assign = format!("    state.waiting_for = {mint}");
+
+        // BASELINE — the paired positive for the bare negative below: the same scanner,
+        // through the same helpers, returns exactly one key for one construction.
+        let baseline = keys(&[
+            "fn mint_one() {",
+            assign.as_str(),
+            "        player: prompt_player,",
+            "        source_id: ability.source_id,",
+            "        may_trigger_key,",
+            "    };",
+            "}",
+        ]);
+        assert_eq!(
+            baseline,
+            vec![base_key.clone()],
+            "one construction in one function keys as `file::fn {{fields}}`"
+        );
+
+        let moved = keys(&[
+            "// text above the producer",
+            "// more text above the producer",
+            "// and more",
+            "fn mint_one() {",
+            "    let _ = ();",
+            assign.as_str(),
+            "        player: prompt_player,",
+            "        source_id: ability.source_id,",
+            "        may_trigger_key,",
+            "    };",
+            "}",
+        ]);
+        assert_eq!(
+            moved, baseline,
+            "inserting lines above a producer must not move its key"
+        );
+
+        let nested_assign = format!("        state.waiting_for = {mint}");
+        let renested = keys(&[
+            "fn mint_one() {",
+            "    if gate {",
+            nested_assign.as_str(),
+            "            player: prompt_player,",
+            "            source_id: ability",
+            "                .source_id,",
+            "            may_trigger_key,",
+            "        };",
+            "    }",
+            "}",
+        ]);
+        assert_eq!(
+            renested, baseline,
+            "re-indenting the construction and breaking a field expression across lines is \
+             what `rustfmt` does; neither may move the key"
+        );
+
+        let twice = keys(&[
+            "fn mint_one() {",
+            assign.as_str(),
+            "        player: prompt_player,",
+            "        source_id: ability.source_id,",
+            "        may_trigger_key,",
+            "    };",
+            assign.as_str(),
+            "        player: prompt_player,",
+            "        source_id: ability.source_id,",
+            "        may_trigger_key,",
+            "    };",
+            "}",
+        ]);
+        assert_eq!(
+            twice,
+            vec![base_key.clone(), base_key.clone()],
+            "a second mint inside an already-pinned function is a counted event: the keys are \
+             a MULTISET, not a set"
+        );
+
+        let removed = keys(&["fn mint_one() {", "    let _ = ();", "}"]);
+        assert!(
+            removed.is_empty(),
+            "a function that mints nothing yields no key, got {removed:?}"
+        );
+
+        let rebound = keys(&[
+            "fn mint_one() {",
+            assign.as_str(),
+            "        player: ability.controller,",
+            "        source_id: ability.source_id,",
+            "        may_trigger_key,",
+            "    };",
+            "}",
+        ]);
+        assert_eq!(
+            rebound,
+            vec![format!(
+                "{rel}::mint_one {{player:ability.controller,source_id:ability.source_id,may_trigger_key}}"
+            )],
+            "the recipient expression is part of the key"
+        );
+
+        let second_authority = keys(&[
+            "fn mint_one() {",
+            assign.as_str(),
+            "        player: prompt_player,",
+            "        source_id: ability.source_id,",
+            "        may_trigger_key: None,",
+            "    };",
+            "}",
+        ]);
+        assert_eq!(
+            second_authority,
+            vec![format!(
+                "{rel}::mint_one {{player:prompt_player,source_id:ability.source_id,may_trigger_key:None}}"
+            )],
+            "the stored-choice authority is part of the key, with the recipient HELD"
+        );
+
+        assert!(
+            rebound != baseline && second_authority != baseline,
+            "a construction REPLACED inside an already-pinned function must move its key — \
+             recipient rebound: {rebound:?}; stored-choice authority changed: \
+             {second_authority:?}; unchanged construction: {baseline:?}"
+        );
+    }
+
+    /// R25 — **a stored `may` auto-choice is a SECOND authority on the same CR 603.5
+    /// question, and the mint must refuse to it.**
+    ///
+    /// Without the conjunct the pin is minted, then the gate consumes the stored choice and
+    /// **returns before setting any prompt** — so `inject_pinned_answer` is never entered and
+    /// the fail-closed `_ => Err(RecastAbort)` arm the design leans on cannot fire on a prompt
+    /// that is never raised. The declared `Take` would be silently replaced by the stored
+    /// `Decline`. `MayTriggerAutoChoiceKey`/`Record` are `Serialize + Deserialize`, so a real
+    /// dump can carry one.
+    ///
+    /// MATCHED POSITIVE, differing ONLY in the seeded record, so no upstream conjunct can
+    /// dominate.
+    ///
+    /// REVERT-PROBE: delete the `ability.may_trigger_origin.as_ref().is_none_or(…is_none())`
+    /// conjunct from the `may` mint ⇒ the seeded entry publishes a `MayChoice` slot ⇒ the
+    /// negative arm FLIPS TO FAIL.
+    #[test]
+    fn a_stored_may_auto_choice_is_a_second_authority_the_mint_refuses_to() {
+        use crate::types::ability::{
+            Effect, QuantityExpr, TargetFilter, TriggerBaseSetInstanceRef,
+            TriggerDefinitionOccurrenceRef, TriggerDefinitionRef,
+        };
+        use crate::types::game_state::{AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin};
+        use crate::types::identifiers::ObjectIncarnationRef;
+
+        let (mut state, src) = u2_board();
+        // The production shape: `triggers.rs` mints `Definition { definition_ref }` from the
+        // source's own incarnation plus the printed occurrence — built here identically.
+        let origin = MayTriggerOrigin::Definition {
+            definition_ref: TriggerDefinitionRef {
+                source: ObjectIncarnationRef::of(src, 3),
+                occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                    base_set: TriggerBaseSetInstanceRef::INITIAL,
+                    printed_index: 0,
+                },
+            },
+        };
+        let with_origin = |src: ObjectId| {
+            let mut ability = shape_b(
+                src,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            );
+            ability.may_trigger_origin = Some(origin.clone());
+            ability
+        };
+
+        // ── matched positive: no stored record ⇒ the gate WILL prompt ⇒ mint publishes ──
+        let entry = shape_b_entry(950, src, with_origin(src));
+        assert!(
+            state.may_trigger_auto_choices.is_empty(),
+            "reach-guard: the positive arm runs with NO stored record"
+        );
+        assert!(
+            entry_publishes_pin_slots(&state, &entry, P0)
+                .expect("the positive arm publishes")
+                .may
+                .is_some(),
+            "with no stored answer the CR 603.5 gate really asks, so the pin is spendable"
+        );
+
+        // ── negative: the SAME board with one record seeded ──
+        state.set_may_trigger_auto_choice(
+            MayTriggerAutoChoiceKey {
+                player: P0,
+                source_id: src,
+                origin: origin.clone(),
+            },
+            AutoMayChoice::Decline,
+        );
+        assert_eq!(
+            state.may_trigger_auto_choice(&MayTriggerAutoChoiceKey {
+                player: P0,
+                source_id: src,
+                origin,
+            }),
+            Some(AutoMayChoice::Decline),
+            "reach-guard: the mint's key must be the key the seed stored, or the negative \
+             passes for the wrong reason"
+        );
+        assert!(
+            entry_publishes_pin_slots(&state, &entry, P0).is_none(),
+            "CR 603.5: a stored auto-choice already answers this may, so a minted pin would \
+             be silently unused — refuse it at the mint. Shape (B) has no other slot, so the \
+             whole entry publishes nothing"
+        );
+    }
+
+    /// R30 — **one published `MayChoice` slot stands for exactly ONE CR 603.5 prompt.**
+    ///
+    /// CR 732.2a requires the shortcut to describe *the* sequence of choices; a schema point
+    /// is a choice SURFACE, so a slot that answers one prompt while the resolution opens N is
+    /// a schema that under-describes its own sequence. Production suppresses the single
+    /// up-front CR 603.5 gate for three `repeat_for` shapes and re-fires optionality PER
+    /// ITERATION (CR 608.2c + CR 608.2d) instead. The mint asks production's own three
+    /// predicates rather than re-deriving them — re-deriving is the drift defect one symbol
+    /// over.
+    ///
+    /// THREE ARMS, one per predicate, each with its matched positive on the same instrument:
+    /// * **(a) kind-driven — the reachable one.** `has_kind_driven_repeat` matches on
+    ///   `repeat_for` and on NOTHING else (no `Effect` restriction), so an allow-listed
+    ///   optional `PutCounter` of that shape reaches it. **(a′)** differs only in
+    ///   `repeat_for: None`.
+    /// * **(b) member-driven — live for an allow-listed effect.** `Effect::Token` with
+    ///   `attach_to: Some(ParentTarget)` (Asinine Antics' shape, named in
+    ///   `effect_parent_ref_slots`' own doc) is inside the allow list and reaches
+    ///   `effect_iterates_over_parent_target`. **(b′)** differs in exactly the predicate's
+    ///   own deciding leaf: `attach_to: Some(LastCreated)` is ALSO a context ref, so the head
+    ///   filter is still `owner`, the shape is still (B) and the `repeat_for` is still
+    ///   `ObjectCount` — only `filter_refs_parent_target` flips. Without (b′) a blanket
+    ///   "refuse every `ObjectCount`" would pass, which is coarser than production and a mint
+    ///   cost.
+    /// * **(c) repeated optional payment — DISCLOSED as not independently reachable.** It
+    ///   requires `Effect::PayCost`, which D4.3's scope filter refuses at conjunct (6), so no
+    ///   certifiable offer carries such an entry. The arm asserts the mint's refusal only and
+    ///   claims NO closed hole; it ships so the mint asks the same three questions production
+    ///   asks.
+    ///
+    /// REVERT-PROBE: delete the three sub-conjuncts from the `may` mint ⇒ (a) and (b) FLIP TO
+    /// FAIL while (a′)/(b′) stay green — the pairs discriminate the conjunct, not the fixture.
+    #[test]
+    fn one_published_may_slot_stands_for_exactly_one_cr_603_5_prompt() {
+        use crate::types::ability::{
+            AbilityCondition, AbilityCost, Effect, PtValue, QuantityExpr, QuantityRef, TargetFilter,
+        };
+
+        let (state, src) = u2_board();
+        let publishes_may = |ability: ResolvedAbility, id: u64| -> bool {
+            let entry = shape_b_entry(id, src, ability);
+            entry_publishes_pin_slots(&state, &entry, P0)
+                .and_then(|p| p.may)
+                .is_some()
+        };
+
+        // ── (a) kind-driven, and (a′) its matched positive ──
+        let kind_driven = || {
+            let mut a = shape_b(src, scoped_put_counter());
+            a.repeat_for = Some(QuantityExpr::Ref {
+                qty: QuantityRef::DistinctCounterKindsAmong {
+                    filter: TargetFilter::Controller,
+                },
+            });
+            a
+        };
+        assert!(
+            crate::game::effects::has_kind_driven_repeat(&kind_driven()),
+            "reach-guard: production's own predicate must say TRUE for arm (a)'s fixture"
+        );
+        assert!(
+            !publishes_may(kind_driven(), 960),
+            "(a) CR 608.2c/608.2d: a `DistinctCounterKindsAmong` repeat fires ONE prompt PER \
+             ITERATION, so a single slot would under-describe the CR 732.2a sequence"
+        );
+        let mut kind_positive = kind_driven();
+        kind_positive.repeat_for = None;
+        assert!(
+            publishes_may(kind_positive, 961),
+            "(a′) byte-identical except `repeat_for: None` ⇒ published, so (a) keys on the \
+             repeat axis and not on `optional`, the recipient or the auto-choice conjunct"
+        );
+
+        // ── (b) member-driven, and (b′) the one-leaf matched positive ──
+        let token_attached = |attach: TargetFilter| {
+            let mut a = shape_b(
+                src,
+                Effect::Token {
+                    name: "Cursed Role".to_string(),
+                    power: PtValue::Fixed(1),
+                    toughness: PtValue::Fixed(1),
+                    types: vec!["Enchantment".to_string()],
+                    colors: vec![],
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    owner: TargetFilter::Controller,
+                    attach_to: Some(attach),
+                    enters_attacking: false,
+                    supertypes: vec![],
+                    static_abilities: vec![],
+                    enter_with_counters: vec![],
+                },
+            );
+            a.repeat_for = Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Controller,
+                },
+            });
+            a
+        };
+        assert!(
+            crate::game::effects::has_member_driven_repeat_after_hydration(
+                &state,
+                &token_attached(TargetFilter::ParentTarget)
+            ),
+            "reach-guard: the `ParentTarget` fixture must really reach \
+             `effect_iterates_over_parent_target`"
+        );
+        assert!(
+            !publishes_may(token_attached(TargetFilter::ParentTarget), 962),
+            "(b) CR 608.2c/608.2d: an `ObjectCount` repeat over a parent-target ref fires one \
+             prompt per iterated member"
+        );
+        assert!(
+            !crate::game::effects::has_member_driven_repeat_after_hydration(
+                &state,
+                &token_attached(TargetFilter::LastCreated)
+            ),
+            "reach-guard: `LastCreated` is also a context ref, so (b′) differs from (b) in \
+             the predicate's own deciding leaf and in nothing else"
+        );
+        assert!(
+            publishes_may(token_attached(TargetFilter::LastCreated), 963),
+            "(b′) a blanket `refuse every ObjectCount` would be coarser than production and \
+             would fail here"
+        );
+
+        // ── (c) repeated optional payment — refusal asserted, reach DISCLOSED as closed ──
+        let repeated_payment = || {
+            let mut a = shape_b(
+                src,
+                Effect::PayCost {
+                    cost: AbilityCost::Mana {
+                        cost: crate::types::mana::ManaCost::Cost {
+                            shards: vec![],
+                            generic: 1,
+                        },
+                    },
+                    scale: None,
+                    payer: TargetFilter::Controller,
+                },
+            );
+            a.repeat_for = Some(QuantityExpr::Fixed { value: 2 });
+            let mut sub = ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                src,
+                P0,
+            );
+            sub.condition = Some(AbilityCondition::WhenYouDo);
+            a.sub_ability = Some(Box::new(sub));
+            a
+        };
+        assert!(
+            crate::game::effects::is_repeated_optional_payment(&repeated_payment()),
+            "reach-guard: production's own predicate must say TRUE for arm (c)'s fixture"
+        );
+        assert!(
+            !publishes_may(repeated_payment(), 964),
+            "(c) CR 603.12a: the payment process offers its `may` PER iteration. This arm \
+             asserts the mint's refusal only — `Effect::PayCost` is outside D4.3's six-arm \
+             allow list, so no certifiable offer carries such an entry and NO closed hole is \
+             claimed here"
+        );
+    }
+
+    // ────────── 5d U4 — the `OptionalEffectChoice` arm and its two TOTAL head guards ──────────
+
+    /// Life the shared U4 fixture's suspended optional ability gains when its CR 603.5 choice
+    /// is TAKEN. Named rather than inlined so every "the pin was APPLIED" assertion below is
+    /// keyed to the fixture instead of to a literal.
+    const U4_MAY_LIFE: i32 = 5;
+
+    /// A board parked on a REAL CR 603.5 resolution-time prompt. `asked` is the seat the
+    /// resolver is asking, and the suspended optional ability is THAT seat's, so taking the
+    /// choice gains `asked` exactly `U4_MAY_LIFE` life.
+    ///
+    /// The life delta is the observable that separates "the pinned `DecideOptionalEffect` was
+    /// dispatched" from "the injector returned `Ok(())` having done nothing": an empty board
+    /// would answer `Ok(())` just as happily.
+    ///
+    /// The pinned source is a BATTLEFIELD object because `slot_source_prompted` asks
+    /// `resolve_ability_instance`, whose zone set is {Battlefield, Command} at the pinned
+    /// CR 400.7 incarnation — on a graveyard / exile / hand source it would refuse every arm
+    /// below for a reason none of them is about. (A command-zone source would be admitted;
+    /// the battlefield one is chosen because these rows are not about the zone at all.)
+    fn u4_may_board(asked: PlayerId) -> (GameState, ObjectId) {
+        use crate::types::ability::{Effect, QuantityExpr, TargetFilter};
+        let mut state = GameScenario::new_n_player(3, 7).build().state().clone();
+        let src = place(&mut state, 970, Zone::Battlefield);
+        let mut optional = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: U4_MAY_LIFE },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            src,
+            asked,
+        );
+        optional.optional = true;
+        state.push_optional_effect_frame(crate::types::resolution::OptionalEffectFrame {
+            ability: Box::new(optional),
+            trigger_event: None,
+            trigger_events: Vec::new(),
+            trigger_match_count: None,
+        });
+        state.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: asked,
+            source_id: src,
+            description: None,
+            may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
+        };
+        (state, src)
+    }
+
+    /// A template carrying exactly one CR 603.5 `MayChoice` pin for `src` (slot index 1 — the
+    /// may slot in both mint shapes), declared by `owner`.
+    fn u4_may_template(
+        src: ObjectId,
+        owner: PlayerId,
+        take: crate::analysis::decision_template::MayChoiceOption,
+    ) -> DecisionTemplate {
+        let source = this_object(src);
+        DecisionTemplate {
+            owner,
+            decisions: vec![PinnedDecision::MayChoice {
+                slot: DecisionSlot {
+                    source: source.clone(),
+                    index: 1,
+                },
+                take,
+            }],
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::Fixed(1),
+            },
+            key: DecisionGroupKey::from_sources(&[source], DecisionKind::LoopChoice),
+        }
+    }
+
+    /// R23, conjunct 4 — **CR 603.5 + CR 732.2a: a `may` pin answers only the seat the PROMPT
+    /// names.**
+    ///
+    /// The mint's recipient conjunct (U2) is a PREDICTION over one of five
+    /// `WaitingFor::OptionalEffectChoice` producers — only one of them consults
+    /// `optional_prompt_player` — so it is partial by construction. This guard reads the
+    /// recipient OFF THE PROMPT, which is total over all five and over any sixth.
+    ///
+    /// MATCHED POSITIVE, same instrument, same template, differing in exactly one fixture
+    /// parameter (the seat the prompt names — and, coherently, the controller of the suspended
+    /// optional ability, since the resolver asks that ability's controller): the pinned
+    /// `DecideOptionalEffect` is dispatched and `U4_MAY_LIFE` life is gained.
+    ///
+    /// Two reach-guards keep the negative off the arm's other refusals: the pin's slot really
+    /// does match the prompted source on the NEGATIVE's own board (so the `find_map` is not the
+    /// refuser), and the beat guard's cursor is absent on both boards.
+    ///
+    /// The POSITIVE is asserted FIRST, deliberately: under the revert-probe below one run then
+    /// shows the positive PASSING and the negative FAILING, which is what proves the pair
+    /// discriminates the SEAT rather than the fixture.
+    ///
+    /// REVERT-PROBE: delete `if *player != template.owner { return Err(RecastAbort); }` ⇒ the
+    /// negative arm FLIPS TO FAIL (it returns `Ok(())` and P1 gains the life P0's pin bought).
+    #[test]
+    fn a_may_pin_answers_only_the_seat_the_prompt_names() {
+        use crate::analysis::decision_template::MayChoiceOption;
+
+        // ── MATCHED POSITIVE: the template against ITS OWNER's own prompt ──
+        let (mut asks_owner, src) = u4_may_board(P0);
+        let template = u4_may_template(src, P0, MayChoiceOption::Take);
+        let own_prompt = asks_owner.waiting_for.clone();
+        let p0_before = life(&asks_owner, P0);
+        inject_pinned_answer(&mut asks_owner, Some(&template), 0, &own_prompt)
+            .expect("CR 603.5: the owner's own pin answers the owner's own choice");
+        assert_eq!(
+            life(&asks_owner, P0),
+            p0_before + U4_MAY_LIFE,
+            "the pinned `DecideOptionalEffect {{ accept: true }}` was really APPLIED — an \
+             `Ok(())` that dispatched nothing would leave this unchanged"
+        );
+        assert_ne!(
+            asks_owner.waiting_for, own_prompt,
+            "the prompt was consumed, not silently skipped"
+        );
+
+        // ── NEGATIVE: same template (owner P0), but the prompt asks P1 ──
+        let (mut asks_other, other_src) = u4_may_board(P1);
+        assert_eq!(
+            other_src, src,
+            "both boards mint the same pinned source object"
+        );
+        let prompt = asks_other.waiting_for.clone();
+        assert!(
+            slot_source_prompted(&asks_other, &this_object(src), src),
+            "reach-guard: the pin's slot MATCHES the prompted source on this very board, so a \
+             refusal below cannot be the `find_map`'s"
+        );
+        assert!(
+            asks_other.pending_trigger.is_none(),
+            "reach-guard: no construction cursor, so the BEAT guard cannot be the refuser"
+        );
+        let p1_before = life(&asks_other, P1);
+        assert!(
+            inject_pinned_answer(&mut asks_other, Some(&template), 0, &prompt).is_err(),
+            "CR 603.5: a pin owned by the proposer must not answer ANOTHER seat's choice"
+        );
+        assert_eq!(
+            life(&asks_other, P1),
+            p1_before,
+            "the refusal is fail-closed: nothing was dispatched as P1"
+        );
+        assert_eq!(
+            asks_other.waiting_for, prompt,
+            "the other seat's prompt is still standing, for a human to answer"
+        );
+    }
+
+    /// R23, conjunct 5 — **CR 603.5 vs CR 603.3c + CR 700.2b: the pin binds the BEAT as well as
+    /// the seat.**
+    ///
+    /// A `MayChoice` pin answers the RESOLUTION-time question (CR 603.5). The engine also asks a
+    /// same-`source_id` ANNOUNCEMENT-time question while a trigger is still mid-construction
+    /// (the optional-modal gate, CR 603.3c / CR 700.2b), and `slot_source_prompted` cannot
+    /// separate the two: it matches the SOURCE OBJECT and both prompts carry it. That is why the
+    /// pair below uses the SAME `source_id` in the cursor as in the prompt — a differing-source
+    /// fixture would be refused by the slot lookup instead and the row would report the wrong
+    /// guard.
+    ///
+    /// Both arms hold the seat guard SATISFIED (`player == template.owner == P0`), asserted
+    /// below, so conjunct 4's guard cannot be what decides either arm.
+    ///
+    /// (5-pos) is asserted FIRST so that under the revert-probe ONE run shows the positive
+    /// passing and the negative failing — the evidence that the pair discriminates the CURSOR
+    /// and not the fixture.
+    ///
+    /// REVERT-PROBE: delete `if work.pending_trigger.is_some() { return Err(RecastAbort); }` ⇒
+    /// (5-neg) FLIPS TO FAIL while (5-pos) and conjuncts 1–4 stay green.
+    #[test]
+    fn a_may_pin_never_answers_the_announcement_time_question() {
+        use crate::analysis::decision_template::MayChoiceOption;
+
+        let template = |src: ObjectId| u4_may_template(src, P0, MayChoiceOption::Take);
+
+        // ── (5-pos): the same board with NO construction cursor ──
+        let (mut cursor_clear, src) = u4_may_board(P0);
+        assert!(cursor_clear.pending_trigger.is_none());
+        let pos_prompt = cursor_clear.waiting_for.clone();
+        let pos_before = life(&cursor_clear, P0);
+        inject_pinned_answer(&mut cursor_clear, Some(&template(src)), 0, &pos_prompt).expect(
+            "(5-pos) CR 603.5: with no cursor the pin answers its own resolution-time question",
+        );
+        assert_eq!(
+            life(&cursor_clear, P0),
+            pos_before + U4_MAY_LIFE,
+            "(5-pos) the pinned choice was applied"
+        );
+
+        // ── (5-neg): a LIVE construction cursor on the SAME source ──
+        let (mut cursor_live, neg_src) = u4_may_board(P0);
+        assert_eq!(neg_src, src, "the pair is built from one fixture");
+        let mut mid_construction = ResolvedAbility::new(
+            crate::types::ability::Effect::GainLife {
+                amount: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                player: crate::types::ability::TargetFilter::Controller,
+            },
+            vec![],
+            src,
+            P0,
+        );
+        // The production shape that raises a same-source ANNOUNCEMENT-time prompt: an optional
+        // modal trigger, asked before its modes are chosen (CR 603.3c / CR 700.2b).
+        mid_construction.optional = true;
+        cursor_live.pending_trigger = Some(Box::new(super::triggers::PendingTrigger {
+            source_id: src,
+            controller: P0,
+            condition: None,
+            ability: Box::new(mid_construction),
+            timestamp: 0,
+            target_constraints: vec![],
+            distribute: None,
+            trigger_event: None,
+            modal: None,
+            mode_abilities: vec![],
+            description: None,
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+            provenance: None,
+        }));
+        let prompt = cursor_live.waiting_for.clone();
+        assert_eq!(
+            prompt, pos_prompt,
+            "(5-neg) differs from (5-pos) in `work.pending_trigger` and in NOTHING else the \
+             injector reads — the prompts are equal"
+        );
+        let WaitingFor::OptionalEffectChoice {
+            player: asked,
+            source_id: prompt_source,
+            ..
+        } = &prompt
+        else {
+            panic!("the fixture parks on a CR 603.5 prompt; got {prompt:?}");
+        };
+        assert_eq!(
+            *asked,
+            template(src).owner,
+            "reach-guard: the SEAT guard is satisfied on both arms, so conjunct 4 cannot be \
+             what decides this pair"
+        );
+        assert_eq!(
+            cursor_live
+                .pending_trigger
+                .as_ref()
+                .map(|t| t.source_id)
+                .expect("(5-neg) carries a cursor"),
+            *prompt_source,
+            "the cursor names the SAME source as the prompt — that identity is what makes this \
+             arm non-vacuous, because `slot_source_prompted` matches on exactly that object"
+        );
+        let before = life(&cursor_live, P0);
+        assert!(
+            inject_pinned_answer(&mut cursor_live, Some(&template(src)), 0, &prompt).is_err(),
+            "CR 603.5 vs CR 603.3c: with a live construction cursor the prompt in hand may be \
+             the ANNOUNCEMENT-time question the pin does not answer ⇒ fail-closed"
+        );
+        assert_eq!(
+            life(&cursor_live, P0),
+            before,
+            "(5-neg) fail-closed: no `DecideOptionalEffect` was dispatched"
+        );
+        assert_eq!(
+            cursor_live.waiting_for, prompt,
+            "(5-neg) the prompt still stands"
+        );
+    }
+
+    /// The arm's own leaf, covered in BOTH directions — **CR 603.5: a "may" is binary, and the
+    /// pin says WHICH.**
+    ///
+    /// The injector's `accept` flag is one equality test against `MayChoiceOption`'s take
+    /// variant — the single place the typed pin becomes the engine's boolean. A
+    /// single-direction row would pass just as happily against the INVERTED mapping, which is
+    /// why both options are driven on one fixture. (That comparison is deliberately NOT quoted
+    /// verbatim here: a textual revert-probe whose needle also matched this doc line would
+    /// silently no-op — the tripwire this row's own probe hit on its first run.)
+    ///
+    /// `Decline` is separated from "nothing was dispatched" by the prompt: a declined optional
+    /// effect CONSUMES the prompt (the frame resolves its decline branch) while a refusal leaves
+    /// it standing. Both facts are asserted, so neither arm can pass by inaction.
+    #[test]
+    fn a_may_pin_dispatches_the_option_it_names_in_both_directions() {
+        use crate::analysis::decision_template::MayChoiceOption;
+
+        for take in [MayChoiceOption::Take, MayChoiceOption::Decline] {
+            let (mut board, src) = u4_may_board(P0);
+            let prompt = board.waiting_for.clone();
+            let before = life(&board, P0);
+            inject_pinned_answer(
+                &mut board,
+                Some(&u4_may_template(src, P0, take)),
+                0,
+                &prompt,
+            )
+            .expect("both options are legal answers to a CR 603.5 prompt");
+            assert_ne!(
+                board.waiting_for, prompt,
+                "{take:?}: the prompt is ANSWERED either way — that is what separates a \
+                 `Decline` from a fail-closed refusal"
+            );
+            assert_eq!(
+                life(&board, P0) - before,
+                match take {
+                    MayChoiceOption::Take => U4_MAY_LIFE,
+                    MayChoiceOption::Decline => 0,
+                },
+                "{take:?}: the pin's own option decides `accept`, so an inverted mapping fails \
+                 on one of these two arms"
+            );
+        }
+    }
+
+    /// A live `LoopShortcut` offer with an EMPTY schema, proposed by P0 on `state`.
+    fn u4_park_on_offer(state: &mut GameState) {
+        use crate::analysis::decision_template::ShortcutDecisionSchema;
+        use crate::analysis::loop_check::{LoopCertificate, WinKind};
+        use crate::analysis::resource::BoardDelta;
+        state.waiting_for = WaitingFor::LoopShortcut {
+            proposer: P0,
+            predicted_winner: None,
+            certificate: LoopCertificate {
+                unbounded: vec![],
+                win_kind: WinKind::LethalDamage,
+                mandatory: false,
+                residual_board_delta: BoardDelta::default(),
+                per_cycle: None,
+            },
+            schema: ShortcutDecisionSchema::default(),
+            declaration: None,
+        };
+    }
+
+    /// R28 arm (b) — **the DRIVE seam cannot see a `template.owner` the engine never bound; the
+    /// DECLARE firewall is what makes the drive's seat guard meaningful.**
+    ///
+    /// ⚠ **(b1) ASSERTS A MEASURED BREACH, NOT A DESIRED BEHAVIOUR.** `template.owner` arrives
+    /// verbatim from the client, and `inject_pinned_answer` holds the template but not the
+    /// offer — so when an attacker sets `owner` to the seat the prompt names, the seat guard
+    /// compares that value against itself and passes. Measured on this tree: the injector
+    /// returns `Ok(())` and dispatches the PROPOSER's pinned choice as the OTHER seat's
+    /// `GameAction::DecideOptionalEffect` (P1 gains `U4_MAY_LIFE`). That is the whole reason the
+    /// binding lives at declare (`handle_declare_shortcut`) and at consumption
+    /// (`apply_confirmed_shortcut`), one layer above this one.
+    ///
+    /// ⚠ **PLAN DEVIATION, DISCLOSED:** §6 R28(b) predicts the drive seam refuses this pair
+    /// (*"must still `RecastAbort`"*). It does not, and cannot — the same cell's own analysis
+    /// says so two sentences later (*"under the round-33 design alone it returns `Ok(())`"*).
+    /// The arm ships keyed to the measurement, with (b2) supplying the refusal the row is
+    /// really about. If a future change closes the drive seam (e.g. by threading the
+    /// engine-issued proposer into the injector), (b1) FLIPS and must be re-keyed onto the new
+    /// refusal rather than deleted.
+    ///
+    /// **(b2) THE REFUSAL, AT THE SEAM THAT HAS THE ENGINE-ISSUED COMPARAND.** The identical
+    /// hostile template declared against a live `LoopShortcut { proposer: P0 }` is refused into
+    /// the manual handback — no `ShortcutProposal` is built — so the (b1) configuration is
+    /// unreachable in production. **MATCHED POSITIVE:** byte-identical except `owner`, which
+    /// opens APNAP; without it, "refused" would be indistinguishable from "this constructed
+    /// offer refuses everything".
+    ///
+    /// REVERT-PROBE: delete `if template.as_ref().is_some_and(|t| t.owner != offer.proposer)`
+    /// from `handle_declare_shortcut` ⇒ **(b2) FLIPS TO FAIL** (the hostile declaration builds a
+    /// proposal and APNAP opens), while **(b1) MUST NOT FLIP** — the injector reads no firewall.
+    /// The pair therefore proves the two halves measure two different seams rather than one
+    /// seam asserted twice. Arm (b) and arm (c) (`apply_confirmed_shortcut`, U2, integration)
+    /// take OPPOSITE reverts by design: (b) is about the drive-side comparand, (c) about the
+    /// restore ingress that never reaches declare.
+    #[test]
+    fn r28_b_the_drive_seat_guard_compares_a_client_supplied_owner_against_itself() {
+        use crate::analysis::decision_template::{IterationCount, MayChoiceOption};
+
+        // ── (b1) DRIVE seam: prompt player P1, template owner P1 (the attacker's choice) ──
+        let (mut board, src) = u4_may_board(P1);
+        let hostile = u4_may_template(src, P1, MayChoiceOption::Take);
+        let prompt = board.waiting_for.clone();
+        let p1_before = life(&board, P1);
+        let outcome = inject_pinned_answer(&mut board, Some(&hostile), 0, &prompt);
+        assert!(
+            outcome.is_ok(),
+            "(b1) MEASURED: with `owner` set to the prompt's own seat the drive guard has \
+             nothing to compare — it passes. Got {outcome:?}"
+        );
+        assert_eq!(
+            life(&board, P1),
+            p1_before + U4_MAY_LIFE,
+            "(b1) and the proposer's pinned value was really dispatched AS P1 — this is the \
+             breach the declare-time binding closes, measured rather than argued"
+        );
+
+        // ── (b2) DECLARE seam: the same template, refused by the engine-issued comparand ──
+        for owner in [P1, P0] {
+            let (mut state, offer_src) = u4_may_board(P0);
+            assert_eq!(offer_src, src, "one fixture feeds both halves");
+            u4_park_on_offer(&mut state);
+            apply_action(
+                &mut state,
+                P0,
+                GameAction::DeclareShortcut {
+                    count: IterationCount::Fixed(1),
+                    template: Some(u4_may_template(src, owner, MayChoiceOption::Take)),
+                },
+                None,
+            )
+            .expect("the declaration is dispatched either way — refusal is a HANDBACK");
+
+            if owner == P1 {
+                assert!(
+                    matches!(state.waiting_for, WaitingFor::Priority { .. }),
+                    "(b2) CR 732.2a + CR 603.5 + CR 800.4a: a declaration whose `owner` is not \
+                     the engine-issued proposer hands priority back; got {:?}",
+                    state.waiting_for
+                );
+                assert!(
+                    !matches!(state.waiting_for, WaitingFor::RespondToShortcut { .. }),
+                    "(b2) no `ShortcutProposal` carrying the hostile owner may exist — that is \
+                     what makes (b1)'s configuration production-unreachable"
+                );
+            } else {
+                let WaitingFor::RespondToShortcut { proposal, .. } = &state.waiting_for else {
+                    panic!(
+                        "(b2) matched positive: the honest declaration must open APNAP, so the \
+                         refusal above is keyed to `owner` and not to this constructed offer \
+                         refusing everything; got {:?}",
+                        state.waiting_for
+                    );
+                };
+                assert_eq!(
+                    proposal.template.as_ref().map(|t| t.owner),
+                    Some(P0),
+                    "(b2) the proposal that IS built carries the engine-bound owner"
+                );
+            }
+        }
     }
 }
 
@@ -11166,9 +19639,13 @@ mod kilo_interruptibility_tests {
         // (`migrate_transient_loop_sequence`) drops the dump's 6 stale pinless steps on load —
         // exactly as the integration helper does. Deserializing directly would bypass the hook,
         // leaving the stale prefix so the live drive yields an 8-step (not 2-step) sequence.
-        let raw: GameState =
-            serde_json::from_value(envelope["gameState"].clone()).expect("gameState deserializes");
-        PersistedGameState::Raw(Box::new(raw)).into_game_state()
+        // Decoding AS `PersistedGameState` (rather than decoding a bare `GameState` and
+        // wrapping it) additionally routes the dump through
+        // `reject_legacy_raw_prompt_authority` + `decode_persisted_resolution_state`.
+        // `.expect(..)`, not `?`: `into_game_state` returns `GameState`, not `Result`.
+        serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
+            .expect("gameState deserializes through the production decoder")
+            .into_game_state()
     }
 
     fn beat_actor(state: &GameState) -> PlayerId {
@@ -11454,7 +19931,7 @@ mod kilo_interruptibility_tests {
     /// combo-interruptibility-acceptance-criterion). A declined `Counters`/`Life` axis leaves its
     /// ∞ capability marker in `unbounded_resources` intentionally (CR 732.2b never forces a
     /// shortcut). This test guards the MEASURED retirement path (a) documented at the boundary
-    /// seam: the empty-stack offer hook `try_offer_object_growth_shortcut` (engine.rs:472) is NOT
+    /// seam: the empty-stack offer hook `try_offer_object_growth_shortcut` is NOT
     /// gated by existing ∞ marks, so a later genuine re-detection RE-OFFERS the loop and can
     /// re-collapse the declined axis once the observer is gone.
     ///
@@ -11503,5 +19980,1565 @@ mod kilo_interruptibility_tests {
             "the empty-stack offer hook is NOT ∞-gated: a persisted declined ∞ axis does not \
              suppress a genuine re-detection re-offering the loop (CR 732.2a / CR 732.2b)"
         );
+    }
+
+    /// Plant ONE extra `Targets` pin into the recorded period's first step, on a slot that
+    /// no prompt in the replay answers. That is what makes these three rows isolate the
+    /// OFFER-BUILDER: the drive never consults the planted pin, while
+    /// `pinned_decisions_to_points` — which builds its points from exactly
+    /// `build_recast_template(&seq[0]).decisions` — always does.
+    fn plant_offer_pin(state: &mut GameState, pin: TargetPin) -> GameState {
+        let mut planted = state.clone();
+        let step = planted
+            .last_loop_action_sequence
+            .first_mut()
+            .expect("reach-guard: the recorded period has a first step to plant into");
+        step.pins.push(PinnedDecision::Targets {
+            slot: crate::analysis::decision_template::DecisionSlot {
+                source: YieldTarget::ThisObject {
+                    source_id: KILO,
+                    incarnation: None,
+                    trigger_description: None,
+                },
+                // An index no live prompt publishes, so only the point-builder reads it.
+                index: 99,
+            },
+            targets: vec![pin],
+        });
+        planted
+    }
+
+    /// R4b — CR 732.2a: *"a sequence of game choices ... that may be legally taken based on
+    /// the current game state"*. If a pinned target no longer resolves, there IS no such
+    /// sequence, so the offer must be WITHDRAWN — not published with a short legal set.
+    ///
+    /// Before the fix, `pinned_decisions_to_points` `filter_map`ped the unresolvable pin out
+    /// of `legal_targets` while keeping `min_targets = targets.len()`, publishing a point
+    /// that no legal declaration could satisfy: the player is offered a shortcut they cannot
+    /// take, and the failure surfaces later as `IllegalPinValue` instead of as "no offer".
+    ///
+    /// MATCHED PAIR on one board, one variable — the planted pin's identity:
+    ///   * live object  ⇒ the point resolves ⇒ the offer FIRES (the reach-guard: it proves
+    ///     the plant itself does not break the drive, so the negative arm's `None` is the
+    ///     withdrawal and not a broken fixture);
+    ///   * absent object ⇒ the offer is WITHDRAWN.
+    ///
+    /// REVERT-PROBE: restore the `filter_map` (drop the `?`) ⇒ the negative arm publishes an
+    /// undeclarable point instead of withdrawing ⇒ FAILS. Reachable TODAY and independent of
+    /// item 1: this arm's pin is `ByIdentity`, and no player legality is involved.
+    #[test]
+    fn an_unresolvable_identity_pin_withdraws_the_offer() {
+        let mut driven = load_migrated_dump();
+        drive_one_live_cycle(&mut driven);
+        let base = at_priority_window(driven);
+
+        let live = plant_offer_pin(
+            &mut base.clone(),
+            TargetPin::ByIdentity(YieldTarget::ThisObject {
+                source_id: KILO,
+                incarnation: None,
+                trigger_description: None,
+            }),
+        );
+        assert!(
+            try_offer_object_growth_shortcut(&live).is_some(),
+            "reach-guard: a planted pin that RESOLVES leaves the offer intact, so the \
+             negative arm below is the withdrawal and not the plant"
+        );
+
+        let mut dangling = plant_offer_pin(
+            &mut base.clone(),
+            TargetPin::ByIdentity(YieldTarget::ThisObject {
+                source_id: ObjectId(999_999),
+                incarnation: None,
+                trigger_description: None,
+            }),
+        );
+        assert!(
+            !dangling.objects.contains_key(&ObjectId(999_999)),
+            "setup: the planted identity must genuinely be absent from the board"
+        );
+        assert!(
+            try_offer_object_growth_shortcut(&dangling).is_none(),
+            "CR 732.2a: a pin that cannot resolve withdraws the offer"
+        );
+        // The withdrawal is the whole point: nothing was published to be declared.
+        assert!(matches!(dangling.waiting_for, WaitingFor::Priority { .. }));
+        dangling.last_loop_action_sequence.clear();
+    }
+
+    /// R4d — the same withdrawal, on the OTHER end of the invariant: a `TargetPin::Player`
+    /// aimed at a seat that has left the game (CR 800.4 + CR 102.1) no longer resolves, so
+    /// the offer is withdrawn rather than ratifying its own pin.
+    ///
+    /// This is the offer-builder half of the pair whose MINT half is
+    /// `effects::proliferate`'s R4a row: the two ends of the invariant that a Player pin
+    /// must never reach materialization validated only against a legal set derived from the
+    /// pins themselves. `pinned_decisions_to_points` derives its legal sets FROM the pins,
+    /// so on this route the seat's existence check inside `resolve_target` is the only
+    /// authority there is.
+    ///
+    /// MATCHED PAIR, one variable (`is_eliminated`): live seat ⇒ offer fires; departed seat
+    /// ⇒ offer withdrawn. REVERT-PROBE: drop the existence conjunct in
+    /// `players::player_exists_for_choice` ⇒ the departed seat resolves ⇒ the offer is
+    /// published ⇒ FAILS.
+    #[test]
+    fn a_departed_player_pin_withdraws_the_offer() {
+        let mut driven = load_migrated_dump();
+        drive_one_live_cycle(&mut driven);
+        let base = at_priority_window(driven);
+        let victim = PlayerId(1);
+
+        let live = plant_offer_pin(&mut base.clone(), TargetPin::Player(victim));
+        assert!(
+            !live.players[1].is_eliminated,
+            "reach-guard: the seat starts in the game"
+        );
+        assert!(
+            try_offer_object_growth_shortcut(&live).is_some(),
+            "reach-guard: a Player pin on a LIVE seat leaves the offer intact"
+        );
+
+        let mut departed = live.clone();
+        departed.players[1].is_eliminated = true;
+        assert!(
+            try_offer_object_growth_shortcut(&departed).is_none(),
+            "a Player pin aimed at a departed seat withdraws the offer (CR 732.2a)"
+        );
+    }
+
+    /// R2b — the CR 115.10a boundary, enforced at the OFFER level rather than explained in a
+    /// comment. A shrouded seat (CR 702.18a) is un-TARGETable, and this row proves the
+    /// offer-builder still publishes it as a CHOICE: the point carries it in
+    /// `legal_targets`, and the offer FIRES.
+    ///
+    /// This is the enforcement half of the pair whose explanation half is the site-4 comment
+    /// and whose seam-level half is
+    /// `analysis::decision_template::tests::a_shrouded_seat_is_untargetable_yet_still_
+    /// choosable_at_the_pin_recheck`. Without it, re-introducing target-scoped conjuncts at
+    /// site 4 would silently restore the over-veto at the one seam that publishes an offer.
+    ///
+    /// REVERT-PROBE: route `resolve_target`'s `TargetPin::Player` arm through
+    /// `targeting::player_is_legal_target` ⇒ the shrouded seat stops resolving ⇒ the offer is
+    /// WITHDRAWN ⇒ both assertions FAIL. The paired positive that keeps this from passing on
+    /// an un-shrouded board is the shroud reach-guard asserted first.
+    #[test]
+    fn a_shrouded_player_pin_is_still_published_by_the_offer_builder() {
+        use crate::types::statics::StaticMode;
+
+        let mut driven = load_migrated_dump();
+        drive_one_live_cycle(&mut driven);
+        let mut base = at_priority_window(driven);
+        let victim = PlayerId(1);
+
+        // P1 gains shroud, through the single TCE construction authority — the same route
+        // a resolved "target player gains shroud until end of turn" effect takes.
+        base.add_transient_continuous_effect(
+            KILO,
+            P0,
+            crate::types::ability::Duration::UntilEndOfTurn,
+            crate::types::ability::TargetFilter::SpecificPlayer { id: victim },
+            vec![
+                crate::types::ability::ContinuousModification::AddStaticMode {
+                    mode: StaticMode::Shroud,
+                },
+            ],
+            None,
+        );
+        crate::game::layers::flush_layers(&mut base);
+
+        // Reach-guard, and the paired positive: the shroud actually bites at the TARGET
+        // seam. Without this the row would pass on a board with no shroud at all.
+        assert!(
+            crate::game::static_abilities::player_cannot_be_targeted_by(&base, victim, KILO, P0),
+            "CR 702.18a: the planted shroud must make the seat un-targetable"
+        );
+
+        let planted = plant_offer_pin(&mut base, TargetPin::Player(victim));
+        let (_, schema) = try_offer_object_growth_shortcut(&planted)
+            .expect("CR 115.10a: a shrouded seat is still CHOOSABLE, so the offer fires");
+        assert!(
+            schema.points.iter().any(|point| matches!(
+                &point.kind,
+                crate::analysis::decision_template::DecisionPointKind::Targets { legal_targets, .. }
+                    if legal_targets.contains(&TargetRef::Player(victim))
+            )),
+            "the published point carries the shrouded seat: exclusion belongs to the TARGET \
+             seam, not to this one"
+        );
+    }
+}
+
+/// FIX ROUND 1 (MED-2) — a named negative row per [`try_offer_bounded_cycle_shortcut`] conjunct
+/// that no tracked test was exercising.
+///
+/// The reviewer measured all three by disabling them on the PRE-ROW tree: step (2)
+/// `ProposerIsNotActivePlayer` and step (5) `AdvantageOnlyCycle` could each be deleted with the
+/// whole suite still green, and only step (1b) (then `DrivingSequenceNotEmpty`, now
+/// `ProposerHasDrivingPeriod`) was asserted by name anywhere.
+/// A conjunct no row can name is a conjunct nobody notices losing.
+///
+/// ⚠ The pass COUNT that used to appear here ("4167 passed / 0 failed") is deleted rather than
+/// re-dressed, because it shipped with no runner and no filter recorded beside it and a bare
+/// count means nothing without both (fix round 2, LOW-2: a count in this file named a shape it
+/// did not have). It is also not reproducible on this tree BY DESIGN — the rows below now exist,
+/// so deleting either conjunct today flips its named row, which is the entire point. Each row's
+/// own REVERT-PROBE line is the reproducible claim; run it with
+/// `cargo test -p phase-engine --lib -- game::engine::bounded_offer_conjunct_tests::` (module filter on
+/// the `engine` lib target).
+///
+/// # Why these are UNIT rows on a synthetic ring
+///
+/// Each row must reach ONE conjunct and refuse there, which means holding every earlier conjunct
+/// satisfied on purpose. A ring is the input the certification step reads, and
+/// `GameState::normalize_for_loop` is `pub(crate)`, so an integration test cannot build one. The
+/// refusal is asserted BY REASON (`BoundedOfferRefusal`), never as a bare "no offer": a row that
+/// only observes absence silently stops testing its own conjunct the moment an EARLIER one
+/// starts refusing first, which is the domination trap the enum exists to close.
+#[cfg(test)]
+mod bounded_offer_conjunct_tests {
+    use super::{try_offer_bounded_cycle_shortcut, BoundedOfferRefusal};
+    use crate::game::scenario::GameScenario;
+    use crate::types::game_state::{GameState, LoopDetectionMode, WaitingFor};
+    use crate::types::player::PlayerId;
+
+    const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
+
+    /// A 2-player board parked at `Priority{P0}` (P0 active) whose retained ring encodes a
+    /// period seen twice: `frames` successive normalized snapshots, each mutated by `shape`.
+    ///
+    /// `2k + 1 = 3` frames at `k = 1` is the smallest ring `ring_delta_signature` will certify,
+    /// and every frame shares `turn_number` / `phase` / `extra_phases`, so the CR 703.1
+    /// turn-position conjunct passes and this fixture is not silently testing that instead.
+    fn ring_state(frames: usize, shape: impl Fn(&mut GameState, usize)) -> GameState {
+        let mut scenario = GameScenario::new_n_player(2, 7);
+        // A stocked library is load-bearing, not scenery: the period this fixture encodes IS a
+        // library delta, and an empty library makes every frame identical ⇒ a zero per-period
+        // vector ⇒ `ring_delta_signature` returns `None` and every row below refuses at
+        // `NoCertification` instead of at the conjunct it is about.
+        let names: Vec<String> = (0..40).map(|i| format!("Filler {i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        scenario.with_library_top(P0, &refs);
+        scenario.with_library_top(P1, &refs);
+        let mut runner = scenario.build();
+        let mut state = runner.state_mut().clone();
+        state.loop_detection = LoopDetectionMode::Interactive;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        state.active_player = P0;
+        state.last_loop_action_sequence.clear();
+        for i in 0..frames {
+            let mut frame = state.clone();
+            shape(&mut frame, i);
+            // Both halves built exactly as `record_loop_detect_sample` builds them.
+            state
+                .loop_detect_ring
+                .push_back(std::sync::Arc::new(crate::types::LoopDetectSample {
+                    normalized: frame.normalize_for_loop(),
+                    live: frame.loop_detect_live_sample(),
+                }));
+        }
+        state
+    }
+
+    /// R20 — RELIEF-PATH BUDGET STARVATION IS COVERAGE, NEVER SOUNDNESS.
+    ///
+    /// CR 732.2a. The named regression row for the branch NOT taken (hoist only the primary
+    /// and let the budget absorb the relief path). A board whose non-exempt stack carries more
+    /// in-scope chain LINKS than the cap can pay for must REFUSE — no certificate consumed, no
+    /// offer, no `WaitingFor::LoopShortcut` write — and the refusal must be attributable to
+    /// the budget rather than to any upstream conjunct.
+    ///
+    /// THE BOUND IS PER-LINK, NOT PER-ENTRY, which is why the last entry is CHAINED: the
+    /// classifier recurses into `sub_ability`, so an N-link chain charges up to N. A per-entry
+    /// regression passes a per-entry row and fails this one.
+    ///
+    /// THREE CONJUNCTS, because `spent == cap` alone proves consumption, not BINDINGNESS:
+    /// (i) the SAME board offers once the budget stops binding (`ProbeCap::RaisedTwiceLinks`,
+    /// board-derived so no arbitrary raise is representable) — a matched positive on the
+    /// constructed board, not on a proxy; (ii) at the shipped cap the refusal is
+    /// `UnspecifiedChoiceWindow` with `denied == true` at `spent == PROBE_BUDGET`; (iii) a
+    /// PRE-CHARGE refusal on the same board reads a clean meter, which is the control that
+    /// keeps `denied` meaningful.
+    ///
+    /// (ii)'s VARIANT is reachable only because this board's basis-A match comes from the
+    /// EQUALITY disjunct: the `||` short-circuits, the charging cover call never runs, and
+    /// exhaustion lands one gate later in `stack_choices_are_all_specified`. That precondition
+    /// is carried as an EXECUTABLE reach-guard, not as prose, so a fixture drift to the cover
+    /// path fails loudly instead of silently flipping the variant.
+    ///
+    /// REVERT-PROBE: delete `probe_resolution`'s `try_charge_one` arm ⇒ the exhausted budget
+    /// falls through to the clone-and-resolve ⇒ the over-budget board OFFERS ⇒ FLIPS.
+    #[test]
+    fn r20_an_over_budget_relief_path_refuses_instead_of_certifying() {
+        use crate::analysis::resource::{loop_states_equal_modulo_resources, PROBE_BUDGET};
+        use crate::game::engine::{try_offer_bounded_cycle_shortcut_metered, ProbeCap};
+
+        // One more entry than the cap can pay for, with the last one CHAINED so the population
+        // is links rather than entries.
+        let entries = PROBE_BUDGET as usize + 1;
+        let state = equality_ring_with_stack(entries, true);
+
+        // ── reach-guards, all three before any verdict ──────────────────────────────────
+        assert!(
+            state.loop_detect_ring.len() >= 2,
+            "REACH-GUARD: a ring-starved board refuses at the ring gate with a clean meter and \
+             this row would pass for the wrong reason"
+        );
+        assert_eq!(
+            state.stack.len(),
+            entries,
+            "REACH-GUARD: the non-exempt population must exceed the cap ({PROBE_BUDGET})"
+        );
+        let prior = &state.loop_detect_ring[state.loop_detect_ring.len() - 2].normalized;
+        assert!(
+            loop_states_equal_modulo_resources(prior, &state),
+            "REACH-GUARD (the (ii) precondition, executable rather than prose): this board must \
+             match basis A through the EQUALITY disjunct. On a cover-matched board the charging \
+             cover call exhausts FIRST and the refusal is `NoCertification` with the same meter"
+        );
+
+        // ── (i) THE SAME BOARD OFFERS once the budget stops binding ─────────────────────
+        let (raised, raised_meter) =
+            try_offer_bounded_cycle_shortcut_metered(&state, false, ProbeCap::RaisedTwiceLinks);
+        assert!(
+            raised.is_ok(),
+            "(i) with the cap raised to 2x the board's own link count the SAME board must \
+             certify and offer — this is what pins the budget as the binding refusal below, \
+             rather than some upstream conjunct. Got {raised:?}, meter {raised_meter:?}"
+        );
+        // Keyed to the POPULATION counter, not to `spent`, and deliberately: `spent` measures
+        // CHARGING, so a revert-probe that deletes the charge arm would abort this conjunct
+        // first and mask the flip belonging to (ii). `conjunct6_asks` measures what the gate
+        // actually examined, which is the evidence (i) is here to give.
+        assert!(
+            !raised_meter.denied && raised_meter.conjunct6_asks >= entries as u32,
+            "(i) the raised arm must have examined the whole non-exempt population without \
+             denial; meter {raised_meter:?}"
+        );
+
+        // ── (ii) AT THE SHIPPED CAP: refuse, exhausted, and no offer ────────────────────
+        let (refused, meter) =
+            try_offer_bounded_cycle_shortcut_metered(&state, false, ProbeCap::Shipped);
+        assert!(
+            matches!(refused, Err(BoundedOfferRefusal::UnspecifiedChoiceWindow)),
+            "(ii) exhaustion reads `Prompted`, so the step-6 predicate goes false and the \
+             refusal is an unspecified window. Got {refused:?}, meter {meter:?}"
+        );
+        assert!(
+            meter.denied && meter.spent == PROBE_BUDGET,
+            "(ii) the cap must be CONSUMED and the denial latched — that pair is the \
+             exhaustion witness the refusal variant alone cannot carry. meter {meter:?}"
+        );
+
+        // ── (iii) THE CLEAN-METER CONTROL, keyed to a PRE-CHARGE refusal on the SAME board ─
+        let mut not_at_priority = state.clone();
+        not_at_priority.waiting_for = WaitingFor::DiscardToHandSize {
+            player: P0,
+            count: 1,
+            cards: Vec::new(),
+        };
+        let (control, control_meter) =
+            try_offer_bounded_cycle_shortcut_metered(&not_at_priority, false, ProbeCap::Shipped);
+        assert!(
+            matches!(control, Err(BoundedOfferRefusal::NotAtPriority)),
+            "(iii) the control arm must refuse UPSTREAM of the first charge; got {control:?}"
+        );
+        assert!(
+            !control_meter.denied && control_meter.spent == 0,
+            "(iii) a pre-charge refusal reads a clean meter BY CONTROL-FLOW POSITION — without \
+             this control, `denied` would look like a property of refusals in general \
+             rather than of exhaustion. meter {control_meter:?}"
+        );
+    }
+
+    /// R33 arm (a′2) — THE SELECTION SITE: AN EQUALITY-CERTIFIED CANDIDATE CARRIES NO FROZEN
+    /// EXEMPTION, EVEN THOUGH ITS WINDOW HAS ONE AVAILABLE.
+    ///
+    /// CR 732.2a + CR 608.1. Arms (a)/(b)/(a′1) prove the CONSTRUCTOR keys the subtraction to
+    /// the certificate value. This arm proves §3 D2's step 4b actually SELECTS the right
+    /// value: it is the only arm that fails on the round-39 shape (one `BoardCovered`
+    /// certificate for the whole `equality || cover` disjunction), which every other arm in
+    /// the row passes unchanged.
+    ///
+    /// The fixture is CONSTRUCTED, not fixture-mined: `drain_ring`'s frames are board-equal at
+    /// every index, so `loop_states_equal_modulo_resources` matches and — by the mutual
+    /// exclusivity of the two disjuncts (equality = constant depth, cover = strictly growing
+    /// depth) — `stack_covers` cannot. One stack entry is seeded IDENTICALLY into `current`
+    /// and into both halves of every retained frame, which is what makes the window carry a
+    /// non-empty observed-frozen set: the exemption is genuinely AVAILABLE here, and the row
+    /// is about it being genuinely WITHDRAWN.
+    ///
+    /// REVERT-PROBE 3 (the round's signature probe): delete step 4b and let conjunct (6)
+    /// consume step 3's `touch_cover` directly ⇒ this row FLIPS while (a)/(b)/(a′1)/(c) all
+    /// still pass — which is exactly why the arm exists.
+    #[test]
+    fn r33_equality_certified_candidate_carries_no_frozen_exemption() {
+        use crate::analysis::resource::{certified_period_touch, PeriodCertification};
+        use crate::game::engine::{try_offer_bounded_cycle_shortcut_metered, ProbeCap};
+
+        let state = equality_ring_with_stack(1, false);
+
+        // REACH-GUARD 1: the exemption is genuinely AVAILABLE on this candidate's window —
+        // otherwise "withdrawn" is indistinguishable from "there was nothing to withdraw".
+        let live: Vec<&GameState> = state.loop_detect_ring.iter().map(|f| &f.live).collect();
+        let window = &live[live.len() - 2..];
+        let available = certified_period_touch(window, &state, PeriodCertification::BoardCovered);
+        assert!(
+            !available.frozen_ids.is_empty(),
+            "REACH-GUARD: the constructed window must carry a non-empty observed-frozen set"
+        );
+
+        let (outcome, meter) =
+            try_offer_bounded_cycle_shortcut_metered(&state, false, ProbeCap::Shipped);
+
+        // REACH-GUARD 2: the EQUALITY arm is the one that matched. Without this the row could
+        // pass on a candidate that never certified, or one that took the cover disjunct.
+        assert_eq!(
+            meter.certification,
+            Some(PeriodCertification::BoardEqualOnly),
+            "REACH-GUARD: the constructed pair must certify through the EQUALITY disjunct, \
+             which is the case this arm is about; outcome {outcome:?}"
+        );
+
+        // THE RULING: equality supplies P2 but not P4, so the period carried forward exempts
+        // NOTHING — observable as conjunct (6) skipping nothing while it really does run.
+        assert_eq!(
+            meter.conjunct6_frozen_skips, 0,
+            "(a′2) step 4b must REBUILD the equality candidate's period with the subtraction \
+             withdrawn; a non-zero skip count means the `BoardCovered` touch from step 3 was \
+             carried into conjunct (6). meter {meter:?}"
+        );
+        assert!(
+            meter.conjunct6_asks > 0,
+            "REACH-GUARD against a vacuous skip count: conjunct (6) must actually have RUN, \
+             else `skips == 0` is trivially true. meter {meter:?}"
+        );
+    }
+
+    /// Mill `victim` by one card per retained frame — a constant per-frame library delta, which
+    /// is a period observed twice at `frames >= 3`.
+    fn mill_ring(victim: PlayerId, frames: usize) -> GameState {
+        ring_state(frames, move |frame, i| {
+            let player = frame
+                .players
+                .iter_mut()
+                .find(|p| p.id == victim)
+                .expect("seat exists");
+            for _ in 0..i {
+                player.library.pop_back();
+            }
+        })
+    }
+
+    /// Drain `victim` by one life per retained frame — a constant per-frame LIFE delta.
+    ///
+    /// The counterpart to [`mill_ring`], and the difference is exactly the one basis A turns on:
+    /// library size is BOARD (`loop_states_equal_modulo_resources` compares it), while life is a
+    /// PROJECTED resource (`project_out_resources` removes it). So a mill ring can only certify
+    /// through basis B's `ring_delta_signature`, whereas a drain ring's frames are board-EQUAL
+    /// at every index and certify through basis A's first disjunct.
+    ///
+    /// ⚠ The REASON basis A refuses a mill ring is not uniform across the ring, and an earlier
+    /// revision of this doc claimed it was ("a mill ring's frames are board-UNEQUAL"). MEASURED
+    /// in fix round 3 (LOW-5) and recorded at
+    /// [`a_zero_span_certifying_pair_never_publishes_a_zero_width_period`]: `mill_ring`'s frames
+    /// are board-unequal at every index EXCEPT the OLDEST, which pops zero cards and IS
+    /// board-equal (`span = 2`, `eq = true`) — that one is refused by `net_progress_for` on its
+    /// zero δ instead. Basis A still certifies nothing on a mill ring; only the per-index reason
+    /// differs.
+    ///
+    /// Frame `i` sits `frames - i` life ABOVE the live state, so the newest frame is exactly one
+    /// period ahead of it and every older frame one more — i.e. the live state is the far end of
+    /// the period, which is the orientation `ResourceVector::delta(prior, current)` reads.
+    fn drain_ring(victim: PlayerId, frames: usize) -> GameState {
+        ring_state(frames, move |frame, i| {
+            let player = frame
+                .players
+                .iter_mut()
+                .find(|p| p.id == victim)
+                .expect("seat exists");
+            player.life += (frames - i) as i32;
+        })
+    }
+
+    /// A [`drain_ring`] whose stack carries `links` in-scope chain links, seeded IDENTICALLY
+    /// into `current` and into both halves of every retained frame.
+    ///
+    /// Two properties come out of that one construction, which is why both rows share it:
+    /// board equality survives (so basis A matches on its FIRST disjunct), and every entry
+    /// sits at the SAME INDEX in every window frame (so the window carries a non-empty
+    /// observed-frozen set — the thing the certificate is allowed to subtract, or not).
+    ///
+    /// Each entry is a MANDATORY, choice-free `LoseLife`, so conjunct (6) can accept it and a
+    /// refusal is never attributable to an unspecified choice. `chained` gives the LAST entry
+    /// a `sub_ability`, which the classifier recurses into: that is what makes the budget a
+    /// per-LINK bound rather than a per-ENTRY one, and what a per-entry regression would miss.
+    fn equality_ring_with_stack(entries: usize, chained: bool) -> GameState {
+        use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility};
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+        use crate::types::identifiers::{CardId, ObjectId};
+        use crate::types::LoopDetectSample;
+        use std::sync::Arc;
+
+        let mut state = drain_ring(P1, 3);
+        let src = ObjectId(941);
+        let mut source = crate::game::game_object::GameObject::new(
+            src,
+            CardId(0),
+            P0,
+            "Frozen Ticker".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        source.incarnation = 3;
+        let lose_one = || {
+            ResolvedAbility::new(
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: None,
+                },
+                vec![],
+                src,
+                P0,
+            )
+        };
+        let built: Vec<StackEntry> = (0..entries)
+            .map(|i| {
+                let mut ability = lose_one();
+                if chained && i + 1 == entries {
+                    ability.sub_ability = Some(Box::new(lose_one()));
+                }
+                StackEntry {
+                    id: ObjectId(951 + i as u64),
+                    source_id: src,
+                    controller: P0,
+                    kind: StackEntryKind::TriggeredAbility {
+                        source_id: src,
+                        ability: Box::new(ability),
+                        condition: None,
+                        trigger_event: None,
+                        description: None,
+                        source_name: String::new(),
+                        subject_match_count: None,
+                        die_result: None,
+                        provenance: None,
+                    },
+                }
+            })
+            .collect();
+        let inject = |g: &mut GameState| {
+            g.objects.insert(src, source.clone());
+            g.battlefield.push_back(src);
+            for e in &built {
+                g.stack.push_back(e.clone());
+            }
+        };
+        inject(&mut state);
+        let frames: std::collections::VecDeque<Arc<LoopDetectSample>> = state
+            .loop_detect_ring
+            .iter()
+            .map(|s| {
+                let mut normalized = s.normalized.clone();
+                let mut live = s.live.clone();
+                inject(&mut normalized);
+                inject(&mut live);
+                Arc::new(LoopDetectSample { normalized, live })
+            })
+            .collect();
+        state.loop_detect_ring = frames;
+        state
+    }
+
+    /// STEP (2) `ProposerIsNotActivePlayer`. CR 732.2a lets the player with priority propose;
+    /// this conjunct additionally requires that player to be the ACTIVE one, because the ring
+    /// sampler only samples at `Priority{active_player}` — which is what establishes the
+    /// proposer held priority at every certified frame.
+    ///
+    /// REVERT-PROBE: delete the conjunct ⇒ arm ⓑ stops returning `ProposerIsNotActivePlayer`
+    /// and falls through to a later conjunct (or an offer) ⇒ FAILS.
+    #[test]
+    fn a_non_active_priority_holder_mints_no_bounded_offer() {
+        let mut state = mill_ring(P1, 3);
+
+        // ⓐ REACH-GUARD / positive control: the SAME ring certifies for the active player, so
+        //   ⓑ's refusal is attributable to the seat and not to an unsatisfied earlier conjunct.
+        let armed = try_offer_bounded_cycle_shortcut(&state, false);
+        assert_ne!(
+            armed,
+            Err(BoundedOfferRefusal::ProposerIsNotActivePlayer),
+            "the active player must NOT be refused by step (2); got {armed:?}"
+        );
+        assert_ne!(
+            armed,
+            Err(BoundedOfferRefusal::NoCertification),
+            "REACH-GUARD: the ring must actually certify, else ⓑ never reaches step (2); \
+             got {armed:?}"
+        );
+
+        // ⓑ one field reassigned: priority moves to the non-active seat.
+        state.waiting_for = WaitingFor::Priority { player: P1 };
+        assert_eq!(
+            try_offer_bounded_cycle_shortcut(&state, false),
+            Err(BoundedOfferRefusal::ProposerIsNotActivePlayer),
+            "CR 732.2a: the ring sampler gates on `Priority{{active_player}}`, so a proposer \
+             who is not the active player did not hold priority at the certified frames"
+        );
+    }
+
+    /// STEP (5) `AdvantageOnlyCycle`. CR 732.2a: this producer's whole claim is that it measured
+    /// a CR 704 threshold INSIDE the loop and divided the headroom by the per-period magnitude.
+    /// An `Advantage` cycle drives nobody toward such a threshold, so it has no bound to state
+    /// and belongs to Path C's revocable-infinity mark instead.
+    ///
+    /// The pair is a SELF-mill against an OPPONENT-mill, which is exactly the discrimination
+    /// `classify_win_kind` makes: `Decking` requires "an unbounded downward library delta on a
+    /// player other than the loop's controller", so a controller milling themselves falls
+    /// through to `Advantage`. Without this conjunct that self-mill takes Path D and is offered
+    /// a bound — `elimination_bounds` narrows on `narrow(p.library.len(), -library_delta[p])`
+    /// for the PROPOSER too, so it happily produces one.
+    ///
+    /// REVERT-PROBE: delete the conjunct ⇒ arm ⓑ stops returning `AdvantageOnlyCycle` ⇒ FAILS.
+    #[test]
+    fn a_self_mill_advantage_cycle_mints_no_bounded_offer() {
+        // ⓐ POSITIVE CONTROL: the SAME shape aimed at the OPPONENT is `Decking`, not
+        //   `Advantage`, so step (5) must let it through. Without this arm ⓑ would pass for a
+        //   fixture that simply never certifies.
+        let opponent_mill = try_offer_bounded_cycle_shortcut(&mill_ring(P1, 3), false);
+        assert_ne!(
+            opponent_mill,
+            Err(BoundedOfferRefusal::AdvantageOnlyCycle),
+            "CR 104.3c: milling an OPPONENT is a win kind, not an advantage engine; got \
+             {opponent_mill:?}"
+        );
+        assert_ne!(
+            opponent_mill,
+            Err(BoundedOfferRefusal::NoCertification),
+            "REACH-GUARD: the mill ring must certify, else neither arm reaches step (5); got \
+             {opponent_mill:?}"
+        );
+
+        // ⓑ the same period, victim = the proposer.
+        assert_eq!(
+            try_offer_bounded_cycle_shortcut(&mill_ring(P0, 3), false),
+            Err(BoundedOfferRefusal::AdvantageOnlyCycle),
+            "CR 732.2a: a cycle that drives nobody toward a CR 704 threshold has no bound to \
+             state, so it belongs to Path C's revocable-infinity mark, not to this seam"
+        );
+    }
+
+    /// STEP (7) `NoNarrowedLegalCount`, LOWER end. `elimination_bounds` returning 0 states that
+    /// no repetition is legal at all — a seat is already AT the CR 704 threshold's last legal
+    /// step — and `1..MAX_SHORTCUT_CYCLES` refuses it rather than minting a `Fixed(0)` offer
+    /// whose acceptance would commit nothing while spending the CR 732.2b window.
+    ///
+    /// ⚠ SCOPE, stated because the reviewer's probe targeted the OTHER end. Widening the check
+    /// to `1..=MAX_SHORTCUT_CYCLES` flips nothing in the tracked suite, and that is not an
+    /// oversight: the upper end is DOMINATED by step (5). A bound of exactly
+    /// `MAX_SHORTCUT_CYCLES` means no axis narrowed, i.e. the period drives no living seat
+    /// toward any CR 704 threshold, which is precisely what `classify_win_kind` reports as
+    /// `Advantage` — so such a cycle has already been refused two conjuncts earlier. This row
+    /// therefore covers the reachable end and names the reason the other is unreachable rather
+    /// than leaving it as an untested branch of unknown status.
+    ///
+    /// REVERT-PROBE: change the range to `0..MAX_SHORTCUT_CYCLES` ⇒ arm ⓑ mints an offer ⇒ FAILS.
+    #[test]
+    fn a_bound_of_zero_mints_no_bounded_offer() {
+        // ⓐ POSITIVE CONTROL: a full library certifies and narrows to a legal count.
+        let healthy = try_offer_bounded_cycle_shortcut(&mill_ring(P1, 3), false);
+        assert!(
+            healthy.is_ok(),
+            "REACH-GUARD: the un-narrowed fixture must OFFER, else ⓑ's refusal could come from \
+             any earlier conjunct; got {healthy:?}"
+        );
+
+        // ⓑ the same ring, with the victim's library already empty at the offer beat: CR 104.3c
+        //   headroom 0 ⇒ `0 / 1 == 0` ⇒ no legal repetition count.
+        let mut state = mill_ring(P1, 3);
+        state
+            .players
+            .iter_mut()
+            .find(|p| p.id == P1)
+            .expect("seat exists")
+            .library
+            .clear();
+        assert_eq!(
+            try_offer_bounded_cycle_shortcut(&state, false),
+            Err(BoundedOfferRefusal::NoNarrowedLegalCount),
+            "CR 104.3c: with zero cards left there is no legal repetition, and a `Fixed(0)` \
+             offer would spend the CR 732.2b response window to commit nothing"
+        );
+    }
+
+    /// FIX ROUND 2 — basis A's `span >= 1` fail-closed guard, which shipped in fix round 1 with
+    /// no row of its own.
+    ///
+    /// The basis-A walk is `.rev()`, so the FIRST candidate it tries is `ring.last()` — the
+    /// sample `pass_priority_once_with_pipeline` recorded at this very beat, whose span from the
+    /// current state is 0. In a production trajectory that pair carries a zero δ and dies on
+    /// `net_progress_for`, but nothing structural forces that: this fixture's newest retained
+    /// frame is board-equal to the live state and its δ IS net progress (the reach-guards below
+    /// assert exactly that, so the guard is provably reached rather than assumed to be).
+    ///
+    /// The fixture is a [`drain_ring`], NOT a [`mill_ring`], and the difference is load-bearing:
+    /// library size is BOARD, so basis A certifies NOTHING on a mill ring, every mill-ring row in
+    /// this module is really exercising basis B, and a guard inside the basis-A walk is
+    /// unreachable from that fixture.
+    ///
+    /// ⚠ Basis A is a DISJUNCTION, and the board-equality reach-guard below — which does FAIL on
+    /// `mill_ring(P1, 3)` — measures only its FIRST half. Fix round 3 (LOW-5) MEASURED the second,
+    /// `loop_states_cover_modulo_growth_pinned`, rather than leaving the wider claim resting on
+    /// the narrower evidence: a probe evaluating both disjuncts plus `net_progress_for` at every
+    /// `(prior, live)` pair of `mill_ring(P1, 3)` (temporary `#[test]` in this module, run with
+    /// `cargo test -p phase-engine --lib -- game::engine::bounded_offer_conjunct_tests:: --nocapture`,
+    /// then reverted) reports `cover = false` at ALL THREE ring indices. Both halves refuse, so
+    /// the conclusion holds.
+    ///
+    /// The probe also corrects the REASON at one index, which the board-inequality phrasing had
+    /// wrong: `mill_ring`'s OLDEST frame pops zero cards, so it IS board-equal to the live state
+    /// (`span = 2`, `eq = true`) and is refused by `net_progress_for` on its zero δ, not by board
+    /// inequality. Newest-first, the `.rev()` walk therefore refuses `span = 0` at `span >= 1`,
+    /// `span = 1` on `eq`/`cover` both false, and `span = 2` on net progress. (`drain_ring(P1, 3)`
+    /// under the same probe: `eq = true` and `net = true` at every index, `cover = false`
+    /// throughout — so it certifies through the FIRST disjunct at `span = 1`, which is the pair
+    /// this row's guard is about.)
+    ///
+    /// A published `frames_per_period: 0` would mean "one repetition spans no retained frames",
+    /// which `drive_one_shortcut_cycle`'s delimiter cannot honour — `frames_this_cycle >= 0`
+    /// holds before a single beat is driven, so the first settle beat would complete a "cycle"
+    /// that moved nothing, and `materialize_fixed_shortcut`'s conformance check would then drop
+    /// every one of them. The bounded offer would be minted, accepted, and commit nothing.
+    ///
+    /// REVERT-PROBE: delete `span >= 1 &&` from the basis-A closure ⇒ the span-0 pair certifies
+    /// first and the published `frames_per_period` is 0 ⇒ this row FAILS.
+    #[test]
+    fn a_zero_span_certifying_pair_never_publishes_a_zero_width_period() {
+        use crate::analysis::resource::{loop_states_equal_modulo_resources, ResourceVector};
+
+        let state = drain_ring(P1, 3);
+
+        // ── REACH-GUARDS: the span-0 pair really is a certifying candidate on this fixture, so
+        //    the guard is what refuses it. Both halves of basis A's first disjunct, asserted on
+        //    the exact pair the `.rev()` walk reaches first.
+        let newest = state
+            .loop_detect_ring
+            .back()
+            .expect("the fixture builds a ring")
+            .normalized
+            .clone();
+        assert!(
+            loop_states_equal_modulo_resources(&newest, &state),
+            "REACH-GUARD: the newest retained frame must be board-equal to the live state, else \
+             the span-0 pair fails the board predicate and the guard is never the refuser"
+        );
+        let span_zero_delta = ResourceVector::delta(
+            &ResourceVector::snapshot(&newest),
+            &ResourceVector::snapshot(&state),
+        );
+        assert!(
+            span_zero_delta.net_progress_for(P0),
+            "REACH-GUARD: the span-0 pair must carry net progress, else `net_progress_for` \
+             refuses it first and this row would pass without the guard existing; δ \
+             {span_zero_delta:?}"
+        );
+
+        let offer = try_offer_bounded_cycle_shortcut(&state, false)
+            .expect("REACH-GUARD: the fixture must OFFER, else nothing publishes a period");
+        let WaitingFor::LoopShortcut { certificate, .. } = &offer else {
+            panic!("a bounded offer is a LoopShortcut window; got {offer:?}")
+        };
+        let per_cycle = certificate
+            .per_cycle
+            .as_ref()
+            .expect("a bounded offer publishes its per-period signature");
+        assert!(
+            per_cycle.frames_per_period >= 1,
+            "CR 732.2a: a repetition spans at least one retained ring frame — a published 0 is a \
+             delimiter no drive can honour; got {}",
+            per_cycle.frames_per_period
+        );
+    }
+
+    // ───────────────────────────────────────────────────────────────────────────────────
+    // The two CARRIER rows. Both are about WHICH object identifies a retained beat, an axis
+    // that has exactly one behavioural surface (`PeriodVerdicts::frame_ix`) and one source
+    // surface (this file), so each ships with one arm on each.
+    // ───────────────────────────────────────────────────────────────────────────────────
+
+    /// Symbol-anchored extent of a column-0 `fn` in THIS file, as `(head, end)` line indices —
+    /// the §6 R8 self-census extractor: signature line to the first column-0 `}`.
+    #[cfg(test)]
+    fn engine_fn_extent(lines: &[&str], signature: &str) -> (usize, usize) {
+        let head = lines
+            .iter()
+            .position(|l| l.starts_with(signature))
+            .unwrap_or_else(|| panic!("extractor found no column-0 `{signature}`"));
+        let end = lines[head..]
+            .iter()
+            .position(|l| *l == "}")
+            .map(|i| head + i)
+            .unwrap_or_else(|| panic!("`{signature}` has no column-0 closing brace"));
+        assert!(
+            end - head > 5,
+            "`{signature}` extent {head}-{end} is degenerate — the extractor is not keyed"
+        );
+        (head, end)
+    }
+
+    /// Code lines (comments excluded, per R8's ruling: a comment reads nothing) of an extent
+    /// that contain `needle`, as absolute line indices.
+    ///
+    /// "Comments excluded" means the shared `crate::source_census::code` rule — whole-line AND
+    /// trailing — not a private `starts_with("//")` test.
+    #[cfg(test)]
+    fn engine_code_hits(lines: &[&str], extent: (usize, usize), needle: &str) -> Vec<usize> {
+        (extent.0..=extent.1)
+            .filter(|i| crate::source_census::code(lines[*i]).contains(needle))
+            .collect()
+    }
+
+    /// `Arc::as_ptr` BEAT IDENTITY IS THE SAMPLE, NOT ONE OF ITS HALVES — the U0 ruling that
+    /// had no falsifier until `FrameIx` existed.
+    ///
+    /// CR 732.2a. U0 split each retained ring element into a CR 104.4b comparand
+    /// (`normalized`) and a CR 732.2a evaluable (`live`), and left `drive_one_shortcut_cycle`'s
+    /// ring-advance detector on `Arc::as_ptr` — the SAMPLE's allocation — with the ruling that
+    /// it must never be re-based onto a field address. U0 could not assert that: nothing at
+    /// that step distinguished the two halves as identities. U3's verdict door does.
+    ///
+    /// ARM 1, BEHAVIOURAL — the door's identity domain is the LIVE half and ONLY it.
+    /// [`crate::analysis::resource::PeriodVerdicts::frame_ix`] resolves by `std::ptr::eq`
+    /// against the very table `verdict` indexes, so a beat identified by the `normalized`
+    /// half is a DIFFERENT identity from the one every period-touch consumer keys on. The two
+    /// field addresses are asserted distinct first, which is what makes the choice load-bearing
+    /// rather than a distinction without a difference.
+    ///
+    /// ARM 2, STRUCTURAL — the detector still reads the sample. Two sites, both
+    /// `loop_detect_ring.back().map(std::sync::Arc::as_ptr)`, and NO raw-pointer field
+    /// address anywhere in the extent.
+    ///
+    /// REVERT-PROBE: re-base either site to `.map(|s| &s.normalized as *const _)` ⇒ arm 2's
+    /// site count goes 2 → 1 AND its `as *const` count goes 0 → 1 ⇒ FLIPS. (Arm 1 is
+    /// deliberately NOT reachable by that edit — it pins the property the edit would violate,
+    /// so the two arms partition "is the rule still true" from "is the code still obeying it".)
+    #[test]
+    fn arc_as_ptr_beat_identity_is_the_sample_not_one_of_its_halves() {
+        use crate::analysis::resource::PeriodVerdicts;
+
+        // ── ARM 1: behavioural ───────────────────────────────────────────────────────────
+        let state = ring_state(3, |frame, i| {
+            frame.turn_number += i as u32;
+        });
+        assert_eq!(
+            state.loop_detect_ring.len(),
+            3,
+            "REACH-GUARD: the ring must carry samples, else the universals below are vacuous"
+        );
+        // Built exactly as `bounded_cycle_offer` builds its `ring_live` — the CR 732.2a
+        // evaluable half. The binding is named differently ON PURPOSE: a verbatim copy of the
+        // production line makes the carrier revert-probe (a whole-line replace of that line)
+        // match twice and silently no-op, which is how the probe for the sibling row below
+        // failed to apply on its first run.
+        let evaluable: Vec<&GameState> = state.loop_detect_ring.iter().map(|f| &f.live).collect();
+        let verdicts =
+            PeriodVerdicts::for_period_with_cap(&evaluable, &state, P0, 0, super::CapAuthority(()));
+        for (i, sample) in state.loop_detect_ring.iter().enumerate() {
+            assert!(
+                !std::ptr::eq(&sample.live, &sample.normalized),
+                "sample {i}: the two halves must be DISTINCT addresses, else `beat identity \
+                 is the sample, not a half` is a distinction without a difference"
+            );
+            assert!(
+                verdicts.frame_ix(&sample.live).is_some(),
+                "sample {i}: the verdict door's frame table IS the live half — this is the \
+                 identity every period-touch consumer keys on"
+            );
+            assert!(
+                verdicts.frame_ix(&sample.normalized).is_none(),
+                "sample {i}: the comparand half is NOT in the door's domain. A beat identity \
+                 based on `&s.normalized` would therefore name an object no `FrameIx` can \
+                 ever resolve — that is the concrete harm the U0 ruling forbids"
+            );
+        }
+
+        // ── ARM 2: structural ────────────────────────────────────────────────────────────
+        let src = include_str!("engine.rs");
+        let lines: Vec<&str> = src.lines().collect();
+        let extent = engine_fn_extent(&lines, "fn drive_one_shortcut_cycle(");
+        // Needles ASSEMBLED at runtime so this test's own source cannot be counted by its own
+        // instrument.
+        let sample_identity = format!("loop_detect_ring.back().map(std::sync::Arc::{}ptr)", "as_");
+        let field_address = format!("as {}const", '*');
+        assert_eq!(
+            engine_code_hits(&lines, extent, &sample_identity).len(),
+            3,
+            "the ring-advance detector must read the SAMPLE's allocation at EVERY one of its \
+             sites — the shared per-beat `before` read plus an `after` read in each arm that \
+             can advance the ring (the active-player settle arm and the forced-window ANSWER \
+             arm), in {}-{}",
+            extent.0 + 1,
+            extent.1 + 1
+        );
+        assert_eq!(
+            engine_code_hits(&lines, extent, &field_address).len(),
+            0,
+            "no raw-pointer FIELD address may appear in the detector's extent — that is the \
+             re-basing the U0 ruling forbids"
+        );
+        // POSITIVE CONTROL against a dead grep, same extractor and same filter.
+        assert!(
+            !engine_code_hits(&lines, extent, "frames_this_cycle").is_empty(),
+            "the instrument must be able to find a token that IS there"
+        );
+        assert!(
+            engine_code_hits(&lines, extent, "certified_period_touch").is_empty(),
+            "…and must not find one that is not"
+        );
+    }
+
+    /// R27 (a2), STRUCTURAL HALF — THE PERIOD-TOUCH WINDOW IS CARRIED BY THE `live` HALF.
+    ///
+    /// CR 732.2a + CR 104.4b. The behavioural half
+    /// (`analysis::resource::tests::r27_a2_every_announced_pair_carries_an_unnormalized_evaluation_board`)
+    /// builds its own window, so it cannot flip on an edit to the MINT's carrier. This arm is
+    /// that edit's detector: `bounded_cycle_offer` builds exactly two ring vecs — the CR 104.4b
+    /// comparand from `&f.normalized` and the CR 732.2a evaluable from `&f.live` — and every
+    /// `certified_period_touch` window inside `certified_bounded_cycle_offer` is sliced from
+    /// the evaluable one.
+    ///
+    /// REVERT-PROBE: point `ring_live` at `&f.normalized` (rounds 13–33's carrier) ⇒ the
+    /// `&f.live` count goes 1 → 0 ⇒ FLIPS.
+    #[test]
+    fn the_period_touch_window_is_carried_by_the_live_half() {
+        let src = include_str!("engine.rs");
+        let lines: Vec<&str> = src.lines().collect();
+        let mint = engine_fn_extent(&lines, "fn bounded_cycle_offer(");
+        let live_needle = format!("&f.{}", "live");
+        let norm_needle = format!("&f.{}", "normalized");
+
+        let live_hits = engine_code_hits(&lines, mint, &live_needle);
+        let norm_hits = engine_code_hits(&lines, mint, &norm_needle);
+        assert_eq!(
+            live_hits.len(),
+            1,
+            "exactly ONE evaluable ring vec is built, in {}-{}",
+            mint.0 + 1,
+            mint.1 + 1
+        );
+        assert_eq!(norm_hits.len(), 1, "…and exactly one comparand ring vec");
+        assert!(
+            lines[live_hits[0]].contains("ring_live"),
+            "the evaluable half must be the one bound to `ring_live`; line {} reads `{}`",
+            live_hits[0] + 1,
+            lines[live_hits[0]].trim()
+        );
+
+        let certified = engine_fn_extent(&lines, "fn certified_bounded_cycle_offer<'a>(");
+        let touch_needle = format!("certified_period{}touch(", '_');
+        let touch_sites = engine_code_hits(&lines, certified, &touch_needle);
+        assert!(
+            touch_sites.len() >= 2,
+            "REACH-GUARD: the certification step must actually call the period touch; found \
+             {} sites",
+            touch_sites.len()
+        );
+        for site in &touch_sites {
+            assert!(
+                lines[*site].contains("window"),
+                "every period-touch call must be handed a WINDOW, never a raw ring; line {} \
+                 reads `{}`",
+                site + 1,
+                lines[*site].trim()
+            );
+        }
+        // F-4: after `candidate_windows` was extracted, basis A's carrier decision lives at the
+        // CALL SITE, not in a `let window`. A `!is_empty()` reach-guard tolerated losing half
+        // the subject (2 producers -> 1) IN SILENCE — MEASURED: the pin still passed with one
+        // producer gone. And the obvious repair, widening the extent over `fn
+        // candidate_windows`, is VACUOUS — also MEASURED: `ring_live` is the walk's own
+        // PARAMETER NAME, so it reads identically whatever the caller passes, including under
+        // the DROP mutant that hands the walk the CR 104.4b comparand. Both producers are
+        // therefore pinned by EXACT COUNT, and each must name the evaluable ring on the line
+        // that chooses it.
+        let walk_calls = engine_code_hits(&lines, certified, "candidate_windows(");
+        assert_eq!(
+            walk_calls.len(),
+            1,
+            "basis A takes its window from EXACTLY ONE `candidate_windows` call; found {}",
+            walk_calls.len()
+        );
+        let window_bindings = engine_code_hits(&lines, certified, "let window");
+        assert_eq!(
+            window_bindings.len(),
+            1,
+            "basis B binds EXACTLY ONE window directly; found {}. Together with the walk call \
+             that is the TWO producers this pin covers — a count that DROPS is a producer that \
+             left the extent, which is exactly what an extraction does silently",
+            window_bindings.len()
+        );
+        for producer in walk_calls.iter().chain(window_bindings.iter()) {
+            assert!(
+                lines[*producer].contains("ring_live"),
+                "every period-touch window is sliced from the EVALUABLE ring (CR 732.2a), never \
+                 the CR 104.4b comparand; line {} reads `{}`",
+                producer + 1,
+                lines[*producer].trim()
+            );
+        }
+    }
+
+    // ───────────────────────────────────────────────────────────────────────────────────
+    // N1 — the period boundary has ONE authority, and every frame-recording arm asks it.
+    // ───────────────────────────────────────────────────────────────────────────────────
+
+    /// N1, BEHAVIOURAL HALF — `published_period_elapsed` is TOTAL over the two axes that
+    /// delimit a cycle, and each of its three interesting answers is asserted.
+    ///
+    /// CR 732.2a. This is the anti-vacuity control for the structural half below: a census
+    /// proving the two arms call ONE function says nothing if that function is wrong, and the
+    /// two properties a caller depends on — `None` never elapses, `>=` and not `==` — are
+    /// invisible at the call sites.
+    ///
+    /// * **`None` ⇒ never.** An offer whose producer states no per-period signature publishes
+    ///   no frame count. Inventing one would end the cycle after an arbitrary number of frames
+    ///   and commit a FRACTION of the published delta — the conditional action CR 732.2a
+    ///   forbids. Fail-closed means "keep driving until the board recurs", not "stop early".
+    /// * **`Some(k)` with fewer frames ⇒ not yet.** The row asserts `k - 1` explicitly, so an
+    ///   off-by-one that closed a 2-frame period after 1 frame FLIPS here.
+    /// * **`Some(k)` with `k` or MORE ⇒ elapsed.** A single beat may retain more than one
+    ///   frame, so a strict `==` would drive past its own boundary and end at the beat cap
+    ///   instead. `k + 1` is the arm that discriminates `>=` from `==`.
+    ///
+    /// REVERT-PROBE: change `is_some_and` to `is_none_or` ⇒ the `None` rows FLIP. Change `>=`
+    /// to `==` ⇒ the `k + 1` row FLIPS. Change `>=` to `>` ⇒ the exact-`k` row FLIPS.
+    #[test]
+    fn published_period_elapsed_is_total_over_the_axes_that_delimit_a_cycle() {
+        use super::published_period_elapsed;
+
+        // (frames_this_cycle, frames_per_period) -> elapsed
+        let table: [((u32, Option<u32>), bool); 8] = [
+            ((0, None), false),
+            ((1, None), false),
+            ((7, None), false),
+            ((0, Some(1)), false),
+            ((1, Some(1)), true),
+            ((1, Some(2)), false),
+            ((2, Some(2)), true),
+            ((3, Some(2)), true),
+        ];
+        let measured: Vec<((u32, Option<u32>), bool)> = table
+            .iter()
+            .map(|&(input, _)| (input, published_period_elapsed(input.0, input.1)))
+            .collect();
+        assert_eq!(
+            measured,
+            table.to_vec(),
+            "CR 732.2a: an UNPUBLISHED period never elapses by frame count ({{None}} rows), a \
+             period is not over before its k-th frame, and one that overshot k IS over — the \
+             three properties `drive_one_shortcut_cycle`'s two arms depend on and neither \
+             call site can state"
+        );
+    }
+
+    /// N1, STRUCTURAL HALF — ONE authority for the period boundary, ASKED BY BOTH ARMS.
+    ///
+    /// CR 732.2a. `drive_one_shortcut_cycle` can record a ring frame in two places now that
+    /// `apply_action` carries the forced-window ANSWER sampling site: the active-player settle
+    /// arm and the injector arm. Both must advance the frame counter and both must ask the
+    /// same delimiter, or the published `frames_per_period` is unreachable on exactly the
+    /// boards the widening was for and the drive can only end at its runaway beat cap.
+    ///
+    /// The census is EXTENT-SCOPED (`engine_fn_extent` + `engine_code_hits`, the same
+    /// machinery the two carrier rows and the CR 603.5 census use) and comment lines are
+    /// excluded, so it cannot count its own prose.
+    ///
+    /// REVERT-PROBE: drop the injector arm's counter advance ⇒ `frames_this_cycle += 1` goes
+    /// 2 → 1 ⇒ FLIPS. Re-inline `frames_per_period.is_some_and(|k| frames_this_cycle >= k)` at
+    /// either arm ⇒ the raw-comparison count goes 0 → 1 ⇒ FLIPS.
+    #[test]
+    fn the_period_delimiter_has_one_authority_and_both_frame_recording_arms_ask_it() {
+        let src = include_str!("engine.rs");
+        let lines: Vec<&str> = src.lines().collect();
+        let drive = engine_fn_extent(&lines, "fn drive_one_shortcut_cycle(");
+
+        let delimiter = format!("published_period{}elapsed(", '_');
+        let asks = engine_code_hits(&lines, drive, &delimiter);
+        assert_eq!(
+            asks.len(),
+            2,
+            "the settle arm and the injector arm must EACH ask the delimiter, in {}-{}; found \
+             {:?} (1-based)",
+            drive.0 + 1,
+            drive.1 + 1,
+            asks.iter().map(|i| i + 1).collect::<Vec<_>>()
+        );
+        let advances = engine_code_hits(&lines, drive, "frames_this_cycle += 1");
+        assert_eq!(
+            advances.len(),
+            2,
+            "…and each of those two arms must ADVANCE the counter first, else one arm asks a \
+             question the other's bookkeeping answers; found {:?} (1-based)",
+            advances.iter().map(|i| i + 1).collect::<Vec<_>>()
+        );
+        let raw = engine_code_hits(&lines, drive, "frames_this_cycle >=");
+        assert!(
+            raw.is_empty(),
+            "the comparison itself lives in the authority and NOWHERE in this extent — an \
+             inlined copy is the second place to get `>=` and the `None` arm wrong; found \
+             {:?} (1-based)",
+            raw.iter().map(|i| i + 1).collect::<Vec<_>>()
+        );
+
+        // POSITIVE CONTROL against a dead grep, same extractor and same filter: one token
+        // known present in this extent, one known absent. The `raw.is_empty()` assertion above
+        // is a ZERO census and needs an instrument proven able to return non-zero.
+        assert!(
+            !engine_code_hits(&lines, drive, "frames_this_cycle").is_empty(),
+            "the instrument must be able to find a token that IS there"
+        );
+        assert!(
+            engine_code_hits(&lines, drive, "certified_period_touch").is_empty(),
+            "…and must not find one that is not"
+        );
+    }
+
+    /// F2c — **NO FOURTH COPY OF THE CR 603.5 CONJUNCT SET IS BUILT OUT OF THESE FIVE
+    /// PREDICATES, AND EVERY SURVIVING PRODUCTION CALLER IS INSIDE `game/effects/`.**
+    ///
+    /// CR 603.5 + CR 608.2c + CR 608.2d + CR 603.12a. Three places used to answer *"does this
+    /// ability open ONE up-front optional gate?"* — production's own branch, the mint's guard
+    /// (b), and `analysis::resource::auto_may_answer_for` — and the latter two omitted
+    /// conjuncts the first has. After adoption, `effects::upfront_optional_gate` is the only
+    /// place the set is assembled, and the census is what keeps it that way.
+    ///
+    /// MEASURED counts, not derived ones. The plan's derivation predicted `2 / 2 / 2 / 1 / 2`
+    /// and the tree measures `2 / 2 / 2 / 1 / 2`; if these ever disagree the MEASURED value is
+    /// what belongs here.
+    ///
+    /// | predicate | production sites | where |
+    /// |---|---|---|
+    /// | `has_kind_driven_repeat` | 2 | `upfront_optional_gate` + `repeat_for_outermost_with_scope_or_unless` |
+    /// | `has_member_driven_repeat_after_hydration` | 2 | `upfront_optional_gate` + `resolve_chain_body`'s driver guard |
+    /// | `is_repeated_optional_payment` | 2 | `upfront_optional_gate` + `resolve_chain_body`'s driver dispatch |
+    /// | `optional_prompt_player` | 1 | `upfront_optional_gate` only |
+    /// | `optional_effect_is_infeasible` | 2 | `upfront_optional_gate` + `resolve_chain_body`'s `CastFromZone` decline |
+    ///
+    /// **THE THREE NON-AUTHORITY SITES ARE NOT COPIES, AND FOLDING THEM IN WOULD BE WRONG.**
+    /// They consume these predicates to decide WHICH DRIVER RUNS — whether a counted repeat
+    /// has to wrap scoped/unless-pay instructions (CR 608.2c), which repeat driver takes the
+    /// ability, and the CR 603.12a repeated-payment dispatch that fires *because* the up-front
+    /// gate suppressed itself. That is a different question from "does one up-front window
+    /// open", and it is asked after the gate has already declined.
+    ///
+    /// **HONEST GUARANTEE.** This enforces that no fourth copy is built OUT OF THESE FIVE
+    /// PREDICATES. A copy that re-derives the same conjunct from `ability.repeat_for` (or from
+    /// `optional_for`, or from the effect discriminant) inline is NOT caught, and no census
+    /// over these five tokens can catch it — `has_kind_driven_repeat` is itself exactly such a
+    /// re-derivation.
+    ///
+    /// The zero-outside-`game/effects/` assertion carries its own POSITIVE CONTROL, because a
+    /// zero census with a dead instrument is indistinguishable from a passing one.
+    ///
+    /// REVERT-PROBE: re-introduce any one predicate call in `analysis/resource.rs` or in
+    /// `entry_publishes_pin_slots` ⇒ that predicate's count rises AND the outside-set becomes
+    /// non-empty ⇒ FLIPS on two independent assertions.
+    #[test]
+    fn f2c_the_cr_603_5_conjunct_set_has_one_production_assembler() {
+        /// Every `.rs` under the crate's `src`. A whole file whose stem ends `_tests` is
+        /// test-only (its parent declares it under `#[cfg(test)]`).
+        fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("readable source dir") {
+                let path = entry.expect("readable dir entry").path();
+                if path.is_dir() {
+                    rs_files(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        /// The `#[cfg(test)]`-attributed column-0 `mod … {` … column-0 `}` spans, so the
+        /// census cannot count its own harness. Same shape as the CR 603.5 prompt census.
+        fn cfg_test_spans(lines: &[&str]) -> Vec<(usize, usize)> {
+            let mut spans = Vec::new();
+            let mut i = 0;
+            while i < lines.len() {
+                if lines[i].trim() == "#[cfg(test)]" {
+                    let mut j = i + 1;
+                    while j < lines.len()
+                        && (lines[j].trim_start().starts_with("#[") || lines[j].trim().is_empty())
+                    {
+                        j += 1;
+                    }
+                    let is_mod = j < lines.len()
+                        && lines[j].starts_with(['m', 'p'])
+                        && lines[j].contains("mod ")
+                        && lines[j].trim_end().ends_with('{');
+                    if is_mod {
+                        let mut k = j + 1;
+                        while k < lines.len() && lines[k] != "}" {
+                            k += 1;
+                        }
+                        spans.push((j, k));
+                        i = k;
+                    }
+                }
+                i += 1;
+            }
+            spans
+        }
+
+        // ASSEMBLED needles, so this row's own source cannot be counted by its own instrument.
+        let predicates: [(String, usize); 5] = [
+            (format!("has_kind_driven{}repeat(", '_'), 2),
+            (
+                format!("has_member_driven_repeat_after{}hydration(", '_'),
+                3,
+            ),
+            (format!("is_repeated_optional{}payment(", '_'), 2),
+            (format!("optional_prompt{}player(", '_'), 1),
+            (format!("optional_effect_is{}infeasible(", '_'), 2),
+        ];
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rs_files(&root, &mut files);
+        files.sort();
+        assert!(files.len() > 100, "reach-guard: the walker found the crate");
+
+        let mut sites: Vec<(usize, String)> = Vec::new();
+        let mut control_hits = 0usize;
+        for path in &files {
+            let text = std::fs::read_to_string(path).expect("readable source file");
+            let lines: Vec<&str> = text.lines().collect();
+            let spans = cfg_test_spans(&lines);
+            let rel = path
+                .strip_prefix(&root)
+                .expect("under src")
+                .display()
+                .to_string()
+                // Canonicalize to forward slashes so the census pins below are
+                // platform-independent: `Path::display()` emits the OS-native
+                // separator (backslash on Windows), but the pins are written in
+                // the crate's forward-slash convention. No-op on Unix/CI.
+                .replace('\\', "/");
+            let test_file = rel.trim_end_matches(".rs").ends_with("_tests");
+            for (n, line) in lines.iter().enumerate() {
+                // The shared comment rule, not a private one: comment text declares no
+                // predicate and calls none.
+                let line = crate::source_census::code(line);
+                if test_file || spans.iter().any(|(a, b)| (*a..=*b).contains(&n)) {
+                    continue;
+                }
+                // POSITIVE CONTROL for the zero census below: a token that IS present in
+                // production, counted by this very walker under this very filter.
+                if line.contains("fn resolve_chain_body(") {
+                    control_hits += 1;
+                }
+                for (i, (needle, _)) in predicates.iter().enumerate() {
+                    // The DEFINITION is not a call site.
+                    if line.contains(needle) && !line.contains(&format!("fn {needle}")) {
+                        sites.push((i, format!("{rel}:{}", n + 1)));
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            control_hits, 1,
+            "POSITIVE CONTROL: the walker+filter must find `fn resolve_chain_body(` exactly \
+             once in production source. A zero below is only meaningful with a live instrument"
+        );
+
+        let counted: Vec<(String, usize)> = predicates
+            .iter()
+            .enumerate()
+            .map(|(i, (needle, _))| {
+                (
+                    needle.clone(),
+                    sites.iter().filter(|(j, _)| *j == i).count(),
+                )
+            })
+            .collect();
+        let expected: Vec<(String, usize)> = predicates
+            .iter()
+            .map(|(needle, want)| (needle.clone(), *want))
+            .collect();
+        assert_eq!(
+            counted, expected,
+            "the CR 603.5 conjunct set gained or lost a production consumer. The surviving \
+             non-authority sites are `repeat_for_outermost_with_scope_or_unless` (does a \
+             counted repeat wrap scoped/unless-pay instructions), `resolve_chain_body`'s \
+             repeat-driver guard, its per-member unless-payment gate, and its CR 603.12a \
+             driver dispatch, and \
+             `resolve_chain_body`'s `CastFromZone` decline probe — every one of them selects a \
+             DRIVER rather than opening an up-front window, so a NEW site is a decision to \
+             adjudicate here and not a number to move.\nsites={sites:#?}"
+        );
+
+        let outside: Vec<&String> = sites
+            .iter()
+            .filter(|(_, site)| !site.starts_with("game/effects/"))
+            .map(|(_, site)| site)
+            .collect();
+        assert!(
+            outside.is_empty(),
+            "SINGLE ASSEMBLER: every production consumer of these five predicates lives in \
+             `game/effects/`, next to the authority that assembles them. A caller in another \
+             module is by construction re-deriving the gate's conjunct set from outside it — \
+             which is exactly what `analysis::resource::auto_may_answer_for` and \
+             `engine::entry_publishes_pin_slots` used to do, each with a DIFFERENT omission. \
+             Found {outside:#?}"
+        );
+    }
+}
+
+/// Separation of the settle gate's two questions: *has this resolution
+/// finished?* (readiness, `resolving_stack_entry_can_settle`) and *is the
+/// carrier well-formed?* (`resolving_carrier_parity_is_coherent`).
+///
+/// These live inline because `resolving_trigger_firing` is `pub(crate)` and
+/// both settle wrappers are `pub(super)`, so no external test crate can reach
+/// the surface under test.
+#[cfg(test)]
+mod resolving_carrier_settle_tests {
+    use super::{
+        resolving_carrier_parity_is_coherent, resolving_stack_entry_can_settle,
+        settle_resolving_stack_entry_after_continuation_resume,
+    };
+    use crate::types::ability::{Effect, ResolvedAbility, TargetFilter};
+    use crate::types::game_state::{
+        GameState, PendingContinuation, StackEntry, StackEntryKind, WaitingFor,
+    };
+    use crate::types::identifiers::{ObjectId, TriggerFiring};
+    use crate::types::player::PlayerId;
+
+    const SOURCE: ObjectId = ObjectId(60);
+
+    fn trivial_ability() -> Box<ResolvedAbility> {
+        Box::new(ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![],
+            SOURCE,
+            PlayerId(0),
+        ))
+    }
+
+    fn carrier(kind: StackEntryKind) -> StackEntry {
+        StackEntry {
+            id: ObjectId(500),
+            source_id: SOURCE,
+            controller: PlayerId(0),
+            kind,
+        }
+    }
+
+    fn triggered_kind() -> StackEntryKind {
+        StackEntryKind::TriggeredAbility {
+            source_id: SOURCE,
+            ability: trivial_ability(),
+            condition: None,
+            trigger_event: None,
+            description: None,
+            source_name: "Test Trigger".to_string(),
+            subject_match_count: None,
+            die_result: None,
+            provenance: None,
+        }
+    }
+
+    fn activated_kind() -> StackEntryKind {
+        StackEntryKind::ActivatedAbility {
+            source_id: SOURCE,
+            ability: trivial_ability(),
+        }
+    }
+
+    /// A state at a priority boundary with every resolution hold clear.
+    fn settled_priority_state() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state
+    }
+
+    /// Test 1 (discriminating). A triggered carrier whose firing classification
+    /// is absent is malformed, but its resolution is nonetheless finished. The
+    /// sweep must be able to do its job on that input; while the readiness gate
+    /// also tested well-formedness, this input read as "not finished" and the
+    /// wrapper no-opped.
+    #[test]
+    fn a_triggered_carrier_missing_its_firing_still_settles_at_the_priority_boundary() {
+        let mut state = settled_priority_state();
+        state.resolving_stack_entry = Some(carrier(triggered_kind()));
+        state.resolving_trigger_firing = None;
+
+        // Fixture guard: this is the desynchronized shape, not a well-formed one.
+        assert!(
+            !resolving_carrier_parity_is_coherent(&state),
+            "fixture must actually be the incoherent pairing under test"
+        );
+
+        settle_resolving_stack_entry_after_continuation_resume(&mut state);
+
+        assert!(
+            state.resolving_stack_entry.is_none(),
+            "a finished resolution's carrier must settle even when its firing \
+             classification is absent"
+        );
+        assert!(
+            state.resolving_trigger_firing.is_none(),
+            "settling clears both halves of the carrier"
+        );
+    }
+
+    /// Test 2 (non-vacuity). Removing the well-formedness conjunct must not
+    /// have weakened readiness: a carrier whose resolution is still suspended
+    /// stays put, for the well-formed and malformed pairing alike.
+    ///
+    /// Scope of the pin, stated precisely: `park_ability_continuation` also
+    /// pushes onto `resolution_stack`, which `resolution_completion_can_settle`
+    /// rejects independently. So this fixture falsifies TWO readiness conjuncts
+    /// at once and does not hold either one down on its own — deleting only the
+    /// `active_ability_continuation()` conjunct would leave it green. It pins
+    /// what the change needs pinned (readiness survived, and A1 did not make
+    /// settling unconditional); it is not a single-conjunct probe, and the name
+    /// says "suspended" rather than naming a conjunct for that reason.
+    #[test]
+    fn a_suspended_resolution_still_blocks_settling_for_either_pairing() {
+        for firing in [Some(TriggerFiring::Ordinary), None] {
+            let mut state = settled_priority_state();
+            state.resolving_stack_entry = Some(carrier(triggered_kind()));
+            state.resolving_trigger_firing = firing;
+            let pending = PendingContinuation::new(trivial_ability(), &state);
+            state.park_ability_continuation(pending);
+
+            // Probe guard: the suspension the fixture claims is actually installed.
+            assert!(
+                state.active_ability_continuation().is_some(),
+                "fixture must actually park a live continuation ({firing:?})"
+            );
+            assert!(
+                !resolving_stack_entry_can_settle(&state),
+                "a suspended resolution is not finished ({firing:?})"
+            );
+
+            settle_resolving_stack_entry_after_continuation_resume(&mut state);
+
+            assert!(
+                state.resolving_stack_entry.is_some(),
+                "an unfinished resolution's carrier must survive the sweep ({firing:?})"
+            );
+        }
+    }
+
+    /// Test 3 (non-vacuity). The leading conjunct is intact: with no carrier
+    /// there is nothing to settle, even if a stray firing classification is
+    /// present.
+    #[test]
+    fn no_carrier_means_nothing_to_settle() {
+        let mut state = settled_priority_state();
+        assert!(state.resolving_stack_entry.is_none());
+        assert!(
+            !resolving_stack_entry_can_settle(&state),
+            "an absent carrier is not a settleable one"
+        );
+
+        state.resolving_trigger_firing = Some(TriggerFiring::Ordinary);
+        assert!(
+            !resolving_stack_entry_can_settle(&state),
+            "a stray firing classification does not conjure a carrier to settle"
+        );
+    }
+
+    /// Test 4. Direct coverage of the extracted well-formedness predicate
+    /// across every carrier/firing pairing.
+    #[test]
+    fn parity_predicate_classifies_every_carrier_pairing() {
+        let cases = [
+            (Some(triggered_kind()), Some(TriggerFiring::Ordinary), true),
+            (Some(triggered_kind()), None, false),
+            (Some(activated_kind()), None, true),
+            (Some(activated_kind()), Some(TriggerFiring::Ordinary), false),
+            (None, None, true),
+            (None, Some(TriggerFiring::Ordinary), false),
+        ];
+
+        for (kind, firing, expected) in cases {
+            let mut state = settled_priority_state();
+            let described = format!("{kind:?} paired with {firing:?}");
+            state.resolving_stack_entry = kind.map(carrier);
+            state.resolving_trigger_firing = firing;
+
+            assert_eq!(
+                resolving_carrier_parity_is_coherent(&state),
+                expected,
+                "{described}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod cost_move_drain_priority_boundary_tests {
+    use super::{drain_pending_cost_move_resume, CostMoveDrainBoundary};
+    use crate::types::ability::{AbilityCost, Effect, ResolvedAbility, TargetFilter};
+    use crate::types::game_state::{GameState, PendingCostMoveResume};
+    use crate::types::identifiers::ObjectId;
+    use crate::types::mana::ManaCost;
+    use crate::types::player::PlayerId;
+
+    /// `engine_payment_choices::resume_counter_addition_unless_payment` maps
+    /// `CostMoveDrainBoundary::PriorityBoundary` to `unreachable!`, and nothing but
+    /// this eligibility table makes that true: it admits only `DelveManaPayment` and
+    /// `ManaAbilityPayment` at that boundary. Nothing else in the crate pinned that
+    /// premise, so widening the table would leave the suite green and abort a live
+    /// session instead.
+    ///
+    /// This pins the guard, not the panic. A `#[should_panic]` row would assert the
+    /// panic is *reachable*, which is the inverse of the invariant. Admitting
+    /// `CounterAdditionUnlessPayment` at `PriorityBoundary` turns this row red: the
+    /// root takes the parked continuation and panics before it can return `Ok(None)`.
+    #[test]
+    fn a_parked_counter_addition_unless_payment_is_never_drained_at_the_priority_boundary() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_cost_move_resume =
+            Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::generic(2),
+                },
+                pending_effect: Box::new(ResolvedAbility::new(
+                    Effect::TargetOnly {
+                        target: TargetFilter::Any,
+                    },
+                    vec![],
+                    ObjectId(60),
+                    PlayerId(0),
+                )),
+                trigger_event: None,
+                effect_description: None,
+                remaining: Vec::new(),
+            });
+        let mut events = Vec::new();
+
+        let drained = drain_pending_cost_move_resume(
+            &mut state,
+            &mut events,
+            CostMoveDrainBoundary::PriorityBoundary,
+        );
+
+        assert!(
+            matches!(drained, Ok(None)),
+            "the priority boundary must not drain a counter-addition unless-payment"
+        );
+        assert!(
+            matches!(
+                state.pending_cost_move_resume,
+                Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
+            ),
+            "the continuation must stay parked for the replacement boundary that owns it"
+        );
+        assert!(events.is_empty(), "an ineligible drain must emit no events");
     }
 }

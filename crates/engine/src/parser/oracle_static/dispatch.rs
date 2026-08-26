@@ -27,6 +27,46 @@ fn parse_self_reference_subject(input: &str) -> OracleResult<'_, ()> {
     Err(oracle_err(input))
 }
 
+/// CR 707.2c + CR 613.1a + CR 303.4: "Enchanted <subject> is a copy of the
+/// chosen <type>." — Metamorphic Alteration's companion static. Emits the
+/// parse-time `ContinuousModification::CopyChosen` MARKER affecting the
+/// enchanted host. The marker is a Layer-1 no-op at apply time: the real copy
+/// is installed as a `CopyValues` transient continuous effect when the
+/// `Effect::ChoosePermanent` as-enters choice is answered (per CR 707.2c the
+/// copiable values are fixed only when the effect first starts to apply).
+/// Emitting the static keeps the printed line "supported" and documents the
+/// copy layer on the card. The donor type after "the chosen" is informational
+/// (the concrete copy source is picked at entry), so it is required to parse
+/// but is not otherwise threaded.
+fn parse_enchanted_is_copy_of_chosen(tp: &TextPair, text: &str) -> Option<StaticDefinition> {
+    let rest = nom_tag_tp(tp, "enchanted ")?;
+    // Subject type of the enchanted host (creature / permanent). Trim the
+    // trailing period first so the donor phrase parses to an empty remainder.
+    let subject_lower = rest.lower.trim_end_matches('.').trim();
+    let (subject_filter, after_subject) = parse_type_phrase(subject_lower);
+    let TargetFilter::Typed(mut subject) = subject_filter else {
+        return None;
+    };
+    let (donor_lower, _) = tag::<_, _, OracleError<'_>>(" is a copy of the chosen ")
+        .parse(after_subject)
+        .ok()?;
+    // The donor type ("creature" / "permanent") must parse and fully consume the
+    // remainder — a trailing rider (e.g. "except it has flying") is not modeled
+    // by the marker, so bail rather than silently drop it.
+    let (_donor_filter, donor_rest) = parse_type_phrase(donor_lower);
+    if !donor_rest.trim().is_empty() {
+        return None;
+    }
+    // CR 303.4 + CR 613.1: the static affects the enchanted host.
+    subject.properties.push(FilterProp::EnchantedBy);
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(subject))
+            .modifications(vec![ContinuousModification::CopyChosen])
+            .description(text.to_string()),
+    )
+}
+
 /// CR 208.1 + CR 113.7: Parse the dynamic referent of a "{X} … less to activate,
 /// where X is [source]'s {power|toughness|mana value}" activated-ability cost
 /// reduction (Agatha of the Vile Cauldron — "where X is Agatha's power", which
@@ -256,10 +296,12 @@ fn parse_untaps_during_each_other_players_untap_step(
     tp: &TextPair<'_>,
     description: &str,
 ) -> Option<StaticDefinition> {
-    // "Untap all <type> you control during each other player's untap step."
-    // Delegate the subject to `parse_type_phrase`, which handles the full range
-    // of type + controller phrases.
-    if let Some(rest) = nom_tag_tp(tp, "untap all ") {
+    // "Untap all/each <type> you control during each other player's untap
+    // step." — Seedborn Muse prints "all"; Prop Room and Ivorytusk Fortress
+    // print "each" for the same subject shape, so both tags share this arm.
+    // Delegate the subject to `parse_type_phrase`, which handles the full
+    // range of type + controller + property phrases.
+    if let Some(rest) = nom_tag_tp(tp, "untap all ").or_else(|| nom_tag_tp(tp, "untap each ")) {
         let (filter, remainder) = parse_type_phrase(rest.original);
         let remainder_lower = remainder.to_lowercase();
         let during_ok = nom_on_lower(
@@ -601,10 +643,12 @@ pub(crate) fn parse_damage_not_removed_during_cleanup(
 /// block this creature." — a can't-be-blocked-by restriction whose blocker
 /// filter gates on a power threshold that may be DYNAMIC (Kraken of the Straits:
 /// "Creatures with power less than the number of Islands you control can't block
-/// this creature."). Sibling of `parse_source_power_block_restriction` (which
-/// fixes the threshold to `~'s power` and targets `creatures you control`); this
-/// arm accepts any `parse_target` power-comparison filter — including a dynamic
-/// `ObjectCount` threshold — and targets the source itself. Without it the
+/// this creature."). Sibling of the general "<subject> can't block <object>"
+/// production in `parse_subject_combat_rule_static`, which owns every FILTERED
+/// object but declines a self-referential one; this arm covers exactly that
+/// declined case. It accepts any `parse_target` power-comparison filter —
+/// including a dynamic `ObjectCount` threshold — and targets the source
+/// itself, keeping `affected` tight. Without it the
 /// subject-first "creatures with power … can't block this creature" wording
 /// mis-dispatches to a bare `CantBlock { SelfRef }` (source can't block), which
 /// is the inverse of the intended restriction.
@@ -1080,6 +1124,10 @@ pub(crate) fn parse_static_line_inner(
         return Some(result);
     }
 
+    if let Some(result) = try_parse_unspent_mana_loss_causes_life_loss_static(&text, &lower) {
+        return Some(result);
+    }
+
     if let Some(result) = try_parse_retain_unspent_mana_static(&text, &lower) {
         return Some(result);
     }
@@ -1232,6 +1280,14 @@ pub(crate) fn parse_static_line_inner(
     if let Some(def) = parse_becomes_equipment_with_ability(&tp, &text) {
         return Some(def);
     }
+    // CR 707.2c + CR 613.1a + CR 303.4: "Enchanted <subject> is a copy of the
+    // chosen <type>" — Metamorphic Alteration's companion static. Must precede
+    // `parse_enchanted_is_type`, whose "is a <type>" copula would otherwise try
+    // (and fail) to read "copy" as a card type.
+    if let Some(def) = parse_enchanted_is_copy_of_chosen(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 613.1d + CR 205.1a: "Enchanted [permanent-type] is a [type] [with base P/T N/N]
     // [in addition to its other types]" — type-changing aura effects.
     // Must come before the basic-land-type handler which is a subset of this pattern.
@@ -1431,6 +1487,18 @@ pub(crate) fn parse_static_line_inner(
     // land-type words, so this is order-safe here; it precedes `parse_land_type_change`
     // so "All lands are basic" (supertype) is not probed as a land-type line.
     if let Some(def) = parse_subject_is_supertype(&tp, &text) {
+        return Some(def);
+    }
+
+    // CR 508.1d + CR 604.1: "<subject> attacks <player-class> each combat if able
+    // [unless ...]" — a static attack requirement whose required defender is a
+    // live-evaluated player class (Galactus: "an opponent with the most life among
+    // your opponents ... unless you control a creature named ..."). Richer than the
+    // bare scoped must-attack below: the selector form is disjoint (returns None
+    // without a defender phrase), and the wrapper's flavor-label strip is a
+    // retry-on-failure (never fires when the body already parses), so ordering
+    // before `try_parse_scoped_must_attack_block` is safe.
+    if let Some(def) = parse_forced_attack_defender_static(&text) {
         return Some(def);
     }
 
@@ -2197,10 +2265,6 @@ pub(crate) fn parse_static_line_inner(
     // CR 702.122a / 702.171a / 702.184c: crew/saddle/station power-contribution
     // modifier (Reckoner Bankbuster, Giant Ox, Stoic Star-Captain).
     if let Some(def) = parse_crew_contribution_static(&text) {
-        return Some(def);
-    }
-
-    if let Some(def) = parse_source_power_block_restriction(&text) {
         return Some(def);
     }
 

@@ -46,6 +46,7 @@ const KERAL_ORACLE: &str =
     "Whenever you activate a loyalty ability of a Chandra planeswalker, this creature deals 1 damage to each opponent.";
 const ELSPETH_TALENT_ORACLE: &str =
     "Whenever you activate a loyalty ability of enchanted planeswalker, creatures you control get +2/+2 and gain vigilance until end of turn.";
+const AJANI_ORACLE: &str = "Whenever you activate a loyalty ability, create a 2/2 colorless Wizard Soldier creature token named Cadet.\n[+1]: Creatures you control get +1/+0 and gain haste until end of turn.\n[−2]: Discard your hand, then draw a card for each creature you control.\n[−3]: Ajani deals 4 damage to each creature except for tokens you control.";
 
 /// A targeted minus-loyalty ability: CR 606.1 loyalty cost (`[−2]`, an
 /// `AbilityCost::Loyalty`) + `Effect::DealDamage 2` to `target creature`. Two
@@ -128,6 +129,85 @@ fn scenario_with_trigger_source(
         .from_oracle_text(oracle)
         .id();
     (scenario.build(), c1, source)
+}
+
+fn scenario_with_ajani() -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature(P0, "Ajani Ally", 2, 2);
+    let ajani = scenario
+        .add_creature(P0, "Ajani Unrelenting", 0, 0)
+        .from_oracle_text(AJANI_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    let object = runner.state_mut().objects.get_mut(&ajani).unwrap();
+    object.card_types.core_types = vec![CoreType::Planeswalker];
+    object.base_card_types = object.card_types.clone();
+    object.loyalty = Some(5);
+    object.counters.insert(CounterType::Loyalty, 5);
+    (runner, ajani)
+}
+
+fn ajani_stack_entries(runner: &GameRunner, ajani: ObjectId) -> usize {
+    runner
+        .state()
+        .stack
+        .iter()
+        .filter(|entry| entry.source_id == ajani)
+        .count()
+}
+
+#[test]
+fn ajani_unqualified_loyalty_trigger_uses_production_activation_scope() {
+    let (mut positive, ajani) = scenario_with_ajani();
+    positive
+        .act(GameAction::ActivateAbility {
+            source_id: ajani,
+            ability_index: 0,
+        })
+        .expect("Ajani's parsed +1 loyalty ability must activate through apply");
+    assert_eq!(
+        ajani_stack_entries(&positive, ajani),
+        2,
+        "the loyalty ability and Ajani's unqualified trigger must both be stacked"
+    );
+
+    let (mut normal, ajani) = scenario_with_ajani();
+    let normal_source = place_planeswalker(
+        &mut normal,
+        P0,
+        "Normal Ability Source",
+        "Jace",
+        5,
+        targeted_normal_ability(),
+    );
+    activate_and_target(&mut normal, normal_source, ajani);
+    assert_eq!(
+        ajani_stack_entries(&normal, ajani),
+        0,
+        "a Normal-kind activation must not fire Ajani's loyalty trigger"
+    );
+
+    let (mut opponent, ajani) = scenario_with_ajani();
+    let opponent_walker = place_planeswalker(
+        &mut opponent,
+        PlayerId(1),
+        "Opponent Walker",
+        "Jace",
+        5,
+        targeted_minus_loyalty_ability(),
+    );
+    opponent.state_mut().active_player = PlayerId(1);
+    opponent.state_mut().priority_player = PlayerId(1);
+    opponent.state_mut().waiting_for = WaitingFor::Priority {
+        player: PlayerId(1),
+    };
+    activate_and_target(&mut opponent, opponent_walker, ajani);
+    assert_eq!(
+        ajani_stack_entries(&opponent, ajani),
+        0,
+        "an opponent's loyalty activation must not satisfy Ajani's 'you' scope"
+    );
 }
 
 /// Activate `pw`'s loyalty ability at index 0, announcing the `[−X]` counter

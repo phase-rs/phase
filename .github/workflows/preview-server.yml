@@ -2,6 +2,13 @@ name: Preview Server Artifacts
 
 on:
   workflow_call:
+    secrets:
+      CLOUDFLARE_API_TOKEN:
+        required: true
+      CLOUDFLARE_ACCOUNT_ID:
+        required: true
+      SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY:
+        required: true
     inputs:
       fingerprint:
         required: true

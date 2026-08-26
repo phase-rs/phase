@@ -1,9 +1,11 @@
 //! Suite runner — executes every registered `MatchupSpec` and emits a
 //! structured JSON report.
 //!
-//! Deterministic-core results are a pure function of `(binary, spec, seed)`.
-//! Wall-clock fields are retained in `SuiteReport` for operator visibility but
-//! are excluded from [`SuiteReport::deterministic_core`].
+//! Deterministic-core results are a function of `(binary, spec, seed)` **modulo
+//! the run-to-run caveats catalogued at the top of [`super::perf`]** — do not read
+//! this as byte-stability across repeated runs. Wall-clock fields are retained in
+//! `SuiteReport` for operator visibility but are excluded from
+//! [`SuiteReport::deterministic_core`].
 
 use std::collections::{HashMap, HashSet};
 use std::io::BufWriter;
@@ -207,7 +209,14 @@ pub fn run_suite(db: &CardDatabase, options: &SuiteOptions) -> Result<SuiteRepor
     let mut harvest_sink = match &options.harvest_output {
         Some(path) => {
             let meta = harvest::HarvestMeta {
-                schema: 1,
+                // schema 2 added the `mana_development_offset` control column as
+                // a SELF-ONLY absolute count; schema 3 keeps the column name and
+                // changes its semantics to a signed self-minus-opponent
+                // DIFFERENTIAL (Unit 5).
+                //
+                // The trainer accepts only schema 3+ shards, preventing it from
+                // pooling this signed differential with schema 2's absolute count.
+                schema: 3,
                 git_sha: options.git_sha.clone(),
                 card_data_hash: options.card_data_hash.clone(),
                 difficulty: format!("{:?}", options.difficulty),
@@ -304,31 +313,106 @@ fn run_all_matchups(
         return results;
     }
 
-    run_matchups_parallel(db, options, &selected)
+    run_games_parallel(db, options, &selected)
+}
+
+/// Flat `(selection position, game index)` work list for the game-level runner.
+///
+/// A matchup whose decks failed to resolve contributes **no** tasks: it already
+/// has a `failed_result`, and enqueuing games for it would run `drive_game` on a
+/// payload that does not exist. Positions stay aligned with `payloads`/`selected`
+/// so a task can recover its spec, payload and matchup seed by index alone.
+fn game_tasks(
+    payloads: &[Result<DeckPayload, String>],
+    games_per_matchup: usize,
+) -> Vec<(usize, usize)> {
+    payloads
+        .iter()
+        .enumerate()
+        .filter(|(_, payload)| payload.is_ok())
+        .flat_map(|(pos, _)| (0..games_per_matchup).map(move |game| (pos, game)))
+        .collect()
+}
+
+/// Regroup finished games by matchup position, restoring `game_idx` order and
+/// summing per-matchup duration.
+///
+/// The sort is load-bearing, not cosmetic: `MatchupResult::games` is a field of
+/// [`DeterministicSuiteReport`], so games arriving in completion order instead of
+/// `game_idx` order would be a real baseline diff on every parallel run.
+fn regroup_games(
+    matchup_count: usize,
+    mut collected: Vec<(usize, usize, GameResult, u128)>,
+) -> Vec<(Vec<GameResult>, u128)> {
+    // `(pos, game_idx)` pairs are unique, so `game_idx` alone would also be correct
+    // once the bucketing below splits by `pos`. Keying on both is self-documenting:
+    // it says the output order is "matchup, then game", which is what the report is.
+    collected.sort_by_key(|(pos, game_idx, _, _)| (*pos, *game_idx));
+    let mut per_matchup: Vec<(Vec<GameResult>, u128)> =
+        (0..matchup_count).map(|_| (Vec::new(), 0)).collect();
+    for (pos, _, game, elapsed_ms) in collected {
+        let entry = &mut per_matchup[pos];
+        entry.0.push(game);
+        entry.1 += elapsed_ms;
+    }
+    per_matchup
 }
 
 /// Run the selected matchups across all available cores via a work-stealing
-/// atomic cursor (matchups vary widely in length, so a static split would leave
-/// cores idle). Each matchup is a pure function of `(db, spec, options,
-/// matchup_seed)` with its seed derived from the original index, so results are
-/// byte-identical to a sequential run regardless of scheduling — only live
-/// progress order varies. The returned Vec is restored to selection order.
-fn run_matchups_parallel(
+/// atomic cursor over **(matchup, game) pairs**.
+///
+/// The unit of work is one game, not one matchup. Capping the cursor at the
+/// matchup count left every core past the third idle on the quick gate
+/// (`ai_gate.rs`'s `DEFAULT_QUICK_FILTER` selects three matchups) while the
+/// ten games inside each matchup ran strictly one after another. A game is a
+/// function of `(payload, seed, difficulty, action_cap)` **modulo #4878** — see
+/// [`drive_game`] and the run-to-run caveat at the top of `duel_suite::perf` —
+/// and its seed is `base_seed + matchup_idx*1000 + game_idx`, derived from the
+/// matchup's ORIGINAL index, so no game's result depends on which worker picked
+/// it up or when. Only live progress order varies.
+///
+/// Results are regrouped by matchup and re-sorted by `game_idx` before
+/// aggregation, so this runner adds no *new* scheduling dependence to
+/// `SuiteReport::deterministic_core`. That core is not byte-stable across repeat
+/// runs and never was: `RandomState` is seeded per thread from OS randomness and
+/// that iteration order reaches AI tie-breaking (#4878). The verdict is
+/// insulated from it because `compare::paired_seed_shift` keys on `seed`, not on
+/// position.
+///
+/// Output contract (changed by this restructuring): per-GAME lines stream live
+/// from [`play_reported_game`], interleaved across matchups and each tagged with
+/// its matchup id; the per-matchup verdict rows are printed after the join, in
+/// selection order. A killed run therefore still leaves every completed game's
+/// seed, winner, turn count and duration in the log.
+fn run_games_parallel(
     db: &CardDatabase,
     options: &SuiteOptions,
     selected: &[(usize, &MatchupSpec)],
 ) -> Vec<MatchupResult> {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let run_total = selected.len();
+    // Payloads are resolved ONCE per matchup, on this thread, before the fan-out:
+    // deck resolution is pure setup, and re-resolving it per game would add real
+    // work that the sequential runner never did. A matchup whose decks fail to
+    // resolve contributes no game tasks and keeps its `failed_result` — one bad
+    // deck list must not abort the other matchups.
+    let mut payloads: Vec<Result<DeckPayload, String>> = Vec::with_capacity(selected.len());
+    for (_, spec) in selected {
+        payloads.push(build_payload(db, spec));
+    }
+
+    let tasks = game_tasks(&payloads, options.games_per_matchup);
+    let task_total = tasks.len();
     let n_workers = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
-        .min(run_total.max(1));
+        .min(task_total.max(1));
     let cursor = AtomicUsize::new(0);
-    let done = AtomicUsize::new(0);
 
-    let mut collected: Vec<(usize, MatchupResult)> = std::thread::scope(|scope| {
+    let collected: Vec<(usize, usize, GameResult, u128)> = std::thread::scope(|scope| {
+        let payloads = &payloads;
+        let tasks = &tasks;
+        let cursor = &cursor;
         let handles: Vec<_> = (0..n_workers)
             .map(|_| {
                 // The plan-mandated `cargo ai-gate --difficulty hard` runs in a
@@ -339,26 +423,30 @@ fn run_matchups_parallel(
                 // production impact.
                 std::thread::Builder::new()
                     .stack_size(32 << 20)
-                    .spawn_scoped(scope, || {
-                        let mut local: Vec<(usize, MatchupResult)> = Vec::new();
+                    .spawn_scoped(scope, move || {
+                        let mut local: Vec<(usize, usize, GameResult, u128)> = Vec::new();
                         loop {
-                            let pos = cursor.fetch_add(1, Ordering::Relaxed);
-                            if pos >= run_total {
+                            let next = cursor.fetch_add(1, Ordering::Relaxed);
+                            if next >= task_total {
                                 break;
                             }
+                            let (pos, game_idx) = tasks[next];
                             let (idx, spec) = selected[pos];
+                            let payload = payloads[pos]
+                                .as_ref()
+                                .expect("only Ok payloads produce game tasks");
                             let matchup_seed = options.base_seed.wrapping_add(idx as u64 * 1_000);
                             // Parallel path never harvests (harvesting forces the
                             // sequential branch in `run_all_matchups`).
-                            let result = run_single_matchup(db, spec, options, matchup_seed, None);
-                            let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
-                            eprintln!(
-                                "[{completed:>2}/{run_total}] {id}  done (games: {games})",
-                                id = spec.id,
-                                games = options.games_per_matchup,
+                            let (game, elapsed_ms) = play_reported_game(
+                                spec,
+                                payload,
+                                options,
+                                matchup_seed,
+                                game_idx,
+                                None,
                             );
-                            print_matchup_row(&result);
-                            local.push((pos, result));
+                            local.push((pos, game_idx, game, elapsed_ms));
                         }
                         local
                     })
@@ -371,10 +459,32 @@ fn run_matchups_parallel(
             .collect()
     });
 
-    // Parallel completion is unordered; restore the original selection order so
-    // the report and any baseline comparison are stable across runs.
-    collected.sort_by_key(|(pos, _)| *pos);
-    collected.into_iter().map(|(_, result)| result).collect()
+    let per_matchup = regroup_games(selected.len(), collected);
+
+    let results: Vec<MatchupResult> = selected
+        .iter()
+        .zip(payloads.iter())
+        .zip(per_matchup)
+        .map(
+            |(((_, spec), payload), (games, total_duration_ms))| match payload {
+                Err(reason) => failed_result(spec, reason),
+                Ok(_) => assemble_matchup_result(spec, options, games, total_duration_ms),
+            },
+        )
+        .collect();
+
+    let run_total = results.len();
+    for (n, result) in results.iter().enumerate() {
+        eprintln!(
+            "[{n:>2}/{run_total}] {id}  done (games: {games})",
+            n = n + 1,
+            id = result.matchup_id,
+            games = options.games_per_matchup,
+        );
+        print_matchup_row(result);
+    }
+
+    results
 }
 
 fn finalize_report(
@@ -401,73 +511,146 @@ fn finalize_report(
     Ok(report)
 }
 
-fn run_single_matchup(
-    db: &CardDatabase,
+/// Wall-clock `HH:MM:SS` in UTC for progress lines.
+///
+/// The suite has no date dependency (`phase-ai/Cargo.toml` pulls neither `chrono`
+/// nor `time`), and a bare elapsed counter is useless once a CI job is killed —
+/// the operator needs to line the last emitted game up against the job's own
+/// timeline. Seconds-of-day arithmetic is enough for that and cannot drift.
+/// Diagnostics only: never parsed, never compared, never part of a verdict.
+fn utc_hms() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        % 86_400;
+    format!(
+        "{:02}:{:02}:{:02}",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
+}
+
+/// Progress-line label for a finished game's winner. `None` is a draw *or* an
+/// aborted game — [`play_reported_game`] prints a distinct `aborted:` line on the
+/// panic path, so the two stay distinguishable in a killed run's tail.
+fn winner_label(winner: Option<PlayerId>) -> &'static str {
+    match winner {
+        Some(PlayerId(0)) => "p0",
+        Some(_) => "p1",
+        None => "draw",
+    }
+}
+
+/// Play one suite game and report it. **Sole authority** for what a single game
+/// is: the seed derivation, the panic guard, the harvest side-channel and the
+/// progress lines all live here, so the sequential runner and the parallel
+/// game-level runner cannot drift in `(seed, winner, turns)`.
+///
+/// The returned `GameResult` is derived from `(payload, matchup_seed, game_idx,
+/// difficulty)` alone: no wall clock this function reads (`Instant::now` for
+/// `elapsed_ms`, `utc_hms` for the progress lines) enters it, and neither does
+/// completion order or worker index. It is NOT thread-identity-free in the
+/// absolute sense —
+/// `RandomState` is seeded per thread and leaks into AI tie-breaking (#4878,
+/// documented at the top of `duel_suite::perf`) — but that exposure is identical
+/// under the sequential and the parallel runner. `elapsed_ms` is the only value
+/// this function itself makes scheduling-dependent, and it is excluded from
+/// [`SuiteReport::deterministic_core`].
+fn play_reported_game(
     spec: &MatchupSpec,
+    payload: &DeckPayload,
     options: &SuiteOptions,
     matchup_seed: u64,
-    mut harvest_sink: Option<&mut HarvestSink>,
-) -> MatchupResult {
-    let payload = match build_payload(db, spec) {
-        Ok(p) => p,
-        Err(reason) => return failed_result(spec, &reason),
-    };
-
-    let mut p0_wins = 0usize;
-    let mut p1_wins = 0usize;
-    let mut draws = 0usize;
-    let mut games = Vec::with_capacity(options.games_per_matchup);
-    let mut total_turns: u64 = 0;
-    let mut total_duration_ms: u128 = 0;
-
-    for game_idx in 0..options.games_per_matchup {
-        let seed = matchup_seed.wrapping_add(game_idx as u64);
-        let start = Instant::now();
-        let (winner, turns) = if harvest_sink.is_some() {
-            // Harvester declared OUTSIDE catch_unwind. The observe closure's `&mut`
-            // borrow ends when the closure returns; `finish(winner)` then runs
-            // unconditionally (panic → `catch_unwind` Err → winner None → empty
-            // records, partial buffer dropped with the harvester).
-            let mut harvester = harvest::GameHarvester::new(seed, spec.id.to_string(), game_idx);
-            let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                run_game_observed(&payload, seed, options.difficulty, &mut |state, session| {
-                    harvester.observe(state, session)
-                })
-            }));
-            let (winner, turns) = match outcome {
-                Ok(result) => result,
-                Err(_) => {
-                    eprintln!("       seed {seed} aborted: AI panic during suite game");
-                    (None, 0)
-                }
-            };
-            let records = harvester.finish(winner);
-            if let Some(sink) = harvest_sink.as_deref_mut() {
-                if let Err(e) = sink.write_records(&records) {
-                    eprintln!("       seed {seed}: harvest write failed: {e}");
-                }
-            }
-            (winner, turns)
-        } else {
-            match std::panic::catch_unwind(AssertUnwindSafe(|| {
-                run_game(&payload, seed, options.difficulty)
-            })) {
-                Ok(result) => result,
-                Err(_) => {
-                    eprintln!("       seed {seed} aborted: AI panic during suite game");
-                    (None, 0)
-                }
+    game_idx: usize,
+    harvest_sink: Option<&mut HarvestSink>,
+) -> (GameResult, u128) {
+    let seed = matchup_seed.wrapping_add(game_idx as u64);
+    let start = Instant::now();
+    eprintln!(
+        "{ts} [{id}] game {n}/{total} seed={seed} start",
+        ts = utc_hms(),
+        id = spec.id,
+        n = game_idx + 1,
+        total = options.games_per_matchup,
+    );
+    let (winner, turns) = if harvest_sink.is_some() {
+        // Harvester declared OUTSIDE catch_unwind. The observe closure's `&mut`
+        // borrow ends when the closure returns; `finish(winner)` then runs
+        // unconditionally (panic → `catch_unwind` Err → winner None → empty
+        // records, partial buffer dropped with the harvester).
+        let mut harvester = harvest::GameHarvester::new(seed, spec.id.to_string(), game_idx);
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            run_game_observed(payload, seed, options.difficulty, &mut |state, session| {
+                harvester.observe(state, session)
+            })
+        }));
+        let (winner, turns) = match outcome {
+            Ok(result) => result,
+            Err(_) => {
+                eprintln!("       seed {seed} aborted: AI panic during suite game");
+                (None, 0)
             }
         };
-        total_duration_ms += start.elapsed().as_millis();
-        total_turns += turns as u64;
-        games.push(GameResult {
+        let records = harvester.finish(winner);
+        if let Some(sink) = harvest_sink {
+            if let Err(e) = sink.write_records(&records) {
+                eprintln!("       seed {seed}: harvest write failed: {e}");
+            }
+        }
+        (winner, turns)
+    } else {
+        match std::panic::catch_unwind(AssertUnwindSafe(|| {
+            run_game(payload, seed, options.difficulty)
+        })) {
+            Ok(result) => result,
+            Err(_) => {
+                eprintln!("       seed {seed} aborted: AI panic during suite game");
+                (None, 0)
+            }
+        }
+    };
+    let elapsed_ms = start.elapsed().as_millis();
+    eprintln!(
+        "{ts} [{id}] game {n}/{total} seed={seed} done winner={winner} turns={turns} {elapsed_ms}ms",
+        ts = utc_hms(),
+        id = spec.id,
+        n = game_idx + 1,
+        total = options.games_per_matchup,
+        winner = winner_label(winner),
+    );
+    (
+        GameResult {
             seed,
             winner: winner.map(|p| p.0),
             turns,
-        });
-        match winner {
-            Some(PlayerId(0)) => p0_wins += 1,
+        },
+        elapsed_ms,
+    )
+}
+
+/// Fold a matchup's finished games into its [`MatchupResult`]. **Sole authority**
+/// for the win/draw tally and the [`classify`] verdict, shared by both runners.
+///
+/// `games` MUST already be in `game_idx` order — the parallel runner sorts them
+/// back before calling. The report field `games` is part of
+/// [`SuiteReport::deterministic_core`], so any other order would be a visible
+/// baseline diff, not a cosmetic one.
+fn assemble_matchup_result(
+    spec: &MatchupSpec,
+    options: &SuiteOptions,
+    games: Vec<GameResult>,
+    total_duration_ms: u128,
+) -> MatchupResult {
+    let mut p0_wins = 0usize;
+    let mut p1_wins = 0usize;
+    let mut draws = 0usize;
+    let mut total_turns: u64 = 0;
+    for game in &games {
+        total_turns += game.turns as u64;
+        match game.winner {
+            Some(0) => p0_wins += 1,
             Some(_) => p1_wins += 1,
             None => draws += 1,
         }
@@ -496,6 +679,36 @@ fn run_single_matchup(
         fail_reason,
         attribution: None,
     }
+}
+
+fn run_single_matchup(
+    db: &CardDatabase,
+    spec: &MatchupSpec,
+    options: &SuiteOptions,
+    matchup_seed: u64,
+    mut harvest_sink: Option<&mut HarvestSink>,
+) -> MatchupResult {
+    let payload = match build_payload(db, spec) {
+        Ok(p) => p,
+        Err(reason) => return failed_result(spec, &reason),
+    };
+
+    let mut games = Vec::with_capacity(options.games_per_matchup);
+    let mut total_duration_ms: u128 = 0;
+    for game_idx in 0..options.games_per_matchup {
+        let (game, elapsed_ms) = play_reported_game(
+            spec,
+            &payload,
+            options,
+            matchup_seed,
+            game_idx,
+            harvest_sink.as_deref_mut(),
+        );
+        total_duration_ms += elapsed_ms;
+        games.push(game);
+    }
+
+    assemble_matchup_result(spec, options, games, total_duration_ms)
 }
 
 fn build_payload(db: &CardDatabase, spec: &MatchupSpec) -> Result<DeckPayload, String> {
@@ -621,9 +834,14 @@ fn run_game_observed(
 /// actions have been taken (checked at `run_ai_actions` batch boundaries, so the
 /// realized count may overshoot the cap within a batch — identical semantics to
 /// the historical `run_game` body, which capped at `MAX_TOTAL_ACTIONS`). The
-/// result `(winner, turn_number)` is a pure function of
-/// `(binary, payload, seed, difficulty, action_cap)`; no wall-clock or thread
-/// scheduling influences it.
+/// result `(winner, turn_number)` is a function of
+/// `(binary, payload, seed, difficulty, action_cap)` and nothing this function
+/// itself reads. `projection.rs`'s wall-clock projection cap is now gated on
+/// measurement mode (`projection::projection_deadline` returns
+/// `Deadline::none()` under `ExecutionMode::Measurement`), so projections here
+/// are bounded by `STEP_CAP` and host speed cannot change which creature the AI
+/// targets. The remaining run-to-run caveat is `RandomState` iteration order
+/// (#4878) — see the notes at the top of [`super::perf`].
 pub(crate) fn drive_game(
     payload: &DeckPayload,
     seed: u64,
@@ -886,6 +1104,129 @@ mod tests {
 
         assert_eq!(status, SuiteStatus::Fail);
         assert!(reason.unwrap().contains("Wilson 95% CI"));
+    }
+
+    fn game(seed: u64, winner: Option<u8>, turns: u32) -> GameResult {
+        GameResult {
+            seed,
+            winner,
+            turns,
+        }
+    }
+
+    /// A matchup whose decks failed to resolve must enqueue ZERO games — it
+    /// already carries a `failed_result`, and its `payloads` slot holds no
+    /// `DeckPayload` for a worker to run.
+    ///
+    /// Discriminating: dropping the `payload.is_ok()` filter makes position 1
+    /// appear in the output and the `expect("only Ok payloads produce game
+    /// tasks")` in the worker becomes reachable. Verified by deleting the
+    /// filter — the equality below then sees the extra `(1, 0)`/`(1, 1)` pair.
+    #[test]
+    fn game_tasks_skip_matchups_whose_payload_failed() {
+        let payloads = vec![
+            Ok(DeckPayload::default()),
+            Err("p0 load: no such deck".to_string()),
+            Ok(DeckPayload::default()),
+        ];
+
+        let tasks = game_tasks(&payloads, 2);
+
+        assert_eq!(tasks, vec![(0, 0), (0, 1), (2, 0), (2, 1)]);
+    }
+
+    /// Every matchup's games must land in `game_idx` order no matter what order
+    /// the workers finished them in. `MatchupResult::games` is a
+    /// `deterministic_core` field, so completion order leaking into it would be a
+    /// baseline diff on every parallel run.
+    ///
+    /// Discriminating by construction: the input is deliberately shuffled
+    /// (matchup 0's games arrive 2,0,1 and are interleaved with matchup 1's), so
+    /// removing `regroup_games`' `sort_by_key` yields `[2,0,1]` and the first
+    /// assertion fails. Verified by deleting the sort.
+    #[test]
+    fn regroup_games_restores_game_index_order_from_shuffled_completion() {
+        let collected = vec![
+            (0, 2, game(102, Some(1), 12), 30),
+            (1, 1, game(1101, None, 21), 100),
+            (0, 0, game(100, Some(0), 10), 10),
+            (1, 0, game(1100, Some(0), 20), 200),
+            (0, 1, game(101, Some(0), 11), 20),
+        ];
+
+        let per_matchup = regroup_games(2, collected);
+
+        assert_eq!(
+            per_matchup[0].0,
+            vec![
+                game(100, Some(0), 10),
+                game(101, Some(0), 11),
+                game(102, Some(1), 12)
+            ],
+        );
+        assert_eq!(
+            per_matchup[1].0,
+            vec![game(1100, Some(0), 20), game(1101, None, 21)],
+        );
+        // Durations are summed per matchup, not mixed between them.
+        assert_eq!(per_matchup[0].1, 60);
+        assert_eq!(per_matchup[1].1, 300);
+    }
+
+    /// A matchup that produced no games at all (its payload failed) must still
+    /// get an empty slot rather than shifting later matchups' games onto it.
+    #[test]
+    fn regroup_games_keeps_an_empty_slot_for_a_matchup_with_no_games() {
+        let collected = vec![(2, 0, game(2100, Some(0), 7), 5)];
+
+        let per_matchup = regroup_games(3, collected);
+
+        assert!(per_matchup[0].0.is_empty());
+        assert!(per_matchup[1].0.is_empty());
+        assert_eq!(per_matchup[2].0, vec![game(2100, Some(0), 7)]);
+    }
+
+    /// `assemble_matchup_result` is the sole authority for BOTH halves of a
+    /// matchup row: the win/draw tally (read off the games vector) and the
+    /// [`classify`] verdict plus the two averages (divided by
+    /// `options.games_per_matchup`, NOT by `games.len()`).
+    ///
+    /// The 4-games-against-`games_per_matchup: 16` mismatch is deliberate — it is
+    /// what makes the denominator observable. Every one of the three uses flips
+    /// if it is switched to `games.len()`: `avg_turns` 1.625 → 6.5,
+    /// `avg_duration_ms` 25.0 → 100.0, and the verdict PASS-vs-FAIL, because the
+    /// Wilson 95% interval for 2/16 excludes 0.50 while the interval for 2/4
+    /// (which is centred on 0.50) cannot. A real run always has
+    /// `games.len() == games_per_matchup`, so the two are indistinguishable there.
+    #[test]
+    fn assemble_matchup_result_tallies_from_games_and_divides_by_games_per_matchup() {
+        let spec = crate::duel_suite::find_matchup("red-mirror").expect("red-mirror must resolve");
+        let options = SuiteOptions::new(AiDifficulty::Medium, 16, 7);
+        let games = vec![
+            game(7, Some(0), 5),
+            game(8, Some(1), 6),
+            game(9, None, 7),
+            game(10, Some(0), 8),
+        ];
+
+        let result = assemble_matchup_result(spec, &options, games.clone(), 400);
+
+        assert_eq!((result.p0_wins, result.p1_wins, result.draws), (2, 1, 1));
+        assert_eq!(result.total_turns, 26);
+        assert_eq!(result.games, games);
+        assert_eq!(result.total_duration_ms, 400);
+        // Denominator is `games_per_matchup` (16), not `games.len()` (4).
+        assert_eq!(result.avg_turns, 1.625);
+        assert_eq!(result.avg_duration_ms, 25.0);
+        assert_eq!(result.status, SuiteStatus::Fail);
+        assert!(
+            result
+                .fail_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("mirror imbalance")),
+            "classify must be fed games_per_matchup; got {:?}",
+            result.fail_reason,
+        );
     }
 
     /// Observer seam is inert: for the same `(payload, seed)`, a no-op observer

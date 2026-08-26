@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use engine::ai_support::{adversarial_swarm_witness, SwarmWitnessResult};
 use engine::game::combat::{
     can_block_pair, can_block_pair_with_precomputed, collect_block_restriction_statics,
     collect_blocker_allowed_statics, collect_blocker_restriction_statics, AttackTarget,
@@ -16,10 +17,10 @@ use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
-use crate::config::AiProfile;
+use crate::config::{AiConfig, AiProfile, ExecutionMode};
 use crate::damage_reflection::has_damage_reflection_to_controller;
 use crate::eval::{evaluate_creature, threat_level};
-use crate::projection::{project_to, Projection, ProjectionHorizon};
+use crate::projection::{project_to, projection_deadline, Projection, ProjectionHorizon};
 use crate::session::AiSession;
 
 /// Block-legality static slices collected once per combat decision and threaded
@@ -73,6 +74,45 @@ enum CombatObjective {
     Stabilize,
     PreserveAdvantage,
     Race,
+}
+
+/// Whether the attacker heuristic may spend an opponent-turn projection on
+/// crackback analysis, and the execution regime that projection runs under.
+///
+/// The regime travels with the permission so the two cannot drift: a caller
+/// cannot enable lookahead without stating a regime, and a caller that disables
+/// it never has to invent one (`search::deterministic_combat_choice` has no
+/// `AiConfig` at all). Replaces a `combat_lookahead: bool` that could express
+/// only half the decision.
+///
+/// Carries `ExecutionMode`, NOT a `Deadline`, deliberately: a `Deadline`
+/// snapshots an absolute instant at construction, and this value is built as an
+/// argument at `search::deterministic_choice` — before this function's opponent
+/// enumeration, must-attack sweep, `adversarial_swarm_witness` reducer replay,
+/// block-legality collection and per-candidate `defender_best_block` loop have
+/// run. Anchoring the 15 ms budget there would let that prologue consume it and
+/// silently disable CEDH crackback lookahead on a large board. The `Deadline` is
+/// therefore constructed at the point of use, below.
+#[derive(Debug, Clone, Copy)]
+pub enum CombatLookahead {
+    Disabled,
+    Enabled { execution_mode: ExecutionMode },
+}
+
+impl CombatLookahead {
+    /// `AiConfig::combat_lookahead` decides permission; `execution_mode` travels
+    /// with it so the measurement carve-out reaches the projection. Only CEDH
+    /// enables this today, but `cargo ai-gate --difficulty cedh` is a supported
+    /// invocation, so the carve-out must hold here too.
+    pub fn from_config(config: &AiConfig) -> Self {
+        if config.combat_lookahead {
+            Self::Enabled {
+                execution_mode: config.execution_mode,
+            }
+        } else {
+            Self::Disabled
+        }
+    }
 }
 
 fn emit_attack_trace(
@@ -141,7 +181,7 @@ pub fn choose_attackers_with_targets(
         state,
         player,
         &AiProfile::default(),
-        false,
+        CombatLookahead::Disabled,
         None,
         None,
         None,
@@ -152,7 +192,7 @@ pub fn choose_attackers_with_targets_with_profile(
     state: &GameState,
     player: PlayerId,
     profile: &AiProfile,
-    combat_lookahead: bool,
+    lookahead: CombatLookahead,
     valid_attacker_ids: Option<&[ObjectId]>,
     valid_attack_targets: Option<&[AttackTarget]>,
     session: Option<&AiSession>,
@@ -185,15 +225,23 @@ pub fn choose_attackers_with_targets_with_profile(
     // attackers or the engine rejects the whole declaration. Partition them out
     // and union them back unconditionally — value heuristics only apply to the
     // free choices. `creature_must_attack` is the engine's single authority.
-    // Loop-invariant hoist: `attackable_player_targets` depends only on `state`
+    // Loop-invariant hoist: the attackable-defender set depends only on `state`
     // (immutable during this filter), so compute it once instead of per creature
-    // inside `creature_must_attack`.
-    let attackable = engine::game::combat::attackable_player_targets(state);
+    // inside `creature_must_attack`. `attackable_defender_targets` is the COUNTED
+    // form; `attacker_choice_sweeps_attackable_players_independent_of_goaded_count`
+    // is revert-failing on this hoist.
+    //
+    // CR 506.3: the whole defender universe — players, planeswalkers, and
+    // battles — so a requirement pointed at a planeswalker (Gideon Jura's "+2")
+    // is recognized as mandatory here exactly like a player-directed lure.
+    // Passing only the player subset would have made the AI omit a creature the
+    // engine then rejects the declaration for.
+    let attackable = engine::game::combat::attackable_defender_targets(state);
     let mandatory: Vec<ObjectId> = candidates
         .iter()
         .copied()
         .filter(|&id| {
-            engine::game::combat::creature_must_attack_with_attackable_players(
+            engine::game::combat::creature_must_attack_with_attackable_targets(
                 state,
                 id,
                 &attackable,
@@ -218,6 +266,46 @@ pub fn choose_attackers_with_targets_with_profile(
             }
         })
         .collect();
+
+    // CR 508.1 / CR 509.1 / CR 510.1: promote only an exact lethal
+    // declaration the engine has reducer-replayed against every bounded legal
+    // defense. This precedes all value, objective, crackback, and redirection
+    // policy gates: each would otherwise mutate the certified action.
+    // Preserve the non-mandatory commander heuristic, but include every
+    // must-attack creature before certification so the result cannot authorize
+    // a later union.
+    let alpha_candidates: Vec<ObjectId> = candidates
+        .iter()
+        .copied()
+        .filter(|&id| {
+            !state
+                .objects
+                .get(&id)
+                .map(|object| object.is_commander)
+                .unwrap_or(false)
+        })
+        .collect();
+    let mut certified_candidates = alpha_candidates;
+    for &id in &mandatory {
+        if !certified_candidates.contains(&id) {
+            certified_candidates.push(id);
+        }
+    }
+    if state.players.len() == 2 && opponents.len() == 1 {
+        let certified_attacks: Vec<_> = certified_candidates
+            .iter()
+            .map(|&id| (id, AttackTarget::Player(opponents[0])))
+            .collect();
+        if matches!(
+            adversarial_swarm_witness(state, player, &certified_attacks),
+            SwarmWitnessResult::Certified(witness)
+                if witness.is_lethal && witness.binds_declaration(state, &certified_attacks)
+        ) {
+            emit_attack_trace(player, &candidates, &certified_attacks);
+            return certified_attacks;
+        }
+    }
+
     let objective = determine_attack_objective(
         state,
         player,
@@ -283,58 +371,6 @@ pub fn choose_attackers_with_targets_with_profile(
         }
     }
 
-    // Alpha-strike: if no individual attack looks good but we outnumber blockers,
-    // attack with everyone — the excess creatures get through unblocked.
-    // Only do this if expected unblocked damage justifies the trade.
-    if attacking_ids.is_empty()
-        && !candidates.is_empty()
-        && candidates.len() > opponent_blockers.len()
-        && matches!(
-            objective,
-            CombatObjective::PreserveAdvantage | CombatObjective::Race
-        )
-    {
-        // CR 903.8: exclude the commander from the desperation alpha-strike for
-        // the same reason the per-creature gate does — don't trade it away.
-        // Alpha-strike only fires under PreserveAdvantage|Race when the per-loop
-        // gate rejected every candidate, so any commander here was a
-        // `!free_damage` rejection: `is_commander` is equivalent to the loop's
-        // `is_commander && !free_damage && objective != PushLethal`. Filter
-        // BEFORE the cost/benefit math so unblocked_power/worst_loss_value match
-        // the actual swing set. (A goaded commander is re-added by the
-        // must-attack union below, which runs after this block.)
-        let alpha_candidates: Vec<ObjectId> = candidates
-            .iter()
-            .copied()
-            .filter(|&id| {
-                !state
-                    .objects
-                    .get(&id)
-                    .map(|o| o.is_commander)
-                    .unwrap_or(false)
-            })
-            .collect();
-
-        if alpha_candidates.len() > opponent_blockers.len() {
-            let mut valued: Vec<(ObjectId, f64)> = alpha_candidates
-                .iter()
-                .map(|&id| (id, evaluate_creature(state, id)))
-                .collect();
-            valued.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-            let blocked_count = opponent_blockers.len();
-            let unblocked_power: i32 = valued[blocked_count..]
-                .iter()
-                .filter_map(|&(id, _)| state.objects.get(&id)?.power)
-                .sum();
-            let worst_loss_value: f64 = valued[..blocked_count].iter().map(|&(_, v)| v).sum();
-
-            if unblocked_power as f64 > worst_loss_value {
-                attacking_ids = alpha_candidates;
-            }
-        }
-    }
-
     // CR 508.1d / CR 701.15b: union the mandatory must-attack set. These
     // creatures are declared regardless of the value heuristic's verdict.
     for &id in &mandatory {
@@ -351,32 +387,43 @@ pub fn choose_attackers_with_targets_with_profile(
         // crackback_damage sees scaled creatures (Ouroboroid class) and
         // attack-trigger pumps (Battle Cry, Mentor). Failure to project
         // falls through to current state — matches pre-projection behavior.
-        let projection: Option<Arc<Projection>> = if combat_lookahead {
-            match session {
-                // Session present: route through the per-game projection cache
-                // (turn-scoped key; identical result to project_to on a miss,
-                // cached on subsequent identical combat decisions this turn).
-                Some(session) => session
-                    .get_or_project(
+        let projection: Option<Arc<Projection>> = match lookahead {
+            CombatLookahead::Disabled => None,
+            CombatLookahead::Enabled { execution_mode } => {
+                // Constructed HERE, not at the caller: `Deadline::after` snapshots
+                // an absolute instant, and everything above in this function
+                // (must-attack sweep, adversarial_swarm_witness reducer replay,
+                // block-legality slices, per-candidate defender_best_block) would
+                // otherwise run inside the 15 ms projection budget.
+                let deadline = projection_deadline(execution_mode);
+                match session {
+                    // Session present: route through the per-game projection cache
+                    // (turn-scoped key; identical result to project_to on a miss,
+                    // cached on subsequent identical combat decisions this turn).
+                    Some(session) => session
+                        .get_or_project(
+                            state,
+                            player,
+                            opponents[0],
+                            ProjectionHorizon::OpponentAttackersDeclared,
+                            deadline,
+                        )
+                        .ok(),
+                    // No session: the planner's production quiescence loop, the
+                    // public `choose_attackers_with_targets` wrapper, and tests.
+                    // Fall back to the free projection, wrapped in Arc to unify
+                    // the branch type.
+                    None => project_to(
                         state,
                         player,
                         opponents[0],
                         ProjectionHorizon::OpponentAttackersDeclared,
+                        deadline,
                     )
-                    .ok(),
-                // No session (public wrappers, tests): fall back to the free
-                // projection, wrapped in Arc to unify the branch type.
-                None => project_to(
-                    state,
-                    player,
-                    opponents[0],
-                    ProjectionHorizon::OpponentAttackersDeclared,
-                )
-                .ok()
-                .map(Arc::new),
+                    .ok()
+                    .map(Arc::new),
+                }
             }
-        } else {
-            None
         };
         let cb_damage = crackback_damage(
             state,
@@ -751,6 +798,33 @@ pub fn choose_blockers_with_profile(
         .collect();
     let blocker_value = |id: &ObjectId| -> f64 { blocker_values.get(id).copied().unwrap_or(0.0) };
 
+    // CR 509.1b + CR 702.111b: the minimum number of creatures that must block a
+    // given attacker. Menace is only the most common source of that floor — a
+    // `MinBlockers` restriction ("can't be blocked except by three or more
+    // creatures", e.g. Pathrazer of Ulamog) imposes an arbitrary one, and every
+    // pass below must respect it or the declaration it builds is illegal and gets
+    // rewritten to the empty witness by `complete_blocker_proposal` (issue #7183).
+    //
+    // `min_blockers_required` is the engine's single authority for the floor — the
+    // same value `validate_blockers` enforces and `block_requirements_for_player`
+    // shows the UI — so the AI can never plan against a rule different from the one
+    // enforced. Read through it rather than through `block_requirements_for_player`
+    // because that helper derives from `state.combat`, which callers that evaluate
+    // a hypothetical block (lookahead, tests) may not have populated; the floor is
+    // a property of the attacker's own restrictions, not of the combat record.
+    //
+    // The block-restriction statics are collected once here and threaded through
+    // the precomputed variant: every pass below reads this per attacker, and the
+    // non-precomputed entry point re-walks the battlefield on each call.
+    let block_restriction_statics = engine::game::combat::collect_block_restriction_statics(state);
+    let required_blockers = |attacker_id: &ObjectId| -> usize {
+        engine::game::combat::min_blockers_required_from_precomputed(
+            state,
+            *attacker_id,
+            &block_restriction_statics,
+        ) as usize
+    };
+
     // Sort attackers by value (highest first) to prioritize blocking high-value threats
     let mut sorted_attackers: Vec<(ObjectId, f64)> = attacker_ids
         .iter()
@@ -759,13 +833,13 @@ pub fn choose_blockers_with_profile(
     sorted_attackers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     // First pass: assign deathtouch blockers to highest-value attackers.
-    // CR 702.111b: Skip menace attackers — they require 2+ blockers (handled in gang-block pass).
+    // CR 509.1b: Skip attackers with a minimum-blocker floor above 1 — a lone
+    // blocker is an illegal declaration against them (handled in gang-block pass).
     for &(attacker_id, _) in &sorted_attackers {
-        let attacker = match state.objects.get(&attacker_id) {
-            Some(a) => a,
-            None => continue,
-        };
-        if attacker.has_keyword(&Keyword::Menace) {
+        if !state.objects.contains_key(&attacker_id) {
+            continue;
+        }
+        if required_blockers(&attacker_id) > 1 {
             continue;
         }
 
@@ -788,7 +862,8 @@ pub fn choose_blockers_with_profile(
     }
 
     // Second pass: assign remaining blockers where they'd survive.
-    // CR 702.111b: Skip menace attackers — they require 2+ blockers (handled in gang-block pass).
+    // CR 509.1b: Skip attackers with a minimum-blocker floor above 1 — a lone
+    // blocker is an illegal declaration against them (handled in gang-block pass).
     for &(attacker_id, attacker_value) in &sorted_attackers {
         if blocked_attackers.contains(&attacker_id) {
             continue; // Already blocked
@@ -798,7 +873,7 @@ pub fn choose_blockers_with_profile(
             Some(a) => a,
             None => continue,
         };
-        if attacker.has_keyword(&Keyword::Menace) {
+        if required_blockers(&attacker_id) > 1 {
             continue;
         }
 
@@ -881,8 +956,8 @@ pub fn choose_blockers_with_profile(
                 priority == 0 && attacker_power >= 2 && matches!(objective, CombatObjective::Race);
             // CR 903.10a: Skip chumps that don't actually save under commander damage
             // (e.g. 1/1 in front of a 12/12 trample commander with 3 cmd-damage headroom).
-            let chump_unsafe = priority == 0
-                && commander_chump_unsafe(state, player, attacker_id, blocker_toughness);
+            let chump_unsafe =
+                priority == 0 && commander_chump_unsafe(state, player, attacker_id, &[blocker_id]);
             let favorable_trade =
                 priority != 1 || selected_blocker_value <= attacker_value + damage_prevented as f64;
             if !chump_unsafe
@@ -913,6 +988,7 @@ pub fn choose_blockers_with_profile(
         let attacker_has_deathtouch = attacker.has_keyword(&Keyword::Deathtouch);
         let attacker_has_first_strike = attacker.has_keyword(&Keyword::FirstStrike)
             || attacker.has_keyword(&Keyword::DoubleStrike);
+        let attacker_has_trample = attacker.has_keyword(&Keyword::Trample);
 
         // Collect eligible unused blockers sorted by value (ascending = sacrifice cheapest)
         let mut gang_candidates: Vec<(ObjectId, i32, f64)> = available_blockers
@@ -929,10 +1005,11 @@ pub fn choose_blockers_with_profile(
         gang_candidates.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
 
         // Skip if any single blocker can already kill it (handled in second pass above).
-        // CR 702.111b: Exception — menace attackers MUST be gang-blocked even when a
-        // single blocker could kill them, because single blocks are illegal.
-        let has_menace = attacker.has_keyword(&Keyword::Menace);
-        if !has_menace
+        // CR 509.1b: Exception — an attacker with a minimum-blocker floor MUST be
+        // gang-blocked even when a single blocker could kill it, because a lone
+        // block is an illegal declaration.
+        let needed_blockers = required_blockers(&attacker_id);
+        if needed_blockers <= 1
             && gang_candidates.iter().any(|&(bid, _, _)| {
                 state
                     .objects
@@ -947,10 +1024,43 @@ pub fn choose_blockers_with_profile(
             continue;
         }
 
+        // CR 509.1b + CR 903.10a: the lethal-pressure test for the survival override
+        // below. Hoisted above the two value heuristics that follow because both of
+        // them short-circuit this attacker out of the pass entirely, and whether
+        // that is correct depends on whether a block is the player's last line.
+        let p_life = state.players[player.0 as usize].life;
+        let effective_life = commander_lethal_headroom(state, player, attacker_id)
+            .map(|headroom| p_life.min(headroom as i32))
+            .unwrap_or(p_life);
+
+        // CR 509.1b: an attacker whose minimum-blocker floor exceeds 1 is skipped by
+        // both single-blocker passes, so this gang pass is its only blocking route.
+        let floor_stabilize_route = needed_blockers > 1
+            && matches!(objective, CombatObjective::Stabilize)
+            && effective_life <= attacker_power * 3;
+
+        // CR 510.1c: a blocked creature assigns its combat damage to the creatures
+        // blocking it, and "if no creatures are currently blocking it (if, for
+        // example, they were destroyed or removed from combat), it assigns no combat
+        // damage." So for a *nontrampling* attacker a legal block prevents every
+        // point of damage to the player whether or not the blockers survive it and
+        // whether or not they can kill the attacker — a doomed block is still a full
+        // save. Trample is the exception (CR 702.19b): excess damage past lethal to
+        // the blockers is assigned to the player, and under deathtouch "lethal" is
+        // only 1 per blocker (CR 702.2c), so a trampler's damage still lands.
+        //
+        // The two heuristics below are value heuristics — correct when the question
+        // is "is this trade worth it", wrong when the question is "do I survive".
+        // They may only decline a block that is not the difference between living
+        // and losing (issue #7183).
+        let survival_route_is_live = floor_stabilize_route;
+
         // CR 702.7b: If attacker has first strike and blocker doesn't, the blocker
-        // dies before dealing damage. Skip blockers that would die to first strike.
+        // dies before dealing damage. Skip blockers that would die to first strike —
+        // they contribute no damage, so they cannot be counted toward a kill.
         let effective_candidates: Vec<(ObjectId, i32, f64)> = gang_candidates
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|&(bid, _, _)| {
                 if !attacker_has_first_strike {
                     return true;
@@ -970,8 +1080,10 @@ pub fn choose_blockers_with_profile(
         // CR 702.2c: Deathtouch means any nonzero damage is lethal, so one
         // blocker with deathtouch is enough — no need to gang-block.
         // Also skip if attacker has deathtouch: every blocker dies, so
-        // gang-blocking just loses more creatures.
-        if attacker_has_deathtouch {
+        // gang-blocking just loses more creatures — unless the block is the
+        // player's only route to surviving the turn, where CR 510.1c makes the
+        // doomed block a full save anyway.
+        if attacker_has_deathtouch && !survival_route_is_live {
             continue;
         }
 
@@ -988,26 +1100,191 @@ pub fn choose_blockers_with_profile(
             }
         }
 
-        // CR 702.111b: Menace requires at least 2 blockers. If the gang set is too
-        // small, try to add another blocker even if combined power already suffices.
-        if has_menace && gang_set.len() < 2 {
-            if let Some(&(bid, power, value)) = effective_candidates
+        // CR 509.1b: The declaration needs at least `needed_blockers` creatures on
+        // this attacker. Top the gang set up to that floor even when combined power
+        // already suffices — a short set is an illegal declaration, not a cheaper
+        // one. Loops rather than adding a single blocker: menace's floor is 2, but a
+        // `MinBlockers` restriction can require any number (Pathrazer of Ulamog
+        // requires 3), so one top-up is not enough (issue #7183).
+        // Damage-dealing candidates come first so the kill claim below stays honest.
+        // Only when a doomed block is still a full save (CR 510.1c) may the floor be
+        // filled out with blockers that die to first strike before dealing damage
+        // (CR 702.7b) — otherwise a legal, life-saving declaration is impossible to
+        // reach for a floored first- or double-striker at all.
+        while gang_set.len() < needed_blockers {
+            let next = effective_candidates
                 .iter()
                 .find(|(bid, _, _)| !gang_set.contains(bid))
-            {
-                combined_power += power;
-                gang_set.push(bid);
-                gang_value += value;
-            }
+                .copied()
+                .or_else(|| {
+                    if !survival_route_is_live {
+                        return None;
+                    }
+                    // Contributes no damage, so it is added with zero power: it pads
+                    // the CR 509.1b floor without inflating `combined_power`.
+                    gang_candidates
+                        .iter()
+                        .find(|(bid, _, _)| !gang_set.contains(bid))
+                        .map(|&(bid, _, value)| (bid, 0, value))
+                });
+            let Some((bid, power, value)) = next else {
+                break;
+            };
+            combined_power += power;
+            gang_set.push(bid);
+            gang_value += value;
         }
 
-        // Only gang-block if combined power can kill AND total value risked <= attacker value.
-        // For menace attackers, also require at least 2 blockers.
-        let min_blockers = if has_menace { 2 } else { 1 };
-        if combined_power >= attacker_toughness
-            && gang_set.len() >= min_blockers
+        // The engine owns this calculation. `combat_damage_to_defender` models both
+        // damage steps (CR 702.4b), the blockers a first striker removes between them
+        // (CR 702.7b), per-blocker lethal minimums including damage already marked
+        // (CR 702.19b), a blocked trampler left with no blockers (CR 702.19d), and
+        // deathtouch (CR 702.2c). Every one of those interacts, and the AI's previous
+        // hand-rolled single-step estimate got the double-strike case wrong by a
+        // whole second strike.
+        let damage_through = |set: &[ObjectId]| -> i32 {
+            engine::game::combat_damage::combat_damage_to_defender(state, attacker_id, set)
+        };
+        // The no-block baseline, read from the same authority so the comparison below
+        // is like for like. NOT `attacker_power`: that is one damage step's worth,
+        // while `damage_through` reports the whole combat phase, so a double striker
+        // makes the two disagree by an entire strike (CR 702.4b) — and disagree in
+        // the direction that rejects a block which does save the game.
+        let unblocked_damage = damage_through(&[]);
+        // CR 510.1c: a block that lets nothing through is a full save whatever
+        // becomes of the blockers. Otherwise it has to get the player under lethal
+        // AND actually prevent something worth the creatures — the same
+        // `damage_prevented >= 2` floor the single-blocker pass applies.
+        let averts_lethal = |set: &[ObjectId]| -> bool {
+            let through = damage_through(set);
+            through < effective_life && (through == 0 || unblocked_damage - through >= 2)
+        };
+
+        // CR 509.1b + CR 510.1c + CR 702.7b + CR 702.19b: the survival gang answers a
+        // different question from the kill gang, so it draws from a different pool.
+        // EVERY legal blocker absorbs, including one the attacker kills in the
+        // first-strike step — trample still has to assign that blocker its lethal
+        // damage before excess reaches the player, and a nontrampler assigns nothing
+        // to the player once blocked whatever becomes of its blockers. Filtering the
+        // first-strike casualties out is right for a kill estimate and wrong here: it
+        // left an 11/11 menace first-strike trampler unblockable by two 4/4s at 4
+        // life, though that block absorbs 4+4 and tramples only 3.
+        //
+        // Ordering: against a trampler what a blocker contributes is absorption, not
+        // cheapness, so take the biggest absorbers first and break ties on value —
+        // a value-ordered walk spends several 1/1s where one 6/6 would do. Against a
+        // nontrampler any legal block already prevents everything (CR 510.1c), so the
+        // cheapest bodies are correct there and the existing value order stands.
+        let survival_gang: Option<Vec<ObjectId>> = if floor_stabilize_route {
+            let mut pool: Vec<(ObjectId, f64)> = gang_candidates
+                .iter()
+                .map(|&(bid, _, value)| (bid, value))
+                .collect();
+            if attacker_has_trample {
+                pool.sort_by(|a, b| {
+                    let absorb = |bid: ObjectId| {
+                        engine::game::combat_damage::lethal_damage_needed(
+                            state,
+                            bid,
+                            attacker_has_deathtouch,
+                        )
+                    };
+                    absorb(b.0)
+                        .cmp(&absorb(a.0))
+                        .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                });
+            }
+            let mut set: Vec<ObjectId> = Vec::new();
+            for &(bid, _) in &pool {
+                if set.len() >= needed_blockers && averts_lethal(&set) {
+                    break;
+                }
+                set.push(bid);
+            }
+
+            // The walk above adds by *static* absorption, which cannot see what a
+            // blocker contributes beyond soaking damage — a first-striking
+            // deathtouch blocker can kill the attacker outright in the first step
+            // (CR 702.7b + CR 702.2c) and cancel its regular-step damage entirely.
+            // So once the set survives, drop any member the rest has made redundant,
+            // judged through the same whole-combat authority rather than the
+            // ordering heuristic. One bounded pass over the gang, never below the
+            // CR 509.1b floor.
+            //
+            // Concretely: a 10/10 menace double-strike trampler against two 0/6
+            // walls and a 1/1 first-strike deathtouch blocker. Absorption order
+            // takes both walls (8 still gets through) and then the 1/1 to survive —
+            // but one wall plus the 1/1 holds it to 3, because the attacker dies
+            // before the regular step. Three creatures spent where two suffice.
+            let mut index = 0;
+            while index < set.len() && set.len() > needed_blockers {
+                let mut trial = set.clone();
+                trial.remove(index);
+                if averts_lethal(&trial) {
+                    set = trial;
+                } else {
+                    index += 1;
+                }
+            }
+
+            (set.len() >= needed_blockers && averts_lethal(&set)).then_some(set)
+        } else {
+            None
+        };
+
+        // CR 509.1b + CR 704.5a: Survival override, restricted to attackers that a
+        // minimum-blocker floor routes here. Such an attacker is skipped by BOTH
+        // single-blocker chump passes, which are the only places carrying a
+        // survival override (`should_chump_stabilize`), so this gang pass is its
+        // sole blocking route — and the kill-and-trade gates below are a pure value
+        // heuristic that declines a legal, life-saving block. That is how a menace /
+        // "can't be blocked except by three or more creatures" attacker (Pathrazer
+        // of Ulamog) walks past a full board for lethal (issue #7183).
+        //
+        // Deliberately NOT applied when the floor is 1: those attackers already ran
+        // through the single-blocker passes with their full guard set, so widening
+        // the gate here would double-count their chump decision.
+        //
+        // Mirrors the single-blocker pass guard-for-guard: the same
+        // `effective_life <= attacker_power * 3` threshold with the CR 903.10a
+        // commander-damage tightening, the same `commander_chump_unsafe` rejection
+        // (evaluated against the gang's absorption, since trample assigns lethal
+        // damage to every blocker before any tramples through, CR 702.19b), and the
+        // same exclusion of damage-reflection blockers, which hand the attacker's
+        // power straight back to the player and so save nothing.
+        let reflects_damage = |set: &[ObjectId]| -> bool {
+            set.iter().any(|bid| {
+                state
+                    .objects
+                    .get(bid)
+                    .is_some_and(has_damage_reflection_to_controller)
+            })
+        };
+
+        // CR 702.2c: never gang a deathtouch attacker for *value* — every blocker
+        // assigned any damage dies, so the kill is paid for with the whole gang.
+        // Preserves the pre-existing skip for deathtouch attackers now that the
+        // survival route no longer short-circuits them out of the pass.
+        let gang_kills_for_value = !attacker_has_deathtouch
+            && combined_power >= attacker_toughness
             && gang_value <= attacker_value
-        {
+            && gang_set.len() >= needed_blockers
+            && !reflects_damage(&gang_set);
+
+        // The survival route already proved its own set legal and lethal-averting;
+        // it only remains to reject the two shapes that save nothing.
+        let stabilizing_gang = survival_gang.filter(|set| {
+            !reflects_damage(set) && !commander_chump_unsafe(state, player, attacker_id, set)
+        });
+
+        // Gang-block to kill when the trade is worth it, else to survive. Never below
+        // the CR 509.1b floor, which would make the declaration illegal.
+        let declared_gang = if gang_kills_for_value {
+            Some(gang_set)
+        } else {
+            stabilizing_gang
+        };
+        if let Some(gang_set) = declared_gang {
             for bid in gang_set {
                 assignments.push((bid, attacker_id));
                 used_blockers.insert(bid);
@@ -1057,8 +1334,9 @@ pub fn choose_blockers_with_profile(
                     Some(a) => a,
                     None => continue,
                 };
-                // CR 702.111b: Skip menace attackers — single chump blocks are illegal.
-                if attacker.has_keyword(&Keyword::Menace) {
+                // CR 509.1b: Skip attackers with a minimum-blocker floor above 1 —
+                // a single chump block is an illegal declaration against them.
+                if required_blockers(&attacker_id) > 1 {
                     continue;
                 }
                 // Find any unused blocker that can legally block this attacker.
@@ -1103,8 +1381,9 @@ pub fn choose_blockers_with_profile(
                 Some(a) => a,
                 None => continue,
             };
-            // CR 702.111b: Menace requires 2+ blockers — handled by gang-block, not chump.
-            if attacker.has_keyword(&Keyword::Menace) {
+            // CR 509.1b: A minimum-blocker floor above 1 is handled by the
+            // gang-block pass, not by a single-creature chump.
+            if required_blockers(&attacker_id) > 1 {
                 continue;
             }
             let Some(headroom) = commander_lethal_headroom(state, player, attacker_id) else {
@@ -1123,12 +1402,7 @@ pub fn choose_blockers_with_profile(
                 if !can_block_with_engine_map(state, bid, attacker_id, valid_block_targets) {
                     return false;
                 }
-                let blocker_toughness = state
-                    .objects
-                    .get(&bid)
-                    .and_then(|b| b.toughness)
-                    .unwrap_or(1);
-                !commander_chump_unsafe(state, player, attacker_id, blocker_toughness)
+                !commander_chump_unsafe(state, player, attacker_id, &[bid])
             });
             if let Some(&blocker_id) = safe_blocker {
                 assignments.push((blocker_id, attacker_id));
@@ -1161,28 +1435,19 @@ fn commander_chump_unsafe(
     state: &GameState,
     defender: PlayerId,
     attacker_id: ObjectId,
-    chump_toughness: i32,
+    blockers: &[ObjectId],
 ) -> bool {
     let Some(headroom) = commander_lethal_headroom(state, defender, attacker_id) else {
         return false;
     };
-    let Some(attacker) = state.objects.get(&attacker_id) else {
-        return false;
-    };
-    let power = attacker.power.unwrap_or(0).max(0);
-    let trample_through = if attacker.has_keyword(&Keyword::Trample) {
-        // CR 702.2c: Deathtouch makes any nonzero damage lethal, so the trampler need only
-        // assign 1 to the blocker before sending excess to the player.
-        let lethal_to_blocker = if attacker.has_keyword(&Keyword::Deathtouch) {
-            1
-        } else {
-            chump_toughness
-        };
-        (power - lethal_to_blocker).max(0)
-    } else {
-        0
-    };
-    trample_through as u32 >= headroom
+    // CR 903.10a: unsafe when what still gets through would cross the
+    // commander-damage threshold. Delegates to the engine's damage authority rather
+    // than re-deriving trample and deathtouch here — the previous local version took
+    // a single blocker's toughness and replaced it with 1 under deathtouch (CR
+    // 702.2c), which is right for one chump blocker and throws away a whole gang's
+    // absorption when handed one, rejecting legal blocks that do prevent lethality.
+    engine::game::combat_damage::combat_damage_to_defender(state, attacker_id, blockers) as u32
+        >= headroom
 }
 
 fn determine_attack_objective(
@@ -3441,6 +3706,9 @@ mod tests {
             bears.push(add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]));
         }
         add_creature(&mut state, PlayerId(1), "Wall", 0, 4, vec![]);
+        state.players[PlayerId(1).0 as usize].life = 10;
+        state.phase = engine::types::phase::Phase::DeclareAttackers;
+        state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(&state);
 
         let attacks = choose_attackers_with_targets(&state, PlayerId(0));
         assert!(
@@ -3450,6 +3718,410 @@ mod tests {
         assert!(
             bears.iter().any(|b| attacks.iter().any(|(id, _)| id == b)),
             "the bear swarm should still alpha-strike (the swing fires without the commander)"
+        );
+    }
+
+    /// Production-path guard: the policy must promote a reducer-certified lethal
+    /// alpha strike when the attacker count equals the defender's creature count,
+    /// but only one defender can block the flyers. The engine-built
+    /// `DeclareAttackers` payload is essential here: the witness replays this
+    /// actual declaration and the chosen action is then accepted by the same
+    /// reducer.
+    ///
+    /// CR 508.1 / CR 509.1 / CR 510.1b-c: three 1/1 flyers into one reach
+    /// creature and two ground creatures at two life leave two unblocked damage.
+    /// The equal raw counts must not reject this legal, lethal declaration before
+    /// the witness checks actual block legality.
+    #[test]
+    fn reducer_certified_equal_count_flying_swarm_promotes_alpha() {
+        let mut scenario = engine::game::scenario::GameScenario::new();
+        scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+        let flyers: Vec<_> = (0..3)
+            .map(|_| {
+                scenario
+                    .add_creature(PlayerId(0), "Flyer", 1, 1)
+                    .flying()
+                    .id()
+            })
+            .collect();
+        scenario.add_creature(PlayerId(1), "Reach", 0, 2).reach();
+        for _ in 0..2 {
+            scenario.add_creature(PlayerId(1), "Ground", 0, 2);
+        }
+        scenario.with_life(PlayerId(1), 2);
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+
+        let (valid_attacker_ids, valid_attack_targets) = match &runner.state().waiting_for {
+            WaitingFor::DeclareAttackers {
+                player,
+                valid_attacker_ids,
+                valid_attack_targets,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                (valid_attacker_ids.clone(), valid_attack_targets.clone())
+            }
+            other => panic!("fixture must reach DeclareAttackers, got {other:?}"),
+        };
+        let alpha_attacks: Vec<_> = flyers
+            .iter()
+            .copied()
+            .map(|id| (id, AttackTarget::Player(PlayerId(1))))
+            .collect();
+        let result = adversarial_swarm_witness(runner.state(), PlayerId(0), &alpha_attacks);
+        let SwarmWitnessResult::Certified(witness) = result else {
+            panic!("equal-count flying alpha must certify: {result:?}");
+        };
+        assert!(witness.is_lethal);
+        assert_eq!(witness.resulting_life_loss, 2);
+        assert!(witness.binds_declaration(runner.state(), &alpha_attacks));
+
+        let attacks = choose_attackers_with_targets_with_profile(
+            runner.state(),
+            PlayerId(0),
+            &AiProfile::default(),
+            CombatLookahead::Disabled,
+            Some(&valid_attacker_ids),
+            Some(&valid_attack_targets),
+            None,
+        );
+        assert_eq!(
+            attacks, alpha_attacks,
+            "only the engine Certified(lethal) witness may promote this hostile alpha strike"
+        );
+        runner
+            .declare_attackers(&attacks)
+            .expect("the policy's witness-backed DeclareAttackers action must be reducer-legal");
+    }
+
+    /// Phase 5 production-path guard: the policy must promote a reducer-certified
+    /// lethal alpha strike even when the legacy creature-value comparison would
+    /// reject it. The engine-built `DeclareAttackers` payload is essential here:
+    /// the witness replays this actual declaration and the chosen action is then
+    /// accepted by the same reducer.
+    ///
+    /// CR 508.1 / CR 509.1 / CR 510.1b-c: three 3/3s into one 5/5 at five
+    /// life leave six life loss after the defender's best legal block. Each
+    /// individual bear is a pure loss, and the old fallback's `6 > 7.5` gate
+    /// would incorrectly decline the lethal attack.
+    #[test]
+    fn reducer_certified_swarm_lethal_overrides_legacy_trade_value_veto() {
+        let mut scenario = engine::game::scenario::GameScenario::new();
+        scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+        let bears: Vec<_> = (0..3)
+            .map(|_| scenario.add_creature(PlayerId(0), "Bear", 3, 3).id())
+            .collect();
+        scenario.add_creature(PlayerId(1), "Giant", 5, 5);
+        scenario.with_life(PlayerId(1), 5);
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+
+        let (valid_attacker_ids, valid_attack_targets) = match &runner.state().waiting_for {
+            WaitingFor::DeclareAttackers {
+                player,
+                valid_attacker_ids,
+                valid_attack_targets,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                (valid_attacker_ids.clone(), valid_attack_targets.clone())
+            }
+            other => panic!("fixture must reach DeclareAttackers, got {other:?}"),
+        };
+        let alpha_attacks: Vec<_> = bears
+            .iter()
+            .copied()
+            .map(|id| (id, AttackTarget::Player(PlayerId(1))))
+            .collect();
+        assert!(matches!(
+            adversarial_swarm_witness(runner.state(), PlayerId(0), &alpha_attacks),
+            SwarmWitnessResult::Certified(witness) if witness.is_lethal
+        ));
+        assert!(
+            6.0 <= evaluate_creature(runner.state(), bears[0]),
+            "fixture must defeat the retired unblocked-power-versus-sacrifice-value gate"
+        );
+
+        let attacks = choose_attackers_with_targets_with_profile(
+            runner.state(),
+            PlayerId(0),
+            &AiProfile::default(),
+            CombatLookahead::Disabled,
+            Some(&valid_attacker_ids),
+            Some(&valid_attack_targets),
+            None,
+        );
+        assert_eq!(
+            attacks, alpha_attacks,
+            "only the engine Certified(lethal) witness may promote this hostile alpha strike"
+        );
+        runner
+            .declare_attackers(&attacks)
+            .expect("the policy's witness-backed DeclareAttackers action must be reducer-legal");
+    }
+
+    /// A mandatory commander must be part of the declaration before it is
+    /// certified. This hostile commander has trample, so the complete action is
+    /// indeterminate and the policy must not promote the optional bears.
+    #[test]
+    fn swarm_certificate_is_revoked_when_mandatory_union_changes_the_action() {
+        let mut scenario = engine::game::scenario::GameScenario::new();
+        scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+        let commander = scenario
+            .add_creature(PlayerId(0), "Goaded Commander", 3, 3)
+            .trample()
+            .id();
+        let bears: Vec<_> = (0..3)
+            .map(|_| scenario.add_creature(PlayerId(0), "Bear", 3, 3).id())
+            .collect();
+        scenario.add_creature(PlayerId(1), "Giant", 5, 5);
+        scenario.with_life(PlayerId(1), 5);
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&commander)
+            .expect("fixture commander")
+            .is_commander = true;
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&commander)
+            .expect("fixture commander")
+            .goaded_by
+            .insert(PlayerId(1));
+        runner.advance_to_combat();
+
+        let (valid_attacker_ids, valid_attack_targets) = match &runner.state().waiting_for {
+            WaitingFor::DeclareAttackers {
+                valid_attacker_ids,
+                valid_attack_targets,
+                ..
+            } => (valid_attacker_ids.clone(), valid_attack_targets.clone()),
+            other => panic!("fixture must reach DeclareAttackers, got {other:?}"),
+        };
+        let complete_action: Vec<_> =
+            std::iter::once((commander, AttackTarget::Player(PlayerId(1))))
+                .chain(
+                    bears
+                        .iter()
+                        .copied()
+                        .map(|id| (id, AttackTarget::Player(PlayerId(1)))),
+                )
+                .collect();
+        assert!(matches!(
+            adversarial_swarm_witness(runner.state(), PlayerId(0), &complete_action),
+            SwarmWitnessResult::Indeterminate(
+                engine::ai_support::SwarmWitnessIndeterminate::DamageChoice
+            )
+        ));
+
+        assert_eq!(
+            choose_attackers_with_targets_with_profile(
+                runner.state(),
+                PlayerId(0),
+                &AiProfile::default(),
+                CombatLookahead::Disabled,
+                Some(&valid_attacker_ids),
+                Some(&valid_attack_targets),
+                None,
+            ),
+            vec![(commander, AttackTarget::Player(PlayerId(1)))],
+            "the mandatory attacker remains legal, but an indeterminate complete declaration must not promote optional bears"
+        );
+    }
+
+    /// A lethal certificate must bypass crackback pruning. Holding back one
+    /// bear would make the future swing survivable, but it would no longer be
+    /// the exact declaration that the engine replayed.
+    #[test]
+    fn swarm_certificate_is_not_pruned_for_crackback() {
+        let mut scenario = engine::game::scenario::GameScenario::new();
+        scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+        let bears: Vec<_> = (0..3)
+            .map(|_| scenario.add_creature(PlayerId(0), "Bear", 3, 3).id())
+            .collect();
+        scenario.add_creature(PlayerId(1), "Giant", 5, 5);
+        scenario.with_life(PlayerId(0), 5);
+        scenario.with_life(PlayerId(1), 5);
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+
+        let (valid_attacker_ids, valid_attack_targets) = match &runner.state().waiting_for {
+            WaitingFor::DeclareAttackers {
+                valid_attacker_ids,
+                valid_attack_targets,
+                ..
+            } => (valid_attacker_ids.clone(), valid_attack_targets.clone()),
+            other => panic!("fixture must reach DeclareAttackers, got {other:?}"),
+        };
+        let certified_attacks: Vec<_> = bears
+            .iter()
+            .copied()
+            .map(|id| (id, AttackTarget::Player(PlayerId(1))))
+            .collect();
+        assert!(matches!(
+            adversarial_swarm_witness(runner.state(), PlayerId(0), &certified_attacks),
+            SwarmWitnessResult::Certified(witness) if witness.is_lethal
+        ));
+        assert!(
+            crackback_damage(runner.state(), PlayerId(0), &[PlayerId(1)], &bears, None) >= 5,
+            "fixture must activate the crackback-pruning branch"
+        );
+
+        assert_eq!(
+            choose_attackers_with_targets_with_profile(
+                runner.state(),
+                PlayerId(0),
+                &AiProfile::default(),
+                CombatLookahead::Disabled,
+                Some(&valid_attacker_ids),
+                Some(&valid_attack_targets),
+                None,
+            ),
+            certified_attacks,
+            "crackback must not remove an attacker from a certified declaration"
+        );
+    }
+
+    /// Player-target binding is part of the certificate. Double strike makes
+    /// this exact declaration reducer-lethal even though its raw power is below
+    /// the opponent's life, so the redirect helper would otherwise divert it to
+    /// a planeswalker. The certified player attack must be returned unchanged.
+    #[test]
+    fn swarm_certificate_keeps_its_player_targets_despite_planeswalker_redirect() {
+        let mut scenario = engine::game::scenario::GameScenario::new();
+        scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+        let bears: Vec<_> = (0..3)
+            .map(|_| {
+                scenario
+                    .add_creature(PlayerId(0), "Double-strike Bear", 3, 3)
+                    .double_strike()
+                    .id()
+            })
+            .collect();
+        scenario.add_creature(PlayerId(1), "Giant", 7, 7);
+        scenario.with_life(PlayerId(1), 10);
+        let mut runner = scenario.build();
+        let planeswalker = add_planeswalker(runner.state_mut(), PlayerId(1), 3);
+        runner.advance_to_combat();
+
+        let (valid_attacker_ids, valid_attack_targets) = match &runner.state().waiting_for {
+            WaitingFor::DeclareAttackers {
+                valid_attacker_ids,
+                valid_attack_targets,
+                ..
+            } => (valid_attacker_ids.clone(), valid_attack_targets.clone()),
+            other => panic!("fixture must reach DeclareAttackers, got {other:?}"),
+        };
+        assert!(valid_attack_targets.contains(&AttackTarget::Planeswalker(planeswalker)));
+        let certified_attacks: Vec<_> = bears
+            .iter()
+            .copied()
+            .map(|id| (id, AttackTarget::Player(PlayerId(1))))
+            .collect();
+        assert!(matches!(
+            adversarial_swarm_witness(runner.state(), PlayerId(0), &certified_attacks),
+            SwarmWitnessResult::Certified(witness)
+                if witness.is_lethal && witness.resulting_life_loss == 12
+        ));
+        assert!(
+            bears
+                .iter()
+                .filter_map(|id| runner.state().objects.get(id)?.power)
+                .sum::<i32>()
+                < runner.state().players[PlayerId(1).0 as usize].life,
+            "the redirect path must remain live for this exact certified declaration"
+        );
+        let redirected = redirect_attackers_to_planeswalker(
+            runner.state(),
+            &bears,
+            Some(&valid_attack_targets),
+            CombatObjective::PreserveAdvantage,
+            PlayerId(1),
+            runner.state().players[PlayerId(1).0 as usize].life,
+        );
+        assert!(
+            redirected
+                .iter()
+                .any(|(_, target)| *target == AttackTarget::Planeswalker(planeswalker)),
+            "the redirect transform must mutate this exact certified declaration"
+        );
+        assert_ne!(
+            redirected, certified_attacks,
+            "revert guard: post-certificate redirection would invalidate the certificate"
+        );
+
+        assert_eq!(
+            choose_attackers_with_targets_with_profile(
+                runner.state(),
+                PlayerId(0),
+                &AiProfile::default(),
+                CombatLookahead::Disabled,
+                Some(&valid_attacker_ids),
+                Some(&valid_attack_targets),
+                None,
+            ),
+            certified_attacks,
+            "planeswalker redirection must not mutate the certified player-target declaration"
+        );
+    }
+
+    /// Companion fail-closed guard: the same hostile board must not attack when
+    /// a trample attacker makes the witness indeterminate due to damage-assignment
+    /// choice. This proves the policy consumes the typed engine fact rather than
+    /// independently treating raw excess power as forced lethal.
+    #[test]
+    fn swarm_alpha_abstains_when_engine_witness_is_indeterminate() {
+        let mut scenario = engine::game::scenario::GameScenario::new();
+        scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+        let trampler = scenario
+            .add_creature(PlayerId(0), "Trampling Bear", 3, 3)
+            .trample()
+            .id();
+        let bears = [
+            trampler,
+            scenario.add_creature(PlayerId(0), "Bear", 3, 3).id(),
+            scenario.add_creature(PlayerId(0), "Bear", 3, 3).id(),
+        ];
+        scenario.add_creature(PlayerId(1), "Giant", 5, 5);
+        scenario.with_life(PlayerId(1), 5);
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+
+        let (valid_attacker_ids, valid_attack_targets) = match &runner.state().waiting_for {
+            WaitingFor::DeclareAttackers {
+                valid_attacker_ids,
+                valid_attack_targets,
+                ..
+            } => (valid_attacker_ids.clone(), valid_attack_targets.clone()),
+            other => panic!("fixture must reach DeclareAttackers, got {other:?}"),
+        };
+        let alpha_attacks: Vec<_> = bears
+            .iter()
+            .copied()
+            .map(|id| (id, AttackTarget::Player(PlayerId(1))))
+            .collect();
+        assert!(matches!(
+            adversarial_swarm_witness(runner.state(), PlayerId(0), &alpha_attacks),
+            SwarmWitnessResult::Indeterminate(
+                engine::ai_support::SwarmWitnessIndeterminate::DamageChoice
+            )
+        ));
+
+        assert!(
+            choose_attackers_with_targets_with_profile(
+                runner.state(),
+                PlayerId(0),
+                &AiProfile::default(),
+                CombatLookahead::Disabled,
+                Some(&valid_attacker_ids),
+                Some(&valid_attack_targets),
+                None,
+            )
+            .is_empty(),
+            "without a Certified(lethal) engine witness, the hostile alpha strike must abstain"
         );
     }
 
@@ -3471,7 +4143,7 @@ mod tests {
             &state,
             PlayerId(0),
             &AiProfile::default(),
-            false,
+            CombatLookahead::Disabled,
             None,
             Some(&targets),
             None,
@@ -3506,7 +4178,7 @@ mod tests {
             &state,
             PlayerId(0),
             &AiProfile::default(),
-            false,
+            CombatLookahead::Disabled,
             None,
             Some(&targets),
             None,
@@ -3532,7 +4204,7 @@ mod tests {
             &state,
             PlayerId(0),
             &AiProfile::default(),
-            false,
+            CombatLookahead::Disabled,
             None,
             Some(&targets),
             None,
@@ -3561,7 +4233,7 @@ mod tests {
             &state,
             PlayerId(0),
             &AiProfile::default(),
-            false,
+            CombatLookahead::Disabled,
             None,
             Some(&targets),
             None,
@@ -3591,7 +4263,7 @@ mod tests {
             &state,
             PlayerId(0),
             &AiProfile::default(),
-            false,
+            CombatLookahead::Disabled,
             None,
             Some(&targets),
             None,
@@ -3641,7 +4313,10 @@ mod tests {
             &state,
             PlayerId(0),
             &profile,
-            /* combat_lookahead = */ true,
+            /* lookahead = */
+            CombatLookahead::Enabled {
+                execution_mode: ExecutionMode::Interactive,
+            },
             None,
             None,
             Some(&session),
@@ -3682,7 +4357,7 @@ mod tests {
             &state,
             PlayerId(0),
             &profile,
-            /* combat_lookahead = */ false,
+            /* lookahead = */ CombatLookahead::Disabled,
             None,
             None,
             Some(&session),
@@ -3707,7 +4382,10 @@ mod tests {
             &state,
             PlayerId(0),
             &profile,
-            /* combat_lookahead = */ true,
+            /* lookahead = */
+            CombatLookahead::Enabled {
+                execution_mode: ExecutionMode::Interactive,
+            },
             None,
             None,
             Some(&AiSession::empty()),
@@ -3716,7 +4394,10 @@ mod tests {
             &state,
             PlayerId(0),
             &profile,
-            /* combat_lookahead = */ true,
+            /* lookahead = */
+            CombatLookahead::Enabled {
+                execution_mode: ExecutionMode::Interactive,
+            },
             None,
             None,
             None,
@@ -3725,6 +4406,649 @@ mod tests {
         assert_eq!(
             with_session, without_session,
             "session-cached projection must yield the identical attacker decision as the free path"
+        );
+    }
+
+    /// T5a + T5b — `CombatLookahead::from_config` binds two authorities into one
+    /// value, and each must survive the binding.
+    ///
+    /// T5a (regime survives): the CEDH preset is the only one enabling combat
+    /// lookahead, so it is the only config that can carry a regime here. Its
+    /// measurement variant must arrive as `Enabled { execution_mode }` with the
+    /// measurement regime intact — `from_config` hardcoding
+    /// `ExecutionMode::Interactive` turns this red, and that is exactly the bug
+    /// that would leave the gate reading the wall clock at `--difficulty cedh`.
+    ///
+    /// T5b (permission dominates): with `combat_lookahead == false` the result
+    /// is `Disabled` in BOTH regimes, so measurement mode cannot smuggle a
+    /// projection into a tier that never takes one.
+    #[test]
+    fn combat_lookahead_from_config_carries_execution_mode() {
+        use crate::config::{create_config, AiDifficulty, Platform};
+
+        // T5a.
+        let cedh = create_config(AiDifficulty::CEDH, Platform::Native);
+        assert!(
+            cedh.combat_lookahead,
+            "T5a precondition: CEDH must be the tier that enables combat lookahead — if this \
+             preset changes, this test is measuring the wrong config"
+        );
+        let measured = CombatLookahead::from_config(&cedh.clone().into_measurement(1));
+        assert!(
+            matches!(
+                measured,
+                CombatLookahead::Enabled { execution_mode } if execution_mode.is_measurement()
+            ),
+            "a measurement CEDH config must produce Enabled carrying the measurement regime; \
+             got {measured:?}"
+        );
+        let interactive = CombatLookahead::from_config(&cedh);
+        assert!(
+            matches!(
+                interactive,
+                CombatLookahead::Enabled { execution_mode } if !execution_mode.is_measurement()
+            ),
+            "an interactive CEDH config must produce Enabled carrying the interactive regime; \
+             got {interactive:?}"
+        );
+
+        // T5b — the permission axis dominates in both regimes.
+        let medium = create_config(AiDifficulty::Medium, Platform::Native);
+        assert!(
+            !medium.combat_lookahead,
+            "T5b precondition: Medium must NOT enable combat lookahead — a future preset flip \
+             must fail loudly here rather than pass silently"
+        );
+        assert!(
+            matches!(
+                CombatLookahead::from_config(&medium),
+                CombatLookahead::Disabled
+            ),
+            "combat_lookahead == false must map to Disabled in interactive mode"
+        );
+        assert!(
+            matches!(
+                CombatLookahead::from_config(&medium.into_measurement(1)),
+                CombatLookahead::Disabled
+            ),
+            "combat_lookahead == false must map to Disabled in measurement mode too — \
+             measurement must not enable a projection the tier never takes"
+        );
+    }
+
+    // ── CR 509.1b minimum-blocker floors (issue #7183) ────────────────────────
+    //
+    // These exercise the *class* — any attacker whose minimum-blocker floor
+    // exceeds 1 — through both of its sources: the Menace keyword (CR 702.111b,
+    // floor 2) and a `CantBeBlockedExceptBy { MinBlockers { min } }` static
+    // (CR 509.1b, arbitrary floor). Before the fix the AI keyed on the Menace
+    // keyword alone, so a `MinBlockers` attacker was routed through the
+    // single-blocker passes, produced an illegal lone block, and had it rewritten
+    // to the empty declaration by `complete_blocker_proposal` — the AI never
+    // blocked Pathrazer of Ulamog even at lethal.
+
+    /// Give `attacker` a "can't be blocked except by `min` or more creatures"
+    /// restriction — the static half of the CR 509.1b floor, as parsed from
+    /// Pathrazer of Ulamog's second line.
+    fn add_min_blockers_restriction(state: &mut GameState, attacker: ObjectId, min: u32) {
+        use engine::types::ability::StaticDefinition;
+        use engine::types::statics::BlockExceptionKind;
+
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantBeBlockedExceptBy {
+                kind: BlockExceptionKind::MinBlockers { min },
+            }));
+    }
+
+    /// Board where `blockers` 4/4s face one lethal attacker at `life`.
+    fn lethal_attacker_board(life: i32, blockers: usize) -> (GameState, ObjectId, Vec<ObjectId>) {
+        lethal_attacker_board_with(life, blockers, vec![])
+    }
+
+    /// Same board, with `keywords` on the 11/11 attacker. Parameterized rather than
+    /// duplicated so each floor source (Menace / `MinBlockers`) can be crossed with
+    /// each combat-damage keyword class (deathtouch, first strike, trample).
+    fn lethal_attacker_board_with(
+        life: i32,
+        blockers: usize,
+        keywords: Vec<Keyword>,
+    ) -> (GameState, ObjectId, Vec<ObjectId>) {
+        let mut state = setup();
+        state.players[1].life = life;
+        let attacker = add_creature(&mut state, PlayerId(0), "Attacker", 11, 11, keywords);
+        let blocker_ids = (0..blockers)
+            .map(|i| {
+                add_creature(
+                    &mut state,
+                    PlayerId(1),
+                    &format!("Blocker {i}"),
+                    4,
+                    4,
+                    vec![],
+                )
+            })
+            .collect();
+        (state, attacker, blocker_ids)
+    }
+
+    /// CR 509.1b: an attacker with a `MinBlockers { min: 3 }` restriction must be
+    /// gang-blocked by at least three creatures. The AI is at 6 life facing 11
+    /// power, so declining loses the game outright while a legal three-creature
+    /// block is available.
+    #[test]
+    fn min_blockers_three_attacker_is_gang_blocked_at_lethal() {
+        let (mut state, attacker, _) = lethal_attacker_board(6, 10);
+        add_min_blockers_restriction(&mut state, attacker, 3);
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert!(
+            on_attacker >= 3,
+            "a 'can't be blocked except by three or more creatures' attacker must be \
+             gang-blocked by at least 3 at lethal, got {assignments:?}"
+        );
+        // The declaration the engine would actually accept — proves the proposal is
+        // legal rather than silently rewritten to the empty witness.
+        assert_eq!(
+            engine::game::combat::complete_blocker_proposal(&state, PlayerId(1), &assignments),
+            engine::types::actions::GameAction::DeclareBlockers {
+                assignments: assignments.clone()
+            },
+            "the AI's declaration must survive the CR 509.1c completion authority"
+        );
+    }
+
+    /// CR 702.111b: the Menace floor of 2 is the same class and must behave
+    /// identically — the fix must not be specific to the static form.
+    #[test]
+    fn menace_attacker_is_gang_blocked_at_lethal() {
+        let (mut state, attacker, _) = lethal_attacker_board(6, 10);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Menace);
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert!(
+            on_attacker >= 2,
+            "a menace attacker must be gang-blocked by at least 2 at lethal, got {assignments:?}"
+        );
+    }
+
+    /// A floor above 1 must never produce a *short* declaration. With only two
+    /// creatures available against a `MinBlockers { min: 3 }` attacker no legal
+    /// block exists, so the AI must decline rather than offer an illegal pair
+    /// (which the completion authority would rewrite to empty anyway).
+    #[test]
+    fn min_blockers_floor_is_never_under_filled() {
+        let (mut state, attacker, _) = lethal_attacker_board(6, 2);
+        add_min_blockers_restriction(&mut state, attacker, 3);
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert!(
+            on_attacker == 0 || on_attacker >= 3,
+            "a declaration against a min-3 attacker is either absent or at least 3 \
+             creatures — never a short, illegal set. Got {assignments:?}"
+        );
+    }
+
+    /// The survival override is scoped to lethal pressure: at a comfortable life
+    /// total the AI must still decline an unprofitable gang block rather than
+    /// throwing three 4/4s at a 5/5. Guards against the fix over-blocking.
+    #[test]
+    fn min_blockers_attacker_is_not_gang_blocked_when_not_under_pressure() {
+        let mut state = setup();
+        state.players[1].life = 40;
+        let attacker = add_creature(&mut state, PlayerId(0), "Attacker", 5, 5, vec![]);
+        add_min_blockers_restriction(&mut state, attacker, 3);
+        for i in 0..10 {
+            add_creature(
+                &mut state,
+                PlayerId(1),
+                &format!("Blocker {i}"),
+                4,
+                4,
+                vec![],
+            );
+        }
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        assert!(
+            assignments.is_empty(),
+            "at 40 life a 5/5 is not worth three 4/4s — the survival override must not \
+             fire outside Stabilize. Got {assignments:?}"
+        );
+    }
+
+    // ── CR 510.1c doomed-but-saving floor blocks (issue #7183 review) ─────────
+    //
+    // A floored attacker reaches the battlefield-clearing gang pass as its ONLY
+    // blocking route. Two value heuristics live on that route — the CR 702.7b
+    // first-strike filter and the CR 702.2c deathtouch skip — and both used to
+    // fire before the survival override, so a menace/min-3 attacker with either
+    // keyword walked past a full board for lethal even though CR 510.1c makes the
+    // block a complete save: a blocked nontrampling attacker assigns its damage to
+    // its blockers, and none to the player even when every blocker is already dead.
+    //
+    // Each test below is discriminating: reverting its half of the fix (the
+    // `!doomed_block_still_saves` guard on the deathtouch skip, or the doomed
+    // top-up pool behind the first-strike filter) drops the block to zero.
+
+    /// Nothing the gang does can save the blockers from an 11/11 deathtouch
+    /// attacker, but CR 510.1c means the block still prevents all 11 damage.
+    /// At 6 life that is the difference between living and losing.
+    #[test]
+    fn min_blockers_three_deathtouch_attacker_is_gang_blocked_at_lethal() {
+        let (mut state, attacker, _) = lethal_attacker_board_with(6, 10, vec![Keyword::Deathtouch]);
+        add_min_blockers_restriction(&mut state, attacker, 3);
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert!(
+            on_attacker >= 3,
+            "CR 510.1c: a min-3 deathtouch attacker must still be gang-blocked at \
+             lethal — the blockers all die, but the player takes 0. Got {assignments:?}"
+        );
+        assert_eq!(
+            engine::game::combat::complete_blocker_proposal(&state, PlayerId(1), &assignments),
+            engine::types::actions::GameAction::DeclareBlockers {
+                assignments: assignments.clone()
+            },
+            "the AI's declaration must survive the CR 509.1c completion authority"
+        );
+    }
+
+    /// Same class through the Menace floor of 2 (CR 702.111b).
+    #[test]
+    fn menace_deathtouch_attacker_is_gang_blocked_at_lethal() {
+        let (state, attacker, _) =
+            lethal_attacker_board_with(6, 10, vec![Keyword::Menace, Keyword::Deathtouch]);
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert!(
+            on_attacker >= 2,
+            "CR 510.1c: a menace deathtouch attacker must still be gang-blocked at \
+             lethal. Got {assignments:?}"
+        );
+    }
+
+    /// CR 702.7b: every 4/4 blocker dies in the first-strike step before dealing
+    /// damage, so the first-strike filter empties the candidate set. CR 510.1c
+    /// still makes the block a full save — the attacker has no blockers left to
+    /// assign to, and no trample to push damage through to the player.
+    #[test]
+    fn min_blockers_three_first_strike_attacker_is_gang_blocked_at_lethal() {
+        let (mut state, attacker, _) =
+            lethal_attacker_board_with(6, 10, vec![Keyword::FirstStrike]);
+        add_min_blockers_restriction(&mut state, attacker, 3);
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert!(
+            on_attacker >= 3,
+            "CR 510.1c: a min-3 first-striker must still be gang-blocked at lethal \
+             even though no blocker survives to deal damage. Got {assignments:?}"
+        );
+        assert_eq!(
+            engine::game::combat::complete_blocker_proposal(&state, PlayerId(1), &assignments),
+            engine::types::actions::GameAction::DeclareBlockers {
+                assignments: assignments.clone()
+            },
+            "the AI's declaration must survive the CR 509.1c completion authority"
+        );
+    }
+
+    /// Double strike takes the same route (CR 702.4b): the blockers die in the
+    /// first-strike step, and CR 510.1c leaves the attacker with nothing to assign
+    /// to in the regular step.
+    #[test]
+    fn menace_double_strike_attacker_is_gang_blocked_at_lethal() {
+        let (state, attacker, _) =
+            lethal_attacker_board_with(6, 10, vec![Keyword::Menace, Keyword::DoubleStrike]);
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert!(
+            on_attacker >= 2,
+            "CR 510.1c: a menace double-striker must still be gang-blocked at lethal. \
+             Got {assignments:?}"
+        );
+    }
+
+    /// CR 702.19b + CR 702.2c: a deathtouch trampler assigns only 1 damage per
+    /// blocker as "lethal", so each blocker absorbs 1 and the rest tramples through.
+    /// With ten 4/4s available against an 11/11 at 6 life the AI must still block —
+    /// six blockers absorb 6 and leave 5, surviving at 1 — and must spend exactly
+    /// the six that achieve it rather than the whole board.
+    ///
+    /// The absorption is what decides, not the trample keyword: an earlier revision
+    /// refused every deathtouch trampler outright, which declines a block that
+    /// saves the game.
+    #[test]
+    fn menace_deathtouch_trampler_is_ganged_only_as_far_as_survival_needs() {
+        let (state, attacker, _) = lethal_attacker_board_with(
+            6,
+            10,
+            vec![Keyword::Menace, Keyword::Deathtouch, Keyword::Trample],
+        );
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert_eq!(
+            on_attacker, 6,
+            "CR 702.2c: deathtouch makes 1 damage lethal, so N blockers absorb N. \
+             At 6 life facing 11 power the AI needs 6 (residual 5) and must not \
+             spend more. Got {assignments:?}"
+        );
+    }
+
+    /// The other side of that boundary: when absorption cannot get under the life
+    /// total the block is a pure loss and must be declined. Three 4/4s absorb only
+    /// 3 against a deathtouch trampler, leaving 8 against 6 life.
+    ///
+    /// Note `block_is_futile` does not catch this — it bounds absorption by raw
+    /// toughness (12 here) and so believes the board survives. The gang gate's
+    /// `lethal_damage_needed` accounting is what declines it.
+    #[test]
+    fn menace_deathtouch_trampler_is_declined_when_absorption_cannot_save() {
+        let (state, attacker, _) = lethal_attacker_board_with(
+            6,
+            3,
+            vec![Keyword::Menace, Keyword::Deathtouch, Keyword::Trample],
+        );
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert_eq!(
+            on_attacker, 0,
+            "three blockers absorb 3 under deathtouch, leaving 8 against 6 life — \
+             the gang dies and the player still dies. Got {assignments:?}"
+        );
+    }
+
+    /// CR 702.7b + CR 702.19b: a first-striker kills these blockers before their
+    /// damage step, so they are excluded from the *kill* estimate — but trample must
+    /// still assign each of them its lethal damage before any excess reaches the
+    /// player. An 11/11 menace first-strike trampler against two 4/4s at 4 life
+    /// assigns 4+4 and tramples 3, leaving the player alive at 1.
+    ///
+    /// Regression for deriving the survival gang from `effective_candidates`: that
+    /// filter emptied the pool, so this legal, life-saving block could not be formed
+    /// at all.
+    #[test]
+    fn menace_first_strike_trampler_is_gang_blocked_by_doomed_absorbers() {
+        let (state, attacker, _) = lethal_attacker_board_with(
+            4,
+            2,
+            vec![Keyword::Menace, Keyword::FirstStrike, Keyword::Trample],
+        );
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert_eq!(
+            on_attacker, 2,
+            "CR 702.19b: blockers that die in the first-strike step still absorb \
+             their lethal damage — 4+4 of 11 leaves 3 against 4 life. Got \
+             {assignments:?}"
+        );
+    }
+
+    /// CR 702.4b + CR 702.19d: a double striker assigns damage in BOTH steps. The
+    /// first step kills these blockers and tramples 3; the second finds no blockers
+    /// and, per CR 702.19d, assigns its full 11 to the player "as though all
+    /// blocking creatures have been assigned lethal damage". 14 total against 4
+    /// life, so the block does not save and must be declined.
+    ///
+    /// Discriminating for the single-step model: counting one step reads this as
+    /// 3 through and approves a block that loses the game.
+    #[test]
+    fn menace_double_strike_trampler_is_declined_when_the_second_strike_still_kills() {
+        let (state, attacker, _) = lethal_attacker_board_with(
+            4,
+            2,
+            vec![Keyword::Menace, Keyword::DoubleStrike, Keyword::Trample],
+        );
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert_eq!(
+            on_attacker, 0,
+            "CR 702.4b + CR 702.19d: the second strike finds an empty block and \
+             tramples 11 more into a player already down to 1. Got {assignments:?}"
+        );
+    }
+
+    /// The survival test must compare like with like. `combat_damage_to_defender`
+    /// reports the WHOLE combat phase, so for a double striker it counts both steps
+    /// (CR 702.4b) while `attacker_power` is one step's worth — and the block that
+    /// saves the game is exactly where the two disagree.
+    ///
+    /// A 5/5 menace double-strike trampler is 10 damage unblocked (5 through the
+    /// first step's excess plus 5 more into the empty block, CR 702.19d), lethal at
+    /// 7 life. Two 2/2s absorb 2+2 in the first step, so 1 tramples then, and 5 in
+    /// the regular step: 6 total, and the player lives at 1.
+    ///
+    /// Comparing against raw `attacker_power` gives `5 - 6 = -1`, fails the
+    /// prevented-damage floor, and declines a block that saves the game — so
+    /// reverting the baseline to `attacker_power` fails this test.
+    #[test]
+    fn double_strike_trample_gang_is_taken_when_it_is_the_difference_between_living_and_dying() {
+        let mut state = setup();
+        state.players[1].life = 7;
+        let attacker = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Attacker",
+            5,
+            5,
+            vec![Keyword::Menace, Keyword::DoubleStrike, Keyword::Trample],
+        );
+        for i in 0..2 {
+            add_creature(
+                &mut state,
+                PlayerId(1),
+                &format!("Blocker {i}"),
+                1,
+                2,
+                vec![],
+            );
+        }
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert_eq!(
+            on_attacker, 2,
+            "10 unblocked at 7 life is lethal; the legal pair cuts it to 6 and the \
+             player lives. Got {assignments:?}"
+        );
+    }
+
+    /// A blocker can contribute something absorption cannot express: a first-strike
+    /// deathtouch body kills the attacker in the first damage step (CR 702.7b +
+    /// CR 702.2c), cancelling its regular-step damage outright.
+    ///
+    /// 10/10 menace double-strike trampler at 4 life, against two 0/6 walls and a
+    /// 1/1 first-strike deathtoucher. By absorption the walls come first, and they
+    /// still let 8 through, so the walk then adds the 1/1 — three creatures. But one
+    /// wall plus the 1/1 holds it to 3: the attacker takes lethal deathtouch damage
+    /// in the first step and never reaches the second. Two creatures, same result.
+    ///
+    /// Guards the shrink pass; without it the AI sacrifices a blocker it did not need.
+    #[test]
+    fn survival_gang_drops_blockers_the_rest_of_the_gang_makes_redundant() {
+        let mut state = setup();
+        state.players[1].life = 4;
+        let attacker = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Attacker",
+            10,
+            10,
+            vec![Keyword::Menace, Keyword::DoubleStrike, Keyword::Trample],
+        );
+        add_creature(&mut state, PlayerId(1), "Wall 1", 0, 6, vec![]);
+        add_creature(&mut state, PlayerId(1), "Wall 2", 0, 6, vec![]);
+        add_creature(
+            &mut state,
+            PlayerId(1),
+            "Deathtouch Skirmisher",
+            1,
+            1,
+            vec![Keyword::FirstStrike, Keyword::Deathtouch],
+        );
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker: Vec<_> = assignments
+            .iter()
+            .filter(|&&(_, a)| a == attacker)
+            .map(|&(b, _)| b)
+            .collect();
+        assert_eq!(
+            on_attacker.len(),
+            2,
+            "one wall plus the first-strike deathtoucher already holds this to 3 \
+             against 4 life — the third blocker is spent for nothing. Got \
+             {assignments:?}"
+        );
+        // Still a legal declaration against the CR 702.111b menace floor.
+        assert_eq!(
+            engine::game::combat::complete_blocker_proposal(&state, PlayerId(1), &assignments),
+            engine::types::actions::GameAction::DeclareBlockers {
+                assignments: assignments.clone()
+            },
+            "the shrunk declaration must still survive the CR 509.1c completion \
+             authority"
+        );
+    }
+
+    /// Ordering: against a trampler a blocker contributes absorption, not cheapness.
+    /// One 6/6 absorbs the whole gap that three 1/1s cannot, so the AI must reach for
+    /// it rather than walking the value order and spending bodies that do not save.
+    ///
+    /// 8/8 menace trampler at 3 life: 1/1s absorb 1 each (three of them leave 5), the
+    /// 6/6 absorbs 6 and leaves 2. The floor is 2, so the answer is the 6/6 plus one
+    /// 1/1 — absorbing 7, leaving 1.
+    #[test]
+    fn trample_survival_gang_prefers_absorbers_over_cheap_bodies() {
+        let mut state = setup();
+        state.players[1].life = 3;
+        let attacker = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Attacker",
+            8,
+            8,
+            vec![Keyword::Menace, Keyword::Trample],
+        );
+        let big = add_creature(&mut state, PlayerId(1), "Big", 1, 6, vec![]);
+        for i in 0..3 {
+            add_creature(&mut state, PlayerId(1), &format!("Small {i}"), 1, 1, vec![]);
+        }
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker: Vec<_> = assignments
+            .iter()
+            .filter(|&&(_, a)| a == attacker)
+            .map(|&(b, _)| b)
+            .collect();
+        assert!(
+            on_attacker.contains(&big),
+            "CR 702.19b: the 6-toughness blocker absorbs 6 of the 8 — a value-ordered \
+             walk spends 1/1s that cannot close the gap. Got {assignments:?}"
+        );
+        assert_eq!(
+            on_attacker.len(),
+            2,
+            "the floor is 2 and the 6/6 plus one 1/1 already leaves 1 damage — no \
+             further creatures should be spent. Got {assignments:?}"
+        );
+    }
+
+    /// CR 702.19b: "take into account damage already marked on the creature" — a
+    /// 4/4 with 3 damage marked needs only 1 more to be lethal, so it absorbs 1, not
+    /// 4. Two of them absorb 2 against an 11/11 menace trampler, leaving 9 against
+    /// 4 life, and the block must be declined.
+    ///
+    /// Summing raw toughness reads this board as absorbing 8 and approves a gang
+    /// that leaves the player dead — the reason absorption goes through the
+    /// resolver's own `lethal_damage_needed` rather than the toughness field.
+    #[test]
+    fn marked_damage_lowers_absorption_below_the_survival_threshold() {
+        let (mut state, attacker, blockers) =
+            lethal_attacker_board_with(4, 2, vec![Keyword::Menace, Keyword::Trample]);
+        for &bid in &blockers {
+            state.objects.get_mut(&bid).unwrap().damage_marked = 3;
+        }
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert_eq!(
+            on_attacker, 0,
+            "CR 702.19b: damage already marked lowers each blocker's lethal minimum \
+             to 1, so the gang absorbs 2 of 11 and the player still dies. Got \
+             {assignments:?}"
+        );
+    }
+
+    /// CR 702.19b: the same boundary without deathtouch, which reaches the
+    /// `gang_stabilize` gate rather than exiting at the deathtouch skip. Needs two
+    /// attackers to be reachable: `block_is_futile` bounds absorption optimistically
+    /// over the whole board, so a lone trampler whose gang cannot absorb is caught
+    /// there — but a gang built from what earlier passes left over is not.
+    ///
+    /// The 6/6 is consumed blocking the 5/5, leaving the menace trampler a
+    /// floor-sized gang of two 1/1s. That gang absorbs 2 of 11, so the player takes
+    /// 9 at 6 life and dies either way: the block is a pure loss of both creatures.
+    #[test]
+    fn floored_trampler_is_not_chump_ganged_when_the_gang_cannot_absorb_lethal() {
+        let mut state = setup();
+        state.players[1].life = 6;
+        let plain = add_creature(&mut state, PlayerId(0), "Plain", 5, 5, vec![]);
+        let trampler = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Trampler",
+            11,
+            11,
+            vec![Keyword::Menace, Keyword::Trample],
+        );
+        add_creature(&mut state, PlayerId(1), "Big", 6, 6, vec![]);
+        add_creature(&mut state, PlayerId(1), "Small 0", 1, 1, vec![]);
+        add_creature(&mut state, PlayerId(1), "Small 1", 1, 1, vec![]);
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[plain, trampler]);
+
+        let on_trampler = assignments.iter().filter(|&&(_, a)| a == trampler).count();
+        assert_eq!(
+            on_trampler, 0,
+            "CR 702.19b: a floor-sized gang absorbing 2 of 11 leaves a lethal residual \
+             at 6 life, so the trampler must not be chump-ganged — the creatures are \
+             spent and the player dies anyway. Got {assignments:?}"
         );
     }
 }

@@ -3,6 +3,7 @@ use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PublicStateDirty, WaitingFor};
 use crate::types::identifiers::ObjectId;
+use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -37,8 +38,77 @@ pub fn finalize_public_state(state: &mut GameState) {
     finalize_display_state(state);
 }
 
+/// CR 703.1: the combat step whose TURN-BASED ACTION this prompt is the player's
+/// answer to, or `None` when the prompt answers to some other authority.
+/// ("Turn-based actions are game actions that happen automatically when certain
+/// steps or phases begin, or when each step and phase ends." Each bound step's
+/// own rule is cited on its arm below.)
+///
+/// The bound set is exactly the combat turn-based actions of CR 508.1, CR 509.1,
+/// CR 510.1c and CR 510.1d. It is NOT a closed enumeration of step-associated
+/// `WaitingFor` variants, and the wildcard is not a shortcut — several prompts
+/// are live during a combat step under a DIFFERENT authority and must stay
+/// unbound, or a legal state would trip the assertion below:
+///
+/// * `CombatTaxPayment { context: Attacking }`, `ExertChoice`, `EnlistChoice` —
+///   CR 508.1g optional attack costs (CR 701.43d exert, CR 702.154b enlist).
+///   These are a sub-step of the declaration with their own re-entry
+///   (`engine_combat::handle_pay_combat_tax`), not the declaration itself.
+/// * `MeldAttackTargetChoice`, `EntryAttackTargetChoice` — CR 508.4 "put onto
+///   the battlefield attacking". This is a RESOLUTION-time choice: CR 508.4d
+///   explicitly contemplates it during the declare blockers, combat damage, and
+///   end of combat steps, and `combat::choose_entry_attack_target_or_enter` is
+///   reached from effect resolution in any phase.
+///
+/// Adding a variant to this match is a rules claim: it asserts the prompt can
+/// only ever be installed during that one step. Verify against the CR before
+/// binding anything new.
+fn step_bound_phase(waiting_for: &WaitingFor) -> Option<Phase> {
+    match waiting_for {
+        // CR 508.1: the active player declares attackers as a turn-based action.
+        WaitingFor::DeclareAttackers { .. } => Some(Phase::DeclareAttackers),
+        // CR 509.1: the defending player declares blockers as a turn-based action.
+        WaitingFor::DeclareBlockers { .. } => Some(Phase::DeclareBlockers),
+        // CR 510.1c: an attacker blocked by two or more creatures divides its
+        // combat damage as its controller chooses, during the combat damage step.
+        WaitingFor::AssignCombatDamage { .. } => Some(Phase::CombatDamage),
+        // CR 510.1d (+ CR 702.22k banding): a blocker blocking two or more
+        // creatures divides its combat damage among them. Same step, same
+        // turn-based action pair as CR 510.1c above.
+        WaitingFor::AssignBlockerDamage { .. } => Some(Phase::CombatDamage),
+        _ => None,
+    }
+}
+
 pub fn sync_waiting_for(state: &mut GameState, waiting_for: &WaitingFor) {
     state.waiting_for = waiting_for.clone();
+    // CR 703.1: a turn-based action happens automatically when its own step
+    // begins or ends, so a prompt that is a player's answer to one is answerable
+    // only during that step. Installing one outside that step produces a
+    // decision no seat can legally submit and the game cannot leave.
+    //
+    // `debug_assert!` rather than production validation because the CR 603.3
+    // drain in `turns::process_phase_triggers` is meant to have settled the
+    // queue before any boundary is reached, so a hit here is an engine bug to be
+    // fixed at its producer, not a runtime condition to handle. Read that as an
+    // intent this check enforces, NOT as a proof that no producer can construct
+    // the pairing — the paragraph below says outright that the producer
+    // population was never enumerated, which is precisely why the check has to
+    // be executable rather than argued.
+    //
+    // This is an ACTION-BOUNDARY check, not a producer check: a large number of
+    // sites in `crates/engine/src/` assign `state.waiting_for` directly, and this
+    // function is a boundary re-synchronizer with a small number of call sites,
+    // not the single install authority. A pairing written and then overwritten
+    // before the next boundary is invisible here, and a panic's backtrace names
+    // the boundary, not the producer. It is still the cheapest place to catch a
+    // pairing that actually reaches a client.
+    debug_assert!(
+        step_bound_phase(&state.waiting_for).is_none_or(|required| required == state.phase),
+        "waiting_for {:?} is bound to a combat step but the game is in {:?}",
+        state.waiting_for,
+        state.phase,
+    );
     normalize_legacy_attach_waiting_for(state);
     sync_priority_player_from_waiting_for(state);
 }
@@ -88,6 +158,15 @@ fn normalize_legacy_attach_waiting_for(state: &mut GameState) {
 }
 
 fn sync_priority_player_from_waiting_for(state: &mut GameState) {
+    // Resolve All temporarily presents consent slots without transferring the
+    // underlying priority window. Its run snapshot owns that priority until a
+    // decline restores it or the Ready consumer materializes its passes.
+    if matches!(
+        &state.waiting_for,
+        WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
+    ) {
+        return;
+    }
     if let Some(player) = state.waiting_for.acting_player() {
         state.priority_player = turn_control::authorized_submitter_for_player(state, player);
     }
@@ -267,6 +346,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
                 mark_public_state_object_dirty(state, *source_id);
                 mark_mana_display_dirty(state);
             }
+            GameEvent::ManaAbilityProduced { .. } => {}
             GameEvent::ManaExpended { player_id, .. } => {
                 mark_public_state_player_dirty(state, *player_id);
                 mark_mana_display_dirty(state);
@@ -358,13 +438,14 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             }
             GameEvent::MonarchChanged { player_id }
             | GameEvent::CityBlessingGained { player_id }
+            | GameEvent::EnduringStoryGained { player_id }
             | GameEvent::InitiativeTaken { player_id }
             | GameEvent::AttractionOpened { player_id, .. }
             | GameEvent::ContraptionAssembled { player_id, .. }
             | GameEvent::AttractionsRolledToVisit { player_id, .. }
             | GameEvent::AttractionVisited { player_id, .. }
             | GameEvent::ContraptionCranked { player_id, .. }
-            | GameEvent::RingTemptsYou { player_id } => {
+            | GameEvent::RingTemptsYou { player_id, .. } => {
                 mark_public_state_player_dirty(state, *player_id);
             }
             // CR 702.26: Phasing changes which objects/statics are active and
@@ -376,6 +457,10 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             // Transform changes copiable values (Layer 1) and can flip statics
             // on/off; conservatively all-dirty.
             | GameEvent::Transformed { .. }
+            // CR 710.1b: flipping replaces the permanent's name, type line,
+            // power, toughness, and text box (Layer 1 copiable values) and can
+            // flip statics on/off; conservatively all-dirty like Transform.
+            | GameEvent::Flipped { .. }
             | GameEvent::Specialized { .. }
             | GameEvent::TurnedFaceUp { .. }
             // Turning a permanent face down resets its copiable values to a 2/2
@@ -410,12 +495,21 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::LandPlayed { .. }
             | GameEvent::StackPushed { .. }
             | GameEvent::StackResolved { .. }
+            // CR 714.2: a notification consumed by triggers only; the chapter
+            // ability's own effects dirty whatever display state they touched.
+            | GameEvent::SagaChapterAbilityResolved { .. }
             | GameEvent::GameOver { .. }
             // CR 732.2: a halted-resolution notification dirties no display state.
             | GameEvent::ResolutionHalted { .. }
             | GameEvent::SpellCountered { .. }
             | GameEvent::EffectResolved { .. }
             | GameEvent::Unattached { .. }
+            // CR 116.2c + CR 613.1: ending a continuous effect DOES change
+            // derived characteristics, but `GameState::end_continuous_effect`
+            // sets `layers_dirty.mark_full()`, so Gate 1 above has already
+            // marked everything and returned before this match is reached. No
+            // additional per-event marking is needed or correct here.
+            | GameEvent::ContinuousEffectEnded { .. }
             | GameEvent::AttackersDeclared { .. }
             | GameEvent::BlockersDeclared { .. }
             | GameEvent::AttackerBecameBlockedByEffect { .. }
@@ -429,6 +523,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::ReplacementApplied { .. }
             | GameEvent::DayNightChanged { .. }
             | GameEvent::CardsRevealed { .. }
+            | GameEvent::ChosenNumbersRevealed { .. }
             | GameEvent::CombatDamageDealtToPlayer { .. }
             | GameEvent::PlayerEliminated { .. }
             | GameEvent::CrimeCommitted { .. }
@@ -492,8 +587,159 @@ pub fn clear_public_state_dirty(state: &mut GameState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::game_state::{CastOfferKind, PendingContinuation};
+    use crate::game::combat::AttackTarget;
+    use crate::types::game_state::{
+        CastOfferKind, CombatTaxContext, CombatTaxPending, MeldSelection, PendingContinuation,
+    };
     use crate::types::identifiers::ObjectId;
+    use crate::types::mana::ManaCost;
+
+    /// CR 703.1: every combat turn-based-action prompt maps to the one step it
+    /// can legally be answered in, and every prompt that answers to a DIFFERENT
+    /// authority maps to `None`.
+    ///
+    /// The `None` rows are the load-bearing half. Each is a prompt that can
+    /// legitimately be live during (or adjacent to) a combat step under an
+    /// authority other than the declaration itself, so binding it would make
+    /// `sync_waiting_for`'s `debug_assert!` fire on a legal state:
+    ///
+    /// * `CombatTaxPayment { context: Attacking }`, `ExertChoice`, `EnlistChoice`
+    ///   — CR 508.1g optional attack costs (CR 701.43d exert, CR 702.154b
+    ///   enlist): a sub-step of the declaration, not the declaration.
+    /// * `MeldAttackTargetChoice`, `EntryAttackTargetChoice` — CR 508.4 "put
+    ///   onto the battlefield attacking", a resolution-time choice that CR 508.4d
+    ///   explicitly contemplates during declare blockers, combat damage, and end
+    ///   of combat.
+    /// * `Priority` (CR 117.3a) and `OrderTriggers` (CR 603.3b) are not
+    ///   step-bound at all.
+    #[test]
+    fn step_bound_phase_maps_combat_turn_based_prompts() {
+        // CR 508.1: the active player declares attackers as a turn-based action.
+        assert_eq!(
+            step_bound_phase(&WaitingFor::DeclareAttackers {
+                player: PlayerId(0),
+                valid_attacker_ids: Vec::new(),
+                valid_attack_targets: Vec::new(),
+                valid_attack_targets_by_attacker: None,
+                attacker_constraints: Default::default(),
+            }),
+            Some(Phase::DeclareAttackers),
+        );
+        // CR 509.1: the defending player declares blockers as a turn-based action.
+        assert_eq!(
+            step_bound_phase(&WaitingFor::DeclareBlockers {
+                player: PlayerId(1),
+                valid_blocker_ids: Vec::new(),
+                valid_block_targets: Default::default(),
+                block_requirements: Default::default(),
+                blocker_constraints: Default::default(),
+            }),
+            Some(Phase::DeclareBlockers),
+        );
+        // CR 510.1c: an attacker blocked by 2+ creatures divides its damage.
+        assert_eq!(
+            step_bound_phase(&WaitingFor::AssignCombatDamage {
+                player: PlayerId(0),
+                attacker_id: ObjectId(1),
+                total_damage: 2,
+                blockers: Vec::new(),
+                assignment_modes: Vec::new(),
+                trample: None,
+                defending_player: PlayerId(1),
+                attack_target: AttackTarget::Player(PlayerId(1)),
+                pw_loyalty: None,
+                pw_controller: None,
+            }),
+            Some(Phase::CombatDamage),
+        );
+        // CR 510.1d (+ CR 702.22k banding): a blocker blocking 2+ creatures.
+        assert_eq!(
+            step_bound_phase(&WaitingFor::AssignBlockerDamage {
+                player: PlayerId(1),
+                blocker_id: ObjectId(2),
+                total_damage: 2,
+                attackers: Vec::new(),
+            }),
+            Some(Phase::CombatDamage),
+        );
+
+        // --- Deliberately unbound siblings, each with its CR reason above. ---
+
+        // CR 117.3a: priority is not bound to any step.
+        assert_eq!(
+            step_bound_phase(&WaitingFor::Priority {
+                player: PlayerId(0)
+            }),
+            None,
+        );
+        // CR 603.3b: trigger ordering is not bound to any step.
+        assert_eq!(
+            step_bound_phase(&WaitingFor::OrderTriggers {
+                player: PlayerId(0),
+                triggers: Vec::new(),
+            }),
+            None,
+        );
+        // CR 508.1g: an optional attack cost is a sub-step with its own re-entry.
+        assert_eq!(
+            step_bound_phase(&WaitingFor::CombatTaxPayment {
+                player: PlayerId(0),
+                context: CombatTaxContext::Attacking,
+                total_cost: ManaCost::NoCost,
+                per_creature: Vec::new(),
+                pending: CombatTaxPending::Attack {
+                    attacks: Vec::new(),
+                    bands: Vec::new(),
+                },
+            }),
+            None,
+        );
+        // CR 701.43d: "you may exert as it attacks" is an optional attack cost.
+        assert_eq!(
+            step_bound_phase(&WaitingFor::ExertChoice {
+                player: PlayerId(0),
+                attacker: ObjectId(1),
+                remaining: Vec::new(),
+            }),
+            None,
+        );
+        // CR 702.154b: enlist's static ability is an optional cost to attack.
+        assert_eq!(
+            step_bound_phase(&WaitingFor::EnlistChoice {
+                player: PlayerId(0),
+                attacker: ObjectId(1),
+                eligible: Vec::new(),
+                remaining: Vec::new(),
+            }),
+            None,
+        );
+        // CR 508.4 / CR 508.4d: resolution-time "enters attacking" choices are
+        // legal during declare blockers, combat damage, and end of combat.
+        assert_eq!(
+            step_bound_phase(&WaitingFor::MeldAttackTargetChoice {
+                player: PlayerId(0),
+                context: MeldSelection {
+                    source_id: ObjectId(1),
+                    partner_id: ObjectId(2),
+                    controller: PlayerId(0),
+                    expected_source: String::new(),
+                    expected_partner: String::new(),
+                    result: String::new(),
+                    entry: Default::default(),
+                },
+                valid_targets: Vec::new(),
+            }),
+            None,
+        );
+        assert_eq!(
+            step_bound_phase(&WaitingFor::EntryAttackTargetChoice {
+                player: PlayerId(0),
+                object_id: ObjectId(1),
+                valid_targets: Vec::new(),
+            }),
+            None,
+        );
+    }
 
     #[test]
     fn sync_waiting_for_updates_priority_player_for_resolution_choices() {

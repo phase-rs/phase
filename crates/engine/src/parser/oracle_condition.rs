@@ -12,8 +12,8 @@ use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_target::parse_type_phrase;
 use crate::types::ability::{
-    CommanderOwnership, Comparator, ControllerRef, FilterProp, ParsedCondition, QuantityExpr,
-    QuantityRef, StaticCondition, TargetFilter, TypedFilter,
+    Comparator, FilterProp, ParsedCondition, QuantityExpr, QuantityRef, StaticCondition,
+    TargetFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
@@ -274,30 +274,19 @@ fn static_condition_to_restriction_condition(
         // The `Not` recursion arm above yields `Not(IsYourTurn)` for
         // "it's not your turn".
         StaticCondition::DuringYourTurn => Some(ParsedCondition::IsYourTurn),
-        // CR 903.3d: "If an effect refers to controlling a commander, it refers to a
-        // permanent on the battlefield that is a commander" — regardless of who OWNS it.
-        // That is exactly an `ObjectCount` over the `IsCommander` filter scoped to your
-        // control, so it converts through the same presence bridge as `IsPresent`.
-        //
-        // `CommanderOwnership::Own` ("your commander") additionally requires you to own
-        // the permanent, and `TargetFilter` has no owner axis — it is rejected below
-        // rather than silently widened to "any commander you control", which would let
-        // a STOLEN commander satisfy a condition the card restricts to your own.
-        StaticCondition::ControlsCommander {
-            ownership: CommanderOwnership::Any,
-        } => Some(ParsedCondition::QuantityComparison {
-            lhs: QuantityExpr::Ref {
-                qty: QuantityRef::ObjectCount {
-                    filter: TargetFilter::Typed(TypedFilter {
-                        controller: Some(ControllerRef::You),
-                        properties: vec![FilterProp::IsCommander],
-                        ..Default::default()
-                    }),
-                },
-            },
-            comparator: Comparator::GE,
-            rhs: QuantityExpr::Fixed { value: 1 },
-        }),
+        // CR 102.3 + CR 805.4a: keep the opponent relation distinct from
+        // `Not(IsYourTurn)`, which would incorrectly include a teammate's turn.
+        StaticCondition::DuringOpponentsTurn => Some(ParsedCondition::IsOpponentsTurn),
+        // CR 903.3 / CR 903.3d: both commander-control phrasings mirror directly onto
+        // the `ParsedCondition` variant carrying the same `CommanderOwnership` axis.
+        // `Own` ("your commander") requires you to OWN the permanent (CR 109.5,
+        // Lieutenant); `Any` ("a commander") is controller-only, any owner (CR 903.3d,
+        // a stolen commander counts). Runtime evaluation delegates to the single
+        // `game::commander` authority — the same helpers `layers.rs` uses for the static
+        // form — so `Own` cannot be silently widened to "any commander you control".
+        StaticCondition::ControlsCommander { ownership } => {
+            Some(ParsedCondition::ControlsCommander { ownership })
+        }
         // Source zone/state leaves with an exact restriction evaluator.
         StaticCondition::SourceInZone { zone } => Some(ParsedCondition::SourceInZone { zone }),
         StaticCondition::SourceIsAttacking => Some(ParsedCondition::SourceIsAttacking),
@@ -309,6 +298,14 @@ fn static_condition_to_restriction_condition(
         }),
         // Player-state leaves with an exact restriction evaluator.
         StaticCondition::HasCityBlessing => Some(ParsedCondition::HasCityBlessing),
+        // CR 702.179e: max speed is a player-state leaf in the same sense as the
+        // city's blessing — a designation read off the scoped player, with no
+        // filter or quantity to approximate. Both readings call
+        // `game::speed::has_max_speed`, so the restriction cannot drift from the
+        // static one this condition also feeds.
+        StaticCondition::HasMaxSpeed => Some(ParsedCondition::HasMaxSpeed),
+        // CR 702.195b: The enduring story designation is available to restrictions.
+        StaticCondition::HasEnduringStory => Some(ParsedCondition::HasEnduringStory),
         StaticCondition::OpponentPoisonAtLeast { count } => {
             Some(ParsedCondition::OpponentPoisonAtLeast { count })
         }
@@ -378,7 +375,6 @@ fn static_condition_to_restriction_condition(
         | StaticCondition::IsPresent { filter: None }
         | StaticCondition::ChosenColorIs { .. }
         | StaticCondition::ChosenLabelIs { .. }
-        | StaticCondition::HasMaxSpeed
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::DayNightIs { .. }
         | StaticCondition::CastVariantPaid { .. }
@@ -386,7 +382,7 @@ fn static_condition_to_restriction_condition(
         | StaticCondition::DefendingPlayerControls { .. }
         | StaticCondition::SourceAttackingAlone
         | StaticCondition::SourceIsBlocking
-        | StaticCondition::IsMonarch
+        | StaticCondition::IsMonarch { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::CompletedADungeon
@@ -397,9 +393,6 @@ fn static_condition_to_restriction_condition(
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
-        | StaticCondition::ControlsCommander {
-            ownership: CommanderOwnership::Own,
-        }
         | StaticCondition::SourceIsTapped
         | StaticCondition::IsTapped { .. }
         | StaticCondition::SourceIsFaceUp
@@ -419,6 +412,12 @@ fn static_condition_to_restriction_condition(
         | StaticCondition::TopOfLibraryMatches { .. }
         | StaticCondition::SourceIsPaired
         | StaticCondition::AdditionalCostPaid
+        // CR 508.6: "a player attacked you during their last turn" is a real
+        // game-state predicate (Avenge's cost reduction), but it is not a
+        // cast/activation restriction and has no `ParsedCondition` counterpart —
+        // it is evaluated via `layers::evaluate_condition` on the self-spell cost
+        // path, so lowering here returns `None`.
+        | StaticCondition::AnyPlayerAttackedYouLastTurn
         | StaticCondition::CastingAsVariant { .. } => None,
     }
 }
@@ -826,7 +825,8 @@ fn capitalize_condition_word(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AggregateFunction, CountScope, PlayerScope, SharedQuality, TypeFilter,
+        AggregateFunction, CommanderOwnership, ControllerRef, CountScope, PlayerScope,
+        SharedQuality, TypeFilter,
     };
     use crate::types::card_type::Supertype;
     use crate::types::counter::CounterType;
@@ -1060,16 +1060,8 @@ mod tests {
     /// filter-carrying `SourceMatchesFilter`, which `ParsedCondition` has no variant to
     /// hold.
     ///
-    /// "you control your commander" is the second, and it is the sharper one. The sibling
-    /// phrase "you control **a** commander" (CR 903.3d — any commander you control,
-    /// regardless of owner) DOES convert, to an `ObjectCount` over the `IsCommander`
-    /// filter. The possessive form additionally requires you to OWN the permanent, and
-    /// `TargetFilter` has no owner axis — so converting it with the same filter would
-    /// silently let a STOLEN commander satisfy a condition the card restricts to your own.
-    /// Reject beats approximate.
-    ///
-    /// Fail-on-revert: routing `Unsupported` back into `parse_restriction_only_condition`,
-    /// or widening the `Own` arm to reuse the `Any` filter, makes these `Some(..)` again.
+    /// Fail-on-revert: routing `Unsupported` back into `parse_restriction_only_condition`
+    /// makes this `Some(..)` again.
     #[test]
     fn recognized_but_nonrepresentable_condition_fails_the_parse() {
         // Assert WHICH `StaticCondition` is rejected by running the conversion directly.
@@ -1100,52 +1092,44 @@ mod tests {
             SharedRestrictionParse::Unsupported
         ));
         assert_eq!(parse_restriction_condition("~ is a creature"), None);
-
-        // The possessive commander form requires OWNERSHIP, which `TargetFilter` cannot
-        // express; its sibling "you control A commander" DOES convert (test below).
-        let own = shared_static("you control your commander");
-        assert!(matches!(
-            own,
-            StaticCondition::ControlsCommander {
-                ownership: CommanderOwnership::Own
-            }
-        ));
-        assert_eq!(static_condition_to_restriction_condition(own), None);
-        assert!(matches!(
-            parse_shared_restriction_condition("you control your commander"),
-            SharedRestrictionParse::Unsupported
-        ));
-        assert_eq!(
-            parse_restriction_condition("you control your commander"),
-            None
-        );
     }
 
-    /// CR 903.3d: "you control a commander" refers to a permanent on the battlefield that
-    /// is a commander — regardless of owner. It converts to an `ObjectCount` over the
-    /// `IsCommander` filter scoped to your control.
+    /// CR 903.3 / CR 903.3d: both commander-control phrasings now convert to the
+    /// parameterized `ParsedCondition::ControlsCommander` variant carrying the same
+    /// `CommanderOwnership` axis as the sibling `StaticCondition`/`TriggerCondition`
+    /// forms. "your commander" → `Own` (CR 109.5, owner-scoped Lieutenant); "a
+    /// commander" → `Any` (CR 903.3d, any owner, a stolen commander counts).
     ///
-    /// The legacy restriction grammar read this as subtype `"commander"` — a subtype no
-    /// permanent has — so Deflecting Swat's free-cast condition could NEVER be satisfied.
+    /// This replaces the earlier split where `Any` lowered to an `ObjectCount`
+    /// `QuantityComparison` and `Own` was rejected outright (the possessive form has no
+    /// owner-axis `TargetFilter`). Both now delegate to the single `game::commander`
+    /// runtime authority — the same one `layers.rs` uses for the static form — so `Own`
+    /// is represented exactly instead of dropped, and `Deflecting Swat`'s "a commander"
+    /// free-cast condition remains satisfiable.
+    ///
+    /// Fail-on-revert: collapsing the converter back to the `Any`→`ObjectCount` /
+    /// `Own`→reject split makes the `Own` assertion fail (it becomes `None`), and the
+    /// `Any` assertion fail (it becomes a `QuantityComparison`).
     #[test]
-    fn controls_a_commander_converts_to_object_count() {
-        match shared("you control a commander") {
-            ParsedCondition::QuantityComparison {
-                lhs:
-                    QuantityExpr::Ref {
-                        qty:
-                            QuantityRef::ObjectCount {
-                                filter: TargetFilter::Typed(tf),
-                            },
-                    },
-                comparator: Comparator::GE,
-                rhs: QuantityExpr::Fixed { value: 1 },
-            } => {
-                assert_eq!(tf.controller, Some(ControllerRef::You));
-                assert!(tf.properties.contains(&FilterProp::IsCommander));
-            }
-            other => panic!("expected ObjectCount(IsCommander) >= 1, got {other:?}"),
-        }
+    fn both_commander_phrasings_convert_to_controls_commander() {
+        assert_eq!(
+            shared("you control your commander"),
+            ParsedCondition::ControlsCommander {
+                ownership: CommanderOwnership::Own,
+            },
+        );
+        assert_eq!(
+            parse_restriction_condition("you control your commander"),
+            Some(ParsedCondition::ControlsCommander {
+                ownership: CommanderOwnership::Own,
+            }),
+        );
+        assert_eq!(
+            shared("you control a commander"),
+            ParsedCondition::ControlsCommander {
+                ownership: CommanderOwnership::Any,
+            },
+        );
     }
 
     /// CR 122.1 + CR 711.2a: a counter BAND must never be widened into an "at least"

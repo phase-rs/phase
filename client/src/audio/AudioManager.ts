@@ -32,6 +32,8 @@ class AudioManager {
   private trackOrder: ThemeTrack[] = [];
   private trackIndex = 0;
   private isWarmedUp = false;
+  private disabled = false;
+  private deviceOpenArmed = false;
   private crossfadeInProgress = false;
   /** Incremented on every context/theme change to invalidate stale timeouts. */
   private generation = 0;
@@ -43,9 +45,38 @@ class AudioManager {
   private activeContext: AudioContextName = "menu";
   private battlefieldPhase: GamePhaseTag = "early";
 
+  /**
+   * Permanently skip audio for this session: `warmUp()` becomes a no-op so no
+   * device-open path can run (every other device touch already guards on a
+   * null `ctx`). Set at boot when the shell reports the OS audio server
+   * wedged — WebKitGTK opens the device synchronously on the page main
+   * thread, so opening it then would freeze the page. Invariant: while
+   * disabled, `ctx` stays null across `dispose()`/`restart()` cycles; an
+   * `isWarmedUp`-based fast path must never bypass the `disabled` check.
+   */
+  disable(): void {
+    this.disabled = true;
+  }
+
+  get isDisabled(): boolean {
+    return this.disabled;
+  }
+
+  /**
+   * Allow device-open. Until the boot gate has a verdict, every warmUp()
+   * caller — gesture handlers, VolumeControl restart/ensurePlayback, future
+   * callers — is a no-op, so no UI path (e.g. Tab+Enter through the splash
+   * overlay, which blocks pointers but is not a focus trap) can open the
+   * device before audioDeviceSafe() resolves. ensurePreload() arms this
+   * right after the verdict, on every platform.
+   */
+  armDeviceOpen(): void {
+    this.deviceOpenArmed = true;
+  }
+
   /** Create AudioContext and gain nodes. Apply saved volume preferences. */
   warmUp(): void {
-    if (this.isWarmedUp) return;
+    if (this.disabled || !this.deviceOpenArmed || this.isWarmedUp) return;
     this.ctx = new AudioContext();
     this.sfxGain = this.ctx.createGain();
     this.sfxGain.connect(this.ctx.destination);
@@ -432,7 +463,7 @@ class AudioManager {
 
   /** Return a human-readable diagnostic string for the debug panel. */
   diagnostics(): string {
-    const ctxState = this.ctx?.state ?? "none";
+    const ctxState = this.disabled ? "disabled" : (this.ctx?.state ?? "none");
     const playing = this.currentAudio ? !this.currentAudio.paused : false;
     return `ctx=${ctxState} music=${playing ? "playing" : "stopped"} context=${this.activeContext}`;
   }

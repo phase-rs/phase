@@ -3,6 +3,8 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use engine::parser::oracle::draft_effect_from_oracle_text;
+
 use crate::set_pool::{
     LimitedCardPrint, LimitedSetPool, PackSlot, PackVariant, Rarity, SheetCard, SheetDefinition,
     WeightedSheetChoice,
@@ -89,6 +91,10 @@ struct MtgjsonSheet {
     cards: HashMap<String, u64>,
     total_weight: u64,
     #[serde(default)]
+    allow_duplicates: bool,
+    #[serde(default)]
+    fixed: bool,
+    #[serde(default)]
     foil: bool,
     #[serde(default)]
     balance_colors: bool,
@@ -121,6 +127,8 @@ struct MtgjsonCard {
     /// Full type line (e.g. "Creature — Human Wizard"). Used for frontend sorting.
     #[serde(default, rename = "type")]
     type_line: String,
+    #[serde(default)]
+    text: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +204,7 @@ fn extract_set_pool_indexed(
                     colors: card.colors.clone(),
                     cmc: card.mana_value as u8,
                     type_line: card.type_line.clone(),
+                    draft_effect: card.text.as_deref().and_then(draft_effect_from_oracle_text),
                 });
             } else {
                 eprintln!(
@@ -212,6 +221,8 @@ fn extract_set_pool_indexed(
             SheetDefinition {
                 cards,
                 total_weight: mtg_sheet.total_weight,
+                allow_duplicates: mtg_sheet.allow_duplicates,
+                fixed: mtg_sheet.fixed,
                 foil: mtg_sheet.foil,
                 balance_colors: mtg_sheet.balance_colors,
             },

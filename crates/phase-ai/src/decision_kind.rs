@@ -20,7 +20,9 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         WaitingFor::MulliganDecision { .. } | WaitingFor::OpeningHandBottomCards { .. } => {
             DecisionKind::Mulligan
         }
-        WaitingFor::ManaPayment { .. } | WaitingFor::PhyrexianPayment { .. } => {
+        WaitingFor::ManaPayment { .. }
+        | WaitingFor::ManaSourceSelection { .. }
+        | WaitingFor::PhyrexianPayment { .. } => {
             DecisionKind::ManaPayment
         }
         WaitingFor::ChooseXValue { .. } => DecisionKind::ChooseX,
@@ -58,7 +60,9 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
             GameAction::PlayLand { .. } => DecisionKind::PlayLand,
             GameAction::CastSpell { .. } => DecisionKind::CastSpell,
             GameAction::ActivateAbility { .. } => DecisionKind::ActivateAbility,
-            GameAction::TapLandForMana { .. } | GameAction::UntapLandForMana { .. } => {
+            GameAction::TapLandForMana { .. }
+            | GameAction::ActivateManaSource { .. }
+            | GameAction::UntapLandForMana { .. } => {
                 DecisionKind::ActivateManaAbility
             }
             // Default: any other priority-time action (PassPriority, special
@@ -69,9 +73,12 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         // All other WaitingFor states are mechanical/forced choices that no
         // tactical policy currently routes on. Map them to ActivateAbility as
         // the catch-all bucket so policies that explicitly opt in still run.
-        WaitingFor::ReplacementChoice { .. }
+        WaitingFor::ResolveAllConsent { .. }
+        | WaitingFor::ResolveAllReady { .. }
+        | WaitingFor::ReplacementChoice { .. }
         | WaitingFor::MeldPairChoice { .. }
         | WaitingFor::MeldAttackTargetChoice { .. }
+        | WaitingFor::EntryAttackTargetChoice { .. }
         | WaitingFor::OrderTriggers { .. }
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
@@ -151,6 +158,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::ClashChooseOpponent { .. }
         | WaitingFor::ChooseFromZoneOpponentChooser { .. }
         | WaitingFor::ChooseAnnouncingOpponent { .. }
+        | WaitingFor::ChooseGiftRecipient { .. }
         | WaitingFor::ClashCardPlacement { .. }
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesChooseOpponent { .. }
@@ -197,7 +205,8 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::LoopShortcut { .. }
         | WaitingFor::RespondToShortcut { .. }
         | WaitingFor::PrecastCopyShortcutOffer { .. }
-        | WaitingFor::RespondToPrecastCopyShortcut { .. } => DecisionKind::ActivateAbility,
+        | WaitingFor::RespondToPrecastCopyShortcut { .. }
+        | WaitingFor::EntryControllerChoice { .. } => DecisionKind::ActivateAbility,
     }
 }
 
@@ -337,6 +346,9 @@ mod tests {
                         },
                         ability_index: None,
                         mana_type: engine::types::mana::ManaType::Green,
+                        output: engine::types::mana::ManaSourceOutput::Concrete(
+                            engine::types::mana::ManaType::Green,
+                        ),
                         atomic_combination: None,
                         restrictions: Vec::new(),
                         penalty: engine::types::mana::ManaSourcePenalty::None,

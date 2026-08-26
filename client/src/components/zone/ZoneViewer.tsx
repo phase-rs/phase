@@ -6,7 +6,6 @@ import { CardImage } from "../card/CardImage.tsx";
 import { objectImageProps } from "../../services/cardImageLookup.ts";
 import { ModalPanelShell } from "../ui/ModalPanelShell.tsx";
 import { ScrollableCardStrip } from "../modal/ChoiceOverlay.tsx";
-import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -64,27 +63,10 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
   const cards = useMemo(() => {
     if (!objects) return [];
     const resolved = zoneIds.map((id) => objects[id]).filter(Boolean) as GameObject[];
-    // CR 701.20: the library viewer shows only the cards the engine has revealed
-    // to this viewer (top-of-library reveals + private looks), top-first.
-    // Unrevealed cards are omitted entirely — visibility is gated on the engine's
-    // reveal sets, never inferred from name redaction (single-player renders the
-    // raw, unredacted state).
+    // The library viewer shows only the cards whose identities Rust projected
+    // for this viewer, top-first. Unrevealed cards are omitted entirely.
     if (zone === "library") {
-      // The "look at the top card of your library" capability (Future Sight,
-      // Bolas's Citadel, Oracle of Mul Daya) is a continuous static that exposes
-      // the OWNER's own top card without adding it to revealed_cards/private_look
-      // — mirror LibraryPile's `peek` clause so that top still shows (and stays
-      // castable) through the modal.
-      const ownTopId =
-        viewerId === playerId &&
-        (gameState?.players[playerId]?.can_look_at_top_of_library ?? false)
-          ? gameState?.players[playerId]?.library?.[0]
-          : undefined;
-      return resolved.filter(
-        (obj) =>
-          isLibraryCardRevealedToViewer(gameState, obj.id, viewerId) ||
-          obj.id === ownTopId,
-      );
+      return resolved.filter((obj) => isLibraryCardRevealedToViewer(gameState, obj.id, viewerId));
     }
     return resolved;
   }, [objects, zoneIds, zone, gameState, viewerId, playerId]);
@@ -236,18 +218,12 @@ function ZoneCard({
   onCast: () => void;
   onDelve: () => void;
 }) {
-  const inspectObject = useUiStore((s) => s.inspectObject);
-  const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
+  // `hoverProps` owns the long-press → sticky-preview gesture and swallows the
+  // click that follows it in the capture phase, so this component needs neither
+  // its own useLongPress nor a firedRef guard here.
   const hoverProps = useInspectHoverProps();
-  const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(
-    useCallback(() => {
-      inspectObject(obj.id);
-      setPreviewSticky(true);
-    }, [inspectObject, setPreviewSticky, obj.id]),
-  );
 
   const handleClick = useCallback((e: React.MouseEvent) => {
-    if (longPressFired.current) { longPressFired.current = false; return; }
     if (useUiStore.getState().debugInteractionMode) {
       e.stopPropagation();
       useUiStore.getState().openDebugContextMenu({ objectId: obj.id, x: e.clientX, y: e.clientY });
@@ -256,7 +232,7 @@ function ZoneCard({
     if (isValidTarget) { onTarget(); return; }
     if (canDelve) { onDelve(); return; }
     if (canCast) onCast();
-  }, [obj.id, isValidTarget, canDelve, canCast, onTarget, onDelve, onCast, longPressFired]);
+  }, [obj.id, isValidTarget, canDelve, canCast, onTarget, onDelve, onCast]);
 
   return (
     <div
@@ -272,7 +248,6 @@ function ZoneCard({
       title={canCast && !isValidTarget ? castTitle : undefined}
       {...hoverProps(obj.id)}
       onClick={handleClick}
-      {...longPressHandlers}
     >
       {/* Resolve the image via the engine's printed_ref (oracle_id + face)
           like every other object-rendering modal — name-only lookup fails for

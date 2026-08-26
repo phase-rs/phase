@@ -1,7 +1,7 @@
 {
   "name": "phase-rs-client",
   "private": true,
-  "version": "0.35.1",
+  "version": "0.64.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -24,7 +24,7 @@
     "@tailwindcss/vite": "^4.2.1",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-process": "^2.3.1",
-    "@tauri-apps/plugin-shell": "^2.3.5",
+    "@tauri-apps/plugin-opener": "2.5.4",
     "@tauri-apps/plugin-updater": "^2.10.0",
     "fflate": "^0.8.2",
     "framer-motion": "^12.35.1",
@@ -35,10 +35,9 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-i18next": "^17.0.8",
-    "react-router": "^7.15.1",
+    "react-router": "^7.18.0",
     "tailwindcss": "^4.2.1",
     "three": "^0.184.0",
-    "vite-plugin-top-level-await": "^1.5.0",
     "vite-plugin-wasm": "^3.4.1",
     "zustand": "^5.0.11"
   },

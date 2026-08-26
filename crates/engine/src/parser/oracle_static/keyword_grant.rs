@@ -4,6 +4,8 @@
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use nom::character::complete::alphanumeric1;
+use nom::combinator::not;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RuleStaticPredicate {
@@ -414,15 +416,10 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
         // correctly. Each qualifier consumes its own bytes.
         let mut cursor = after_spells;
 
-        // Parse optional zone qualifier: "from exile", "from your graveyard"
-        let zone_filter = if let Ok((rest, zone)) = alt((
-            value(Zone::Exile, tag::<_, _, VE<'_>>("from exile")),
-            value(Zone::Hand, tag("from your hand")),
-        ))
-        .parse(cursor)
-        {
-            cursor = rest.trim_start();
-            Some(FilterProp::InZone { zone })
+        // Parse optional zone qualifier via the shared authority below.
+        let zone_filter = if let Some((rest, prop)) = parse_cast_origin_zone_qualifier(cursor) {
+            cursor = rest;
+            Some(prop)
         } else {
             None
         };
@@ -678,6 +675,28 @@ pub(crate) fn parse_cast_as_though_flash_static(
         .description(text.to_string())
         .active_zones(vec![Zone::Battlefield]),
     )
+}
+
+/// CR 601.2a: Optional origin-zone qualifier on a "spell(s) you cast" subject —
+/// "from exile" / "from your hand". Single authority for the recognized zone
+/// list, shared by the keyword-grant subject walk and the alternative-cost
+/// grant lowering (`parse_spells_alternative_cost`). The runtime spell-filter
+/// path compares `FilterProp::InZone` against the cast's ORIGIN zone
+/// (`spell_object_matches_filter_inner`), so the lowered prop means "cast from
+/// that zone", not "currently in that zone".
+pub(crate) fn parse_cast_origin_zone_qualifier(input: &str) -> Option<(&str, FilterProp)> {
+    // Word boundary: "from exile" must not accept "from exiled..." (the repo's
+    // parser doctrine — near-miss tokens reject, PR #7543's pattern).
+    terminated(
+        alt((
+            value(Zone::Exile, tag::<_, _, OracleError<'_>>("from exile")),
+            value(Zone::Hand, tag("from your hand")),
+        )),
+        not(alphanumeric1),
+    )
+    .parse(input)
+    .ok()
+    .map(|(rest, zone)| (rest.trim_start(), FilterProp::InZone { zone }))
 }
 
 pub(crate) fn apply_spell_keyword_subject_constraints(
@@ -1647,6 +1666,11 @@ fn rebind_source_scope_to_recipient(
         } => QuantityRef::Power {
             scope: ObjectScope::Recipient,
         },
+        QuantityRef::BasePower {
+            scope: ObjectScope::Source,
+        } => QuantityRef::BasePower {
+            scope: ObjectScope::Recipient,
+        },
         QuantityRef::Toughness {
             scope: ObjectScope::Source,
         } => QuantityRef::Toughness {
@@ -1670,9 +1694,11 @@ pub(crate) fn push_grant_clause_modifications(
     // BARE (unquoted) keyword token — granted activated/triggered abilities are
     // quoted and stripped to a separate path (strip_quoted_segments at :645 +
     // parse_quoted_ability_modifications at :798) before extract_keyword_clause
-    // runs, so any ". " here can only introduce a trailing inert prose sentence
+    // runs, so any ". " here can only introduce a trailing rider sentence
     // (e.g. Benevolent Blessing's SBA-exemption "This effect doesn't remove ...").
-    // Drop it so the keyword sentence reaches map_keyword clean.
+    // Drop it so the keyword sentence reaches map_keyword clean; the rider itself
+    // is recovered onto the hosting `StaticDefinition` via
+    // `parse_protection_does_not_remove` (CR 702.16n/p).
     let part =
         match super::oracle_nom::bridge::split_once_on_lower(part, &part.to_lowercase(), ". ") {
             Some((first, _)) => first,
@@ -1756,7 +1782,7 @@ pub(crate) fn push_grant_clause_modifications(
     // equip {0}") is the equip activated ability — not an inert AddKeyword.
     // Mirrors `classify_quoted_inner`'s pre-keyword equip dispatch.
     if nom_tag_lower(&part_lower, &part_lower, "equip").is_some() {
-        if let Some(ability) = super::oracle::try_parse_equip(part_trimmed) {
+        if let Some(ability) = super::oracle::try_parse_equip_lowered(part_trimmed) {
             modifications.push(ContinuousModification::GrantAbility {
                 definition: Box::new(ability),
             });
@@ -1908,7 +1934,7 @@ pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModific
     // `starts_with` guard is required — without it any quoted line would be
     // mis-parsed as equip.
     if nom_tag_lower(&lower, &lower, "equip").is_some() {
-        if let Some(ability) = super::oracle::try_parse_equip(&ability_text) {
+        if let Some(ability) = super::oracle::try_parse_equip_lowered(&ability_text) {
             return vec![ContinuousModification::GrantAbility {
                 definition: Box::new(ability),
             }];
@@ -1924,6 +1950,31 @@ pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModific
     // CR 113.3d + CR 604.1: Static-line text → GrantStaticAbility / AddStaticMode.
     if let Some(static_modifications) = parse_quoted_rule_static_modifications(&ability_text) {
         return static_modifications;
+    }
+
+    // CR 614.1a + CR 614.6 + CR 201.5b: Object-hosted replacement rider — "If ~
+    // would leave the battlefield, exile it instead of putting it anywhere else."
+    // (`~` because `normalize_card_name_refs` rewrote the "this creature/permanent/
+    // land" self-reference card-wide). The parser IS the detector: route through
+    // the shared `try_parse_leave_battlefield_exile_replacement` combinator and,
+    // on a hit, grant the replacement to the recipient via `GrantReplacement` so
+    // the `~` binds to the object that gains the ability (the reanimated
+    // permanent), not the granting source.
+    //
+    // CR 611.2a + CR 613.1f: the granted definition is built from the UNSTAMPED
+    // `leave_battlefield_exile_replacement` constructor, never from the detector's
+    // `AddTargetReplacement` payload — that standalone payload carries
+    // `RestrictionExpiry::UntilHostLeavesPlay` (#6538). A granted replacement's
+    // lifetime is governed by the granting continuous effect's duration and is
+    // re-derived every layer pass, so it must not carry a host-lifetime stamp:
+    // #6538's `is_runtime_host_lifetime_replacement` keys base-install /
+    // non-copiable / host-exit-prune off exactly that stamp, and a base-installed
+    // granted rider would survive the granting effect lapsing (Elemental
+    // Expressionist's "until end of turn" grant would become permanent).
+    if super::oracle_effect::try_parse_leave_battlefield_exile_replacement(&lower).is_some() {
+        return vec![ContinuousModification::GrantReplacement {
+            replacement: Box::new(super::oracle_effect::leave_battlefield_exile_replacement()),
+        }];
     }
 
     // CR 113 / CR 117 fallback: spell/activated text → GrantAbility.
@@ -1958,4 +2009,88 @@ pub(crate) fn split_keyword_list(text: &str) -> Vec<Cow<'_, str>> {
     // Reuses the building block from oracle_keyword.rs which handles inline,
     // comma-continuation, and Oxford comma protection patterns.
     super::oracle_keyword::expand_protection_parts(&parts)
+}
+
+/// CR 702.16n / CR 702.16p: Parse the trailing "This effect doesn't remove …"
+/// rider that accompanies a protection grant (Flickering Ward, Ward cycle,
+/// Spectra Ward, Benevolent Blessing). Returns `None` when the rider is absent.
+///
+/// Combinator-based word-boundary scan (parser-combinator gate): tries the
+/// fixed rider prefix at each word start so the sentence may follow any
+/// protection grant phrasing.
+pub(crate) fn parse_protection_does_not_remove(
+    text: &str,
+) -> Option<crate::types::ability::ProtectionDoesNotRemove> {
+    use nom::branch::alt;
+    use nom::bytes::complete::tag;
+    use nom::combinator::value;
+    use nom::Parser;
+
+    let lower = text.to_lowercase();
+    let mut remaining = lower.as_str();
+    while !remaining.is_empty() {
+        if let Ok((rest, ())) = value(
+            (),
+            alt((
+                tag::<_, _, nom::error::Error<&str>>("this effect doesn't remove "),
+                tag("this effect does not remove "),
+            )),
+        )
+        .parse(remaining)
+        {
+            let rest = rest.trim().trim_end_matches('.').trim();
+            return parse_does_not_remove_object(rest);
+        }
+        remaining = remaining
+            .find(' ')
+            .map_or("", |i| remaining[i + 1..].trim_start());
+    }
+    None
+}
+
+/// CR 702.16n / CR 702.16p: Object phrase after "doesn't remove ".
+fn parse_does_not_remove_object(
+    rest: &str,
+) -> Option<crate::types::ability::ProtectionDoesNotRemove> {
+    use crate::types::ability::ProtectionDoesNotRemove;
+    use nom::branch::alt;
+    use nom::bytes::complete::tag;
+    use nom::combinator::value;
+    use nom::Parser;
+
+    // Longest matches first so Benevolent Blessing doesn't collapse to Auras.
+    // `~` is the post-normalization form of "this Aura" (SELF_REF_TYPE_PHRASES):
+    // `parse_oracle_text` rewrites self-refs before static dispatch, so Source
+    // must match both the raw Oracle phrase and the tilde form.
+    alt((
+        value(
+            ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached,
+            alt((
+                tag::<_, _, nom::error::Error<&str>>(
+                    "auras and equipment you control that are already attached to it",
+                ),
+                tag("auras and equipment you control that are already attached to them"),
+            )),
+        ),
+        value(
+            ProtectionDoesNotRemove::Source,
+            alt((tag("this aura"), tag("~"))),
+        ),
+        value(ProtectionDoesNotRemove::Auras, tag("auras")),
+    ))
+    .parse(rest)
+    .ok()
+    .and_then(|(leftover, exemption)| leftover.trim().is_empty().then_some(exemption))
+}
+
+/// CR 702.16n / CR 702.16p: Stamp a parsed protection SBA-exemption rider onto
+/// a continuous static when the Oracle text carries one.
+pub(crate) fn with_protection_does_not_remove(
+    def: crate::types::ability::StaticDefinition,
+    text: &str,
+) -> crate::types::ability::StaticDefinition {
+    match parse_protection_does_not_remove(text) {
+        Some(exemption) => def.protection_does_not_remove(exemption),
+        None => def,
+    }
 }

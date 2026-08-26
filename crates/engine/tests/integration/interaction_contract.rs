@@ -1,36 +1,45 @@
+use std::sync::Arc;
+
 use engine::analysis::decision_template::{
     DecisionPoint, DecisionPointKind, DecisionSlot, IterationCount, ShortcutDecisionSchema,
 };
 use engine::game::engine::apply;
 use engine::game::interaction::{
-    bind_interaction_authority, derive_viewer_interaction, preview_interaction, submit_interaction,
+    bind_interaction_authority, derive_viewer_interaction, preview_interaction,
+    resolve_interaction_response, submit_interaction,
 };
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::visibility::filter_state_for_viewer;
+use engine::game::DeckEntry;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, Chooser, CounterCostSelection,
-    Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef, TypedFilter, ZoneOwner,
+    AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, Chooser, ChosenAttribute,
+    CounterCostSelection, Effect, ManaContribution, ManaProduction, QuantityExpr, ResolvedAbility,
+    SacrificeCost, TargetFilter, TargetRef, TypedFilter, ZoneOwner,
 };
 use engine::types::actions::{GameAction, MulliganChoice};
+use engine::types::card::CardFace;
 use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{
     AlternativeCastKeyword, AutoPassMode, CastPaymentMode, GameState, MulliganBottomEntry,
     MulliganDecisionEntry, MulliganDecisionPhase, OpeningHandBottomReason, PendingTriggerSummary,
-    TurnBoundary, WaitingFor,
+    PlayerDeckPool, TurnBoundary, WaitingFor,
 };
-use engine::types::identifiers::CardId;
+use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::interaction::{
-    InteractionActionCode, InteractionAvailability, InteractionChoiceId,
+    AmountAssignment, InteractionActionCode, InteractionAvailability, InteractionChoiceId,
+    InteractionManaAbilityActivationScope, InteractionManaColor, InteractionManaRestriction,
     InteractionOpportunityResponse, InteractionOutcomeCode, InteractionPresentationSurface,
     InteractionPreviewRequest, InteractionPreviewStatus, InteractionReasonCode,
     InteractionResponse, InteractionResponseSpec, InteractionRoleCode, InteractionSessionId,
-    InteractionShortcutDecision, InteractionShortcutPin, InteractionShortcutPointKind,
-    InteractionShortcutResponseCode, InteractionSubmission, PreviewRequestId,
-    MAX_INTERACTION_LIST_LEN,
+    InteractionShortcutCountSpec, InteractionShortcutDecision, InteractionShortcutPin,
+    InteractionShortcutPointKind, InteractionShortcutPreview, InteractionShortcutPreviewEntry,
+    InteractionShortcutPreviewFamily, InteractionShortcutResponseCode, InteractionSubmission,
+    PreviewRequestId, MAX_INTERACTION_LIST_LEN,
 };
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::match_config::MatchPhase;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -194,7 +203,8 @@ fn priority_cast_exposes_auto_and_manual_and_opaque_manual_submission_starts_pay
                 matches!(
                     surface,
                     InteractionPresentationSurface::Action {
-                        code: InteractionActionCode::CastSpell
+                        code: InteractionActionCode::CastSpell,
+                        ..
                     }
                 )
             }) && choice.surfaces.iter().any(|surface| {
@@ -284,6 +294,40 @@ fn bottom_card_opportunities_use_and_only_materialize_select_responses() {
 }
 
 #[test]
+fn resolving_a_response_materializes_the_advertised_action_under_the_same_authorization() {
+    let mut state = GameState::new_two_player(42);
+    bind(&mut state, "resolve-seam");
+    let witness = progress_witness(&state, P0);
+
+    // Authorization parity with `submit_interaction` is the entire risk of a
+    // non-mutating sibling: without the actor check it would become a way to
+    // materialize — and therefore to read — a decision belonging to another
+    // seat. Nothing here asserts that the state is unchanged, because
+    // `resolve_interaction_response` takes `&GameState`: non-mutation is a
+    // borrow-checker guarantee, and a test of it would pass for reasons that
+    // have nothing to do with this function.
+    let unauthorized = resolve_interaction_response(&state, P1, &witness)
+        .expect_err("resolving authorizes against the actor, not merely the interaction id");
+    assert_eq!(unauthorized.code, InteractionReasonCode::NotAuthorized);
+
+    let action = resolve_interaction_response(&state, P0, &witness)
+        .expect("the advertised progress witness resolves to the action it denotes");
+    assert_eq!(action, GameAction::PassPriority);
+
+    // The same witness really is submittable, so the resolution above concerns a
+    // live decision rather than one the engine would have refused anyway.
+    // Equivalence between the two paths needs no assertion: `submit_interaction`
+    // delegates here, so they cannot disagree.
+    let applied = submit_interaction(&mut state, P0, witness)
+        .expect("the witness the projection advertised is submittable");
+    assert_eq!(
+        applied.action,
+        GameAction::PassPriority,
+        "the post-success transaction exposes the exact engine-materialized action for replay"
+    );
+}
+
+#[test]
 fn priority_projection_previews_submits_and_rejects_stale_or_unauthorized_ids() {
     let mut state = GameState::new_two_player(42);
     bind(&mut state, "priority");
@@ -349,6 +393,505 @@ fn priority_projection_previews_submits_and_rejects_stale_or_unauthorized_ids() 
     )
     .expect_err("an accepted submission consumes its opaque capability");
     assert_eq!(stale.code, InteractionReasonCode::StaleInteraction);
+}
+
+#[test]
+fn attachment_fans_are_per_interaction_filtered_and_direct() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Fan Host", 2, 2).id();
+    let attachment = scenario.add_creature(P0, "Fan Attachment", 1, 1).id();
+    let unrelated = scenario.add_creature(P0, "Fan Unrelated", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        engine::game::effects::attach::attach_to(state, attachment, host);
+        state.objects.get_mut(&attachment).unwrap().tapped = true;
+        state.objects.get_mut(&unrelated).unwrap().tapped = true;
+        state.waiting_for = WaitingFor::ChooseUntapSubset {
+            player: P0,
+            group: vec![attachment, unrelated],
+            max: 1,
+        };
+        bind(state, "attachment-fan");
+    }
+
+    let view = viewer_interaction(runner.state(), P0);
+    assert!(
+        !view.opportunities.is_empty(),
+        "reach guard: the selected attachment has a live opportunity"
+    );
+    assert_eq!(view.attachment_fans.len(), 1);
+    let fan = view
+        .attachment_fans
+        .get(&host.0)
+        .expect("the engine keys the fan by its visible host object");
+    assert_eq!(fan.host_id, host.0);
+    assert_eq!(fan.children.len(), 1);
+    assert_eq!(fan.children[0].object_id, attachment.0);
+    let submission = fan.children[0].submission.clone();
+    submit_interaction(runner.state_mut(), P0, submission).expect(
+        "the engine-authored fan submission resolves through production interaction dispatch",
+    );
+    assert!(
+        !runner.state().objects[&attachment].tapped,
+        "the published attachment submission applies its selected untap"
+    );
+
+    let mut mismatched_filtered = filter_state_for_viewer(runner.state(), P0);
+    mismatched_filtered
+        .objects
+        .get_mut(&host)
+        .expect("fixture host remains visible")
+        .attachments
+        .clear();
+    let mismatched = derive_viewer_interaction(runner.state(), &mismatched_filtered, P0);
+    assert!(
+        mismatched.attachment_fans.is_empty(),
+        "a stale host back-link must not expose an attachment fan from authoritative state"
+    );
+
+    let unauthorized = viewer_interaction(runner.state(), P1);
+    assert!(
+        unauthorized.attachment_fans.is_empty(),
+        "non-authorized viewers receive no attachment sidecar before any opportunity derivation"
+    );
+}
+
+/// Attaches `attachment` to `host` and asserts the engine wrote both directions
+/// of the relationship, so a later membership assertion cannot pass on a
+/// half-built fixture.
+fn attach_and_assert_linked(state: &mut GameState, attachment: ObjectId, host: ObjectId) {
+    engine::game::effects::attach::attach_to(state, attachment, host);
+    assert!(
+        state.objects[&host].attachments.contains(&attachment),
+        "fixture guard: the host must list its attachment"
+    );
+    assert_eq!(
+        state.objects[&attachment].attached_to,
+        Some(engine::game::game_object::AttachTarget::Object(host)),
+        "fixture guard: the attachment must point back at its host"
+    );
+}
+
+/// A host wearing two attachments, one of them itself a host, with exactly one
+/// published pick in the whole subtree.
+///
+/// This is the shape that made membership and affordance look like one question:
+/// the engine publishes a fan per DIRECT host and only for a child with exactly
+/// one legal choice, so a consumer that read the fans as the membership list
+/// dropped the two cards nothing was published for — off the only surface that
+/// shows what is attached at all.
+#[test]
+fn attachment_views_publish_the_whole_subtree_whatever_is_pickable() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "View Host", 2, 2).id();
+    let inner = scenario.add_creature(P0, "View Inner", 1, 1).id();
+    let nested = scenario.add_creature(P0, "View Nested", 1, 1).id();
+    let sibling = scenario.add_creature(P0, "View Sibling", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        attach_and_assert_linked(state, inner, host);
+        attach_and_assert_linked(state, nested, inner);
+        attach_and_assert_linked(state, sibling, host);
+        state.objects.get_mut(&nested).unwrap().tapped = true;
+        // Only the nested card is a candidate, so only the INTERMEDIATE host
+        // gets a fan — the outer host gets none at all.
+        state.waiting_for = WaitingFor::ChooseUntapSubset {
+            player: P0,
+            group: vec![nested],
+            max: 1,
+        };
+        bind(state, "attachment-view");
+    }
+
+    let view = priority_view(runner.state());
+    assert_eq!(
+        view.attachment_fans.keys().copied().collect::<Vec<_>>(),
+        vec![inner.0],
+        "reach guard: the engine publishes its pick under the direct host only"
+    );
+
+    let outer = view
+        .attachment_views
+        .get(&host.0)
+        .expect("the outer host publishes its own membership");
+    assert_eq!(
+        outer
+            .cards
+            .iter()
+            .map(|card| card.object_id)
+            .collect::<Vec<_>>(),
+        vec![inner.0, nested.0, sibling.0],
+        "membership is the whole subtree in depth-first order, not the published picks"
+    );
+    assert!(
+        outer.cards[0].submission.is_none() && outer.cards[2].submission.is_none(),
+        "a card the engine published no pick for is still a member, without a submission"
+    );
+    let nested_submission = outer.cards[1]
+        .submission
+        .clone()
+        .expect("a pick published under a nested host reaches the outer host's view");
+
+    let intermediate = view
+        .attachment_views
+        .get(&inner.0)
+        .expect("an attachment that is itself a host publishes its own membership");
+    assert_eq!(
+        intermediate
+            .cards
+            .iter()
+            .map(|card| card.object_id)
+            .collect::<Vec<_>>(),
+        vec![nested.0],
+        "a nested host lists what hangs on it, and never itself"
+    );
+
+    submit_interaction(runner.state_mut(), P0, nested_submission).expect(
+        "the submission published in the view resolves through production interaction dispatch",
+    );
+    assert!(
+        !runner.state().objects[&nested].tapped,
+        "the nested card's published submission applies its selected untap"
+    );
+}
+
+/// Membership answers a different question than the fan does, and must not
+/// inherit its authorization gate: an attached permanent is an object in play
+/// (CR 301.5 / CR 303.4), so it stays visible while another player holds the
+/// turn. Both directions of the relationship still have to agree.
+#[test]
+fn attachment_views_follow_visibility_while_fans_follow_authorization() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Link Host", 2, 2).id();
+    let attachment = scenario.add_creature(P0, "Link Attachment", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        attach_and_assert_linked(state, attachment, host);
+        state.objects.get_mut(&attachment).unwrap().tapped = true;
+        state.waiting_for = WaitingFor::ChooseUntapSubset {
+            player: P0,
+            group: vec![attachment],
+            max: 1,
+        };
+        bind(state, "attachment-view-links");
+    }
+
+    let unauthorized = viewer_interaction(runner.state(), P1);
+    assert!(
+        unauthorized.attachment_fans.is_empty(),
+        "reach guard: the pick sidecar stays authorization-scoped"
+    );
+    let opponent_view = unauthorized
+        .attachment_views
+        .get(&host.0)
+        .expect("the opponent still sees what is attached to a battlefield permanent");
+    assert_eq!(
+        opponent_view
+            .cards
+            .iter()
+            .map(|card| card.object_id)
+            .collect::<Vec<_>>(),
+        vec![attachment.0]
+    );
+    assert!(
+        opponent_view.cards[0].submission.is_none(),
+        "a viewer who may not submit is offered nothing to submit"
+    );
+
+    let mut stale_back_link = filter_state_for_viewer(runner.state(), P0);
+    stale_back_link
+        .objects
+        .get_mut(&host)
+        .expect("fixture host remains visible")
+        .attachments
+        .clear();
+    assert!(
+        derive_viewer_interaction(runner.state(), &stale_back_link, P0)
+            .attachment_views
+            .is_empty(),
+        "a host that no longer lists the attachment publishes no membership for it"
+    );
+
+    let mut stale_forward_link = filter_state_for_viewer(runner.state(), P0);
+    stale_forward_link
+        .objects
+        .get_mut(&attachment)
+        .expect("fixture attachment remains visible")
+        .attached_to = None;
+    assert!(
+        derive_viewer_interaction(runner.state(), &stale_forward_link, P0)
+            .attachment_views
+            .is_empty(),
+        "an attachment that no longer points back at its host publishes no membership"
+    );
+}
+
+/// The projection crosses the generated adapter as the client reads it: camel
+/// case on the wire, a `null` submission for a card with no published pick.
+#[test]
+fn attachment_views_survive_the_adapter_round_trip() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Wire Host", 2, 2).id();
+    let attachment = scenario.add_creature(P0, "Wire Attachment", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        attach_and_assert_linked(state, attachment, host);
+        bind(state, "attachment-view-wire");
+    }
+
+    let view = priority_view(runner.state());
+    assert!(view.attachment_views.contains_key(&host.0));
+    let wire = serde_json::to_string(&view).expect("serialize the viewer projection");
+    assert!(
+        wire.contains("\"attachmentViews\"") && wire.contains("\"objectId\""),
+        "the adapter reads camel case: {wire}"
+    );
+    assert!(
+        wire.contains("\"submission\":null"),
+        "a member with no published pick crosses the wire as null: {wire}"
+    );
+    let decoded: engine::types::interaction::ViewerInteraction =
+        serde_json::from_str(&wire).expect("deserialize the viewer projection");
+    assert_eq!(decoded.attachment_views, view.attachment_views);
+
+    // A projection written before this field existed still loads.
+    let mut legacy: serde_json::Value = serde_json::from_str(&wire).expect("reparse as value");
+    legacy
+        .as_object_mut()
+        .expect("the projection is an object")
+        .remove("attachmentViews");
+    let legacy: engine::types::interaction::ViewerInteraction =
+        serde_json::from_value(legacy).expect("a projection without the field still loads");
+    assert!(legacy.attachment_views.is_empty());
+}
+
+/// Hangs one more copy of the engine-written attachment `seed` on `host`,
+/// writing both directions exactly as `attach::attach_to` wrote them for the
+/// seed itself. Cloning rather than re-attaching keeps a ten-thousand-row
+/// fixture cheap without inventing a relationship shape of its own.
+fn clone_attachment_onto(
+    state: &mut GameState,
+    seed: ObjectId,
+    host: ObjectId,
+    next_id: &mut u64,
+) -> ObjectId {
+    let id = ObjectId(*next_id);
+    *next_id += 1;
+    let mut copy = state.objects[&seed].clone();
+    copy.id = id;
+    copy.attachments.clear();
+    copy.attached_to = Some(engine::game::game_object::AttachTarget::Object(host));
+    state.objects.insert(id, copy);
+    state.battlefield.push_back(id);
+    state
+        .objects
+        .get_mut(&host)
+        .expect("host exists")
+        .attachments
+        .push(id);
+    id
+}
+
+fn next_object_id(state: &GameState) -> u64 {
+    state.objects.keys().map(|id| id.0).max().unwrap_or(0) + 1
+}
+
+/// Membership is derived before the authorization, session and slot gates, so
+/// an early return carries as much of it as the derived path does. Only the
+/// whole-projection bound charges the map and every card in it: each view below
+/// is inside the per-view cap, and it is their SUM that has to fail closed —
+/// otherwise a viewer who may not submit anything at all still receives an
+/// attachment tree of unbounded size.
+///
+/// The same early return ships its membership normally while it fits — that is
+/// `attachment_views_follow_visibility_while_fans_follow_authorization`.
+#[test]
+fn an_early_return_fails_closed_on_the_aggregate_attachment_budget() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Budget Host", 2, 2).id();
+    let seed = scenario.add_creature(P0, "Budget Attachment", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        attach_and_assert_linked(state, seed, host);
+        // Fill the host to the per-view maximum, so no single view is oversized
+        // on its own and only the aggregate can object.
+        let mut next_id = next_object_id(state);
+        while state.objects[&host].attachments.len() < MAX_INTERACTION_LIST_LEN {
+            clone_attachment_onto(state, seed, host, &mut next_id);
+        }
+        bind(state, "attachment-view-budget");
+    }
+    assert!(
+        runner.state().objects[&host]
+            .attachments
+            .iter()
+            .all(|id| runner.state().objects[id].attached_to
+                == runner.state().objects[&seed].attached_to),
+        "fixture guard: every filled row carries the same back-link the engine wrote"
+    );
+
+    let unauthorized = viewer_interaction(runner.state(), P1);
+    assert_eq!(
+        unauthorized.availability,
+        InteractionAvailability::Unsupported {
+            reason: InteractionReasonCode::PayloadTooLarge,
+        },
+        "an early return that cannot be bounded says so instead of shipping the payload"
+    );
+    assert!(
+        unauthorized.attachment_views.is_empty()
+            && unauthorized.attachment_fans.is_empty()
+            && unauthorized.opportunities.is_empty(),
+        "failing the budget drops every unbounded list rather than truncating one"
+    );
+    assert!(
+        !unauthorized.can_submit,
+        "the fail-closed projection keeps the authority answer it was already carrying"
+    );
+}
+
+/// A single direct host whose own subtree passes the per-view cap.
+///
+/// This shape used to be absorbed inside the membership derivation — the host
+/// was skipped, and an over-limit host map was replaced by an empty one — which
+/// handed the budget gate a small, plausible projection it had no reason to
+/// reject. The viewer then read a bounded empty map as an authoritative
+/// "nothing is attached", which is the one answer the engine must never invent.
+///
+/// Read through the unauthorized early return, which is the cheap seat: the
+/// derived path would enumerate every legal action over ten thousand
+/// permanents, and `a_deep_attachment_chain_fails_closed_on_the_aggregate`
+/// already carries the same claim through it.
+#[test]
+fn an_oversized_attachment_tree_fails_closed_instead_of_publishing_an_empty_map() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Wide Host", 2, 2).id();
+    let seed = scenario.add_creature(P0, "Wide Attachment", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        attach_and_assert_linked(state, seed, host);
+        let mut next_id = next_object_id(state);
+        while state.objects[&host].attachments.len() <= MAX_INTERACTION_LIST_LEN {
+            clone_attachment_onto(state, seed, host, &mut next_id);
+        }
+        bind(state, "attachment-view-wide");
+    }
+    let wide = viewer_interaction(runner.state(), P1);
+    assert_eq!(
+        wide.availability,
+        InteractionAvailability::Unsupported {
+            reason: InteractionReasonCode::PayloadTooLarge,
+        },
+        "a host whose own subtree is over the cap fails closed; it is not skipped"
+    );
+    assert!(wide.attachment_views.is_empty() && wide.opportunities.is_empty());
+}
+
+/// The nesting half of the same claim, read through the DERIVED path: every
+/// view is small, and it is the tree that is too large.
+///
+/// A chain is the shape where the derivation's own cost is quadratic — every
+/// ancestor carries the whole tail beneath it — so the row is also the one that
+/// says the budget is charged while membership is derived rather than after it.
+/// At this depth the finished payload would hold 499 500 cards; the derivation
+/// stops one card past the aggregate instead.
+///
+/// The depth is capped by what the derived path costs elsewhere, not by what the
+/// walk costs: enumerating every legal action over the chain is quadratic too,
+/// and measured on this fixture it runs 1 s at 1 000 links, 14 s at 3 000 and
+/// 109 s at 10 000. `a_cap_depth_attachment_chain_is_refused_before_it_is_built`
+/// carries the depth claim past that ceiling through the cheap seat.
+#[test]
+fn a_deep_attachment_chain_fails_closed_on_the_aggregate() {
+    const CHAIN: usize = 1_000;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let root = scenario.add_creature(P0, "Chain Root", 2, 2).id();
+    let seed = scenario.add_creature(P0, "Chain Link", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        attach_and_assert_linked(state, seed, root);
+        let mut next_id = next_object_id(state);
+        let mut tip = seed;
+        for _ in 1..CHAIN {
+            tip = clone_attachment_onto(state, seed, tip, &mut next_id);
+        }
+        bind(state, "attachment-view-deep");
+    }
+    let deep = priority_view(runner.state());
+    assert_eq!(
+        deep.availability,
+        InteractionAvailability::Unsupported {
+            reason: InteractionReasonCode::PayloadTooLarge,
+        },
+        "nesting sums the same way: {CHAIN} views of at most {CHAIN} cards each \
+         exceed the aggregate even though none exceeds the per-view cap"
+    );
+    assert!(deep.attachment_views.is_empty());
+}
+
+/// The depth half, at the worst depth there is: a chain exactly
+/// `MAX_INTERACTION_LIST_LEN` links long is the LONGEST one in which no single
+/// view exceeds the per-view cap, so it is precisely the shape a per-host check
+/// cannot catch. One link shorter and the aggregate is smaller; one longer and
+/// the outermost view trips the per-view cap on its own and the derivation stops
+/// at the first host. This is the depth the engine permits, too — CR 732.2's
+/// runaway-cascade guard (`MAX_OBJECT_GROWTH`, `game::engine`) lets one dispatch
+/// grow the board by 16 000 objects.
+///
+/// The finished payload here holds 49 995 000 cards, the prefix sums of every
+/// nested view. Measured on this fixture, deriving membership in full and
+/// measuring afterwards costs 23.2 s and peaks at 7.4 GB resident; charging the
+/// aggregate as the walk goes costs 0.16 s and 4.7 GB, which is the fixture
+/// itself. The engine ships to WASM, where that difference is linear-memory
+/// exhaustion rather than a slow frame.
+///
+/// The answer is the same either way — the finalizer always refused this payload
+/// — so the row asserts the answer and the cost above is what the change is for.
+/// Read through the unauthorized early return, which reaches the same membership
+/// derivation without the action enumeration the derived path owes over ten
+/// thousand permanents (109 s, measured); the row above carries the same
+/// fail-closed answer through the derived path at an affordable depth.
+#[test]
+fn a_cap_depth_attachment_chain_is_refused_before_it_is_built() {
+    const CHAIN: usize = MAX_INTERACTION_LIST_LEN;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let root = scenario.add_creature(P0, "Cap Depth Root", 2, 2).id();
+    let seed = scenario.add_creature(P0, "Cap Depth Link", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        attach_and_assert_linked(state, seed, root);
+        let mut next_id = next_object_id(state);
+        let mut tip = seed;
+        for _ in 1..CHAIN {
+            tip = clone_attachment_onto(state, seed, tip, &mut next_id);
+        }
+        bind(state, "attachment-view-cap-depth");
+    }
+    let deep = viewer_interaction(runner.state(), P1);
+    assert_eq!(
+        deep.availability,
+        InteractionAvailability::Unsupported {
+            reason: InteractionReasonCode::PayloadTooLarge,
+        },
+        "a chain {CHAIN} links deep is refused, not walked to the bottom"
+    );
+    assert!(deep.attachment_views.is_empty() && deep.opportunities.is_empty());
 }
 
 #[test]
@@ -510,7 +1053,8 @@ fn exact_priority_choices_distinguish_two_engine_authored_card_objects() {
                 matches!(
                     surface,
                     InteractionPresentationSurface::Action {
-                        code: InteractionActionCode::PlayLand
+                        code: InteractionActionCode::PlayLand,
+                        ..
                     }
                 )
             })
@@ -760,6 +1304,7 @@ fn alternative_cast_siblings_use_stable_typed_codes() {
         normal_cost: ManaCost::NoCost,
         alternative_cost: Some(ManaCost::NoCost),
         alternative_additional_cost: None,
+        alternative_additional_cost_description: None,
     };
     bind(runner.state_mut(), "alternative-cast-codes");
 
@@ -835,6 +1380,7 @@ fn modal_schema_includes_mode_indices_and_engine_descriptions() {
         surface,
         InteractionPresentationSurface::Action {
             code: InteractionActionCode::CancelCast,
+            ..
         }
     )));
     let descriptions: std::collections::HashSet<_> = choices
@@ -994,7 +1540,8 @@ fn zone_opponent_chooser_exact_choices_surface_distinct_opponents_and_action_cod
             matches!(
                 surface,
                 InteractionPresentationSurface::Action {
-                    code: InteractionActionCode::ChooseZoneOpponentChooser
+                    code: InteractionActionCode::ChooseZoneOpponentChooser,
+                    ..
                 }
             )
         })
@@ -1066,6 +1613,230 @@ fn mana_group_schema_exposes_engine_authored_symbols() {
 }
 
 #[test]
+fn tap_land_for_mana_projects_live_castle_output_per_unit_and_rejects_stale_choice() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let castle = scenario
+        .add_land_from_oracle(
+            P0,
+            "Castle Garenbrig",
+            "{T}: Add {G}.\n{T}: Add {G}{G}{G}{G}{G}{G}. Spend this mana only to cast creature spells or activate abilities of creatures.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    bind(runner.state_mut(), "live-castle-mana-output");
+
+    let view = priority_view(runner.state());
+    let interaction_id = view.opportunities[0].interaction_id.clone();
+    let InteractionOpportunityResponse::ExactChoices { choices } = &view.opportunities[0].response
+    else {
+        panic!("priority is projected as exact choices");
+    };
+    let castle_choices: Vec<_> = choices
+        .iter()
+        .filter(|choice| {
+            choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Action {
+                        code: InteractionActionCode::TapLandForMana,
+                        ..
+                    }
+                )
+            }) && choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Object {
+                        role: InteractionRoleCode::Source,
+                        reference,
+                        ..
+                    } if reference == &castle.0.to_string()
+                )
+            })
+        })
+        .collect();
+    assert_eq!(
+        castle_choices.len(),
+        2,
+        "Castle exposes both mana abilities"
+    );
+
+    let (one_green, six_green) = castle_choices
+        .iter()
+        .map(|choice| {
+            let produced: Vec<_> = choice
+                .surfaces
+                .iter()
+                .filter_map(|surface| match surface {
+                    InteractionPresentationSurface::Mana {
+                        role: InteractionRoleCode::ProducedMana,
+                        symbols,
+                        restrictions,
+                        ..
+                    } => Some((symbols, restrictions)),
+                    _ => None,
+                })
+                .collect();
+            (choice.id.clone(), produced)
+        })
+        .fold(
+            (None, None),
+            |(one, six), (choice_id, produced)| match produced.len() {
+                1 => (Some(choice_id), six),
+                6 => (one, Some((choice_id, produced))),
+                count => panic!("unexpected Castle mana output count: {count}"),
+            },
+        );
+    let one_green = one_green.expect("the unrestricted one-green ability is projected");
+    let (six_green, six_output) = six_green.expect("the restricted six-green ability is projected");
+    assert!(six_output.iter().all(|(symbols, restrictions)| {
+        *symbols == &vec!["G".to_string()]
+            && *restrictions
+                == &vec![InteractionManaRestriction::OnlyForTypeSpellsOrAbilities {
+                    spell_type: "Creature".to_string(),
+                    ability: InteractionManaAbilityActivationScope::OfSpellType,
+                }]
+    }));
+
+    submit_interaction(
+        runner.state_mut(),
+        P0,
+        InteractionSubmission {
+            interaction_id: interaction_id.clone(),
+            response: InteractionResponse::Choose {
+                choice_id: one_green,
+            },
+        },
+    )
+    .expect("the sibling one-green option is a legal activation");
+    let stale = submit_interaction(
+        runner.state_mut(),
+        P0,
+        InteractionSubmission {
+            interaction_id,
+            response: InteractionResponse::Choose {
+                choice_id: six_green,
+            },
+        },
+    )
+    .expect_err("the six-green choice is stale after its sibling tapped the land");
+    assert_eq!(stale.code, InteractionReasonCode::StaleInteraction);
+}
+
+#[test]
+fn tap_land_for_mana_projects_resolved_and_missing_chosen_color_restrictions() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let oracle = "As this land enters, choose a color.\n{T}: Add {C}. Spend this mana only to cast monocolored spells of the chosen color.";
+    let red_source = scenario
+        .add_land_from_oracle(P0, "Red Chosen Color Contract", oracle)
+        .id();
+    let blue_source = scenario
+        .add_land_from_oracle(P0, "Blue Chosen Color Contract", oracle)
+        .id();
+    let missing_choice_source = scenario
+        .add_land_from_oracle(P0, "Missing Chosen Color Contract", oracle)
+        .id();
+    let mut runner = scenario.build();
+    for (source, color) in [(red_source, ManaColor::Red), (blue_source, ManaColor::Blue)] {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&source)
+            .expect("chosen-color source exists")
+            .chosen_attributes
+            .push(ChosenAttribute::Color(color));
+    }
+
+    let projected_restrictions = |state: &mut GameState, source: ObjectId, binding: &str| {
+        bind(state, binding);
+        let view = priority_view(state);
+        let InteractionOpportunityResponse::ExactChoices { choices } =
+            &view.opportunities[0].response
+        else {
+            panic!("priority is projected as exact choices");
+        };
+        choices
+            .iter()
+            .find(|choice| {
+                choice.surfaces.iter().any(|surface| {
+                    matches!(
+                        surface,
+                        InteractionPresentationSurface::Action {
+                            code: InteractionActionCode::TapLandForMana,
+                            ..
+                        }
+                    )
+                }) && choice.surfaces.iter().any(|surface| {
+                    matches!(
+                        surface,
+                        InteractionPresentationSurface::Object {
+                            role: InteractionRoleCode::Source,
+                            reference,
+                            ..
+                        } if reference == &source.0.to_string()
+                    )
+                })
+            })
+            .and_then(|choice| {
+                choice.surfaces.iter().find_map(|surface| match surface {
+                    InteractionPresentationSurface::Mana {
+                        role: InteractionRoleCode::ProducedMana,
+                        restrictions,
+                        ..
+                    } => Some(restrictions.clone()),
+                    _ => None,
+                })
+            })
+            .expect("the chosen-color mana source projects one produced mana unit")
+    };
+
+    assert_eq!(
+        projected_restrictions(runner.state_mut(), red_source, "red-chosen-color-output"),
+        vec![
+            InteractionManaRestriction::OnlyForSpellWithColorCount {
+                comparator: engine::types::interaction::InteractionManaComparator::Equal,
+                count: 1,
+            },
+            InteractionManaRestriction::OnlyForSpellColor {
+                color: InteractionManaColor::Red,
+            },
+        ],
+        "the viewer contract preserves the red source's resolved restriction"
+    );
+
+    assert_eq!(
+        projected_restrictions(runner.state_mut(), blue_source, "blue-chosen-color-output"),
+        vec![
+            InteractionManaRestriction::OnlyForSpellWithColorCount {
+                comparator: engine::types::interaction::InteractionManaComparator::Equal,
+                count: 1,
+            },
+            InteractionManaRestriction::OnlyForSpellColor {
+                color: InteractionManaColor::Blue,
+            },
+        ],
+        "each source projects its own chosen color rather than another source's choice"
+    );
+
+    assert_eq!(
+        projected_restrictions(
+            runner.state_mut(),
+            missing_choice_source,
+            "missing-chosen-color-output"
+        ),
+        vec![
+            InteractionManaRestriction::OnlyForSpellWithColorCount {
+                comparator: engine::types::interaction::InteractionManaComparator::Equal,
+                count: 1,
+            },
+            InteractionManaRestriction::Impossible,
+        ],
+        "a missing choice remains visibly fail-closed instead of appearing unrestricted"
+    );
+}
+
+#[test]
 fn preference_and_failed_actions_preserve_capability_but_same_actor_progress_rotates_it() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -1109,7 +1880,7 @@ fn preference_and_failed_actions_preserve_capability_but_same_actor_progress_rot
 }
 
 #[test]
-fn preference_action_rotates_capability_when_internal_auto_pass_advances() {
+fn preference_action_does_not_advance_auto_pass_or_rotate_capability() {
     let mut state = GameState::new_two_player(42);
     bind(&mut state, "preference-auto-pass");
     let initial = state.active_interaction_slots[0].interaction_id.clone();
@@ -1125,15 +1896,15 @@ fn preference_action_rotates_capability_when_internal_auto_pass_advances() {
         P0,
         GameAction::SetPhaseStops { stops: Vec::new() },
     )
-    .expect("the preference update triggers the configured auto-pass loop");
+    .expect("the actor-scoped preference update is legal");
     assert!(matches!(
         state.waiting_for,
-        WaitingFor::Priority { player: P1 }
+        WaitingFor::Priority { player: P0 }
     ));
     assert!(state
         .active_interaction_slots
         .iter()
-        .all(|slot| slot.interaction_id != initial));
+        .any(|slot| slot.interaction_id == initial));
 }
 
 #[test]
@@ -1994,6 +2765,137 @@ fn trigger_sequence_materializes_arbitrary_permutations_larger_than_four() {
     );
 }
 
+/// NEW-1 — a published CR 732.2a offer carrying `max_iterations: 0` is REJECTED, not
+/// clamped. `elimination_bounds` returns `0` to mean "no legal repetition exists and the
+/// caller must not offer" (CR 704.5a), so repairing it to `1` would render a
+/// one-iteration offer whose single iteration eliminates a player mid-proposal.
+///
+/// LATENT, NOT LIVE: no in-tree producer can emit `0` here — `build_shortcut_schema`'s two
+/// call sites both pass `MAX_SHORTCUT_CYCLES`, the per-viewer projection copies an existing
+/// value, and both `Default` and the `#[serde(default)]` resolve to the cap. Hand-assigning
+/// `max_iterations: 0` IS the loaded/persisted-authority seat, which is exactly the shape a
+/// restored dump can carry. This row is therefore a latent-hole guard, not a live-bug
+/// reproduction.
+///
+/// REVERT-PROBE, and note the FAILURE MODE: delete
+/// `if schema.max_iterations == 0 { return Err(..) }` ⇒ post-edit `max` is
+/// `0u32.min(1000) == 0`, so `suggested.clamp(1, 0)` trips `Ord::clamp`'s
+/// `assert!(min <= max)` and **PANICS** (`min > max. min = 1, max = 0`). That assert is a
+/// PLAIN assert, so it survives release — the guard is load-bearing against an engine
+/// panic on a malformed restored dump, not merely against a bad offer. The probe flips RED
+/// by panic, not by a value mismatch.
+#[test]
+fn loop_shortcut_zero_max_iterations_is_rejected_not_clamped() {
+    let shortcut_state = |max_iterations: u32| {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::LoopShortcut {
+            proposer: P0,
+            predicted_winner: Some(P0),
+            certificate: engine::analysis::loop_check::LoopCertificate {
+                unbounded: Vec::new(),
+                win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
+                mandatory: false,
+                residual_board_delta: engine::analysis::resource::BoardDelta::default(),
+                per_cycle: None,
+            },
+            schema: engine::analysis::decision_template::ShortcutDecisionSchema {
+                iteration_count: engine::analysis::decision_template::IterationCount::Fixed(2),
+                max_iterations,
+                ..Default::default()
+            },
+            declaration: None,
+        };
+        bind(&mut state, "loop-zero-bound");
+        state
+    };
+
+    // ── PAIRED CONTROL, first: the byte-identical schema at the DEFAULT bound projects a
+    //    shortcut schema. Without this the rejection below could be the whole window being
+    //    unsupported for an unrelated reason.
+    let control = shortcut_state(ShortcutDecisionSchema::default().max_iterations);
+    let control_view = priority_view(&control);
+    let InteractionOpportunityResponse::Schema {
+        spec: InteractionResponseSpec::Shortcut { .. },
+        ..
+    } = &control_view.opportunities[0].response
+    else {
+        panic!(
+            "control: the same window at the default bound must project a shortcut schema, \
+             else this row's rejection is not attributable to `max_iterations`"
+        );
+    };
+
+    // ── SUBJECT: the only variable is `max_iterations: 0`.
+    let subject = shortcut_state(0);
+    assert_eq!(
+        priority_view(&subject).availability,
+        InteractionAvailability::Unsupported {
+            reason: InteractionReasonCode::InvalidAuthorityState,
+        },
+        "CR 704.5a: `max_iterations == 0` means NO legal repetition exists, so the offer is \
+         an authority violation to reject — not a number to clamp back up to 1"
+    );
+}
+
+/// CR-12 — the picker's ceiling is the offer's OWN narrowed CR 732.2a bound, never the
+/// raw global safety limit. Before this row the file only ever asserted the default bound,
+/// so a projection that ignored `max_iterations` entirely would have stayed green.
+///
+/// Disclosed: an over-bound `suggested` is CLAMPED, not rejected. That is correct —
+/// `suggested` is a hint, `max_iterations` is the authority.
+///
+/// REVERT-PROBE: change `let max = schema.max_iterations.min(MAX_SHORTCUT_CYCLES)` back to
+/// `MAX_SHORTCUT_CYCLES` ⇒ `max` becomes the global cap ⇒ this assertion FAILS.
+#[test]
+fn loop_shortcut_narrowed_max_iterations_bounds_the_picker() {
+    let mut state = GameState::new_two_player(42);
+    state.waiting_for = WaitingFor::LoopShortcut {
+        proposer: P0,
+        predicted_winner: Some(P0),
+        certificate: engine::analysis::loop_check::LoopCertificate {
+            unbounded: Vec::new(),
+            win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
+            mandatory: false,
+            residual_board_delta: engine::analysis::resource::BoardDelta::default(),
+            per_cycle: None,
+        },
+        schema: engine::analysis::decision_template::ShortcutDecisionSchema {
+            // A NARROWED bound, i.e. what `elimination_bounds` produces on a real board.
+            iteration_count: engine::analysis::decision_template::IterationCount::Fixed(9),
+            max_iterations: 3,
+            ..Default::default()
+        },
+        declaration: None,
+    };
+    bind(&mut state, "loop-narrowed-bound");
+
+    // Reach-guard: the narrowed bound really is BELOW the global cap, else `min(..)` and
+    // the global cap coincide and the row cannot discriminate.
+    assert!(
+        3 < ShortcutDecisionSchema::default().max_iterations,
+        "reach-guard: the narrowed bound must be strictly below the global cap"
+    );
+
+    let view = priority_view(&state);
+    let InteractionOpportunityResponse::Schema {
+        spec: InteractionResponseSpec::Shortcut { count, .. },
+        ..
+    } = &view.opportunities[0].response
+    else {
+        panic!("loop shortcut uses a shortcut schema");
+    };
+    assert_eq!(
+        *count,
+        InteractionShortcutCountSpec::Fixed {
+            min: 1,
+            max: 3,
+            suggested: 3,
+        },
+        "CR 732.2a: the picker's ceiling is the offer's own narrowed bound (3), and an \
+         over-bound `suggested` (9) is clamped down to it rather than rejected"
+    );
+}
+
 #[test]
 fn loop_shortcut_number_schema_accepts_a_fixed_count_above_one() {
     let mut state = GameState::new_two_player(42);
@@ -2005,12 +2907,14 @@ fn loop_shortcut_number_schema_accepts_a_fixed_count_above_one() {
             win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
             mandatory: false,
             residual_board_delta: engine::analysis::resource::BoardDelta::default(),
+            per_cycle: None,
         },
         schema: engine::analysis::decision_template::ShortcutDecisionSchema {
             iteration_count: engine::analysis::decision_template::IterationCount::Fixed(2),
-            points: Vec::new(),
-            convoke_tappable_count: 0,
+            // No narrowed CR 732.2a bound — `Default` carries the global cap.
+            ..Default::default()
         },
+        declaration: None,
     };
     bind(&mut state, "loop-count");
     let view = priority_view(&state);
@@ -2036,6 +2940,386 @@ fn loop_shortcut_number_schema_accepts_a_fixed_count_above_one() {
     assert_eq!(preview.status, InteractionPreviewStatus::Confirmable);
 }
 
+/// The per-period signature the C4 preview rows multiply out. Chosen so that three separate
+/// ways of getting the preview wrong all show up as a value mismatch:
+///
+/// * **two mana colors**, so a preview that published raw axes instead of folding them into
+///   one engine-side family total would emit two `Mana` rows;
+/// * **a life LOSS on a seat that is not the proposer**, which `unbounded_components` drops
+///   entirely (it reports only what a cycle accrues) and which a proposer-keyed subject
+///   mapping would attribute to the wrong player;
+/// * **a whole-game axis** (`tokens_created`) with no seat, so the `Option<u8>` subject is
+///   exercised on both sides.
+fn preview_period_delta() -> engine::analysis::resource::ResourceVector {
+    let mut delta = engine::analysis::resource::ResourceVector::default();
+    // `MANA_INDEX` is `[W, U, B, R, G, C]`.
+    delta.mana[0] = 1;
+    delta.mana[1] = 2;
+    delta.life.insert(P1, -2);
+    delta.tokens_created = 4;
+    delta
+}
+
+/// A `LoopShortcut` offer stated exactly the way `certified_bounded_cycle_offer` states one:
+/// `Fixed(max_iterations)` as the suggestion and the same number as the ceiling, with the
+/// measured period on the certificate.
+fn preview_offer(
+    iteration_count: IterationCount,
+    max_iterations: u32,
+    per_cycle: Option<engine::analysis::resource::ResourceVector>,
+) -> GameState {
+    let mut state = GameState::new_two_player(42);
+    state.waiting_for = WaitingFor::LoopShortcut {
+        proposer: P0,
+        predicted_winner: Some(P0),
+        certificate: engine::analysis::loop_check::LoopCertificate {
+            unbounded: Vec::new(),
+            win_kind: engine::analysis::loop_check::WinKind::Advantage,
+            mandatory: false,
+            residual_board_delta: engine::analysis::resource::BoardDelta::default(),
+            per_cycle: per_cycle.map(|delta| engine::analysis::resource::PeriodicDelta {
+                frames_per_period: 1,
+                delta,
+                victim_slot: Vec::new(),
+            }),
+        },
+        schema: ShortcutDecisionSchema {
+            iteration_count,
+            max_iterations,
+            ..Default::default()
+        },
+        // `points` is empty here (`..Default::default()`), and an empty schema never publishes a
+        // declaration — the same invariant row D4 asserts against `build_bounded_declaration`. So
+        // `None` is what the engine itself would stage, not merely what makes the literal compile.
+        // These rows exercise the PREVIEW projection, which reads the certificate and schema; a
+        // declaration here would stage a state the producer cannot emit.
+        declaration: None,
+    };
+    bind(&mut state, "loop-preview");
+    state
+}
+
+fn shortcut_preview_of(state: &GameState) -> Option<InteractionShortcutPreview> {
+    let view = priority_view(state);
+    let InteractionOpportunityResponse::Schema {
+        spec: InteractionResponseSpec::Shortcut { preview, .. },
+        ..
+    } = &view.opportunities[0].response
+    else {
+        panic!("loop shortcut uses a shortcut schema");
+    };
+    preview.clone()
+}
+
+fn preview_entry(
+    family: InteractionShortcutPreviewFamily,
+    player: Option<u8>,
+    amount: i32,
+) -> InteractionShortcutPreviewEntry {
+    InteractionShortcutPreviewEntry {
+        family,
+        player,
+        amount,
+    }
+}
+
+/// C4a — CR 732.2a: the offer publishes what its stated count actually DOES, computed by the
+/// engine as `n × δ` over the certificate's measured per-period delta. Without this the count
+/// picker C5 wires up is a number with no displayed consequence, and the only other way to
+/// show one is `× count` arithmetic in the display layer, which the layer rule forbids.
+///
+/// **Asserted at TWO distinct counts, and that is the point of the row.** A single count is
+/// satisfiable by an implementation that ignores `count` entirely and publishes the raw
+/// per-cycle delta, or by one that hardcodes a constant. Only the pair pins the
+/// multiplication.
+///
+/// REVERT-PROBES, both RUN:
+/// * drop the `count` factor (`per_cycle` instead of `per_cycle.saturating_mul(count)`) ⇒
+///   both arms fail on values;
+/// * hardcode the factor to `3` ⇒ the `n = 3` arm still PASSES and the `n = 5` arm fails,
+///   which is exactly the "one value is satisfiable by a constant" hole the second count
+///   closes.
+#[test]
+fn loop_shortcut_preview_states_the_finished_magnitude_for_the_declared_count() {
+    use engine::analysis::resource::ResourceAxis;
+
+    // ── REACH-GUARDS on the fixture, before any preview is read. Each one names the wrong
+    //    implementation it makes observable; without them this row could pass while the
+    //    preview was built on the wrong fold or aggregated in the wrong layer.
+    let delta = preview_period_delta();
+    assert!(
+        !delta
+            .unbounded_components()
+            .iter()
+            .any(|(axis, _)| matches!(axis, ResourceAxis::Life(_))),
+        "reach-guard: the victim's life LOSS is INVISIBLE to `unbounded_components`, so a \
+         preview rebuilt on that fold would silently publish a lethal drain as producing \
+         nothing. The `Life` expectations below are what detect it"
+    );
+    assert_eq!(
+        delta
+            .axis_components()
+            .iter()
+            .filter(|(axis, _)| matches!(axis, ResourceAxis::Mana(_)))
+            .count(),
+        2,
+        "reach-guard: the period moves TWO mana axes, so the single `Mana` entry expected \
+         below is proof the engine folded them — not proof that only one existed"
+    );
+    assert_ne!(
+        P1.0, P0.0,
+        "reach-guard: the victim is not the proposer, so a subject mapping keyed off the \
+         proposer resolves to the wrong seat"
+    );
+
+    let at = |n: u32| {
+        shortcut_preview_of(&preview_offer(
+            IterationCount::Fixed(n),
+            n,
+            Some(preview_period_delta()),
+        ))
+        .expect("a bounded offer with a measured period states a preview")
+    };
+
+    let three = at(3);
+    assert_eq!(
+        three.count, 3,
+        "the count travels WITH the magnitudes, so a renderer cannot attach them to another"
+    );
+    assert_eq!(
+        three.entries,
+        vec![
+            preview_entry(InteractionShortcutPreviewFamily::Mana, None, 9),
+            preview_entry(InteractionShortcutPreviewFamily::Life, Some(P1.0), -6),
+            preview_entry(InteractionShortcutPreviewFamily::Tokens, None, 12),
+        ],
+        "CR 732.2a: three repetitions of (+1W +2U, P1 -2 life, +4 tokens) finish at +9 mana, \
+         P1 at -6 life, +12 tokens"
+    );
+
+    let five = at(5);
+    assert_eq!(five.count, 5);
+    assert_eq!(
+        five.entries,
+        vec![
+            preview_entry(InteractionShortcutPreviewFamily::Mana, None, 15),
+            preview_entry(InteractionShortcutPreviewFamily::Life, Some(P1.0), -10),
+            preview_entry(InteractionShortcutPreviewFamily::Tokens, None, 20),
+        ],
+        "the SECOND count is what makes this row unsatisfiable by a constant: an \
+         implementation pinned to 3 passes the arm above and fails here"
+    );
+}
+
+/// C4a, negative half — a preview is published only when the offer supplies BOTH authorities
+/// it multiplies: a measured per-period signature and a finite count. Every arm is paired
+/// with the positive control on the same builder, so none of them can pass because the whole
+/// window failed to project.
+#[test]
+fn loop_shortcut_preview_is_absent_without_both_a_period_and_a_finite_count() {
+    // ── PAIRED POSITIVE, first.
+    assert!(
+        shortcut_preview_of(&preview_offer(
+            IterationCount::Fixed(4),
+            4,
+            Some(preview_period_delta()),
+        ))
+        .is_some(),
+        "control: both authorities present must publish a preview, else every arm below \
+         passes for an unrelated reason"
+    );
+
+    // ── No measured period: every mint except the bounded one carries `per_cycle: None`,
+    //    as does every save written before that field existed.
+    assert_eq!(
+        shortcut_preview_of(&preview_offer(IterationCount::Fixed(4), 4, None)),
+        None,
+        "an offer that states no per-period signature has nothing to multiply"
+    );
+
+    // ── CR 704.5a: `UntilLethal` is the determinate-drain mode. It names no number, so
+    //    there is no declared count to state a finished magnitude for — even though the
+    //    period here IS measured, which is what keeps this arm distinct from the one above.
+    assert_eq!(
+        shortcut_preview_of(&preview_offer(
+            IterationCount::UntilLethal,
+            4,
+            Some(preview_period_delta()),
+        )),
+        None,
+        "`UntilLethal` states no finite count to multiply the period by"
+    );
+
+    // ── A period whose every family nets to zero (one W gained and one W spent) states
+    //    nothing, and is dropped rather than published as a row of zeroes.
+    let mut inert = engine::analysis::resource::ResourceVector::default();
+    inert.mana[0] = 1;
+    inert.mana[5] = -1;
+    assert_eq!(
+        inert.axis_components().len(),
+        2,
+        "reach-guard: the inert period really does move two axes, so the `None` below is the \
+         family fold cancelling them — not an empty vector arriving empty"
+    );
+    assert_eq!(
+        shortcut_preview_of(&preview_offer(IterationCount::Fixed(4), 4, Some(inert))),
+        None,
+        "a period that nets to nothing on every family publishes no preview at all"
+    );
+}
+
+/// C4a's hostile guard — the preview is ARITHMETIC, and must never become a clone-apply.
+///
+/// `game::interaction::preview_interaction` answers a different question (is this response
+/// submittable) by cloning the whole `GameState` and applying to the clone. It cannot answer
+/// this one: a CR 732.2a shortcut's declared count may reach `MAX_SHORTCUT_CYCLES`, and the
+/// entire point of the rule is that the sequence is NOT played out to find out what it does.
+/// A future rewrite that reached for the previewer would be quietly quadratic and quietly
+/// wrong, and no value assertion would catch it — so this row reads the source.
+///
+/// ⚠ TWO SPANS, AND THE SECOND ONE IS WHY THIS ROW CAN FAIL AT ALL (fix round 2, F1).
+///
+/// The first revision read only `shortcut_preview_entries`, whose signature is
+/// `(&ResourceVector, u32)` — no `GameState` is in scope anywhere in it, and neither is one in
+/// its only caller `loop_shortcut_projection(&WaitingFor)`. The banned construct was therefore
+/// not CONSTRUCTIBLE in the span, so the row could not fail no matter what regressed. MEASURED
+/// by the reviewer: inserting `let mut probe_clone = authoritative_state.clone();` immediately
+/// above the `loop_shortcut_projection` call left all three C4 rows green.
+///
+/// The clone-apply can only originate where the spec is BUILT: `opportunity_for_slot`'s
+/// `LoopShortcut` arm, which holds `authoritative_state` and `filtered_state`, both
+/// `&GameState`. Both spans are read now, and the arm span proves its OWN constructibility —
+/// the enclosing signature binds two `&GameState` parameters and the span uses one — so it
+/// cannot silently degrade into another span where the ban is unwritable. A positive control
+/// proves the SEARCH is real; only the constructibility guard proves the SPAN is right.
+///
+/// WHAT WRONG IMPLEMENTATION WOULD STILL PASS THIS ROW? One that clones the state inside a
+/// THIRD function called from the arm — the ban is textual, not a call-graph closure — and one
+/// that computes the right numbers by some other expensive means. This is a routing guard; the
+/// value rows above pin the arithmetic.
+///
+/// The likeliest instance of that first gap is closed by TYPE rather than by text (fix round 3,
+/// G4): the cheapest way to reach a `GameState` from the preview is to widen
+/// `loop_shortcut_projection` to accept one, which contains none of the banned strings and
+/// lives in a span this row does not read. Its parameter list is pinned below, so the
+/// projection can see the waiting-for state and nothing else — and neither can anything it
+/// calls. What remains uncovered is a clone reached through some OTHER existing binding, which
+/// no signature can rule out.
+///
+/// REVERT-PROBES, ALL THREE RUN:
+/// * add the line `// preview_interaction` inside `shortcut_preview_entries` ⇒ FAILS on the
+///   assert (it still compiles, so the probe discriminates on the assertion, not the build);
+/// * insert `let mut probe_clone = authoritative_state.clone();` immediately above the
+///   `loop_shortcut_projection` call in the arm — the reviewer's exact probe ⇒ FAILS;
+/// * widen `loop_shortcut_projection` to `(waiting_for: &WaitingFor, _state: &GameState)` —
+///   the exact evasion the textual ban misses ⇒ FAILS on the signature pin (and on nothing
+///   else, which is the point).
+#[test]
+fn loop_shortcut_preview_never_routes_through_the_clone_apply_previewer() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/game/interaction.rs");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+
+    // ── POSITIVE CONTROL: the banned symbol IS in this file. Without this the "does not
+    //    contain" assertions below would pass just as happily against an empty read, a
+    //    renamed file, or a search that never matched anything.
+    assert!(
+        text.contains("pub fn preview_interaction("),
+        "positive control: `preview_interaction` must exist in this file, else the absence \
+         asserted below is the absence of the whole search"
+    );
+
+    // The span from `marker` up to the next `terminator`, both anchored at a line start.
+    let extract = |scope: &str, marker: &str, terminator: &str| -> String {
+        let start = scope.find(marker).unwrap_or_else(|| {
+            panic!("reach-guard: `{marker}` must be found by name, or this row is vacuous")
+        });
+        let rest = &scope[start + marker.len()..];
+        let end = rest.find(terminator).unwrap_or(rest.len());
+        format!("{marker}{}", &rest[..end])
+    };
+
+    // ── SPAN 1: the arithmetic itself.
+    let arithmetic = extract(&text, "\nfn shortcut_preview_entries(", "\nfn ");
+    assert!(
+        arithmetic.contains("saturating_mul"),
+        "reach-guard: the extracted span must be the real body — the multiplication is the \
+         function's entire job, so its absence means the span is wrong"
+    );
+
+    // ── SPAN 2: the attach site, where the spec carrying the preview is built.
+    let builder = "\nfn opportunity_for_slot(";
+    let builder_start = text.find(builder).expect(
+        "reach-guard: the spec builder must be found by name — it is the only scope holding a \
+         `GameState` on the preview's path",
+    );
+    let builder_scope = &text[builder_start..];
+    let signature_end = builder_scope
+        .find(") -> ")
+        .expect("reach-guard: the builder's signature must be delimited");
+    let signature = &builder_scope[..signature_end];
+    // ── CONSTRUCTIBILITY: the ban below is only a guard where the banned thing can be
+    //    WRITTEN. This span sits inside a function that binds two `&GameState` parameters,
+    //    so `authoritative_state.clone()` — the reviewer's exact probe — compiles here.
+    assert!(
+        signature.contains("authoritative_state: &GameState")
+            && signature.contains("filtered_state: &GameState"),
+        "constructibility: the arm span guards nothing unless a `GameState` is IN SCOPE to be \
+         cloned. `shortcut_preview_entries` takes `(&ResourceVector, u32)`, which is exactly \
+         why reading only that function produced a row that could not fail"
+    );
+    let attach = extract(
+        builder_scope,
+        "\n        HumanResponseModel::LoopShortcut => {",
+        "\n        HumanResponseModel::",
+    );
+    assert!(
+        attach.contains("loop_shortcut_projection(") && attach.contains("projection.preview"),
+        "reach-guard: the extracted arm must be the one that projects the offer AND publishes \
+         the preview onto the spec, else the ban is being applied to the wrong arm"
+    );
+    assert!(
+        attach.contains("filtered_state"),
+        "constructibility, second half: the arm must actually USE one of those `&GameState` \
+         bindings, so a clone is writable at the exact point the reviewer's probe inserted one"
+    );
+
+    // ── TYPE-LEVEL PIN: the ban below is TEXTUAL, so its cheapest evasion is to widen
+    //    `loop_shortcut_projection` to take a `&GameState` and clone it THERE — a third span
+    //    this row does not read, and one that would contain none of the three banned strings.
+    //    The projection's parameter list closes that route by TYPE rather than by text: with
+    //    only a `&WaitingFor` in scope, no callee it reaches can be handed a `GameState`
+    //    either, so "the preview computation cannot see game state" stops being a search
+    //    result and becomes a fact about the signature.
+    let projection_signature = extract(&text, "\nfn loop_shortcut_projection(", ") -> ");
+    let projection_params = projection_signature
+        .strip_prefix("\nfn loop_shortcut_projection(")
+        .expect("`extract` re-emits its own marker, so the prefix is always present")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(
+        projection_params.trim_end_matches(','),
+        "waiting_for: &WaitingFor",
+        "type-level pin: the shortcut preview is computed from the WAITING-FOR state alone. \
+         Adding a parameter here — a `&GameState`, or anything reaching one — reopens the \
+         clone-apply route through a span the textual ban below never reads"
+    );
+
+    for (span_name, body) in [
+        ("shortcut_preview_entries", &arithmetic),
+        ("opportunity_for_slot's LoopShortcut arm", &attach),
+    ] {
+        for banned in ["preview_interaction", "state.clone()", "GameState"] {
+            assert!(
+                !body.contains(banned),
+                "CR 732.2a: the shortcut preview is `n × δ` over the certificate's measured \
+                 period. {span_name} must not reach `{banned}` — a clone-apply cannot state \
+                 the result of a sequence that is deliberately never played out"
+            );
+        }
+    }
+}
+
 #[test]
 fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
     let mut scenario = GameScenario::new();
@@ -2059,9 +3343,12 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
             win_kind: engine::analysis::loop_check::WinKind::Advantage,
             mandatory: false,
             residual_board_delta: engine::analysis::resource::BoardDelta::default(),
+            per_cycle: None,
         },
         schema: ShortcutDecisionSchema {
             iteration_count: IterationCount::Fixed(2),
+            // No narrowed CR 732.2a bound — `Default` carries the global cap.
+            max_iterations: ShortcutDecisionSchema::default().max_iterations,
             points: vec![
                 DecisionPoint {
                     slot: slot(0),
@@ -2104,6 +3391,7 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
             ],
             convoke_tappable_count: 1,
         },
+        declaration: None,
     };
     bind(runner.state_mut(), "loop-point-kinds");
 
@@ -2174,6 +3462,187 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
         InteractionPreviewStatus::Rejected {
             reason: InteractionReasonCode::UnknownChoice,
         }
+    );
+}
+
+/// **Row R2-f — the HUMAN ingress emits the same spelling as the engine's own producer.**
+///
+/// CR 601.2c: one shape per point kind, whoever submitted it. `materialize_loop_shortcut_response`
+/// decodes a submitted player candidate on a `Targets` point into
+/// `Scheduled(Constant(Ranking::one(AnnouncementSubject::Seat(..))))` — the same value
+/// `game::engine::record_trigger_target_answer` journals for an announced seat — and an OBJECT
+/// candidate on the SAME point into `TargetPin::ByIdentity`, unchanged.
+///
+/// # Discrimination
+///
+/// Migrate only the engine's producer and leave this decoder emitting `TargetPin::Player(*player)`
+/// ⇒ one `Targets` point yields two different pin spellings depending on WHO submitted the
+/// answer, and the seat assertion below FAILS while the object assertion stays green. That
+/// asymmetry — one arm moving, one not — is what makes this a spelling row rather than a
+/// smoke test.
+///
+/// # Paired positive reach-guard
+///
+/// The decoder must still ACCEPT end to end: `resolve_interaction_response` returns
+/// `Ok(GameAction::DeclareShortcut { .. })`, which means `declaration_conforms` ran
+/// `predictability_gate` and `validate_pins` at range 1 and passed. Without it the row would be
+/// satisfied by a decoder that had simply started refusing everything.
+///
+/// # ⚠ WHY THIS ROW BUILDS ITS OWN BOARD (measured, not preference)
+///
+/// The file's other shortcut rows share a schema whose only slot source is
+/// `AllCopies { CardId(9001) }`, which no battlefield object carries. After the split a `Seat`
+/// pin on such a slot resolves through `resolve_ability_instance` ⇒ `resolve_source`'s
+/// `AllCopies` arm (`.filter(|o| o.zone == Zone::Battlefield && o.card_id == *card_id)`) ⇒
+/// `None` ⇒ `IllegalTarget` ⇒ `validate_pins` ⇒ `declaration_conforms == false` ⇒
+/// `ConstraintUnsatisfied`. The positive reach-guard above would be UNSATISFIABLE there, and the
+/// cheapest-looking repair would be to loosen a fail-closed predicate. So the slot source here is
+/// a `ThisObject` naming a live battlefield creature, at that object's LIVE incarnation read from
+/// state (CR 400.7) — never a hard-coded one. `AllCopies` cannot take the CR 114.4 / CR 113.6p
+/// command-zone disjunct either: that disjunct is `ThisObject`-only, so a command-zone source
+/// named by CARD identity (a conspiracy, an Eminence commander — both of which DO have cards)
+/// still resolves `None` and fails closed. Measured residual, disclosed rather than closed.
+///
+/// The three shipped `Shortcut` rows in this file are untouched by the split, but by INDEX
+/// ORDERING rather than by design: the file has exactly one candidate-selection site and it takes
+/// `candidate_ids[0]`, which on the one board offering both is the OBJECT. That vector must not
+/// be reordered.
+///
+/// This row's own board deliberately exercises BOTH indices, and the two arms key each other: if
+/// the projection's candidate order did not follow `legal_targets`, both assertions would fail
+/// rather than one silently passing on the wrong candidate.
+#[test]
+fn loop_shortcut_human_ingress_emits_the_target_class_spelling_for_a_submitted_seat() {
+    use engine::analysis::decision_template::{
+        AnnouncementSubject, PinnedDecision, Ranking, TargetPin, TargetSchedule,
+    };
+
+    let mut scenario = GameScenario::new();
+    let target = scenario.add_creature(P0, "R2f Ability Source", 1, 1).id();
+    let mut runner = scenario.build();
+    let incarnation = runner.state().objects[&target].incarnation;
+    let slot = DecisionSlot {
+        source: engine::types::game_state::YieldTarget::ThisObject {
+            source_id: target,
+            incarnation: Some(incarnation),
+            trigger_description: None,
+        },
+        index: 0,
+    };
+    runner.state_mut().waiting_for = WaitingFor::LoopShortcut {
+        proposer: P0,
+        predicted_winner: Some(P0),
+        certificate: engine::analysis::loop_check::LoopCertificate {
+            unbounded: Vec::new(),
+            win_kind: engine::analysis::loop_check::WinKind::Advantage,
+            mandatory: false,
+            residual_board_delta: engine::analysis::resource::BoardDelta::default(),
+            per_cycle: None,
+        },
+        schema: ShortcutDecisionSchema {
+            iteration_count: IterationCount::Fixed(2),
+            max_iterations: ShortcutDecisionSchema::default().max_iterations,
+            points: vec![DecisionPoint {
+                slot: slot.clone(),
+                kind: DecisionPointKind::Targets {
+                    // Index 0 is the OBJECT, index 1 is the SEAT. Both are exercised below.
+                    legal_targets: vec![TargetRef::Object(target), TargetRef::Player(P1)],
+                    min_targets: 1,
+                    max_targets: 1,
+                    ordered: true,
+                },
+            }],
+            convoke_tappable_count: 0,
+        },
+        declaration: None,
+    };
+    bind(runner.state_mut(), "r2f-human-seat-pin");
+
+    let view = priority_view(runner.state());
+    let InteractionOpportunityResponse::Schema {
+        spec: InteractionResponseSpec::Shortcut { points, .. },
+        ..
+    } = &view.opportunities[0].response
+    else {
+        panic!("the loop shortcut offer uses a shortcut schema");
+    };
+    assert_eq!(
+        points.len(),
+        1,
+        "reach-guard: exactly one published point, so the pin below addresses the point this \
+         row is about"
+    );
+    assert_eq!(
+        points[0].candidate_ids.len(),
+        2,
+        "reach-guard: BOTH legal targets must be offered as candidates, else one of the two \
+         arms below is unreachable"
+    );
+
+    let decode = |candidate: usize| {
+        resolve_interaction_response(
+            runner.state(),
+            P0,
+            &InteractionSubmission {
+                interaction_id: view.opportunities[0].interaction_id.clone(),
+                response: InteractionResponse::Shortcut {
+                    decision: InteractionShortcutDecision::AcceptSuggested,
+                    pins: vec![InteractionShortcutPin {
+                        group: 0,
+                        choice_ids: vec![points[0].candidate_ids[candidate].clone()],
+                    }],
+                },
+            },
+        )
+    };
+
+    // ── THE CLAIM: a submitted SEAT decodes to the CR 601.2c TARGET-class spelling ──
+    let GameAction::DeclareShortcut {
+        template: Some(seat_template),
+        ..
+    } = decode(1).expect(
+        "paired positive: the human ingress still ACCEPTS end to end — `declaration_conforms` \
+         ran `predictability_gate` and `validate_pins` at range 1 and passed",
+    )
+    else {
+        panic!("a shortcut acceptance carrying pins materializes a template");
+    };
+    assert_eq!(
+        seat_template.decisions,
+        vec![PinnedDecision::Targets {
+            slot: slot.clone(),
+            targets: vec![TargetPin::Scheduled(TargetSchedule::Constant(
+                Ranking::one(AnnouncementSubject::Seat(P1))
+            ))],
+        }],
+        "CR 601.2c: a candidate on a `Targets` point is an ANNOUNCED target, so a submitted \
+         seat takes the TARGET-class spelling — the same value the engine's own producer \
+         journals. `TargetPin::Player(P1)` here would select the authority by WHO SUBMITTED \
+         the answer rather than by WHAT IT IS"
+    );
+
+    // ── THE SIBLING: an OBJECT candidate on the SAME point is unchanged ──
+    let GameAction::DeclareShortcut {
+        template: Some(object_template),
+        ..
+    } = decode(0).expect("the object candidate is accepted on the same point")
+    else {
+        panic!("a shortcut acceptance carrying pins materializes a template");
+    };
+    assert_eq!(
+        object_template.decisions,
+        vec![PinnedDecision::Targets {
+            slot,
+            targets: vec![TargetPin::ByIdentity(
+                engine::types::game_state::YieldTarget::ThisObject {
+                    source_id: target,
+                    incarnation: Some(incarnation),
+                    trigger_description: None,
+                }
+            )],
+        }],
+        "the migration re-spelled the SEAT branch only: an object candidate still binds by \
+         CR 400.7 identity"
     );
 }
 
@@ -2382,4 +3851,714 @@ fn oversized_session_fails_closed_and_serial_rolls_to_next_generation() {
                 } => choices.iter().all(|choice| choice.id.as_str().len() <= 256),
             }
     }));
+}
+
+fn sideboard_deck_entry(name: &str, count: u32) -> DeckEntry {
+    DeckEntry {
+        card: CardFace {
+            name: name.to_string(),
+            ..Default::default()
+        },
+        count,
+    }
+}
+
+/// A Standard match between games with a registered 60/15 pool. `Aaa` sorts
+/// before `Bbb`, so the projection's candidate indices are stable.
+fn between_games_sideboard_state() -> GameState {
+    let mut state = GameState::new_two_player(11);
+    state.match_phase = MatchPhase::BetweenGames;
+    state.game_number = 2;
+    state.deck_pools = vec![PlayerDeckPool {
+        player: P0,
+        registered_main: Arc::new(vec![sideboard_deck_entry("Aaa", 60)]),
+        registered_sideboard: Arc::new(vec![sideboard_deck_entry("Bbb", 15)]),
+        current_main: Arc::new(vec![sideboard_deck_entry("Aaa", 60)]),
+        current_sideboard: Arc::new(vec![sideboard_deck_entry("Bbb", 15)]),
+        ..Default::default()
+    }];
+    // The projection recomputes its bounds from `deck_pools` + `format_config`
+    // via the same authority `handle_submit_sideboard` uses, so these published
+    // copies are the client's display hint, not the gate.
+    state.waiting_for = WaitingFor::BetweenGamesSideboard {
+        player: P0,
+        game_number: 2,
+        score: Default::default(),
+        min_main_deck_size: 60,
+        max_sideboard_size: Some(15),
+    };
+    state
+}
+
+fn deck_partition_opportunity(
+    view: &engine::types::interaction::ViewerInteraction,
+) -> (
+    &engine::types::interaction::InteractionOpportunity,
+    u32,
+    u32,
+) {
+    let opportunity = view
+        .opportunities
+        .iter()
+        .find(|opportunity| {
+            matches!(
+                &opportunity.response,
+                InteractionOpportunityResponse::Schema {
+                    spec: InteractionResponseSpec::DeckPartition { .. },
+                    ..
+                }
+            )
+        })
+        .expect("a between-games seat is offered a deck-partition schema");
+    let InteractionOpportunityResponse::Schema {
+        spec:
+            InteractionResponseSpec::DeckPartition {
+                min_main_total,
+                max_main_total,
+                ..
+            },
+        ..
+    } = &opportunity.response
+    else {
+        unreachable!("filtered for DeckPartition above");
+    };
+    (opportunity, *min_main_total, *max_main_total)
+}
+
+fn partition_choice_ids(
+    opportunity: &engine::types::interaction::InteractionOpportunity,
+) -> Vec<InteractionChoiceId> {
+    let InteractionOpportunityResponse::Schema { candidates, .. } = &opportunity.response else {
+        unreachable!("deck partition is a schema response");
+    };
+    candidates.iter().map(|choice| choice.id.clone()).collect()
+}
+
+/// CR 100.2a + CR 100.4a + CR 100.5: `deck_size` is a *minimum* and non-Commander
+/// decks have no maximum, so the between-games schema must publish the interval
+/// the engine will accept — `[minimum, whole pool]` — not one exact size. A
+/// player who registered 60/15 may legally present anything from 60 up to all
+/// 75 cards; the sideboard cap is what pins the floor at 60.
+///
+/// This drives `HumanResponseModel::SideboardPartition` end-to-end (schema →
+/// submission → applied state) rather than calling `handle_submit_sideboard`
+/// directly, because the interaction layer carries its own copy of the gate.
+#[test]
+fn deck_partition_schema_publishes_an_interval_not_an_exact_deck_size() {
+    let mut state = between_games_sideboard_state();
+    bind(&mut state, "sideboard-interval");
+
+    let view = viewer_interaction(&state, P0);
+    let (opportunity, min_main_total, max_main_total) = deck_partition_opportunity(&view);
+    assert_eq!(
+        (min_main_total, max_main_total),
+        (60, 75),
+        "60-card minimum, and the whole 75-card pool may go to the main deck"
+    );
+    // No exact aggregate exists for a range, so `total` must stay absent.
+    assert!(opportunity
+        .surfaces
+        .contains(&InteractionPresentationSurface::Amount {
+            min: 60,
+            max: 75,
+            total: None,
+        }));
+
+    let choice_ids = partition_choice_ids(opportunity);
+    let interaction_id = opportunity.interaction_id.clone();
+
+    // 59 main cards would leave a 16-card sideboard: below the floor.
+    let too_small = preview_interaction(
+        &state,
+        P0,
+        &InteractionPreviewRequest {
+            request_id: PreviewRequestId("sideboard-too-small".to_string()),
+            interaction_id: interaction_id.clone(),
+            response: InteractionResponse::DeckPartition {
+                main: vec![AmountAssignment {
+                    choice_id: choice_ids[0].clone(),
+                    amount: 59,
+                }],
+            },
+        },
+    );
+    assert_eq!(
+        too_small.status,
+        InteractionPreviewStatus::Rejected {
+            reason: InteractionReasonCode::ConstraintUnsatisfied,
+        }
+    );
+
+    // 61/14 — siding one card in without siding one out. This is the exact
+    // shape the old exact-total contract rejected.
+    submit_interaction(
+        &mut state,
+        P0,
+        InteractionSubmission {
+            interaction_id,
+            response: InteractionResponse::DeckPartition {
+                main: vec![
+                    AmountAssignment {
+                        choice_id: choice_ids[0].clone(),
+                        amount: 60,
+                    },
+                    AmountAssignment {
+                        choice_id: choice_ids[1].clone(),
+                        amount: 1,
+                    },
+                ],
+            },
+        },
+    )
+    .expect("a 61-card main deck is legal when the sideboard still fits under 15");
+
+    let pool = &state.deck_pools[0];
+    assert_eq!(
+        pool.current_main
+            .iter()
+            .map(|entry| entry.count)
+            .sum::<u32>(),
+        61
+    );
+    assert_eq!(
+        pool.current_sideboard
+            .iter()
+            .map(|entry| entry.count)
+            .sum::<u32>(),
+        14
+    );
+}
+
+/// The interaction contract omits a debug-capability gate at the transport
+/// (`SessionManager::handle_interaction`) on the grounds that candidate
+/// enumeration never produces one. This converts that "cannot happen" into
+/// something that fails the day it starts happening.
+///
+/// It asserts on the **client-visible** publication — `derive_viewer_interaction`
+/// -> `opportunity_for_slot` -> `actor_candidates` -> `ai_support`'s validated
+/// candidate set — rather than on an internal helper, so it covers what a
+/// remote seat could actually submit.
+///
+/// The sandbox capability is armed *fully* and deliberately: the claim is not
+/// that debug actions are unreachable because sandbox mode is off, it is that
+/// enumeration ignores the flag even when it is on. All three of
+/// `allow_debug_actions`, `debug_mode`, and `debug_permitted` are set because
+/// `apply`'s own gate requires the latter two together — arming only one would
+/// leave the capability half-granted and the test could pass for the wrong
+/// reason.
+#[test]
+fn published_interaction_choices_never_offer_a_debug_action_in_a_sandbox_game() {
+    let mut state = GameState::new_two_player(42);
+    state.format_config.allow_debug_actions = true;
+    state.debug_mode = true;
+    state.debug_permitted.insert(P0);
+    bind(&mut state, "sandbox-debug-enumeration");
+
+    let view = priority_view(&state);
+
+    // Reach guard (1): a `ViewerInteraction` with `can_submit: false`, or a
+    // terminal `waiting_for`, publishes no opportunities at all and would
+    // satisfy the negative below vacuously.
+    assert!(
+        !view.opportunities.is_empty(),
+        "the fixture must publish something for the negative assertion to bite"
+    );
+
+    // Reach guard (3): the capability is genuinely in force at assertion time.
+    assert!(
+        state.format_config.allow_debug_actions
+            && state.debug_mode
+            && state.debug_permitted.contains(&P0),
+        "the sandbox capability must be armed, or this asserts nothing"
+    );
+
+    // Reach guard (2): `WaitingFor::Priority` maps to
+    // `HumanResponseModel::ExactCandidates`, which is the `actor_candidates`
+    // branch — the enumerator whose output this test is about.
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "the enumerating branch is selected by the waiting_for shape, got {:?}",
+        state.waiting_for
+    );
+
+    let mut saw_choices = false;
+    for opportunity in &view.opportunities {
+        let InteractionOpportunityResponse::ExactChoices { choices } = &opportunity.response else {
+            continue;
+        };
+        saw_choices |= !choices.is_empty();
+        for choice in choices {
+            for surface in &choice.surfaces {
+                if let InteractionPresentationSurface::Action { code, .. } = surface {
+                    assert!(
+                        !matches!(
+                            code,
+                            InteractionActionCode::Debug
+                                | InteractionActionCode::GrantDebugPermission
+                                | InteractionActionCode::RevokeDebugPermission
+                        ),
+                        "candidate enumeration published a debug action ({code:?}); \
+                         `SessionManager::handle_interaction`'s missing debug gate is \
+                         no longer safe"
+                    );
+                }
+            }
+        }
+    }
+
+    assert!(
+        saw_choices,
+        "an ExactChoices opportunity with real choices is what proves the \
+         actor_candidates path ran"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #6944: a flexible-mana land rendered an unlabelled "Tap for mana".
+//
+// `TapLandForMana` candidates are minted from `ManaSourceOption::semantic_selection`
+// (one *concrete* row per producible color) and executed via
+// `live_land_mana_option_for_selection`. The label projection resolved them
+// through the *manual* authority (`live_mana_source_option_for_selection`)
+// instead, whose `manual_selection_for_option` deliberately collapses a flexible
+// source to `Colorless` + `DeferredColorChoice`. The concrete row therefore never
+// matched, the resolver returned `Err`, and the projection silently emitted no
+// `ProducedMana` surface at all.
+//
+// Every test below asserts a *non-empty* produced-mana label for a flexible
+// source, which is exactly the surface that was missing before the fix.
+// ---------------------------------------------------------------------------
+
+/// Produced-mana symbols projected for each `TapLandForMana` candidate whose
+/// source is `source` — one inner `Vec` per candidate, one entry per produced
+/// mana unit. An unlabelled candidate surfaces as an empty inner `Vec`.
+fn projected_land_mana_labels(
+    state: &mut GameState,
+    source: ObjectId,
+    binding: &str,
+) -> Vec<Vec<String>> {
+    bind(state, binding);
+    let view = priority_view(state);
+    let InteractionOpportunityResponse::ExactChoices { choices } = &view.opportunities[0].response
+    else {
+        panic!("priority is projected as exact choices");
+    };
+    choices
+        .iter()
+        .filter(|choice| {
+            choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Action {
+                        code: InteractionActionCode::TapLandForMana,
+                        ..
+                    }
+                )
+            }) && choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Object {
+                        role: InteractionRoleCode::Source,
+                        reference,
+                        ..
+                    } if reference == &source.0.to_string()
+                )
+            })
+        })
+        .map(|choice| {
+            choice
+                .surfaces
+                .iter()
+                .filter_map(|surface| match surface {
+                    InteractionPresentationSurface::Mana {
+                        role: InteractionRoleCode::ProducedMana,
+                        symbols,
+                        ..
+                    } => symbols.first().cloned(),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Flatten per-candidate labels into one sorted symbol list, asserting that no
+/// candidate was left unlabelled. The unlabelled case is the #6944 regression.
+fn sorted_labelled_symbols(labels: &[Vec<String>], context: &str) -> Vec<String> {
+    assert!(
+        !labels.is_empty(),
+        "{context}: expected at least one TapLandForMana candidate"
+    );
+    assert!(
+        labels.iter().all(|units| !units.is_empty()),
+        "{context}: every mana candidate must carry a produced-mana label, got {labels:?}"
+    );
+    let mut symbols: Vec<String> = labels.iter().flatten().cloned().collect();
+    symbols.sort();
+    symbols
+}
+
+#[test]
+fn tap_land_for_mana_labels_each_color_of_an_any_one_color_land() {
+    // ManaProduction::AnyOneColor — the card from issue #6944.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let city = scenario
+        .add_land_from_oracle(
+            P0,
+            "City of Brass",
+            "Whenever this land becomes tapped, it deals 1 damage to you.\n{T}: Add one mana of any color.",
+        )
+        .id();
+    let mut runner = scenario.build();
+
+    let labels = projected_land_mana_labels(runner.state_mut(), city, "city-of-brass-mana-label");
+    assert_eq!(
+        sorted_labelled_symbols(&labels, "City of Brass"),
+        ["B", "G", "R", "U", "W"],
+        "each concrete color row must project its own color, not an unlabelled tap"
+    );
+    assert!(
+        labels.iter().all(|units| units.len() == 1),
+        "'Add one mana of any color' produces exactly one unit per row: {labels:?}"
+    );
+}
+
+#[test]
+fn tap_land_for_mana_labels_a_granted_flexible_mana_ability() {
+    // ManaProduction::AnyOneColor { count: 2 } reached through a `GrantAbility`
+    // static — the second card named in issue #6944. The label must carry both
+    // produced units and the granted spend restriction.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(
+        P0,
+        "Resonating Lute",
+        "Lands you control have \"{T}: Add two mana of any one color. Spend this mana only to cast instant and sorcery spells.\"\n{T}: Draw a card. Activate only if you have seven or more cards in your hand.",
+    );
+    // An explicitly-printed mana ability, not `add_basic_land`: a basic land's
+    // production is subtype-inferred by `land_mana_options`, and that fallback is
+    // deliberately suppressed once any explicit `Effect::Mana` ability exists —
+    // which the grant itself supplies. Printing the ability keeps this test about
+    // the label projection rather than the basic-land fallback.
+    let forest = scenario
+        .add_land_from_oracle(P0, "Forest", "{T}: Add {G}.")
+        .id();
+    let mut runner = scenario.build();
+    // `GameScenario::build` does not run a layer pass, so the `GrantAbility`
+    // static has not yet been applied to the land's ability list.
+    engine::game::layers::evaluate_layers(runner.state_mut());
+
+    let labels = projected_land_mana_labels(runner.state_mut(), forest, "resonating-lute-grant");
+    let symbols = sorted_labelled_symbols(&labels, "Resonating Lute granted ability");
+    let granted: Vec<&Vec<String>> = labels.iter().filter(|units| units.len() == 2).collect();
+    assert_eq!(
+        granted.len(),
+        5,
+        "the granted 'two mana of any one color' ability exposes one two-unit row \
+         per color: {labels:?}"
+    );
+    assert!(
+        granted
+            .iter()
+            .all(|units| units[0] == units[1] && symbols.contains(&units[0])),
+        "'any one color' produces two units of the SAME chosen color: {granted:?}"
+    );
+    assert!(
+        labels.iter().any(|units| units == &vec!["G".to_string()]),
+        "the Forest's own printed mana ability is still labelled: {labels:?}"
+    );
+}
+
+#[test]
+fn tap_land_for_mana_labels_an_any_type_produceable_by_land() {
+    // ManaProduction::AnyTypeProduceableBy.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let pool = scenario
+        .add_land_from_oracle(
+            P0,
+            "Reflecting Pool",
+            "{T}: Add one mana of any type that a land you control could produce.",
+        )
+        .id();
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let mut runner = scenario.build();
+
+    let labels = projected_land_mana_labels(runner.state_mut(), pool, "reflecting-pool-mana-label");
+    assert_eq!(
+        sorted_labelled_symbols(&labels, "Reflecting Pool"),
+        ["G"],
+        "the surveyed Forest's type is the only produceable type"
+    );
+}
+
+#[test]
+fn tap_land_for_mana_labels_an_opponent_land_colors_land() {
+    // ManaProduction::OpponentLandColors.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let orchard = scenario
+        .add_land_from_oracle(
+            P0,
+            "Exotic Orchard",
+            "{T}: Add one mana of any color that a land an opponent controls could produce.",
+        )
+        .id();
+    scenario.add_basic_land(P1, ManaColor::Blue);
+    let mut runner = scenario.build();
+
+    let labels = projected_land_mana_labels(runner.state_mut(), orchard, "exotic-orchard-label");
+    assert_eq!(
+        sorted_labelled_symbols(&labels, "Exotic Orchard"),
+        ["U"],
+        "the opponent's Island is the only surveyed color"
+    );
+}
+
+#[test]
+fn tap_land_for_mana_labels_a_commander_color_identity_land() {
+    // ManaProduction::AnyInCommandersColorIdentity.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let tower = scenario
+        .add_land_from_oracle(
+            P0,
+            "Command Tower",
+            "{T}: Add one mana of any color in your commander's color identity.",
+        )
+        .id();
+    let commander = scenario
+        .add_creature(P0, "Mono-Red Commander", 2, 2)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Red],
+        })
+        .id();
+    scenario.with_commander(commander);
+    let mut runner = scenario.build();
+
+    let labels = projected_land_mana_labels(runner.state_mut(), tower, "command-tower-label");
+    assert_eq!(
+        sorted_labelled_symbols(&labels, "Command Tower"),
+        ["R"],
+        "the label follows the commander's color identity"
+    );
+}
+
+#[test]
+fn tap_land_for_mana_labels_an_any_color_among_permanents_land() {
+    // ManaProduction::AnyOneColorAmongPermanents.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let plaza = scenario
+        .add_land_from_oracle(
+            P0,
+            "Plaza of Heroes",
+            "{T}: Add {C}.\n{T}: Add one mana of any color. Spend this mana only to cast a legendary spell.\n{T}: Add one mana of any color among legendary permanents you control.\n{3}, {T}, Exile this land: Target legendary creature gains hexproof and indestructible until end of turn.",
+        )
+        .id();
+    scenario
+        .add_creature(P0, "Legendary Red Bear", 2, 2)
+        .as_legendary()
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Red],
+        });
+    let mut runner = scenario.build();
+
+    let labels = projected_land_mana_labels(runner.state_mut(), plaza, "plaza-of-heroes-label");
+    let symbols = sorted_labelled_symbols(&labels, "Plaza of Heroes");
+    assert!(
+        symbols.contains(&"R".to_string()),
+        "the among-legendary-permanents ability projects the legend's color: {labels:?}"
+    );
+    assert!(
+        symbols.contains(&"C".to_string()),
+        "the sibling colorless ability stays labelled: {labels:?}"
+    );
+}
+
+#[test]
+fn tap_land_for_mana_labels_a_choice_among_exiled_colors_land() {
+    // ManaProduction::ChoiceAmongExiledColors.
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let pit = scenario
+        .add_land_from_oracle(
+            P0,
+            "Pit of Offerings",
+            "{T}: Add {C}.\n{T}: Add one mana of any of the exiled cards' colors.",
+        )
+        .id();
+    let exiled = scenario.add_real_card(P0, "Lightning Bolt", Zone::Exile, db);
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .exile_links
+        .push(engine::types::game_state::ExileLink {
+            exiled_id: exiled,
+            source_id: pit,
+            kind: engine::types::game_state::ExileLinkKind::TrackedBySource,
+        });
+
+    let labels = projected_land_mana_labels(runner.state_mut(), pit, "pit-of-offerings-label");
+    assert_eq!(
+        sorted_labelled_symbols(&labels, "Pit of Offerings"),
+        ["C", "R"],
+        "the exiled red card's color is labelled alongside the colorless sibling"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Sibling coverage: `ActivateManaSource`.
+//
+// The two mana surfaces now share `push_produced_mana_surfaces`, each passing
+// its own reducer's resolver. The tests above pin the `TapLandForMana` arm; this
+// one pins the `ActivateManaSource` arm so the shared helper cannot be changed
+// to satisfy one caller while silently dropping the other's labels.
+//
+// `ActivateManaSource` is only ever projected from the
+// `WaitingFor::ManaSourceSelection` arm of `direct_choice_projection` — no
+// priority arm mints it — so the fixture must drive the real cast pipeline into
+// that window. `CastPaymentMode::AutoExceptSacrificialMana` does exactly that:
+// the automatic planner refuses to spend an irreversible sacrifice row without
+// explicit consent and hands the choice back as `ManaSourceSelection`.
+// ---------------------------------------------------------------------------
+
+fn sacrificial_mana_source(produced: ManaProduction) -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Mana {
+            produced,
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        },
+    )
+    .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+        TargetFilter::SelfRef,
+        1,
+    )))
+}
+
+/// Produced-mana symbols projected for the `ActivateManaSource` candidates whose
+/// source is `source` — one inner `Vec` per candidate, one entry per produced
+/// mana unit. An unlabelled candidate surfaces as an empty inner `Vec`.
+fn projected_mana_source_labels(
+    state: &mut GameState,
+    source: ObjectId,
+    binding: &str,
+) -> Vec<Vec<String>> {
+    bind(state, binding);
+    let view = viewer_interaction(state, P0);
+    let InteractionOpportunityResponse::ExactChoices { choices } = &view.opportunities[0].response
+    else {
+        panic!("the mana-source prompt is projected as exact choices");
+    };
+    choices
+        .iter()
+        .filter(|choice| {
+            choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Action {
+                        code: InteractionActionCode::ActivateManaSource,
+                        ..
+                    }
+                )
+            }) && choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Object {
+                        role: InteractionRoleCode::Source,
+                        reference,
+                        ..
+                    } if reference == &source.0.to_string()
+                )
+            })
+        })
+        .map(|choice| {
+            choice
+                .surfaces
+                .iter()
+                .filter_map(|surface| match surface {
+                    InteractionPresentationSurface::Mana {
+                        role: InteractionRoleCode::ProducedMana,
+                        symbols,
+                        ..
+                    } => symbols.first().cloned(),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn activate_mana_source_labels_fixed_and_flexible_sacrificial_sources() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Mana Source Label Witness", true)
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    // Both rows must be sacrifice-only: a non-sacrificial row on either source
+    // would let the automatic planner pay without ever opening the prompt.
+    let fixed = scenario
+        .add_creature(P0, "Fixed Output Witness", 1, 1)
+        .with_ability_definition(sacrificial_mana_source(ManaProduction::Fixed {
+            colors: vec![ManaColor::Black],
+            contribution: ManaContribution::Base,
+        }))
+        .id();
+    let flexible = scenario
+        .add_creature(P0, "Flexible Output Witness", 1, 1)
+        .with_ability_definition(sacrificial_mana_source(ManaProduction::AnyOneColor {
+            count: QuantityExpr::Fixed { value: 2 },
+            color_options: vec![ManaColor::Red, ManaColor::Green],
+            contribution: ManaContribution::Base,
+        }))
+        .id();
+    let mut runner = scenario.build();
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::AutoExceptSacrificialMana,
+        })
+        .expect("the production cast path should stop for sacrificial-mana consent");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManaSourceSelection { .. }
+        ),
+        "ActivateManaSource is projected only from this window, got {:?}",
+        runner.state().waiting_for
+    );
+
+    let fixed_labels = projected_mana_source_labels(runner.state_mut(), fixed, "fixed-mana-source");
+    assert_eq!(
+        fixed_labels,
+        vec![vec!["B".to_string()]],
+        "a fixed sacrificial source projects its one concrete produced unit"
+    );
+
+    let flexible_labels =
+        projected_mana_source_labels(runner.state_mut(), flexible, "flexible-mana-source");
+    assert_eq!(
+        flexible_labels,
+        vec![vec!["R".to_string(), "R".to_string()]],
+        "a flexible source is offered as ONE deferred-color candidate whose label \
+         still carries both produced units; `manual_selection_for_option` collapses \
+         it to Colorless + DeferredColorChoice, so resolving it through the land \
+         authority (the #6944 bug) would drop this label entirely"
+    );
 }

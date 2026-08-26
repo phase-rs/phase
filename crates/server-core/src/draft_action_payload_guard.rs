@@ -18,6 +18,30 @@ pub fn guard_draft_action_payload(action: &DraftAction) -> Result<(), String> {
         } => {
             validate_token("Pick.card_instance_id", card_instance_id, MAX_TOKEN_LEN)?;
         }
+        DraftAction::PickWithDraftEffect {
+            effect_card_instance_id,
+            card_instance_ids,
+            ..
+        } => {
+            validate_token(
+                "PickWithDraftEffect.effect_card_instance_id",
+                effect_card_instance_id,
+                MAX_TOKEN_LEN,
+            )?;
+            if card_instance_ids.len() != 2 {
+                return Err("PickWithDraftEffect requires exactly two card IDs".to_string());
+            }
+            if card_instance_ids[0] == card_instance_ids[1] {
+                return Err("PickWithDraftEffect requires distinct card IDs".to_string());
+            }
+            for card_instance_id in card_instance_ids {
+                validate_token(
+                    "PickWithDraftEffect.card_instance_id",
+                    card_instance_id,
+                    MAX_TOKEN_LEN,
+                )?;
+            }
+        }
         DraftAction::SubmitDeck { main_deck, .. } => {
             validate_deck_list("SubmitDeck.main_deck", main_deck, MAX_MAIN_DECK_ENTRIES)?;
         }
@@ -33,7 +57,7 @@ pub fn guard_draft_action_payload(action: &DraftAction) -> Result<(), String> {
         }
         DraftAction::StartDraft
         | DraftAction::AdvanceRound
-        | DraftAction::GeneratePairings { .. }
+        | DraftAction::GeneratePairings
         | DraftAction::SetSeatConnected { .. } => {}
     }
     Ok(())
@@ -58,6 +82,49 @@ mod tests {
         let action = DraftAction::Pick {
             seat: 0,
             card_instance_id: "x".repeat(MAX_TOKEN_LEN + 1),
+        };
+        let err = guard_draft_action_payload(&action).unwrap_err();
+        assert!(err.contains("card_instance_id"));
+    }
+
+    #[test]
+    fn draft_effect_pick_accepts_two_distinct_card_ids() {
+        let action = DraftAction::PickWithDraftEffect {
+            seat: 0,
+            effect_card_instance_id: "cogwork-1".to_string(),
+            card_instance_ids: vec!["card-1".to_string(), "card-2".to_string()],
+        };
+        assert!(guard_draft_action_payload(&action).is_ok());
+    }
+
+    #[test]
+    fn draft_effect_pick_rejects_wrong_card_count() {
+        let action = DraftAction::PickWithDraftEffect {
+            seat: 0,
+            effect_card_instance_id: "cogwork-1".to_string(),
+            card_instance_ids: vec!["card-1".to_string()],
+        };
+        let err = guard_draft_action_payload(&action).unwrap_err();
+        assert!(err.contains("exactly two"));
+    }
+
+    #[test]
+    fn draft_effect_pick_rejects_duplicate_card_ids() {
+        let action = DraftAction::PickWithDraftEffect {
+            seat: 0,
+            effect_card_instance_id: "cogwork-1".to_string(),
+            card_instance_ids: vec!["card-1".to_string(), "card-1".to_string()],
+        };
+        let err = guard_draft_action_payload(&action).unwrap_err();
+        assert!(err.contains("distinct"));
+    }
+
+    #[test]
+    fn draft_effect_pick_rejects_oversized_card_id() {
+        let action = DraftAction::PickWithDraftEffect {
+            seat: 0,
+            effect_card_instance_id: "cogwork-1".to_string(),
+            card_instance_ids: vec!["card-1".to_string(), "x".repeat(MAX_TOKEN_LEN + 1)],
         };
         let err = guard_draft_action_payload(&action).unwrap_err();
         assert!(err.contains("card_instance_id"));

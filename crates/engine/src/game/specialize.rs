@@ -73,12 +73,16 @@ pub fn eligible_specialize_colors(
         .collect()
 }
 
-fn empty_back_face() -> BackFaceData {
+/// An all-empty `BackFaceData`. `pub(crate)` rather than private because it is the only
+/// constructor of the type that does not hand-roll the full field list, and a second copy
+/// of that literal would go stale the moment `BackFaceData` gains a field.
+pub(crate) fn empty_back_face() -> BackFaceData {
     BackFaceData {
         name: String::new(),
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: Default::default(),
         mana_cost: Default::default(),
@@ -94,6 +98,7 @@ fn empty_back_face() -> BackFaceData {
         strive_cost: None,
         casting_restrictions: vec![],
         casting_options: vec![],
+        parse_warnings: vec![],
         layout_kind: None,
     }
 }

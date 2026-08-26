@@ -1,8 +1,8 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
-    DigSource, Effect, EffectError, EffectKind, ParentTargetMissingReason, ResolvedAbility,
-    TargetFilter,
+    DigRestOrder, DigSource, Effect, EffectError, EffectKind, ParentTargetMissingReason,
+    ResolvedAbility, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
@@ -23,8 +23,10 @@ pub fn resolve(
         filter,
         kept_dest,
         rest_dest,
+        rest_order,
         is_reveal,
         enter_tapped,
+        enters_attacking,
         dig_source,
     ) = match &ability.effect {
         Effect::Dig {
@@ -36,8 +38,10 @@ pub fn resolve(
             filter,
             destination,
             rest_destination,
+            rest_order,
             reveal,
             enter_tapped,
+            enters_attacking,
             source,
         } => {
             let resolved_count =
@@ -63,8 +67,10 @@ pub fn resolve(
                 filter.clone(),
                 *destination,
                 *rest_destination,
+                *rest_order,
                 *reveal,
                 *enter_tapped,
+                *enters_attacking,
                 *source,
             )
         }
@@ -76,6 +82,8 @@ pub fn resolve(
             TargetFilter::Any,
             None,
             None,
+            DigRestOrder::Preserve,
+            false,
             false,
             false,
             DigSource::Library,
@@ -107,7 +115,9 @@ pub fn resolve(
             filter,
             kept_dest,
             rest_dest,
+            rest_order,
             enter_tapped,
+            enters_attacking,
         );
     }
 
@@ -141,21 +151,42 @@ pub fn resolve(
         .collect::<Vec<_>>();
     let raw_keep_count = raw_keep_num.min(cards.len());
 
-    // CR 701.20e: Pure-peek pattern (keep_count = 0): "look at the top card" with no
-    // player selection — the sub_ability condition decides whether to take it. Set
-    // last_revealed_ids so RevealedHasCardType can evaluate, then return without
-    // creating a DigChoice interaction.
-    if raw_keep_count == 0 && !is_reveal {
+    // CR 701.20e / CR 701.20a: Pure-peek pattern (keep_count = 0): "look at" /
+    // "reveal the top N" with no player selection on this step — a following
+    // ForEachCategory / LastRevealed move decides disposition (Portent of
+    // Calamity). Set last_revealed_ids (and emit CardsRevealed for public
+    // reveals) then return without creating a DigChoice interaction.
+    if raw_keep_count == 0 {
         state.last_revealed_ids = cards.clone();
-        // CR 701.20e: "look at" privately reveals the cards to the looking
-        // player. The looker is the ability controller (e.g. Delver of Secrets'
-        // "look at the top card of your library"). Record the looker-scoped peek
-        // window so `filter_state_for_viewer` keeps these cards visible to the
-        // looker — and only the looker — through any subsequent "you may reveal
-        // that card" optional decision, instead of leaving the looking player to
-        // choose blind.
-        state.private_look_ids = cards.clone();
-        state.private_look_player = Some(ability.controller);
+        if is_reveal {
+            // CR 701.20a: public reveal — show to all players.
+            for &card_id in &cards {
+                state.revealed_cards.insert(card_id);
+            }
+            let card_names: Vec<String> = cards
+                .iter()
+                .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
+                .collect();
+            events.push(GameEvent::CardsRevealed {
+                player: ability.controller,
+                card_ids: cards.clone(),
+                card_names,
+            });
+        } else {
+            // CR 701.20e: "look at" privately reveals the cards to the looking
+            // player. The looker is the ability controller (e.g. Delver of Secrets'
+            // "look at the top card of your library"). Record the looker-scoped peek
+            // window so `filter_state_for_viewer` keeps these cards visible to the
+            // looker — and only the looker — through any subsequent "you may reveal
+            // that card" optional decision, instead of leaving the looking player to
+            // choose blind.
+            state.remember_card_identities(
+                crate::game::turn_control::decision_audience_for_player(state, ability.controller),
+                &cards,
+            );
+            state.private_look_ids = cards.clone();
+            state.private_look_player = Some(ability.controller);
+        }
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -180,6 +211,12 @@ pub fn resolve(
             card_ids: cards.clone(),
             card_names,
         });
+    }
+    if !is_reveal {
+        state.remember_card_identities(
+            crate::game::turn_control::decision_audience_for_player(state, ability.controller),
+            &cards,
+        );
     }
 
     // Pre-compute selectable cards by evaluating the filter against each card.
@@ -214,7 +251,9 @@ pub fn resolve(
                 &selectable_cards,
                 dest,
                 rest_dest,
+                rest_order,
                 enter_tapped,
+                enters_attacking,
                 events,
             );
             return Ok(());
@@ -236,8 +275,10 @@ pub fn resolve(
         up_to: is_up_to,
         kept_destination: kept_dest,
         rest_destination: rest_dest,
+        rest_order,
         source_id: Some(ability.source_id),
         enter_tapped,
+        enters_attacking,
     };
 
     events.push(GameEvent::EffectResolved {
@@ -273,7 +314,9 @@ fn resolve_from_prior_look(
     filter: TargetFilter,
     kept_dest: Option<Zone>,
     rest_dest: Option<Zone>,
+    rest_order: DigRestOrder,
     enter_tapped: bool,
+    enters_attacking: bool,
 ) -> Result<(), EffectError> {
     let cards = state.private_look_ids.clone();
     if cards.is_empty() {
@@ -300,6 +343,7 @@ fn resolve_from_prior_look(
                 state,
                 &cards,
                 dest,
+                rest_order,
                 Some(ability.source_id),
                 events,
             ) {
@@ -347,6 +391,7 @@ fn resolve_from_prior_look(
                 state,
                 &cards,
                 dest,
+                rest_order,
                 Some(ability.source_id),
                 events,
             ) {
@@ -390,8 +435,10 @@ fn resolve_from_prior_look(
         up_to: is_up_to,
         kept_destination: kept_dest,
         rest_destination: rest_dest,
+        rest_order,
         source_id: Some(ability.source_id),
         enter_tapped,
+        enters_attacking,
     };
 
     events.push(GameEvent::EffectResolved {
@@ -423,7 +470,9 @@ fn resolve_mass_put_all(
     selectable: &[crate::types::identifiers::ObjectId],
     dest: Zone,
     rest_destination: Option<Zone>,
+    rest_order: DigRestOrder,
     enter_tapped: bool,
+    enters_attacking: bool,
     events: &mut Vec<GameEvent>,
 ) {
     let rest: Vec<_> = cards
@@ -438,6 +487,7 @@ fn resolve_mass_put_all(
         state,
         &rest,
         rest_destination.unwrap_or(Zone::Library),
+        rest_order,
         Some(ability.source_id),
         events,
     ) {
@@ -448,6 +498,7 @@ fn resolve_mass_put_all(
             selectable.to_vec(),
             dest,
             EtbTapState::from_legacy_bool(enter_tapped),
+            enters_attacking,
             events,
         ),
         crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
@@ -459,6 +510,7 @@ fn resolve_mass_put_all(
                     selected: selectable.to_vec(),
                     destination: dest,
                     enter_tapped: EtbTapState::from_legacy_bool(enter_tapped),
+                    enters_attacking,
                 },
             );
         }
@@ -469,6 +521,7 @@ fn resolve_mass_put_all(
 /// mass Dig. The typed batch completion is the single authority for publication
 /// and the parent result, so a replacement pause cannot expose a pre-redirect
 /// selected set to a chained instruction.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn move_mass_put_all_selected(
     state: &mut GameState,
     player: crate::types::player::PlayerId,
@@ -476,6 +529,7 @@ pub(crate) fn move_mass_put_all_selected(
     selected: Vec<crate::types::identifiers::ObjectId>,
     destination: Zone,
     enter_tapped: EtbTapState,
+    enters_attacking: bool,
     events: &mut Vec<GameEvent>,
 ) {
     let requests = selected
@@ -487,6 +541,7 @@ pub(crate) fn move_mass_put_all_selected(
                 source_id,
             );
             request.mods.enter_tapped = enter_tapped;
+            request.mods.enters_attacking = enters_attacking;
             request
         })
         .collect();
@@ -523,6 +578,7 @@ mod tests {
     use crate::types::mana::{ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+    use rand::seq::SliceRandom;
 
     fn make_dig_ability(dig_num: u32) -> ResolvedAbility {
         ResolvedAbility::new(
@@ -537,8 +593,10 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![],
@@ -631,8 +689,10 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![crate::types::ability::TargetRef::Player(PlayerId(1))],
@@ -684,8 +744,10 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![],
@@ -737,8 +799,10 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![],
@@ -807,8 +871,10 @@ mod tests {
             up_to: true,
             kept_destination: None,
             rest_destination: Some(Zone::Library),
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
         let action = GameAction::SelectCards {
             cards: kept.clone(),
@@ -888,8 +954,10 @@ mod tests {
             up_to: true,
             kept_destination: None,
             rest_destination: Some(Zone::Library),
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
         let mut events = Vec::new();
 
@@ -948,8 +1016,10 @@ mod tests {
             up_to: false,
             kept_destination: Some(Zone::Library),
             rest_destination: Some(Zone::Library),
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
         state.park_ability_continuation(PendingContinuation::new(
             Box::new(ResolvedAbility::new(
@@ -1019,8 +1089,10 @@ mod tests {
             up_to: false,
             kept_destination: Some(Zone::Library),
             rest_destination: Some(Zone::Library),
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
 
         let mut events = Vec::new();
@@ -1082,8 +1154,10 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Graveyard),
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
 
         let mut events = Vec::new();
@@ -1142,8 +1216,10 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Graveyard),
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
 
         let mut events = Vec::new();
@@ -1211,8 +1287,10 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Library),
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
@@ -1283,8 +1361,10 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Library),
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
@@ -1349,8 +1429,10 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Library),
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
@@ -1426,8 +1508,10 @@ mod tests {
                 up_to: false,
                 filter,
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![],
@@ -1502,8 +1586,10 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Typed(TypedFilter::creature()),
                 rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![],
@@ -1807,8 +1893,10 @@ mod tests {
                 up_to: true,
                 filter: filter.clone(),
                 rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![],
@@ -1863,8 +1951,10 @@ mod tests {
                 up_to: true,
                 filter: filter_you,
                 rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![],
@@ -1930,8 +2020,10 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Battlefield),
             rest_destination: Some(Zone::Library),
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
         let action = GameAction::SelectCards {
             cards: kept.clone(),
@@ -1999,6 +2091,7 @@ mod tests {
                 up_to,
                 destination,
                 rest_destination,
+                rest_order,
                 ..
             } => {
                 assert_eq!(
@@ -2013,6 +2106,11 @@ mod tests {
                     Some(Zone::Library),
                     "the in-clause 'and the rest on the bottom' rider must set rest=Library, \
                      not fall through to the graveyard default"
+                );
+                assert_eq!(
+                    *rest_order,
+                    DigRestOrder::Random,
+                    "Muxus's exact random-order rider must reach the mass Dig resolver"
                 );
             }
             other => panic!("expected a Dig effect, got {other:?}"),
@@ -2056,6 +2154,9 @@ mod tests {
 
         let ability =
             ResolvedAbility::new((*def.effect).clone(), vec![], ObjectId(100), PlayerId(0));
+        let mut expected_rest = rest.clone();
+        let mut expected_rng = state.rng.clone();
+        expected_rest.shuffle(&mut expected_rng);
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
@@ -2088,6 +2189,15 @@ mod tests {
                 "non-matching card {id:?} must remain in the library"
             );
         }
+        assert_eq!(
+            library, expected_rest,
+            "Muxus's random-order rest pile must use the seeded shuffle before bottom placement"
+        );
+        assert_eq!(
+            state.rng.get_word_pos(),
+            expected_rng.get_word_pos(),
+            "the deterministic mass path must consume exactly its rest-pile shuffle"
+        );
         let bottom: Vec<_> = library
             .iter()
             .rev()

@@ -75,31 +75,22 @@ impl TacticalPolicy for TutorPolicy {
     }
 }
 
-pub(crate) fn score_search_choice_cards(
-    state: &GameState,
-    ai_player: PlayerId,
-    cards: &[ObjectId],
-) -> Vec<(ObjectId, f64)> {
-    let available_mana = crate::zone_eval::available_mana(state, ai_player);
-    let intent = crate::eval::strategic_intent(state, ai_player);
-    let mana_constrained = materially_mana_constrained_state(state, ai_player);
-    let combo_targets = combo_missing_piece_names(state, ai_player);
-
-    cards
-        .iter()
-        .filter_map(|&card_id| {
-            let object = state.objects.get(&card_id)?;
-            let base = tutor_object_score(object, available_mana, intent, mana_constrained);
-            let combo_bonus = if combo_targets.contains(&object.name.as_str()) {
-                COMBO_PIECE_TUTOR_BONUS
-            } else {
-                0.0
-            };
-            Some((card_id, base + combo_bonus))
-        })
-        .collect()
-}
-
+/// Score one whole `SelectCards` selection the engine issued for a search.
+///
+/// Whole-selection rather than per-card, because a multi-card search is
+/// combinatorial: an opponent may pick the worst card of the chosen set (Gifts
+/// Ungiven), and redundant names are worth less together than apart. A
+/// single-card selection is just the degenerate case — rank 0 takes neither the
+/// duplicate-name discount nor the decay, so it scores exactly its card's
+/// intrinsic tutor value.
+///
+/// Both discounts are applied by **value rank, not by slice position**. The
+/// caller hands over ids in whatever order the engine enumerated them —
+/// combinations are emitted in pool order and the candidate list is then sorted
+/// by `GameAction::cmp_stable`, i.e. by `ObjectId` — so a position-indexed decay
+/// would discount by object id, and two selections holding the same cards could
+/// score differently. Ranking makes the score a function of the *set*, which is
+/// what "the opponent takes the worst card" actually models.
 pub(crate) fn score_search_choice_selection(
     state: &GameState,
     ai_player: PlayerId,
@@ -109,25 +100,41 @@ pub(crate) fn score_search_choice_selection(
     let intent = crate::eval::strategic_intent(state, ai_player);
     let mana_constrained = materially_mana_constrained_state(state, ai_player);
     let combo_targets = combo_missing_piece_names(state, ai_player);
-    let mut seen_names = HashSet::new();
 
-    chosen
+    let mut scored: Vec<(&str, f64)> = chosen
         .iter()
-        .enumerate()
-        .filter_map(|(index, object_id)| state.objects.get(object_id).map(|object| (index, object)))
-        .map(|(index, object)| {
+        .filter_map(|object_id| state.objects.get(object_id))
+        .map(|object| {
             let mut score = tutor_object_score(object, available_mana, intent, mana_constrained);
             if combo_targets.contains(&object.name.as_str()) {
                 score += COMBO_PIECE_TUTOR_BONUS;
             }
-            if !seen_names.insert(object.name.clone()) {
-                score *= 0.7;
-            }
-            if index > 0 {
-                score *= 0.88_f64.powi(index as i32);
-            }
-            score
+            (object.name.as_str(), score)
         })
+        .collect();
+
+    // Descending before the redundancy discount, so the copy that keeps full
+    // value is the most valuable one rather than the first one listed.
+    scored.sort_by(|left, right| right.1.total_cmp(&left.1));
+    let mut seen_names = HashSet::new();
+    let mut values: Vec<f64> = scored
+        .into_iter()
+        .map(|(name, score)| {
+            if seen_names.insert(name) {
+                score
+            } else {
+                score * 0.7
+            }
+        })
+        .collect();
+
+    // Re-sort: a discounted duplicate can drop below a card it outranked before
+    // the discount, and the decay must fall on whatever is weakest *now*.
+    values.sort_by(|left, right| right.total_cmp(left));
+    values
+        .iter()
+        .enumerate()
+        .map(|(rank, score)| score * 0.88_f64.powi(rank as i32))
         .sum()
 }
 
@@ -537,19 +544,33 @@ mod tests {
             .core_types
             .push(CoreType::Land);
 
-        let scored = score_search_choice_cards(&state, PlayerId(0), &[titan, land]);
-        let titan_score = scored
-            .iter()
-            .find(|(id, _)| *id == titan)
-            .map(|(_, score)| *score)
-            .expect("titan score");
-        let land_score = scored
-            .iter()
-            .find(|(id, _)| *id == land)
-            .map(|(_, score)| *score)
-            .expect("land score");
+        // Single-card selections are what the enumerator issues for a count-1
+        // search, so score them the same way the AI ranks them.
+        let titan_score = score_search_choice_selection(&state, PlayerId(0), &[titan]);
+        let land_score = score_search_choice_selection(&state, PlayerId(0), &[land]);
 
         assert!(titan_score > land_score);
+
+        // The score must be a function of the SET, not of the order the engine
+        // happened to enumerate the ids in. The enumerator emits combinations in
+        // pool order and the candidate list is then sorted by `ObjectId`, so a
+        // position-indexed decay would rank two identical selections
+        // differently purely on object id — and would discount the STRONG card
+        // whenever it sorted second.
+        let strong_first = score_search_choice_selection(&state, PlayerId(0), &[titan, land]);
+        let weak_first = score_search_choice_selection(&state, PlayerId(0), &[land, titan]);
+        assert_eq!(
+            strong_first, weak_first,
+            "selection score must not depend on the order the ids arrived in"
+        );
+        // Pins WHICH card takes the decay: the weakest one. Without this an
+        // order-independent but wrongly-ranked implementation (ascending sort)
+        // would satisfy the equality above.
+        assert_eq!(
+            strong_first,
+            titan_score + 0.88 * land_score,
+            "the decay must fall on the weaker card, at full value for the best"
+        );
     }
 
     #[test]
@@ -654,17 +675,8 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
 
-        let scored = score_search_choice_cards(&state, PlayerId(0), &[titan, ballista]);
-        let titan_score = scored
-            .iter()
-            .find(|(id, _)| *id == titan)
-            .map(|(_, s)| *s)
-            .expect("titan score");
-        let ballista_score = scored
-            .iter()
-            .find(|(id, _)| *id == ballista)
-            .map(|(_, s)| *s)
-            .expect("ballista score");
+        let titan_score = score_search_choice_selection(&state, PlayerId(0), &[titan]);
+        let ballista_score = score_search_choice_selection(&state, PlayerId(0), &[ballista]);
 
         assert!(
             ballista_score > titan_score,

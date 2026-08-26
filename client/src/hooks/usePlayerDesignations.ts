@@ -1,12 +1,13 @@
 import { useMemo } from "react";
 
 import type {
-  DungeonId,
+  DungeonRoomView,
   ObjectId,
   PendingNextSpellModifier,
   PendingSpellCostReduction,
   PlayerId,
   PlayerStatusView,
+  UnboundedFamilyView,
   UnboundedResourceView,
 } from "../adapter/types.ts";
 import { useGameStore } from "../stores/gameStore.ts";
@@ -15,15 +16,19 @@ export interface PlayerDesignations {
   isMonarch: boolean;
   hasInitiative: boolean;
   hasCityBlessing: boolean;
+  hasEnduringStory: boolean;
   ringLevel: number;
   ringBearerId: ObjectId | null;
   ringBearerName: string | null;
   energy: number;
-  /** The active dungeon, or null when the player is not currently venturing.
-   *  `dungeon_progress` may carry a stale entry with `current_dungeon: null`
-   *  after a dungeon is completed, so this is the only safe presence signal. */
-  activeDungeon: DungeonId | null;
-  currentRoom: number;
+  /** CR 309.4b-c: the engine's naming of the room the venture marker is on —
+   *  dungeon, room name, printed effect, and the dungeon's room count. Null
+   *  when the player is not venturing, which is also the only safe presence
+   *  signal: `dungeon_progress` keeps a stale entry with `current_dungeon:
+   *  null` after a dungeon is completed (CR 309.7), and the engine projects
+   *  `derived.dungeon_rooms` only for an ACTIVE dungeon. The FE never derives
+   *  the room's name or effect; that table lives in the engine. */
+  dungeonRoom: DungeonRoomView | null;
   /** Engine-aggregated continuous conditions afflicting this player (can't gain
    *  life, can't cast, etc.). Shared empty array when none, so the memoized
    *  result stays stable in the dominant case. */
@@ -35,6 +40,10 @@ export interface PlayerDesignations {
   /** CR 732.2a: engine-attributed unbounded-resource (`∞`) rows for this player.
    *  Shared empty array when none, so the memoized result stays stable. */
   unboundedResources: UnboundedResourceView[];
+  /** CR 732.2a: the engine's per-display-family collapse state for this player's `∞` badges.
+   *  Shared empty array when none. The FE never re-derives these — the engine resolves them on
+   *  the producing controller key, which does not survive onto the wire. */
+  unboundedFamilies: UnboundedFamilyView[];
   hasAny: boolean;
 }
 
@@ -50,21 +59,23 @@ const NO_CONDITIONS: PlayerStatusView[] = [];
 const NO_MODIFIERS: PendingNextSpellModifier[] = [];
 const NO_REDUCTIONS: PendingSpellCostReduction[] = [];
 const NO_UNBOUNDED: UnboundedResourceView[] = [];
+const NO_FAMILIES: UnboundedFamilyView[] = [];
 
 const EMPTY: PlayerDesignations = {
   isMonarch: false,
   hasInitiative: false,
   hasCityBlessing: false,
+  hasEnduringStory: false,
   ringLevel: 0,
   ringBearerId: null,
   ringBearerName: null,
   energy: 0,
-  activeDungeon: null,
-  currentRoom: 0,
+  dungeonRoom: null,
   statusConditions: NO_CONDITIONS,
   pendingSpellModifiers: NO_MODIFIERS,
   pendingSpellReductions: NO_REDUCTIONS,
   unboundedResources: NO_UNBOUNDED,
+  unboundedFamilies: NO_FAMILIES,
   hasAny: false,
 };
 
@@ -85,11 +96,11 @@ export function usePlayerDesignations(playerId: PlayerId): PlayerDesignations {
   return useMemo(() => {
     const gs = gameState;
     if (!gs) return EMPTY;
-    const dungeon = gs.dungeon_progress?.[playerKey(playerId)];
-    const activeDungeon = dungeon?.current_dungeon ?? null;
+    const dungeonRoom = gs.derived?.dungeon_rooms?.[playerKey(playerId)] ?? null;
     const isMonarch = gs.monarch != null && gs.monarch === playerId;
     const hasInitiative = gs.initiative != null && gs.initiative === playerId;
     const hasCityBlessing = gs.city_blessing?.includes(playerId) ?? false;
+    const hasEnduringStory = gs.enduring_story?.includes(playerId) ?? false;
     const ringLevel = gs.ring_level?.[playerKey(playerId)] ?? 0;
     const ringBearerId = gs.ring_bearer?.[playerKey(playerId)] ?? null;
     const ringBearerName = ringBearerId != null ? (gs.objects[String(ringBearerId)]?.name ?? null) : null;
@@ -110,32 +121,43 @@ export function usePlayerDesignations(playerId: PlayerId): PlayerDesignations {
       playerId,
       NO_UNBOUNDED,
     );
+    const unboundedFamilies = forPlayer(gs.derived?.unbounded_families, playerId, NO_FAMILIES);
+    // The collapse question is answered per (seat, family) by the engine, on the producing
+    // controller key before attribution rewrites `player`. Nothing here derives or joins it.
     const hasAny =
       isMonarch
       || hasInitiative
       || hasCityBlessing
-      || activeDungeon != null
+      || hasEnduringStory
+      || dungeonRoom != null
       || ringLevel > 0
       || energy > 0
       || statusConditions.length > 0
       || pendingSpellModifiers.length > 0
       || pendingSpellReductions.length > 0
-      || unboundedResources.length > 0;
+      || unboundedResources.length > 0
+      || unboundedFamilies.length > 0;
     return {
       isMonarch,
       hasInitiative,
       hasCityBlessing,
+      hasEnduringStory,
       ringLevel,
       ringBearerId,
       ringBearerName,
       energy,
-      activeDungeon,
-      currentRoom: dungeon?.current_room ?? 0,
+      dungeonRoom,
       statusConditions,
       pendingSpellModifiers,
       pendingSpellReductions,
       unboundedResources,
+      unboundedFamilies,
       hasAny,
     };
   }, [gameState, playerId]);
+}
+
+/** Engine-projected player designation; this hook deliberately performs only membership lookup. */
+export function useHasEnduringStory(playerId: PlayerId): boolean {
+  return useGameStore((state) => state.gameState?.enduring_story?.includes(playerId) ?? false);
 }

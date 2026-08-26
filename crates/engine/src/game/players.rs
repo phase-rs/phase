@@ -15,6 +15,38 @@ pub fn is_alive(state: &GameState, player: PlayerId) -> bool {
         .any(|p| p.id == player && !p.is_eliminated)
 }
 
+/// May this seat be CHOSEN AT ALL — whether the choice is a target (CR 115.1) or not
+/// (CR 115.10a)? The EXISTENCE half only.
+///
+/// CR 800.4: "multiplayer games can continue after one or more players have left the
+/// game" — a departed seat is no longer one of CR 102.1's "people in the game", so it is
+/// not choosable by anything.
+///
+/// CR 702.26b as an explicit MIRROR, never as authority: 702.26b is PERMANENT phasing
+/// ("a phased-out permanent is treated as though it does not exist"); the engine's
+/// PLAYER-level phased-out flag mirrors that wording. The MIRROR label is load-bearing —
+/// 702.26b is not a rule about players and must not be read as one.
+///
+/// NOTE the CR set deliberately does NOT include CR 800.4a: that rule governs a departed
+/// player's OBJECTS, control effects and priority — not the legality of a choice.
+///
+/// TARGETED choices need MORE than this: see [`crate::game::targeting::player_is_legal_target`],
+/// which adds the targeting-only exclusions. CR 115.10a is the boundary — a seat that is
+/// merely *chosen* (CR 701.34a proliferate, CR 701.30b clash, CR 702.132a assist) is not a
+/// target, so those exclusions must NOT be applied here. Applying them would refuse a
+/// legal choice, which is exactly the over-veto class this split exists to prevent.
+///
+/// This is the choke point for the CHOICE-ENUMERATION class: every seam that materializes
+/// a list of seats offered to a player to pick from routes through this function (directly
+/// or through [`choosable_opponents`]), so the enumerating sides cannot drift apart.
+pub fn player_exists_for_choice(state: &GameState, player: PlayerId) -> bool {
+    is_alive(state, player)
+        && !state
+            .players
+            .iter()
+            .any(|p| p.id == player && p.is_phased_out())
+}
+
 /// CR 607.2d / CR 607.2m (by analogy): true iff `player`'s durable per-player
 /// `chosen_attributes` records a `ChosenAttribute::Label` equal to `label`
 /// (case-insensitive). Single authority consulted by every "player who last
@@ -166,6 +198,27 @@ pub fn opponents(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
         .collect()
 }
 
+/// CR 115.10a: the opponents of `player` that may be CHOSEN — [`opponents`] narrowed by
+/// [`player_exists_for_choice`].
+///
+/// Opponent-hood itself is whatever [`opponents`] says (CR 102.2 in a two-player game,
+/// CR 102.3 in a game between teams; a free-for-all has no single defining rule and the
+/// engine's authority is `topology::is_opponent`). This function adds no relation — only
+/// the existence conjunct.
+///
+/// This is a SIBLING of [`opponents`], never a conjunct pushed INTO it. `opponents` is the
+/// seat-RELATION authority, consumed across the whole engine by combat, targeting,
+/// visibility and replacement — each governed by its own CR section — so widening it
+/// would silently change every one of them. Same two-layer split as
+/// [`crate::game::targeting::player_is_legal_target`] vs [`player_exists_for_choice`]: the
+/// CHOICE seam gets the conjunct, the RELATION seam does not.
+pub fn choosable_opponents(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
+    opponents(state, player)
+        .into_iter()
+        .filter(|&id| player_exists_for_choice(state, id))
+        .collect()
+}
+
 /// CR 102.2 / CR 102.3: Whether `other` is an opponent of `player`.
 pub fn is_opponent(state: &GameState, player: PlayerId, other: PlayerId) -> bool {
     super::topology::is_opponent(state, player, other)
@@ -241,6 +294,14 @@ pub fn apnap_order_from(
     // compile error here rather than a silent fall-back to APNAP.
     let start_player = match starting_with {
         Some(ControllerRef::You) => controller,
+        // CR 101.4 + CR 109.4: a resolution-time snapshot names the anchor
+        // outright, so it anchors AT that id. Folding it into the default arm
+        // below would silently order from the active player whenever the
+        // snapshotted player is not the active one — the exact case the variant
+        // exists to represent. Unlike its dynamic siblings there is nothing to
+        // resolve and no context to be missing, so there is no reason to fail
+        // closed here.
+        Some(ControllerRef::SpecificPlayer { id }) => id,
         None
         | Some(
             ControllerRef::Opponent
@@ -425,6 +486,39 @@ pub fn team_poison_total(state: &GameState, player: PlayerId) -> u32 {
 
 #[cfg(test)]
 mod tests {
+
+    /// CR 101.4 + CR 109.4: a snapshotted anchor orders from ITS OWN player, not
+    /// from the active player.
+    ///
+    /// The fixture deliberately makes the snapshotted player NON-ACTIVE — that is
+    /// the only configuration in which the bug is visible, since folding
+    /// `SpecificPlayer` into the default arm returns the active player and a
+    /// same-player fixture would pass either way.
+    #[test]
+    fn specific_player_anchor_orders_from_the_snapshotted_player() {
+        let mut state = make_state(3, FormatConfig::free_for_all());
+        state.active_player = PlayerId(0);
+
+        let anchored = apnap_order_from(
+            &state,
+            Some(ControllerRef::SpecificPlayer { id: PlayerId(2) }),
+            PlayerId(0),
+        );
+        assert_eq!(
+            anchored.first(),
+            Some(&PlayerId(2)),
+            "the snapshotted (non-active) player anchors the order"
+        );
+
+        // Paired guard: the default anchor really is the active player, so the
+        // assertion above is not passing for an unrelated reason.
+        let default_anchored = apnap_order_from(&state, None, PlayerId(0));
+        assert_eq!(
+            default_anchored.first(),
+            Some(&PlayerId(0)),
+            "with no anchor the order still starts at the active player"
+        );
+    }
     use super::*;
     use crate::types::format::FormatConfig;
 

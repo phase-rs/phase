@@ -7,12 +7,14 @@
 //! build, but the suite only references a few hundred distinct cards.
 //!
 //! So [`shared_card_db`] loads a small committed fixture
-//! (`tests/fixtures/integration_cards.json`, a strict subset of the export) that
+//! (`tests/fixtures/integration_cards.json.gz`, a strict subset of the export) that
 //! parses in milliseconds. Regenerate it with `python3 scripts/gen-test-fixture.py`
 //! after adding a test that references a new card; set `FORGE_TEST_FULL_DB=1` to
 //! force the full export. [`shared_card_export_json`] still loads the full export
 //! for the few drift-guard tests that must inspect every card.
 
+use std::fs::File;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -20,6 +22,7 @@ use engine::database::card_db::CardDatabase;
 use engine::game::triggers::trigger_source_context_for_latch;
 use engine::types::game_state::{GameState, NamedChoiceSource, NamedChoiceSourceBinding};
 use engine::types::identifiers::ObjectId;
+use flate2::read::GzDecoder;
 use serde_json::{Map, Value};
 
 /// Builds the exact object-and-resolution authority used by persisted named
@@ -34,13 +37,26 @@ pub fn exact_named_choice_source(state: &GameState, object_id: ObjectId) -> Name
 
 /// Path to the full parsed card-data export, relative to the engine crate root.
 fn export_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json")
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let client_export = root.join("client/public/card-data.json");
+    if client_export.exists() {
+        client_export
+    } else {
+        root.join("data/card-data.json")
+    }
 }
 
 /// Path to the curated integration-test fixture (a subset of the export).
 // TWIN-SYNC: keep this fixture path in lockstep with src/test_support.rs.
 fn fixture_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/integration_cards.json")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/integration_cards.json.gz")
+}
+
+fn load_fixture(path: &Path) -> CardDatabase {
+    let file = File::open(path).expect("fixture should open");
+    let reader = BufReader::new(file);
+    let decoder = GzDecoder::new(reader);
+    CardDatabase::from_export_reader(decoder).expect("fixture should load")
 }
 
 /// Returns the shared, process-wide card database, loading it on first use.
@@ -54,11 +70,11 @@ pub fn shared_card_db() -> Option<&'static CardDatabase> {
     DB.get_or_init(|| {
         let fixture = fixture_path();
         if std::env::var_os("FORGE_TEST_FULL_DB").is_none() && fixture.exists() {
-            return Some(CardDatabase::from_export(&fixture).expect("fixture should load"));
+            return Some(load_fixture(&fixture));
         }
         let path = export_path();
         if !path.exists() {
-            eprintln!("skipping: client/public/card-data.json not generated");
+            eprintln!("skipping: full card-data export not generated");
             return None;
         }
         Some(CardDatabase::from_export(&path).expect("export should load"))

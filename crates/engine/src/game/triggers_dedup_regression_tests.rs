@@ -1,8 +1,8 @@
 use super::*;
 use crate::game::zones::create_object;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ControllerRef, Effect, QuantityExpr, ResolvedAbility,
-    TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
+    AbilityDefinition, AbilityKind, ControllerRef, Effect, ModalChoice, QuantityExpr,
+    ResolvedAbility, TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
 };
 use crate::types::actions::GameAction;
 use crate::types::card_type::{CoreType, Supertype};
@@ -206,6 +206,7 @@ fn spell_cast_observer_fires_once_per_event() {
         card_id: CardId(4),
         controller: PlayerId(0),
         object_id: spell,
+        cast_mana_value: None,
     };
 
     process_triggers(&mut state, &[event]);
@@ -1379,6 +1380,7 @@ fn veyran_doubles_trigger_caused_by_controller_casting_instant() {
         card_id: CardId(200),
         controller: PlayerId(0),
         object_id: spell,
+        cast_mana_value: None,
     };
 
     process_triggers(&mut state, &[event]);
@@ -1475,6 +1477,7 @@ fn veyran_does_not_double_opponent_cast_trigger() {
         card_id: CardId(201),
         controller: PlayerId(1),
         object_id: spell,
+        cast_mana_value: None,
     };
 
     process_triggers(&mut state, &[event]);
@@ -3315,7 +3318,7 @@ fn order_triggers_distinct_event_context_still_prompt() {
             source_id: source,
             controller: PlayerId(0),
             condition: None,
-            ability: ability.clone(),
+            ability: Box::new(ability.clone()),
             timestamp: count,
             target_constraints: Vec::new(),
             distribute: None,
@@ -3326,6 +3329,7 @@ fn order_triggers_distinct_event_context_still_prompt() {
             may_trigger_origin: None,
             subject_match_count: Some(count),
             die_result: None,
+            provenance: None,
         })
     };
     let ctx_a = make_ctx(ObjectId(1), 1);
@@ -3371,7 +3375,7 @@ fn order_triggers_event_context_ability_still_prompts_on_distinct_events() {
             source_id: source,
             controller: PlayerId(0),
             condition: None,
-            ability: ability.clone(),
+            ability: Box::new(ability.clone()),
             timestamp: source.0 as u32,
             target_constraints: Vec::new(),
             distribute: None,
@@ -3385,6 +3389,7 @@ fn order_triggers_event_context_ability_still_prompts_on_distinct_events() {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         })
     };
     let ctx_a = make_ctx(ObjectId(1), ObjectId(11));
@@ -3425,7 +3430,7 @@ fn archenemy_hero_team_orders_triggers_from_multiple_heroes_together() {
             source_id: source,
             controller,
             condition: None,
-            ability,
+            ability: Box::new(ability),
             timestamp: source.0 as u32,
             target_constraints: Vec::new(),
             distribute: None,
@@ -3436,6 +3441,7 @@ fn archenemy_hero_team_orders_triggers_from_multiple_heroes_together() {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         })
     };
 
@@ -3642,4 +3648,916 @@ fn order_triggers_apnap_three_players() {
             "stack top must contain NAP triggers (CR 405.3 + 603.3b)"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// CR 603.2c: the shared "already collected" authority
+// (`filter_already_collected_trigger_events_from`).
+//
+// These pin the exact semantics of the queued-context witness, which is a BOUND
+// and not an occurrence count: `deferred_triggers` holds one context per matching
+// observer, so N observers of ONE occurrence contribute N copies of that value.
+// ---------------------------------------------------------------------------
+
+/// A byte-identical `ZoneChanged` builder — `ZoneChangeRecord::test_minimal` is
+/// fully deterministic, so two calls with the same arguments compare equal.
+fn zone_change_event(object_id: ObjectId) -> GameEvent {
+    GameEvent::ZoneChanged {
+        object_id,
+        from: Some(Zone::Library),
+        to: Zone::Battlefield,
+        record: Box::new(ZoneChangeRecord::test_minimal(
+            object_id,
+            Some(Zone::Library),
+            Zone::Battlefield,
+        )),
+    }
+}
+
+/// One queued context carrying exactly one copy of `event`, matching the
+/// one-witness-copy-per-matched-observer shape
+/// `collect_pending_triggers_with_collection` produces. That function builds
+/// `PendingTriggerContext::batched(matched.pending, matched.trigger_events)`, but
+/// for a non-batched trigger `matched.trigger_events` is the singleton
+/// `vec![event.clone()]` — so a `::single` context is the same one-copy shape and
+/// is used here because `::batched` is private to `triggers`.
+fn queued_context_for(event: GameEvent) -> PendingTriggerContext {
+    PendingTriggerContext::single(PendingTrigger {
+        source_id: ObjectId(99),
+        controller: PlayerId(0),
+        condition: None,
+        ability: Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(99),
+            PlayerId(0),
+        )),
+        timestamp: 0,
+        target_constraints: Vec::new(),
+        distribute: None,
+        trigger_event: Some(event),
+        modal: None,
+        mode_abilities: Vec::new(),
+        description: None,
+        may_trigger_origin: None,
+        subject_match_count: None,
+        die_result: None,
+        provenance: None,
+    })
+}
+
+fn zone_change_count(events: &[GameEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+        .count()
+}
+
+fn recorded_zone_change_event(state: &mut GameState, object_id: ObjectId) -> GameEvent {
+    let mut event = zone_change_event(object_id);
+    let GameEvent::ZoneChanged { record, .. } = &mut event else {
+        unreachable!("zone_change_event always returns ZoneChanged");
+    };
+    crate::game::restrictions::record_zone_change(state, record);
+    event
+}
+
+#[test]
+fn deferred_zone_change_witness_does_not_alias_the_next_turns_ledger_index() {
+    let mut state = setup();
+    let old_turn = state.turn_number;
+    let old_event = recorded_zone_change_event(&mut state, ObjectId(7));
+    state
+        .deferred_triggers
+        .push(queued_context_for(old_event.clone()));
+
+    assert!(
+        filter_already_collected_trigger_events_from(
+            &state,
+            std::slice::from_ref(&old_event),
+            0,
+            &[]
+        )
+        .is_empty(),
+        "the same-turn queued witness must suppress its own occurrence"
+    );
+
+    crate::game::turns::start_next_turn(&mut state, &mut Vec::new());
+    let new_event = recorded_zone_change_event(&mut state, ObjectId(7));
+    let GameEvent::ZoneChanged { record, .. } = &new_event else {
+        unreachable!("recorded helper always returns ZoneChanged");
+    };
+    assert_eq!(record.turn_zone_change_index, 0);
+    assert_eq!(
+        filter_already_collected_trigger_events_from(
+            &state,
+            std::slice::from_ref(&new_event),
+            0,
+            &[],
+        ),
+        vec![new_event],
+        "a deferred witness from turn {old_turn} must not consume index 0 from turn {}",
+        state.turn_number
+    );
+}
+
+#[test]
+fn batched_zone_change_replay_guard_keeps_old_turn_markers_distinct_from_new_index_zero() {
+    let (mut state, observer) = setup_with_observer(TriggerMode::ChangesZone);
+    let (definition, definition_ref) = {
+        let object = state.objects.get_mut(&observer).unwrap();
+        object.trigger_definitions[0].definition.batched = true;
+        let definition = object.trigger_definitions[0].definition.clone();
+        let definition_ref = object.trigger_definition_ref(&object.trigger_definitions[0]);
+        (definition, definition_ref)
+    };
+    let old_event = recorded_zone_change_event(&mut state, ObjectId(7));
+
+    assert!(batched_zone_change_replay_guard_applies(
+        &definition,
+        std::slice::from_ref(&old_event)
+    ));
+    record_batched_zone_change_collected(
+        &mut state,
+        Some(&definition_ref),
+        std::slice::from_ref(&old_event),
+    );
+    assert!(
+        batched_zone_change_already_collected(
+            &state,
+            Some(&definition_ref),
+            std::slice::from_ref(&old_event),
+        ),
+        "the same-turn marker must suppress the event it recorded"
+    );
+
+    let GameEvent::ZoneChanged { record, .. } = &old_event else {
+        unreachable!("recorded helper always returns ZoneChanged");
+    };
+    let old_key = (
+        definition_ref.clone(),
+        record.recorded_turn_number,
+        record.turn_zone_change_index,
+    );
+    crate::game::turns::start_next_turn(&mut state, &mut Vec::new());
+    state.batched_zone_change_trigger_fired.insert(old_key);
+    assert!(
+        batched_zone_change_already_collected(
+            &state,
+            Some(&definition_ref),
+            std::slice::from_ref(&old_event),
+        ),
+        "a retained marker must still suppress its old-turn event after the boundary"
+    );
+
+    let new_event = recorded_zone_change_event(&mut state, ObjectId(7));
+    let GameEvent::ZoneChanged { record, .. } = &new_event else {
+        unreachable!("recorded helper always returns ZoneChanged");
+    };
+    assert_eq!(record.turn_zone_change_index, 0);
+    assert!(
+        !batched_zone_change_already_collected(
+            &state,
+            Some(&definition_ref),
+            std::slice::from_ref(&new_event),
+        ),
+        "a new-turn index-0 event must not alias the retained old-turn marker"
+    );
+}
+
+/// U1 — the queued witness is COUNT-LIMITED, not set membership.
+///
+/// Two byte-identical `ZoneChanged` in the slice against ONE queued context
+/// carrying that value must leave exactly one survivor. Set membership would
+/// return 0, and so would a blanket `ZoneChanged` drop; both are wrong, because
+/// the second occurrence belongs to no owner.
+#[test]
+fn owner_collected_filter_consumes_one_witness_per_queued_context() {
+    let mut state = setup();
+    let event = zone_change_event(ObjectId(7));
+    let events = vec![event.clone(), event.clone()];
+    state.deferred_triggers.push(queued_context_for(event));
+
+    assert_eq!(
+        zone_change_count(&events),
+        2,
+        "the slice must really hold two byte-identical ZoneChanged"
+    );
+    assert_eq!(
+        state.deferred_triggers.len(),
+        1,
+        "exactly one context must be queued"
+    );
+
+    let survivors = filter_already_collected_trigger_events_from(&state, &events, 0, &[]);
+    assert_eq!(
+        zone_change_count(&survivors),
+        1,
+        "CR 603.2c: one queued witness consumes one copy, not every copy"
+    );
+}
+
+/// U2 — the consumed-occurrence ledger alone suppresses, with an empty queue.
+///
+/// This is the witness that survives an intervening `drain_deferred_trigger_queue`.
+/// Production isolation of this case at the search-delivery park is an open gap;
+/// it is evidenced here at the authority layer.
+#[test]
+fn owner_collected_filter_honors_consumed_ledger_with_empty_queue() {
+    let state = setup();
+    let claimed = zone_change_event(ObjectId(7));
+    let other = zone_change_event(ObjectId(8));
+    let events = vec![claimed.clone(), other.clone()];
+
+    assert!(
+        state.deferred_triggers.is_empty(),
+        "the queued-context witness must be absent so the ledger is isolated"
+    );
+
+    let consumed = vec![ConsumedTriggerEventOccurrence {
+        event: claimed.clone(),
+        occurrence: 0,
+        scope: ConsumedTriggerEventScope::AllCollectors,
+    }];
+    let survivors = filter_already_collected_trigger_events_from(&state, &events, 0, &consumed);
+    assert_eq!(
+        survivors,
+        vec![other],
+        "the ledger-claimed occurrence is removed and the unrelated one survives"
+    );
+}
+
+/// U3 — the queued witness never touches a non-`ZoneChanged` event.
+#[test]
+fn owner_collected_filter_never_drops_non_zone_change_events() {
+    let mut state = setup();
+    let zone_change = zone_change_event(ObjectId(7));
+    let life = GameEvent::LifeChanged {
+        player_id: PlayerId(0),
+        amount: -1,
+    };
+    let events = vec![zone_change.clone(), life.clone()];
+    state
+        .deferred_triggers
+        .push(queued_context_for(zone_change));
+
+    let survivors = filter_already_collected_trigger_events_from(&state, &events, 0, &[]);
+    assert!(
+        !survivors.is_empty(),
+        "the non-zone event must not be swept away with the zone change"
+    );
+    assert_eq!(
+        survivors,
+        vec![life],
+        "only the owner-collected ZoneChanged is removed"
+    );
+}
+
+/// U4 — the witness counts CONTEXT COPIES, not occurrences.
+///
+/// Two observers of ONE occurrence queue two contexts, each carrying that same
+/// single value. A slice holding two byte-identical copies therefore loses BOTH.
+/// This is the documented bound in
+/// `filter_already_collected_trigger_events_from`'s contract, made executable so
+/// no future author can re-assert occurrence-exactness without deliberately
+/// updating this row.
+///
+/// THIS ROW DESCRIBES A `#[cfg(test)]`-ONLY INPUT, NOT A PRODUCTION LOSS. Both
+/// events come from `zone_change_event`, which builds its record with
+/// `ZoneChangeRecord::test_minimal` — a `#[cfg(test)]` constructor whose own doc
+/// says *"Production code must use `GameObject::snapshot_for_zone_change`"*. It
+/// pins `turn_zone_change_index` at `0` for BOTH events and leaves
+/// `trigger_source_context` and `entered_incarnation` as `None`. In production,
+/// two byte-identical `ZoneChanged` denote ONE occurrence emitted twice, so
+/// dropping both is the CORRECT answer for this input.
+///
+/// Distinct production occurrences are separated by `turn_zone_change_index` in
+/// EVERY family, and additionally by `object_id` (a top-level field of the
+/// event, sibling to `record`), by `entered_incarnation` (battlefield
+/// destinations only), and by
+/// `trigger_source_context.identity.reference.incarnation` (only where the path
+/// bumps the incarnation). Within-library reorders are excluded entirely: they
+/// emit neither a `ZoneChanged` event nor a ledger row, as pinned by
+/// `within_library_reposition_does_not_create_a_zone_change` (in `game/zones.rs`).
+/// The occurrence-separation links are pinned by
+/// `occurrence_exact_witness_consumes_the_occurrence_its_witness_names` (U5,
+/// below) and by `parked_delivery_records_carry_distinct_occurrence_indices` (in
+/// `tests/integration/search_delivery_observer_dedup.rs`).
+#[test]
+fn owner_collected_filter_counts_contexts_not_occurrences() {
+    let mut state = setup();
+    let event = zone_change_event(ObjectId(7));
+    let events = vec![event.clone(), event.clone()];
+    state
+        .deferred_triggers
+        .push(queued_context_for(event.clone()));
+    state.deferred_triggers.push(queued_context_for(event));
+
+    assert_eq!(
+        zone_change_count(&events),
+        2,
+        "the slice must really hold two byte-identical ZoneChanged"
+    );
+    assert_eq!(
+        state.deferred_triggers.len(),
+        2,
+        "two observers of one occurrence queue two contexts"
+    );
+
+    let survivors = filter_already_collected_trigger_events_from(&state, &events, 0, &[]);
+    assert_eq!(
+        zone_change_count(&survivors),
+        0,
+        "the queued witness is a min(queued_copies, slice_copies) BOUND, and is \
+         NOT occurrence-exact"
+    );
+}
+
+/// U5 — the witness consumes the occurrence IT NAMES, not merely one of that shape.
+///
+/// CR 603.2c sentence 2. Two DISTINCT occurrences of one object are separated in
+/// production by `turn_zone_change_index` always, and by up to three further
+/// fields depending on the family (`object_id`, `entered_incarnation`,
+/// `trigger_source_context.identity.reference.incarnation`). This row isolates the
+/// one that is live for EVERY family and lives inside `ZoneChangeRecord`'s
+/// equality — `turn_zone_change_index`, assigned per-occurrence by
+/// `restrictions::record_zone_change`. `ZoneChangeRecord::test_minimal` leaves
+/// `trigger_source_context` and `entered_incarnation` as `None`, and both events
+/// here share one `ObjectId`, so the index is the SOLE difference.
+///
+/// There is no production analogue with these same three fields neutralized:
+/// a within-library reorder emits neither a `ZoneChanged` event nor a ledger row
+/// (see `within_library_reposition_does_not_create_a_zone_change` in `zones.rs`).
+/// A production fixture for the FILTER-AUTHORITY link pinned here is
+/// CONSTRUCTIBLE but deliberately NOT built: the only known route depends on a duplicate-id
+/// `SelectCards` payload that the `EffectZoneChoice` arm fails to reject, and
+/// every sibling validator rejects such a payload with an error. So once that
+/// gap is closed the action is REJECTED, the row fails to construct, and it goes
+/// RED — the row would be testing the validation gap, not the invariant. The
+/// behavioural pin therefore lives here.
+///
+/// The witness names the SECOND occurrence, so the survivor must be the FIRST.
+/// The survivor is identified by a RAW FIELD READ, not by `GameEvent` equality:
+/// an equality-based assertion would itself be evaluated under the very
+/// `PartialEq` a regression would break, and would pass either way.
+///
+/// Goes red if a future change drops `turn_zone_change_index` out of
+/// `ZoneChangeRecord` equality (e.g. a manual `impl PartialEq` that skips it), or
+/// if the filter regresses to set membership.
+#[test]
+fn occurrence_exact_witness_consumes_the_occurrence_its_witness_names() {
+    let mut state = setup();
+
+    let first_event = GameEvent::ZoneChanged {
+        object_id: ObjectId(7),
+        from: Some(Zone::Library),
+        to: Zone::Battlefield,
+        record: Box::new(ZoneChangeRecord {
+            turn_zone_change_index: 0,
+            ..ZoneChangeRecord::test_minimal(ObjectId(7), Some(Zone::Library), Zone::Battlefield)
+        }),
+    };
+    let second_event = GameEvent::ZoneChanged {
+        object_id: ObjectId(7),
+        from: Some(Zone::Library),
+        to: Zone::Battlefield,
+        record: Box::new(ZoneChangeRecord {
+            turn_zone_change_index: 1,
+            ..ZoneChangeRecord::test_minimal(ObjectId(7), Some(Zone::Library), Zone::Battlefield)
+        }),
+    };
+
+    assert_ne!(
+        first_event, second_event,
+        "CR 400.7: turn_zone_change_index is the ONLY field separating these two \
+         occurrences of one object, and it MUST participate in GameEvent equality"
+    );
+
+    let events = vec![first_event.clone(), second_event.clone()];
+
+    // Reach-guard: with an empty queue the filter body still runs and keeps both
+    // events. Without this the main assertion below would also be satisfied by a
+    // function that returned everything. NOT revert-failing under F-EQ.
+    assert!(
+        state.deferred_triggers.is_empty(),
+        "the reach-guard needs an empty queue"
+    );
+    assert_eq!(
+        zone_change_count(&filter_already_collected_trigger_events_from(
+            &state,
+            &events,
+            0,
+            &[]
+        )),
+        2,
+        "reach-guard: with no queued witness the filter keeps both occurrences"
+    );
+
+    // The witness names the SECOND occurrence.
+    state
+        .deferred_triggers
+        .push(queued_context_for(second_event.clone()));
+
+    let survivors = filter_already_collected_trigger_events_from(&state, &events, 0, &[]);
+    assert_eq!(
+        survivors.len(),
+        1,
+        "one witness consumes exactly one occurrence"
+    );
+    let GameEvent::ZoneChanged { record, .. } = &survivors[0] else {
+        panic!("the survivor must be the ZoneChanged that no witness named");
+    };
+    assert_eq!(
+        record.turn_zone_change_index, 0,
+        "CR 603.2c: the witness named occurrence 1, so occurrence 0 must survive; \
+         reading the index RAW (not via GameEvent equality) is what makes this \
+         assertion survive a broken ZoneChangeRecord PartialEq"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Ordered ordinary and delayed trigger contexts that pause while being put on
+// the stack must drain the already-built delayed tail through their own reducer
+// continuation. These fixtures intentionally enter at `OrderTriggers` and
+// complete via `engine::apply_as_current`, rather than calling a construction
+// finalizer directly.
+// ---------------------------------------------------------------------------
+
+fn continuation_source(state: &mut GameState, name: &str) -> ObjectId {
+    create_object(
+        state,
+        CardId(state.next_object_id),
+        PlayerId(0),
+        name.to_string(),
+        Zone::Battlefield,
+    )
+}
+
+fn continuation_pending(
+    source_id: ObjectId,
+    ability: ResolvedAbility,
+    description: &str,
+) -> PendingTrigger {
+    PendingTrigger {
+        source_id,
+        controller: PlayerId(0),
+        condition: None,
+        ability: Box::new(ability),
+        timestamp: source_id.0 as u32,
+        target_constraints: Vec::new(),
+        distribute: None,
+        trigger_event: None,
+        modal: None,
+        mode_abilities: Vec::new(),
+        description: Some(description.to_string()),
+        may_trigger_origin: None,
+        subject_match_count: None,
+        die_result: None,
+        provenance: None,
+    }
+}
+
+/// Builds a continuation fixture through the same definition-to-resolved path
+/// that collected triggers use, preserving definition-owned interaction data.
+fn definition_backed_continuation_pending(
+    state: &GameState,
+    source_id: ObjectId,
+    execute: AbilityDefinition,
+    description: &str,
+) -> PendingTrigger {
+    let definition = TriggerDefinition::new(TriggerMode::ChangesZone).execute(execute);
+    let execute = definition
+        .execute
+        .as_ref()
+        .expect("fixture trigger definition must have an execute body");
+    let mut pending = continuation_pending(
+        source_id,
+        super::build_triggered_ability(state, &definition, source_id, PlayerId(0)),
+        description,
+    );
+    pending
+        .target_constraints
+        .clone_from(&execute.target_constraints);
+    pending.distribute.clone_from(&execute.distribute);
+    pending.modal.clone_from(&execute.modal);
+    pending.mode_abilities.clone_from(&execute.mode_abilities);
+    pending
+}
+
+fn delayed_tail_context(source_id: ObjectId) -> PendingTriggerContext {
+    PendingTriggerContext::delayed(
+        continuation_pending(
+            source_id,
+            ResolvedAbility::new(Effect::NoOp, Vec::new(), source_id, PlayerId(0)),
+            "Delayed tail",
+        ),
+        DelayedInstallIdentity::LegacyDelayed,
+    )
+}
+
+fn begin_paused_continuation_batch(
+    state: &mut GameState,
+    ordinary: PendingTriggerContext,
+    delayed: PendingTriggerContext,
+) {
+    let TriggerOrderingDisposition::PromptForChoice(waiting_for) =
+        begin_trigger_ordering(state, vec![ordinary, delayed])
+    else {
+        panic!("distinct ordinary and delayed contexts must require OrderTriggers");
+    };
+    state.waiting_for = *waiting_for;
+    crate::game::engine::apply_as_current(state, GameAction::OrderTriggers { order: vec![0, 1] })
+        .expect("public reducer must dispatch the ordered trigger batch");
+}
+
+fn assert_delayed_tail_reaches_stack_once(state: &GameState, delayed_source: ObjectId) {
+    assert!(
+        state
+            .pending_trigger_construction_priority_recipient
+            .is_none(),
+        "ordinary ordering must not install a settled-priority recipient"
+    );
+    assert!(
+        state.deferred_triggers.is_empty(),
+        "the construction continuation must consume the delayed tail"
+    );
+    assert_eq!(
+        state
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == delayed_source)
+            .count(),
+        1,
+        "the deferred delayed context must reach the stack exactly once"
+    );
+    assert_eq!(
+        state
+            .stack_trigger_firings
+            .values()
+            .filter(|firing| firing.is_delayed())
+            .count(),
+        1,
+        "the sole delayed stack entry must retain delayed firing provenance"
+    );
+}
+
+/// Target selection drains a delayed tail even though no settled-priority
+/// recipient exists. This uses the public `SelectTargets` reducer arm.
+#[test]
+fn ordered_delayed_tail_drains_after_trigger_target_selection_without_recipient() {
+    let mut state = setup();
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    let ordinary_source = continuation_source(&mut state, "Targeting ordinary");
+    let delayed_source = continuation_source(&mut state, "Delayed observer");
+    let target = make_creature(&mut state, PlayerId(1), "Target", 1, 1);
+    let alternative_target = make_creature(&mut state, PlayerId(1), "Alternative target", 1, 1);
+    let ordinary = definition_backed_continuation_pending(
+        &state,
+        ordinary_source,
+        AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::SetTapState {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            },
+        ),
+        "Ordinary target trigger",
+    );
+
+    begin_paused_continuation_batch(
+        &mut state,
+        PendingTriggerContext::single(ordinary),
+        delayed_tail_context(delayed_source),
+    );
+    let WaitingFor::TriggerTargetSelection { target_slots, .. } = &state.waiting_for else {
+        panic!("ambiguous trigger target must pause through TriggerTargetSelection");
+    };
+    assert!(
+        target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(target))
+            && target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(alternative_target)),
+        "the fixture must keep target selection interactive rather than auto-assigning it"
+    );
+    assert_eq!(state.deferred_triggers.len(), 1);
+    assert!(state
+        .pending_trigger_construction_priority_recipient
+        .is_none());
+
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(target)],
+        },
+    )
+    .expect("public target-selection reducer must finish construction");
+
+    assert_delayed_tail_reaches_stack_once(&state, delayed_source);
+}
+
+/// Triggered modal choice drains the same delayed tail through the public
+/// `SelectModes` reducer arm, without relying on a priority recipient.
+#[test]
+fn ordered_delayed_tail_drains_after_triggered_mode_choice_without_recipient() {
+    let mut state = setup();
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    let ordinary_source = continuation_source(&mut state, "Modal ordinary");
+    let delayed_source = continuation_source(&mut state, "Delayed observer");
+    let mut execute = AbilityDefinition::new(AbilityKind::Database, Effect::NoOp);
+    execute.modal = Some(ModalChoice {
+        min_choices: 1,
+        max_choices: 1,
+        mode_count: 1,
+        mode_descriptions: vec!["Do nothing".to_string()],
+        ..Default::default()
+    });
+    execute.mode_abilities = vec![AbilityDefinition::new(AbilityKind::Database, Effect::NoOp)];
+    let ordinary = definition_backed_continuation_pending(
+        &state,
+        ordinary_source,
+        execute,
+        "Ordinary modal trigger",
+    );
+
+    begin_paused_continuation_batch(
+        &mut state,
+        PendingTriggerContext::single(ordinary),
+        delayed_tail_context(delayed_source),
+    );
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::AbilityModeChoice { .. }
+    ));
+    assert_eq!(state.deferred_triggers.len(), 1);
+    assert!(state
+        .pending_trigger_construction_priority_recipient
+        .is_none());
+
+    crate::game::engine::apply_as_current(&mut state, GameAction::SelectModes { indices: vec![0] })
+        .expect("public triggered-mode reducer must finish construction");
+
+    assert_delayed_tail_reaches_stack_once(&state, delayed_source);
+}
+
+/// Trigger-owned division uses its distinct public `DistributeAmong` reducer
+/// arm, but must reach the same no-recipient delayed-tail outcome.
+#[test]
+fn ordered_delayed_tail_drains_after_trigger_distribution_without_recipient() {
+    let mut state = setup();
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    let ordinary_source = continuation_source(&mut state, "Distribution ordinary");
+    let delayed_source = continuation_source(&mut state, "Delayed observer");
+    let target_a = make_creature(&mut state, PlayerId(1), "Target A", 1, 3);
+    let target_b = make_creature(&mut state, PlayerId(1), "Target B", 1, 3);
+    let ability = AbilityDefinition::new(
+        AbilityKind::Database,
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            damage_source: None,
+            excess: None,
+        },
+    )
+    .multi_target(crate::types::ability::MultiTargetSpec::fixed(2, 2))
+    .distribute(crate::types::game_state::DistributionUnit::Damage);
+    let ordinary = definition_backed_continuation_pending(
+        &state,
+        ordinary_source,
+        ability,
+        "Ordinary divided trigger",
+    );
+
+    begin_paused_continuation_batch(
+        &mut state,
+        PendingTriggerContext::single(ordinary),
+        delayed_tail_context(delayed_source),
+    );
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::TriggerTargetSelection { .. }
+    ));
+    assert_eq!(state.deferred_triggers.len(), 1);
+    assert!(state
+        .pending_trigger_construction_priority_recipient
+        .is_none());
+
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(target_a), TargetRef::Object(target_b)],
+        },
+    )
+    .expect("public trigger target-selection reducer must lead into distribution");
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::DistributeAmong { .. }
+    ));
+
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::DistributeAmong {
+            distribution: vec![
+                (TargetRef::Object(target_a), 1),
+                (TargetRef::Object(target_b), 1),
+            ],
+        },
+    )
+    .expect("public trigger-owned distribution reducer must finish construction");
+
+    assert_delayed_tail_reaches_stack_once(&state, delayed_source);
+}
+
+fn begin_empty_continuation_batch(state: &mut GameState, ordinary: PendingTrigger) {
+    let mut events = Vec::new();
+    let outcome = process_collected_triggers_with_delayed_events(
+        state,
+        vec![PendingTriggerContext::single(ordinary)],
+        &[],
+        &mut events,
+    );
+    assert!(
+        outcome.fired,
+        "the ordinary trigger fixture must reach trigger construction"
+    );
+    state.waiting_for = crate::game::engine::begin_pending_trigger_target_selection(state)
+        .expect("a real pending trigger must begin construction")
+        .expect("the interactive trigger fixture must surface its public prompt");
+    assert!(
+        state.deferred_triggers.is_empty(),
+        "the empty-tail control must begin with no deferred context"
+    );
+    assert!(state
+        .pending_trigger_construction_priority_recipient
+        .is_none());
+}
+
+/// Empty deferred tails are inert after target selection: the public reducer
+/// completes the ordinary trigger without fabricating another trigger or order.
+#[test]
+fn empty_deferred_tail_is_inert_after_trigger_target_selection_without_recipient() {
+    let mut state = setup();
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    let source = continuation_source(&mut state, "Targeting ordinary");
+    let target = make_creature(&mut state, PlayerId(1), "Target", 1, 1);
+    let alternative_target = make_creature(&mut state, PlayerId(1), "Alternative target", 1, 1);
+    let ordinary = definition_backed_continuation_pending(
+        &state,
+        source,
+        AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::SetTapState {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            },
+        ),
+        "Ordinary target trigger",
+    );
+
+    begin_empty_continuation_batch(&mut state, ordinary);
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::TriggerTargetSelection { .. }
+    ));
+    let WaitingFor::TriggerTargetSelection { target_slots, .. } = &state.waiting_for else {
+        unreachable!("the preceding reach guard fixed this waiting state");
+    };
+    assert!(
+        target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(target))
+            && target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(alternative_target)),
+        "the empty-tail control must keep target selection interactive"
+    );
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(target)],
+        },
+    )
+    .expect("target selection with an empty deferred tail must complete");
+
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "empty tail must not fabricate a trigger"
+    );
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.pending_trigger_order.is_none());
+    assert!(state
+        .pending_trigger_construction_priority_recipient
+        .is_none());
+}
+
+/// Empty deferred tails are also inert after triggered mode choice.
+#[test]
+fn empty_deferred_tail_is_inert_after_triggered_mode_choice_without_recipient() {
+    let mut state = setup();
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    let source = continuation_source(&mut state, "Modal ordinary");
+    let mut execute = AbilityDefinition::new(AbilityKind::Database, Effect::NoOp);
+    execute.modal = Some(ModalChoice {
+        min_choices: 1,
+        max_choices: 1,
+        mode_count: 1,
+        mode_descriptions: vec!["Do nothing".to_string()],
+        ..Default::default()
+    });
+    execute.mode_abilities = vec![AbilityDefinition::new(AbilityKind::Database, Effect::NoOp)];
+    let ordinary =
+        definition_backed_continuation_pending(&state, source, execute, "Ordinary modal trigger");
+
+    begin_empty_continuation_batch(&mut state, ordinary);
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::AbilityModeChoice { .. }
+    ));
+    crate::game::engine::apply_as_current(&mut state, GameAction::SelectModes { indices: vec![0] })
+        .expect("mode choice with an empty deferred tail must complete");
+
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "empty tail must not fabricate a trigger"
+    );
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.pending_trigger_order.is_none());
+    assert!(state
+        .pending_trigger_construction_priority_recipient
+        .is_none());
+}
+
+/// Empty deferred tails are inert after trigger-owned distribution as well.
+#[test]
+fn empty_deferred_tail_is_inert_after_trigger_distribution_without_recipient() {
+    let mut state = setup();
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    let source = continuation_source(&mut state, "Distribution ordinary");
+    let target_a = make_creature(&mut state, PlayerId(1), "Target A", 1, 3);
+    let target_b = make_creature(&mut state, PlayerId(1), "Target B", 1, 3);
+    let ability = AbilityDefinition::new(
+        AbilityKind::Database,
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            damage_source: None,
+            excess: None,
+        },
+    )
+    .multi_target(crate::types::ability::MultiTargetSpec::fixed(2, 2))
+    .distribute(crate::types::game_state::DistributionUnit::Damage);
+    let ordinary =
+        definition_backed_continuation_pending(&state, source, ability, "Ordinary divided trigger");
+
+    begin_empty_continuation_batch(&mut state, ordinary);
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::TriggerTargetSelection { .. }
+    ));
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(target_a), TargetRef::Object(target_b)],
+        },
+    )
+    .expect("target selection with an empty deferred tail must lead into distribution");
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::DistributeAmong { .. }
+    ));
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::DistributeAmong {
+            distribution: vec![
+                (TargetRef::Object(target_a), 1),
+                (TargetRef::Object(target_b), 1),
+            ],
+        },
+    )
+    .expect("distribution with an empty deferred tail must complete");
+
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "empty tail must not fabricate a trigger"
+    );
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.pending_trigger_order.is_none());
+    assert!(state
+        .pending_trigger_construction_priority_recipient
+        .is_none());
 }

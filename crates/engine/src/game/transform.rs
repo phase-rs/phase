@@ -1,10 +1,82 @@
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use crate::types::resolved_commands::{
+    ResolvedObjectTransformCommand, ResolvedObjectTransformReplayInvariantError,
+};
 use crate::types::zones::Zone;
 
-use super::engine::EngineError;
+use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use super::printed_cards::{apply_back_face_to_object, snapshot_object_face};
+
+/// An engine-authored transform announcement for Priority preflight. The
+/// permanent identity remains private to the transform authority until facade
+/// conversion reconstructs the ordinary reducer primer.
+pub(in crate::game) struct PriorityTransformAnnouncement {
+    object_id: ObjectId,
+}
+
+impl PriorityTransformAnnouncement {
+    fn new(object_id: ObjectId) -> Self {
+        Self { object_id }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+}
+
+/// CR 701.27 + CR 710.4 + CR 712.4c: Whether a battlefield permanent can
+/// transform rather than silently ignoring the instruction.
+pub(in crate::game) fn can_transform(state: &GameState, object_id: ObjectId) -> bool {
+    let Some(object) = state.objects.get(&object_id) else {
+        return false;
+    };
+    object.zone == Zone::Battlefield
+        && object.back_face.is_some()
+        && !transform_instruction_is_noop(state, object_id)
+}
+
+/// CR 701.27 + CR 710.4 + CR 712.4c: Whether a transform instruction is a
+/// silent no-op after its subject is known to be a battlefield permanent.
+fn transform_instruction_is_noop(state: &GameState, object_id: ObjectId) -> bool {
+    let object = state
+        .objects
+        .get(&object_id)
+        .expect("transform subject was validated before checking eligibility");
+    crate::game::static_abilities::object_has_static_other(state, object_id, "CantTransform")
+        // `merge_kind` distinguishes meld from a two-component mutate pile.
+        || object.merge_kind == Some(crate::game::game_object::MergeKind::Meld)
+        // Flip cards retain their alternate face in `back_face` but never
+        // transform; `is_flip_permanent` is the canonical discriminator.
+        || object.flipped
+        || crate::game::flip::is_flip_permanent(object)
+}
+
+/// Enumerates controlled transformable battlefield permanents as Priority
+/// primers. `can_transform` is shared with the reducer so accepted primers
+/// always perform the advertised face change.
+pub(in crate::game) fn priority_transform_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityTransformAnnouncement> {
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|object_id| {
+            state
+                .objects
+                .get(object_id)
+                .is_some_and(|object| object.controller == principal.semantic_holder())
+                && can_transform(state, *object_id)
+        })
+        .map(PriorityTransformAnnouncement::new)
+        .collect()
+}
 
 /// CR 701.27a: Transform a double-faced permanent — turn it to its other face.
 ///
@@ -28,27 +100,11 @@ pub fn transform_permanent(
         ));
     }
 
-    // CR 701.27: "Can't transform" prevents this action. The effect invoking
-    // the transform resolves as if it had happened successfully — silent no-op.
-    if crate::game::static_abilities::object_has_static_other(state, object_id, "CantTransform") {
+    // A blocked, melded, or flip permanent ignores the instruction before a
+    // meld result's intentionally absent back-face payload is inspected.
+    if transform_instruction_is_noop(state, object_id) {
         return Ok(());
     }
-
-    // CR 712.4c: Unlike other double-faced cards, meld cards cannot be
-    // transformed or converted; any instruction to do so is ignored. Key on the
-    // TYPED meld discriminator (`merge_kind == Some(MergeKind::Meld)`) rather than
-    // `merged_components.len() == 2`: a two-creature MUTATE permanent ALSO has
-    // `merged_components.len() == 2` (set at `merge.rs`), so a length check would
-    // wrongly block a mutate pile containing a DFC from transforming. The melded
-    // survivor renders the RESULT (a non-DFC) and has no back face to flip.
-    if state
-        .objects
-        .get(&object_id)
-        .is_some_and(|o| o.merge_kind == Some(crate::game::game_object::MergeKind::Meld))
-    {
-        return Ok(());
-    }
-
     let back_face = obj
         .back_face
         .clone()
@@ -81,24 +137,101 @@ pub fn transform_permanent(
     // self-transform instructions from abilities already on the stack.
     obj.transformation_count = obj.transformation_count.wrapping_add(1);
 
+    let reference = ObjectIncarnationRef::from_object(obj);
+    let resulting_transformed = obj.transformed;
+    let resulting_transformation_count = obj.transformation_count;
+
     crate::game::layers::mark_layers_full(state);
+
+    // CR 733: journal the settled transform through its owning family. Every
+    // no-op guard above returned before the swap, so only a transform that
+    // actually changed the displayed face is recorded.
+    let cause = state.current_or_begin_rules_execution_node();
+    state
+        .resolved_rules_journal
+        .record_object_transform(ResolvedObjectTransformCommand {
+            object: reference,
+            expected_old_transformed: !resulting_transformed,
+            resulting_transformed,
+            resulting_timestamp: ts,
+            resulting_transformation_count,
+            cause,
+        })
+        .expect("resolved transform must have a live journal cause");
 
     events.push(GameEvent::Transformed { object_id });
 
     Ok(())
 }
 
+/// CR 701.27a + CR 613.7g: Apply one exact already-resolved transform.
+///
+/// This installs the recorded face swap, displayed-face flag, timestamp, and
+/// transformation count. It re-runs none of `transform_permanent`'s CR 701.27
+/// eligibility guards — those decided at resolve time, and a command only
+/// exists because the transform actually happened.
+pub fn apply_resolved_transform(
+    state: &mut GameState,
+    command: &ResolvedObjectTransformCommand,
+) -> Result<(), ResolvedObjectTransformReplayInvariantError> {
+    let object = state.objects.get(&command.object.object_id).ok_or(
+        ResolvedObjectTransformReplayInvariantError::UnknownObject(command.object.object_id),
+    )?;
+    let found = ObjectIncarnationRef::from_object(object);
+    if found != command.object {
+        return Err(ResolvedObjectTransformReplayInvariantError::StaleObject {
+            expected: command.object,
+            found,
+        });
+    }
+    if object.transformed != command.expected_old_transformed {
+        return Err(
+            ResolvedObjectTransformReplayInvariantError::TransformedPreconditionMismatch {
+                expected: command.expected_old_transformed,
+                found: object.transformed,
+            },
+        );
+    }
+    let back_face = object.back_face.clone().ok_or(
+        ResolvedObjectTransformReplayInvariantError::MissingBackFace(command.object.object_id),
+    )?;
+
+    let obj = state
+        .objects
+        .get_mut(&command.object.object_id)
+        .expect("validated transform command object remains live");
+    let displayed = snapshot_object_face(obj);
+    apply_back_face_to_object(obj, back_face);
+    obj.back_face = Some(displayed);
+    obj.transformed = command.resulting_transformed;
+    obj.timestamp = command.resulting_timestamp;
+    obj.transformation_count = command.resulting_transformation_count;
+
+    // CR 613.7g: the transform drew this timestamp during the original
+    // execution, so replay installs it rather than drawing a fresh one — and
+    // must carry the allocator past it or a later draw reissues it.
+    state.adopt_replayed_timestamp(command.resulting_timestamp);
+
+    crate::game::layers::mark_layers_full(state);
+
+    Ok(())
+}
+
 /// CR 712.16 + CR 730.2j: True when `obj` is a double-faced permanent
 /// (transform/modal/meld DFC) or a melded permanent — none of which can be
-/// turned face down. Used by `effects::turn_face_down` to enforce the no-op.
+/// turned face down. Used by `effects::turn_face_down` to enforce the no-op,
+/// and by presentation adapters that need the engine's authoritative
+/// "is this permanent double-faced?" answer instead of re-deriving one.
 ///
 /// Keys on the typed layout/merge discriminants rather than `back_face.is_some()`
 /// so that single-faced layouts that may legally be turned face down — Adventure,
 /// Omen, Split, Flip — are NOT blocked (they carry no Transform/Modal/Meld
-/// `layout_kind`). A DFC currently showing its back face is caught by the
+/// `layout_kind`). CR 710 flip cards in particular put their alternative half in
+/// the same `back_face` slot, so `back_face.is_some()` would report all 21 of
+/// them as double-faced. A DFC currently showing its back face is caught by the
 /// `transformed` flag, because `snapshot_object_face` zeroes `layout_kind` when
 /// the front face is stashed in `back_face` during a transform.
-pub(crate) fn is_double_faced_permanent(obj: &crate::game::game_object::GameObject) -> bool {
+pub fn is_double_faced_permanent(obj: &crate::game::game_object::GameObject) -> bool {
     use crate::types::card::LayoutKind;
     // CR 730.2j: a face-up melded permanent contains a double-faced component.
     if obj.merge_kind == Some(crate::game::game_object::MergeKind::Meld) {
@@ -122,6 +255,7 @@ mod tests {
     use super::*;
     use crate::game::game_object::BackFaceData;
     use crate::game::zones::create_object;
+    use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
@@ -161,12 +295,18 @@ mod tests {
         obj.base_abilities = Arc::clone(&obj.abilities);
         obj.color = vec![ManaColor::Green];
         obj.base_color = vec![ManaColor::Green];
+        obj.parse_warnings = vec![OracleDiagnostic::IgnoredRemainder {
+            text: "front diagnostic".to_string(),
+            parser: "transform_test".to_string(),
+            line_index: 0,
+        }];
 
         obj.back_face = Some(BackFaceData {
             name: "Werewolf Back".to_string(),
             power: Some(4),
             toughness: Some(4),
             loyalty: None,
+            printed_loyalty: None,
             defense: None,
             card_types: CardType {
                 supertypes: vec![],
@@ -193,6 +333,11 @@ mod tests {
             casting_restrictions: vec![],
             casting_options: vec![],
             layout_kind: None,
+            parse_warnings: vec![OracleDiagnostic::IgnoredRemainder {
+                text: "back diagnostic".to_string(),
+                parser: "transform_test".to_string(),
+                line_index: 0,
+            }],
         });
 
         id
@@ -217,6 +362,10 @@ mod tests {
             "BackAbility"
         );
         assert_eq!(obj.color, vec![ManaColor::Green, ManaColor::Red]);
+        assert!(matches!(
+            obj.parse_warnings.as_slice(),
+            [OracleDiagnostic::IgnoredRemainder { text, .. }] if text == "back diagnostic"
+        ));
         assert!(state.layers_dirty.is_dirty());
         assert_eq!(events.len(), 1);
         assert_eq!(events[0], GameEvent::Transformed { object_id: id });
@@ -234,6 +383,10 @@ mod tests {
         let obj = &state.objects[&id];
         assert!(!obj.transformed);
         assert_eq!(obj.name, "Werewolf Front");
+        assert!(matches!(
+            obj.parse_warnings.as_slice(),
+            [OracleDiagnostic::IgnoredRemainder { text, .. }] if text == "front diagnostic"
+        ));
         assert_eq!(events.len(), 2);
     }
 
@@ -338,6 +491,34 @@ mod tests {
         assert!(!obj.transformed, "transform should have been blocked");
         assert_eq!(obj.name, "Werewolf Front");
         assert!(events.is_empty(), "no Transformed event should be emitted");
+    }
+
+    #[test]
+    fn priority_omits_a_permanent_that_cannot_transform() {
+        use crate::types::ability::{StaticDefinition, TargetFilter};
+        use crate::types::game_state::WaitingFor;
+        use crate::types::phase::Phase;
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let id = setup_dfc(&mut state);
+        state.objects.get_mut(&id).unwrap().static_definitions.push(
+            StaticDefinition::new(StaticMode::Other("CantTransform".to_string()))
+                .affected(TargetFilter::SelfRef),
+        );
+        let principal = crate::game::engine::priority_principal_for_preflight(&state)
+            .expect("the synchronized priority window has a principal");
+
+        assert!(
+            priority_transform_announcements(&state, &principal).is_empty(),
+            "Priority must not announce a transform that the reducer silently ignores"
+        );
     }
 
     #[test]

@@ -19,8 +19,11 @@ import { installChunkReloadHandler } from "./pwa/chunkReloadHandler";
 import { installTauriExternalLinkHandler } from "./services/externalLinks";
 import { importLegacyStorage, markRemoteLoadOk } from "./services/legacyMigration";
 import { installTelemetry } from "./services/telemetryEvents";
+import { initializeHostPlatform } from "./services/platform";
 
-async function bootstrap(): Promise<void> {
+export async function bootstrap(): Promise<void> {
+  await initializeHostPlatform();
+
   // Cloud-sync restores its Supabase session from an App effect, so migration
   // must finish before React mounts and that effect can observe localStorage.
   await importLegacyStorage();

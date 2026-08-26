@@ -20,7 +20,7 @@ use std::str::FromStr;
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
-use nom::combinator::{all_consuming, eof, map, opt, peek, value};
+use nom::combinator::{all_consuming, eof, map, map_opt, opt, peek, recognize, rest, value};
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -37,12 +37,13 @@ use super::oracle_nom::target as nom_target;
 use crate::parser::oracle_effect::counter::normalize_counter_type;
 use crate::parser::oracle_effect::parse_controls_permanent_object;
 use crate::parser::oracle_target::{parse_target, parse_type_phrase, parse_type_phrase_with_ctx};
-use crate::parser::oracle_util::merge_or_filters;
+use crate::parser::oracle_util::{merge_or_filters, parse_count_multiplier};
 use crate::types::ability::{
     AggregateFunction, AttackScope, AttackSubject, Comparator, ControllerRef, CountScope,
     DamageChannel, DamageKindFilter, DevotionColors, FilterProp, ObjectProperty, ObjectScope,
-    PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, RoundingMode,
-    TargetFilter, ThisWayCause, TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
+    PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, QuantityExpr, QuantityRef,
+    RoundingMode, TargetFilter, ThisWayCause, TrackedAnaphorSource, TypeFilter, TypedFilter,
+    ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::PlayerActionKind;
@@ -164,6 +165,7 @@ pub(crate) fn parse_quantity_ref_with_context(
         if try_parse_counters_removed_this_way(rest) {
             return Some(QuantityRef::PreviousEffectAmount {
                 channel: crate::types::ability::DamageChannel::Total,
+                aggregate: AggregateFunction::Sum,
             });
         }
     }
@@ -784,6 +786,32 @@ pub(crate) fn parse_cda_quantity_with_context(
 ) -> Option<QuantityExpr> {
     let text = text.trim().trim_end_matches('.');
 
+    // CR 101.4 + CR 608.2d: "the highest number" / "the lowest number" — the
+    // cross-player extremum of the numbers players secretly chose earlier in THIS
+    // ability (Wheel of Misfortune, Menacing Ogre, Life at Stake).
+    //
+    // Gated on PROVENANCE, never on wording. The phrase is ambiguous in isolation:
+    // Custodi Peacekeeper's "power less than or equal to the highest number you
+    // noted for cards named Custodi Peacekeeper" is a draft-time noted value, and
+    // reading it as a secretly-chosen number silently reinterpreted a card that
+    // has no choice in it at all. `pending_choice_type` is the chunk-loop-threaded
+    // record of the last `Effect::Choose` domain in this ability (set in
+    // `imperative.rs`, carried across chunks by `chain_pending_choice_type`), so
+    // requiring it to be a `NumberRange` binds the reference to an actual
+    // preceding secret-number ledger. Same provenance gate `try_parse_guess_clause`
+    // applies to "guesses which number you chose". Without a proven choice the arm
+    // declines and the phrase falls through to the pre-existing grammar unchanged.
+    if matches!(
+        ctx.pending_choice_type,
+        Some(crate::types::ability::ChoiceType::NumberRange { .. })
+    ) {
+        if let Ok((rest, qty)) = nom_quantity::parse_extreme_chosen_number_ref(text) {
+            if rest.is_empty() {
+                return Some(QuantityExpr::Ref { qty });
+            }
+        }
+    }
+
     // CR 107.1a: "half/third/tenth <inner>, rounded up/down" fractional
     // quantities delivered via a "where X is …" binding or a CDA route through
     // here (Chainer's Torment, Endless Ranks of the Dead, Ghoulcaller's Harvest,
@@ -836,13 +864,10 @@ pub(crate) fn parse_cda_quantity_with_context(
         }
     }
 
-    // "twice [inner]" or "three times [inner]" → Multiply { factor, inner }
-    if let Ok((rest, factor)) = alt((
-        value(2i32, tag::<_, _, OracleError<'_>>("twice ")),
-        value(3, tag("three times ")),
-    ))
-    .parse(text)
-    {
+    // Multiplicative quantity prefixes share the nom authority used by effect
+    // count positions, so `N times <quantity>` has one grammar across CDA and
+    // imperative consumers.
+    if let Ok((rest, factor)) = parse_count_multiplier(text) {
         if let Some(inner) = parse_cda_quantity_with_context(rest, ctx) {
             return Some(QuantityExpr::Multiply {
                 factor,
@@ -1243,7 +1268,7 @@ fn parse_owned_cards_in_zones_quantity(
     Ok((rest, expr))
 }
 
-/// CR 608.2c + CR 120.6 / CR 120.10: "[the] <numeric result> this way", reporting
+/// CR 608.2c + CR 120.10: "[the] <numeric result> this way", reporting
 /// WHICH damage channel the phrase named.
 ///
 /// The damage arm carries a channel because "excess" is an independent qualifier
@@ -1758,14 +1783,17 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     //   - counter-removal chains: "counters removed", "counter removed"
     //     (Sensational Spider-Man's "stun counters removed this way";
     //     `state.last_effect_amount` is stamped by the preceding RemoveCounter).
-    // PreviousEffectAmount reads `state.last_effect_amount` (CR 120.6) or
+    // PreviousEffectAmount reads `state.last_effect_amount` or
     // `state.last_effect_excess_amount` (CR 120.10), whichever channel the phrase
     // named — the combinator reports it rather than the caller assuming `Total`.
     // Assuming Total here is precisely what made "the excess damage dealt this
     // way" gain the FULL damage instead of the overkill (Razor Rings).
     if let Ok((_, channel)) = parse_previous_effect_amount_this_way(lower) {
         return Some(QuantityExpr::Ref {
-            qty: QuantityRef::PreviousEffectAmount { channel },
+            qty: QuantityRef::PreviousEffectAmount {
+                channel,
+                aggregate: AggregateFunction::Sum,
+            },
         });
     }
 
@@ -1788,21 +1816,14 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
         });
     }
 
-    if nom::combinator::all_consuming((
-        tag::<_, _, OracleError<'_>>("the "),
-        alt((tag("greatest "), tag("highest "))),
-        tag("number of cards "),
-        nom::combinator::opt(alt((tag("a player "), tag("any player ")))),
-        tag("discarded this way"),
-    ))
-    .parse(lower)
-    .is_ok()
-    {
-        return Some(QuantityExpr::Ref {
-            qty: QuantityRef::PreviousEffectAmount {
-                channel: crate::types::ability::DamageChannel::Total,
-            },
-        });
+    // CR 608.2c + CR 608.2i: "the greatest number of cards a player discarded
+    // this way" — the superlative IS the aggregate axis and is REPORTED by the
+    // combinator, never matched and discarded. Grammar lives in
+    // `oracle_nom/quantity.rs` per the parser skill's single-authority
+    // doctrine; `Ok(("", …))` is the same full-consumption requirement the
+    // deleted `all_consuming` tuple expressed.
+    if let Ok(("", qty)) = nom_quantity::parse_greatest_discarded_this_way(lower) {
+        return Some(QuantityExpr::Ref { qty });
     }
 
     // CR 614.1a: "that much/many [noun] (plus|minus) N" — Offset over the
@@ -2648,10 +2669,9 @@ fn target_hand_card_filter(
 /// searched and failed to find).
 ///
 /// Nesting: the population word ("opponent(s)"/"player(s)") fixes the relation,
-/// then the shared `"who "` prefix dispatches on the verb arm. The search arm
-/// carries an object-noun ("searched their library"); the investigate arm is
-/// object-less ("investigated"). Composed entirely from `alt`/`value`/`tag` —
-/// no permutation enumeration.
+/// then the shared `"who … this way"` tail (`parse_who_action_this_way`)
+/// dispatches on the verb arm. Composed entirely from `alt`/`value`/`tag` — no
+/// permutation enumeration.
 fn parse_action_this_way(
     input: &str,
 ) -> nom::IResult<&str, (PlayerRelation, PlayerActionKind), OracleError<'_>> {
@@ -2662,10 +2682,32 @@ fn parse_action_this_way(
         value(PlayerRelation::All, tag("player ")),
     ))
     .parse(input)?;
-    let (input, _) = tag("who ").parse(input)?;
-    let (input, action) = alt((parse_searched_arm, parse_investigated_arm)).parse(input)?;
-    let (input, _) = tag(" this way").parse(input)?;
+    let (input, action) = parse_who_action_this_way(input)?;
     Ok((input, (relation, action)))
+}
+
+/// CR 608.2c + CR 109.5: The population-agnostic `"who [verb] this way"`
+/// relative-clause tail shared by both this-way callers. Matches the `"who "`
+/// prefix, the verb arm (search carries an object-noun "searched their library";
+/// investigate is object-less; draw carries "drew a card"), and the `" this way"`
+/// anaphor terminator, returning the performed action and the residual after the
+/// terminator. Composed entirely from `alt`/`value`/`tag`.
+///
+/// Single authority for the this-way verb table across two scopes:
+/// - `parse_action_this_way` (this module) prepends the population relation for
+///   the QUANTITY path ("the number of opponents who drew a card this way").
+/// - `strip_performed_action_this_way_clause` (oracle_effect/lower.rs) supplies
+///   the relation from the already-stripped "each player "/"each opponent "
+///   subject prefix for the player-SCOPE SUBJECT path (Kwain, Itinerant Meddler:
+///   "each player who drew a card this way gains 1 life").
+pub(crate) fn parse_who_action_this_way(
+    input: &str,
+) -> nom::IResult<&str, PlayerActionKind, OracleError<'_>> {
+    let (input, _) = tag("who ").parse(input)?;
+    let (input, action) =
+        alt((parse_searched_arm, parse_investigated_arm, parse_drew_arm)).parse(input)?;
+    let (input, _) = tag(" this way").parse(input)?;
+    Ok((input, action))
 }
 
 /// "searches/searched a/their library" → `SearchedLibrary` (Tempting Offer cycle).
@@ -2684,6 +2726,104 @@ fn parse_investigated_arm(input: &str) -> nom::IResult<&str, PlayerActionKind, O
         alt((tag("investigates"), tag("investigated"))),
     )
     .parse(input)
+}
+
+/// "draws/drew/draw a card" → `Draw`. The tense axis is one `alt`; the
+/// object noun "a card" is fixed. The `" this way"` terminator is consumed by
+/// `parse_who_action_this_way`, so "drew a card this turn" cannot reach this arm.
+///
+/// Reached from both this-way callers via that shared tail: the QUANTITY path
+/// (Cut a Deal: "for each opponent who drew a card this way") through
+/// `parse_action_this_way`, and the player-SCOPE SUBJECT path (Kwain, Itinerant
+/// Meddler: "each player who drew a card this way gains 1 life") through
+/// `strip_performed_action_this_way_clause` in oracle_effect/lower.rs.
+fn parse_drew_arm(input: &str) -> nom::IResult<&str, PlayerActionKind, OracleError<'_>> {
+    let (input, _) = alt((tag("draws"), tag("drew"), tag("draw"))).parse(input)?;
+    let (input, _) = tag(" a card").parse(input)?;
+    Ok((input, PlayerActionKind::Draw))
+}
+
+/// Normalize the two existing "<object phrase> <verb> this way" tails to a
+/// common `(filter, cause)` pair. This CALLS them; it does not restate either
+/// verb table, so both keep their single authority over their own verbs.
+///
+/// - `parse_filtered_landing_zone_this_way` — the returned / put-into-a-graveyard
+///   table. Its only return shape is `FilteredTrackedSetSize { filter,
+///   caused_by: None }`; the `if let` asserts that structurally rather than
+///   assuming it. `caused_by` stays `None` because the cause is derived from the
+///   producing effect's DESTINATION (`this_way_cause_for_effect` maps
+///   `Battlefield ⇒ Returned`, `Hand ⇒ Bounced`) while the parser sees only the
+///   English verb "returned", which both destinations print.
+/// - `parse_destroyed_or_sacrificed_this_way_filter` — the destroyed /
+///   sacrificed / milled / discarded / exiled table, which is
+///   action-discriminated and so carries a real cause.
+///
+/// A `(None, cause)` result is REJECTED rather than mapped to a permissive
+/// filter: that delegate returns it for two different reasons — the type phrase
+/// was trivial, OR it did not fully consume. Mapping either to "no restriction"
+/// would conflate "unrestricted" with "not understood" and silently mis-filter.
+/// Rejecting lets the clause fall through to the existing `TrackedSetSize`
+/// fallback, i.e. exactly today's behaviour, keeping the gap visible.
+fn parse_this_way_filter_and_cause(lower: &str) -> Option<(TargetFilter, Option<ThisWayCause>)> {
+    if let Some(QuantityRef::FilteredTrackedSetSize { filter, caused_by }) =
+        parse_filtered_landing_zone_this_way(lower)
+    {
+        return Some((*filter, caused_by));
+    }
+    match parse_destroyed_or_sacrificed_this_way_filter(lower)? {
+        (Some(filter), cause) => Some((filter, Some(cause))),
+        (None, _) => None,
+    }
+}
+
+/// CR 608.2c + CR 608.2h + CR 109.4: "[population] who controlled|owned
+/// [article] <object tail> this way" → a player count over the possessors of
+/// the preceding effect's tracked object set (Faerie Slumber Party: "for each
+/// opponent who controlled a creature returned this way").
+///
+/// Distinct from `parse_action_this_way`, its sibling one function up: that one
+/// recognizes what a player DID (a CR 701.x keyword action, keyed on the
+/// `player_actions_this_way` ledger); this one recognizes what a player
+/// POSSESSED (a CR 108.3/109.4 relation, keyed on the published tracked set).
+///
+/// Nested by prefix — population → `"who "` → possession verb → article — and
+/// the OBJECT TAIL is delegated whole to the two existing this-way filter
+/// helpers, so no verb table is restated here. Every axis is exactly one
+/// `alt()`; there is no permutation enumeration.
+fn parse_tracked_set_possessor_this_way(
+    input: &str,
+) -> OracleResult<
+    '_,
+    (
+        PlayerRelation,
+        PossessionAxis,
+        TargetFilter,
+        Option<ThisWayCause>,
+    ),
+> {
+    let (input, relation) = parse_player_population(input)?;
+    let (input, _) = tag("who ").parse(input)?;
+    // CR 108.3 / CR 109.4: one `alt()` on the possession axis. Both tenses are
+    // the same relation ("controls" on Sudden Salvation, "owns" on Kefka); they
+    // cost one `tag` each and are not reachable from this dispatch site today
+    // because neither card carries the "this way" anaphor — noted, not hidden.
+    let (input, possession) = alt((
+        value(
+            PossessionAxis::Controller,
+            alt((tag("controlled "), tag("controls "))),
+        ),
+        value(PossessionAxis::Owner, alt((tag("owned "), tag("owns ")))),
+    ))
+    .parse(input)?;
+    // Leading article, stripped with a local `alt()` of `tag()`s exactly as
+    // `parse_searched_arm` does. ("one of those " is the demonstrative-anaphor
+    // form Guff/Sudden Salvation use.)
+    let (input, _) = opt(alt((tag("a "), tag("an "), tag("one of those ")))).parse(input)?;
+    // The tail — including its own " this way" terminator — is consumed whole by
+    // the delegated verb tables.
+    let (input, (filter, caused_by)) =
+        map_opt(rest, parse_this_way_filter_and_cause).parse(input)?;
+    Ok((input, (relation, possession, filter, caused_by)))
 }
 
 /// "opponent who does" / "players who do" → accepted the optional offer.
@@ -2761,6 +2901,68 @@ fn parse_suspended_card_clause(clause: &str) -> Option<QuantityRef> {
     Some(QuantityRef::ObjectCount {
         filter: suspended_card_filter(Some(ControllerRef::You)),
     })
+}
+
+/// CR 122.1: the counter-kind noun, spelled to match the CANONICAL head in
+/// `oracle_nom::quantity::parse_distinct_counter_kinds_among_tail`.
+///
+/// The plural sits on KIND, not only on COUNTER: the printed form is "different
+/// kinds of counters among …" (Perrie, the Pulverizer — Oracle text verified
+/// against Scryfall, not paraphrased). Composing `tag("kind of counter")` with a
+/// trailing `opt(tag("s"))`, as this guard used to, recognizes "kind of
+/// counters" — a form no card prints — and fails to recognize the one that is
+/// printed.
+///
+/// The trailing "s" of "counters" is left to the caller's shared `opt(tag("s"))`
+/// so every characteristic arm pluralizes through one place.
+fn parse_counter_kind_noun(input: &str) -> OracleResult<'_, &str> {
+    recognize((tag("kind"), opt(tag("s")), tag(" of counter"))).parse(input)
+}
+
+/// CR 105.1 + CR 205.2 + CR 205.3 + CR 122.1: the distinct-characteristic
+/// aggregation heads ("colors among …", "card types among …", …).
+///
+/// A typed combinator over the already-enumerated characteristic vocabulary, not
+/// a string blocklist: each axis is one `alt` arm and the "different" determiner,
+/// plural, rider and "among" separators are composed, so a new characteristic is
+/// one arm rather than a table of full phrases.
+///
+/// DUPLICATION, ACKNOWLEDGED: the canonical heads live in
+/// `oracle_nom::quantity`. This is a DETECTION-only restatement — it answers
+/// "does a head start here", where the canonical combinators also consume the
+/// population — and it has already drifted once, which is how the counter-kind
+/// plural came to be wrong. Extracting a shared head-only combinator is the real
+/// fix and is deliberately left as follow-up rather than done mid review cycle;
+/// until then, a vocabulary change here must be mirrored there.
+///
+/// Anchored at position 0 by design. Both production callers hand this a clause
+/// whose determiner is already gone — the "the number of " arm strips that
+/// prefix before calling, and the "for each " arm never carries one.
+fn parse_characteristic_head(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            // Shared determiner: "different subtypes among", "different kinds of
+            // counters among". Hoisted out of the arms so it cannot be baked into
+            // one noun and forgotten on the next.
+            opt(tag("different ")),
+            alt((
+                // Longest-first: "colors" must win over "color".
+                tag("colors"),
+                tag("color"),
+                tag("card type"),
+                tag("permanent type"),
+                tag("subtype"),
+                parse_counter_kind_noun,
+            )),
+            opt(tag("s")),
+            // CR 205.3m: the subtype head's exclusion rider sits between the noun
+            // and "among".
+            opt(tag(" other than creature types")),
+            tag(" among "),
+        ),
+    )
+    .parse(input)
 }
 
 /// CR 400.1 + CR 601.2a: Parse a spell-history count clause into its
@@ -2863,6 +3065,17 @@ fn parse_spell_history_clause(
         let (filter, remainder) = parse_type_phrase(qualifier);
         if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
             return Some((scope, Some(filter)));
+        }
+
+        // CR 608.2c: a noun that still carries an unconsumed aggregation head
+        // ("colors among …", "card types among …") is NOT a spell-history noun —
+        // the head belongs to a characteristic-count grammar that owns the whole
+        // clause. Returning a bare spell count here would silently discard it and
+        // report a confident count of SPELLS where the card asks for a count of
+        // COLORS or CARD TYPES (First Family, April O'Neil, Hurkyl). Decline so
+        // later arms can try.
+        if parse_characteristic_head(noun).is_ok() {
+            return None;
         }
 
         // Suffix-anchored noun with no recognized qualifier (e.g. an unknown
@@ -2995,6 +3208,7 @@ fn parse_for_each_clause_with_they_controller(
     {
         return Some(QuantityRef::PreviousEffectAmount {
             channel: crate::types::ability::DamageChannel::Total,
+            aggregate: AggregateFunction::Sum,
         });
     }
 
@@ -3064,16 +3278,38 @@ fn parse_for_each_clause_with_they_controller(
         // Tempting Offer cycle's bonus-tutor-per-accepting-opponent step and
         // Wernog's bonus-investigate-per-investigating-opponent step. A single
         // verb-dispatched combinator handles every (population × verb tense ×
-        // article) permutation, returning a player-count quantity rather than
-        // the object-count `TrackedSetSize` fallback below. Must be tried before
-        // that fallback because every "[population] who … this way" clause does
-        // contain "this way".
+        // article) permutation OF A KEYWORD-ACTION VERB, returning a player-count
+        // quantity rather than the object-count `TrackedSetSize` fallback below.
+        // Possession verbs ("controlled"/"owned") are a different relation and
+        // are handled by the sibling arm immediately below, not here. Both must
+        // be tried before that fallback because every "[population] who … this
+        // way" clause does contain "this way".
         if let Ok((rest, (relation, action))) = parse_action_this_way(lower.as_str()) {
             if rest.is_empty() {
                 return Some(QuantityRef::PlayerCount {
                     filter: PlayerFilter::PerformedActionThisWay { relation, action },
                 });
             }
+        }
+        // CR 608.2c + CR 608.2h + CR 109.4: "[population] who controlled a
+        // <type> <verb> this way" counts PLAYERS who possessed a member of the
+        // preceding effect's tracked set — a different axis from the
+        // object-count `TrackedSetSize` fallback below, which would count the
+        // returned creatures themselves (Faerie Slumber Party #6943). Placed
+        // AFTER `parse_action_this_way` so the Tempting Offer cycle still
+        // matches its action arm first, and BEFORE the fallback because every
+        // such clause contains "this way".
+        if let Ok(("", (relation, possession, filter, caused_by))) =
+            parse_tracked_set_possessor_this_way(lower.as_str())
+        {
+            return Some(QuantityRef::PlayerCount {
+                filter: PlayerFilter::TrackedSetPossessor {
+                    relation,
+                    possession,
+                    filter,
+                    caused_by,
+                },
+            });
         }
         // CR 608.2c + CR 122.1: "[counter-type] counter[s] removed this way" — the
         // numeric amount of counters removed by the preceding `Effect::RemoveCounter`
@@ -3096,6 +3332,7 @@ fn parse_for_each_clause_with_they_controller(
         if try_parse_counters_removed_this_way(&lower) {
             return Some(QuantityRef::PreviousEffectAmount {
                 channel: crate::types::ability::DamageChannel::Total,
+                aggregate: AggregateFunction::Sum,
             });
         }
         // CR 608.2c + CR 400.7: "nontoken creature you controlled that was
@@ -3400,14 +3637,9 @@ fn add_filter_property(filter: TargetFilter, property: FilterProp) -> TargetFilt
 }
 
 fn parse_for_each_kicker_count(clause: &str) -> Option<QuantityRef> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("time ").parse(clause).ok()?;
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("it was kicked"),
-        tag("this spell was kicked"),
-    ))
-    .parse(rest)
-    .ok()?;
-    rest.is_empty().then_some(QuantityRef::KickerCount)
+    nom_quantity::parse_kicker_count_time_clause(clause)
+        .ok()
+        .map(|(_, quantity)| quantity)
 }
 
 fn parse_for_each_target_controlled_type(clause: &str) -> Option<QuantityRef> {
@@ -3458,6 +3690,121 @@ mod tests {
         RoundingMode, SubtypeExclusion, TypeFilter, TypedFilter,
     };
     use crate::types::mana::ManaColor;
+
+    // -----------------------------------------------------------------------
+    // CR 608.2c — the spell-history swallow guard, and the narrow contract of
+    // the retained tracked-set entry.
+    // -----------------------------------------------------------------------
+
+    /// Row 9. `parse_spell_history_clause`'s terminal fallback used to claim ANY
+    /// clause containing a cast verb phrase, discarding whatever aggregation
+    /// head preceded it and returning a confident bare spell count. That is the
+    /// exact mechanism that made First Family, April O'Neil and Hurkyl silently
+    /// wrong. This test drives the helper DIRECTLY, so it verifies the GUARD and
+    /// not merely the combinator ordering that now claims those phrases earlier.
+    #[test]
+    fn spell_history_clause_declines_an_unconsumed_characteristic_head() {
+        for clause in [
+            "colors among permanents you control and spells you've cast this turn",
+            "card type among spells you've cast this turn",
+            "card types among noncreature spells you've cast this turn",
+            "different subtypes among spells you've cast this turn",
+            "different subtypes other than creature types among spells you've cast this turn",
+            // The counter-kind head in its PRINTED form. This row read "kind of
+            // counter among …" — a spelling no card uses, which the old
+            // `tag("kind of counter") + opt("s")` composition happened to accept
+            // while rejecting the real one. The test agreed with the bug and so
+            // could not catch it; both are now spelled the way Perrie, the
+            // Pulverizer prints it (verified against Scryfall).
+            "different kinds of counters among spells you've cast this turn",
+            // Plural-tolerant siblings of the same head, so the arm cannot
+            // regress to matching exactly one hard-coded spelling.
+            "different kind of counter among spells you've cast this turn",
+            "kinds of counters among spells you've cast this turn",
+        ] {
+            assert_eq!(
+                parse_spell_history_clause(clause, CountScope::Controller),
+                None,
+                "an aggregation head must NOT be swallowed as a bare spell count: {clause:?}"
+            );
+        }
+    }
+
+    /// Row 10. The guard is narrow: every bare and qualified spell-history form
+    /// the 20+ cards in this class rely on keeps its pre-change reading.
+    #[test]
+    fn spell_history_clause_keeps_its_bare_and_qualified_readings() {
+        for clause in [
+            "spells you've cast this turn",
+            "spell you've cast this turn",
+            "spells you cast this turn",
+        ] {
+            assert_eq!(
+                parse_spell_history_clause(clause, CountScope::Controller),
+                Some((CountScope::Controller, None)),
+                "bare spell-history forms must be unchanged: {clause:?}"
+            );
+        }
+
+        for clause in [
+            "instant and sorcery spell you've cast this turn",
+            "noncreature spell you've cast this turn",
+            "spells you've cast this turn from anywhere other than your hand",
+        ] {
+            let parsed = parse_spell_history_clause(clause, CountScope::Controller);
+            let Some((scope, Some(filter))) = parsed else {
+                panic!(
+                    "qualified spell-history form must keep its filter: {clause:?} -> {parsed:?}"
+                )
+            };
+            assert_eq!(scope, CountScope::Controller, "{clause:?}");
+            assert!(
+                !matches!(filter, TargetFilter::Any),
+                "{clause:?} must keep a real filter, got {filter:?}"
+            );
+        }
+    }
+
+    /// Row 19, call site 1 of 2 (`oracle_quantity`'s "this way" `TrackedSetSize`
+    /// fallback chain). Consolidating the three card-type combinators must NOT
+    /// widen this site's source axis: only a tracked set may reach it.
+    ///
+    /// Preserving the SYMBOL `parse_distinct_card_types_among_tracked_set` is
+    /// insufficient — the CONTRACT must stay narrow, which is what this asserts
+    /// by feeding non-tracked-set populations directly to the entry the site
+    /// calls.
+    #[test]
+    fn the_this_way_tracked_set_entry_stays_narrow() {
+        use crate::parser::oracle_nom::quantity::parse_distinct_card_types_among_tracked_set as narrow;
+
+        // Positive control (Occult Epiphany): the tracked set still routes.
+        let (rest, qty) = narrow("card type among cards discarded this way")
+            .expect("the tracked-set reading must survive consolidation");
+        assert_eq!(rest, "");
+        assert!(
+            matches!(
+                qty,
+                QuantityRef::DistinctCardTypes {
+                    source: CardTypeSetSource::TrackedSet { .. }
+                }
+            ),
+            "expected a TrackedSet source, got {qty:?}"
+        );
+
+        // Negatives: every other population must be refused HERE, even though
+        // the merged head accepts them.
+        for clause in [
+            "card type among cards in your graveyard",
+            "card type among permanents you control",
+            "card type among spells you've cast this turn",
+            "card type among permanents you control and spells you've cast this turn",
+        ] {
+            assert!(
+                narrow(clause).is_err(),
+                "a '{clause}' population must not reach the 'this way' token context"
+            );
+        }
+    }
 
     /// DynQty subgroup D / Matrix #1 — the comparative hand-size producer builds the
     /// exact `PlayerAttribute` AST (Wojek Investigator). Fails iff EDIT 2 is reverted;
@@ -4024,6 +4371,54 @@ mod tests {
     }
 
     #[test]
+    fn for_each_time_gendered_pronoun_was_kicked_maps_to_kicker_count() {
+        // CR 702.33c-d: named creatures that self-reference with a
+        // gendered/singular pronoun (Batroc the Leaper: "he was kicked") name
+        // the same kicker count as the neuter "it was kicked" form.
+        for subject in ["he", "she", "they"] {
+            assert_eq!(
+                parse_for_each_clause(&format!("time {subject} was kicked")),
+                Some(QuantityRef::KickerCount),
+                "'{subject} was kicked' should map to KickerCount"
+            );
+        }
+        // Plural verb agreement ("were kicked") is accepted for distributive
+        // subjects.
+        assert_eq!(
+            parse_for_each_clause("time they were kicked"),
+            Some(QuantityRef::KickerCount)
+        );
+    }
+
+    #[test]
+    fn for_each_time_not_kicked_is_not_kicker_count() {
+        // The verb anchor is mandatory: a "time …" clause without
+        // "was/were kicked" must not be misread as a kicker count. Tests the
+        // changed recognizer directly so the guard is exercised without
+        // coupling to unrelated for-each branches.
+        assert_eq!(parse_for_each_kicker_count("time he was kissed"), None);
+        assert_eq!(parse_for_each_kicker_count("time it dealt damage"), None);
+        assert_eq!(
+            parse_for_each_kicker_count("time a creature was kicked"),
+            None
+        );
+        assert_eq!(parse_for_each_kicker_count("time was kicked"), None);
+        // A trailing tail after "was kicked" is not full consumption, so the
+        // clause is not a bare kicker count either.
+        assert_eq!(
+            parse_for_each_kicker_count("time it was kicked this turn, draw"),
+            None
+        );
+        // Positive reach-guard: a genuine non-kicker for-each still resolves to
+        // its own quantity through the full dispatch, proving the negatives
+        // above are not vacuously failing on unrelated grounds.
+        assert!(matches!(
+            parse_for_each_clause("creature you control"),
+            Some(QuantityRef::ObjectCount { .. })
+        ));
+    }
+
+    #[test]
     fn for_each_counter_on_that_creature() {
         let qty = parse_for_each_clause("+1/+1 counter on that creature").unwrap();
         assert!(
@@ -4101,66 +4496,36 @@ mod tests {
         }
     }
 
+    /// Every counter-removed for-each phrase lowers to the same
+    /// `PreviousEffectAmount { Total }` — the counter-type word and the "this way"
+    /// suffix are both informational; the runtime amount is whatever the parent
+    /// effect removed.
     #[test]
-    fn for_each_charge_counter_removed_this_way_is_previous_effect_amount() {
-        let qty = parse_for_each_clause("charge counter removed this way").unwrap();
-        assert_eq!(
-            qty,
-            QuantityRef::PreviousEffectAmount {
-                channel: crate::types::ability::DamageChannel::Total,
-            }
-        );
-    }
-
-    #[test]
-    fn for_each_charge_counters_removed_this_way_is_previous_effect_amount() {
-        // Plural variant — same dispatch.
-        let qty = parse_for_each_clause("charge counters removed this way").unwrap();
-        assert_eq!(
-            qty,
-            QuantityRef::PreviousEffectAmount {
-                channel: crate::types::ability::DamageChannel::Total,
-            }
-        );
-    }
-
-    #[test]
-    fn for_each_counter_removed_this_way_is_previous_effect_amount() {
-        // Untyped (no leading counter-type word). The runtime amount is whatever
-        // the parent removed; the omitted English type word is informational.
-        let qty = parse_for_each_clause("counter removed this way").unwrap();
-        assert_eq!(
-            qty,
-            QuantityRef::PreviousEffectAmount {
-                channel: crate::types::ability::DamageChannel::Total,
-            }
-        );
-    }
-
-    #[test]
-    fn for_each_storage_counter_removed_this_way_is_previous_effect_amount() {
-        // Storage Counter cycle (Saprazzan Cove etc.) — same shape, different
-        // counter type. Must produce the same dispatch.
-        let qty = parse_for_each_clause("storage counter removed this way").unwrap();
-        assert_eq!(
-            qty,
-            QuantityRef::PreviousEffectAmount {
-                channel: crate::types::ability::DamageChannel::Total,
-            }
-        );
-    }
-
-    #[test]
-    fn for_each_bare_counter_removed_is_previous_effect_amount() {
-        // Blademane Baku: "For each counter removed, this creature gets +2/+0
-        // until end of turn" — no "this way" suffix on the activated tail.
-        let qty = parse_for_each_clause("counter removed").unwrap();
-        assert_eq!(
-            qty,
-            QuantityRef::PreviousEffectAmount {
-                channel: crate::types::ability::DamageChannel::Total,
-            }
-        );
+    fn for_each_counter_removed_phrases_are_previous_effect_amount() {
+        for (phrase, note) in [
+            ("charge counter removed this way", "typed singular"),
+            ("charge counters removed this way", "typed plural"),
+            ("counter removed this way", "untyped — no leading type word"),
+            (
+                "storage counter removed this way",
+                "Storage Counter cycle (Saprazzan Cove)",
+            ),
+            (
+                "counter removed",
+                "Blademane Baku — no \"this way\" suffix on the activated tail",
+            ),
+        ] {
+            let qty = parse_for_each_clause(phrase)
+                .unwrap_or_else(|| panic!("{phrase:?} ({note}) must parse"));
+            assert_eq!(
+                qty,
+                QuantityRef::PreviousEffectAmount {
+                    channel: crate::types::ability::DamageChannel::Total,
+                    aggregate: AggregateFunction::Sum,
+                },
+                "{phrase:?} ({note})"
+            );
+        }
     }
 
     #[test]
@@ -4170,6 +4535,7 @@ mod tests {
             qty,
             QuantityRef::PreviousEffectAmount {
                 channel: crate::types::ability::DamageChannel::Total,
+                aggregate: AggregateFunction::Sum,
             }
         );
     }
@@ -5482,6 +5848,23 @@ mod tests {
     }
 
     #[test]
+    fn cda_quantity_five_times_object_count() {
+        let qty = parse_cda_quantity("five times the number of creatures you control").unwrap();
+        assert!(matches!(
+            qty,
+            QuantityExpr::Multiply {
+                factor: 5,
+                inner,
+            } if matches!(
+                inner.as_ref(),
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+            )
+        ));
+    }
+
+    #[test]
     fn cda_quantity_difference_between_two_counts() {
         let qty = parse_cda_quantity(
             "the difference between the number of cards in your hand and the number of cards in your graveyard",
@@ -5538,7 +5921,7 @@ mod tests {
         );
     }
 
-    /// CR 120.6: the TOTAL channel. Every phrase here names an unqualified
+    /// The TOTAL channel. Every phrase here names an unqualified
     /// numeric result — no "excess" qualifier — so it reads `last_effect_amount`.
     #[test]
     fn parse_event_context_quantity_previous_effect_this_way_variants() {
@@ -5553,11 +5936,72 @@ mod tests {
                 Some(QuantityExpr::Ref {
                     qty: QuantityRef::PreviousEffectAmount {
                         channel: crate::types::ability::DamageChannel::Total,
+                        aggregate: AggregateFunction::Sum,
                     },
                 }),
                 "phrase {phrase:?} must map to PreviousEffectAmount on the TOTAL channel"
             );
         }
+    }
+
+    /// V7a — CR 608.2c + CR 608.2i: the PRODUCTION path reports the aggregate.
+    ///
+    /// `parse_event_context_quantity` is `pub(crate)`, so this guard must live
+    /// in-crate. It pins the delegation added at the deleted legacy block's
+    /// exact position: the superlative form must now carry
+    /// `AggregateFunction::Max` instead of the bare (Sum-equivalent) ref that
+    /// made Windfall draw the cross-player SUM. Revert the combinator's `Max`
+    /// to `Sum` and all three positives FAIL.
+    #[test]
+    fn parse_event_context_quantity_greatest_discarded_this_way_reports_max() {
+        for phrase in [
+            "the greatest number of cards a player discarded this way",
+            "the highest number of cards a player discarded this way",
+            "the greatest number of cards any player discarded this way",
+        ] {
+            assert_eq!(
+                parse_event_context_quantity(phrase),
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: crate::types::ability::DamageChannel::Total,
+                        aggregate: AggregateFunction::Max,
+                    },
+                }),
+                "phrase {phrase:?} must report the MAX aggregate, not a bare ref"
+            );
+        }
+    }
+
+    /// V7a paired negatives — the superlative-free neighbours keep their
+    /// MEASURED shapes, so the new delegation cannot have stolen them. Each
+    /// `.expect(…)`s first, so neither can pass on a parse failure.
+    #[test]
+    fn parse_event_context_quantity_superlative_free_discard_phrases_are_unchanged() {
+        let bare = parse_event_context_quantity("the number of cards discarded this way")
+            .expect("superlative-free bare form must still parse");
+        assert!(
+            matches!(
+                bare,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::FilteredTrackedSetSize {
+                        caused_by: Some(ThisWayCause::Discarded),
+                        ..
+                    }
+                }
+            ),
+            "bare form must stay a filtered tracked-set read, got {bare:?}"
+        );
+
+        let per_player =
+            parse_event_context_quantity("the number of cards a player discarded this way")
+                .expect("superlative-free per-player form must still parse");
+        assert_eq!(
+            per_player,
+            QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize
+            },
+            "per-player superlative-free form must stay a tracked-set read"
+        );
     }
 
     #[test]
@@ -5607,6 +6051,7 @@ mod tests {
                 Some(QuantityExpr::Ref {
                     qty: QuantityRef::PreviousEffectAmount {
                         channel: crate::types::ability::DamageChannel::Excess,
+                        aggregate: AggregateFunction::Sum,
                     },
                 }),
                 "phrase {phrase:?} names EXCESS damage (CR 120.10) and must read the \
@@ -6553,6 +6998,92 @@ mod tests {
         );
     }
 
+    /// CR 121.1 + CR 608.2c + CR 109.5: Cut a Deal — "you draw a card for each
+    /// opponent who drew a card this way" must count the PLAYERS who drew, via
+    /// `PerformedActionThisWay { Opponent, Draw }`, NOT the object-count
+    /// `TrackedSetSize` fallback that the misparse produced. Revert-failing
+    /// anchor: without the `parse_drew_arm` in `parse_action_this_way`, this
+    /// clause falls through to `TrackedSetSize`.
+    #[test]
+    fn for_each_opponent_who_drew_a_card_this_way_is_player_count() {
+        let qty = parse_for_each_clause("opponent who drew a card this way").unwrap();
+        assert_eq!(
+            qty,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::PerformedActionThisWay {
+                    relation: PlayerRelation::Opponent,
+                    action: PlayerActionKind::Draw,
+                },
+            }
+        );
+    }
+
+    /// CR 121.1 + CR 608.2c: The present-tense / all-players sibling ("each
+    /// player who draws a card this way", Kwain class) shares the same combinator
+    /// and only differs on the relation axis.
+    #[test]
+    fn for_each_player_who_draws_a_card_this_way_is_all_player_count() {
+        let qty = parse_for_each_clause("player who draws a card this way").unwrap();
+        assert_eq!(
+            qty,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::PerformedActionThisWay {
+                    relation: PlayerRelation::All,
+                    action: PlayerActionKind::Draw,
+                },
+            }
+        );
+    }
+
+    /// CR 121.1: Reach-guard — `parse_action_this_way` (the shared authority for
+    /// both quantity dispatch sites) recognizes the population-scoped "drew a
+    /// card this way" form and binds the correct relation.
+    #[test]
+    fn parse_action_this_way_binds_drew_arm() {
+        assert_eq!(
+            parse_action_this_way("opponent who drew a card this way"),
+            Ok(("", (PlayerRelation::Opponent, PlayerActionKind::Draw)))
+        );
+    }
+
+    #[test]
+    fn parse_action_this_way_binds_plural_draw_arm() {
+        assert_eq!(
+            parse_action_this_way("players who draw a card this way"),
+            Ok(("", (PlayerRelation::All, PlayerActionKind::Draw)))
+        );
+    }
+
+    /// CR 121.1 + CR 608.2c: Negative — "drew a card this turn" is a per-turn
+    /// attribute, NOT the CR 608.2c "this way" anaphor. The `" this way"`
+    /// terminator in `parse_action_this_way` rejects the "this turn" tail, so the
+    /// Draw arm is unreachable and the clause never becomes a
+    /// `PerformedActionThisWay` draw count. Paired with the positive above, this
+    /// proves the arm is gated on the "this way" anaphor, not on the verb alone.
+    #[test]
+    fn opponent_who_drew_a_card_this_turn_is_not_performed_action_draw() {
+        assert!(parse_action_this_way("opponent who drew a card this turn").is_err());
+        let this_way = QuantityRef::PlayerCount {
+            filter: PlayerFilter::PerformedActionThisWay {
+                relation: PlayerRelation::Opponent,
+                action: PlayerActionKind::Draw,
+            },
+        };
+        assert_ne!(
+            parse_for_each_clause("opponent who drew a card this turn"),
+            Some(this_way)
+        );
+    }
+
+    /// CR 121.1: Negative — a bare "cards drawn this way" object phrase has no
+    /// "[population] who" prefix, so `parse_action_this_way` cannot match and the
+    /// arm stays unreachable; such clauses keep falling through to the
+    /// object-count `TrackedSetSize` path unchanged.
+    #[test]
+    fn cards_drawn_this_way_has_no_population_who_prefix() {
+        assert!(parse_action_this_way("cards drawn this way").is_err());
+    }
+
     /// CR 109.1 + CR 122.1: "[type] you control with a [counter] counter on it"
     /// lowers to `ObjectCount` over a filter that includes `FilterProp::Counters`,
     /// not `CountersOnSelf` over a bogus counter-type string. Inspiring Call class.
@@ -7407,6 +7938,76 @@ mod tests {
             }
             other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
         }
+    }
+
+    /// T2 (issue #6943) — the AST pin for Faerie Slumber Party's second
+    /// sentence: "For each opponent who controlled a creature returned this
+    /// way, you create two … tokens."
+    ///
+    /// CR 608.2c + CR 109.4: this counts PLAYERS on the possession axis. Before
+    /// the fix the clause fell through to the bare `TrackedSetSize` fallback and
+    /// counted the returned CREATURES instead — a silent wrong-answer misparse
+    /// (9 creatures × 2 = 18 tokens instead of 3 opponents × 2 = 6).
+    ///
+    /// This is the paired POSITIVE that stops the anti-swallow negatives below
+    /// from being vacuously satisfied by a fallback or an `Unimplemented`
+    /// early-return: it proves the new arm actually fires on the real clause.
+    #[test]
+    fn for_each_opponent_who_controlled_a_creature_returned_this_way_counts_players() {
+        let qty = parse_for_each_clause("opponent who controlled a creature returned this way")
+            .expect("must parse");
+        assert_eq!(
+            qty,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::TrackedSetPossessor {
+                    relation: PlayerRelation::Opponent,
+                    possession: PossessionAxis::Controller,
+                    filter: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        ..Default::default()
+                    }),
+                    // Derived from the producing effect's DESTINATION, which the
+                    // parser cannot see — both "returned to hand" and "returned
+                    // to the battlefield" print the same verb. `None` accepts
+                    // every member and is strictly more robust than pinning a
+                    // cause the parser would have to guess.
+                    caused_by: None,
+                },
+            },
+            "the possession-axis clause must count players, not the returned objects"
+        );
+    }
+
+    /// T3 (issue #6943) anti-swallow — Paradoxical Outcome: "Draw a card for
+    /// each card returned to your hand this way." Its clause has no
+    /// "[population] who" prefix, so the new possession arm must not touch it;
+    /// it stays the bare object-count `TrackedSetSize`.
+    ///
+    /// The realistic failure mode this guards is a SCANNING (non-anchored)
+    /// implementation. The shipped one is anchored at `parse_player_population`
+    /// → `tag("who ")`, so it structurally cannot reach this clause.
+    #[test]
+    fn paradoxical_outcome_card_returned_to_your_hand_this_way_stays_tracked_set_size() {
+        let qty = parse_for_each_clause("card returned to your hand this way").expect("must parse");
+        assert_eq!(
+            qty,
+            QuantityRef::TrackedSetSize,
+            "a bare object-count 'returned this way' clause must be unaffected"
+        );
+    }
+
+    /// T4 (issue #6943) anti-swallow — Revival Experiment: "You lose 3 life for
+    /// each card returned this way." Same guard as T3 on the shortest form of
+    /// the "returned" verb, where a scanning implementation would be most
+    /// likely to over-match.
+    #[test]
+    fn revival_experiment_card_returned_this_way_stays_tracked_set_size() {
+        let qty = parse_for_each_clause("card returned this way").expect("must parse");
+        assert_eq!(
+            qty,
+            QuantityRef::TrackedSetSize,
+            "a bare 'card returned this way' clause must be unaffected"
+        );
     }
 
     /// CR 608.2c + CR 701.20b: "nonland card revealed this way" (Selvala,

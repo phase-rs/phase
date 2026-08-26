@@ -7,10 +7,12 @@ import type {
   GameState,
   LegalActionsResult,
   ManaCost,
+  ObjectAction,
   ObjectId,
   PlayerId,
   SubmitResult,
 } from "./types";
+import type { InteractionSubmission } from "./generated/interaction";
 import { actionRejectionError, AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, nextSnapshotSeq } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import {
@@ -24,6 +26,7 @@ import type {
   StandingEntry,
   TournamentFormat,
   PodPolicy,
+  DraftKind,
 } from "./draft-adapter";
 import type { ServerInfo } from "./ws-adapter";
 
@@ -41,7 +44,7 @@ export type DraftPhase =
 export interface CreateDraftSettings {
   displayName: string;
   setCode: string;
-  kind: "Premier" | "Traditional";
+  kind: Exclude<DraftKind, "Quick">;
   public: boolean;
   password?: string;
   timerSeconds?: number;
@@ -198,6 +201,30 @@ export class ServerDraftAdapter implements EngineAdapter {
     });
   }
 
+  async submitInteraction(
+    submission: InteractionSubmission,
+    _actor: PlayerId,
+  ): Promise<SubmitResult> {
+    if (this.phase !== "match") {
+      throw new AdapterError("PHASE_ERROR", "Not in a match phase", false);
+    }
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
+    }
+
+    this.emit({ type: "actionPendingChanged", pending: true });
+    return new Promise<SubmitResult>((resolve, reject) => {
+      this.pendingResolve = resolve;
+      this.pendingReject = reject;
+      if (!this.send({ type: "Interaction", data: { submission } })) {
+        this.pendingResolve = null;
+        this.pendingReject = null;
+        this.emit({ type: "actionPendingChanged", pending: false });
+        reject(new AdapterError("WS_CLOSED", "Failed to send interaction", true));
+      }
+    });
+  }
+
   async previewManaPayment(action: GameAction, _actor: PlayerId): Promise<ObjectId[]> {
     if (this.phase !== "match") {
       throw new AdapterError("PHASE_ERROR", "Not in a match phase", false);
@@ -221,10 +248,6 @@ export class ServerDraftAdapter implements EngineAdapter {
       throw new AdapterError("WS_ERROR", "No game state available", false);
     }
     return this.snapshot.state;
-  }
-
-  getAiAction(): GameAction | null {
-    return null;
   }
 
   async getLegalActions(): Promise<LegalActionsResult> {
@@ -603,9 +626,11 @@ export class ServerDraftAdapter implements EngineAdapter {
           your_player: PlayerId;
           legal_actions?: GameAction[];
           auto_pass_recommended?: boolean;
+          end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"];
           mana_payment_shortcut_actions?: GameAction[];
           spell_costs?: Record<string, ManaCost>;
-          legal_actions_by_object?: Record<string, GameAction[]>;
+          legal_actions_by_object?: Record<string, ObjectAction[]>;
+          viewer_interaction?: LegalActionsResult["viewerInteraction"];
           derived?: GameState["derived"];
         };
         const startedSnapshot = this.cacheSnapshot(
@@ -613,9 +638,11 @@ export class ServerDraftAdapter implements EngineAdapter {
           {
             actions: data.legal_actions ?? [],
             autoPassRecommended: data.auto_pass_recommended ?? false,
+            endContinuousEffectOffers: data.end_continuous_effect_offers ?? [],
             manaPaymentShortcutActions: data.mana_payment_shortcut_actions ?? [],
             spellCosts: data.spell_costs,
             legalActionsByObject: data.legal_actions_by_object,
+            viewerInteraction: data.viewer_interaction,
           },
         );
         this._playerId = data.your_player;
@@ -634,9 +661,11 @@ export class ServerDraftAdapter implements EngineAdapter {
           events: GameEvent[];
           legal_actions?: GameAction[];
           auto_pass_recommended?: boolean;
+          end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"];
           mana_payment_shortcut_actions?: GameAction[];
           spell_costs?: Record<string, ManaCost>;
-          legal_actions_by_object?: Record<string, GameAction[]>;
+          legal_actions_by_object?: Record<string, ObjectAction[]>;
+          viewer_interaction?: LegalActionsResult["viewerInteraction"];
           log_entries?: GameLogEntry[];
           derived?: GameState["derived"];
         };
@@ -645,9 +674,11 @@ export class ServerDraftAdapter implements EngineAdapter {
           {
             actions: data.legal_actions ?? [],
             autoPassRecommended: data.auto_pass_recommended ?? false,
+            endContinuousEffectOffers: data.end_continuous_effect_offers ?? [],
             manaPaymentShortcutActions: data.mana_payment_shortcut_actions ?? [],
             spellCosts: data.spell_costs,
             legalActionsByObject: data.legal_actions_by_object,
+            viewerInteraction: data.viewer_interaction,
           },
         );
         if (this.pendingResolve) {

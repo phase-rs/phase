@@ -29,6 +29,7 @@
     "logDefault": "Registro predefinito",
     "spellPayment": "Pagamento magie",
     "manualManaPayment": "Pagamento manuale del mana per le magie",
+    "spellPaymentOptions": { "auto": "Automatico", "autoExceptSacrificialMana": "Chiedi prima di sacrificare", "manual": "Manuale" },
     "nativeEngine": "Usa il motore nativo per partite locali e multiplayer ospitato",
     "nativeEngineDescription": "Usa il motore scaricato per le partite locali contro l'IA e le partite che ospiti tramite una lobby. Gli ospiti continuano a connettersi tramite la connessione peer-to-peer della lobby. Usa il motore integrato quando non è disponibile.",
     "boardBackground": "Sfondo del campo",
@@ -69,6 +70,7 @@
     "showOpponentBoard": "Mostra il campo dell'avversario passando sull'HUD",
     "multiplayerBoardLayout": "Layout del campo multigiocatore",
     "multiplayerBoardLayoutOptions": {
+      "auto": "Automatico",
       "focused": "Avversario in focus",
       "split": "Tavolo diviso"
     },
@@ -166,9 +168,10 @@
     "lastSynced": "Ultima sincronizzazione {{time}}",
     "never": "mai",
     "conflictTitle": "Entrambe le copie hanno modifiche",
-    "conflictBody": "Questo dispositivo e il tuo account cloud contengono entrambi dati e non possiamo stabilire quale sia aggiornato. Scegli quale copia mantenere; l'altra verrà sostituita.",
+    "conflictBody": "Questo dispositivo e il tuo account cloud contengono entrambi dati e non possiamo stabilire quale sia aggiornata. Scegli una copia o conserva entrambe le raccolte di mazzi.",
     "keepCloud": "Usa il cloud",
     "keepLocal": "Mantieni questo dispositivo",
+    "keepBothDecks": "Mantieni entrambe le raccolte di mazzi",
     "savesNote": "I salvataggi delle partite e le cache restano su questo dispositivo.",
     "diffDecks": "Mazzi: {{added}} aggiunti, {{modified}} modificati, {{removed}} rimossi",
     "diffPrefs": "Le preferenze differiscono",

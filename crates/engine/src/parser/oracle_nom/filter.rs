@@ -6,17 +6,21 @@
 
 use nom::branch::alt;
 use nom::bytes::complete::tag;
-use nom::character::complete::space1;
-use nom::combinator::{map, opt, value};
+use nom::character::complete::{alphanumeric1, space1};
+use nom::combinator::{map, not, opt, value};
 use nom::sequence::preceded;
 use nom::Parser;
 
 use super::error::OracleResult;
-use super::primitives::{parse_article, parse_pt_modifier};
+use super::primitives::{
+    parse_article, parse_property_keyword, parse_pt_modifier, parse_superlative_adjective,
+};
 use super::quantity::{parse_quantity_expr_number, parse_quantity_ref};
 use crate::types::ability::{
-    Comparator, ControllerRef, FilterProp, PtStat, PtValueScope, QuantityExpr,
+    AggregateFunction, Comparator, ControllerRef, FilterProp, ObjectProperty, PtStat, PtValueScope,
+    QuantityExpr, SourceExclusion,
 };
+use crate::types::card_type::CoreType;
 #[cfg(test)]
 use crate::types::counter::CounterType;
 use crate::types::counter::{parse_counter_type, CounterMatch};
@@ -288,18 +292,46 @@ pub fn parse_pt_comparison(input: &str) -> OracleResult<'_, FilterProp> {
     Ok((rest, prop))
 }
 
-/// CR 208.1: Possessive pronoun introducing a creature's *own* stat in a
-/// self-referential P/T comparison — "its" (singular subject) or "their" (plural
-/// subject). Both refer to the candidate object itself, not the ability source.
+/// CR 208.1 (power and toughness) + CR 202.3 (mana value): the HEAD of a
+/// postnominal superlative property qualifier — "with the `<superlative>`
+/// `<property>`".
+///
+/// SINGLE AUTHORITY for that head. The trailing eligible-set clause is the
+/// caller's business: an explicit "among `<set>`" (CR 109.2, owned by
+/// `oracle_target::parse_superlative_property_suffix`), or the enclosing noun
+/// phrase itself (CR 109.2, owned by the bare-form pass in
+/// `parse_type_phrase_with_ctx`).
+///
+/// The `not(alphanumeric1)` tail guard enforces a word boundary so "mana values"
+/// or "powerstone" cannot half-match the property word. The `among`-form caller
+/// gets that boundary implicitly from its following `tag(" among ")`; the
+/// bare-form caller has none. The guard lives HERE rather than inside
+/// `parse_property_keyword`, because narrowing that shared atom would silently
+/// change the ten existing condition-layer call sites.
+pub(crate) fn parse_superlative_property_head(
+    input: &str,
+) -> OracleResult<'_, (AggregateFunction, ObjectProperty)> {
+    let (input, _) = tag("with the ").parse(input)?;
+    let (input, function) = parse_superlative_adjective(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, property) = parse_property_keyword(input)?;
+    let (input, _) = not(alphanumeric1).parse(input)?;
+    Ok((input, (function, property)))
+}
+
+/// CR 208.1: Possessive phrase introducing a creature's *own* stat in a
+/// self-referential P/T comparison — "its", "their", or "that creature's".
+/// All refer to the candidate object itself, not the ability source.
 fn parse_pt_possessive(input: &str) -> OracleResult<'_, &str> {
-    alt((tag("its"), tag("their"))).parse(input)
+    alt((tag("its "), tag("their "), tag("that creature's "))).parse(input)
 }
 
 /// CR 208.1: "toughness greater than <poss> power" → [`FilterProp::ToughnessGTPower`]
 /// and "power greater than <poss> base power" → [`FilterProp::PowerExceedsBase`].
 /// These are the self-referential P/T comparisons (a creature's own stat vs its
 /// own other stat), distinct from the numeric/quantity-threshold comparisons the
-/// rest of `parse_pt_comparison` handles. Accepts singular and plural possessives.
+/// rest of `parse_pt_comparison` handles. Accepts pronoun and demonstrative
+/// possessives.
 fn parse_self_referential_pt(input: &str) -> OracleResult<'_, FilterProp> {
     alt((
         value(
@@ -307,7 +339,7 @@ fn parse_self_referential_pt(input: &str) -> OracleResult<'_, FilterProp> {
             (
                 tag("toughness greater than "),
                 parse_pt_possessive,
-                tag(" power"),
+                tag("power"),
             ),
         ),
         value(
@@ -315,7 +347,7 @@ fn parse_self_referential_pt(input: &str) -> OracleResult<'_, FilterProp> {
             (
                 tag("power greater than "),
                 parse_pt_possessive,
-                tag(" base power"),
+                tag("base power"),
             ),
         ),
     ))
@@ -471,9 +503,121 @@ pub fn parse_color_property(input: &str) -> OracleResult<'_, FilterProp> {
     .parse(input)
 }
 
+/// CR 614.1a + CR 109.1: the parsed "\[other\] `<plural-type>` you control" tail
+/// of a compound damage recipient. A named struct rather than a tuple so both
+/// axes are explicit at every call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlledPermanentsConjunct {
+    /// CR 614.1a: restriction on the permanent leg — `None` for bare
+    /// "permanents", `Some(ct)` for a plural type word.
+    pub permanent_type: Option<CoreType>,
+    /// CR 109.1: whether the leading "other" article excluded the ability's own
+    /// source object.
+    pub source_scope: SourceExclusion,
+}
+
+/// CR 614.1a + CR 109.1: SINGLE AUTHORITY for the "\[other\] `<plural-type>` you
+/// control" noun phrase that follows "…to you and " in a compound damage
+/// recipient.
+///
+/// Both damage surfaces compose this one combinator rather than re-spelling the
+/// noun list:
+/// * `oracle_effect::imperative::parse_compound_you_and_permanents` →
+///   `TargetFilter::ControllerAndControlledPermanents` (the `Effect::PreventDamage`
+///   half: Comeuppance, Channel Harm, Blessed Sanctuary, Safe Passage, The
+///   Wanderer).
+/// * `oracle_replacement::parse_damage_target_phrase` →
+///   `DamageTargetFilter::PlayerOrPermanentsControlledBy` (the replacement half:
+///   Palisade Giant, Ancient Adamantoise, Heroic Sacrifice, Gideon's Sacrifice).
+///
+/// They previously kept two hand-rolled copies that had already drifted apart in
+/// both directions — one knew six nouns but not "other", the other knew "other"
+/// but only three nouns. One combinator, one noun `alt()`, one article `opt()`.
+///
+/// Composed one axis per combinator: the optional CR 109.1 "other" article, the
+/// plural type noun, and the fixed " you control" suffix.
+pub fn parse_controlled_permanents_conjunct(
+    input: &str,
+) -> OracleResult<'_, ControlledPermanentsConjunct> {
+    let (input, other) = opt(tag("other ")).parse(input)?;
+    let (input, permanent_type) = alt((
+        value(Some(CoreType::Planeswalker), tag("planeswalkers")),
+        value(Some(CoreType::Creature), tag("creatures")),
+        value(Some(CoreType::Artifact), tag("artifacts")),
+        value(Some(CoreType::Enchantment), tag("enchantments")),
+        value(Some(CoreType::Land), tag("lands")),
+        value(None, tag("permanents")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" you control").parse(input)?;
+    Ok((
+        input,
+        ControlledPermanentsConjunct {
+            permanent_type,
+            source_scope: match other {
+                Some(_) => SourceExclusion::Exclude,
+                None => SourceExclusion::Include,
+            },
+        },
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CR 614.1a + CR 109.1: the single authority must cover every plural noun
+    /// BOTH former copies knew, and must carry the "other" article rather than
+    /// discarding it.
+    #[test]
+    fn controlled_permanents_conjunct_covers_every_noun_and_the_other_article() {
+        for (phrase, expected_type) in [
+            ("permanents you control", None),
+            ("creatures you control", Some(CoreType::Creature)),
+            ("planeswalkers you control", Some(CoreType::Planeswalker)),
+            ("artifacts you control", Some(CoreType::Artifact)),
+            ("enchantments you control", Some(CoreType::Enchantment)),
+            ("lands you control", Some(CoreType::Land)),
+        ] {
+            let (rest, plain) = parse_controlled_permanents_conjunct(phrase)
+                .unwrap_or_else(|_| panic!("{phrase} must parse"));
+            assert!(rest.is_empty(), "{phrase} must be fully consumed");
+            assert_eq!(plain.permanent_type, expected_type);
+            assert_eq!(
+                plain.source_scope,
+                SourceExclusion::Include,
+                "no \"other\" article means the source is included"
+            );
+
+            let othered = format!("other {phrase}");
+            let (rest, excluded) = parse_controlled_permanents_conjunct(&othered)
+                .unwrap_or_else(|_| panic!("{othered} must parse"));
+            assert!(rest.is_empty());
+            assert_eq!(excluded.permanent_type, expected_type);
+            assert_eq!(
+                excluded.source_scope,
+                SourceExclusion::Exclude,
+                "the \"other\" article must reach the caller, not be opt()-discarded"
+            );
+        }
+    }
+
+    /// Hostile: the combinator must not claim a phrase whose controller clause is
+    /// absent or inverted, and must leave the remainder untouched on failure.
+    #[test]
+    fn controlled_permanents_conjunct_fails_closed_off_grammar() {
+        for phrase in [
+            "permanents an opponent controls",
+            "creatures",
+            "other stuff you control",
+            "creature you control",
+        ] {
+            assert!(
+                parse_controlled_permanents_conjunct(phrase).is_err(),
+                "{phrase} must not be claimed by the conjunct authority"
+            );
+        }
+    }
 
     #[test]
     fn test_parse_zone_filter_battlefield() {
@@ -650,6 +794,16 @@ mod tests {
             }
         );
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_with_self_referential_base_power_demonstrative() {
+        // CR 208.4b: the demonstrative possessive names the candidate creature's
+        // base power, not the ability source's power.
+        let (rest, prop) =
+            parse_with_property("with power greater than that creature's base power").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(prop, FilterProp::PowerExceedsBase);
     }
 
     #[test]

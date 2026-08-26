@@ -8,8 +8,8 @@
 
 import type { Update } from "@tauri-apps/plugin-updater";
 
-import { isTauri } from "../services/platform";
-import { isMultiplayerGameLive, whenMultiplayerGameEnds } from "./multiplayerGuard";
+import { isDesktopTauri } from "../services/platform";
+import { deferUntilMultiplayerSessionEnds, isMultiplayerGameLive } from "./multiplayerGuard";
 import { markPendingAutoUpdate } from "./updateMarker";
 import {
   claimUpdateStatus,
@@ -35,7 +35,9 @@ let inFlight: Promise<void> | null = null;
  *   the bundle is already swapped in by the first).
  * - Manual `↻` clicks from triggering parallel installs during the wait.
  */
-let deferredUnsub: (() => void) | null = null;
+let deferredCancel: (() => void) | null = null;
+let deferredUpdate: Update | null = null;
+let deferredInstall: Promise<void> | null = null;
 
 function setTauriUpdateStatus(next: "checking" | "downloading" | "activating" | "deferred", ownsStatus: boolean): void {
   if (ownsStatus) setUpdateStatus(next);
@@ -98,7 +100,7 @@ async function runInstall(update: Update, ownsStatus: boolean): Promise<void> {
 }
 
 async function performCheck(reason: "startup" | "interval" | "manual"): Promise<void> {
-  if (deferredUnsub) {
+  if (deferredCancel || deferredInstall) {
     pushUpdateDebug(
       `Tauri update check (${reason}) skipped — install already deferred for end of multiplayer game.`,
     );
@@ -147,12 +149,22 @@ async function performCheck(reason: "startup" | "interval" | "manual"): Promise<
         "warn",
       );
       setTauriUpdateStatus("deferred", ownsStatus);
-      const pending = update;
-      deferredUnsub = whenMultiplayerGameEnds(() => {
-        deferredUnsub = null;
+      deferredUpdate = update;
+      const scheduledInstall = deferUntilMultiplayerSessionEnds(() => {
+        const pending = deferredUpdate;
+        deferredUpdate = null;
+        deferredCancel = null;
+        if (!pending) return;
         pushUpdateDebug("Multiplayer game ended; applying deferred Tauri update.");
-        void runInstall(pending, ownsStatus);
-      });
+        deferredInstall = runInstall(pending, ownsStatus).finally(() => {
+          deferredInstall = null;
+        });
+      }, "install");
+      if (scheduledInstall.deferred && deferredUpdate !== null) {
+        deferredCancel = scheduledInstall.cancel;
+        return;
+      }
+      await deferredInstall;
       return;
     }
 
@@ -171,7 +183,7 @@ async function performCheck(reason: "startup" | "interval" | "manual"): Promise<
  * or the updater hasn't been initialized yet.
  */
 export function checkForTauriUpdate(): boolean {
-  if (!isTauri() || !manualCheck) {
+  if (!isDesktopTauri() || !manualCheck) {
     pushUpdateDebug(
       "Manual Tauri update check ignored (not a Tauri build or updater not initialized).",
       "warn",
@@ -188,7 +200,11 @@ export function checkForTauriUpdate(): boolean {
  * `registerServiceWorker()` in `main.tsx`.
  */
 export function registerTauriUpdater(): void {
-  if (initialized || !isTauri()) return;
+  // Skipped in dev for the same reason `registerServiceWorker` skips there: a
+  // dev build carries the app version rather than the shell release version, so
+  // every check resolves an update, and installing it overwrites the cargo
+  // binary with the released bundle and relaunches out of the dev build.
+  if (initialized || import.meta.env.DEV || !isDesktopTauri()) return;
   initialized = true;
   pushUpdateDebug("Registering Tauri updater.");
 
@@ -205,8 +221,9 @@ export function registerTauriUpdater(): void {
     () => {
       window.clearInterval(intervalId);
       manualCheck = null;
-      deferredUnsub?.();
-      deferredUnsub = null;
+      deferredCancel?.();
+      deferredCancel = null;
+      deferredUpdate = null;
       releaseUpdateStatus("tauri");
     },
     { once: true },

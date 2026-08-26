@@ -48,6 +48,7 @@ function ScrubHarness({
     >
       <div data-testid="card-11" data-hand-card data-object-id="11" />
       <div data-testid="card-12" data-hand-card data-object-id="12" />
+      <div data-testid="zone-wing" data-zone-fan-card />
     </div>
   );
 }
@@ -59,6 +60,25 @@ afterEach(() => {
 });
 
 describe("useHandScrubPreview", () => {
+  it("leaves a castable zone wing's pointer stream to its own drag gesture", () => {
+    vi.useFakeTimers();
+    const onOpen = vi.fn();
+    render(<ScrubHarness onOpen={onOpen} />);
+
+    fireEvent.pointerDown(screen.getByTestId("zone-wing"), {
+      button: 0,
+      clientX: 40,
+      clientY: 100,
+      isPrimary: true,
+      pointerId: 3,
+      pointerType: "touch",
+    });
+    act(() => vi.advanceTimersByTime(400));
+
+    expect(useUiStore.getState().inspectedObjectId).toBeNull();
+    expect(useUiStore.getState().mobileHandGesture).toBeNull();
+  });
+
   it("holds to preview, scrubs adjacent cards, and suppresses the release click", () => {
     vi.useFakeTimers();
     const onOpen = vi.fn();

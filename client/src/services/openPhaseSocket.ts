@@ -1,7 +1,8 @@
 import {
-  LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL,
-  MIN_SUPPORTED_SERVER_PROTOCOL,
+  LOBBY_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
+  serverProtocolRejection,
+  type ProtocolSurface,
   type ServerInfo,
 } from "../adapter/ws-adapter";
 
@@ -50,6 +51,22 @@ export interface OpenOptions<T extends PhaseSocketTransport = WebSocket> {
    * browser's direct `new WebSocket(url)` behavior.
    */
   socketFactory?: PhaseSocketFactory<T>;
+  /**
+   * Which protocol surface this socket will carry. Defaults to `"full"`, the
+   * conservative choice: a caller that has not thought about it gets the
+   * exact-match full-game window.
+   *
+   * Pass `"lobby"` ONLY for a socket that can never elicit a full-game reply.
+   * Sending `LobbyClientMessage` variants is necessary but NOT sufficient: a
+   * `Full` server answers `JoinGameWithPassword` and `CreateGameWithSettings`
+   * from its server-run game path with `SessionAttached`/`StateUpdate`, which
+   * are not `LobbyServerMessage` variants at all. Those two frames are gated in
+   * `brokerClient.ts` — `resolveGuestOver` refuses every `Full` server, and
+   * `openBrokerClient` accepts only `LobbyOnly` ones. Server-run hosting,
+   * joining, drafts and spectating each open their own socket and must keep the
+   * default.
+   */
+  surface?: ProtocolSurface;
 }
 
 export class HandshakeError extends Error {
@@ -80,7 +97,8 @@ export class HandshakeError extends Error {
  * Opens a WebSocket to `wsUrl`, waits for `ServerHello`, sends `ClientHello`,
  * and resolves with a ready-to-use `PhaseSocket`. Mode-agnostic: works for
  * both `Full` and `LobbyOnly` servers — callers that need to gate on mode
- * inspect `serverInfo.mode` themselves.
+ * inspect `serverInfo.mode` themselves. `opts.surface` selects which protocol
+ * window the handshake is held to; see {@link OpenOptions.surface}.
  *
  * Failure modes (all result in the returned promise rejecting with a
  * `HandshakeError` and the underlying socket being closed):
@@ -102,7 +120,7 @@ export function openPhaseSocket(
   wsUrl: string,
   opts: OpenOptions<PhaseSocketTransport> = {},
 ): Promise<PhaseSocket<PhaseSocketTransport>> {
-  const { signal, timeoutMs = 5000 } = opts;
+  const { signal, timeoutMs = 5000, surface = "full" } = opts;
 
   return new Promise<PhaseSocket<PhaseSocketTransport>>((resolve, reject) => {
     if (signal?.aborted) {
@@ -211,6 +229,7 @@ export function openPhaseSocket(
         build_commit: string;
         protocol_version: number;
         mode: "Full" | "LobbyOnly";
+        lobby_protocol_version?: number;
         public_url?: string;
       };
       const info: ServerInfo = {
@@ -218,39 +237,39 @@ export function openPhaseSocket(
         buildCommit: data.build_commit,
         protocolVersion: data.protocol_version,
         mode: data.mode,
+        lobbyProtocolVersion: data.lobby_protocol_version,
         publicUrl: data.public_url,
       };
 
-      const minAcceptedProtocol =
-        info.mode === "LobbyOnly"
-          ? LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL
-          : MIN_SUPPORTED_SERVER_PROTOCOL;
-
-      // Accept any server in [minAcceptedProtocol, PROTOCOL_VERSION]. Full
-      // servers are current-only for breaking game protocol releases; LobbyOnly
-      // brokers keep a one-version rollout window because they do not carry
-      // game-state/action payloads.
-      if (
-        info.protocolVersion < minAcceptedProtocol ||
-        info.protocolVersion > PROTOCOL_VERSION
-      ) {
-        const reason =
-          info.protocolVersion < minAcceptedProtocol
-            ? `Server protocol version ${info.protocolVersion} is older than supported (client speaks ${PROTOCOL_VERSION}, min ${minAcceptedProtocol}). Please wait for the lobby to finish rolling out.`
-            : `Server protocol version ${info.protocolVersion} is newer than this client (${PROTOCOL_VERSION}). Please refresh to update.`;
+      const rejection = serverProtocolRejection(info, surface);
+      if (rejection) {
         settle(() => {
           ws.close();
-          reject(new HandshakeError("protocol_mismatch", reason, info));
+          reject(new HandshakeError("protocol_mismatch", rejection, info));
         });
         return;
       }
 
-      const clientProtocolVersion =
-        info.mode === "LobbyOnly" ? info.protocolVersion : PROTOCOL_VERSION;
+      const onLobbySurface = surface === "lobby" || info.mode === "LobbyOnly";
+      const clientProtocolVersion = onLobbySurface
+        ? info.protocolVersion
+        : PROTOCOL_VERSION;
 
-      // Send our ClientHello back. For LobbyOnly brokers in the rollout
-      // window, echo the accepted broker protocol so an older deployed worker
-      // does not reject a newer local-dev client as a future protocol.
+      // Send our ClientHello back.
+      //
+      // `protocol_version` echoes the server's own number on the lobby surface.
+      // `ClientHello` carries no surface field, so `HelloAcceptance::FullGame`
+      // in `crates/phase-server/src/main.rs` holds every socket a `Full` server
+      // accepts to `MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION` — the echo is
+      // therefore this client's only way to declare the socket lobby-only, and
+      // the one that reaches servers already deployed. Sound only because the
+      // caller keeps its side of {@link OpenOptions.surface} — a `Full` server
+      // will still answer a game frame sent over this socket.
+      //
+      // `lobby_protocol_version` is always our own: a server that understands
+      // it gates on that instead, which is what decouples the lobby handshake
+      // from full-game churn. Servers that predate the field ignore it (nothing
+      // sets `deny_unknown_fields`).
       ws.send(
         JSON.stringify({
           type: "ClientHello",
@@ -258,6 +277,7 @@ export function openPhaseSocket(
             client_version: __APP_VERSION__,
             build_commit: __BUILD_HASH__,
             protocol_version: clientProtocolVersion,
+            lobby_protocol_version: LOBBY_PROTOCOL_VERSION,
           },
         }),
       );

@@ -33,11 +33,28 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
   new Set<WaitingFor["type"]>([
     // Active priority — passes via PassButton / mana payment / cast.
     "Priority",
+    // Resolve All's explicit standing-pass authorization. The consent modal
+    // gathers each representative's response.
+    //
+    // `ResolveAllReady` is listed as handled even though it renders nothing,
+    // because whoever submits the FINAL Grant consumes it: this client via the
+    // modal, a browser-driven AI seat via `aiController`, and a server-driven
+    // AI seat via `server-core`'s own hand-off inside `run_ai`. The state has
+    // no acting player, and while the engine does still offer each grantor a
+    // `RevokeResolveAllConsent`, nothing here renders it — so a transport that
+    // reaches this state without one of those owners parks the game
+    // permanently, which is exactly what happened before the server grew its
+    // half. Any new transport that can mint a consent run owes a consumer here
+    // before this entry stays honest.
+    "ResolveAllConsent",
+    "ResolveAllReady",
     // CR 701.42 / CR 508.4: meld pair and attacking-entry destination dialogs.
     "MeldPairChoice",
     "MeldAttackTargetChoice",
+    "EntryAttackTargetChoice",
     // Cast / activation chain — ManaPayment + PhyrexianPayment share ManaPaymentUI.
     ...MANA_PAYMENT_WAITING_FOR_TYPES,
+    "ManaSourceSelection",
     "ChooseXValue",
     "PayAmountChoice",
     "TargetSelection",
@@ -90,12 +107,14 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "PrecastCopyShortcutOffer",
     "RespondToPrecastCopyShortcut",
     "ReplacementChoice",
+    "EntryControllerChoice",
     "CopyTargetChoice",
     "CopyRetarget",
     "ExploreChoice",
     // CR 303.4 + CR 115.1: return-as-Aura / non-spell Aura entry host pick.
     // Resolved on the board (object hosts) or via player HUD glow (Curse /
-    // enchant-player Auras) — see TargetingOverlay + PlayerHud/OpponentHud.
+    // enchant-player Auras). Legal picks come from `getWaitingForClickTargetRefs`
+    // (viewmodel/gameStateView.ts), which every click surface reads.
     "ReturnAsAuraTarget",
     "EquipTarget",
     "CrewVehicle",
@@ -127,6 +146,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     // choosing opponent (ZoneOpponentChooserModal).
     "ChooseFromZoneOpponentChooser",
     "ChooseAnnouncingOpponent",
+    "ChooseGiftRecipient",
     "ClashCardPlacement",
     // CR 702.132a: Assist — caster picks a helper (AssistChoosePlayerModal),
     // then the helper commits generic mana (AssistPaymentUI).
@@ -246,6 +266,7 @@ export function waitingForReason(
     case "RetargetChoice":
       return { key: "status.reason.choosingTargets" };
     case "ManaPayment":
+    case "ManaSourceSelection":
     case "PhyrexianPayment":
     case "PayCost":
     case "PayManaAbilityMana":

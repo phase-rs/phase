@@ -82,6 +82,7 @@ fn drive_siege_choice(
 ) {
     let source = crate::support::exact_named_choice_source(runner.state(), siege);
     runner.state_mut().waiting_for = WaitingFor::NamedChoice {
+        free_entry: None,
         player: P0,
         choice_type: ChoiceType::Labeled {
             options: vec!["Jeskai".to_string(), "Temur".to_string()],
@@ -514,6 +515,7 @@ fn cast_siege_from_hand(runner: &mut GameRunner, siege: ObjectId, chosen_label: 
     // is silently dropped on real ETB.
     match &runner.state().waiting_for {
         WaitingFor::NamedChoice {
+            free_entry: None,
             player,
             choice_type,
             options,

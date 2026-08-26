@@ -52,6 +52,15 @@
 //! (`--refresh-baseline`), which prints the baseline-vs-current diff before
 //! overwriting — never a blind widen.
 //!
+//! That stamp covers **only the card-data entries [`default_scenarios`]'s decks
+//! actually name**, not the whole file (`ai_perf_gate::gate_card_data_hash`).
+//! `card-data.json` is derived from both MTGJSON and the Oracle parser, so a
+//! whole-file hash moved on every set release and every parser change while this
+//! gate's frozen decks saw none of it — leaving the diagnostic true on nearly
+//! every run, and therefore unable to make the distinction above. The workload is
+//! fixed by construction (inline builders + pinned snapshots), so the narrow
+//! stamp is the one that tracks this gate's real input.
+//!
 //! Wall-clock is recorded (`wall_clock_ms`) for human triage only; it is never
 //! compared.
 
@@ -73,7 +82,7 @@ use super::run::{drive_game, resolve_matchup};
 /// the report shape or the counter field set changes (a changed field set is
 /// self-flagged by [`PerfCounters::from_snapshot`]'s struct destructure — the
 /// `Removed`/`New` classifications also warn to bump this).
-pub const PERF_SCHEMA_VERSION: u32 = 3; // was 2: added SBA snapshot counters
+pub const PERF_SCHEMA_VERSION: u32 = 5; // was 4: added offer-payment counters
 
 /// Number of INDEPENDENT cold-process trajectory samples the gate aggregates by
 /// per-counter median. Independence is why each sample must be its own process
@@ -143,6 +152,19 @@ impl PerfCounters {
     pub fn from_snapshot(snapshot: &PerfCounterSnapshot) -> Self {
         let PerfCounterSnapshot {
             state_clone_for_legality,
+            generation_state_clones,
+            strict_fast_path_state_clones,
+            strict_fast_path_mana_readiness_state_clones,
+            raw_validation_state_clones,
+            grouped_mana_readiness_state_clones,
+            post_apply_auto_payment_core_state_clones,
+            priority_cast_probe_state_clones,
+            auto_payment_borrowed_wrapper_calls,
+            auto_payment_owned_state_clones,
+            generation_auto_payment_wrapper_calls,
+            strict_fast_path_auto_payment_wrapper_calls,
+            post_apply_auto_payment_core_calls,
+            post_apply_uncached_source_collections,
             static_full_scans,
             spell_keyword_grant_scans,
             layers_full_eval,
@@ -177,6 +199,58 @@ impl PerfCounters {
         map.insert(
             "state_clone_for_legality".to_string(),
             state_clone_for_legality,
+        );
+        map.insert(
+            "generation_state_clones".to_string(),
+            generation_state_clones,
+        );
+        map.insert(
+            "strict_fast_path_state_clones".to_string(),
+            strict_fast_path_state_clones,
+        );
+        map.insert(
+            "strict_fast_path_mana_readiness_state_clones".to_string(),
+            strict_fast_path_mana_readiness_state_clones,
+        );
+        map.insert(
+            "raw_validation_state_clones".to_string(),
+            raw_validation_state_clones,
+        );
+        map.insert(
+            "grouped_mana_readiness_state_clones".to_string(),
+            grouped_mana_readiness_state_clones,
+        );
+        map.insert(
+            "post_apply_auto_payment_core_state_clones".to_string(),
+            post_apply_auto_payment_core_state_clones,
+        );
+        map.insert(
+            "priority_cast_probe_state_clones".to_string(),
+            priority_cast_probe_state_clones,
+        );
+        map.insert(
+            "auto_payment_borrowed_wrapper_calls".to_string(),
+            auto_payment_borrowed_wrapper_calls,
+        );
+        map.insert(
+            "auto_payment_owned_state_clones".to_string(),
+            auto_payment_owned_state_clones,
+        );
+        map.insert(
+            "generation_auto_payment_wrapper_calls".to_string(),
+            generation_auto_payment_wrapper_calls,
+        );
+        map.insert(
+            "strict_fast_path_auto_payment_wrapper_calls".to_string(),
+            strict_fast_path_auto_payment_wrapper_calls,
+        );
+        map.insert(
+            "post_apply_auto_payment_core_calls".to_string(),
+            post_apply_auto_payment_core_calls,
+        );
+        map.insert(
+            "post_apply_uncached_source_collections".to_string(),
+            post_apply_uncached_source_collections,
         );
         map.insert("static_full_scans".to_string(), static_full_scans);
         map.insert(
@@ -325,13 +399,35 @@ pub fn run_perf_suite(
 ) -> PerfReport {
     let start = Instant::now();
     let mut counters = PerfCounters::default();
-    for id in scenarios {
+    for (n, id) in scenarios.iter().enumerate() {
         let spec = find_matchup(id)
             .unwrap_or_else(|| panic!("perf scenario id '{id}' does not resolve via find_matchup"));
         let (payload, _p0, _p1) = resolve_matchup(db, spec)
             .unwrap_or_else(|err| panic!("perf scenario '{id}' failed to resolve decks: {err}"));
+        // Progress goes to STDERR only: the parent gate runs its children with
+        // `Stdio::null()` on stdout precisely so its own markdown table stays clean
+        // (`bin/ai_perf_gate.rs:185`), and stderr is inherited so these lines reach
+        // the CI log. Without them a killed sample leaves no evidence at all — the
+        // report is written once, after every scenario has finished.
+        let scenario_start = Instant::now();
+        eprintln!(
+            "perf scenario {n}/{total} '{id}' start (seed={seed} action_cap={action_cap})",
+            n = n + 1,
+            total = scenarios.len(),
+        );
         let snapshot = run_perf_scenario(&payload, seed, action_cap);
-        counters.merge_add(&PerfCounters::from_snapshot(&snapshot));
+        let scenario_counters = PerfCounters::from_snapshot(&snapshot);
+        // One JSON line per scenario: a killed child still leaves a machine-readable
+        // partial payload for every scenario that did finish.
+        eprintln!(
+            "perf scenario {n}/{total} '{id}' done {ms}ms counters={json}",
+            n = n + 1,
+            total = scenarios.len(),
+            ms = scenario_start.elapsed().as_millis(),
+            json = serde_json::to_string(&scenario_counters)
+                .unwrap_or_else(|e| format!("<unserializable: {e}>")),
+        );
+        counters.merge_add(&scenario_counters);
     }
     let wall_clock_ms = start.elapsed().as_millis();
 
@@ -761,7 +857,67 @@ pub fn print_repro_margin(report: &ReproMarginReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::duel_suite::DeckRef;
     use std::collections::BTreeSet;
+
+    /// The narrowed `card_data_hash` (`ai_perf_gate::gate_card_data_hash`) is only
+    /// meaningful because every gate scenario draws from a deck fixed at compile
+    /// time — an inline builder or a pinned snapshot. A scenario whose deck were
+    /// derived from the card pool would make the narrow stamp silently wrong: the
+    /// workload would move with the pool while the stamp reported "unchanged",
+    /// which is strictly worse than the whole-file hash it replaced.
+    ///
+    /// This guards that premise at the point it can break — adding a scenario —
+    /// rather than at the hash, which cannot tell where its names came from.
+    #[test]
+    fn gate_scenarios_draw_only_from_decks_fixed_at_compile_time() {
+        let mut names = BTreeSet::new();
+        for id in default_scenarios() {
+            let matchup = crate::duel_suite::find_matchup(id)
+                .unwrap_or_else(|| panic!("gate scenario {id:?} must resolve to a matchup"));
+            for deck in [&matchup.p0, &matchup.p1] {
+                // Exhaustive and wildcard-free ON PURPOSE: the compiler is the
+                // census here, not the card count below. Both current variants
+                // are fixed at compile time — `Inline` is a Rust builder,
+                // `Snapshot` a committed, `frozen_date`-stamped file — and a
+                // future pool-derived variant would resolve perfectly well and
+                // land inside the band, so no runtime assertion can catch it.
+                // Adding a `DeckRef` variant must break THIS match, because
+                // `gate_card_data_hash`'s narrowing is unsound for any deck the
+                // card pool can move.
+                match deck {
+                    DeckRef::Inline { .. } | DeckRef::Snapshot { .. } => {}
+                }
+                let cards = crate::duel_suite::resolve_deck_ref(deck).unwrap_or_else(|err| {
+                    panic!("gate scenario {id:?} deck {deck:?} must resolve without a card pool: {err}")
+                });
+                assert!(
+                    !cards.is_empty(),
+                    "gate scenario {id:?} deck {deck:?} resolved to an EMPTY deck — the perf \
+                     workload would be vacuous and the narrowed provenance stamp would cover \
+                     nothing"
+                );
+                names.extend(cards.into_iter().map(|c| c.to_lowercase()));
+            }
+        }
+
+        // Non-vacuity: the stamp must actually cover cards. The upper bound is the
+        // load-bearing half — it is what fails if a scenario starts pulling a
+        // pool-sized deck, at which point narrowing the hash stops being sound.
+        // Measured at 46 distinct names for the three mirrors on 2026-08-04.
+        //
+        // The band is a const so the panic message cannot drift from the
+        // assertion — printing a hardcoded range here was wrong once already.
+        const BAND: std::ops::RangeInclusive<usize> = 20..=400;
+        assert!(
+            BAND.contains(&names.len()),
+            "gate scenarios name {} distinct cards, outside the {BAND:?} band this narrowing \
+             assumes. Too few means a scenario stopped resolving; too many means a deck is no \
+             longer a fixed list, and `gate_card_data_hash` must be re-justified before the \
+             band is widened",
+            names.len()
+        );
+    }
 
     fn mk_report(counters: &[(&str, u64)]) -> PerfReport {
         PerfReport {
@@ -896,6 +1052,19 @@ mod tests {
     fn from_snapshot_maps_every_field_distinctly() {
         let snapshot = PerfCounterSnapshot {
             state_clone_for_legality: 1,
+            generation_state_clones: 30,
+            strict_fast_path_state_clones: 31,
+            strict_fast_path_mana_readiness_state_clones: 32,
+            raw_validation_state_clones: 33,
+            grouped_mana_readiness_state_clones: 34,
+            post_apply_auto_payment_core_state_clones: 35,
+            priority_cast_probe_state_clones: 36,
+            auto_payment_borrowed_wrapper_calls: 37,
+            auto_payment_owned_state_clones: 38,
+            generation_auto_payment_wrapper_calls: 39,
+            strict_fast_path_auto_payment_wrapper_calls: 40,
+            post_apply_auto_payment_core_calls: 41,
+            post_apply_uncached_source_collections: 42,
             static_full_scans: 2,
             spell_keyword_grant_scans: 29,
             layers_full_eval: 3,

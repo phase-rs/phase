@@ -89,6 +89,7 @@ export function DialogShell({
       <motion.div
         ref={constraintsRef}
         className="fixed inset-0 z-50 flex items-center justify-center px-2 py-2 lg:px-4 lg:py-6"
+        data-card-preview-dock="side"
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}

@@ -132,7 +132,7 @@ fn squirrel_spec() -> TokenSpec {
         sacrifice_at: None,
         source_id: ObjectId(0),
         controller: P0,
-        attach_to: None,
+        attach_to: engine::types::proposed_event::TokenHostRequest::NotRequested,
     }
 }
 

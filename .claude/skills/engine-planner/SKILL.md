@@ -9,11 +9,30 @@ Produce an implementation plan for the phase.rs engine. Design for the class, no
 
 This skill produces the plan only. The plan-review loop belongs to the caller — when invoked from `/engine-implementer`, the orchestrator owns the loop. When invoked standalone, run `/review-engine-plan` against the plan yourself and iterate until clean.
 
-> **⚠️ `mtgish` is dormant — out of scope for ALL plans.** Never plan changes to `mtgish/`, `crates/mtgish-import/`, or `data/mtgish-*`. The import pipeline is not a live consumer of the engine or parser; new variants, parser patterns, and effects do NOT need to be mirrored there. If a task description references mtgish, surface the contradiction and stop — do not silently include mtgish in the plan.
-
 ## Input
 
 A task description: parser enhancement/fix, or engine mechanic enhancement/fix. May reference cards, Oracle text patterns, CR rules, or coverage gaps.
+
+## Modes
+
+Ordinary mode is the default and produces a full single plan via the Process below. Three additional modes are activated when the caller's spawn inputs name them (the `/engine-implementer` phase-fit pipeline is the caller). Each mode scopes this file's mandatory language explicitly here, in this file — a spawn prompt never overrides this file's text; this section does.
+
+### Charter mode (spawn inputs: a plan or draft plus the phase-fit firing context)
+
+Output contract: a **phase charter**, not a plan.
+
+- **Input mapping (three shapes):** a *draft plan*, with whatever findings have accumulated (the initial gate firing on a fresh draft carries none; mid-loop and plan-loop T4 firings carry the round history) → derive the charter from the draft. A *review-clean plan* (scope-freeze or pre-existing-clean firing) → **partition, not re-plan**: carve the converged content into phases; nothing is rewritten, so the split does not invalidate the reviewed artifact. A *review-clean plan with landed candidates* (impl-loop T4) → derive phase 1 from the stabilized current candidate and partition the remainder.
+- **Step survival (enumerated):** Step 0 (premise verification) survives — a fabricated premise poisons every phase. Step 1 (identify applicable skills) survives — the checklist inventory informs unit boundaries and seams. Step 2 (analogous trace) survives — it informs seam choice. Step 3 (read every file) survives, scoped to the files the charter's phases will touch. Steps 4 and 5 (the architectural sections and the step-by-step plan) are replaced by the charter output contract below — they apply later, to each phase plan in phase-plan mode.
+- **Charter output contract:** linearly ordered phases; per phase, a goal statement, scope-path hints (literal paths or directories, **no globs** — the orchestrator's frozen `SCOPE_PATHS` representation and T2 directory expansion consume concrete paths), a verification plan (a phase's discriminating test may be written `DEFERRED(phase n)` naming the landing phase when it structurally cannot exist until a consumer phase lands — the defining property of a dependency seam; that phase's interim verification is structural: green tree, existing suites, unit-level assertions), and a **deferral list** — everything the full task needs that the phase intentionally omits, attributed to the phase that will land it; seam notes (shared files such as `effects/mod.rs`, surfaces held green via strict-failure tags); and a recursive check that no individual phase itself trips the T1∧T2 phase-fit conjunction defined in `/engine-implementer`.
+- **Feasibility exit:** if no green-tree seam exists, report that instead of a charter — name every candidate split point and show why each leaves the tree non-compiling or tests red.
+
+### Phase-plan mode (spawn inputs: charter + one phase's entry + its deferral allowlist)
+
+Produce the plan for one chartered phase. Three mandatory sentences in this file are scoped to the phase's chartered content: "Complete every step. Do not skip any."; Step 1's "Every checklist step must appear" — checklist steps belonging to later phases appear as `DEFERRED(phase n)` entries rather than being omitted; and Step 4's Pattern Coverage stop ("If the answer is 1, stop and find the general pattern") — assessed against the **charter's** class attribution, not the phase's own diff, since an infrastructure phase covers zero cards by itself by construction. Verification Matrix rows whose discriminating test structurally cannot exist until a later phase lands are written `DEFERRED(phase n)` with the landing phase named — the same vocabulary the executor authors and both reviewers audit. Phase-plan mode emits the Sizing section for the phase (the measured input for the orchestrator's per-phase re-adjudication).
+
+### Sizing-only mode (spawn input: an existing plan lacking a Sizing section)
+
+Produce the Sizing section alone, derived from the plan body. "Complete every step. Do not skip any." and the mandatory Output contract are scoped to the Sizing output; only the unit-enumeration analysis survives. Used by `/engine-implementer` for pre-existing plans reaching its phase-fit gate.
 
 ## Process
 
@@ -57,11 +76,58 @@ Find the existing feature most similar to what you're implementing. Trace it end
 
 Before proposing changes, read every file you plan to modify. Understand existing patterns, abstractions, and conventions in each.
 
+### Step 3.5: Probe it — measure, don't trace
+
+Steps 2 and 3 tell you what the code *looks like*. Only a probe that compiles and runs tells you what it
+*does*. For a rules engine this intricate, plans built by tracing repeatedly encode plausible-but-wrong
+assertions that survive plan review and break at implementation — or ship a predicate that is true for
+the wrong reason. Probing early is also the cheap path: a reviewer handed no fresh evidence has nothing
+to do but audit your prose, and that loop does not converge.
+
+So probe. A throwaway `#[test]` or scratch driver, compiled and run, is worth more than any amount of
+re-reading. Probe whatever the design would change if it turned out false: a predicate's runtime
+verdict, which branch is actually taken, an observed count or delta, "X never happens", "this conjunct
+is what refuses". Assertions that look obvious from the source are exactly where this pays — the classic
+failure is a predicate whose body reads correctly and whose verdict is decided by inputs the source
+never mentions. Say plainly which assertions you probed and which you didn't; an unprobed assertion is
+fine as long as it is labelled, and dangerous the moment it is quietly promoted to fact.
+
+Three things make a probe worth believing:
+
+- **It reached the code under test.** Print a positive marker beside the verdict — a nonzero count, a
+  hit on the production branch, the value at the seam. A zero with no positive control showing the
+  instrument fires at all is not a negative result; it is a probe that told you nothing. This is Step
+  4's paired-positive-reach-guard rule one step earlier, applied to evidence rather than to tests.
+- **It ran against a real board.** Prefer committed fixtures and dumps over synthetic state. Synthetic
+  input proves the predicate reads a field; a real board proves what it answers in production.
+- **It finished.** A run that died partway still printed everything up to the point it died. If it
+  didn't exit cleanly, you didn't measure it.
+
+**Write claims in the form that survives the next edit.** A probe yields a snapshot — a count, a
+coordinate, a cardinality. Transcribing it is fragile: the next edit falsifies it, review correctly
+flags it, and the repair mints a fresh snapshot for the round after. Prefer the formulation that stays
+true — a symbol name over a line number, "every case in §Y" over "the four cases". Where only the figure
+carries the information, name the command that regenerates it. **A falsified snapshot is repaired by
+reformulating it, not by refreshing it.**
+
+**Probing needs the cargo target lock and a stable tree.** Use an isolated `CARGO_TARGET_DIR` and the
+worktree's absolute path; never build in a checkout another process (e.g. Tilt) owns. Serialize probe
+activity behind any active implementation executor on a shared worktree — read-only discovery may run
+concurrently. Never put a scratch target dir on tmpfs. Keep one isolated target dir per worktree and
+*reuse* it across probes — deleting it between runs buys nothing and re-imposes the full dependency
+rebuild that talks planners out of probing in the first place. Because that isolation exists,
+target-directory lock contention is not a reason to withhold builds: if you catch yourself writing "do
+not run cargo" into a brief, name the isolated target dir instead. Shared `CARGO_HOME` registry/package-
+cache locks are a separate lock domain that target-dir isolation doesn't touch, and can still delay a
+build. Capacity is the one thing isolation cannot fix — a fresh target dir costs disk rather than saving
+it — so a genuinely full or saturated box is worth naming, and worth probing once it clears.
+
 ### Step 4: Answer architectural questions
 
 The plan MUST include these sections with substantive, specific answers:
 
-- **Pattern Coverage** — What class of cards/patterns does this cover? Estimate card count. If the answer is 1, stop and find the general pattern.
+- **Pattern Coverage** — What class of cards/patterns does this cover? Estimate card count. If the answer is 1, stop and find the general pattern. (In phase-plan mode this stop is assessed against the charter's class attribution — see Modes.)
+- **Sizing** (mandatory in ordinary and phase-plan modes) — The unit list, where one *unit* = one coherent mechanic/behavior implementable by a single skill-checklist pass regardless of how many lockstep layers it touches; each unit's registration surfaces and discriminating test; inter-unit dependency edges (infrastructure→consumer); and the expected scope-path count under the phase-fit counting rule (test fixtures and regenerated pipeline data excluded outright; committed generated artifacts and translation mirrors group with their authored source as one path; directory entries expanded to expected changed files before grouping). The `/engine-implementer` phase-fit gate adjudicates its triggers against this section, and `/review-engine-plan` checks it for consistency with the plan body — a plan whose body names N independently tested behaviors must not report fewer units.
 - **Building Blocks** — Which existing modules and helpers will you compose from? Reference specific functions by name from `parser/oracle_nom/`, `parser/oracle_util.rs`, `game/filter.rs`, `game/quantity.rs`, `game/ability_utils.rs`, `game/keywords.rs`, etc. Justify any new helper.
 - **Logic Placement** — Where does each piece of logic belong (parser vs game vs effects vs types)? Justify each choice.
 - **Rust Idioms** — Most idiomatic representation. Typed enums not bools. Exhaustive match not wildcards. Existing type reuse over new types.

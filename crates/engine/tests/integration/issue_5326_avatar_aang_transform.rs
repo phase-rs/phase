@@ -60,6 +60,7 @@ fn attach_aang_back_face(runner: &mut engine::game::scenario::GameRunner, aang: 
         power: Some(6),
         toughness: Some(6),
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: CardType {
             supertypes: vec![],
@@ -80,6 +81,7 @@ fn attach_aang_back_face(runner: &mut engine::game::scenario::GameRunner, aang: 
         casting_restrictions: vec![],
         casting_options: vec![],
         layout_kind: None,
+        parse_warnings: vec![],
     });
 }
 

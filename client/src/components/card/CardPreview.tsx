@@ -14,11 +14,16 @@ import { useCardImage } from "../../hooks/useCardImage.ts";
 import type { SourcePrinting } from "../../hooks/useCardImage.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useEngineCardData, useCardParseDetails, useCardRulings, type ParsedItem } from "../../hooks/useEngineCardData.ts";
+import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { tokenFiltersForObject } from "../../services/cardImageLookup.ts";
+import { CARD_BACK_URL } from "../../services/scryfall.ts";
+import { faceDownMarkerRef } from "./faceDownMarker.ts";
+import { shouldRenderCardBack } from "../../viewmodel/cardProps.ts";
 import type { CardRuling } from "../../services/engineRuntime.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore, type MobileHandGesture } from "../../stores/uiStore.ts";
+import { renderDescription } from "../../utils/description.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { RichLabel } from "../mana/RichLabel.tsx";
 import { CardArtFallback } from "./CardArtFallback.tsx";
@@ -65,6 +70,7 @@ if (typeof window !== "undefined") {
 
 export interface CardHoverInfo {
   name: string;
+  scryfallId?: string;
   sourcePrinting?: SourcePrinting;
 }
 
@@ -311,6 +317,28 @@ function CardPreviewInner({
   const backParseDetails = useCardParseDetails(backFaceName);
 
   const isToken = obj?.display_source === "Token";
+  // Face-down permanents (#7547): opponents preview the cause MARKER full
+  // size (it carries the mechanic's reminder text); the controller previews
+  // the real card alone — the marker would only cover its rules text, and the
+  // controller already knows the mechanic (playtest call, 2026-08-19).
+  const previewMarkerRef = faceDownMarkerRef(
+    obj?.face_down ?? false,
+    obj?.face_down_cause,
+  );
+  const markerIsPrimary =
+    previewMarkerRef != null && obj != null && shouldRenderCardBack(obj);
+  // A hidden face-down PERMANENT whose cause has NO marker printing (unknown
+  // cause from an older save, or the Ixidron class) still gets a preview: the
+  // plain card back. It reveals nothing (CR 708.2a — the public face is a
+  // blank 2/2), and every art lookup below is suppressed so neither the
+  // generic label nor a blanked ref can leak into a network search.
+  // Battlefield only: a face-down card in a hidden zone (hideaway exile,
+  // issue #2889) has no public characteristics at all and keeps no preview.
+  const genericFaceDownBack =
+    obj != null
+    && obj.zone === "Battlefield"
+    && shouldRenderCardBack(obj)
+    && previewMarkerRef == null;
   // For transformed DFCs, the active face is the back (Scryfall faceIndex 1).
   // The engine swaps obj.name to the active face, but Scryfall always indexes
   // 0=front, 1=back regardless of search name — so we must flip the index.
@@ -318,17 +346,27 @@ function CardPreviewInner({
   const defaultFaceIndex = faceIndex ?? (isTransformed ? 1 : 0);
   // Battlefield path: route through oracle_id when the engine attached one.
   // Deck-builder path: `obj` is null, so we keep the name-based fallback.
-  const { src, isLoading, isRotated, isFlip } = useCardImage(cardName, {
-    size: "normal",
-    faceIndex: defaultFaceIndex,
-    isToken,
-    tokenFilters: isToken && obj ? tokenFiltersForObject(obj) : undefined,
-    tokenImageRef: isToken && obj ? obj.token_image_ref : undefined,
-    oracleId: obj?.printed_ref?.oracle_id,
-    faceName: obj?.printed_ref?.face_name,
-    scryfallId,
-    sourcePrinting,
-  });
+  const suppressArtLookup = markerIsPrimary || genericFaceDownBack;
+  const { src, isLoading, isRotated, isFlip } = useCardImage(
+    genericFaceDownBack ? "" : cardName,
+    {
+      size: "normal",
+      faceIndex: defaultFaceIndex,
+      isToken: isToken || markerIsPrimary,
+      tokenFilters: isToken && obj && !genericFaceDownBack
+        ? tokenFiltersForObject(obj)
+        : undefined,
+      tokenImageRef: markerIsPrimary
+        ? previewMarkerRef
+        : isToken && obj && !genericFaceDownBack
+          ? obj.token_image_ref
+          : undefined,
+      oracleId: suppressArtLookup ? undefined : obj?.printed_ref?.oracle_id,
+      faceName: suppressArtLookup ? undefined : obj?.printed_ref?.face_name,
+      scryfallId,
+      sourcePrinting,
+    },
+  );
   const classLevel = obj?.class_level;
   const previewRef = useRef<HTMLDivElement | null>(null);
   const pointerRef = useRef<{ x: number; y: number } | null>(null);
@@ -380,8 +418,16 @@ function CardPreviewInner({
     faceName: showOtherFace ? otherFaceName : undefined,
   });
 
-  const activeSrc = showOtherFace ? otherFaceImgResult.src : src;
-  const activeLoading = showOtherFace ? otherFaceImgResult.isLoading : isLoading;
+  const activeSrc = genericFaceDownBack
+    ? CARD_BACK_URL
+    : showOtherFace
+      ? otherFaceImgResult.src
+      : src;
+  const activeLoading = genericFaceDownBack
+    ? false
+    : showOtherFace
+      ? otherFaceImgResult.isLoading
+      : isLoading;
   const activeRotated = showOtherFace ? otherFaceImgResult.isRotated : isRotated;
   const displayName = showOtherFace ? backFaceName! : cardName;
   const showInfoPanel = obj?.zone === "Battlefield";
@@ -684,10 +730,8 @@ function CardPreviewInner({
       <MobilePreviewOverlay
         cardName={cardName}
         backFaceName={backFaceName}
-        faceIndex={defaultFaceIndex}
-        obj={obj}
+        art={{ src: activeSrc, isLoading: activeLoading, isRotated: activeRotated, isFlip }}
         onDismiss={onDismiss ?? dismissPreview}
-        sourcePrinting={sourcePrinting}
         layout={mobileLayout ?? "modal"}
         report={reportContext}
       />
@@ -789,35 +833,26 @@ function CardPreviewInner({
 /** Mobile/tablet: card anchored right (landscape) or center (portrait), whole card visible. */
 function MobilePreviewOverlay({
   cardName,
-  faceIndex,
-  obj,
+  art,
   onDismiss,
-  sourcePrinting,
   layout = "modal",
   report,
 }: {
   cardName: string;
   backFaceName: string | null;
-  faceIndex?: number;
-  obj: GameObject | null;
+  /** The parent's RESOLVED art state (marker / generic back / peek already
+   *  applied). The overlay must never run its own lookup: a second
+   *  `useCardImage` with raw `printed_ref` fields is exactly the mobile
+   *  hidden-information bypass the PR 7551 review flagged. */
+  art: { src: string | null; isLoading: boolean; isRotated: boolean; isFlip: boolean };
   onDismiss: () => void;
-  sourcePrinting?: SourcePrinting;
   layout?: "modal" | "compact";
   /** In-game report context; absent in the deck builder. Only the full modal
    *  layout hosts the button — the compact peek dismisses on any tap. */
   report?: CardReportContext;
 }) {
   const { t } = useTranslation("game");
-  const { src, isLoading, isRotated, isFlip } = useCardImage(cardName, {
-    size: "normal",
-    faceIndex,
-    isToken: obj?.display_source === "Token",
-    tokenFilters: obj?.display_source === "Token" ? tokenFiltersForObject(obj) : undefined,
-    tokenImageRef: obj?.display_source === "Token" ? obj.token_image_ref : undefined,
-    oracleId: obj?.printed_ref?.oracle_id,
-    faceName: obj?.printed_ref?.face_name,
-    sourcePrinting,
-  });
+  const { src, isLoading, isRotated, isFlip } = art;
 
   // Issue #6156 on the mobile path: both arms below used to gate the art on
   // `src &&`, so an artless token (no official paper printing) opened an
@@ -1040,7 +1075,11 @@ function CardImagePreview({
       if (action.type !== "ActivateAbility") continue;
       const ability = obj.abilities[action.data.ability_index];
       if (!ability) continue;
-      const rawLabel = abilityLabel(ability);
+      // CR 201.5: the engine ships `~` as the self-reference token; substitute the host
+      // object's name BEFORE the `seen` dedup below so the dedup key stays 1:1 with what
+      // renders. Today Pentad Prism's hover preview reads
+      // "Activate — Remove a charge counter from ~".
+      const rawLabel = renderDescription(abilityLabel(ability), obj.name);
       if (!rawLabel || seen.has(rawLabel)) continue;
       seen.add(rawLabel);
       // CR 606.1: a Loyalty ability cost renders as a mana-font badge; strip
@@ -1102,12 +1141,12 @@ function CardImagePreview({
           />
         )}
         {displayCost && (
-          <ManaCostPips
-            cost={displayCost}
-            isReduced={displayCostReduced}
-            size="lg"
-            className="absolute right-[7.00%] top-[5.25%] z-10"
-          />
+          // @container overlay sized to the frame so the pips scale with the
+          // preview's own width, which varies from a 300px hand hover to a
+          // 472px docked preview — a fixed px size can only be right at one end.
+          <div className="pointer-events-none absolute inset-0 z-10 @container">
+            <ManaCostPips cost={displayCost} isReduced={displayCostReduced} size="fluid" />
+          </div>
         )}
         {classLevel != null && (
           <div className="absolute bottom-3 left-3 z-10">
@@ -1316,9 +1355,6 @@ function CardInfoPanel({
 }) {
   const { t } = useTranslation("game");
   const ptDisplay = computePTDisplay(obj);
-  const counters = Object.entries(obj.counters).flatMap(([type, count]) =>
-    type === "loyalty" || count == null ? [] : [[type, count] as const],
-  );
   const keywords = sortKeywords(obj.keywords);
   const colorsChanged =
     obj.color.length !== obj.base_color.length ||
@@ -1334,6 +1370,12 @@ function CardInfoPanel({
   const transientContinuousEffects = useGameStore(
     (s) => s.gameState?.transient_continuous_effects,
   );
+  // CR 122.1 + CR 306.5c: the engine's complete counter projection for this object. Same channel
+  // PermanentCard's pill and ArtCropCard's badge read — every counter display mode must agree, or
+  // a row silently drops in one of them. The loyalty TOTAL is already partitioned out by the
+  // engine; this site renders no loyalty badge, so it takes the pills alone.
+  const counterDisplay = useCounterDisplay(obj.id);
+  const counters = pillsOf(counterDisplay);
   const deref = { objects, transientContinuousEffects };
   const keywordSources = buildGrantedKeywordSources(attribution, obj.id, deref);
   const ptSources = buildPTSources(attribution, obj.id, deref);
@@ -1433,10 +1475,15 @@ function CardInfoPanel({
       {(obj.blocked_abilities?.length ?? 0) > 0 && (
         <div className="mt-1 space-y-0.5 text-amber-300/90">
           {(obj.blocked_abilities ?? []).map((entry, i) => {
-            const abilityName =
+            // CR 201.5: same `~` binding as the activate read-out above — the blocked row
+            // shows the ability's own description, so it leaks the raw token otherwise.
+            const rawAbilityName =
               entry.ability_index < obj.abilities.length
                 ? obj.abilities[entry.ability_index]?.description
                 : undefined;
+            const abilityName = rawAbilityName
+              ? renderDescription(rawAbilityName, obj.name)
+              : undefined;
             const names = (entry.sources ?? [])
               .map((id) => objects?.[String(id)]?.name)
               .filter((n): n is string => !!n);
@@ -1496,13 +1543,20 @@ function CardInfoPanel({
       {/* Counters */}
       {counters.length > 0 && (
         <div className="mt-1 flex flex-wrap gap-x-3 text-gray-400">
-          {counters.map(([type, count]) => (
-            <CounterTooltip key={type} type={type} count={count}>
-              <span>
-                {formatCounterType(type)}: {count}
-              </span>
-            </CounterTooltip>
-          ))}
+          {counters.map((row) => {
+            const type = row.counter;
+            // CR 732.2a / CR 701.34a: an accepted counter-growth loop pumps this counter
+            // unboundedly — render ∞ instead of the (still-finite) real count, and tell the
+            // tooltip so its summary can't contradict the row.
+            const unbounded = isUnbounded(row);
+            return (
+              <CounterTooltip key={type} type={type} count={row.count} isUnbounded={unbounded}>
+                <span>
+                  {formatCounterType(type)}: {unbounded ? "∞" : row.count}
+                </span>
+              </CounterTooltip>
+            );
+          })}
         </div>
       )}
 

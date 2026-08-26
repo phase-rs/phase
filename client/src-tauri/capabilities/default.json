@@ -3,11 +3,27 @@
     "identifier": "default",
     "description": "Local permissions for the bundled bootstrap page",
     "windows": ["main"],
-    "permissions": ["core:default", "core:window:allow-set-fullscreen", "allow-stash-legacy-storage"]
+    "permissions": [
+      "core:default",
+      {
+        "identifier": "opener:allow-open-url",
+        "allow": [{ "url": "http://*" }, { "url": "https://*" }]
+      },
+      "allow-stash-legacy-storage",
+      "allow-host-platform",
+      "allow-audio-boot-health"
+    ]
   },
   {
-    "identifier": "remote-shell",
-    "description": "Remote permissions for the first-party thin-shell content",
+    "identifier": "local-shell-desktop",
+    "description": "Desktop-only permissions for the bundled bootstrap page",
+    "platforms": ["linux", "macOS", "windows"],
+    "windows": ["main"],
+    "permissions": ["core:window:allow-set-fullscreen"]
+  },
+  {
+    "identifier": "remote-shell-common",
+    "description": "Mobile-safe remote permissions for first-party thin-shell content",
     "local": false,
     "windows": ["main"],
     "remote": {
@@ -19,20 +35,42 @@
     },
     "permissions": [
       "core:default",
-      "core:window:allow-set-fullscreen",
-      "shell:allow-open",
-      "process:allow-exit",
-      "process:allow-restart",
-      "updater:default",
+      {
+        "identifier": "opener:allow-open-url",
+        "allow": [{ "url": "http://*" }, { "url": "https://*" }]
+      },
+      "allow-host-platform",
       "allow-set-channel-preference",
       "allow-take-legacy-storage",
       "allow-confirm-legacy-import",
       "allow-mark-remote-load-ok",
       "allow-ensure-native-engine",
+      "allow-native-engine-progress",
       "allow-stop-native-engine",
       "allow-connect-native-engine",
       "allow-native-engine-bridge-send",
-      "allow-native-engine-bridge-close"
+      "allow-native-engine-bridge-close",
+      "allow-audio-boot-health"
+    ]
+  },
+  {
+    "identifier": "remote-shell-desktop",
+    "description": "Desktop-only remote permissions for first-party thin-shell content",
+    "local": false,
+    "platforms": ["linux", "macOS", "windows"],
+    "windows": ["main"],
+    "remote": {
+      "urls": [
+        "https://phase-rs.dev/*",
+        "https://app.phase-rs.dev/*",
+        "https://preview.phase-rs.dev/*"
+      ]
+    },
+    "permissions": [
+      "core:window:allow-set-fullscreen",
+      "process:allow-exit",
+      "process:allow-restart",
+      "updater:default"
     ]
   }
 ]

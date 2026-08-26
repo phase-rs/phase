@@ -31,13 +31,102 @@ pub enum ServerErrorCode {
 /// Wire-protocol version shared by the native server, client, and Cloudflare
 /// lobby Worker. Bump when any `ClientMessage` or `ServerMessage` variant is
 /// added, removed, renamed, or has a field type changed. Adding a new optional
-/// field with `#[serde(default)]` does not require a bump.
+/// field with `#[serde(default)]` does not require a bump — **unless the client
+/// stops deriving a fallback for it.** That clause is about wire
+/// *parseability*, not capability: once the client renders a feature only from
+/// the new field, an old server that omits it produces a silent feature loss
+/// rather than a parse error, and the handshake is the only place that pairing
+/// can be refused. See 24.
 ///
 /// Note: renaming or removing a variant silently fails at JSON parse time
 /// (clients see "Invalid message: unknown variant") rather than at the
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
 ///
+/// 39 — `ManaRestriction::CannotCastSpellFromZone` adds a serialized
+///      GameState/ManaUnit restriction used by Karolina Dean. Older peers
+///      cannot deserialize that externally tagged enum variant. Lobby messages
+///      are unchanged.
+/// 38 — `WaitingFor::ChooseObjectsSelection` publishes the resolving effect's
+///      `min` and optional `max` bounds. Older clients parse and silently
+///      ignore these additive fields, then offer selections outside the
+///      engine-authoritative range; refuse that capability mismatch at the
+///      full-game handshake. Lobby messages are unchanged.
+/// 37 — `PayCostKind::TapCreatures` changed from `{ aggregate:
+///      Option<TapCreaturesAggregate> }` to a required `{ mode:
+///      TapCreaturesSelectionMode }` (Fixed/VariableX/Aggregate) — the fix
+///      that also unlocks the `u32::MAX` X-sentinel tap-cost form (Glacian,
+///      Powerstone Engineer + 8 sibling cards, #7799). `mode` carries no
+///      `#[serde(default)]`: a `GameState` snapshot paused mid-TapCreatures
+///      payment (Crew/Saddle/Teamwork/Conspire, or the newly-unlocked
+///      X-sentinel form) under the old `aggregate` shape now fails
+///      deserialization rather than risk silently misclassifying an
+///      aggregate payment as fixed-count (or vice versa) — exactly the
+///      ambiguity `TapCreaturesSelectionMode` exists to make
+///      unrepresentable. Old and new peers can't parse each other's
+///      serialized snapshots while such a payment is in flight.
+/// 36 — `WaitingFor::ChooseDungeon::options` changed from `Vec<DungeonId>` to
+///      `Vec<DungeonPreview>`, and `WaitingFor::ChooseDungeonRoom` dropped
+///      `option_names`, gained a required `dungeon_name`, and changed `options`
+///      from `Vec<u8>` to `Vec<RoomPreview>`, so each option carries the room's
+///      printed name and room-ability text (CR 309.4b-c). A PARSE bump like 23,
+///      not a capability bump like 24: none of the new fields carry
+///      `#[serde(default)]`, so a v35 peer fails deserialization on a
+///      dungeon-choice `GameState` outright rather than degrading silently.
+///      `DerivedViews::dungeon_rooms` rides along in the same bump — it IS
+///      `#[serde(default)]`, but the client deleted its `dungeon_progress`
+///      room-index derivation, so a v35 server that omits it would leave a new
+///      client rendering no dungeon badge at all.
+/// 35 — `DerivedViews::current_target_kind` publishes the engine's CR 115.1
+///      classification of the live target announcement. A CAPABILITY bump like
+///      24 and 32, not a parse bump: the field is `Option` +
+///      `skip_serializing_if`, but the client deleted `inferTargetNoun`, so a
+///      v34 server that omits it would leave a new client naming no target at
+///      all — silently, with no parse error to catch it.
+/// 33 — `LegendCandidateIdentity::Unknown` prevents face-down legend candidates
+///      from publishing an affirmative original/copy identity.
+/// 32 — `DerivedViews::legend_candidate_identities` publishes the engine-authored
+///      original/copy/token-copy identity for each active legend-rule choice. The
+///      field is `#[serde(default)]`, but the client deliberately no longer derives
+///      this rules-sensitive identity from raw objects; an older server would
+///      silently omit every choice identity.
+/// 31 — `WaitingFor::LoopShortcut` publishes the engine-issued `declaration`, and
+///      `InteractionResponseSpec::Shortcut` publishes `preview`, the per-axis
+///      consequence of the offered count. Both are `Option` and neither type sets
+///      `deny_unknown_fields`, so a v30 peer still *parses* the frame — this is a
+///      capability bump like 24, not a parse bump. UNLIKE 24, no pairing is left to
+///      exercise the gap, so this entry names no silent-drop hazard. Full-game floors
+///      are exact-match on both sides (`server_core::MIN_SUPPORTED_PROTOCOL ==
+///      PROTOCOL_VERSION`, and `MIN_SUPPORTED_SERVER_PROTOCOL` in
+///      `client/src/adapter/ws-adapter.ts`), so a v31/v30 full-game pair is refused
+///      at the handshake and never sends an action frame. The one-version window is
+///      this file's `MIN_SUPPORTED_PROTOCOL` below, and it is lobby-only:
+///      `DeclareShortcut` rides `ClientMessage::Action`, which `LobbyClientMessage`
+///      has no variant for at all, and which `reject_if_disabled` in
+///      `crates/phase-server/src/main.rs` answers under `ServerMode::LobbyOnly` with
+///      an explicit rejection rather than a silent drop. The P2P games this broker
+///      matchmakes are gated tighter still, on build-commit equality
+///      (`check_build_commit`), not on a protocol window.
+/// 30 — Serialized player-action completion provenance and modal continuations.
+/// 29 — Added requester-correlated `ResolveAllRejected` response frames.
+/// 28 — Added native `ResolveAll` request/result frames.
+/// 27 — Added `DraftKind::Sealed`, serialized by draft WebSocket messages.
+/// 26 — Added `ServerMessage::ActionNoOp` for accepted transport no-ops.
+/// 25 — `DebugCardEntries` added a serialized, private resolution frame for
+///      multi-card sandbox battlefield entries that pause for replacement or
+///      as-enters choices. Old peers cannot deserialize that `GameState` shape.
+/// 24 — `DerivedViews::unbounded_families` carries the engine-owned per-seat
+///      family collapse state behind each `∞` badge. The field is
+///      `#[serde(default)]`, so this is a capability bump rather than a parse
+///      bump: the client deleted its row-flag OR-fold derivation, so a v23
+///      server that omits the field would leave a new client rendering NO
+///      infinity badges at all, silently and with no parse error to catch it.
+/// 23 — `PayableResource::ManaGeneric` changed from `{ per_x }` to
+///      `{ base_cost: ManaCost }` (#6410) — a `GameState` payload field type
+///      change, and `base_cost` intentionally carries no `#[serde(default)]`
+///      (a missing `base_cost` must fail deserialization, not silently
+///      resolve to a zero-cost payment), so old and new peers can't parse
+///      each other's serialized snapshots.
 /// 20 — Actor-scoped priority-passing settings and filtered per-player state.
 /// 19 — Connive's exact `EventObjectSnapshot` subject and resident paused
 ///      post-replacement drains changed serialized full-game state. Phase 4
@@ -52,12 +141,46 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 21;
+pub const PROTOCOL_VERSION: u32 = 39;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
-/// handshake. Lobby traffic has a one-version rollout window; full game servers
-/// may choose a stricter floor when state/action payloads change.
+/// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
+/// legacy path only. Lobby traffic has a one-version rollout window; full game
+/// servers may choose a stricter floor when state/action payloads change.
+///
+/// Being derived from [`PROTOCOL_VERSION`] is exactly the defect
+/// [`LOBBY_PROTOCOL_VERSION`] fixes: a `GameState`-only bump slides this floor
+/// even though no lobby message changed. It survives only so already-deployed
+/// clients stay reachable; new gating must use [`MIN_SUPPORTED_LOBBY_PROTOCOL`].
 pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
+
+/// Wire-protocol version of the **lobby** message set ([`LobbyClientMessage`] /
+/// [`LobbyServerMessage`]), independent of [`PROTOCOL_VERSION`].
+///
+/// Bump ONLY when a lobby variant is added, removed, renamed, or has a field
+/// type changed. A full-game bump must NOT move this number: no lobby variant
+/// carries `GameState` or `GameAction`, so full-game churn cannot break lobby
+/// traffic.
+///
+/// Sharing one integer between the two surfaces is what took preview
+/// multiplayer down: `PROTOCOL_VERSION` moved twice for `GameState`-only
+/// changes, [`MIN_SUPPORTED_PROTOCOL`] is derived from it, and the deployed
+/// broker's window went disjoint from the shipped client's. This constant is
+/// the fix — it moves only for reasons the lobby can actually observe.
+///
+/// 1 — Initial lobby-owned version, covering the `LobbyClientMessage` /
+///     `LobbyServerMessage` variant sets, unchanged since #1880.
+pub const LOBBY_PROTOCOL_VERSION: u32 = 1;
+
+/// Lowest [`LOBBY_PROTOCOL_VERSION`] a broker accepts from a client.
+///
+/// There is deliberately **no upper bound**. A client newer than the broker can
+/// only fail by sending a lobby variant this broker does not know, and
+/// [`parse_lobby_client_message`] already answers that with an explicit
+/// [`ParsedFrame::UnknownTag`] rejection scoped to the offending frame. That is
+/// a loud, per-feature failure; refusing the whole connection instead evicts a
+/// client over a variant it may never send.
+pub const MIN_SUPPORTED_LOBBY_PROTOCOL: u32 = 1;
 
 /// Public-lobby view of a single registered game. Populated by the server,
 /// never by clients. Field shape mirrors the pre-extraction
@@ -120,7 +243,7 @@ pub struct DraftLobbyMetadata {
     /// `"custom-cube"`; see [`DraftLobbyMetadata::cube_name`] for the
     /// human-readable cube name.
     pub set_code: String,
-    /// Draft kind label: "Quick", "Premier", or "Traditional".
+    /// Draft kind label: "Quick", "Premier", "Traditional", or "Sealed".
     pub draft_kind: String,
     /// Human-readable cube name when the pod is a cube draft. Absent for
     /// set drafts. Backward-compatible: `#[serde(default)]` accepts
@@ -144,6 +267,13 @@ pub enum LobbyClientMessage {
         client_version: String,
         build_commit: String,
         protocol_version: u32,
+        /// The client's [`LOBBY_PROTOCOL_VERSION`]. `None` from clients built
+        /// before the lobby owned its own version; those fall back to the
+        /// `protocol_version` window. Additive and optional, so an older broker
+        /// ignores it and an older client omits it — no `PROTOCOL_VERSION` bump
+        /// is required for either direction to keep parsing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lobby_protocol_version: Option<u32>,
     },
     SubscribeLobby,
     UnsubscribeLobby,
@@ -224,6 +354,11 @@ pub enum LobbyServerMessage {
         build_commit: String,
         protocol_version: u32,
         mode: ServerMode,
+        /// This broker's [`LOBBY_PROTOCOL_VERSION`]. Advertised alongside — not
+        /// instead of — `protocol_version`, which older clients still gate on
+        /// and which therefore must keep tracking the full-game constant.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lobby_protocol_version: Option<u32>,
     },
     GameCreated {
         game_code: String,
@@ -387,10 +522,39 @@ fn json_string(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The two surfaces must not share a number. `scripts/check-protocol-version.mjs`
+    /// carries the structural half of this guard — it matches
+    /// `LOBBY_PROTOCOL_VERSION` only against a bare integer literal, so
+    /// re-deriving it from `PROTOCOL_VERSION` fails the cross-language gate
+    /// rather than silently re-coupling the lobby to full-game churn.
     #[test]
-    fn protocol_version_tracks_priority_passing_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 21);
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 20);
+    fn lobby_protocol_version_is_independent_of_the_full_game_one() {
+        assert_eq!(LOBBY_PROTOCOL_VERSION, 1);
+        assert_eq!(MIN_SUPPORTED_LOBBY_PROTOCOL, 1);
+        assert_ne!(
+            LOBBY_PROTOCOL_VERSION, PROTOCOL_VERSION,
+            "the lobby must version its own message set, not alias the full-game one"
+        );
+        // A `const` block, not a runtime assert: both operands are constants, so
+        // this is decidable at compile time. A floor above the current version
+        // would refuse every client, and that should fail the BUILD rather than
+        // wait for someone to run the test suite.
+        const {
+            assert!(
+                MIN_SUPPORTED_LOBBY_PROTOCOL <= LOBBY_PROTOCOL_VERSION,
+                "a floor above the current version would refuse every client"
+            )
+        };
+    }
+
+    #[test]
+    fn protocol_version_tracks_full_game_wire_additions() {
+        assert_eq!(PROTOCOL_VERSION, 39);
+        // Lobby keeps its one-version rollout window; full-game servers stay
+        // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
+        // which is what refuses an older full-game peer whose GameState cannot
+        // understand a success acknowledgment the submitting client awaits.
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 38);
     }
 
     #[test]

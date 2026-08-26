@@ -3,16 +3,169 @@ use crate::types::ability::{
 };
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
-use crate::types::identifiers::ObjectId;
+use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use std::sync::Arc;
 
-use super::engine::EngineError;
+use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use super::printed_cards::apply_back_face_to_object;
+
+/// An engine-authored turn-face-up announcement for the Priority preflight.
+/// The permanent identity remains owned by the face-down authority until the
+/// Priority facade reconstructs the special-action primer.
+pub(in crate::game) struct PriorityTurnFaceUpAnnouncement {
+    object_id: ObjectId,
+}
+
+impl PriorityTurnFaceUpAnnouncement {
+    fn new(object_id: ObjectId) -> Self {
+        Self { object_id }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+}
+
+/// One finite Priority outcome from the turn-face-up special-action authority.
+/// `RequiresChosenX` deliberately has no action payload: mandatory progress
+/// must not guess a value for a player-chosen X cost.
+pub(in crate::game) enum PriorityTurnFaceUpCandidate {
+    Ready(PriorityTurnFaceUpAnnouncement),
+    RequiresChosenX,
+}
+
+/// Whether `player` may take the turn-face-up special action on `object_id`
+/// right now, and in which shape.
+///
+/// The single admission authority for the action, shared by the Priority
+/// preflight (which only asks "is any action available?") and by the
+/// legal-action enumeration the client renders. Splitting those two would let
+/// the engine's own progress gate and its offer list disagree about what a
+/// player can do — which is exactly how the action came to be accepted by the
+/// reducer and offered nowhere (#6732).
+///
+/// `turn_face_up_prepare` remains the legality and cost authority; this adds
+/// the action-specific cost reduction and the affordability probe the reducer
+/// would apply.
+pub(crate) fn turn_face_up_offer(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<TurnFaceUpOffer> {
+    let (_, cost) = turn_face_up_prepare(state, object_id, player).ok()?;
+    let cost = super::casting::apply_special_action_cost_reduction(
+        state,
+        player,
+        crate::types::mana::SpecialAction::TurnFaceUp,
+        cost,
+    );
+    super::casting::can_pay_special_action_mana_cost_after_auto_tap(
+        state,
+        player,
+        Some(object_id),
+        &cost,
+        crate::types::mana::SpecialAction::TurnFaceUp,
+    )
+    .then_some(())?;
+    Some(if super::casting_costs::cost_has_x(&cost) {
+        TurnFaceUpOffer::RequiresChosenX
+    } else {
+        TurnFaceUpOffer::Ready
+    })
+}
+
+/// The shape of an available turn-face-up action. `RequiresChosenX` carries no
+/// value on purpose: CR 107.3d says the player chooses X immediately before
+/// paying, so neither the progress gate nor the offer list may guess one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnFaceUpOffer {
+    Ready,
+    RequiresChosenX,
+}
+
+/// Enumerates the current holder's face-up special-action outcomes in
+/// battlefield order, from the shared admission authority above.
+pub(in crate::game) fn priority_turn_face_up_candidates(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityTurnFaceUpCandidate> {
+    let player = principal.semantic_holder();
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter_map(|object_id| {
+            Some(match turn_face_up_offer(state, player, object_id)? {
+                TurnFaceUpOffer::RequiresChosenX => PriorityTurnFaceUpCandidate::RequiresChosenX,
+                TurnFaceUpOffer::Ready => PriorityTurnFaceUpCandidate::Ready(
+                    PriorityTurnFaceUpAnnouncement::new(object_id),
+                ),
+            })
+        })
+        .collect()
+}
+
+/// An engine-authored face-down play announcement for Priority preflight. The
+/// hand object and card identity remain private to the face-down authority
+/// until the Priority facade reconstructs the ordinary reducer primer.
+pub(in crate::game) struct PriorityPlayFaceDownAnnouncement {
+    object_id: ObjectId,
+    card_id: CardId,
+}
+
+impl PriorityPlayFaceDownAnnouncement {
+    fn new(object_id: ObjectId, card_id: CardId) -> Self {
+        Self { object_id, card_id }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+
+    pub(in crate::game) fn card_id(&self, _access: &PriorityAnnouncementFacadeAccess) -> CardId {
+        self.card_id
+    }
+}
+
+/// Enumerates the current active Priority holder's hand primers for the normal
+/// face-down-play reducer. The shared casting predicates exclude cards without
+/// morph/disguise and cards that cannot be cast face down in this window.
+pub(in crate::game) fn priority_play_face_down_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityPlayFaceDownAnnouncement> {
+    let player = principal.semantic_holder();
+    if state.active_player != player {
+        return Vec::new();
+    }
+    state
+        .players
+        .iter()
+        .find(|candidate| candidate.id == player)
+        .into_iter()
+        .flat_map(|candidate| candidate.hand.iter().copied())
+        .filter_map(|object_id| {
+            (super::casting::object_has_effective_face_down_keyword(state, object_id)
+                && super::casting::face_down_cast_is_permitted(state, player, object_id))
+            .then_some(())?;
+            state
+                .objects
+                .get(&object_id)
+                .map(|object| PriorityPlayFaceDownAnnouncement::new(object_id, object.card_id))
+        })
+        .collect()
+}
 
 /// Stores the original characteristics of a face-down card so they can be
 /// restored when the card is turned face up.
@@ -79,6 +232,8 @@ pub fn apply_face_down_creature_characteristics(
     obj.toughness = toughness;
     obj.base_power = power;
     obj.base_toughness = toughness;
+    obj.layer_base_power = power;
+    obj.layer_base_toughness = toughness;
     obj.card_types = CardType {
         supertypes: vec![],
         core_types,
@@ -113,6 +268,20 @@ pub fn apply_face_down_creature_characteristics(
     // `turn_face_up` → `apply_back_face_to_object`.
     obj.printed_ref = None;
     obj.base_printed_ref = None;
+    // CR 708.2a + CR 306.5b + CR 310.4b: a face-down permanent is a 2/2
+    // creature — it has no loyalty or defense characteristic. Blanking here
+    // keeps `intrinsic_etb_counters` from seeding loyalty/defense counters on
+    // a face-down entry and keeps the loyalty/defense displays dark (a badge
+    // on a face-down 2/2 would leak that the card is a planeswalker). The
+    // `base_*` twins must blank too: the layer reset writes them back into the
+    // live fields on every evaluation. The real values are preserved in
+    // `back_face` (snapshotted BEFORE this runs) and restored on turn-up.
+    obj.loyalty = None;
+    obj.base_loyalty = None;
+    obj.printed_loyalty = None;
+    obj.base_printed_loyalty = None;
+    obj.defense = None;
+    obj.base_defense = None;
 }
 
 /// CR 702.37a: A face-down permanent is a 2/2 creature with no name, mana cost, creature types, or abilities.
@@ -218,11 +387,13 @@ pub(crate) fn is_blocked_by_cant_be_turned_face_up(state: &GameState, object_id:
 /// special-action handler can charge the returned cost through
 /// `pay_special_action_mana_cost` before `turn_face_up` flips the permanent,
 /// while the free direct callers (grant path, tests) reuse the same guards.
+use crate::types::ability::TurnUpCostSource;
+
 pub(crate) fn turn_face_up_prepare(
     state: &GameState,
     object_id: ObjectId,
     player: PlayerId,
-) -> Result<ManaCost, EngineError> {
+) -> Result<(TurnUpCostSource, ManaCost), EngineError> {
     let obj = state
         .objects
         .get(&object_id)
@@ -266,13 +437,19 @@ pub(crate) fn turn_face_up_prepare(
     // CR 702.37e / CR 702.168d: the morph/megamorph/disguise cost is the cost
     // paid to turn the permanent face up. CR 701.40b: a manifested creature card
     // is turned up by paying its mana cost; a non-creature or no-mana-cost
-    // manifest can't be turned up this way.
+    // manifest can't be turned up this way. The FIRST matching source wins and
+    // is REPORTED alongside the cost: CR 702.37b's counter rider applies only
+    // when the SELECTED source is megamorph's, so a face that carries both a
+    // morph and a megamorph keyword pays (and is classified by) the first one.
     back_face
         .keywords
         .iter()
         .find_map(|k| match k {
-            Keyword::Morph(c) | Keyword::Megamorph(c) => Some(c.clone()),
-            Keyword::Disguise(crate::types::keywords::DisguiseCost::Mana(c)) => Some(c.clone()),
+            Keyword::Morph(c) => Some((TurnUpCostSource::Morph, c.clone())),
+            Keyword::Megamorph(c) => Some((TurnUpCostSource::Megamorph, c.clone())),
+            Keyword::Disguise(crate::types::keywords::DisguiseCost::Mana(c)) => {
+                Some((TurnUpCostSource::Disguise, c.clone()))
+            }
             Keyword::Disguise(crate::types::keywords::DisguiseCost::Reduced {
                 cost,
                 reduction,
@@ -297,7 +474,7 @@ pub(crate) fn turn_face_up_prepare(
                 if let ManaCost::Cost { generic, .. } = &mut cost {
                     *generic = generic.saturating_sub(reduction.amount_per.saturating_mul(count));
                 }
-                Some(cost)
+                Some((TurnUpCostSource::Disguise, cost))
             }
             _ => None,
         })
@@ -308,7 +485,10 @@ pub(crate) fn turn_face_up_prepare(
                 .contains(&CoreType::Creature)
                 && !matches!(back_face.mana_cost, ManaCost::NoCost)
             {
-                Some(back_face.mana_cost.clone())
+                Some((
+                    TurnUpCostSource::ManifestManaCost,
+                    back_face.mana_cost.clone(),
+                ))
             } else {
                 None
             }
@@ -318,7 +498,221 @@ pub(crate) fn turn_face_up_prepare(
         })
 }
 
-/// CR 702.37c: Turning a face-down permanent face up restores its original characteristics.
+/// CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b: take the turn-face-up
+/// special action — derive its cost, announce CR 107.3d's `{X}`, pay, and flip.
+///
+/// Single authority for the action, shared by the `GameAction::TurnFaceUp`
+/// reducer arm and by the CR 616.1 resume below, so the two cannot drift about
+/// what was paid or what X was announced.
+///
+/// A paused payment is a real outcome, not an error:
+/// `pay_special_action_mana_cost_with_resume` returns `Paused` when an
+/// auto-tapped mana source's own cost surfaces a replacement choice
+/// (CR 605.3b + CR 616.1). The permanent stays face down and the prompt is
+/// returned; [`resume_turn_face_up_payment`] finishes the action once the choice
+/// is answered. The compatibility wrapper `pay_special_action_mana_cost` turns
+/// that state into an error, which is why this action may not use it.
+pub(crate) fn handle_turn_face_up(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    announced_x: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // CR 116.2b: `turn_face_up_prepare` is the single legality and cost
+    // authority, shared with the Priority offer enumeration.
+    let (cost_source, cost) = turn_face_up_prepare(state, object_id, player)?;
+    let mut cost = super::casting::apply_special_action_cost_reduction(
+        state,
+        player,
+        crate::types::mana::SpecialAction::TurnFaceUp,
+        cost,
+    );
+
+    // CR 107.3d: "If a cost associated with a special action, such as a suspend
+    // cost or a morph cost, has an {X} … in it, the value of X is chosen by the
+    // player taking the special action immediately before they pay that cost."
+    // The announcement happens HERE — inside the action, with no priority window
+    // between choosing X and paying it, exactly as the rule describes.
+    //
+    // Warbreak Trumpeter (Morph {X}{X}{R}), Bane of the Living (Morph {X}{B}{B})
+    // and Aurelia's Vindicator (Disguise {X}{3}{W}) are the live faces.
+    let has_x = super::casting_costs::cost_has_x(&cost);
+    if has_x {
+        // CR 118.3: a player can't announce an X they cannot pay for. The cap is
+        // computed with `object_id: None` deliberately — this is a SPECIAL
+        // ACTION, not a cast, so cast-time cost modifiers and floors must not
+        // apply (the special-action reduction was already applied above).
+        let max_x = super::casting_costs::max_x_value(state, player, &cost, None);
+        if announced_x > max_x {
+            return Err(EngineError::InvalidAction(format!(
+                "X={announced_x} exceeds the maximum payable value of {max_x} for this \
+                 turn-face-up cost"
+            )));
+        }
+        // CR 107.1b + CR 601.2f: each `{X}` shard becomes `announced_x` generic,
+        // so Warbreak Trumpeter's `{X}{X}{R}` costs 2X + {R}. Without this the X
+        // shards reach mana payment unresolved and are dropped — the permanent
+        // flips for its non-X remainder alone.
+        cost.concretize_x(announced_x);
+    } else if announced_x != 0 {
+        // A cost with no {X} admits no choice: CR 107.3d only grants one "if a
+        // cost … has an {X} … in it". Reject rather than silently ignore, so a
+        // client bug cannot masquerade as a legal flip.
+        return Err(EngineError::InvalidAction(
+            "This permanent's turn-face-up cost has no {X}, so X must be 0".to_string(),
+        ));
+    }
+
+    let announced_x = has_x.then_some(announced_x);
+    match pay_turn_face_up_cost(
+        state,
+        player,
+        object_id,
+        &cost,
+        cost_source,
+        announced_x,
+        events,
+    )? {
+        super::casting::SpecialActionManaPayment::Paid => {
+            finish_paid_turn_face_up(state, player, object_id, cost_source, announced_x, events)
+        }
+        // The permanent is still face down and nothing has been committed: the
+        // mana source's replacement choice owns the window now.
+        super::casting::SpecialActionManaPayment::Paused => Ok(state.waiting_for.clone()),
+    }
+}
+
+/// CR 116.2b + CR 106.6: pay the already-derived turn-face-up cost through
+/// `PaymentContext::SpecialAction(TurnFaceUp)`, so spend-restricted mana ("only
+/// to turn permanents face up" — Overgrown Zealot, Tin Street Gossip) is
+/// eligible here while other-context mana is rejected.
+fn pay_turn_face_up_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: &ManaCost,
+    cost_source: TurnUpCostSource,
+    announced_x: Option<u32>,
+    events: &mut Vec<GameEvent>,
+) -> Result<super::casting::SpecialActionManaPayment, EngineError> {
+    let resume = crate::types::game_state::ManaAbilityResume::TurnFaceUp {
+        player,
+        object_id,
+        cost: cost.clone(),
+        announced_x,
+        cost_source,
+    };
+    super::casting::pay_special_action_mana_cost_with_resume(
+        state,
+        player,
+        Some(object_id),
+        cost,
+        crate::types::mana::SpecialAction::TurnFaceUp,
+        Some(&resume),
+        events,
+    )
+}
+
+/// CR 605.3b + CR 616.1: finish a turn-face-up whose mana-source cost paused.
+/// `cost` was locked at initiation, so this must not re-derive it against a
+/// board that changed while the replacement choice was pending.
+pub(crate) fn resume_turn_face_up_payment(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: ManaCost,
+    cost_source: TurnUpCostSource,
+    announced_x: Option<u32>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // The locked cost already had CR 107.3d's `{X}` concretized, so its shards
+    // no longer say X. Keep the pre-concretization fact separately: X=0 is a
+    // real announcement and must still bind to the resulting trigger.
+    match pay_turn_face_up_cost(
+        state,
+        player,
+        object_id,
+        &cost,
+        cost_source,
+        announced_x,
+        events,
+    )? {
+        super::casting::SpecialActionManaPayment::Paid => {
+            finish_paid_turn_face_up(state, player, object_id, cost_source, announced_x, events)
+        }
+        super::casting::SpecialActionManaPayment::Paused => Ok(state.waiting_for.clone()),
+    }
+}
+
+/// CR 702.37e: commit the flip, and only once the whole payment has succeeded.
+pub(crate) fn finish_paid_turn_face_up(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost_source: TurnUpCostSource,
+    announced_x: Option<u32>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // CR 702.37f (morph) / CR 702.168e (disguise): "If a permanent's morph cost
+    // includes X, other abilities of that permanent may also refer to X. The
+    // value of X in those abilities is equal to the value of X chosen as the
+    // morph special action was taken." Publish the announced X on the
+    // source-keyed carrier BEFORE the flip emits `TurnedFaceUp`, so
+    // `triggers::build_triggered_ability` — the single trigger-instantiation
+    // authority — stamps it onto the turn-face-up trigger's `chosen_x`.
+    //
+    // The stamp must land at INSTANTIATION, not resolution: Aurelia's Vindicator
+    // spends its X in `multi_target.max` ("exile up to X other target
+    // creatures"), which is consumed during target selection, before the trigger
+    // ever resolves.
+    //
+    // Published only when the cost actually HAS an {X} (CR 107.3d grants a
+    // choice only then). A no-X flip leaves the carrier untouched rather than
+    // clobbering it with `Some((.., 0))`: an unrelated activated ability of
+    // ANOTHER object may be on the stack with its own announced X in flight, and
+    // that value must survive. The carrier is cleared at the start of the next
+    // `resolve_top`, so this publication cannot outlive the trigger it is for.
+    if let Some(announced_x) = announced_x {
+        state.announced_source_x = Some((object_id, announced_x));
+    }
+
+    // CR 614.1e + CR 708.11 + CR 616.1: the "As ~ is turned face up" replacement
+    // pipeline inside `turn_face_up` resolves its execute through
+    // `resolve_ability_chain`, which can install an interactive `WaitingFor`
+    // (measured: two materially-ordered counter-addition replacements turn the
+    // execute's `AddCounter` into a CR 616.1 ordering prompt). Seed the settled
+    // outcome FIRST, then hand back whatever the pipeline left: `Priority` when
+    // nothing interfered, the live choice when something did. Seeding also
+    // covers the paused-payment resume route, where `state.waiting_for` still
+    // holds the mana source's just-answered replacement prompt — returning THAT
+    // would resurrect a dead prompt. An `Err` from `turn_face_up` cannot leak
+    // the seed: every dispatch into this completion runs under the action
+    // boundary, which restores the whole pre-action state on `Err`.
+    // CR 702.37b: publish the payment fact for exactly this flip. The
+    // keyword-synthesized "As this permanent is turned face up" replacement
+    // reads it (`ReplacementCondition::TurnUpCostSourcePaid`) inside the
+    // ordinary CR 616.1 pipeline `turn_face_up` runs — so the rider orders
+    // with any other as-turned-face-up replacement and survives a paused
+    // ordering prompt. The carrier is cleared at the next `resolve_top`, the
+    // same lifecycle as `announced_source_x`; a following paid flip
+    // overwrites it before ITS commit.
+    state.turn_up_paid_cost_source = Some((object_id, cost_source));
+    state.waiting_for = WaitingFor::Priority { player };
+    turn_face_up(state, player, object_id, events)?;
+    // CR 603.2 + CR 603.3b: when the pipeline paused, the reducer's settled
+    // epilogue will not run for this action, so the `TurnedFaceUp` observer
+    // triggers in `events` would be lost (measured: the "when turned face up"
+    // draw never reached the stack). Park them into `deferred_triggers` — the
+    // established authority for exactly this shape — for the drain once the
+    // interposed choice settles. A no-op when the flip completed undisturbed.
+    crate::game::triggers::park_observer_triggers_if_paused(state, events, 0);
+    Ok(state.waiting_for.clone())
+}
+
+/// CR 702.37e: Turning a face-down permanent face up ends the morph effect and
+/// the permanent "regains its normal characteristics". (CR 702.37c is the
+/// CASTING half — it is what turns the card face down in the first place.)
 ///
 /// Validates that the player controls the permanent and that it has morph/disguise
 /// cost data stored. Sets `face_down = false`, restores characteristics from
@@ -427,17 +821,64 @@ pub fn manifest_card(
     // control instead of the library owner's (Cybership routes the damaged
     // player's cards under the Cybership controller). The move is attributed to
     // `source_id` (the manifesting spell/ability), not the moved object.
+    // CR 608.2c: manifest (CR 701.40a), manifest dread (CR 701.62a) and cloak
+    // (CR 701.58a) all reach the battlefield through this one request, and they
+    // are exactly the three effects the parser admits as chain-referent
+    // producers (`oracle_effect::lower::publishes_chain_created_referent`). The
+    // mark lives here, on the producer, rather than in a list of causes or call
+    // sites that a fourth face-down delivery could silently join.
     let mut request =
         super::zone_pipeline::ZoneMoveRequest::effect(object_id, Zone::Battlefield, source_id)
-            .face_down(profile);
+            .face_down(profile)
+            .publishing_chain_referent();
     if let Some(controller) = controller {
         request = request.under_control_of(controller);
     }
     match super::zone_pipeline::move_object(state, request, events) {
+        // Both arms are silent about the chain referent: the publish lives in
+        // `zone_pipeline::apply_face_down_entry_profile`, which the synchronous
+        // delivery and the CR 616.1 resume both run.
         super::zone_pipeline::ZoneMoveResult::Done => Ok(()),
         super::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
         | super::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => Ok(()),
     }
+}
+
+/// CR 608.2c: Record a face-down entrant as the chain's most-recent created
+/// referent, so a following "it" / "that creature" anaphor
+/// (`TargetFilter::LastCreated`) binds to it — "manifest dread, then attach
+/// this Equipment to that creature" (Conductive Machete, #7531).
+///
+/// This writes the SAME slot the token producer writes
+/// (`engine_replacement.rs`, `state.last_created_token_ids`). The slot's name
+/// says "token", but its job is the anaphor's referent, not a claim about
+/// token-ness: CR 608.2c binds a demonstrative to the thing the previous
+/// instruction produced, and a manifested card and a created token are the same
+/// thing to that binding. The parser side keys on the same equivalence
+/// (`publishes_chain_created_referent`).
+///
+/// Assignment, not append — mirroring the token producer. The slot names the
+/// MOST RECENT producer, so a chain that manifests twice leaves the second
+/// entrant as the referent, which is what "that creature" means after it.
+pub(crate) fn publish_face_down_entry_referent(state: &mut GameState, object_id: ObjectId) {
+    state.last_created_token_ids = vec![object_id];
+}
+
+/// CR 608.2c: a chain-referent producer that is about to run clears the slot.
+///
+/// Without this, a producer that ends up producing NOTHING — manifest dread on
+/// an empty library — would leave an EARLIER instruction's referent in place,
+/// and the following demonstrative would bind to it. "Manifest dread, then
+/// attach this Equipment to that creature" would equip a creature the sentence
+/// never mentioned.
+///
+/// Mirrors the token producer, which assigns `last_created_token_ids =
+/// created_ids` at its tail whether or not the count was zero. The manifest
+/// family cannot assign at its tail — a CR 616.1 entry pause can park the
+/// delivery past the end of the resolver — so the two halves are split: the
+/// producer clears up front, the successful delivery publishes.
+pub(crate) fn begin_face_down_referent_production(state: &mut GameState) {
+    state.last_created_token_ids.clear();
 }
 
 /// Find the object id of the top card of `player`'s library, if any.
@@ -560,6 +1001,88 @@ mod tests {
         assert!(obj.color.is_empty());
     }
 
+    #[test]
+    fn priority_omits_an_unpayable_turn_face_up_action() {
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+        let id = setup_morph_creature(&mut state, player);
+        play_face_down(&mut state, player, id, &mut Vec::new()).expect("play morph face down");
+        let principal = crate::game::engine::priority_principal_for_preflight(&state)
+            .expect("the synchronized priority window has a principal");
+
+        assert!(
+            priority_turn_face_up_candidates(&state, &principal).is_empty(),
+            "Priority must not announce a turn-face-up action whose final cost cannot be paid"
+        );
+    }
+
+    #[test]
+    fn priority_applies_turn_face_up_cost_reductions_before_affordability() {
+        use crate::types::ability::StaticDefinition;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::mana::SpecialAction;
+        use crate::types::statics::{CostModifyMode, StaticMode};
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+        let id = setup_morph_creature(&mut state, player);
+        play_face_down(&mut state, player, id, &mut Vec::new()).expect("play morph face down");
+        let reducer = create_object(
+            &mut state,
+            CardId(2),
+            player,
+            "Turn-up Reducer".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&reducer).unwrap().static_definitions =
+            vec![StaticDefinition::new(StaticMode::ReduceActionCost {
+                action: SpecialAction::TurnFaceUp,
+                mode: CostModifyMode::Reduce,
+                amount: 3,
+            })]
+            .into();
+        let principal = crate::game::engine::priority_principal_for_preflight(&state)
+            .expect("the synchronized priority window has a principal");
+
+        assert!(matches!(
+            priority_turn_face_up_candidates(&state, &principal).as_slice(),
+            [PriorityTurnFaceUpCandidate::Ready(_)]
+        ));
+    }
+
+    #[test]
+    fn priority_omits_hand_cards_without_a_face_down_keyword() {
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+        create_object(
+            &mut state,
+            CardId(3),
+            player,
+            "Ordinary Creature".to_string(),
+            Zone::Hand,
+        );
+        let principal = crate::game::engine::priority_principal_for_preflight(&state)
+            .expect("the synchronized priority window has a principal");
+
+        assert!(
+            priority_play_face_down_announcements(&state, &principal).is_empty(),
+            "Priority must not announce ordinary hand cards as face-down casts"
+        );
+    }
+
     /// CR 702.168d + CR 118.7a: Fugitive Codebreaker's disguise discount is
     /// evaluated when the special action is taken and cannot reduce the red pip.
     #[test]
@@ -605,7 +1128,9 @@ mod tests {
             state.objects.get_mut(&gy).unwrap().card_types.core_types = vec![card_type];
         }
         play_face_down(&mut state, player, id, &mut Vec::new()).unwrap();
-        let cost = turn_face_up_prepare(&state, id, player).expect("disguise can turn face up");
+        let (source, cost) =
+            turn_face_up_prepare(&state, id, player).expect("disguise can turn face up");
+        assert_eq!(source, TurnUpCostSource::Disguise);
         assert!(matches!(
             cost,
             ManaCost::Cost { generic: 3, shards }
@@ -1293,6 +1818,7 @@ mod tests {
             extra_core_types: vec![CoreType::Artifact],
             subtypes: vec!["Cyberman".to_string()],
             ward: None,
+            cause: crate::types::ability::FaceDownCause::Manifest,
         };
         {
             let obj = state.objects.get_mut(&id).unwrap();

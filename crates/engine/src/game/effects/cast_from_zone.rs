@@ -8,7 +8,9 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, CastingVariant, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
-use crate::types::zones::Zone;
+use crate::types::statics::CastFrequency;
+use crate::types::zones::{EtbTapState, Zone};
+use std::collections::HashSet;
 
 /// CR 400.1/400.2: Recursively extract a filter's own `controller` axis,
 /// looking through the composed forms (`Not`/`And`/`Or`) a real card's target
@@ -44,6 +46,74 @@ pub(crate) fn looked_at_controller_library_cards(
                 .get(id)
                 .is_some_and(|object| object.zone == Zone::Library && object.owner == controller)
         })
+        .collect()
+}
+
+/// CR 608.2c + CR 115.1: Bind a tracked-set cast anaphor ("you may cast the
+/// exiled cards this turn") from the published set ITSELF, not from
+/// `ability.targets`.
+///
+/// A tracked-set filter is a LINKED reference, never a target (CR 115.1): its
+/// members were established by an earlier instruction in the same resolution,
+/// so nothing was declared on announcement. `ability.targets`, by contrast, can
+/// carry whatever the chain seam injected upstream (for Sanar, the whole
+/// reveal window), which is how "exile two of the revealed cards" turned into
+/// "exile and grant a cast permission to all 76 revealed cards".
+///
+/// The authority for turning the parser's `TrackedSetId(0)` sentinel into a
+/// concrete set is `targeting::resolve_tracked_set_sentinel` — the same call
+/// `change_zone::resolve` makes for the identical filter shape. Its ladder has
+/// four rungs, and all four are safe here:
+///   1. the active chain set (`chain_tracked_set_id`) — a tracked-set shape;
+///   2. the combat-damage source filter (CR 510.2) — yields `SpecificObject`
+///      or `Or` for a bare `TrackedSet`, and `And { [source_filter, filter] }`
+///      for the `TrackedSetFiltered` shape all 51 of these cards actually use.
+///      The `let … else` below rejects every one of those, so a combat-damage
+///      anaphor casts nothing rather than something arbitrary;
+///   3. the latest non-empty published set — a tracked-set shape;
+///   4. no set at all: the sentinel `TrackedSetId(0)` is returned unchanged. It
+///      passes the shape check but indexes a key that can never exist, because
+///      `GameState::next_tracked_set_id` initialises to `1`. Fail-closed.
+///
+/// Deduplication is required, not cosmetic: `publish_tracked_set` EXTENDS the
+/// set, so a chain that publishes the same object twice stores it twice (12
+/// entries observed for 6 objects). Granting the same card two permissions and
+/// queueing two zone moves for it is a real defect, so members are deduplicated
+/// on first appearance, preserving publication order.
+fn tracked_set_cast_candidates(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    let bound = crate::game::targeting::resolve_tracked_set_sentinel(state, target_filter.clone());
+    let (TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. }) = bound
+    else {
+        return Vec::new();
+    };
+    let Some(members) = state.tracked_object_sets.get(&id) else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    let deduped: Vec<ObjectId> = members
+        .iter()
+        .copied()
+        .filter(|obj_id| seen.insert(*obj_id))
+        .collect();
+    // CR 607.2a + CR 608.2c: bind the filter's object-scope reads to exactly the
+    // published set, mirroring the two `ExiledBySource` sites below. Building the
+    // context from `ability` directly would carry `ability.targets` — for Sanar,
+    // the whole reveal window the chain seam injected — so a residual leg that
+    // reads object scope (a `ParentTarget`-relative comparison, a same-name or
+    // shares-a-type leg) would evaluate against the injected window rather than
+    // the members actually published. Latent today (all 51 cards bind
+    // `filter: Any`, which reads no object scope) and closed here so it stays that
+    // way.
+    let mut scoped_ability = ability.clone();
+    scoped_ability.targets = deduped.iter().copied().map(TargetRef::Object).collect();
+    let ctx = crate::game::filter::FilterContext::from_ability(&scoped_ability);
+    deduped
+        .into_iter()
+        .filter(|obj_id| crate::game::filter::matches_target_filter(state, *obj_id, &bound, &ctx))
         .collect()
 }
 
@@ -323,18 +393,62 @@ pub fn resolve(
         _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
     };
 
-    // Collect target object IDs from the resolved ability's targets.
-    let mut target_ids: Vec<_> = ability
-        .targets
-        .iter()
-        .filter_map(|t| {
-            if let TargetRef::Object(id) = t {
-                Some(*id)
-            } else {
-                None
-            }
-        })
-        .collect();
+    // Collect target object IDs. CR 115.1: a tracked-set filter is a linked
+    // reference whose members the chain published, so it binds INTRINSICALLY
+    // (`tracked_set_cast_candidates`) and must not read whatever the chain seam
+    // injected into `ability.targets`. Every other filter shape is a genuine
+    // target list and keeps the announcement-time targets.
+    let mut target_ids: Vec<_> = match target_filter {
+        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => {
+            tracked_set_cast_candidates(state, ability, target_filter)
+        }
+        // CR 400.7 + CR 603.7c: a delayed cast-from-zone whose pinned referent
+        // became a new object casts nothing. This `_` arm is THE single read
+        // through which a pinned referent flows into this resolver.
+        //
+        // The plan pre-flagged this file as a possible STOP because of its three
+        // `scoped_ability.targets = …` assignments (`:112`, `:444`, `:517`) and
+        // `fallback.targets = ability.targets.clone()` (`:257`). Re-read at the
+        // source, none of those is a read of the pinned referent: all three
+        // `scoped_ability` sites WRITE a freshly-derived id list onto a throwaway
+        // clone purely to scope a `FilterContext`, and their inputs
+        // (`deduped`, `candidate_ids`, `target_ids`) are already downstream of
+        // this arm. `:257` is chain-context propagation onto a declined-optional
+        // fallback ability, not a target resolution. So the flat substitution
+        // does apply here, at exactly one site.
+        _ => ability
+            .live_object_targets(state)
+            .iter()
+            .filter_map(|t| {
+                if let TargetRef::Object(id) = t {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect(),
+    };
+
+    // CR 400.7 + CR 603.7c + CR 603.7b: the trigger fired and resolved; it cast
+    // nothing. EARLY RETURN IS MANDATORY, and its placement immediately below
+    // the read is load-bearing: EVERY branch between here and the end of this
+    // function keys on `target_ids.is_empty()` and re-binds to a DIFFERENT set
+    // of objects — the linked-exile scan (`:432`), the `last_revealed` library
+    // scan (`:467`), and the `SelfRef` source fallback (`:570`). Letting the
+    // substitution above empty the list without returning would hand the cast to
+    // one of those pools instead of doing nothing.
+    //
+    // Mirrors the existing "No targets resolved — nothing to cast" exit below,
+    // including its `EffectKind::CastFromZone` literal, so both no-op paths emit
+    // the same event.
+    if ability.pinned_object_targets_all_stale(state) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::CastFromZone,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
 
     // CR 701.20e + CR 608.2c: Look-then-cast chains (Kiora) inject the legal
     // looked-at library cards as targets at the chain seam
@@ -390,6 +504,59 @@ pub fn resolve(
         }
     }
 
+    // CR 601.3: The exile-set anaphor ("… from among them", "…
+    // from among the exiled cards") is a LINKED reference, never a targeted
+    // one — its object ids reach this effect implicitly, forwarded by the
+    // chain seam that resolved the exile step (`Effect::ExileTop`'s sub-ability
+    // hand-off in `effects::resolve_ability_chain`). That seam forwards EVERY
+    // exiled card, because it cannot know which of them this instruction
+    // describes. The permission granted below is what "a rule or effect allows
+    // that player to cast" (CR 601.3), so the clause's own filter — the card
+    // type gate on "cast instant and sorcery spells" / "up to two sorcery
+    // spells" / "a Vehicle or artifact creature spell" — must still be applied
+    // to the forwarded set. Without this, the type leg the parser composes onto
+    // the `ExiledBySource` anaphor is inert at runtime and every exiled card
+    // becomes castable (issue #6960; the mana-value axis already survives via
+    // the `CastPermissionConstraint`).
+    //
+    // Placed HERE, immediately after `target_ids` is final and ABOVE every
+    // downstream router (the private-library one-shot, the per-opponent fanout
+    // window, and the `driver_free_cast` / `immediate_graveyard_free_cast`
+    // single-target casts), so the gate is universal rather than partial: those
+    // routers return early, and `immediate_graveyard_free_cast` in particular
+    // carries no driver requirement, so a set filtered only below them would
+    // leave the type gate unapplied on whichever path fires first.
+    //
+    // Scoped to `references_exiled_by_source()` — the one filter class whose
+    // ids are chain-forwarded rather than chosen. Explicitly targeted grants
+    // (Emry, Bring to Light, Urza) were validated when their target was
+    // declared and must not be re-filtered here. The no-target fallback above
+    // populates `target_ids` from the live exile links and has already applied
+    // the whole filter to them, so re-testing the residual here is idempotent.
+    if !target_ids.is_empty() && target_filter.references_exiled_by_source() {
+        // Apply the clause's OWN legs only. `without_exile_anaphor`
+        // discharges the `ExiledBySource` leg the seam already satisfied and
+        // returns what is left of the tree, preserving its `And`/`Or` structure
+        // (Sanwell's `And[Or[Vehicle, artifact creature], ExiledBySource]`
+        // residualizes to the bare `Or`). Re-evaluating the anaphor here would be
+        // actively wrong: on a triggered ability `filter::ExiledBySource` reads
+        // the trigger's `linked_exile_snapshot`, captured before this ability's
+        // own exile step ran, so every forwarded id would be dropped and the
+        // grant would become a total no-op. `None` means the filter was nothing
+        // *but* the anaphor (Hellcarver Demon, Improvisation Capstone, and every
+        // other bare-`ExiledBySource` row) — those keep the full forwarded set.
+        if let Some(own_filter) = target_filter.without_exile_anaphor() {
+            // Bind the residual's object-scope reads to exactly the
+            // forwarded set, mirroring the no-target fallback's scoped context.
+            let mut scoped_ability = ability.clone();
+            scoped_ability.targets = target_ids.iter().copied().map(TargetRef::Object).collect();
+            let ctx = crate::game::filter::FilterContext::from_ability(&scoped_ability);
+            target_ids.retain(|id| {
+                crate::game::filter::matches_target_filter(state, *id, &own_filter, &ctx)
+            });
+        }
+    }
+
     // The usual no-target fallback above observes the raw chain shape. Optional
     // look-cast frames may instead arrive with the same looked-at cards already
     // injected as resolved targets; both forms carry exactly the private-library
@@ -425,7 +592,7 @@ pub fn resolve(
         );
     }
 
-    // CR 310.11b + CR 608.2c: "exile it, then you may cast it transformed" —
+    // CR 310.12b + CR 608.2c: "exile it, then you may cast it transformed" —
     // the SelfRef filter resolves to the source object itself. When
     // `ability.targets` is empty (no pre-selected target, as is typical for
     // Siege defeat and Suspend self-cast triggers), fall back to the source
@@ -564,24 +731,39 @@ pub fn resolve(
             .get(&target_ids[0])
             .is_some_and(|obj| obj.zone == Zone::Graveyard);
 
-    // CR 608.2g + CR 609.4b: paid during-resolution graveyard cast (Quistis Trepe,
-    // Tinybones the Pickpocket). Not without_paying — the caster pays the real cost
-    // with any-type mana. Offered accept/decline, resolved by
-    // initiate_cast_during_resolution with ResolutionCastCost::FullCost. Replaces
-    // the wrong lingering-permission path (#2884: the offer was inert on
-    // opponent-graveyard targets, and own-graveyard targets deferred the cast to a
-    // later priority window instead of a resolution-time offer).
-    let graveyard_paid_cast = !without_paying
-        && mana_spend_permission.is_some()
+    // CR 608.2g + CR 609.4b: paid during-resolution cast of a CHOSEN target. The
+    // caster pays the real printed cost as the granting ability resolves; the mana
+    // is any-type when `mana_spend_permission` is `Some` (Quistis Trepe, Tinybones
+    // the Pickpocket) and NORMAL mana at the printed cost when it is `None`
+    // (Conduit of Worlds: "Choose target nonland permanent card in your graveyard
+    // … you may cast that card."). Both thread `ResolutionCastCost::FullCost`
+    // through `initiate_cast_during_resolution`, which defaults a `None`
+    // permission to normal mana. Offered accept/decline. Replaces the wrong
+    // lingering-permission path (#2884: the offer was inert on opponent-graveyard
+    // targets, and own-graveyard targets deferred the cast to a later priority
+    // window instead of a resolution-time offer).
+    //
+    // CR 608.2g: during-resolution timing is a property of the resolving
+    // INSTRUCTION (the `DuringResolution` driver, set by the parser from a paid
+    // chosen-target "you may cast that card" with no lingering duration), NOT of
+    // the chosen card's zone. This gate therefore accepts any castable
+    // non-battlefield origin — graveyard (Conduit), hand, exile, or library — rather
+    // than requiring `Zone::Graveyard`; `initiate_cast_during_resolution` casts
+    // the card from whichever zone it currently occupies. Emry's "you may cast
+    // that card THIS TURN" carries `duration: Some(_)` and is lowered to
+    // `LingeringPermission` by the parser, so it never reaches this branch.
+    let paid_during_resolution_cast = !without_paying
         && driver.is_during_resolution()
         && alt_ability_cost.is_none()
         && duration.is_none()
         && target_ids.len() == 1
-        && state
-            .objects
-            .get(&target_ids[0])
-            .is_some_and(|o| o.zone == Zone::Graveyard);
-    if graveyard_paid_cast {
+        && state.objects.get(&target_ids[0]).is_some_and(|o| {
+            matches!(
+                o.zone,
+                Zone::Graveyard | Zone::Hand | Zone::Exile | Zone::Library
+            )
+        });
+    if paid_during_resolution_cast {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CastFromZone,
             source_id: ability.source_id,
@@ -598,6 +780,38 @@ pub fn resolve(
             },
         };
         return Ok(());
+    }
+
+    // CR 608.2g + CR 115.1a: A per-opponent fanout has already chosen its
+    // player/object pairs as the trigger went on the stack. After resolution
+    // revalidation only the surviving object ids remain, so hand them to the
+    // existing free-cast window as an exact pool: do not rescan graveyards and
+    // do not substitute another card from the same opponent. The window's
+    // re-offer pipeline casts selected spells one at a time without priority.
+    let is_per_opponent_fanout = crate::game::ability_utils::is_per_opponent_target_fanout(ability);
+    let graveyard_destination = cast_from_zone_graveyard_destination(ability);
+    if driver.is_during_resolution()
+        && without_paying
+        && alt_ability_cost.is_none()
+        && is_per_opponent_fanout
+        && !target_ids.is_empty()
+    {
+        let mut window = ability.clone();
+        window.effect = Effect::FreeCastFromZones {
+            count: target_ids.len().try_into().unwrap_or(u8::MAX),
+            max_total_mv: None,
+            filter: target_filter.clone(),
+            zones: vec![Zone::Graveyard],
+            // The CastFromZone rider is stored as a sequential ParentTarget
+            // sub-ability; FreeCastWindow carries its exact destination as
+            // per-cast metadata instead of installing a source-global effect.
+            graveyard_replacement: graveyard_destination,
+        };
+        // The rider has been translated into the window's per-cast metadata;
+        // retaining it would run a second destination move after the window.
+        window.sub_ability = None;
+        window.targets = target_ids.drain(..).map(TargetRef::Object).collect();
+        return super::free_cast_from_zones::resolve(state, &window, events);
     }
 
     if driver_free_cast || immediate_graveyard_free_cast {
@@ -859,6 +1073,7 @@ fn cast_stack_spell_copy_during_resolution(
         card_id: obj.card_id,
         controller: ability.controller,
         object_id: copy_id,
+        cast_mana_value: Some(obj.spell_mana_value()),
     });
     crate::game::restrictions::record_spell_cast_from_zone(
         state,
@@ -1135,6 +1350,7 @@ fn record_lingering_permissions(
     target_ids: &[ObjectId],
 ) -> Result<(), EffectError> {
     let (
+        mode,
         without_paying,
         cast_transformed,
         alt_ability_cost,
@@ -1143,6 +1359,7 @@ fn record_lingering_permissions(
         mana_spend_permission,
     ) = match &ability.effect {
         Effect::CastFromZone {
+            mode,
             without_paying_mana_cost,
             cast_transformed,
             alt_ability_cost,
@@ -1151,6 +1368,7 @@ fn record_lingering_permissions(
             mana_spend_permission,
             ..
         } => (
+            *mode,
             *without_paying_mana_cost,
             *cast_transformed,
             alt_ability_cost.clone(),
@@ -1253,6 +1471,41 @@ fn record_lingering_permissions(
             if !obj.casting_permissions.contains(&permission) {
                 obj.casting_permissions.push(permission);
             }
+
+            // CR 305.1: A `CastFromZone` in `mode: Play` must also authorize
+            // playing the card when it is a land. The look-to-play contract
+            // for face-down exile is keyed on `CastingPermission::PlayFromExile`
+            // (CR 406.3a + CR 406.3b), not on `ExileWithAltCost` alone.
+            if matches!(mode, crate::types::ability::CardPlayMode::Play)
+                && alt_ability_cost.is_none()
+            {
+                // CR 305.1: lands are played (not cast) but still require
+                // face-down exile look/play authority.
+                let play_duration = duration.clone().unwrap_or_else(|| {
+                    matches!(current_zone, Some(Zone::Graveyard | Zone::Hand))
+                        .then_some(Duration::UntilEndOfTurn)
+                        .unwrap_or(Duration::Permanent)
+                });
+
+                let play_permission = CastingPermission::PlayFromExile {
+                    duration: play_duration,
+                    granted_to: ability.controller,
+                    frequency: CastFrequency::Unlimited,
+                    source_id: Some(ability.source_id),
+                    invalidation: None,
+                    exiled_by_ability_controller: Some(ability.controller),
+                    mana_spend_permission,
+                    card_filter: None,
+                    single_use_group: None,
+                    single_use: false,
+                    cast_cost_raise: None,
+                    land_enter_tapped: EtbTapState::Unspecified,
+                };
+
+                if !obj.casting_permissions.contains(&play_permission) {
+                    obj.casting_permissions.push(play_permission);
+                }
+            }
         }
     }
     Ok(())
@@ -1328,6 +1581,108 @@ mod tests {
         );
         state.objects.get_mut(&obj_id).unwrap().mana_cost = ManaCost::zero();
         obj_id
+    }
+
+    #[test]
+    fn play_mode_without_paying_stamps_zero_cost_cast_and_play_from_exile() {
+        let mut state = make_test_state();
+        let obj_id = add_card_to_exile(&mut state, PlayerId(1), CardId(100));
+
+        let ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::Any,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Play,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = state.objects.get(&obj_id).unwrap();
+
+        assert!(
+            obj.casting_permissions.iter().any(|p| matches!(
+                p,
+                CastingPermission::ExileWithAltCost {
+                    cost,
+                    granted_to: Some(PlayerId(0)),
+                    duration: None,
+                    ..
+                } if *cost == ManaCost::zero()
+            )),
+            "play-mode without-paying must grant a zero-cost exile alt-cost cast permission"
+        );
+
+        assert!(
+            obj.casting_permissions.iter().any(|p| matches!(
+                p,
+                CastingPermission::PlayFromExile {
+                    duration: Duration::Permanent,
+                    granted_to,
+                    source_id: Some(ObjectId(999)),
+                    exiled_by_ability_controller: Some(PlayerId(0)),
+                    mana_spend_permission: None,
+                    card_filter: None,
+                    ..
+                } if *granted_to == PlayerId(0)
+            )),
+            "play-mode without-paying must also stamp PlayFromExile for face-down exile look/play"
+        );
+    }
+
+    #[test]
+    fn play_mode_with_alt_ability_cost_does_not_stamp_play_from_exile() {
+        let mut state = make_test_state();
+        let obj_id = add_card_to_exile(&mut state, PlayerId(1), CardId(101));
+
+        let ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::Any,
+                without_paying_mana_cost: false,
+                mode: CardPlayMode::Play,
+                cast_transformed: false,
+                alt_ability_cost: Some(
+                    crate::types::ability::AbilityCost::KeywordCostOfCastSpell {
+                        keyword: crate::types::keywords::KeywordKind::Suspend,
+                    },
+                ),
+                constraint: None,
+                duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = state.objects.get(&obj_id).unwrap();
+        assert!(
+            !obj.casting_permissions.iter().any(|p| matches!(
+                p,
+                CastingPermission::PlayFromExile { .. }
+            )),
+            "play-mode with alt-ability cost is a spell-cost override; it must not accidentally grant PlayFromExile"
+        );
+        assert!(
+            obj.casting_permissions
+                .iter()
+                .any(|p| matches!(p, CastingPermission::ExileWithAltAbilityCost { .. })),
+            "play-mode with alt-ability cost must still grant ExileWithAltAbilityCost"
+        );
     }
 
     fn electrodominance_hand_ability(max_value: i32) -> ResolvedAbility {
@@ -1741,7 +2096,7 @@ mod tests {
         );
     }
 
-    /// CR 310.11b (#2876): Siege defeat — "exile it, then you may cast it
+    /// CR 310.12b (#2876): Siege defeat — "exile it, then you may cast it
     /// transformed". The `CastFromZone { target: SelfRef }` sub-ability fires
     /// with an EMPTY `ability.targets` (the exile step doesn't pre-select a
     /// target; the source IS the card to cast). Without the SelfRef fallback in
@@ -1803,7 +2158,7 @@ mod tests {
             controller: PlayerId(0),
             kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
                 source_id: siege_id,
-                ability: ability.clone(),
+                ability: Box::new(ability.clone()),
             },
         });
 
@@ -1828,7 +2183,7 @@ mod tests {
         assert_eq!(
             state.stack.len(),
             1,
-            "CR 310.11b: Siege defeat must put the card on the stack (cast it), \
+            "CR 310.12b: Siege defeat must put the card on the stack (cast it), \
              not silently return with it still in exile"
         );
         assert_eq!(

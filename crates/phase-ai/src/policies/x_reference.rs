@@ -167,6 +167,9 @@ fn continuous_modification_references_x(modification: &ContinuousModification) -
         ContinuousModification::GrantStaticAbility { definition } => {
             static_definition_references_x(definition)
         }
+        ContinuousModification::GrantReplacement { replacement } => {
+            replacement_definition_references_x(replacement)
+        }
         // RC1: dynamic P/T, keyword, and enter-counter magnitudes may reference
         // the chosen X either directly (`Variable "X"`) or via `CostXPaid` (the
         // announced X carried on the granting object — Mirror Entity's
@@ -182,7 +185,9 @@ fn continuous_modification_references_x(modification: &ContinuousModification) -
         | ContinuousModification::AddCounterOnEnter { count: value, .. } => {
             expr_references_chosen_x(value)
         }
-        ContinuousModification::SetName { .. }
+        // CR 707.2c (Metamorphic Alteration): inert copy marker references no X.
+        ContinuousModification::CopyChosen
+        | ContinuousModification::SetName { .. }
         | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddPower { .. }
         | ContinuousModification::AddToughness { .. }
@@ -349,9 +354,18 @@ fn is_cost_x_paid(qty: &QuantityRef) -> bool {
 }
 
 fn is_previous_amount(qty: &QuantityRef) -> bool {
-    // CR 120.6 / CR 120.10: both channels (total and excess) are amounts left by
-    // the preceding effect, so the AI's X-reference detection treats them alike —
-    // it cares that the value is chain-derived, not which tally it came from.
+    // Both channels (total and excess) are amounts left by the preceding
+    // effect, so the AI's X-reference detection treats them alike — it cares
+    // that the value is chain-derived, not which tally it came from, and every
+    // aggregate reduces the same table, so the detection is aggregate-agnostic
+    // too.
+    //
+    // The former CR 120.10 tag is STRUCK, not relocated. Read in full, that
+    // rule scopes triggered abilities that check whether a permanent has been
+    // dealt EXCESS DAMAGE; it says nothing about amounts one effect leaves for
+    // the next, and nothing about aggregate-agnostic detection. An AI scoring
+    // heuristic implements no game rule and needs no CR annotation. The
+    // rationale above is kept verbatim.
     matches!(qty, QuantityRef::PreviousEffectAmount { .. })
 }
 
@@ -399,5 +413,48 @@ fn filter_prop_references_x(prop: &FilterProp) -> bool {
         FilterProp::Cmc { value, .. } => value.contains_x(),
         FilterProp::Counters { count, .. } => count.contains_x(),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The `CR 120.10` strike on `is_previous_amount` is load-bearing, so it is
+    /// asserted rather than left to review. Read in full, CR 120.10 governs
+    /// triggered abilities that check whether a permanent has been dealt excess
+    /// damage — it does not govern "amounts left by the preceding effect", and
+    /// an AI scoring heuristic implements no game rule at all.
+    ///
+    /// Reads this file's own source so the assertion is about the annotation as
+    /// shipped, not about a value re-derived from it.
+    ///
+    /// REVERT PROBE (RUN, not reasoned): restore the tag, i.e. change the
+    /// comment's first line back to `// CR 120.10: both channels (total and
+    /// excess) are amounts left by`. Observed failure — "an AI scoring heuristic
+    /// implements no game rule, so it carries no CR annotation".
+    #[test]
+    fn previous_amount_detection_carries_its_rationale_without_a_cr_tag() {
+        let source = include_str!("x_reference.rs");
+        let start = source
+            .find("fn is_previous_amount(")
+            .expect("the detection helper exists");
+        let body = &source[start..start + 900];
+
+        assert!(
+            body.contains("chain-derived"),
+            "the rationale for treating both channels alike must survive the strike"
+        );
+        // Matched on the ANNOTATION FORM, not on one punctuation variant: an
+        // earlier revision asserted only on `"CR 120.10:"`, which a re-added
+        // `// CR 120.10 both channels …` (no colon) would have slipped past —
+        // while the surrounding window deliberately contains the prose "The
+        // former CR 120.10 tag is STRUCK", so a bare substring test cannot be
+        // used either. Any comment line whose first token after `//` is the
+        // citation is a restored annotation.
+        assert!(
+            !body
+                .lines()
+                .any(|line| line.trim_start().starts_with("// CR 120.10")),
+            "an AI scoring heuristic implements no game rule, so it carries no CR annotation"
+        );
     }
 }

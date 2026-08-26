@@ -2,6 +2,27 @@
 
 <!-- What this PR changes and why. One or two sentences. -->
 
+## Files changed
+
+<!-- Every changed path, as a short bullet list. -->
+
+## Track
+
+<Developer | Non-developer>
+
+## LLM
+
+Model: <actual Frontier model identifier or reported name | not-applicable (no LLM)>
+Tier: <Frontier | not-applicable (no LLM)>
+Thinking: <high | max | not-applicable (no LLM)>
+
+<!-- Keep Model and Tier as exact, standalone canonical lines. AI-assisted PRs
+must report their actual Frontier model, Tier: Frontier, and thinking level.
+If your harness does not expose an exact model identifier, report the name it
+does give you — e.g. "Model: gpt-5.6-sol (via GitHub Copilot; canonical id not
+exposed)" — rather than guessing an identifier. See AI-CONTRIBUTOR.md
+§0.1.1. -->
+
 ## Implementation method (required)
 
 Method: /engine-implementer
@@ -42,5 +63,20 @@ Final review-impl PASS head=<40-hex-sha>
 
 ## Claimed parse impact
 
-- <Exact Card Name>
-<!-- Optional manual quality evidence; not an admission artifact. -->
+None.
+<!-- List exact card names only when the parse-diff changes cards. -->
+
+## Scope Expansion
+
+None.
+<!-- Describe any change that crosses the issue/card's stated scope. -->
+
+## Validation Failures
+
+None.
+<!-- Replace with the unresolved validation failure and its evidence. -->
+
+## CI Failures
+
+None.
+<!-- Replace with the unresolved CI failure and its evidence. -->

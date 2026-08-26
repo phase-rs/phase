@@ -7,6 +7,7 @@
 //! - Damage prevention restriction (AddRestriction effect)
 //! - Full Bonecrusher Giant lifecycle
 
+use engine::ai_support::legal_actions;
 use engine::game::game_object::BackFaceData;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones;
@@ -15,6 +16,7 @@ use engine::types::ability::{
     RestrictionExpiry, TargetFilter, TargetRef, TriggerDefinition,
 };
 use engine::types::actions::GameAction;
+use engine::types::card::LayoutKind;
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::game_state::{CastOfferKind, CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -47,6 +49,7 @@ fn stomp_back_face() -> BackFaceData {
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: {
             let mut ct = CardType::default();
@@ -91,7 +94,8 @@ fn stomp_back_face() -> BackFaceData {
         strive_cost: None,
         casting_restrictions: Vec::new(),
         casting_options: Vec::new(),
-        layout_kind: None,
+        layout_kind: Some(LayoutKind::Adventure),
+        parse_warnings: vec![],
     }
 }
 
@@ -171,6 +175,71 @@ fn adventure_cast_stomp_from_hand() {
         "Expected AdventureCastChoice, got {:?}",
         result.waiting_for
     );
+}
+
+/// CR 715.3a + CR 118.6a: A land-front Adventure card can be cast as its
+/// instant/sorcery face even though the land itself has no mana cost. Lindblum,
+/// Industrial Regency // Mage Siege represents the Final Fantasy Town cycle.
+#[test]
+fn land_front_adventure_offers_only_its_castable_spell_face() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let object_id = scenario
+        .add_land_to_hand(P0, "Lindblum, Industrial Regency")
+        .id();
+    let mut runner = scenario.build();
+
+    let mut mage_siege = stomp_back_face();
+    mage_siege.name = "Mage Siege".to_string();
+    mage_siege.card_types.subtypes.push("Adventure".to_string());
+    mage_siege.layout_kind = Some(LayoutKind::Adventure);
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&object_id)
+        .unwrap()
+        .back_face = Some(mage_siege);
+    add_mana(&mut runner, P0, ManaType::Red, 2);
+
+    let card_id = runner.state().objects[&object_id].card_id;
+    let cast = GameAction::CastSpell {
+        object_id,
+        card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    };
+    assert!(
+        legal_actions(runner.state()).contains(&cast),
+        "a land-front Adventure's castable spell face must reach legal actions"
+    );
+
+    runner
+        .act(cast)
+        .expect("Mage Siege should reach its Adventure cast offer");
+    let offered_faces: Vec<bool> = legal_actions(runner.state())
+        .into_iter()
+        .filter_map(|action| match action {
+            GameAction::ChooseAdventureFace { creature } => Some(creature),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        offered_faces,
+        vec![false],
+        "the uncastable land face must not be offered as a spell"
+    );
+
+    let result = runner
+        .act(GameAction::ChooseAdventureFace { creature: false })
+        .expect("Mage Siege should cast as the Adventure face");
+    if matches!(result.waiting_for, WaitingFor::TargetSelection { .. }) {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(P1)),
+            })
+            .expect("the chosen Adventure face should complete target selection");
+    }
+    assert!(matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0));
 }
 
 // ---------------------------------------------------------------------------
@@ -633,4 +702,71 @@ fn bonecrusher_full_flow() {
             .contains(&CastingPermission::AdventureCreature),
         "AdventureCreature permission should be cleared after leaving exile"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Test 8: Adventure qualifier uses the cast-time spell record
+// ---------------------------------------------------------------------------
+
+/// CR 715.2a + CR 715.4: A creature spell cast from an Adventure card has the
+/// Adventure card's alternative characteristics for the qualifier, even when
+/// the creature face is the face cast. The ordinary-creature cast is the
+/// negative control; the Adventure spell's exile-and-recast path is the
+/// positive reach guard.
+#[test]
+fn garenbrig_squire_triggers_only_for_adventure_creature_casts() {
+    const GARENBRIG_SQUIRE: &str =
+        "Whenever you cast a creature spell that has an Adventure, Garenbrig Squire gets +1/+1 until end of turn.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let squire = scenario
+        .add_creature_from_oracle(P0, "Garenbrig Squire", 2, 2, GARENBRIG_SQUIRE)
+        .id();
+    let ordinary_creature = scenario.add_creature_to_hand(P0, "Grizzly Bear", 2, 2).id();
+    let adventure_creature = add_bonecrusher_to_hand(&mut scenario);
+
+    let mut runner = scenario.build();
+    setup_bonecrusher_adventure(&mut runner, adventure_creature);
+    add_mana(&mut runner, P0, ManaType::Red, 5);
+
+    runner.cast(ordinary_creature).resolve();
+    let ordinary_record = runner
+        .state()
+        .spells_cast_this_turn_by_player
+        .get(&P0)
+        .and_then(|records| records.back())
+        .expect("ordinary creature cast must be recorded");
+    assert!(!ordinary_record.has_adventure);
+    let squire_after_ordinary = runner.state().objects.get(&squire).unwrap();
+    assert_eq!(squire_after_ordinary.power, Some(2));
+    assert_eq!(squire_after_ordinary.toughness, Some(2));
+
+    runner
+        .cast(adventure_creature)
+        .adventure_face(false)
+        .target_player(P1)
+        .resolve();
+    let adventure_spell_record = runner
+        .state()
+        .spells_cast_this_turn_by_player
+        .get(&P0)
+        .and_then(|records| records.back())
+        .expect("Adventure spell cast must be recorded");
+    assert!(!adventure_spell_record.has_adventure);
+    let squire_after_adventure_spell = runner.state().objects.get(&squire).unwrap();
+    assert_eq!(squire_after_adventure_spell.power, Some(2));
+    assert_eq!(squire_after_adventure_spell.toughness, Some(2));
+
+    runner.cast(adventure_creature).resolve();
+    let adventure_record = runner
+        .state()
+        .spells_cast_this_turn_by_player
+        .get(&P0)
+        .and_then(|records| records.back())
+        .expect("Adventure creature cast must be recorded");
+    assert!(adventure_record.has_adventure);
+    let squire_after_adventure = runner.state().objects.get(&squire).unwrap();
+    assert_eq!(squire_after_adventure.power, Some(3));
+    assert_eq!(squire_after_adventure.toughness, Some(3));
 }

@@ -45,6 +45,7 @@ fn make_back_face(
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types,
         mana_cost: ManaCost::default(),
@@ -61,6 +62,7 @@ fn make_back_face(
         casting_restrictions: Vec::new(),
         casting_options: Vec::new(),
         layout_kind,
+        parse_warnings: vec![],
     }
 }
 

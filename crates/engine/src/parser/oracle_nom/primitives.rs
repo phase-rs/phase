@@ -4,14 +4,15 @@ use std::borrow::Cow;
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until, take_while_m_n};
-use nom::character::complete::{char, digit1, space0};
-use nom::combinator::{all_consuming, map, map_res, not, opt, peek, recognize, value};
+use nom::character::complete::{char, digit1, multispace0, satisfy, space0};
+use nom::combinator::{all_consuming, eof, map, map_res, not, opt, peek, recognize, value};
 use nom::multi::{many0, many1};
-use nom::sequence::{delimited, preceded};
+use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use super::error::{OracleError, OracleResult};
-use crate::types::ability::PtValue;
+use crate::types::ability::{AggregateFunction, ObjectProperty, PtValue};
+use crate::types::card_type::CoreType;
 use crate::types::counter::{CounterType, KEYWORD_COUNTERS};
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -182,6 +183,29 @@ pub fn parse_article(input: &str) -> OracleResult<'_, ()> {
     value((), alt((tag("an "), tag("a ")))).parse(input)
 }
 
+/// Parse a bare anaphoric object pronoun that names a previously-referenced
+/// object: `it`, `them`, `him`, or `her`. Returns the matched pronoun slice.
+///
+/// The parser maps the supported grammatical forms to the caller's established
+/// object referent. The pronoun itself does not encode a separate runtime axis.
+///
+/// This is the single authority for the object-recipient pronoun set. Every
+/// site that matches "… on it/them/him/her" (enters-with counter replacements,
+/// `has … counter on <pronoun>` conditions, begin-game battlefield placement,
+/// the `is_it_pronoun` classifier) routes through this combinator so the set
+/// cannot drift between modules. Callers that also accept the self-reference
+/// token `~` compose it as an outer `alt((tag("~"), parse_object_recipient_pronoun))`.
+pub fn parse_object_recipient_pronoun(input: &str) -> OracleResult<'_, &str> {
+    recognize(terminated(
+        alt((tag("it"), tag("them"), tag("him"), tag("her"))),
+        peek(alt((
+            value((), eof),
+            value((), satisfy(|c| !c.is_alphanumeric() && c != '\'')),
+        ))),
+    ))
+    .parse(input)
+}
+
 /// Parse a number OR "x" (as 0). Use for costs, P/T, counter amounts where
 /// X represents a variable that resolves to 0 at parse time.
 ///
@@ -339,6 +363,116 @@ pub fn parse_color(input: &str) -> OracleResult<'_, ManaColor> {
         value(ManaColor::Green, tag("green")),
     ))
     .parse(input)
+}
+
+/// CR 205.2a: Parse a single printed card-type word into its [`CoreType`].
+///
+/// Enumerates the CR 205.2a card-type list ("artifact, battle, conspiracy,
+/// creature, dungeon, enchantment, instant, kindred, land, phenomenon, plane,
+/// planeswalker, scheme, sorcery, and vanguard") plus the errata'd legacy
+/// "tribal" spelling of kindred (CR 308.3). Operates on already-lowercased text.
+///
+/// "vanguard" is absent because [`CoreType`] models no Vanguard variant — the
+/// Vanguard variant's avatar cards are out of scope for the engine, so there is
+/// nothing to map the word onto.
+///
+/// Ordering note: "planeswalker" MUST precede "plane" — they share a prefix and
+/// `alt` commits to the first success, so the reverse order would parse
+/// "planeswalker" as `Plane` with a stray "swalker" remainder.
+///
+/// This combinator matches a bare word with no trailing word-boundary check, so
+/// callers that parse a full phrase must verify the remainder themselves (e.g.
+/// via `all_consuming`) rather than accepting a prefix match.
+pub fn parse_core_type(input: &str) -> OracleResult<'_, CoreType> {
+    alt((
+        value(CoreType::Artifact, tag("artifact")),
+        value(CoreType::Battle, tag("battle")),
+        value(CoreType::Conspiracy, tag("conspiracy")),
+        value(CoreType::Creature, tag("creature")),
+        value(CoreType::Dungeon, tag("dungeon")),
+        value(CoreType::Enchantment, tag("enchantment")),
+        value(CoreType::Instant, tag("instant")),
+        value(CoreType::Kindred, tag("kindred")),
+        value(CoreType::Tribal, tag("tribal")),
+        value(CoreType::Land, tag("land")),
+        value(CoreType::Phenomenon, tag("phenomenon")),
+        value(CoreType::Planeswalker, tag("planeswalker")),
+        value(CoreType::Plane, tag("plane")),
+        value(CoreType::Scheme, tag("scheme")),
+        value(CoreType::Sorcery, tag("sorcery")),
+    ))
+    .parse(input)
+}
+
+/// CR 205.2a + CR 205.2b: Parse a disjunction of printed card-type words into
+/// the set of types that satisfy the gate — "instant or sorcery", "artifact or
+/// enchantment", "artifact, creature, or enchantment".
+///
+/// CR 205.2b ("objects satisfy the criteria for any effect that applies to any
+/// of their card types") is why a disjunction lowers to a *set*: consumers such
+/// as `AbilityCondition::RevealedHasCardType` match with `any`, so listing every
+/// printed leg is exactly the OR semantics the Oracle text prints.
+///
+/// An explicit `or` boundary is REQUIRED for a multi-leg result, because CR
+/// 205.2b describes TWO different things this grammar must not conflate. Its
+/// first sentence — "Some objects have more than one card type (for example, an
+/// artifact creature)" — is a CONJUNCTIVE type stack: ONE object bearing every
+/// listed type. Its second sentence — "Such objects satisfy the criteria for any
+/// effect that applies to any of their card types" — is the `any` match that
+/// makes a printed DISJUNCTION lower to a set.
+///
+/// Only the printed "or" tells the two apart. A bare comma list ("land,
+/// instant") or a printed "and" ("artifact and creature") is the conjunctive
+/// reading, so lowering it to a set that consumers evaluate with `any` would
+/// silently widen a both-types gate into an either-type gate. Comma legs are
+/// therefore buffered and only committed once a terminal `", or "` / `" or "`
+/// leg proves the list really was disjunctive:
+///
+/// - `"instant or sorcery"` → `[Instant, Sorcery]`
+/// - `"artifact, creature, or enchantment"` → `[Artifact, Creature, Enchantment]`
+/// - `"land, instant"` → `[Land]`, remainder `", instant"` (rejected upstream by
+///   the caller's `all_consuming`)
+/// - `"artifact and creature"` → `[Artifact]`, remainder `" and creature"`
+///
+/// A single type word is a well-formed one-element disjunction, so this is a
+/// drop-in superset of [`parse_core_type`].
+pub fn parse_core_type_disjunction(input: &str) -> OracleResult<'_, Vec<CoreType>> {
+    let (after_first, first) = parse_core_type(input)?;
+
+    // Comma legs are provisional until an `or` boundary appears. `pending` holds
+    // them; `probe` walks the candidate list without committing the remainder.
+    let mut pending: Vec<CoreType> = Vec::new();
+    let mut probe = after_first;
+
+    loop {
+        // Terminal disjunctive leg — commits every buffered comma leg with it.
+        // ", or " is tried before " or " because the Oxford comma must be
+        // consumed whole rather than leaving a dangling ", ".
+        if let Ok((after_last, last)) = alt((
+            preceded(tag::<_, _, OracleError<'_>>(", or "), parse_core_type),
+            preceded(tag(" or "), parse_core_type),
+        ))
+        .parse(probe)
+        {
+            let mut types = Vec::with_capacity(pending.len() + 2);
+            types.push(first);
+            types.append(&mut pending);
+            types.push(last);
+            return Ok((after_last, types));
+        }
+
+        // Intermediate ", " leg — buffer it and keep looking for the `or`.
+        match preceded(tag::<_, _, OracleError<'_>>(", "), parse_core_type).parse(probe) {
+            Ok((after_mid, mid)) => {
+                pending.push(mid);
+                probe = after_mid;
+            }
+            // No `or` boundary anywhere in the list — not a disjunction. Yield
+            // the single leading type and leave the comma tail unconsumed so a
+            // full-consumption caller rejects the phrase outright.
+            Err(_) => return Ok((after_first, vec![first])),
+        }
+    }
 }
 
 /// CR 122.1: Combinator mapping a player-counter kind word to its typed
@@ -871,6 +1005,31 @@ pub fn parse_phrase_fragment(input: &str) -> OracleResult<'_, &str> {
     )))
 }
 
+/// CR 608.2c consume-on-success: a subordinate clause has genuinely ENDED here.
+///
+/// A relative-clause combinator that succeeds while leaving unconsumed words
+/// behind has not modelled the sentence — it has modelled a PREFIX of it, and
+/// the caller that discards that remainder silently drops the rest of the
+/// restriction. ("attacks a player who has more life than you AND CONTROLS A
+/// FOREST" binding only the life half is strictly wrong; "…more life than YOU
+/// HAVE" is a different phrasing entirely.) The honest answer for both is to
+/// decline the clause, not to bind an under-restricted filter.
+///
+/// The clause ends when the remainder is exhausted, or when the next character
+/// opens a new clause (`,`) or ends the sentence (`.`). Non-consuming (`peek`),
+/// so callers use it purely as a guard. Object-axis sibling:
+/// `oracle_target::parse_attacking_status_clause_boundary`, which adds
+/// conjunction/conditional lookahead specific to that suffix chain.
+pub fn peek_clause_terminator(input: &str) -> OracleResult<'_, ()> {
+    peek(alt((
+        value((), tag(",")),
+        value((), tag(".")),
+        // `space0` makes this cover both "" and a trailing-whitespace tail.
+        value((), (space0, eof)),
+    )))
+    .parse(input)
+}
+
 // ── Word-boundary scanning primitives ─────────────────────────────────
 //
 // These are the shared building blocks for scanning Oracle text at word
@@ -988,6 +1147,85 @@ where
             .map_or("", |i| remaining[i + 1..].trim_start());
     }
     last
+}
+
+/// Recognize one period-terminated sentence.
+///
+/// The recognized slice INCLUDES the trailing '.' and EXCLUDES any leading
+/// whitespace (`multispace0` is consumed by `preceded`, outside `recognize`).
+///
+/// This is the single authority for period-sentence segmentation, and every
+/// consumer that decides "is THIS sentence the represented CR 608.2c rider?"
+/// delegates here, directly or through [`parse_period_sentences`] /
+/// [`split_sentence_units`], so they cannot develop divergent sentence models.
+/// Today's delegating consumers:
+///   * the replacement-line dispatcher (`oracle::parse_replacement_sentences`,
+///     which feeds `is_replacement_pattern` at its only sentence-scoped call
+///     site, `parse_replacement_sentence_sequence_ir`);
+///   * the classifier's rider head-scoper
+///     (`oracle_classifier::strip_entry_this_way_riders`), itself shared by the
+///     replacement, static and Priority 5-pre classification gates;
+///   * the entry-rider and cast-rider swallow residual builders
+///     (`swallow_check::{conditional_enter_counters_if_is_only_if_marker,
+///     enters_with_finality_this_way_is_only_if_marker}`).
+///
+/// A `split('.')`-based model would diverge in three ways that all matter to the
+/// classifier: it keeps the leading space, drops the terminal '.', and emits an
+/// empty tail element.
+///
+/// Scope of the claim, stated exactly so it stays checkable: older
+/// `swallow_check` strip/residual builders that predate this authority still
+/// carry their own `split('.')` model — today
+/// `enters_modified_if_is_only_if_marker`,
+/// `cast_this_way_alt_cost_is_only_if_marker`,
+/// `strip_represented_replacement_instead_sentences`,
+/// `strip_cr_implicit_if_phrases` and `strip_represented_tiered_pairs_from_line`
+/// (`rg "split\('\.'\)" crates/engine/src/parser/swallow_check.rs` enumerates
+/// them). They are the known remaining drift surface, NOT a claim of delegation;
+/// converting one is a behavior-affecting change (a newline directly after a
+/// period becomes a space, so a post-newline " if " starts being seen) and must
+/// be done deliberately, not incidentally.
+pub fn parse_period_sentence(input: &str) -> OracleResult<'_, &str> {
+    preceded(
+        multispace0,
+        recognize(terminated(take_until("."), tag("."))),
+    )
+    .parse(input)
+}
+
+/// Recognize a run of one or more period-terminated sentences.
+///
+/// Deliberately NOT `all_consuming` — a printed Oracle line need not end in a
+/// period. Callers that require full consumption wrap this themselves (see
+/// `oracle::parse_replacement_sentences`); callers that must also handle an
+/// unterminated tail read it from the returned remainder.
+pub fn parse_period_sentences(input: &str) -> OracleResult<'_, Vec<&str>> {
+    many1(parse_period_sentence).parse(input)
+}
+
+/// Segment a text unit into sentence units, INCLUDING a final unterminated
+/// fragment.
+///
+/// [`parse_period_sentences`] is deliberately partial (a printed Oracle line need
+/// not end in a period); this is the total wrapper every classifier and swallow
+/// detector wants, so none of them has to re-derive tail handling — the exact
+/// place a second, `split('.')`-shaped sentence model keeps growing back.
+///
+/// Units carry their terminal '.' and never carry leading whitespace (that is
+/// [`parse_period_sentence`]'s contract); the unterminated tail is trimmed on
+/// both ends. Text with no period at all yields exactly one unit, and
+/// whitespace-only text yields none.
+pub fn split_sentence_units(input: &str) -> Vec<&str> {
+    let (tail, mut units) = match parse_period_sentences(input) {
+        Ok((tail, units)) => (tail, units),
+        // No period at all: the whole input is one unterminated unit.
+        Err(_) => (input, Vec::new()),
+    };
+    let tail = tail.trim();
+    if !tail.is_empty() {
+        units.push(tail);
+    }
+    units
 }
 
 /// Check whether `phrase` appears at any word boundary in `text`.
@@ -1211,10 +1449,76 @@ pub fn split_once_on<'a>(
     Ok(("", (before, after)))
 }
 
+/// Parse a superlative adjective into its corresponding `AggregateFunction`.
+///
+/// CR 208.1 (a creature's power and toughness) + CR 202.3 (an object's mana
+/// value): greatest/highest select the maximum of the population, least/lowest/
+/// smallest the minimum.
+///
+/// Relocated here from `oracle_nom/condition.rs` so the condition layer and the
+/// target/filter layer share ONE atom rather than maintaining parallel tables.
+pub(crate) fn parse_superlative_adjective(input: &str) -> OracleResult<'_, AggregateFunction> {
+    alt((
+        value(AggregateFunction::Max, tag("greatest")),
+        value(AggregateFunction::Max, tag("highest")),
+        value(AggregateFunction::Min, tag("lowest")),
+        value(AggregateFunction::Min, tag("least")),
+        // Parity with the target-suffix table this consolidation absorbs. ZERO
+        // corpus attestation (0 hits over 35,679 MTGJSON faces), so it adds no
+        // card coverage — it exists so the consolidation loses no grammar that
+        // either predecessor table recognized.
+        value(AggregateFunction::Min, tag("smallest")),
+    ))
+    .parse(input)
+}
+
+/// Property keyword → [`ObjectProperty`]. Shared by the condition layer's
+/// comparison grammar and the target/filter layer's superlative head.
+pub(crate) fn parse_property_keyword(input: &str) -> OracleResult<'_, ObjectProperty> {
+    alt((
+        value(ObjectProperty::Power, tag("power")),
+        value(ObjectProperty::Toughness, tag("toughness")),
+        value(ObjectProperty::ManaValue, tag("mana value")),
+    ))
+    .parse(input)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use nom::bytes::complete::tag;
+
+    /// The total wrapper keeps `parse_period_sentence`'s contract (terminal '.'
+    /// kept, leading whitespace excluded) and adds exactly one thing: the
+    /// unterminated tail every classifier and swallow detector needs. Those three
+    /// properties are what make a `split('.')` model non-substitutable.
+    #[test]
+    fn split_sentence_units_keeps_periods_and_recovers_the_tail() {
+        assert_eq!(
+            split_sentence_units("return it to the battlefield. if a hero enters this way, it enters with a counter on it."),
+            vec![
+                "return it to the battlefield.",
+                "if a hero enters this way, it enters with a counter on it."
+            ]
+        );
+        // Unterminated tail is recovered and trimmed, not dropped.
+        assert_eq!(
+            split_sentence_units("first. second"),
+            vec!["first.", "second"]
+        );
+        // No period at all: exactly one unit.
+        assert_eq!(
+            split_sentence_units("no period here"),
+            vec!["no period here"]
+        );
+        // Whitespace-only input has no units at all.
+        assert!(split_sentence_units("   ").is_empty());
+        // A newline separator is leading whitespace of the next unit, not part of it.
+        assert_eq!(
+            split_sentence_units("flying.\nreach."),
+            vec!["flying.", "reach."]
+        );
+    }
 
     #[test]
     fn strip_double_quoted_spans_no_quote_borrows_unchanged() {
@@ -1299,6 +1603,16 @@ mod tests {
         let out = strip_double_quoted_spans("");
         assert_eq!(out, "");
         assert!(matches!(out, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn object_recipient_pronoun_requires_a_word_boundary() {
+        assert_eq!(
+            parse_object_recipient_pronoun("it, then").unwrap(),
+            (", then", "it")
+        );
+        assert!(parse_object_recipient_pronoun("item").is_err());
+        assert!(parse_object_recipient_pronoun("itself").is_err());
     }
 
     /// Extended number words (30, 40, ..., 100) for cards like Lux Artillery
@@ -1974,5 +2288,123 @@ mod tests {
             assert_eq!(kind, expected, "input: {input:?}");
         }
         assert!(parse_alt_cost_keyword_name_to_kind("unknown").is_err());
+    }
+
+    /// CR 205.2a: every card-type word the enum models maps to its `CoreType`.
+    #[test]
+    fn test_parse_core_type_covers_cr_205_2a_words() {
+        let cases = [
+            ("artifact", CoreType::Artifact),
+            ("battle", CoreType::Battle),
+            ("conspiracy", CoreType::Conspiracy),
+            ("creature", CoreType::Creature),
+            ("dungeon", CoreType::Dungeon),
+            ("enchantment", CoreType::Enchantment),
+            ("instant", CoreType::Instant),
+            ("kindred", CoreType::Kindred),
+            ("tribal", CoreType::Tribal),
+            ("land", CoreType::Land),
+            ("phenomenon", CoreType::Phenomenon),
+            ("plane", CoreType::Plane),
+            ("scheme", CoreType::Scheme),
+            ("sorcery", CoreType::Sorcery),
+        ];
+        for (input, expected) in cases {
+            let (rest, parsed) = parse_core_type(input).unwrap();
+            assert_eq!(parsed, expected, "input: {input:?}");
+            assert!(rest.is_empty(), "input {input:?} left remainder {rest:?}");
+        }
+        assert!(parse_core_type("goblin").is_err());
+    }
+
+    /// "planeswalker" shares a prefix with "plane"; `alt` commits to its first
+    /// success, so the longer word must win or the remainder is corrupted.
+    #[test]
+    fn test_parse_core_type_prefers_planeswalker_over_plane() {
+        let (rest, parsed) = parse_core_type("planeswalker").unwrap();
+        assert_eq!(parsed, CoreType::Planeswalker);
+        assert!(rest.is_empty(), "planeswalker left remainder {rest:?}");
+    }
+
+    /// CR 205.2a + CR 205.2b: a printed disjunction carries every leg.
+    #[test]
+    fn test_parse_core_type_disjunction_carries_every_leg() {
+        let cases: [(&str, Vec<CoreType>); 4] = [
+            ("sorcery", vec![CoreType::Sorcery]),
+            (
+                "instant or sorcery",
+                vec![CoreType::Instant, CoreType::Sorcery],
+            ),
+            (
+                "artifact, creature, or enchantment",
+                vec![
+                    CoreType::Artifact,
+                    CoreType::Creature,
+                    CoreType::Enchantment,
+                ],
+            ),
+            (
+                "artifact, creature, enchantment, or land",
+                vec![
+                    CoreType::Artifact,
+                    CoreType::Creature,
+                    CoreType::Enchantment,
+                    CoreType::Land,
+                ],
+            ),
+        ];
+        for (input, expected) in cases {
+            let (rest, parsed) = parse_core_type_disjunction(input).unwrap();
+            assert_eq!(parsed, expected, "input: {input:?}");
+            assert!(rest.is_empty(), "input {input:?} left remainder {rest:?}");
+        }
+    }
+
+    /// A bare comma is NOT an `or` boundary. Without a printed "or" the phrase is
+    /// an enumerated/conjunctive type stack, and lowering it to a set that
+    /// consumers evaluate with `any` would widen a both-types gate into an
+    /// either-type gate. Only the leading type is yielded, and the comma tail is
+    /// left unconsumed so a full-consumption caller rejects the phrase outright.
+    #[test]
+    fn test_parse_core_type_disjunction_rejects_bare_comma_list() {
+        for input in ["land, instant", "artifact, creature", "land, instant, land"] {
+            let (rest, parsed) = parse_core_type_disjunction(input).unwrap();
+            assert_eq!(
+                parsed.len(),
+                1,
+                "input {input:?} must not yield a multi-leg disjunction, got {parsed:?}"
+            );
+            assert!(
+                !rest.is_empty(),
+                "input {input:?} must leave its comma tail unconsumed"
+            );
+            // The guard that actually protects callers: full consumption fails,
+            // so such a phrase can never reach a multi-type `RevealedHasCardType`.
+            assert!(
+                all_consuming(parse_core_type_disjunction)
+                    .parse(input)
+                    .is_err(),
+                "input {input:?} must be rejected under all_consuming"
+            );
+        }
+    }
+
+    /// A printed "and" between card types is a conjunction naming one object
+    /// with BOTH types, not the `any`-match set this combinator builds — it must
+    /// not be swallowed as a disjunction separator.
+    #[test]
+    fn test_parse_core_type_disjunction_rejects_and_conjunction() {
+        let (rest, parsed) = parse_core_type_disjunction("artifact and creature").unwrap();
+        assert_eq!(parsed, vec![CoreType::Artifact]);
+        assert_eq!(rest, " and creature");
+    }
+
+    /// A trailing non-type clause must not be consumed: the comma-leg probe has
+    /// to rewind to the leading type rather than failing the whole parse.
+    #[test]
+    fn test_parse_core_type_disjunction_backtracks_over_trailing_clause() {
+        let (rest, parsed) = parse_core_type_disjunction("instant, then draw a card").unwrap();
+        assert_eq!(parsed, vec![CoreType::Instant]);
+        assert_eq!(rest, ", then draw a card");
     }
 }

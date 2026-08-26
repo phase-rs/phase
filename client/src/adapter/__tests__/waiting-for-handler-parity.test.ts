@@ -11,25 +11,23 @@ import { repoRoot, rustEnumVariants } from "./rustEnumVariants";
  * Engine `WaitingFor` variants that are never surfaced to a human and so
  * legitimately have no frontend UI handler.
  *
- * This set is intentionally EMPTY. An audit of `WaitingFor::acting_player()`
- * (crates/engine/src/types/game_state.rs) shows every variant routes its
- * authorization to a human player — single-pending mulligan variants resolve
- * to the one pending player, `VoteChoice` to `actor.resolve(player)`,
- * `AssistPayment` to `chosen`, and every remaining variant to `Some(*player)`.
- * The sole exception is `GameOver`, which returns `None` (terminal lifecycle
- * state) and is already present in `HANDLED_WAITING_FOR_TYPES`. No
- * internal-only, never-player-facing variant exists today.
+ * `ResolveAllReady` is deliberately inert: `WaitingFor::acting_player()` in
+ * `crates/engine/src/types/game_state.rs` returns `None` for it, and the
+ * consent submitter consumes the already-authorized run through
+ * `dispatchResolveAll`. `GameOver` likewise returns `None` but remains in
+ * `HANDLED_WAITING_FOR_TYPES` because it has a rendered terminal screen.
  *
  * If a future variant is genuinely never player-facing, add it here WITH a
  * cited `acting_player()` reference proving it returns `None`.
  */
 const INTERNAL_NEVER_PLAYER_FACING: ReadonlySet<WaitingFor["type"]> =
-  new Set<WaitingFor["type"]>([]);
+  new Set<WaitingFor["type"]>(["ResolveAllReady"]);
 
 describe("WaitingFor handler parity", () => {
   it("registers both interactive meld waiting states", () => {
     expect(HANDLED_WAITING_FOR_TYPES.has("MeldPairChoice")).toBe(true);
     expect(HANDLED_WAITING_FOR_TYPES.has("MeldAttackTargetChoice")).toBe(true);
+    expect(HANDLED_WAITING_FOR_TYPES.has("EntryAttackTargetChoice")).toBe(true);
   });
 
   it("every engine WaitingFor variant has a frontend UI handler", () => {

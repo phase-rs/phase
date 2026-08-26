@@ -20,6 +20,10 @@ import type {
   SeatPublicView,
 } from "../adapter/draft-adapter";
 import type { DeckCardCount, MatchConfig, MatchScore } from "../adapter/types";
+import type {
+  DraftIntergameCommand,
+  DraftIntergameCommandAck,
+} from "../services/intergameCommandLedger";
 
 // ── Protocol Version ───────────────────────────────────────────────────
 
@@ -31,8 +35,39 @@ import type { DeckCardCount, MatchConfig, MatchScore } from "../adapter/types";
  *   2 — add timer sync, match start, round advance messages (Phase 57)
  *   3 — add Bo3 sideboard and game-level result messages (Phase 58)
  *   4 — add deck-carrying tournament match launch descriptors
+ *   5 — bind match settlement to a durable pod-issued capability
+ *   6 — durable authorized Bo3 intergame command ledger
+ *   7 — forward authenticated match-host between-games observations
+ *   8 — add Sealed event kind and deckbuilding-first start flow
+ *   9 — add engine-owned limited-pool presentation groups
+ *  10 — add authenticated draft-effect pick actions
+ *  11 — instance-addressable pool entries (`instance_ids`) + engine rarity axis
+ *  12 — publish the engine-derived next pairing round on the player view
+ *  13 — first-contact `draft_join` and `draft_reconnect` messages carry an
+ *       exact draft protocol version; reconnect rejections became typed so
+ *       only an invalidated capability is cleared from durable guest recovery.
+ *  14 — deck submissions carry an immutable client-generated id and the
+ *       host returns an explicit durable receipt.  This makes a reloaded
+ *       participant's deck outbox idempotent instead of relying on a
+ *       best-effort state update.
  */
-export const DRAFT_PROTOCOL_VERSION = 4 as const;
+export const DRAFT_PROTOCOL_VERSION = 14 as const;
+
+/** Canonical multiset fingerprint: deck order is UI-only, card counts are not. */
+export function deckSubmissionFingerprint(mainDeck: readonly string[]): string {
+  const counts = new Map<string, number>();
+  for (const card of mainDeck) counts.set(card, (counts.get(card) ?? 0) + 1);
+  return JSON.stringify([...counts.entries()].sort(([left], [right]) => (
+    left < right ? -1 : left > right ? 1 : 0
+  )));
+}
+
+/** The host's reason for declining a first-contact draft connection. */
+export type DraftReconnectRejectionKind =
+  | "ProtocolMismatch"
+  | "Kicked"
+  | "UnknownToken"
+  | "NoReconnectWindow";
 
 /**
  * Typed reason for a draft pause, used over the wire and on the i18n key path.
@@ -65,6 +100,28 @@ export interface DraftMatchDeckPayload {
   ai_decks: DraftDeckPayload[];
 }
 
+/**
+ * Pod-issued capability for exactly one tournament match authority.  The
+ * random lease and nonce are intentionally opaque: a match result is valid
+ * only when it echoes the complete binding issued for its current round.
+ */
+export interface DraftMatchBinding {
+  podId: string;
+  matchId: string;
+  round: number;
+  sessionKey: string;
+  lease: string;
+  nonce: string;
+  revision: number;
+  matchAuthoritySeat: number;
+}
+
+export interface DraftMatchSettlement {
+  binding: DraftMatchBinding;
+  receiptId: string;
+  winnerSeat: number | null;
+}
+
 export type DraftMatchLaunch =
   | {
       type: "HumanHost";
@@ -77,6 +134,7 @@ export type DraftMatchLaunch =
       matchHostPeerId: string;
       deckPayload: DraftMatchDeckPayload;
       matchConfig: MatchConfig;
+      binding: DraftMatchBinding;
     }
   | {
       type: "HumanGuest";
@@ -89,6 +147,7 @@ export type DraftMatchLaunch =
       matchHostPeerId: string;
       localDeck: DraftDeckPayload;
       matchConfig: MatchConfig;
+      binding: DraftMatchBinding;
     }
   | {
       type: "Bot";
@@ -99,6 +158,7 @@ export type DraftMatchLaunch =
       botName: string;
       deckPayload: DraftMatchDeckPayload;
       matchConfig: MatchConfig;
+      binding: DraftMatchBinding;
     };
 
 // ── Message Types ──────────────────────────────────────────────────────
@@ -107,7 +167,7 @@ export type DraftMatchLaunch =
  * Discriminated union of all draft-specific P2P messages.
  *
  * Flow:
- *   Guest → Host: `draft_join`, `draft_reconnect`, `draft_pick`, `draft_submit_deck`,
+ *   Guest → Host: `draft_join`, `draft_reconnect`, `draft_pick`, `draft_pick_with_draft_effect`, `draft_submit_deck`,
  *                 `draft_request_advance`
  *   Host → Guest: `draft_welcome`, `draft_reconnect_ack`, `draft_reconnect_rejected`,
  *                 `draft_state_update`, `draft_pick_ack`, `draft_error`,
@@ -120,17 +180,26 @@ export type DraftP2PMessage =
   | {
       type: "draft_join";
       displayName: string;
+      draftProtocolVersion: typeof DRAFT_PROTOCOL_VERSION;
     }
   | {
       type: "draft_reconnect";
       draftToken: string;
+      draftProtocolVersion: typeof DRAFT_PROTOCOL_VERSION;
     }
   | {
       type: "draft_pick";
       cardInstanceId: string;
     }
   | {
+      type: "draft_pick_with_draft_effect";
+      effectCardInstanceId: string;
+      cardInstanceIds: string[];
+    }
+  | {
       type: "draft_submit_deck";
+      /** Stable across reconnect/reload retries of this exact payload. */
+      submissionId: string;
       mainDeck: string[];
     }
   // ── Host → Guest ───────────────────────────────────────────────────
@@ -155,10 +224,17 @@ export type DraftP2PMessage =
     }
   | {
       type: "draft_reconnect_rejected";
+      kind: DraftReconnectRejectionKind;
       reason: string;
     }
   | {
       type: "draft_state_update";
+      view: DraftPlayerView;
+    }
+  | {
+      /** The submission is in the host's durable receipt ledger. */
+      type: "draft_deck_submit_ack";
+      submissionId: string;
       view: DraftPlayerView;
     }
   | {
@@ -168,6 +244,10 @@ export type DraftP2PMessage =
   | {
       type: "draft_error";
       reason: string;
+      /** Present only when this rejects one durable deck-submission command. */
+      submissionId?: string;
+      /** A retryable failure retains the guest outbox; rejection frees it. */
+      submissionDisposition?: "Rejected" | "Retryable";
     }
   | {
       type: "draft_kicked";
@@ -187,6 +267,18 @@ export type DraftP2PMessage =
       type: "draft_match_result";
       matchId: string;
       winnerSeat: number | null;
+    }
+  | {
+      /** Match-authority seat → pod host: authenticated result settlement. */
+      type: "draft_match_settlement";
+      settlement: DraftMatchSettlement;
+    }
+  | {
+      /** Pod host → match-authority seat: durable exact-once receipt. */
+      type: "draft_match_settlement_ack";
+      matchId: string;
+      receiptId: string;
+      revision: number;
     }
   | {
       type: "draft_paused";
@@ -233,11 +325,36 @@ export type DraftP2PMessage =
       timerMs: number;
     }
   | {
+      /** Match host → pod host: authenticated observation of an engine between-games state. */
+      type: "draft_bo3_between_games";
+      matchId: string;
+      gameNumber: number;
+      score: MatchScore;
+      loserSeat: number | null;
+    }
+  | {
       /** Guest → Host: player submits their sideboarded deck for the next game. */
       type: "draft_bo3_sideboard_submit";
       matchId: string;
       mainDeck: string[];
       sideboard: DeckCardCount[];
+    }
+  | {
+      /** Participant → pod: a durable, still-held intergame command. */
+      type: "draft_bo3_intergame_command";
+      command: DraftIntergameCommand;
+    }
+  | {
+      /** Pod → participant: the exact held command is now executable. */
+      type: "draft_bo3_intergame_authorized";
+      command: DraftIntergameCommand;
+      acknowledgement: DraftIntergameCommandAck;
+    }
+  | {
+      /** Participant → pod: the authorized command reached its local sink. */
+      type: "draft_bo3_intergame_receipt";
+      acknowledgement: DraftIntergameCommandAck;
+      receiptId: string;
     }
   | {
       /** Host → Guest: prompt the loser to choose play or draw for the next game. */
@@ -283,16 +400,20 @@ const VALID_DRAFT_TYPES = new Set([
   "draft_join",
   "draft_reconnect",
   "draft_pick",
+  "draft_pick_with_draft_effect",
   "draft_submit_deck",
   "draft_welcome",
   "draft_reconnect_ack",
   "draft_reconnect_rejected",
   "draft_state_update",
+  "draft_deck_submit_ack",
   "draft_pick_ack",
   "draft_error",
   "draft_kicked",
   "draft_pairing",
   "draft_match_result",
+  "draft_match_settlement",
+  "draft_match_settlement_ack",
   "draft_paused",
   "draft_resumed",
   "draft_lobby_update",
@@ -301,13 +422,140 @@ const VALID_DRAFT_TYPES = new Set([
   "draft_request_advance",
   "draft_match_start",
   "draft_bo3_sideboard_prompt",
+  "draft_bo3_between_games",
   "draft_bo3_sideboard_submit",
+  "draft_bo3_intergame_command",
+  "draft_bo3_intergame_authorized",
+  "draft_bo3_intergame_receipt",
   "draft_bo3_play_draw_prompt",
   "draft_bo3_play_draw_choice",
   "draft_bo3_game_start",
   "draft_bo3_score_update",
   "draft_bo3_match_complete",
 ]);
+
+const MAX_DRAFT_CARD_INSTANCE_ID_LENGTH = 256;
+
+function requireDraftCardInstanceId(
+  value: unknown,
+  field: string,
+  context = "draft-effect pick",
+): string {
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || value.length > MAX_DRAFT_CARD_INSTANCE_ID_LENGTH
+  ) {
+    throw new Error(`Invalid ${context}: ${field} must be a bounded string`);
+  }
+  return value;
+}
+
+function validateDraftEffectPick(raw: Record<string, unknown>): DraftP2PMessage {
+  const effectCardInstanceId = requireDraftCardInstanceId(
+    raw.effectCardInstanceId,
+    "effectCardInstanceId",
+  );
+  if (!Array.isArray(raw.cardInstanceIds) || raw.cardInstanceIds.length !== 2) {
+    throw new Error("Invalid draft-effect pick: cardInstanceIds must contain exactly two cards");
+  }
+  const cardInstanceIds = raw.cardInstanceIds.map((cardId, index) =>
+    requireDraftCardInstanceId(cardId, `cardInstanceIds[${index}]`),
+  );
+  if (cardInstanceIds[0] === cardInstanceIds[1]) {
+    throw new Error("Invalid draft-effect pick: cardInstanceIds must be distinct");
+  }
+  return {
+    ...raw,
+    type: "draft_pick_with_draft_effect",
+    effectCardInstanceId,
+    cardInstanceIds,
+  } as DraftP2PMessage;
+}
+
+function normalizeArrayField<T>(record: Record<string, unknown>, field: string): T[] {
+  if (!(field in record)) return [];
+  const value = record[field];
+  if (!Array.isArray(value)) {
+    throw new Error(`Invalid draft message: ${field} must be an array`);
+  }
+  return value as T[];
+}
+
+function normalizeSeatPublicView(raw: unknown): SeatPublicView {
+  if (typeof raw !== "object" || raw === null) {
+    throw new Error("Invalid draft message: malformed public seat");
+  }
+  const seat = raw as Record<string, unknown>;
+  return {
+    ...seat,
+    face_up_draft_cards: normalizeArrayField(seat, "face_up_draft_cards"),
+  } as SeatPublicView;
+}
+
+/** v10 → v11: an old-shape entry carries no `instance_ids`. Upgrade it to the
+ * representative id — the one instance the old wire shape can address. A
+ * collapsed multi-copy entry from a v10 message therefore addresses only its
+ * representative; the other copies' ids were never serialized and cannot be
+ * reconstructed here (re-deriving them would make this normalizer a second
+ * classification authority). */
+function normalizePoolEntry(raw: unknown): Record<string, unknown> {
+  if (typeof raw !== "object" || raw === null) {
+    throw new Error("Invalid draft message: malformed pool entry");
+  }
+  const entry = raw as Record<string, unknown>;
+  if (Array.isArray(entry.instance_ids)) return entry;
+  const card = entry.card as { instance_id?: unknown } | undefined;
+  const id = typeof card?.instance_id === "string" ? [card.instance_id] : [];
+  return { ...entry, instance_ids: id };
+}
+
+function normalizePoolGroup(raw: unknown): Record<string, unknown> {
+  if (typeof raw !== "object" || raw === null) {
+    throw new Error("Invalid draft message: malformed pool group");
+  }
+  const group = raw as Record<string, unknown>;
+  return {
+    ...group,
+    cards: normalizeArrayField(group, "cards").map(normalizePoolEntry),
+  };
+}
+
+/** v10 → v11: fill the missing rarity axis (empty — the old host never
+ * classified it) and upgrade every group entry. */
+function normalizePoolGroups(raw: unknown): Record<string, unknown> | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object") {
+    throw new Error("Invalid draft message: malformed pool groups");
+  }
+  const groups = raw as Record<string, unknown>;
+  return {
+    ...groups,
+    color_groups: normalizeArrayField(groups, "color_groups").map(normalizePoolGroup),
+    type_groups: normalizeArrayField(groups, "type_groups").map(normalizePoolGroup),
+    cmc_groups: normalizeArrayField(groups, "cmc_groups").map(normalizePoolGroup),
+    rarity_groups: normalizeArrayField(groups, "rarity_groups").map(normalizePoolGroup),
+    type_filter_options: normalizeArrayField(groups, "type_filter_options"),
+    color_filter_options: normalizeArrayField(groups, "color_filter_options"),
+  };
+}
+
+function normalizeDraftPlayerView(raw: unknown): DraftPlayerView {
+  if (raw === undefined) {
+    return { draft_effects: [], seats: [] } as unknown as DraftPlayerView;
+  }
+  if (typeof raw !== "object" || raw === null) {
+    throw new Error("Invalid draft message: malformed player view");
+  }
+  const view = raw as Record<string, unknown>;
+  const pool_groups = normalizePoolGroups(view.pool_groups);
+  return {
+    ...view,
+    ...(pool_groups !== undefined ? { pool_groups } : {}),
+    draft_effects: normalizeArrayField(view, "draft_effects"),
+    seats: normalizeArrayField(view, "seats").map(normalizeSeatPublicView),
+  } as unknown as DraftPlayerView;
+}
 
 /** Validate a parsed object as a DraftP2PMessage. Throws on malformed data. */
 export function validateDraftMessage(raw: unknown): DraftP2PMessage {
@@ -317,6 +565,76 @@ export function validateDraftMessage(raw: unknown): DraftP2PMessage {
   const msg = raw as { type: string };
   if (!VALID_DRAFT_TYPES.has(msg.type)) {
     throw new Error(`Invalid draft message type: ${msg.type}`);
+  }
+  if (msg.type === "draft_pick_with_draft_effect") {
+    return validateDraftEffectPick(raw as Record<string, unknown>);
+  }
+  if (msg.type === "draft_submit_deck") {
+    const submission = raw as Record<string, unknown>;
+    requireDraftCardInstanceId(submission.submissionId, "submissionId", "deck submission");
+    if (!Array.isArray(submission.mainDeck)
+      || !submission.mainDeck.every((card) => typeof card === "string")) {
+      throw new Error("Invalid draft deck submission");
+    }
+    return submission as DraftP2PMessage;
+  }
+  if (msg.type === "draft_deck_submit_ack") {
+    const acknowledgement = raw as Record<string, unknown>;
+    requireDraftCardInstanceId(acknowledgement.submissionId, "submissionId", "deck acknowledgement");
+    if (typeof acknowledgement.view !== "object" || acknowledgement.view === null) {
+      throw new Error("Invalid draft deck acknowledgement");
+    }
+    return {
+      ...acknowledgement,
+      view: normalizeDraftPlayerView(acknowledgement.view),
+    } as DraftP2PMessage;
+  }
+  if (msg.type === "draft_error") {
+    const error = raw as Record<string, unknown>;
+    if (error.submissionDisposition !== undefined) {
+      if (error.submissionDisposition !== "Rejected" && error.submissionDisposition !== "Retryable") {
+        throw new Error("Invalid draft submission error disposition");
+      }
+      requireDraftCardInstanceId(error.submissionId, "submissionId", "deck submission error");
+    }
+    return error as DraftP2PMessage;
+  }
+  if (msg.type === "draft_reconnect_rejected") {
+    const rejection = raw as Record<string, unknown>;
+    // Pre-v13 frames carried only a string reason. They are never a capability-revocation
+    // signal: normalize it to the safe terminal outcome that preserves the
+    // guest's recovery records and asks the user to refresh.
+    if (rejection.kind === undefined && typeof rejection.reason === "string") {
+      return {
+        ...rejection,
+        type: "draft_reconnect_rejected",
+        kind: "ProtocolMismatch",
+      } as DraftP2PMessage;
+    }
+    if (
+      (rejection.kind !== "ProtocolMismatch"
+        && rejection.kind !== "Kicked"
+        && rejection.kind !== "UnknownToken"
+        && rejection.kind !== "NoReconnectWindow")
+      || typeof rejection.reason !== "string"
+    ) {
+      throw new Error("Invalid draft reconnect rejection");
+    }
+    return rejection as DraftP2PMessage;
+  }
+  const viewMessage = raw as { type: string; view?: unknown; seats?: unknown };
+  if (["draft_welcome", "draft_reconnect_ack", "draft_state_update", "draft_pick_ack"].includes(msg.type)) {
+    return {
+      ...viewMessage,
+      view: normalizeDraftPlayerView(viewMessage.view),
+    } as DraftP2PMessage;
+  }
+  if (msg.type === "draft_lobby_update") {
+    const lobby = raw as Record<string, unknown>;
+    return {
+      ...viewMessage,
+      seats: normalizeArrayField(lobby, "seats").map(normalizeSeatPublicView),
+    } as DraftP2PMessage;
   }
   return raw as DraftP2PMessage;
 }

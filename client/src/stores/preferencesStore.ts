@@ -89,7 +89,7 @@ export type CommandZoneDisplay = "compact" | "inline" | "auto";
  *  tri-state "auto" precedent. Lands and support each carry their own value. */
 export type ZoneCollapseMode = "auto" | "on" | "off";
 export type TapRotation = "mtga" | "classic";
-export type SpellPaymentMode = "auto" | "manual";
+export type SpellPaymentMode = "auto" | "autoExceptSacrificialMana" | "manual";
 /** Which screen edge the resolving-stack panel docks to (and collapses toward).
  *  User-chosen so a player can keep the stack off whichever side of the
  *  battlefield they care about — e.g. dock left to free the right action rail. */
@@ -99,7 +99,11 @@ export type StackDockSide = "left" | "right";
  *  a single thin row (small avatar + name + life) that trades the breakdown for
  *  vertical real-estate. Player-toggleable from the rail. */
 export type OpponentHudDensity = "comfortable" | "compact";
-export type MultiplayerBoardLayout = "focused" | "split";
+/** The persisted board-layout preference. `auto` adapts at the view-model
+ * boundary; the explicit values always honor the player's selection. */
+export type MultiplayerBoardLayout = "auto" | "focused" | "split";
+/** A layout after viewport/table-size resolution, suitable for board chrome. */
+export type ResolvedMultiplayerBoardLayout = Exclude<MultiplayerBoardLayout, "auto">;
 /** "auto-wubrg" picks a random battlefield matching the dominant mana color.
  *  "random" picks a random battlefield each game regardless of color.
  *  "none" disables the background image.
@@ -302,7 +306,8 @@ function buildDefaultPreferences(): PreferencesState {
     showCardPreviewFooter: true,
     stackDockSide: "right",
     opponentHudDensity: "comfortable",
-    multiplayerBoardLayout: "focused",
+    multiplayerBoardLayout: "auto",
+    multiplayerSplitLayoutNudgeDismissed: true,
     aiSeats: [defaultAiSeat()],
     cedhMode: false,
     aiArchetypeFilter: "Any",
@@ -395,6 +400,8 @@ interface PreferencesState {
   opponentHudDensity: OpponentHudDensity;
   /** Multiplayer board presentation: one focused opponent, or all opponent seats. */
   multiplayerBoardLayout: MultiplayerBoardLayout;
+  /** Whether the legacy-focused-layout split-view offer has been dismissed. */
+  multiplayerSplitLayoutNudgeDismissed: boolean;
   aiSeats: AiSeatPref[];
   /** Table-wide cEDH toggle. When true, every AI opponent plays at cEDH
    *  (bracket 5) regardless of its per-seat difficulty, and the AI/human deck
@@ -433,6 +440,7 @@ interface PreferencesActions {
   setStackDockSide: (side: StackDockSide) => void;
   setOpponentHudDensity: (density: OpponentHudDensity) => void;
   setMultiplayerBoardLayout: (layout: MultiplayerBoardLayout) => void;
+  setMultiplayerSplitLayoutNudgeDismissed: (dismissed: boolean) => void;
   setLogDefaultState: (state: LogDefaultState) => void;
   setBoardBackground: (bg: BoardBackground) => void;
   setCustomBackgroundUrl: (url: string) => void;
@@ -572,6 +580,8 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setStackDockSide: (side) => set({ stackDockSide: side }),
       setOpponentHudDensity: (density) => set({ opponentHudDensity: density }),
       setMultiplayerBoardLayout: (layout) => set({ multiplayerBoardLayout: layout }),
+      setMultiplayerSplitLayoutNudgeDismissed: (dismissed) =>
+        set({ multiplayerSplitLayoutNudgeDismissed: dismissed }),
       setLogDefaultState: (state) => set({ logDefaultState: state }),
       setBoardBackground: (bg) => set({ boardBackground: bg }),
       setCustomBackgroundUrl: (url) => set({ customBackgroundUrl: url.trim() }),
@@ -785,7 +795,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 28,
+      version: 30,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -825,8 +835,11 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       // v19 → v20: Add collapseLands/collapseSupport; legacy stores default to
       //          "auto" (the prior threshold-driven collapse) via the shallow
       //          merge, so existing users see no behavior change.
-      // v20 → v21: Add multiplayerBoardLayout; legacy stores default to
-      //          "focused", preserving the current focused-opponent layout.
+      // v20 → v21: Add multiplayerBoardLayout; legacy stores are pinned to
+      //          "focused", preserving the layout they were already playing on.
+      //          Load-bearing now that the fresh-store default is "auto": this
+      //          block is what keeps the new default a NEW-user default rather
+      //          than a layout swap under existing players.
       // v21 → v22: Add telemetryEnabled; legacy stores default to `true` (opt-out,
       //          identity-free crash & usage telemetry) via the shallow merge —
       //          no explicit migration block needed (see flexLayout precedent).
@@ -845,6 +858,9 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //             preserves the intended enabled-by-default behavior.
       // v27 → v28: Add showCardPreviewFooter; legacy stores default to true
       //          via the shallow merge, preserving the prior presentation.
+      // v28 → v29: Add the sacrificial-mana-aware automatic mode. Existing
+      //          values remain valid; malformed persisted values normalize to
+      //          the legacy automatic behavior below.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;
@@ -938,6 +954,17 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           migrated = { ...migrated, spellPaymentMode: "auto" };
         }
 
+        if (version < 29) {
+          const mode = (migrated as { spellPaymentMode?: unknown }).spellPaymentMode;
+          migrated = {
+            ...migrated,
+            spellPaymentMode:
+              mode === "auto" || mode === "autoExceptSacrificialMana" || mode === "manual"
+                ? mode
+                : "auto",
+          };
+        }
+
         if (version < 9) {
           const lng = (migrated as { language?: unknown }).language;
           migrated = {
@@ -981,6 +1008,9 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           };
         }
 
+        // Pin, not merge: the fresh-store default is "auto", so letting a
+        // pre-v21 store fall through to the shallow merge would move existing
+        // players off the layout they have been using.
         if (version < 21) {
           migrated = { ...migrated, multiplayerBoardLayout: "focused" };
         }
@@ -1008,6 +1038,19 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
               legacy === "Smart" || legacy === "SkipLowUseWindows"
                 ? "SkipLowUseWindows"
                 : "Standard",
+          };
+        }
+
+        // v29 → v30: Existing focused-layout profiles are the conservative
+        // nudge cohort. The old store cannot distinguish a deliberate focused
+        // setting from the pre-split default, so offer without changing the
+        // raw preference; existing split profiles and all fresh v30 profiles
+        // remain dismissed.
+        if (version < 30) {
+          migrated = {
+            ...migrated,
+            multiplayerSplitLayoutNudgeDismissed:
+              migrated.multiplayerBoardLayout !== "focused",
           };
         }
 

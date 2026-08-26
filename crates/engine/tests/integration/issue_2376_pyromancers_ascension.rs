@@ -100,7 +100,7 @@ fn push_instant_spell(state: &mut GameState, name: &str) -> ObjectId {
         controller: P0,
         kind: StackEntryKind::Spell {
             card_id: CardId(spell_id.0),
-            ability: Some(ability),
+            ability: Some(Box::new(ability)),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 0,
         },
@@ -113,6 +113,7 @@ fn spell_cast_event(spell_id: ObjectId) -> GameEvent {
         card_id: CardId(spell_id.0),
         controller: P0,
         object_id: spell_id,
+        cast_mana_value: None,
     }
 }
 

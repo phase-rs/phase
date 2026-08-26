@@ -683,9 +683,7 @@ pub(crate) fn put_component_into_zone(
         }
     }
 
-    let turn_zone_change_index =
-        crate::game::restrictions::record_zone_change(state, record.clone());
-    record.turn_zone_change_index = turn_zone_change_index;
+    crate::game::restrictions::record_zone_change(state, &mut record);
     events.push(GameEvent::ZoneChanged {
         object_id: component_id,
         from: None,

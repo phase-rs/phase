@@ -29,6 +29,7 @@
     "logDefault": "Journal par défaut",
     "spellPayment": "Paiement des sorts",
     "manualManaPayment": "Paiement manuel du mana pour les sorts",
+    "spellPaymentOptions": { "auto": "Automatique", "autoExceptSacrificialMana": "Demander avant de sacrifier", "manual": "Manuel" },
     "nativeEngine": "Utiliser le moteur natif pour les parties locales et le multijoueur hébergé",
     "nativeEngineDescription": "Utilisez le moteur téléchargé pour les parties locales contre l’IA et les parties que vous hébergez via un salon. Les invités se connectent toujours via la connexion pair à pair du salon. Utilise le moteur intégré lorsqu’il n’est pas disponible.",
     "boardBackground": "Arrière-plan du plateau",
@@ -69,6 +70,7 @@
     "showOpponentBoard": "Afficher le plateau de l'adversaire au survol du HUD",
     "multiplayerBoardLayout": "Disposition du plateau multijoueur",
     "multiplayerBoardLayoutOptions": {
+      "auto": "Automatique",
       "focused": "Adversaire ciblé",
       "split": "Table divisée"
     },
@@ -166,9 +168,10 @@
     "lastSynced": "Dernière synchronisation {{time}}",
     "never": "jamais",
     "conflictTitle": "Les deux copies ont des modifications",
-    "conflictBody": "Cet appareil et ton compte cloud contiennent tous les deux des données, et nous ne pouvons pas déterminer laquelle est à jour. Choisis la copie à conserver ; l'autre sera remplacée.",
+    "conflictBody": "Cet appareil et ton compte cloud contiennent tous les deux des données, et nous ne pouvons pas déterminer laquelle est à jour. Choisis une copie ou conserve les deux collections de decks.",
     "keepCloud": "Utiliser le cloud",
     "keepLocal": "Conserver cet appareil",
+    "keepBothDecks": "Conserver les deux collections de decks",
     "savesNote": "Les sauvegardes de parties et les caches restent sur cet appareil.",
     "diffDecks": "Decks : {{added}} ajoutés, {{modified}} modifiés, {{removed}} retirés",
     "diffPrefs": "Les préférences diffèrent",

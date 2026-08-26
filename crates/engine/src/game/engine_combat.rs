@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use crate::game::combat::{AttackTarget, DamageAssignment, DamageTarget, TrampleKind};
 use crate::types::ability::{CostPaidObjectSnapshot, TargetRef};
 use crate::types::events::GameEvent;
@@ -357,15 +355,7 @@ pub(super) fn finish_declare_attackers(
     }
 
     if attacks_empty {
-        state.phase = Phase::EndCombat;
-        events.push(GameEvent::PhaseChanged {
-            phase: Phase::EndCombat,
-        });
-        state.combat = None;
-        super::layers::prune_end_of_combat_effects(state);
-        super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
-        turns::advance_phase(state, events);
-        Ok(turns::auto_advance(state, events))
+        Ok(turns::advance_after_empty_attackers(state, events))
     } else {
         priority::reset_priority(state);
         Ok(WaitingFor::Priority {
@@ -389,7 +379,12 @@ pub(super) fn handle_declare_blockers(
         }
     }
 
-    // CR 509.1c + CR 509.1d: Enumerate UnlessPay block-tax static abilities before
+    // CR 509.1a-c: Validate the submitted whole declaration before quoting a
+    // cost. A tax prompt must never bless an illegal or incomplete proposal.
+    super::combat::validate_blockers_for_player(state, player, assignments)
+        .map_err(EngineError::InvalidAction)?;
+
+    // CR 509.1c + CR 509.1d: Enumerate UnlessPay block-tax static abilities after
     // finalizing the blocker declaration. Defending player pays or declines the
     // locked-in total; on decline, taxed blockers are dropped from the assignment
     // list (CR 509.1c: "that player is not required to pay that cost").
@@ -400,7 +395,7 @@ pub(super) fn handle_declare_blockers(
             total_cost,
             per_creature,
             pending: CombatTaxPending::Block {
-                assignments: assignments.to_vec(),
+                assignments: super::combat::snapshot_block_declaration(state, assignments),
             },
         });
     }
@@ -416,10 +411,9 @@ pub(super) fn handle_declare_blockers(
 /// - `accept = true`: deduct the locked-in total via the shared mana-payment pipeline,
 ///   then run the pending declaration with every creature intact (CR 508.1i–k:
 ///   mana-abilities chance → pay costs → become attacking).
-/// - `accept = false`: drop the taxed creatures from the declaration and submit the
-///   remaining untaxed subset. If no creatures remain on the attack side, the engine
-///   ends combat via `handle_empty_attackers` (CR 508.8); on the block side, submit
-///   the filtered assignments.
+/// - `accept = false`: discard the proposal and rebuild the appropriate declaration
+///   prompt. The player may make a different legal declaration with a newly computed
+///   tax quote.
 pub(super) fn handle_pay_combat_tax(
     state: &mut GameState,
     waiting_for: WaitingFor,
@@ -440,6 +434,23 @@ pub(super) fn handle_pay_combat_tax(
     };
 
     if accept {
+        let accepted_block_assignments = match &pending {
+            CombatTaxPending::Block { assignments } => {
+                let restored = super::combat::block_declaration_from_snapshot(state, assignments);
+                if restored.len() != assignments.len() {
+                    return Err(EngineError::InvalidAction(
+                        "Block declaration changed while its tax payment was pending".to_string(),
+                    ));
+                }
+                // CR 509.1d: the declaration and its cost were fixed before
+                // the mana-ability/payment window. Do not rescore, revalidate,
+                // or reprice this exact snapshot here; only reject a stale
+                // incarnation atomically before any payment is taken.
+                Some(restored)
+            }
+            CombatTaxPending::Attack { .. } => None,
+        };
+
         // CR 508.1i–j / CR 509.1e–f: pay the locked-in total through the shared
         // unless-cost mana path. Failures bubble up to the caller.
         super::casting::pay_unless_cost(state, player, &total_cost, events)?;
@@ -464,7 +475,9 @@ pub(super) fn handle_pay_combat_tax(
                     events,
                 );
             }
-            CombatTaxPending::Block { assignments } => {
+            CombatTaxPending::Block { assignments: _ } => {
+                let assignments = accepted_block_assignments
+                    .expect("block tax snapshots are restored and validated before payment");
                 return resume_declare_blockers(state, player, &assignments, events);
             }
         }
@@ -481,19 +494,20 @@ pub(super) fn handle_pay_combat_tax(
             let _ = context;
             Ok(super::combat::build_declare_attackers_waiting_for(state))
         }
-        // Block path is unchanged: filter the taxed blockers and submit the rest.
+        // CR 509.1d: declining discards the whole block proposal. Rebuild the
+        // live prompt; do not commit a stale filtered subset or reuse its price.
         CombatTaxPending::Block { assignments } => {
-            let taxed: HashSet<ObjectId> = per_creature.iter().map(|(id, _)| *id).collect();
-            let filtered: Vec<(ObjectId, ObjectId)> = assignments
-                .into_iter()
-                .filter(|(blocker, _)| !taxed.contains(blocker))
-                .collect();
             events.push(GameEvent::CombatTaxDeclined {
                 player,
-                dropped: taxed.iter().copied().collect(),
+                dropped: assignments
+                    .iter()
+                    .map(|(blocker, _)| blocker.object_id)
+                    .collect(),
             });
-            let _ = context; // suppresses unused in this branch; kept for symmetry
-            resume_declare_blockers(state, player, &filtered, events)
+            let _ = (context, per_creature);
+            Ok(super::combat::build_declare_blockers_waiting_for(
+                state, player,
+            ))
         }
     }
 }
@@ -735,9 +749,7 @@ pub(super) fn handle_assign_combat_damage(
 /// and every target must be an attacker the blocker is actually blocking. There
 /// is NO lethal requirement — a blocker divides its damage freely (CR 510.1d).
 ///
-/// The server bypasses its legality-enumeration gate for this state
-/// (`accepts_freeform_blocker_damage_assignment`), so this handler is the real
-/// validation boundary.
+/// This handler is the validation boundary for submitted assignments.
 pub(super) fn handle_assign_blocker_damage(
     state: &mut GameState,
     _player: PlayerId,
@@ -830,15 +842,7 @@ pub(super) fn handle_empty_attackers(
         return Ok(waiting_for);
     }
 
-    state.phase = Phase::EndCombat;
-    events.push(GameEvent::PhaseChanged {
-        phase: Phase::EndCombat,
-    });
-    state.combat = None;
-    super::layers::prune_end_of_combat_effects(state);
-    super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
-    turns::advance_phase(state, events);
-    Ok(turns::auto_advance(state, events))
+    Ok(turns::advance_after_empty_attackers(state, events))
 }
 
 pub(super) fn handle_empty_blockers(

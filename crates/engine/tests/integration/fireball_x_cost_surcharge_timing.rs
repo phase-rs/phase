@@ -283,21 +283,9 @@ fn fireball_unpayable_recomputed_cost_rolls_back_cleanly() {
         "reach guard: a pending cast must exist before the failing distribution"
     );
 
-    // CR 601.2d: the handler stashes the announced division into
-    // `pending.ability.distribution` BEFORE it clones `pending_for_restore`, so a
-    // correct clean restore carries exactly that stash (and nothing else changes).
-    // Build the expected post-failure pending from the pre-failure snapshot plus
-    // that one stash — a full structural check that both (i) proves the restore is
-    // not a subtly-wrong `Some(_)`, and (ii) proves the distribution stash is
-    // present (a restore that dropped it would fail here just as a bare
-    // pre-snapshot compare would).
+    // The action boundary is transactional: the failed choice must restore the
+    // exact pre-action pending cast, including the absence of a distribution.
     let distribution = even_distribution(total, &targets);
-    let mut expected_pending = pre_pending.clone();
-    expected_pending
-        .as_mut()
-        .expect("reach guard set above")
-        .ability
-        .distribution = Some(distribution.clone());
 
     let result = runner.act(GameAction::DistributeAmong { distribution });
 
@@ -306,13 +294,12 @@ fn fireball_unpayable_recomputed_cost_rolls_back_cleanly() {
         result.is_err(),
         "recomputed 6-mana cost must be unpayable from a 4-mana pool (CR 601.2h)"
     );
-    // (b) full structural restore of pending_cast — not just is_some(): catches a
-    // restore that pushes back a subtly-wrong PendingCast (e.g. a dropped
-    // `.ability.distribution` stash, or a cost/target field mutated in place).
+    // (b) Full structural restore of the pre-action pending cast — not just
+    // `is_some()`: catches a retry state leaked from the rejected action.
     assert_eq!(
         runner.state().pending_cast,
-        expected_pending,
-        "pending_cast must be restored exactly (pre-failure state + the CR 601.2d distribution stash)"
+        pre_pending,
+        "pending_cast must be restored exactly to its pre-action state"
     );
     // (c) waiting_for is unchanged — a clean, retryable/cancellable DistributeAmong
     // state, not a corrupted stale one.

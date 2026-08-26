@@ -3,19 +3,20 @@ import type React from "react";
 import { memo, useCallback, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { AbilityBlockKind, GameAction, GameObject, Keyword } from "../../adapter/types.ts";
+import type { AbilityBlockKind, GameObject, Keyword } from "../../adapter/types.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
-import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { ArtCropCard } from "../card/ArtCropCard.tsx";
 import { CardImage } from "../card/CardImage.tsx";
 import { PTBox } from "./PTBox.tsx";
 import { useCardHover } from "../../hooks/useCardHover.ts";
-import { useCanHover } from "../../hooks/useCanHover.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
+import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { renderDescription } from "../../utils/description.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { buildGrantedKeywordSources, buildPTSources } from "../../viewmodel/attribution.ts";
@@ -36,8 +37,7 @@ import {
 } from "../../viewmodel/gameStateView.ts";
 import {
   collectObjectActions,
-  isManaObjectAction,
-  resolveSingleActionDispatch,
+  resolveObjectActivation,
 } from "../../viewmodel/cardActionChoice.ts";
 
 interface PermanentCardProps {
@@ -75,9 +75,6 @@ const ATTACHMENT_STACK_STEP_PX = 22;
 const HOVERED_CARD_Z_INDEX = 60;
 const HOVERED_ATTACHMENT_HOST_Z_INDEX = 80;
 const EMPTY_KEYWORD_BADGES: Keyword[] = [];
-// CR 732.2a / CR 701.34a: stable empty ref for the per-object ∞-counter selector so a
-// permanent with no unbounded counter (the dominant case) never re-renders on identity churn.
-const EMPTY_UNBOUNDED_COUNTERS: string[] = [];
 
 /**
  * CR 602.5: Maps an engine `AbilityBlockKind` to its i18n reason key. Pure
@@ -112,10 +109,15 @@ function BlockedAbilitiesBadge({ obj }: { obj: GameObject }) {
       </span>
       <GameplayTooltip>
         {blocked.map((entry, i) => {
-          const abilityName =
+          // CR 201.5: `~` is the engine's self-reference token; bind it to the host
+          // object so the badge reads the card's name, not a raw tilde.
+          const rawAbilityName =
             entry.ability_index < obj.abilities.length
               ? obj.abilities[entry.ability_index]?.description
               : undefined;
+          const abilityName = rawAbilityName
+            ? renderDescription(rawAbilityName, obj.name)
+            : undefined;
           const names = (entry.sources ?? [])
             .map((id) => objects?.[String(id)]?.name)
             .filter((n): n is string => !!n);
@@ -129,6 +131,27 @@ function BlockedAbilitiesBadge({ obj }: { obj: GameObject }) {
             </span>
           );
         })}
+      </GameplayTooltip>
+    </span>
+  );
+}
+
+// CR 509.1b: compact display of the engine-authored temporary evasion marker.
+// The component only renders the derived map and resolves a supplied public
+// source object for its tooltip; it never determines whether blocking is legal.
+function CantBeBlockedBadge({ sourceName }: { sourceName?: string }) {
+  const { t } = useTranslation("game");
+  return (
+    <span className="group absolute bottom-1 left-1/2 z-30 inline-flex -translate-x-1/2">
+      <span
+        className="flex items-center rounded bg-cyan-600/90 px-1 py-0.5 text-[10px] font-bold text-cyan-50 shadow ring-1 ring-cyan-200/60"
+        aria-label={t("permanent.cantBeBlocked")}
+      >
+        <span aria-hidden>↯</span>
+      </span>
+      <GameplayTooltip>
+        {t("permanent.cantBeBlocked")}
+        {sourceName ? ` ${t("preview.fromSource", { source: sourceName })}` : ""}
       </GameplayTooltip>
     </span>
   );
@@ -189,6 +212,8 @@ function selectedBoardChoiceGlowClass(intent: BoardChoiceIntent): string {
       return "ring-2 ring-red-400 shadow-[0_0_14px_4px_rgba(248,113,113,0.55),inset_0_0_18px_5px_rgba(248,113,113,0.3)]";
     case "tap":
       return "ring-2 ring-emerald-400 shadow-[0_0_14px_4px_rgba(52,211,153,0.55),inset_0_0_18px_5px_rgba(52,211,153,0.3)]";
+    case "untap":
+      return "ring-2 ring-cyan-300 shadow-[0_0_14px_4px_rgba(103,232,249,0.55),inset_0_0_18px_5px_rgba(103,232,249,0.3)]";
     case "blight":
       return "ring-2 ring-purple-400 shadow-[0_0_14px_4px_rgba(192,132,252,0.55),inset_0_0_18px_5px_rgba(192,132,252,0.3)]";
     case "ringBearer":
@@ -209,6 +234,8 @@ function availableBoardChoiceGlowClass(intent: BoardChoiceIntent): string {
       return "ring-2 ring-red-300/80 shadow-[0_0_10px_3px_rgba(248,113,113,0.35)]";
     case "tap":
       return "ring-2 ring-emerald-300/70 shadow-[0_0_10px_3px_rgba(74,222,128,0.35)]";
+    case "untap":
+      return "ring-2 ring-cyan-300/80 shadow-[0_0_10px_3px_rgba(103,232,249,0.4)]";
     case "blight":
       return "ring-2 ring-purple-300/80 shadow-[0_0_10px_3px_rgba(216,180,254,0.35)]";
     case "ringBearer":
@@ -229,6 +256,8 @@ function boardChoiceBadgeClass(intent: BoardChoiceIntent): string {
       return "bg-red-500 text-white";
     case "tap":
       return "bg-emerald-500 text-emerald-950";
+    case "untap":
+      return "bg-cyan-400 text-cyan-950";
     case "blight":
       return "bg-purple-500 text-white";
     case "ringBearer":
@@ -252,14 +281,20 @@ export const PermanentCard = memo(function PermanentCard({
 }: PermanentCardProps) {
   const { t } = useTranslation("game");
   const isMobile = useIsMobile();
-  const canHover = useCanHover();
   const playerId = usePlayerId();
+  const canActForWaitingState = useCanActForWaitingState();
   const gameObjects = useGameStore((s) => s.gameState?.objects);
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
   const battlefieldKeywordBadges = useGameStore(
     (s) =>
       s.gameState?.derived?.battlefield_keyword_badges?.[String(objectId)]
       ?? EMPTY_KEYWORD_BADGES,
+  );
+  const temporaryCantBeBlockedSourceId = useGameStore(
+    (s) => s.gameState?.derived?.temporary_cant_be_blocked?.[String(objectId)],
+  );
+  const cantBeBlocked = useGameStore((s) =>
+    (s.gameState?.derived?.cant_be_blocked ?? []).includes(objectId),
   );
   // CR 613.2a + CR 707.2: whether a live copy effect supplies this permanent's
   // copiable values. Engine-classified because a copy of a permanent lives in a
@@ -268,14 +303,7 @@ export const PermanentCard = memo(function PermanentCard({
   const isCopiedPermanent = useGameStore((s) =>
     (s.gameState?.derived?.copied_permanents ?? []).includes(objectId),
   );
-  // CR 732.2a / CR 701.34a: the counter-type keys the engine marks as ∞ (unbounded
-  // counter-growth loop) for this object. Values match the object's `counters` map keys
-  // (e.g. "charge"); the pill renders ∞ instead of ×N for any type in this set.
-  const unboundedCounterTypes = useGameStore(
-    (s) =>
-      s.gameState?.derived?.unbounded_counters?.[String(objectId)]
-      ?? EMPTY_UNBOUNDED_COUNTERS,
-  );
+  const counterDisplay = useCounterDisplay(objectId);
   const isManaPaymentPreviewSource = useGameStore((s) =>
     s.manaPaymentPreviewSourceIds.includes(objectId),
   );
@@ -323,7 +351,6 @@ export const PermanentCard = memo(function PermanentCard({
     incomingAttackerCounts,
     manaTappableObjectIds,
     selectableManaCostCreatureIds,
-    selectableSacrificeObjectIds,
     undoableTapObjectIds,
     validAttackerIds,
     validTargetObjectIds,
@@ -374,8 +401,8 @@ export const PermanentCard = memo(function PermanentCard({
   const waitingFor = useGameStore((s) => s.waitingFor);
   const boardChoice = useMemo(() => {
     const choice = getBoardChoiceView(waitingFor, gameObjects);
-    return choice?.player === playerId ? choice : null;
-  }, [gameObjects, playerId, waitingFor]);
+    return canActForWaitingState ? choice : null;
+  }, [canActForWaitingState, gameObjects, waitingFor]);
   const equipTargetChoice = useGameStore((s) =>
     s.waitingFor?.type === "EquipTarget" && s.waitingFor.data.player === playerId
       ? s.waitingFor.data
@@ -408,21 +435,6 @@ export const PermanentCard = memo(function PermanentCard({
 
   const isUndoableTap = undoableTapObjectIds.has(objectId);
 
-  // On touch-only devices, skip mouse events — synthesized mouseenter from touch fires
-  // inspectObject every touch, opening the full-screen MobilePreviewOverlay
-  // and blocking combat interactions (blocker/attacker selection).
-  const handleMouseEnter = useCallback(() => {
-    if (isMobile || !canHover) return;
-    hoverObject(objectId); inspectObject(objectId);
-  }, [canHover, hoverObject, inspectObject, isMobile, objectId]);
-
-  const handleMouseLeave = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
-    if (isMobile || !canHover) return;
-    const nextObjectId = objectIdFromRelatedTarget(event.relatedTarget);
-    hoverObject(nextObjectId);
-    inspectObject(nextObjectId);
-  }, [canHover, hoverObject, inspectObject, isMobile]);
-
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
   const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(
     useCallback(() => {
@@ -431,15 +443,53 @@ export const PermanentCard = memo(function PermanentCard({
     }, [inspectObject, setPreviewSticky, objectId]),
   );
 
+  // Gate on the event's own `pointerType`, not on a `(any-hover: hover)` media
+  // query. The hazard is a touch-synthesized enter — it fires inspectObject on
+  // every touch, opening the full-screen MobilePreviewOverlay and blocking
+  // combat interactions (blocker/attacker selection) — and `pointerType`
+  // reports that per-event. Capability metadata lies on hosts that still
+  // deliver honest pointer events: a remote-desktop session advertises no
+  // hover-capable input while sending `pointerType: "mouse"`. See useCardHover
+  // for why this is a denylist on "touch" rather than a "mouse" allowlist.
+  const handlePointerEnter = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (isMobile || event.pointerType === "touch") return;
+    hoverObject(objectId); inspectObject(objectId);
+  }, [hoverObject, inspectObject, isMobile, objectId]);
+
+  // Composes with useLongPress's own `onPointerLeave` instead of replacing it —
+  // this handler wins the key collision in the spread below, so dropping the
+  // delegation would leave the long-press timer running after the pointer
+  // slides off the card.
+  const cancelLongPress = longPressHandlers.onPointerLeave;
+  const handlePointerLeave = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    cancelLongPress(event);
+    if (isMobile || event.pointerType === "touch") return;
+    const nextObjectId = objectIdFromRelatedTarget(event.relatedTarget);
+    hoverObject(nextObjectId);
+    inspectObject(nextObjectId);
+  }, [cancelLongPress, hoverObject, inspectObject, isMobile]);
+
   const controllerIdentity = useGameStore(
     (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
   );
+  const viewerInteraction = useGameStore((s) => s.viewerInteraction);
+  // The engine's own list of what is attached to this permanent, with a
+  // submission on each card it published a pick for. Same field `AttachmentFan`
+  // renders, so the badge's label can never promise a card the fan won't show.
+  const attachmentView = useMemo(
+    () => viewerInteraction?.attachmentViews[objectId] ?? null,
+    [objectId, viewerInteraction],
+  );
 
-  const openAttachmentFan = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
-    event.stopPropagation();
+  const showAttachmentFan = useCallback(() => {
     dismissPreview();
     setAttachmentFanHost(objectId);
   }, [dismissPreview, objectId, setAttachmentFanHost]);
+
+  const openAttachmentFan = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    showAttachmentFan();
+  }, [showAttachmentFan]);
 
   if (!obj) return null;
 
@@ -452,35 +502,24 @@ export const PermanentCard = memo(function PermanentCard({
     controllerIdentity || undefined,
   );
   const { name: imgName, faceIndex: imgFace, oracleId: imgOracleId, faceName: imgFaceName } = cardImageLookup(obj);
+  // The battlefield TILE of a face-down permanent always shows the cause
+  // marker / card back, exactly as the physical card lies in paper — for the
+  // controller too: the engine blanks a face-down permanent's live name and
+  // art (CR 708.2a), so there is no real face to draw here. The controller's
+  // peek lives in the hover preview, which resolves the stored face for
+  // `display_visible_to_viewer` objects (#7547).
+  const renderCardBack = obj.face_down === true;
   const hasSummoningSickness = obj.has_summoning_sickness ?? false;
 
   const ptDisplay = computePTDisplay(obj);
   const isSelected = selectedObjectId === objectId;
-  // CR 301.5 / CR 303.4: An attached Equipment/Aura is an independent permanent
-  // that can be a valid target, an activation source (re-equip), or a board
-  // choice in its own right. Collapsed behind its host it is unreachable —
-  // clicks land on the host instead, so a "put a counter on target nonland
-  // permanent you control" trigger lands on the creature rather than the chosen
-  // Equipment, and an attached Equipment can't be re-activated to move it. Open
-  // a host's attachments whenever any of them is actionable in the current
-  // waiting state so each is independently clickable without requiring a hover.
+  // The viewer-scoped engine projection owns both the attachment relationship
+  // and whether one is actionable for this interaction. The board must not
+  // rediscover either fact from the raw snapshot. "Actionable" is per card:
+  // the projection lists every attachment and marks the ones it published a
+  // pick for, so this asks whether ANY of them carries one.
   const attachmentsActionable =
-    obj.attachments.length > 0
-    && obj.attachments.some(
-      (id) =>
-        validTargetObjectIds.has(id)
-        || activatableObjectIds.has(id)
-        || manaTappableObjectIds.has(id)
-        || boardChoiceObjectIds.has(id)
-        || selectableSacrificeObjectIds.has(id)
-        || selectableManaCostCreatureIds.has(id)
-        // An attachment tapped for mana that can still be untapped (undo) is
-        // itself actionable — keep it expanded so the undo affordance stays
-        // clickable. `undoableTapObjectIds` is already gated upstream
-        // (GameBoard `undoLegal`) to the states whose engine match arms accept
-        // the untap, so no extra state check is needed here.
-        || undoableTapObjectIds.has(id),
-    );
+    attachmentView?.cards.some((card) => card.submission !== null) ?? false;
   const attachmentsLifted =
     obj.attachments.length > 0
     && (attachmentsLiftedByAncestor || isInHoveredAttachmentTree);
@@ -489,6 +528,12 @@ export const PermanentCard = memo(function PermanentCard({
   const attachmentPathIds = new Set([...attachmentRenderPath, objectId]);
   const renderableAttachmentIds = visibleAttachmentIds.filter((id) => !attachmentPathIds.has(id));
   const hiddenAttachmentCount = obj.attachments.length - visibleAttachmentIds.length;
+  // What the fan will actually put on screen, for the `⧉` control's label: the
+  // very list the fan renders. Counting `obj.attachments` here would be both a
+  // second derivation and a wrong number — the projection also carries the
+  // attachments OF the attachments, which the fan shows and the peek stack
+  // cannot.
+  const attachmentFanCardCount = attachmentView?.cards.length ?? 0;
   const exileLinksExpanded = exileLinks.length <= 1 || isHovered || isSelected || isInspected;
   const visibleExileLinks = exileLinksExpanded ? exileLinks : exileLinks.slice(0, 1);
   const hiddenExileCount = exileLinks.length - visibleExileLinks.length;
@@ -571,9 +616,14 @@ export const PermanentCard = memo(function PermanentCard({
   const isCopy =
     !obj.face_down
     && ((obj.is_token === true && obj.display_source !== "Token") || isCopiedPermanent);
+  const temporaryCantBeBlockedSourceName =
+    temporaryCantBeBlockedSourceId == null
+      ? undefined
+      : gameObjects?.[String(temporaryCantBeBlockedSourceId)]?.name;
 
-  // Filter out loyalty counters — shown separately as the loyalty badge
-  const counters = Object.entries(obj.counters).filter((entry): entry is [string, number] => entry[1] != null && entry[0] !== "loyalty");
+  // CR 306.5c: the engine already split the loyalty TOTAL out of the pill strip, so this site
+  // classifies nothing — it renders the rows it is given, in the order it is given them.
+  const counters = pillsOf(counterDisplay);
 
   // Tap rotation: 17deg in MTGA mode (or compact-height), 90deg in classic mode
   const tapBaseOpacity = (isCompactHeight || tapRotation === "mtga") && obj.tapped ? 0.85 : 1;
@@ -652,61 +702,77 @@ export const PermanentCard = memo(function PermanentCard({
     } else if (isValidTarget) {
       dispatchAction({ type: "ChooseTarget", data: { target: { Object: objectId } } });
     } else if (isActivatable) {
-      const o = useGameStore.getState().gameState?.objects[objectId];
-      // Read the engine-provided action list for this permanent — the mapping
-      // from GameAction variant to source permanent is owned by the engine
-      // (GameAction::source_object), not reconstructed here. Partitioning by
-      // effect type (Mana vs other) is a display concern: mana abilities route
-      // through the mana-tap UI; everything else routes through the ability
-      // choice modal or auto-dispatches.
-      const objectActions = collectObjectActions(
-        useGameStore.getState().legalActionsByObject,
+      // THE single authority for "what does a click on this bucket do"
+      // (viewmodel/cardActionChoice.ts). Owns the CR 605.1a mana/non-mana
+      // partition and the #506 confirmation gate; this site never re-derives it.
+      const store = useGameStore.getState();
+      const verdict = resolveObjectActivation(
+        collectObjectActions(store.legalActionsByObject, objectId),
+        store.gameState?.objects[objectId],
+        { activatableObjectIds, manaTappableObjectIds },
         objectId,
       );
-      const abilityActions: Array<Extract<GameAction, { type: "ActivateAbility" }>> = [];
-      const manaActions: GameAction[] = [];
-      const keywordActions: GameAction[] = [];
-      for (const action of objectActions) {
-        if (isManaObjectAction(action, o)) {
-          manaActions.push(action);
-        } else if (action.type === "ActivateAbility") {
-          abilityActions.push(action);
-        } else {
-          // CR 113.3b keyword activations (Crew/Station/Equip/Saddle) and any
-          // future per-permanent action are surfaced alongside activated
-          // abilities in the choice modal.
-          keywordActions.push(action);
-        }
-      }
-      const manaChoiceNeeded = manaActions.length > 1;
-
-      const nonManaActions: GameAction[] = [...abilityActions, ...keywordActions];
-      if (nonManaActions.length === 0 && canTapForMana) {
-        if (manaChoiceNeeded) {
-          setPendingAbilityChoice({ objectId, actions: manaActions });
-        } else if (manaActions.length === 1) {
-          dispatchAction(manaActions[0]);
-        }
-      } else {
-        // #506: lone-action auto-dispatch is gated through
-        // resolveSingleActionDispatch so a card-consuming ActivateAbility
-        // surfaces the choice modal instead of auto-firing. This merges the
-        // former `nonManaActions.length === 1 && !canTapForMana` branch — when
-        // canTapForMana is false, allActions === nonManaActions, so a lone
-        // non-mana action reproduces that branch exactly.
-        const allActions: GameAction[] = [...nonManaActions];
-        if (canTapForMana) {
-          allActions.push(...manaActions);
-        }
-        const auto = resolveSingleActionDispatch(allActions, o);
-        if (auto) {
-          dispatchAction(auto);
-        } else {
-          setPendingAbilityChoice({ objectId, actions: allActions });
+      switch (verdict.kind) {
+        case "dispatch":
+          dispatchAction(verdict.action);
+          return;
+        case "choose":
+          setPendingAbilityChoice({ objectId, actions: verdict.actions });
+          return;
+        case "none":
+          // Reachable only through the render→click staleness window: the ring
+          // was painted from a bucket this click no longer sees. Doing nothing
+          // is correct — and, as before, this branch does NOT fall through to
+          // select/inspect, because the chain already committed to it.
+          return;
+        default: {
+          // CLAUDE.md "exhaustive match without wildcard fallbacks": a new
+          // ObjectActivation variant is a compile error here, never a silent drop.
+          const _exhaustive: never = verdict;
+          return _exhaustive;
         }
       }
     } else if (isUndoableTap) {
       dispatchAction({ type: "UntapLandForMana", data: { object_id: objectId } });
+    } else if (attachmentsActionable) {
+      // The host is not a legal choice, but one of its attachments is. Open
+      // the full-card chooser rather than requiring a precise click on an
+      // overlapping attachment peek. The fan derives every selectable card
+      // from the engine's current legal-target set.
+      //
+      // Placed after the host's own target / activation / undo intent for the
+      // same reason the affordance-set branch below is placed last: the premise
+      // "the host is not a legal choice" is not something this branch can see.
+      // During Priority `HumanResponseModel::ExactCandidates` publishes a fan for
+      // EVERY activatable attachment, so the fan's existence says nothing about
+      // the host — and while this sat above `isActivatable`, a creature with its
+      // own ability was unreachable whenever an Aura or Equipment on it was also
+      // activatable. The fan cannot stand in for the host either: it excludes the
+      // host by design (`AttachmentFan.tsx`, `id !== host.id`), so the host's
+      // ability had no path at all. Reported for Slumbering Keepguard under
+      // Cooped Up, whose `{2}{W}` is legitimately activatable from the
+      // battlefield — no engine defect required.
+      showAttachmentFan();
+    } else if (
+      obj.attachments.some(
+        (attachId) => activatableObjectIds.has(attachId) || manaTappableObjectIds.has(attachId),
+      )
+    ) {
+      // The host offers nothing, but an attached Aura/Equipment/Fortification does
+      // (CR 301.5 / CR 303.4 — it is its own object). Its only in-place affordance is
+      // a ~22px peek deliberately rendered BELOW the host (ATTACHMENT_PEEK_PX, zIndex
+      // 5 - i), under the 44px touch-target floor. Fall through to the full-card
+      // chooser. Same affordance sets the host's own ring uses, so this can never
+      // offer what the board would not; placed LAST so it can never pre-empt the
+      // host's target / activation / undo intent.
+      //
+      // Selection is set UNCONDITIONALLY, deliberately unlike the plain-click
+      // fallback below which TOGGLES (`selectObject(isSelected ? null : objectId)`).
+      // This branch always opens the fan, so a toggle would strand the fan open over
+      // a host that just lost its white ring, its attachment expansion and its
+      // exile-link expansion.
+      selectObject(objectId);
+      showAttachmentFan();
     } else if (isMobile) {
       inspectObject(objectId);
       setPreviewSticky(true);
@@ -752,9 +818,9 @@ export const PermanentCard = memo(function PermanentCard({
       }}
       transition={{ type: "spring", stiffness: 300, damping: 20 }}
       onClick={handleClick}
-      onMouseEnter={handleMouseEnter}
-      onMouseLeave={handleMouseLeave}
       {...longPressHandlers}
+      onPointerEnter={handlePointerEnter}
+      onPointerLeave={handlePointerLeave}
     >
       {isManaPaymentPreviewSource && (
         <div
@@ -853,7 +919,7 @@ export const PermanentCard = memo(function PermanentCard({
       ) : (
         <>
           <div className="relative z-10 rounded-lg overflow-hidden">
-            <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} tokenImageRef={obj.token_image_ref} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={obj.face_down} />
+            <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} tokenImageRef={obj.token_image_ref} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={renderCardBack} faceDownCause={obj.face_down ? obj.face_down_cause : undefined} />
             {/* CR 702.26: phased-out tint overlay — sky-blue mix-blend-screen
                 matches the player-area treatment (PlayerArea.tsx 4d6cfb506). */}
             {isPhasedOut && (
@@ -886,6 +952,7 @@ export const PermanentCard = memo(function PermanentCard({
             <LoyaltyBadge
               amount={obj.loyalty}
               kind="total"
+              isUnbounded={isUnbounded(counterDisplay.loyalty)}
               size="battlefield"
               className="absolute bottom-0 right-0 z-30"
               style={{ position: "absolute" }}
@@ -931,17 +998,18 @@ export const PermanentCard = memo(function PermanentCard({
           {/* Top-right overlay stack: counter badges kept clear of the
               bottom-right P/T box. */}
           <div className="absolute right-0.5 top-0.5 z-[60] flex flex-col items-end gap-0.5">
-            {counters.map(([type, count]) => {
+            {counters.map((row) => {
+              const type = row.counter;
               const iconClass = counterIconClass(type);
               // CR 732.2a / CR 701.34a: an accepted counter-growth loop pumps this
               // counter unboundedly — render ∞ instead of the (still-finite) real count.
-              const isUnbounded = unboundedCounterTypes.includes(type);
+              const unbounded = isUnbounded(row);
               return (
                 <CounterTooltip
                   key={type}
                   type={type}
-                  count={count}
-                  isUnbounded={isUnbounded}
+                  count={row.count}
+                  isUnbounded={unbounded}
                 >
                   <span
                     className={`flex items-center gap-0.5 rounded px-1 text-[10px] font-bold text-white ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
@@ -953,7 +1021,7 @@ export const PermanentCard = memo(function PermanentCard({
                         label={formatCounterType(type)}
                       />
                     )}
-                    {formatCounterType(type)} {isUnbounded ? "∞" : `x${count}`}
+                    {formatCounterType(type)} {unbounded ? "∞" : `x${row.count}`}
                   </span>
                 </CounterTooltip>
               );
@@ -1051,6 +1119,10 @@ export const PermanentCard = memo(function PermanentCard({
         </div>
       )}
 
+      {cantBeBlocked && (
+        <CantBeBlockedBadge sourceName={temporaryCantBeBlockedSourceName} />
+      )}
+
       {/* Debug-panel preview highlight — fuchsia neon ring + animated pulse.
           Triggered when an ObjectSelect option in the debug panel is hovered
           (`debugHighlightedObjectId` state). Deliberately loud and visually
@@ -1064,7 +1136,42 @@ export const PermanentCard = memo(function PermanentCard({
         />
       )}
 
-      {obj.attachments.length === 1 && (
+      {/* The explicit route into the fan, and the ONLY one once the host's own
+          click belongs to the host (see the `attachmentsActionable` branch). The
+          `+N` control above covers the collapsed case and this covers the
+          expanded one — `attachmentsExpanded` is the same predicate `+N` is
+          derived from, so the two are complementary by construction and exactly
+          one entry point renders in every state.
+          Was `length === 1`, which left a host with SEVERAL expanded attachments
+          with no entry point at all — the state Priority produces, because
+          `attachmentsActionable` is itself one of the disjuncts that expands the
+          stack, and each attachment is then reachable only through a ~22px peek
+          rendered behind the host face.
+          Two states the gate deliberately leaves without a control, so the
+          "complementary" claim above is not unconditional: with no attachments
+          neither renders and none is needed, and on a NESTED host the button is
+          painted inside the peek wrapper's `zIndex: 5 - i` and so sits under the
+          parent's card face, focus ring included — the working fallback there is
+          that host's OWN peek, which opens a fan keyed to it, and since a fan
+          lists a host plus its direct children that is one hop per level and
+          therefore enough.
+          The size is left exactly as it was, deliberately. This control is now
+          the pointer route where the host's own click used to open the fan, and
+          at `clamp(20px, …, 28px)` it is under the 44px floor the branch above
+          cites — but 44px is not reachable here. Battlefield cards sit in an
+          8px gap (`BattlefieldRow.tsx:176`, `const gap = 8`) and `--card-base`
+          floors at 3.5rem, so at `-left-2.5` the badge already overhangs the
+          gap; growing outward to 44px would put ~26px over the NEIGHBOUR's face
+          at `z-40` and steal its clicks, and growing inward would swallow most
+          of a 56px card — either way re-creating, in miniature, the click theft
+          this branch exists to undo. A sub-44px target that takes only its own
+          corner is the better trade; the floor needs a layout-level answer
+          (badge sizes are shared with `+N` and the group-expand control at
+          `GroupedPermanent.tsx:279`, which caps its own overhang at 12px). */}
+      {/* Gated on the projected count, not on `obj.attachments`: the control
+          opens a fan built from the projection, so if the engine published no
+          membership there is nothing behind the badge to show. */}
+      {attachmentFanCardCount > 0 && attachmentsExpanded && (
         <button
           type="button"
           className="absolute -left-2.5 -top-2.5 z-40 flex items-center justify-center rounded-full bg-black/90 leading-none text-amber-200 ring-2 ring-amber-200/80 shadow-[0_2px_8px_rgba(0,0,0,0.65)] transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
@@ -1073,8 +1180,8 @@ export const PermanentCard = memo(function PermanentCard({
             height: attachmentBadgeSize,
             fontSize: attachmentBadgeFontSize,
           }}
-          title={t("permanent.viewAttachmentsFor", { count: 1, name: obj.name })}
-          aria-label={t("permanent.viewAttachmentsFor", { count: 1, name: obj.name })}
+          title={t("permanent.viewAttachmentsFor", { count: attachmentFanCardCount, name: obj.name })}
+          aria-label={t("permanent.viewAttachmentsFor", { count: attachmentFanCardCount, name: obj.name })}
           onPointerDown={(event) => event.stopPropagation()}
           onClick={openAttachmentFan}
         >
@@ -1165,7 +1272,7 @@ const ExileGhostCard = memo(function ExileGhostCard({ objectId, offset }: ExileG
       {useArtCrop ? (
         <ArtCropCard objectId={objectId} />
       ) : (
-        <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} tokenImageRef={obj.token_image_ref} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={obj.face_down} />
+        <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} tokenImageRef={obj.token_image_ref} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={obj.face_down} faceDownCause={obj.face_down_cause} />
       )}
     </div>
   );

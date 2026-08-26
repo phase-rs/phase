@@ -134,7 +134,7 @@ fn sefris_ventures_when_tortured_existence_discards_creature_cost() {
             WaitingFor::ChooseDungeon { options, .. } => {
                 runner
                     .act(GameAction::ChooseDungeon {
-                        dungeon: options[0],
+                        dungeon: options[0].dungeon,
                     })
                     .expect("choose first available dungeon");
             }

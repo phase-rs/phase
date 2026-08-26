@@ -614,6 +614,7 @@ mod tests {
             card_id: CardId(2000),
             controller: PlayerId(0),
             object_id: spell_id,
+            cast_mana_value: None,
         }];
 
         let ts_before = state.next_timestamp;

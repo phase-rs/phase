@@ -31,7 +31,7 @@
 use engine::game::quantity::resolve_quantity;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
-use engine::types::ability::{DamageChannel, Effect, QuantityExpr, QuantityRef};
+use engine::types::ability::{AggregateFunction, DamageChannel, Effect, QuantityExpr, QuantityRef};
 use engine::types::game_state::{CastOfferKind, WaitingFor};
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
@@ -152,6 +152,7 @@ fn total_channel_is_unchanged_and_still_reads_last_effect_amount() {
     let total = QuantityExpr::Ref {
         qty: QuantityRef::PreviousEffectAmount {
             channel: DamageChannel::Total,
+            aggregate: AggregateFunction::Sum,
         },
     };
     let resolved = resolve_quantity(runner.state(), &total, P0, source);

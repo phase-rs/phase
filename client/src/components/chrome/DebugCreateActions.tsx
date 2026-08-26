@@ -33,6 +33,8 @@ import {
   TextInput,
   useAccordion,
 } from "./debugFields";
+import { WebSocketAdapter } from "../../adapter/ws-adapter.ts";
+import { useGameStore } from "../../stores/gameStore";
 
 const ZONES: readonly Zone[] = [
   "Battlefield",
@@ -145,13 +147,16 @@ interface CardFaceShape {
 }
 
 function CreateCardForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [cardName, setCardName] = useState("");
   const [owner, setOwner] = useState<PlayerId>(0);
   const [zone, setZone] = useState<Zone>("Hand");
+  const [count, setCount] = useState(1);
   // Gate the ETB pipeline for battlefield spawns. Checked = run replacements +
   // ETB triggers + SBAs (engine default); unchecked = raw placement. Only sent
   // meaningfully for Battlefield — the engine ignores it for other zones.
   const [runEtb, setRunEtb] = useState(true);
+  const [nonlegendary, setNonlegendary] = useState(false);
   const [face, setFace] = useState<CardFaceShape | null>(null);
   const [targetKind, setTargetKind] = useState<"Object" | "Player">("Object");
   const [targetObjectId, setTargetObjectId] = useState<ObjectId | null>(null);
@@ -228,6 +233,9 @@ function CreateCardForm({ onDispatch }: Props) {
       <FieldRow label="Zone">
         <SelectInput value={zone} onChange={setZone} options={ZONES} />
       </FieldRow>
+      <FieldRow label={t("debugCreate.copies")}>
+        <NumberInput value={count} onChange={setCount} min={0} />
+      </FieldRow>
       {showAttachPicker && (
         <>
           {info.canTargetPlayer && info.canTargetObject && (
@@ -260,11 +268,26 @@ function CreateCardForm({ onDispatch }: Props) {
           <CheckboxInput checked={runEtb} onChange={setRunEtb} label="Run ETB effects" />
         </FieldRow>
       )}
+      <FieldRow label="">
+        <CheckboxInput
+          checked={nonlegendary}
+          onChange={setNonlegendary}
+          label="Make nonlegendary"
+        />
+      </FieldRow>
       <SubmitButton
         onClick={() =>
           onDispatch({
             type: "CreateCard",
-            data: { card_name: cardName, owner, zone, attach_to: buildAttachTo(), run_etb: runEtb },
+            data: {
+              card_name: cardName,
+              owner,
+              zone,
+              attach_to: buildAttachTo(),
+              run_etb: runEtb,
+              nonlegendary,
+              count,
+            },
           })
         }
         disabled={!cardName.trim() || !hasHost}
@@ -376,6 +399,7 @@ export function buildCatalogTokenDebugAction({
   counterType,
   counterCount,
   runEtb,
+  count,
   powerOverride,
   toughnessOverride,
 }: {
@@ -384,6 +408,7 @@ export function buildCatalogTokenDebugAction({
   counterType: CounterType;
   counterCount: number;
   runEtb: boolean;
+  count: number;
   powerOverride?: number | null;
   toughnessOverride?: number | null;
 }): CreateTokenDebugAction | null {
@@ -407,6 +432,7 @@ export function buildCatalogTokenDebugAction({
         },
       },
       run_etb: runEtb,
+      count,
     },
   };
 }
@@ -423,6 +449,7 @@ function CatalogTokenForm({ onDispatch }: Props) {
   const [counterType, setCounterType] = useState<CounterType>("P1P1");
   const [counterCount, setCounterCount] = useState(0);
   const [runEtb, setRunEtb] = useState(true);
+  const [count, setCount] = useState(1);
 
   useEffect(() => {
     listTokenPresets()
@@ -510,6 +537,7 @@ function CatalogTokenForm({ onDispatch }: Props) {
       counterType,
       counterCount,
       runEtb,
+      count,
       powerOverride,
       toughnessOverride,
     });
@@ -534,6 +562,9 @@ function CatalogTokenForm({ onDispatch }: Props) {
       </FieldRow>
       <FieldRow label="Search">
         <TextInput value={search} onChange={setSearch} placeholder="Token, source card, set" />
+      </FieldRow>
+      <FieldRow label={t("debugCreate.copies")}>
+        <NumberInput value={count} onChange={setCount} min={0} />
       </FieldRow>
       <div className="mb-2 max-h-64 overflow-y-auto rounded border border-gray-800 bg-gray-950/40 p-1">
         {orderedGroups.length === 0 && (
@@ -621,6 +652,7 @@ function CatalogTokenForm({ onDispatch }: Props) {
 }
 
 function CustomTokenForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [name, setName] = useState("");
   const [owner, setOwner] = useState<PlayerId>(0);
   const [power, setPower] = useState(1);
@@ -632,6 +664,7 @@ function CustomTokenForm({ onDispatch }: Props) {
   const [counterType, setCounterType] = useState<CounterType>("P1P1");
   const [counterCount, setCounterCount] = useState(0);
   const [runEtb, setRunEtb] = useState(true);
+  const [count, setCount] = useState(1);
 
   const toggleCoreType = (ct: CoreType) => {
     setCoreTypes((prev) =>
@@ -676,6 +709,7 @@ function CustomTokenForm({ onDispatch }: Props) {
           },
         },
         run_etb: runEtb,
+        count,
       },
     });
   };
@@ -695,6 +729,9 @@ function CustomTokenForm({ onDispatch }: Props) {
       </FieldRow>
       <FieldRow label="Owner">
         <PlayerSelect value={owner} onChange={setOwner} />
+      </FieldRow>
+      <FieldRow label={t("debugCreate.copies")}>
+        <NumberInput value={count} onChange={setCount} min={0} />
       </FieldRow>
       <FieldRow label="Power">
         <NumberInput value={power} onChange={setPower} />
@@ -759,8 +796,11 @@ function CustomTokenForm({ onDispatch }: Props) {
 // copiable-value snapshotting, legendary-rule SBAs, ETB triggers — so this
 // form is a thin source+owner picker over the `CreateTokenCopy` debug action.
 function CopyPermanentForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [sourceId, setSourceId] = useState<ObjectId | null>(null);
   const [owner, setOwner] = useState<PlayerId>(0);
+  const [nonlegendary, setNonlegendary] = useState(false);
+  const [count, setCount] = useState(1);
 
   return (
     <>
@@ -776,10 +816,23 @@ function CopyPermanentForm({ onDispatch }: Props) {
       <FieldRow label="Owner">
         <PlayerSelect value={owner} onChange={setOwner} />
       </FieldRow>
+      <FieldRow label={t("debugCreate.copies")}>
+        <NumberInput value={count} onChange={setCount} min={0} />
+      </FieldRow>
+      <FieldRow label="">
+        <CheckboxInput
+          checked={nonlegendary}
+          onChange={setNonlegendary}
+          label="Make nonlegendary"
+        />
+      </FieldRow>
       <SubmitButton
         onClick={() => {
           if (sourceId == null) return;
-          onDispatch({ type: "CreateTokenCopy", data: { source_id: sourceId, owner } });
+          onDispatch({
+            type: "CreateTokenCopy",
+            data: { source_id: sourceId, owner, nonlegendary, count },
+          });
         }}
         disabled={sourceId == null}
       >
@@ -791,11 +844,42 @@ function CopyPermanentForm({ onDispatch }: Props) {
 
 export function DebugCreateActions({ onDispatch }: Props) {
   const { expanded, toggle } = useAccordion();
+  // `Debug::CreateCard` resolves a card NAME, which needs a `CardDatabase` at
+  // action-handling time. Only the WASM layer holds one: `engine-wasm/src/lib.rs`
+  // intercepts the action before `apply()` ever sees it, and `apply()` itself
+  // returns `InvalidAction("Debug::CreateCard must be handled at the WASM
+  // layer")` (`engine/src/game/engine_debug.rs`). `server-core`'s
+  // `handle_action` takes no `&CardDatabase` and has no interception — the
+  // wire path's only CreateCard handling is a string-length guard that
+  // ADMITS the action — so on a server-backed transport this form dispatches
+  // an action that always fails, surfacing as a generic "CreateCard failed".
+  //
+  // Transport capability, not a mode policy — the same seam as the takeback
+  // gate, and for the same reason: the mode does not determine which engine
+  // is behind the adapter, and P2P runs the WASM engine at the host.
+  //
+  // The three sibling forms below are unaffected: `CreateToken` and
+  // `CreateTokenCopy` are handled in `engine_debug.rs` and carry their own
+  // characteristics rather than a name to look up, so they work everywhere.
+  const adapter = useGameStore((s) => s.adapter);
+  const canCreateCardByName = !(adapter instanceof WebSocketAdapter);
 
   return (
     <div>
       <AccordionItem label="Create Card" expanded={expanded === "card"} onToggle={() => toggle("card")}>
-        <CreateCardForm onDispatch={onDispatch} />
+        {canCreateCardByName ? (
+          <CreateCardForm onDispatch={onDispatch} />
+        ) : (
+          /* Named rather than hidden, matching the checkpoint-restore notice:
+             the capability is genuinely absent here and a silently missing
+             accordion body reads as a bug. Hardcoded rather than `t()`-wrapped
+             — `client/src/i18n/README.md` lists dev/debug strings under
+             "Never wrap with t()". */
+          <p className="px-2 py-3 text-xs text-gray-600">
+            Spawning a card by name needs the in-browser engine. The token forms
+            below work on this connection.
+          </p>
+        )}
       </AccordionItem>
       <AccordionItem label="Create Token (Catalog)" expanded={expanded === "token-catalog"} onToggle={() => toggle("token-catalog")}>
         <CatalogTokenForm onDispatch={onDispatch} />

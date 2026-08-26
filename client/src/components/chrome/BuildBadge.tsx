@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { getVersion } from "@tauri-apps/api/app";
 
 import { useCardDataMeta, formatRelativeDate } from "../../hooks/useCardDataMeta";
 import { checkForServiceWorkerUpdate } from "../../pwa/registerServiceWorker";
@@ -12,10 +11,9 @@ import {
   useUpdateError,
   getUpdateDebugReport,
 } from "../../pwa/updateStatus";
-import { isBundledTauriOrigin, isTauri } from "../../services/platform";
+import { isBundledTauriOrigin, isDesktopTauri, isTauri } from "../../services/platform";
 
 const UPDATED_LABEL_MS = 4500;
-const didAutoUpdate = consumeRecentAutoUpdateMarker();
 
 interface BuildBadgeProps {
   className?: string;
@@ -26,13 +24,14 @@ interface BuildBadgeProps {
 
 export function BuildBadge({ className = "", inline = false, compact = false }: BuildBadgeProps = {}) {
   const { t } = useTranslation();
-  const [showUpdatedLabel, setShowUpdatedLabel] = useState(didAutoUpdate);
+  const [showUpdatedLabel, setShowUpdatedLabel] = useState(() => consumeRecentAutoUpdateMarker());
   const [shellVersion, setShellVersion] = useState<string | null>(null);
   const cardDataMeta = useCardDataMeta();
   const updateStatus = useUpdateStatus();
   const downloadProgress = useDownloadProgress();
   const updateError = useUpdateError();
-  const isRemoteTauriShell = isTauri() && !isBundledTauriOrigin();
+  const isRemoteTauriShell = isDesktopTauri() && !isBundledTauriOrigin();
+  const canCheckForUpdates = !isTauri() || isDesktopTauri();
 
   useEffect(() => {
     if (!showUpdatedLabel) return;
@@ -58,7 +57,8 @@ export function BuildBadge({ className = "", inline = false, compact = false }: 
     if (!isRemoteTauriShell) return;
 
     let active = true;
-    void getVersion()
+    void import("@tauri-apps/api/app")
+      .then(({ getVersion }) => getVersion())
       .then((version) => {
         if (active) setShellVersion(version);
       })
@@ -70,11 +70,8 @@ export function BuildBadge({ className = "", inline = false, compact = false }: 
   }, [isRemoteTauriShell]);
 
   const handleCheckUpdate = () => {
-    if (isTauri()) {
-      checkForTauriUpdate();
-      if (isBundledTauriOrigin()) return;
-    }
-    checkForServiceWorkerUpdate();
+    if (isDesktopTauri()) checkForTauriUpdate();
+    if (!isTauri() || !isBundledTauriOrigin()) checkForServiceWorkerUpdate();
   };
 
   const handleShowUpdateDebug = () => {
@@ -100,28 +97,34 @@ export function BuildBadge({ className = "", inline = false, compact = false }: 
           date: cardDataMeta.generated_at,
           commit: cardDataMeta.commit_short,
         }),
-      t("buildBadge.checkForUpdates"),
+      canCheckForUpdates && t("buildBadge.checkForUpdates"),
     ]
       .filter(Boolean)
       .join("\n");
     return (
       <div className={`flex flex-col items-center gap-0.5 ${className}`.trim()}>
-        <button
-          type="button"
-          onClick={handleCheckUpdate}
-          aria-label={t("buildBadge.checkForUpdates")}
-          title={tooltip}
-          className="inline-flex items-center gap-1 font-mono text-[10.5px] leading-none text-slate-400 transition-colors hover:text-white"
-        >
-          <span>v{__APP_VERSION__}</span>
-          <span className={`text-[11px] text-slate-500 ${isActive ? "animate-spin" : ""}`} aria-hidden>
-            ↻
+        {canCheckForUpdates ? (
+          <button
+            type="button"
+            onClick={handleCheckUpdate}
+            aria-label={t("buildBadge.checkForUpdates")}
+            title={tooltip}
+            className="inline-flex items-center gap-1 font-mono text-[10.5px] leading-none text-slate-400 transition-colors hover:text-white"
+          >
+            <span>v{__APP_VERSION__}</span>
+            <span className={`text-[11px] text-slate-500 ${isActive ? "animate-spin" : ""}`} aria-hidden>
+              ↻
+            </span>
+          </button>
+        ) : (
+          <span title={tooltip} className="font-mono text-[10.5px] leading-none text-slate-400">
+            v{__APP_VERSION__}
           </span>
-        </button>
-        {statusLabel && (
+        )}
+        {canCheckForUpdates && statusLabel && (
           <span className="text-center text-[8px] leading-tight text-cyan-300">{statusLabel}</span>
         )}
-        {hasUpdateIssue && !statusLabel && (
+        {canCheckForUpdates && hasUpdateIssue && !statusLabel && (
           <button
             type="button"
             onClick={handleShowUpdateDebug}
@@ -131,7 +134,7 @@ export function BuildBadge({ className = "", inline = false, compact = false }: 
             {t("buildBadge.updateIssue")}
           </button>
         )}
-        {showUpdatedLabel && !statusLabel && (
+        {canCheckForUpdates && showUpdatedLabel && !statusLabel && (
           <span className="text-[8px] text-emerald-300">{t("buildBadge.updated")}</span>
         )}
       </div>
@@ -178,17 +181,19 @@ export function BuildBadge({ className = "", inline = false, compact = false }: 
           </>
         )}
 
-        <button
-          type="button"
-          onClick={handleCheckUpdate}
-          className={`ml-0.5 text-slate-500 hover:text-white transition-colors cursor-pointer ${isActive ? "animate-spin" : ""}`}
-          aria-label={t("buildBadge.checkForUpdates")}
-          title={t("buildBadge.checkForUpdates")}
-        >
-          ↻
-        </button>
+        {canCheckForUpdates && (
+          <button
+            type="button"
+            onClick={handleCheckUpdate}
+            className={`ml-0.5 text-slate-500 hover:text-white transition-colors cursor-pointer ${isActive ? "animate-spin" : ""}`}
+            aria-label={t("buildBadge.checkForUpdates")}
+            title={t("buildBadge.checkForUpdates")}
+          >
+            ↻
+          </button>
+        )}
 
-        {hasUpdateIssue && (
+        {canCheckForUpdates && hasUpdateIssue && (
           <button
             type="button"
             onClick={handleShowUpdateDebug}
@@ -200,11 +205,11 @@ export function BuildBadge({ className = "", inline = false, compact = false }: 
           </button>
         )}
 
-        {statusLabel && <span className="ml-0.5 text-cyan-300">{statusLabel}</span>}
-        {hasUpdateIssue && !statusLabel && <span className="ml-0.5 text-rose-300">{t("buildBadge.updateIssue")}</span>}
-        {showUpdatedLabel && !statusLabel && <span className="ml-0.5 text-emerald-300">{t("buildBadge.updated")}</span>}
+        {canCheckForUpdates && statusLabel && <span className="ml-0.5 text-cyan-300">{statusLabel}</span>}
+        {canCheckForUpdates && hasUpdateIssue && !statusLabel && <span className="ml-0.5 text-rose-300">{t("buildBadge.updateIssue")}</span>}
+        {canCheckForUpdates && showUpdatedLabel && !statusLabel && <span className="ml-0.5 text-emerald-300">{t("buildBadge.updated")}</span>}
 
-        {isDownloading && (
+        {canCheckForUpdates && isDownloading && (
           <div className="absolute bottom-0 left-0 right-0 h-[2px]">
             <div
               className="h-full bg-cyan-400 transition-[width] duration-200 ease-out"

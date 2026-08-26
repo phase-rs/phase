@@ -77,10 +77,38 @@ impl Layer {
 }
 
 impl ContinuousModification {
+    /// CR 613.2a: whether this modification is applied in layer 1 (copy).
+    ///
+    /// Panic-free companion to [`Self::layer`]. Six of `layer`'s arms are
+    /// `unreachable!()` — `AddCounterOnEnter`, `SetStartingLoyalty`,
+    /// `RemoveManaCost` and the three combat-assignment variants are consumed at
+    /// copy resolution and never layered — so asking an arbitrary modification
+    /// (one read out of a `CopyValues` payload, say) for its layer can abort.
+    /// This answers the only layer question sublayer 1a needs without that
+    /// hazard. The variant list is exactly `layer`'s `Layer::Copy` set;
+    /// `copy_grants_continuous_static_covers_every_copy_layer_variant`
+    /// (`game/layers.rs`) pins the two together.
+    pub fn is_copy_layer(&self) -> bool {
+        matches!(
+            self,
+            ContinuousModification::CopyValues { .. }
+                | ContinuousModification::CopyChosen
+                | ContinuousModification::SetName { .. }
+                | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+                | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+                | ContinuousModification::RetainAllOtherAbilitiesFromSource
+        )
+    }
+
     /// Returns the appropriate Layer for this modification type.
     pub fn layer(&self) -> Layer {
         match self {
             ContinuousModification::CopyValues { .. } => Layer::Copy,
+            // CR 707.2c + CR 613.1a: parse-time marker for Metamorphic
+            // Alteration's static copy. Layered at Copy purely for ordering; its
+            // `apply_continuous_effect` arm is an explicit no-op (the real copy
+            // is the latched `CopyValues` TCE installed at the choice answer).
+            ContinuousModification::CopyChosen => Layer::Copy,
             // CR 707.9b + CR 613.1a: Copy-effect name override applies in Layer 1
             // after CopyValues, per timestamp order within the layer.
             ContinuousModification::SetName { .. } => Layer::Copy,
@@ -111,9 +139,15 @@ impl ContinuousModification {
             | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
             | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
             | ContinuousModification::GrantTrigger { .. }
+            // CR 613.1f + CR 614.6: granting an object-hosted replacement is an
+            // ability-adding effect (Layer 6), beside GrantTrigger.
+            | ContinuousModification::GrantReplacement { .. }
             | ContinuousModification::RemoveAllAbilities
             | ContinuousModification::AddStaticMode { .. }
             | ContinuousModification::GrantStaticAbility { .. } => Layer::Ability,
+            // CR 613.1d (Layer 4): type-changing effects cover an object's card
+            // type, subtype, and/or supertype alike. Every arm below changes one
+            // of those three, so they all resolve in the same layer.
             ContinuousModification::AddType { .. }
             | ContinuousModification::RemoveType { .. }
             | ContinuousModification::SetCardTypes { .. }
@@ -127,7 +161,7 @@ impl ContinuousModification {
             | ContinuousModification::AddAllLandTypes
             | ContinuousModification::AddChosenSubtype { .. }
             | ContinuousModification::SetBasicLandType { .. }
-            | ContinuousModification::SetChosenBasicLandType => Layer::Type, // CR 613.1d + CR 205.4b
+            | ContinuousModification::SetChosenBasicLandType => Layer::Type,
             // CR 122.1 + CR 614.1c: One-shot counter placement at copy
             // resolution. Consumed by the BecomeCopy / CopyTokenOf resolvers
             // before any continuous-effect machinery is reached. Reaching this
@@ -265,11 +299,14 @@ mod tests {
                     power: None,
                     toughness: None,
                     loyalty: None,
+                    printed_loyalty: None,
                     keywords: vec![],
                     abilities: Default::default(),
                     trigger_definitions: Default::default(),
                     replacement_definitions: Default::default(),
                     static_definitions: Default::default(),
+                    room_halves: None,
+                    name_origin: Default::default(),
                 }),
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,

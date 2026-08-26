@@ -211,6 +211,7 @@ fn resolve_put_sticker(
             parent_targets: ability.targets.clone(),
             context: ability.context.clone(),
             replacement_applied: ability.replacement_applied.clone(),
+            continuation: None,
             players: vec![ability.controller],
         },
     );
@@ -277,6 +278,7 @@ fn prompt_count_choice(
             parent_targets: ability.targets.clone(),
             context: ability.context.clone(),
             replacement_applied: ability.replacement_applied.clone(),
+            continuation: None,
             players: vec![ability.controller],
         },
     );

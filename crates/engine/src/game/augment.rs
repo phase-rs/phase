@@ -388,11 +388,17 @@ fn merged_copiable_values(
         power: Some(host_values.power.unwrap_or(0) + augment.base_power.unwrap_or(0)),
         toughness: Some(host_values.toughness.unwrap_or(0) + augment.base_toughness.unwrap_or(0)),
         loyalty: host_values.loyalty,
+        // CR 707.2: The merged object's copiable loyalty characteristic follows its host.
+        printed_loyalty: host_values.printed_loyalty,
         keywords,
         abilities: Arc::new(abilities),
         trigger_definitions: Arc::new(triggers),
         replacement_definitions: Arc::new(replacements),
         static_definitions: Arc::new(statics),
+        // An augment merge is a Host+Augment creature, never a Room — augment
+        // is an Un-set mechanic with no Comprehensive Rules entry to cite.
+        room_halves: None,
+        name_origin: Default::default(),
     };
 
     Some((

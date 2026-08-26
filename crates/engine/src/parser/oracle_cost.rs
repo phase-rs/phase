@@ -14,11 +14,12 @@ use super::oracle_nom::primitives::{scan_contains, split_once_on};
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target::parse_cost_self_reference;
 use super::oracle_static::parse_dynamic_x_clause;
-use super::oracle_target::{parse_target, parse_type_phrase};
+use super::oracle_target::{distribute_shared_properties, parse_target, parse_type_phrase};
 use super::oracle_util::parse_count_expr;
 use super::oracle_util::parse_creature_subtype;
 use super::oracle_util::parse_mana_symbols;
 use super::oracle_util::parse_number;
+use super::oracle_util::CountWord;
 use super::oracle_util::TextPair;
 use crate::types::ability::{
     AbilityCost, AggregateFunction, BeholdCostAction, ChoiceType, Comparator, ControllerRef,
@@ -64,6 +65,48 @@ pub fn parse_oracle_cost(text: &str) -> AbilityCost {
     }
 
     parse_oracle_cost_no_or(text)
+}
+
+/// CR 601.2f: Parse a GERUND-form cost phrase ("discarding a card", "paying 1
+/// life", "sacrificing a creature") into an `AbilityCost` by de-conjugating the
+/// leading verb to its imperative stem and delegating to [`parse_oracle_cost`],
+/// the single cost authority.
+///
+/// The gerund construction appears in "cast … by <doing X> in addition to
+/// (paying) its other costs" ADDITIONAL-cost riders (Festival of Embers pay-life;
+/// Dragon Man, Reformed Robot discard; Demilich / Helbrute exile-from-graveyard)
+/// and in the self-flash rider in `oracle_casting.rs`. English gerund→imperative
+/// is irregular (pay→paying, discard→discarding, sacrifice→sacrificing[−e],
+/// remove→removing[−e], exile→exiling[−e], tap→tapping[+p]), so it cannot be a
+/// generic `strip_suffix("ing")`; each verb is one composed `value(stem,
+/// tag(gerund))` arm. Extend by a single arm per cost verb, only once
+/// `parse_oracle_cost` models its imperative.
+///
+/// Returns `AbilityCost::Unimplemented { .. }` when the leading verb is not a
+/// modeled cost gerund OR the delegated imperative is itself unmodeled, so
+/// callers can decline (or drop) rather than silently attach a wrong/absent cost.
+pub(crate) fn parse_gerund_cost(phrase: &str) -> AbilityCost {
+    type E<'a> = super::oracle_nom::error::OracleError<'a>;
+    let original = phrase.trim();
+    let lower = original.to_lowercase();
+    // Compose one `value(stem, tag(gerund))` arm per cost verb — each maps a
+    // gerund onto the imperative stem `parse_oracle_cost` already recognizes.
+    let Some((stem, rest)) = nom_on_lower(original, &lower, |input| {
+        alt((
+            value("pay", tag::<_, _, E<'_>>("paying ")),
+            value("discard", tag("discarding ")),
+            value("sacrifice", tag("sacrificing ")),
+            value("tap", tag("tapping ")),
+            value("remove", tag("removing ")),
+            value("exile", tag("exiling ")),
+        ))
+        .parse(input)
+    }) else {
+        return AbilityCost::Unimplemented {
+            description: original.to_string(),
+        };
+    };
+    parse_oracle_cost(&format!("{stem} {rest}"))
 }
 
 /// True when a top-level ` or ` branch parsed to a concrete activation cost
@@ -798,7 +841,10 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
             };
         }
-        if nom_on_lower(rest, &rest_lower, |i| value((), tag("a card")).parse(i)).is_some() {
+        if all_consuming(tag::<_, _, nom::error::Error<&str>>("a card"))
+            .parse(rest_lower.as_str())
+            .is_ok()
+        {
             return AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
@@ -986,19 +1032,32 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         value((), alt((tag("tap "), tag("tapped ")))).parse(i)
     }) {
         let tap_lower = tap_rest.to_lowercase();
-        let (count, filter_text) = if let Some(((), r)) = nom_on_lower(tap_rest, &tap_lower, |i| {
-            value(
-                (),
-                alt((tag("another untapped "), tag("an untapped "), tag("an "))),
-            )
+        // The leading quantifier reports a typed `CountWord` alongside the
+        // count. "Another"/"other" is not merely a quantity of one: it is the
+        // source-exclusion qualifier, and this branch CONSUMES it, so the
+        // remainder handed to `parse_target` no longer carries it. Without the
+        // signal the exclusion is lost and the source pays its own cost
+        // (Spire Mechcycle, #7522). Same failure and same typed remedy as the
+        // sacrifice imperative's `parse_count_expr_with_exclusion` (#4513).
+        let (count, filter_text, count_word) = if let Some((word, r)) =
+            nom_on_lower(tap_rest, &tap_lower, |i| {
+                alt((
+                    value(CountWord::SourceExclusion, tag("another untapped ")),
+                    value(CountWord::Plain, tag("an untapped ")),
+                    value(CountWord::Plain, tag("an ")),
+                ))
+                .parse(i)
+            }) {
+            (1u32, r.to_lowercase(), word)
+        } else if let Some((word, r)) = nom_on_lower(tap_rest, &tap_lower, |i| {
+            // "X untapped [type]" — variable count, use u32::MAX as sentinel.
+            alt((
+                value(CountWord::Plain, tag("x untapped ")),
+                value(CountWord::SourceExclusion, tag("x other untapped ")),
+            ))
             .parse(i)
         }) {
-            (1u32, r.to_lowercase())
-        } else if let Some(((), r)) = nom_on_lower(tap_rest, &tap_lower, |i| {
-            // "X untapped [type]" — variable count, use u32::MAX as sentinel.
-            value((), alt((tag("x untapped "), tag("x other untapped ")))).parse(i)
-        }) {
-            (u32::MAX, r.to_lowercase())
+            (u32::MAX, r.to_lowercase(), word)
         } else if let Some((n, r)) = super::oracle_util::parse_number(&tap_lower) {
             let r = nom_on_lower(
                 &tap_rest[tap_lower.len() - r.len()..],
@@ -1007,15 +1066,26 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             )
             .map(|((), rest)| rest.to_lowercase())
             .unwrap_or_else(|| r.trim_start().to_string());
-            (n, r)
+            // The numeric branch does NOT consume "other" ("tap two other
+            // untapped artifacts you control"): the `untapped ` tag fails on
+            // the "other " lead, so the phrase reaches `parse_target` intact
+            // and `parse_type_phrase` supplies `FilterProp::Another` itself.
+            // Nothing to re-apply here.
+            (n, r, CountWord::Plain)
         } else {
-            (0, String::new())
+            (0, String::new(), CountWord::Plain)
         };
 
         if count > 0 {
             let target_text = format!("target {filter_text}");
             let (filter, remainder) = parse_target(&target_text);
             if remainder.trim().is_empty() {
+                let filter = match count_word {
+                    CountWord::SourceExclusion => {
+                        distribute_shared_properties(filter, &[FilterProp::Another])
+                    }
+                    CountWord::Plain => filter,
+                };
                 return AbilityCost::TapCreatures {
                     requirement: TapCreaturesRequirement::count(count),
                     filter,
@@ -1490,21 +1560,7 @@ fn ensure_another_sacrifice_filter(filter: TargetFilter, phrase: &str) -> Target
     if !has_another_prefix {
         return filter;
     }
-    match filter {
-        TargetFilter::Typed(mut typed) => {
-            if !typed.properties.contains(&FilterProp::Another) {
-                typed.properties.push(FilterProp::Another);
-            }
-            TargetFilter::Typed(typed)
-        }
-        TargetFilter::Or { filters } => TargetFilter::Or {
-            filters: filters
-                .into_iter()
-                .map(|f| ensure_another_sacrifice_filter(f, phrase))
-                .collect(),
-        },
-        other => other,
-    }
+    distribute_shared_properties(filter, &[FilterProp::Another])
 }
 
 /// CR 117.1 + CR 601.2b + CR 107.4a/107.4e/202.1: Parse Baron Helmut Zemo's
@@ -1795,6 +1851,19 @@ fn extract_filter_zone(filter: &TargetFilter) -> Option<Zone> {
                 None
             }
         }),
+        // Recurse into composite filters so a multi-type source-zone cost carries
+        // the same top-level `zone` a single-type one would. "Exile four instant
+        // and/or sorcery cards from your graveyard" (Demilich) lowers to an
+        // `Or([Typed{Instant, InZone(Graveyard)}, Typed{Sorcery, InZone(Graveyard)}])`
+        // filter; without this, `zone` stayed `None` and the payment layer's
+        // no-zone default (`exile_cost_effective_zone`) looked in the hand instead
+        // of the graveyard, making the cost unpayable and the card uncastable.
+        // Every leg of these disjunctions names the same zone, so the first leg
+        // that yields a zone is authoritative.
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().find_map(extract_filter_zone)
+        }
+        TargetFilter::Not { filter } => extract_filter_zone(filter),
         _ => None,
     }
 }
@@ -1890,6 +1959,86 @@ mod tests {
     #[test]
     fn cost_tap() {
         assert_eq!(parse_oracle_cost("{T}"), AbilityCost::Tap);
+    }
+
+    /// CR 601.2f: `parse_gerund_cost` de-conjugates the gerund verb and delegates
+    /// to the single cost authority, so a gerund cost phrase lowers identically to
+    /// its imperative form across the whole verb class — and an unmodeled verb
+    /// stays honest `Unimplemented`. Tests the building block, not one card.
+    #[test]
+    fn gerund_cost_matches_imperative_authority() {
+        for (gerund, imperative) in [
+            ("discarding a card", "discard a card"),
+            ("paying 1 life", "pay 1 life"),
+            ("sacrificing a creature", "sacrifice a creature"),
+            ("sacrificing a Vehicle", "sacrifice a Vehicle"),
+            // CR 701.13a: the exile arm — Demilich / Helbrute cast-from-graveyard
+            // riders exile cards as an additional cost.
+            (
+                "exiling four instant and/or sorcery cards from your graveyard",
+                "exile four instant and/or sorcery cards from your graveyard",
+            ),
+            (
+                "exiling another creature card from your graveyard",
+                "exile another creature card from your graveyard",
+            ),
+        ] {
+            assert_eq!(
+                parse_gerund_cost(gerund),
+                parse_oracle_cost(imperative),
+                "gerund {gerund:?} must lower like imperative {imperative:?}"
+            );
+        }
+        assert!(matches!(
+            parse_gerund_cost("sacrificing a Vehicle"),
+            AbilityCost::Sacrifice(SacrificeCost {
+                target: TargetFilter::Typed(TypedFilter { type_filters, .. }),
+                ..
+            }) if type_filters == [TypeFilter::Subtype("Vehicle".to_string())]
+        ));
+        // The required-for-this-fix arm is concretely a discard-a-card cost.
+        assert!(
+            matches!(
+                parse_gerund_cost("discarding a card"),
+                AbilityCost::Discard { .. }
+            ),
+            "discarding a card must lower to a Discard cost"
+        );
+        // CR 701.13a: the exile arm lowers to a real graveyard Exile cost — the
+        // regression that turned Demilich/Helbrute from castable-with-dropped-cost
+        // into declined-and-uncastable is fixed at its root (the missing gerund).
+        assert!(
+            matches!(
+                parse_gerund_cost("exiling four instant and/or sorcery cards from your graveyard"),
+                AbilityCost::Exile {
+                    count: 4,
+                    zone: Some(Zone::Graveyard),
+                    filter: Some(_),
+                }
+            ),
+            "Demilich's exile-four rider must lower to an Exile-from-graveyard cost, got {:?}",
+            parse_gerund_cost("exiling four instant and/or sorcery cards from your graveyard")
+        );
+        assert!(
+            matches!(
+                parse_gerund_cost("exiling another creature card from your graveyard"),
+                AbilityCost::Exile {
+                    count: 1,
+                    zone: Some(Zone::Graveyard),
+                    filter: Some(_),
+                }
+            ),
+            "Helbrute's exile-another-creature rider must lower to an Exile-from-graveyard cost, got {:?}",
+            parse_gerund_cost("exiling another creature card from your graveyard")
+        );
+        // A verb the cost authority does not model stays honest.
+        assert!(
+            matches!(
+                parse_gerund_cost("frobnicating a card"),
+                AbilityCost::Unimplemented { .. }
+            ),
+            "an unmodeled gerund verb must lower to Unimplemented"
+        );
     }
 
     #[test]
@@ -2206,6 +2355,102 @@ mod tests {
                 }),
             }
         );
+    }
+
+    /// CR 602.2b + CR 601.2h + CR 118.3: the source-exclusion "another" in a
+    /// `TapCreatures` activation cost must survive into the cost filter, so the
+    /// ability's source cannot pay an activation cost that requires another
+    /// untapped creature (Spire Mechcycle, #7522).
+    ///
+    /// Table-driven over the printed shapes the tap-cost grammar distinguishes,
+    /// with both counter-directions: an ordinary article and a plain numeric
+    /// count must NOT gain the exclusion (a standalone tap cost with no
+    /// "another" does include the source).
+    ///
+    /// The "two other untapped" row was already green before this fix: the
+    /// numeric branch never consumes "other", so the phrase reaches
+    /// `parse_type_phrase` intact and it supplies the property. That row pins
+    /// the path; it is not evidence for the fix.
+    #[test]
+    fn tap_cost_another_carries_the_source_exclusion() {
+        let cases: &[(&str, bool)] = &[
+            ("Tap another untapped Merfolk you control", true),
+            (
+                "Tap another untapped creature you control with flying",
+                true,
+            ),
+            ("Tap two other untapped artifacts you control", true),
+            ("Tap an untapped Merfolk you control", false),
+            ("Tap three untapped Merfolk you control", false),
+        ];
+        for (text, excluded) in cases {
+            let AbilityCost::TapCreatures { filter, .. } = parse_oracle_cost(text) else {
+                panic!("{text:?} must parse to a TapCreatures cost");
+            };
+            let TargetFilter::Typed(typed) = &filter else {
+                panic!("{text:?} must parse to a typed filter, got {filter:?}");
+            };
+            assert_eq!(
+                typed.properties.contains(&FilterProp::Another),
+                *excluded,
+                "{text:?} exclusion mismatch, got {:?}",
+                typed.properties
+            );
+        }
+    }
+
+    /// Spire Mechcycle (#7522): "Tap another untapped Mount or Vehicle you
+    /// control" — the exclusion must land on EVERY leg of the disjunction. The
+    /// Mechcycle is itself a Vehicle, so it matches the SECOND leg; marking
+    /// only the first would still let it pay its own cost.
+    #[test]
+    fn tap_cost_another_marks_every_leg_of_a_disjunction() {
+        let AbilityCost::TapCreatures { filter, .. } =
+            parse_oracle_cost("Tap another untapped Mount or Vehicle you control")
+        else {
+            panic!("expected a TapCreatures cost");
+        };
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("expected an Or filter for 'Mount or Vehicle', got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2, "expected two legs, got {filters:?}");
+        for leg in filters {
+            let TargetFilter::Typed(typed) = leg else {
+                panic!("expected typed legs, got {leg:?}");
+            };
+            assert!(
+                typed.properties.contains(&FilterProp::Another),
+                "every leg must carry the exclusion, got {typed:?}"
+            );
+        }
+    }
+
+    /// CR 602.2b + CR 118.3: shared source exclusion must flow through the
+    /// `And` shape for "creature you control but don't own" without changing
+    /// the negated ownership leg.
+    #[test]
+    fn tap_cost_another_preserves_exclusion_in_conjunctive_filter() {
+        let AbilityCost::TapCreatures { filter, .. } =
+            parse_oracle_cost("Tap another untapped creature you control but don't own")
+        else {
+            panic!("expected a TapCreatures cost");
+        };
+        let TargetFilter::And { filters } = filter else {
+            panic!("expected an And filter, got {filter:?}");
+        };
+        assert!(matches!(
+            filters.first(),
+            Some(TargetFilter::Typed(TypedFilter { properties, .. }))
+                if properties.contains(&FilterProp::Another)
+        ));
+        assert!(matches!(
+            filters.get(1),
+            Some(TargetFilter::Not { filter }) if matches!(
+                filter.as_ref(),
+                TargetFilter::Typed(TypedFilter { properties, .. })
+                    if !properties.contains(&FilterProp::Another)
+            )
+        ));
     }
 
     #[test]
@@ -2725,6 +2970,29 @@ mod tests {
                 )));
             }
             other => panic!("Expected Exile with green + CmcEQ(X), got {:?}", other),
+        }
+    }
+
+    /// CR 107.3a + CR 701.9a: the shared X in an activated discard cost is
+    /// retained as a typed mana-value filter rather than swallowed as "a card".
+    #[test]
+    fn cost_discard_card_with_mana_value_x() {
+        use crate::types::ability::{Comparator, FilterProp, QuantityExpr, QuantityRef};
+
+        match parse_oracle_cost("Discard a card with mana value X") {
+            AbilityCost::Discard {
+                filter: Some(TargetFilter::Typed(typed)),
+                ..
+            } => assert!(typed.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { name }
+                    }
+                } if name == "X"
+            ))),
+            other => panic!("expected discard with CmcEQ(X), got {other:?}"),
         }
     }
 

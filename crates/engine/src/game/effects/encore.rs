@@ -23,10 +23,10 @@
 //! - **Per-opponent must-attack, not enters-attacking.** Encore is activated at
 //!   sorcery speed (typically in a main phase, outside combat), so the tokens
 //!   are *not* created already attacking. Instead each token gains a
-//!   `MustAttackPlayer { player }` requirement (CR 508.1d) bound to the opponent
+//!   `MustAttackDefender { defender }` requirement (CR 508.1d) bound to the opponent
 //!   it was created for, lasting until end of turn (CR 702.141a "this turn").
 //!   Binding the requirement per opponent — instead of via the generic
-//!   `Effect::ForceAttack`, whose `required_player` context ref has no
+//!   `Effect::ForceAttack`, whose `required_defender` context ref has no
 //!   "the opponent" resolution and would fall back to the controller — is the
 //!   reason Encore needs a dedicated resolver.
 //! - **Haste is baked into the copy** via `extra_keywords` (CR 707.2, the
@@ -45,7 +45,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{DelayedTrigger, GameState};
 use crate::types::keywords::Keyword;
 use crate::types::phase::Phase;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{RequiredDefender, StaticMode};
 
 /// CR 702.141a: Resolve a card's Encore ability — for each opponent of the
 /// activating player, create a haste-bearing token copy of the exiled source
@@ -85,7 +85,7 @@ pub fn resolve(
         crate::game::effects::token_copy::resolve(state, &copy_ability, events)?;
 
         // CR 702.141a + CR 508.1d: each token created for this opponent "attacks
-        // that opponent this turn if able." Bind a `MustAttackPlayer` requirement
+        // that opponent this turn if able." Bind a `MustAttackDefender` requirement
         // to the freshly-created token(s) for the rest of the turn.
         for token_id in state.last_created_token_ids.clone() {
             state.add_transient_continuous_effect(
@@ -94,7 +94,10 @@ pub fn resolve(
                 Duration::UntilEndOfTurn,
                 TargetFilter::SpecificObject { id: token_id },
                 vec![ContinuousModification::AddStaticMode {
-                    mode: StaticMode::MustAttackPlayer { player: opponent },
+                    // CR 611.2: snapshot the specific opponent at resolution.
+                    mode: StaticMode::MustAttackDefender {
+                        defender: RequiredDefender::Fixed { player: opponent },
+                    },
                 }],
                 None,
             );
@@ -120,13 +123,18 @@ pub fn resolve(
             ability.source_id,
             ability.controller,
         );
-        state.delayed_triggers.push(DelayedTrigger {
-            condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
-            ability: sacrifice,
-            controller: ability.controller,
-            source_id: ability.source_id,
-            one_shot: true,
-        });
+        crate::game::triggers::install_delayed_trigger(
+            state,
+            DelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                ability: Box::new(sacrifice),
+                controller: ability.controller,
+                source_id: ability.source_id,
+                one_shot: true,
+                provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
+            },
+            events,
+        );
     }
 
     events.push(GameEvent::EffectResolved {

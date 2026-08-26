@@ -94,6 +94,10 @@ describe("AudioManager", () => {
   beforeEach(() => {
     vi.clearAllMocks();
 
+    // This suite exercises post-boot behavior; in production ensurePreload()
+    // arms device-open right after the boot-health verdict.
+    audioManager.armDeviceOpen();
+
     // Reset preferences to defaults
     act(() => {
       usePreferencesStore.setState({

@@ -125,7 +125,7 @@ struct SnapshotEntry {
     gap_count: usize,
 }
 
-/// CR 205.4b: A basic land has the Basic supertype and the Land card type.
+/// CR 205.4c: Any land with the supertype "basic" is a basic land.
 /// Excluded from deck filtering since decks list them in bulk and they carry
 /// no parser surface.
 fn is_basic_land(face: &CardFace) -> bool {

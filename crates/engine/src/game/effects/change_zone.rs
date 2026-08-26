@@ -4,8 +4,8 @@ use crate::game::game_object::AttachTarget;
 #[cfg(test)]
 use crate::game::zones;
 use crate::types::ability::{
-    ControllerRef, Duration, Effect, EffectError, EffectKind, FilterProp, LibraryPosition,
-    QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef,
+    ControllerRef, Duration, Effect, EffectError, EffectKind, EffectResolutionResult, FilterProp,
+    LibraryPosition, QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef,
     TargetSelectionMode, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
@@ -63,11 +63,29 @@ fn resolve_forward_result_search_attach_host(
     let targets = forward_result_attach_host_targets(ability);
     match target {
         TargetFilter::SelfRef => Some(AttachTarget::Object(ability.source_id)),
+        // CR 303.4b + CR 109.4: "attached to you" (Lynde, Cheerful Tormentor)
+        // binds the Aura host to the resolving ability's controller.
+        TargetFilter::Controller => Some(AttachTarget::Player(ability.controller)),
         TargetFilter::ParentTarget => targets
             .first()
             .map(|target| match target {
                 TargetRef::Object(id) => AttachTarget::Object(*id),
                 TargetRef::Player(id) => AttachTarget::Player(*id),
+            })
+            .or_else(|| {
+                // CR 603.2 + CR 608.2c + CR 701.3a: Event-subject return Auras
+                // ("return this … attached to that creature" — Dragon Breath,
+                // Smoke Shroud) bind ParentTarget to the trigger-event referent
+                // (entering creature), not the Aura's prior host.
+                crate::game::targeting::resolve_event_context_target(
+                    state,
+                    &TargetFilter::ParentTarget,
+                    ability.source_id,
+                )
+                .map(|target| match target {
+                    TargetRef::Object(id) => AttachTarget::Object(id),
+                    TargetRef::Player(id) => AttachTarget::Player(id),
+                })
             })
             .or_else(|| {
                 // CR 303.4b + CR 608.2c: Aura search-put "attached to that/enchanted
@@ -186,6 +204,84 @@ fn tracked_set_member_zones(state: &GameState, filter: &TargetFilter) -> Option<
             zones
         });
     (!zones.is_empty()).then_some(zones)
+}
+
+/// CR 400.7 + CR 603.7c: A delayed tracked-set move retains an object-anaphor
+/// member predicate until its creation-time pin has been recorded. At firing,
+/// bind that predicate to the stored referent before the mass scan: the object
+/// has already become the immediate exile successor of the pin, so the generic
+/// `ParentTarget` matcher correctly rejects it as stale.
+fn bind_delayed_parent_target_filter(
+    filter: &TargetFilter,
+    parent_targets: &[TargetRef],
+) -> TargetFilter {
+    match filter {
+        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => {
+            super::delayed_trigger::concrete_parent_target_filter(filter, parent_targets)
+        }
+        TargetFilter::TrackedSetFiltered {
+            id,
+            filter,
+            caused_by,
+        } => TargetFilter::TrackedSetFiltered {
+            id: *id,
+            filter: Box::new(bind_delayed_parent_target_filter(filter, parent_targets)),
+            caused_by: *caused_by,
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .iter()
+                .map(|filter| bind_delayed_parent_target_filter(filter, parent_targets))
+                .collect(),
+        },
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .iter()
+                .map(|filter| bind_delayed_parent_target_filter(filter, parent_targets))
+                .collect(),
+        },
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(bind_delayed_parent_target_filter(filter, parent_targets)),
+        },
+        _ => filter.clone(),
+    }
+}
+
+/// CR 400.7 + CR 603.7c: A delayed Exile → Battlefield return follows the
+/// parent ability's own exile move. Its creation-time target pin is therefore
+/// one incarnation behind the expected exile object; a later zone change creates
+/// a further incarnation which must not be returned.
+fn target_pin_is_current_or_delayed_exile_successor(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    object_id: ObjectId,
+) -> bool {
+    ability
+        .target_incarnations
+        .iter()
+        .find(|pin| pin.object_id == object_id)
+        .is_none_or(|pin| {
+            pin.is_current(state)
+                || state.objects.get(&object_id).is_some_and(|object| {
+                    pin.incarnation.checked_add(1) == Some(object.incarnation)
+                })
+        })
+}
+
+/// CR 400.7 + CR 603.7c: A delayed tracked-set move must validate its
+/// incarnation pins when a nested set member filter names the creation-time
+/// parent object. The anaphor walk is the shared recursive authority.
+fn tracked_set_filter_names_parent_object(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::TrackedSetFiltered { filter, .. } => {
+            super::delayed_trigger::filter_refs_parent_object_anaphor(filter)
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(tracked_set_filter_names_parent_object)
+        }
+        TargetFilter::Not { filter } => tracked_set_filter_names_parent_object(filter),
+        _ => false,
+    }
 }
 
 /// CR 110.2a: Resolve the optional `enters_under` controller override to a
@@ -314,7 +410,8 @@ pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
+) -> Result<Option<EffectResolutionResult>, EffectError> {
+    let events_before = events.len();
     let (
         origin,
         dest_zone,
@@ -385,6 +482,44 @@ pub fn resolve(
         }
         _ => return Err(EffectError::MissingParam("Destination".to_string())),
     };
+
+    let completed_result = |count| {
+        super::this_way_cause_for_zone(dest_zone)
+            .map(|cause| EffectResolutionResult { cause, count })
+    };
+
+    // CR 610.3b: If the specified event occurred after this triggered ability
+    // triggered but before its initial one-shot zone change, the object does
+    // not move.
+    if let Some(duration_event) = ability
+        .duration
+        .as_ref()
+        .and_then(Duration::zone_change_event)
+    {
+        let occurred_before_this_resolution =
+            ability.context.duration_events.contains(&duration_event);
+        let occurred_earlier_this_resolution = events.iter().any(|event| {
+            crate::game::engine::duration_event_matches(
+                state,
+                ability.source_id,
+                ability
+                    .trigger_source
+                    .as_ref()
+                    .map(|source| source.identity.reference),
+                ability.controller,
+                duration_event,
+                event,
+            )
+        });
+        if occurred_before_this_resolution || occurred_earlier_this_resolution {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(completed_result(0));
+        }
+    }
 
     let mut origin = origin;
 
@@ -509,7 +644,7 @@ pub fn resolve(
                 source_id: ability.source_id,
                 subject: None,
             });
-            return Ok(());
+            return Ok(completed_result(0));
         }
 
         // CR 400.7: SelfRef resolves only to the exact source or, for a departure
@@ -522,7 +657,28 @@ pub fn resolve(
                 source_id: ability.source_id,
                 subject: None,
             });
-            return Ok(());
+            return Ok(completed_result(0));
+        }
+
+        // CR 400.7 + CR 603.7c: a delayed ability whose pinned referent became a
+        // new object affects nothing. Return before the untargeted zone-scan
+        // below, which must not rediscover a same-id return — the same reason
+        // the SelfRef guard above exists. `filter.rs`'s never-match arm makes
+        // that scan inert for ParentTarget today; this guard does not rely on
+        // that distant `_ => false` arm.
+        //
+        // Emits EffectResolved first, exactly as the three sibling guards in
+        // this block do (CR 115.6 optional targeting, CR 400.7 SelfRef,
+        // CR 701.23b fail-to-find): the trigger DID fire and DID resolve
+        // (CR 603.7b) — it simply affected nothing, and the game log / event
+        // observers / chain machinery must see that.
+        if ability.pinned_object_targets_all_stale(state) {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(completed_result(0));
         }
 
         // CR 701.23b + CR 401.2: Interactive library-step fail-to-find guard.
@@ -561,7 +717,7 @@ pub fn resolve(
                 source_id: ability.source_id,
                 subject: None,
             });
-            return Ok(());
+            return Ok(completed_result(0));
         }
 
         // CR 608.2c: A tracked-set filter ("from among the milled cards" / "X
@@ -640,7 +796,7 @@ pub fn resolve(
                 source_id: ability.source_id,
                 subject: None,
             });
-            return Ok(());
+            return Ok(completed_result(0));
         }
 
         if eligible.is_empty() {
@@ -652,7 +808,7 @@ pub fn resolve(
                 source_id: ability.source_id,
                 subject: None,
             });
-            return Ok(());
+            return Ok(completed_result(0));
         }
 
         if matches!(ability.target_selection_mode, TargetSelectionMode::Random)
@@ -680,7 +836,7 @@ pub fn resolve(
             );
             // CR 110.2a: `enters_under_player` was resolved once at resolver
             // entry — pass it straight through (no per-branch re-resolution).
-            match execute_zone_move(
+            match crate::game::zone_pipeline::execute_zone_move_with_controller(
                 state,
                 chosen,
                 scan_zone,
@@ -689,29 +845,18 @@ pub fn resolve(
                 ability.duration.as_ref(),
                 effect_enter_transformed,
                 eff_tapped,
+                eff_attacking,
                 enters_under_player,
                 &per_obj_enter_counters,
                 face_down_profile.as_ref(),
                 track_exiled_by_source,
                 None,
                 None,
+                Some(ability.controller),
                 events,
             ) {
                 ZoneMoveResult::Done => {
                     state.last_effect_count = Some(1);
-                    if eff_attacking && dest_zone == Zone::Battlefield {
-                        let controller = state
-                            .objects
-                            .get(&chosen)
-                            .map(|obj| obj.controller)
-                            .unwrap_or(ability.controller);
-                        crate::game::combat::enter_attacking(
-                            state,
-                            chosen,
-                            ability.source_id,
-                            controller,
-                        );
-                    }
                 }
                 ZoneMoveResult::NeedsChoice(player) => {
                     // CR 614.12a: single-pick branch (Random single / single-eligible)
@@ -727,9 +872,9 @@ pub fn resolve(
                         ability.source_id,
                     );
                     crate::game::replacement::park_waiting_for(state, player);
-                    return Ok(());
+                    return Ok(None);
                 }
-                ZoneMoveResult::NeedsAuraAttachmentChoice => return Ok(()),
+                ZoneMoveResult::NeedsAuraAttachmentChoice => return Ok(None),
             }
 
             // CR 614.13a: single-pick entry completed (Done branch) — clear the
@@ -748,7 +893,11 @@ pub fn resolve(
                 source_id: ability.source_id,
                 subject: None,
             });
-            return Ok(());
+            return Ok(completed_result(count_selected_zone_arrivals(
+                &events[events_before..],
+                &[chosen],
+                dest_zone,
+            )));
         }
 
         if eligible.len() == 1 && !choice_up_to && choice_count == 1 {
@@ -772,7 +921,7 @@ pub fn resolve(
             );
             // CR 110.2a: pre-resolved controller override (single-eligible
             // branch). No per-branch re-resolution.
-            match execute_zone_move(
+            match crate::game::zone_pipeline::execute_zone_move_with_controller(
                 state,
                 chosen,
                 scan_zone,
@@ -781,29 +930,18 @@ pub fn resolve(
                 ability.duration.as_ref(),
                 effect_enter_transformed,
                 eff_tapped,
+                eff_attacking,
                 enters_under_player,
                 &per_obj_enter_counters,
                 face_down_profile.as_ref(),
                 track_exiled_by_source,
                 None,
                 None,
+                Some(ability.controller),
                 events,
             ) {
                 ZoneMoveResult::Done => {
                     state.last_effect_count = Some(1);
-                    if eff_attacking && dest_zone == Zone::Battlefield {
-                        let controller = state
-                            .objects
-                            .get(&chosen)
-                            .map(|obj| obj.controller)
-                            .unwrap_or(ability.controller);
-                        crate::game::combat::enter_attacking(
-                            state,
-                            chosen,
-                            ability.source_id,
-                            controller,
-                        );
-                    }
                 }
                 ZoneMoveResult::NeedsChoice(player) => {
                     // CR 614.12a: single-pick branch (Random single / single-eligible)
@@ -819,9 +957,9 @@ pub fn resolve(
                         ability.source_id,
                     );
                     crate::game::replacement::park_waiting_for(state, player);
-                    return Ok(());
+                    return Ok(None);
                 }
-                ZoneMoveResult::NeedsAuraAttachmentChoice => return Ok(()),
+                ZoneMoveResult::NeedsAuraAttachmentChoice => return Ok(None),
             }
 
             // CR 614.13a: single-pick entry completed (Done branch) — clear the
@@ -840,7 +978,11 @@ pub fn resolve(
                 source_id: ability.source_id,
                 subject: None,
             });
-            return Ok(());
+            return Ok(completed_result(count_selected_zone_arrivals(
+                &events[events_before..],
+                &[chosen],
+                dest_zone,
+            )));
         }
 
         state.waiting_for = WaitingFor::EffectZoneChoice {
@@ -881,7 +1023,7 @@ pub fn resolve(
         };
         // EffectResolved is emitted by the EffectZoneChoice handler after the player chooses
         // (matching the DiscardChoice pattern — single authority for the event).
-        return Ok(());
+        return Ok(None);
     }
 
     let ctx = ChangeZoneIterationCtx {
@@ -979,7 +1121,7 @@ pub fn resolve(
             per_obj_ctx.source_id,
         );
         let delivery_start = events.len();
-        let stack_depth_before_zone_move = state.resolution_stack.len();
+        let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
         match process_one_zone_move_with_terminal(state, &per_obj_ctx, *obj_id, events) {
             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                 logical_zone_change_group
@@ -1038,7 +1180,7 @@ pub fn resolve(
                         effect_kind: EffectKind::from(&ability.effect),
                     },
                 );
-                return Ok(());
+                return Ok(None);
             }
             crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsChoice(player) => {
                 // CR 614.12b + CR 614.1c + CR 614.13: stash the unprocessed targets
@@ -1103,7 +1245,7 @@ pub fn resolve(
                 crate::game::replacement::park_waiting_for(state, player);
                 // EffectResolved is emitted by the drain after the loop completes —
                 // do NOT emit here.
-                return Ok(());
+                return Ok(None);
             }
         }
     }
@@ -1139,7 +1281,30 @@ pub fn resolve(
         subject: None,
     });
 
-    Ok(())
+    Ok(completed_result(count_selected_zone_arrivals(
+        &events[events_before..],
+        &targeted_objects,
+        dest_zone,
+    )))
+}
+
+/// CR 614.6 + CR 608.2c: Count only selected members that actually arrived in
+/// the requested destination during this operation's exact event slice.
+pub(crate) fn count_selected_zone_arrivals(
+    events: &[GameEvent],
+    selected: &[ObjectId],
+    destination: Zone,
+) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged { object_id, to, .. }
+                    if *to == destination && selected.contains(object_id)
+            )
+        })
+        .count()
 }
 
 /// CR 122.1 + CR 614.1c: Merge unconditional and conditional entry-time counters
@@ -1355,7 +1520,7 @@ pub(crate) fn process_one_zone_move_with_terminal(
         ctx.enters_attacking,
         ctx.enters_modified_if.as_ref(),
     );
-    let result = crate::game::zone_pipeline::execute_zone_move_with_terminal(
+    let result = crate::game::zone_pipeline::execute_zone_move_with_terminal_and_controller(
         state,
         obj_id,
         from_zone,
@@ -1364,30 +1529,94 @@ pub(crate) fn process_one_zone_move_with_terminal(
         ctx.duration.as_ref(),
         ctx.enter_transformed,
         eff_tapped,
+        eff_attacking,
         ctx.enters_under_player,
         &ctx.enter_with_counters,
         ctx.face_down_profile.as_ref(),
         ctx.track_exiled_by_source,
         ctx.library_placement.clone(),
         ctx.enter_attached_to,
+        Some(ctx.controller),
         events,
     );
 
-    if matches!(
-        result,
-        crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(_)
-    ) {
-        // CR 508.4: Place on battlefield attacking (not declared as attacker).
-        if eff_attacking && ctx.destination == Zone::Battlefield {
-            let controller = state
-                .objects
-                .get(&obj_id)
-                .map(|obj| obj.controller)
-                .unwrap_or(ctx.controller);
-            crate::game::combat::enter_attacking(state, obj_id, ctx.source_id, controller);
-        }
-    }
     result
+}
+
+/// CR 401.4: Group object ids by owner in APNAP order for per-owner library
+/// arrangement prompts.
+fn group_object_ids_by_owner_apnap(
+    state: &GameState,
+    object_ids: &[ObjectId],
+) -> Vec<(PlayerId, Vec<ObjectId>)> {
+    use std::collections::HashMap;
+    let mut by_owner: HashMap<PlayerId, Vec<ObjectId>> = HashMap::new();
+    for &id in object_ids {
+        let owner = state.objects[&id].owner;
+        by_owner.entry(owner).or_default().push(id);
+    }
+    crate::game::players::apnap_order(state)
+        .into_iter()
+        .filter_map(|pid| by_owner.remove(&pid).map(|cards| (pid, cards)))
+        .collect()
+}
+
+fn mass_library_order_effect_zone_choice(
+    owner: PlayerId,
+    cards: Vec<ObjectId>,
+    source_id: ObjectId,
+    library_position: crate::types::ability::LibraryPosition,
+    track_exiled_by_source: bool,
+    duration: Option<crate::types::ability::Duration>,
+) -> WaitingFor {
+    let choice_count = cards.len();
+    WaitingFor::EffectZoneChoice {
+        player: owner,
+        cards,
+        count: choice_count,
+        min_count: choice_count,
+        up_to: false,
+        source_id,
+        effect_kind: EffectKind::PutAtLibraryPosition,
+        zone: Zone::Library,
+        destination: None,
+        enter_tapped: EtbTapState::Unspecified,
+        enter_transformed: false,
+        enters_under_player: None,
+        enters_attacking: false,
+        owner_library: false,
+        track_exiled_by_source,
+        face_down_profile: None,
+        enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
+        count_param: 0,
+        library_position: Some(library_position),
+        is_cost_payment: false,
+        enters_modified_if: None,
+        duration,
+    }
+}
+
+/// CR 401.4: After one owner batch of a mass library-order prompt completes,
+/// surface the next owner's `EffectZoneChoice` if any remain.
+pub(crate) fn resume_next_mass_library_order_choice(state: &mut GameState) -> Option<PlayerId> {
+    let mut pending = state.pending_mass_library_order_choice.take()?;
+    let (owner, cards) = pending.remaining_batches.first()?.clone();
+    pending.remaining_batches.remove(0);
+    if pending.remaining_batches.is_empty() {
+        state.pending_mass_library_order_choice = None;
+    } else {
+        state.pending_mass_library_order_choice = Some(pending.clone());
+    }
+    state.waiting_for = mass_library_order_effect_zone_choice(
+        owner,
+        cards,
+        pending.source_id,
+        pending.library_position,
+        pending.track_exiled_by_source,
+        pending.duration,
+    );
+    Some(owner)
 }
 
 /// Move all objects matching the filter from `Origin` zone to `Destination` zone.
@@ -1405,6 +1634,7 @@ pub fn resolve_all(
         dest_zone,
         target_filter,
         enter_tapped,
+        enters_attacking,
         enter_with_counters,
         effect_library_position,
         random_order,
@@ -1415,6 +1645,7 @@ pub fn resolve_all(
             target,
             enters_under: _,
             enter_tapped,
+            enters_attacking,
             enter_with_counters,
             face_down_profile: _,
             library_position,
@@ -1448,6 +1679,7 @@ pub fn resolve_all(
                 *destination,
                 target.clone(),
                 *enter_tapped,
+                *enters_attacking,
                 resolved_counters,
                 library_position.clone(),
                 *random_order,
@@ -1531,6 +1763,22 @@ pub fn resolve_all(
     let effective_filter =
         crate::game::targeting::resolve_tracked_set_sentinel(state, effective_filter);
 
+    // CR 400.7 + CR 603.7c: This predicate must inspect the parser-preserved
+    // anaphor before the firing-time binding below replaces it with the delayed
+    // trigger's concrete referent.
+    let tracked_members_name_parent_object = tracked_set_filter_names_parent_object(&target_filter);
+
+    // A delayed `ChangeZone` that named its parent object is upgraded to a
+    // tracked-set mass move. The pin distinguishes stale later incarnations;
+    // this binding supplies the one immediate successor that the delayed return
+    // is allowed to find in the tracked set.
+    let effective_filter =
+        if tracked_members_name_parent_object && !ability.target_incarnations.is_empty() {
+            bind_delayed_parent_target_filter(&effective_filter, &ability.targets)
+        } else {
+            effective_filter
+        };
+
     // CR 608.2c: Re-derive scan zones after the tracked-set sentinel binds —
     // the initial `origin`/`target` snapshot may have defaulted to the
     // battlefield before `chain_tracked_set_id` was populated (Zimone's
@@ -1546,6 +1794,7 @@ pub fn resolve_all(
     } else {
         origin_zones
     };
+    let delayed_exile_return = origin_zones == [Zone::Exile] && dest_zone == Zone::Battlefield;
 
     let track_exiled_by_source =
         crate::game::exile_links::should_track_exiled_by_source(state, ability.source_id, ability);
@@ -1611,6 +1860,12 @@ pub fn resolve_all(
             .iter()
             .filter(|(&id, obj)| {
                 origin_zones.contains(&obj.zone)
+                    && (!tracked_members_name_parent_object
+                        || if delayed_exile_return {
+                            target_pin_is_current_or_delayed_exile_successor(state, ability, id)
+                        } else {
+                            ability.target_pin_is_current(id, state)
+                        })
                     && crate::game::filter::matches_target_filter(
                         state,
                         id,
@@ -1666,6 +1921,47 @@ pub fn resolve_all(
         state.push_devour_change_zone_snapshot(state.battlefield.iter().copied().collect());
     }
 
+    // CR 401.4: When multiple objects are placed at the same library position
+    // simultaneously and `random_order` is false, the owner arranges their
+    // relative order ("in any order" restates this default). Route through the
+    // shared `EffectZoneChoice` + `PutAtLibraryPosition` production path instead
+    // of silently picking an engine-default batch order.
+    if dest_zone == Zone::Library
+        && effect_library_position.is_some()
+        && !random_order
+        && matching.len() > 1
+    {
+        let owner_batches = group_object_ids_by_owner_apnap(state, &matching);
+        let (first_owner, first_cards) = owner_batches
+            .first()
+            .expect("matching.len() > 1 guarantees at least one owner batch")
+            .clone();
+        let remaining_batches: Vec<_> = owner_batches.into_iter().skip(1).collect();
+        if !remaining_batches.is_empty() {
+            state.pending_mass_library_order_choice =
+                Some(crate::types::game_state::PendingMassLibraryOrderChoice {
+                    source_id: ability.source_id,
+                    library_position: effect_library_position
+                        .clone()
+                        .expect("library-order branch requires an explicit library position"),
+                    track_exiled_by_source,
+                    duration: ability.duration.clone(),
+                    remaining_batches,
+                });
+        }
+        state.waiting_for = mass_library_order_effect_zone_choice(
+            first_owner,
+            first_cards,
+            ability.source_id,
+            effect_library_position
+                .clone()
+                .expect("library-order branch requires an explicit library position"),
+            track_exiled_by_source,
+            ability.duration.clone(),
+        );
+        return Ok(());
+    }
+
     // CR 401.4: When placing objects on the bottom of a library "in a random
     // order", randomize the processing order so the final bottom-to-top sequence
     // is non-deterministic without shuffling the rest of the library. Top
@@ -1700,8 +1996,8 @@ pub fn resolve_all(
         let anticipated_pause =
             anticipated_zone_change_delivery(state, obj_id, dest_zone, ability.source_id);
         let delivery_start = events.len();
-        let stack_depth_before_zone_move = state.resolution_stack.len();
-        match crate::game::zone_pipeline::execute_zone_move_with_terminal(
+        let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
+        match crate::game::zone_pipeline::execute_zone_move_with_terminal_and_controller(
             state,
             obj_id,
             per_object_origin,
@@ -1710,12 +2006,14 @@ pub fn resolve_all(
             ability.duration.as_ref(),
             false,
             enter_tapped,
+            enters_attacking,
             enters_under_player,
             &enter_with_counters,
             face_down_profile.as_ref(),
             track_exiled_by_source,
             effect_library_position.clone(),
             None,
+            Some(ability.controller),
             events,
         ) {
             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
@@ -1737,6 +2035,10 @@ pub fn resolve_all(
                 }
             }
             crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsChoice(player) => {
+                let entry_target_choice = matches!(
+                    state.waiting_for,
+                    crate::types::game_state::WaitingFor::EntryAttackTargetChoice { .. }
+                );
                 // CR 614.12a + CR 614.13: a Devour as-enters sacrifice surfaced its
                 // own `EffectZoneChoice` (or a counter-pause replacement choice).
                 // Stash the unprocessed co-entering members so
@@ -1759,7 +2061,7 @@ pub fn resolve_all(
                 state.push_change_zone_iteration_after_child(
                     crate::types::game_state::PendingChangeZoneIteration {
                         logical_zone_change_group,
-                        paused_current: Some(
+                        paused_current: (!entry_target_choice).then(|| {
                             state
                                 .pending_zone_change_delivery_from_replacement()
                                 .or_else(|| {
@@ -1768,8 +2070,8 @@ pub fn resolve_all(
                                         boundary
                                     })
                                 })
-                                .expect("zone-change pause must retain its exact boundary"),
-                        ),
+                                .expect("replacement pause must retain its exact boundary")
+                        }),
                         remaining: matching[i + 1..].to_vec(),
                         source_id: ability.source_id,
                         controller: ability.controller,
@@ -1778,14 +2080,14 @@ pub fn resolve_all(
                         enter_transformed: false,
                         enter_tapped,
                         enters_under_player,
-                        enters_attacking: false,
+                        enters_attacking,
                         // CR 122.1h: resumed members of a paused mass return still
                         // receive their counters (Shilgengar's finality counter).
                         enter_with_counters: enter_with_counters.clone(),
                         conditional_enter_with_counters: vec![],
                         duration: ability.duration.clone(),
                         track_exiled_by_source,
-                        moved_count: Some(moved_count),
+                        moved_count: Some(moved_count + i32::from(entry_target_choice)),
                         face_down_profile: face_down_profile.clone(),
                         library_placement: effect_library_position.clone(),
                         // CR 614.12: mass zone moves carry no moved-object type gate.
@@ -1834,7 +2136,7 @@ pub fn resolve_all(
                         enter_transformed: false,
                         enter_tapped,
                         enters_under_player,
-                        enters_attacking: false,
+                        enters_attacking,
                         // CR 122.1h: resumed members of a paused mass return still
                         // receive their counters (Shilgengar's finality counter).
                         enter_with_counters: enter_with_counters.clone(),
@@ -1953,6 +2255,7 @@ mod tests {
         TypedFilter,
     };
     use crate::types::actions::GameAction;
+    use crate::types::card::PrintedLoyalty;
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::game_state::{ExileLinkKind, StackEntry, StackEntryKind, ZoneChangeRecord};
@@ -2789,6 +3092,7 @@ mod tests {
                 target: TargetFilter::None,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -3180,6 +3484,7 @@ mod tests {
                 ])),
                 enters_under: None,
                 enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -4103,6 +4408,7 @@ mod tests {
             None,
             false,
             crate::types::zones::EtbTapState::Unspecified,
+            false,
             None,
             &[],
             None,
@@ -4187,6 +4493,7 @@ mod tests {
                 target: TargetFilter::None,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -4239,6 +4546,7 @@ mod tests {
                 target: TargetFilter::Player,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -4330,6 +4638,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -4352,6 +4661,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
         let mut events = Vec::new();
@@ -4404,6 +4714,7 @@ mod tests {
                 }),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -4469,6 +4780,7 @@ mod tests {
                 target: TargetFilter::Player,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -4544,6 +4856,7 @@ mod tests {
                 ),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Tapped,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -4578,6 +4891,7 @@ mod tests {
                 target: TargetFilter::Player,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -4653,6 +4967,7 @@ mod tests {
                 }),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -4758,6 +5073,7 @@ mod tests {
                 target: TargetFilter::ExiledBySource,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -5186,6 +5502,7 @@ mod tests {
                     }),
                     enters_under: None,
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
                     enter_with_counters: vec![],
                     face_down_profile: None,
                     library_position: None,
@@ -5555,6 +5872,164 @@ mod tests {
         );
     }
 
+    /// CR 401.4: Mass library-bottom placement must prompt each card's owner to
+    /// arrange order, not the spell's `filter_controller` when those differ.
+    #[test]
+    fn change_zone_all_library_bottom_order_prompts_card_owner_not_controller() {
+        let mut state = GameState::new_two_player(42);
+        let card_a = create_object(
+            &mut state,
+            CardId(701),
+            PlayerId(1),
+            "Opponent Revealed A".to_string(),
+            Zone::Library,
+        );
+        let card_b = create_object(
+            &mut state,
+            CardId(702),
+            PlayerId(1),
+            "Opponent Revealed B".to_string(),
+            Zone::Library,
+        );
+        let card_c = create_object(
+            &mut state,
+            CardId(703),
+            PlayerId(1),
+            "Opponent Revealed C".to_string(),
+            Zone::Library,
+        );
+        state.players[1].library = im::vector![card_a, card_b, card_c];
+        state.last_revealed_ids = vec![card_a, card_b, card_c];
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Library),
+                destination: Zone::Library,
+                target: TargetFilter::LastRevealed,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: Some(LibraryPosition::Bottom),
+                random_order: false,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                effect_kind,
+                ..
+            } => {
+                assert_eq!(
+                    *player,
+                    PlayerId(1),
+                    "opponent-owned cards must be ordered by their owner, not the caster"
+                );
+                assert_eq!(cards.len(), 3);
+                assert_eq!(*effect_kind, EffectKind::PutAtLibraryPosition);
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        }
+    }
+
+    /// CR 401.4: When one mass move covers multiple owners' cards, each owner
+    /// receives an independent library-order prompt in APNAP order.
+    #[test]
+    fn change_zone_all_library_bottom_order_prompts_each_owner_sequentially() {
+        let mut state = GameState::new_two_player(42);
+        let p0_card = create_object(
+            &mut state,
+            CardId(711),
+            PlayerId(0),
+            "Self Revealed".to_string(),
+            Zone::Library,
+        );
+        let p1_a = create_object(
+            &mut state,
+            CardId(712),
+            PlayerId(1),
+            "Opponent Revealed A".to_string(),
+            Zone::Library,
+        );
+        let p1_b = create_object(
+            &mut state,
+            CardId(713),
+            PlayerId(1),
+            "Opponent Revealed B".to_string(),
+            Zone::Library,
+        );
+        state.players[0].library = im::vector![p0_card];
+        state.players[1].library = im::vector![p1_a, p1_b];
+        state.last_revealed_ids = vec![p0_card, p1_a, p1_b];
+        state.active_player = PlayerId(1);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Library),
+                destination: Zone::Library,
+                target: TargetFilter::LastRevealed,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: Some(LibraryPosition::Bottom),
+                random_order: false,
+            },
+            vec![],
+            ObjectId(901),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                assert_eq!(
+                    *player,
+                    PlayerId(1),
+                    "APNAP: active player's batch first even when active player is not seat 0"
+                );
+                let mut sorted = cards.clone();
+                sorted.sort_by_key(|id| id.0);
+                let mut expect = vec![p1_a, p1_b];
+                expect.sort_by_key(|id| id.0);
+                assert_eq!(sorted, expect);
+            }
+            other => panic!("expected first-owner EffectZoneChoice, got {other:?}"),
+        }
+        assert!(
+            state.pending_mass_library_order_choice.is_some(),
+            "non-active owner batch must remain queued"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![p1_a, p1_b],
+            },
+        )
+        .unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                assert_eq!(*player, PlayerId(0), "second owner receives their batch");
+                assert_eq!(cards, &vec![p0_card]);
+            }
+            other => panic!("expected second-owner EffectZoneChoice, got {other:?}"),
+        }
+    }
+
     /// Build an Exhume-shaped ability: `Effect::ChangeZone` Graveyard →
     /// Battlefield with a `Typed{Creature}` target carrying the post-fix
     /// owner constraint `Owned{ScopedPlayer}` + `InZone Graveyard`, and
@@ -5807,6 +6282,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -5931,6 +6407,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
         state.waiting_for = WaitingFor::Priority {
@@ -6584,6 +7061,7 @@ mod tests {
                 target: TargetFilter::Controller,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -6722,6 +7200,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 enters_under: Some(ControllerRef::You),
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -6775,6 +7254,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 enters_under: Some(ControllerRef::Opponent),
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -6884,6 +7364,7 @@ mod tests {
                 ),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -6984,6 +7465,7 @@ mod tests {
                 ),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -7119,6 +7601,7 @@ mod tests {
                     ])),
                     enters_under: None,
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
                     enter_with_counters: vec![],
                     face_down_profile: None,
                     library_position: None,
@@ -7327,6 +7810,7 @@ mod tests {
                 },
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -7396,6 +7880,7 @@ mod tests {
                 },
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Tapped,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -7479,6 +7964,7 @@ mod tests {
                 },
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -7554,6 +8040,7 @@ mod tests {
                 },
                 enters_under: Some(ControllerRef::You),
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: Some(FaceDownProfile {
                     power: Some(2),
@@ -7562,6 +8049,7 @@ mod tests {
                     extra_core_types: vec![CoreType::Artifact],
                     subtypes: vec!["Cyberman".to_string()],
                     ward: None,
+                    cause: crate::types::ability::FaceDownCause::Manifest,
                 }),
                 library_position: None,
                 random_order: false,
@@ -7637,6 +8125,7 @@ mod tests {
                 },
                 enters_under: None,
                 enter_tapped: EtbTapState::Tapped,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -7709,6 +8198,7 @@ mod tests {
                 },
                 enters_under: None,
                 enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -7749,6 +8239,7 @@ mod tests {
                 },
                 enters_under: Some(ControllerRef::You),
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: Some(FaceDownProfile::vanilla_2_2()),
                 library_position: None,
@@ -8248,6 +8739,7 @@ mod tests {
             extra_core_types: vec![CoreType::Land],
             subtypes: vec!["Forest".to_string()],
             ward: None,
+            cause: crate::types::ability::FaceDownCause::Manifest,
         };
 
         let ability = ResolvedAbility::new(
@@ -8374,6 +8866,7 @@ mod tests {
                 target: TargetFilter::Any,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -9222,6 +9715,7 @@ mod tests {
                 power: None,
                 toughness: None,
                 loyalty: Some(3),
+                printed_loyalty: Some(PrintedLoyalty::Fixed(3)),
                 defense: None,
                 card_types: CardType {
                     supertypes: vec![],
@@ -9242,6 +9736,7 @@ mod tests {
                 casting_restrictions: vec![],
                 casting_options: vec![],
                 layout_kind: None,
+                parse_warnings: vec![],
             });
         }
 
@@ -9326,9 +9821,8 @@ mod tests {
             );
         }
 
-        // Enter the battlefield with NO imperative controller override (default
-        // would be the owner's control, player 0). The self-replacement must
-        // flip control to the opponent, player 1.
+        // Seed player 0 explicitly as a cast path does. The self-replacement
+        // must still flip control to the sole opponent, player 1.
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
                 origin: Some(Zone::Hand),
@@ -9336,7 +9830,7 @@ mod tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                enters_under: None,
+                enters_under: Some(ControllerRef::You),
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
@@ -9362,5 +9856,77 @@ mod tests {
             PlayerId(1),
             "CR 110.2a: enters under the opponent's control, not its owner's"
         );
+    }
+
+    /// CR 614.12a: with multiple eligible opponents, a self-entry controller
+    /// replacement pauses before the physical move and delivers directly under
+    /// the chosen opponent's control.
+    #[test]
+    fn self_enters_under_opponent_choice_is_pre_entry_and_honors_selection() {
+        use crate::types::ability::{ControllerRef, ReplacementDefinition};
+        use crate::types::card_type::CoreType;
+        use crate::types::format::FormatConfig;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 7);
+        let obj = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Xantcha, Sleeper Agent".to_string(),
+            Zone::Hand,
+        );
+        {
+            let object = state.objects.get_mut(&obj).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.replacement_definitions.push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination_zone(Zone::Battlefield)
+                    .enters_under(ControllerRef::Opponent),
+            );
+        }
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![TargetRef::Object(obj)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&obj].zone, Zone::Hand);
+        assert!(matches!(
+            &state.waiting_for,
+            crate::types::game_state::WaitingFor::EntryControllerChoice {
+                player: PlayerId(0),
+                candidates,
+            } if candidates == &vec![PlayerId(1), PlayerId(2)]
+        ));
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseEntryController {
+                opponent: PlayerId(2),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(state.objects[&obj].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&obj].controller, PlayerId(2));
     }
 }

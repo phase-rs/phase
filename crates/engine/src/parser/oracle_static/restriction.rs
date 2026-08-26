@@ -748,18 +748,25 @@ pub(crate) fn parse_suppress_triggers(tp: &TextPair<'_>, text: &str) -> Option<S
         (vec![SuppressedTriggerEvent::EntersBattlefield], after_tb)
     };
     let after_dying_lower = after_dying.to_lowercase();
-    let after_verb = nom_tag_lower(
-        after_dying,
-        &after_dying_lower,
-        "don't cause abilities to trigger",
-    )?;
-    // Allow only terminal punctuation (period or empty).
-    if !matches!(after_verb.trim(), "" | ".") {
-        return None;
-    }
+    let after_verb = nom_tag_lower(after_dying, &after_dying_lower, "don't cause abilities")?;
+    let trigger_source_filter =
+        if let Some(rest) = nom_tag_lower(after_verb, &after_verb.to_lowercase(), " of ") {
+            let (filter, remainder) = parse_type_phrase(rest);
+            if matches!(filter, TargetFilter::SelfRef)
+                || !matches!(remainder.trim(), "to trigger" | "to trigger.")
+            {
+                return None;
+            }
+            Some(filter)
+        } else if matches!(after_verb.trim(), "to trigger" | "to trigger.") {
+            None
+        } else {
+            return None;
+        };
     Some(
         StaticDefinition::new(StaticMode::SuppressTriggers {
             source_filter,
+            trigger_source_filter,
             events,
         })
         .description(text.to_string()),
@@ -1992,14 +1999,21 @@ pub(crate) fn try_parse_graveyard_cast_permission(
     let graveyard_destination_replacement = parse_exile_spell_cast_this_way_rider(trailing)
         .is_ok()
         .then_some(Zone::Exile);
-    // CR 601.2f: Optional "by paying ... in addition to their other costs"
-    // ADDITIONAL non-mana cost rider (Festival of Embers). Recognized before the
-    // permission-condition fallback so it isn't misread as a condition tail.
-    let extra_cost =
-        parse_cast_permission_additional_cost_rider(trailing).map(|cost| CastExtraCost {
+    // CR 601.2f: Optional "by <cost> in addition to (paying )?(their|its) other
+    // costs" ADDITIONAL non-mana cost rider (Festival of Embers pay-life; Dragon
+    // Man, Reformed Robot discard). Recognized before the permission-condition
+    // fallback so it isn't misread as a condition tail. A present-but-unmodeled
+    // rider DECLINES the whole permission so the dropped cost surfaces as an
+    // honest coverage gap instead of a strictly-more-permissive misparse (a cast
+    // that silently skips a required additional cost).
+    let extra_cost = match parse_cast_permission_additional_cost_rider(trailing) {
+        AdditionalCostRider::Absent => None,
+        AdditionalCostRider::Parsed(cost) => Some(CastExtraCost {
             cost,
             mode: CastCostMode::Additional,
-        });
+        }),
+        AdditionalCostRider::Unmodeled => return None,
+    };
     // `.trim()` (not `.is_empty()`): after the enters-with rider is split off, a
     // two-sentence "if X. If you do, Y." permission leaves a whitespace-only
     // residual (Undead Sprinter) that must still be treated as fully consumed so
@@ -2036,49 +2050,71 @@ pub(crate) fn try_parse_graveyard_cast_permission(
     Some(def)
 }
 
+/// CR 601.2f: Outcome of matching the "by <cost> in addition to … other costs"
+/// ADDITIONAL-cost rider on a cast-from-zone permission. A plain `Option` would
+/// conflate two structurally distinct outcomes — "no rider present" and "rider
+/// present but its cost verb is not yet modeled" — which is precisely how the
+/// silent-drop bug survived: an unmodeled rider read as `None` (Absent) emitted a
+/// permission that skipped a required cost. The three-state enum forces the
+/// caller to decide emit-vs-decline explicitly.
+enum AdditionalCostRider {
+    /// No additional-cost rider is present (Lurrus/Karador/Conduit).
+    Absent,
+    /// Rider present and its cost lowered to a concrete `AbilityCost`.
+    Parsed(crate::types::ability::AbilityCost),
+    /// Rider present but the cost verb/phrase is not yet modeled — the caller
+    /// must DECLINE the whole permission so the dropped cost surfaces as an
+    /// honest coverage gap (Unimplemented) instead of a strictly-more-permissive
+    /// misparse (CR 601.2f: an additional cost that must be paid).
+    Unmodeled,
+}
+
 /// CR 601.2f: Parse a trailing ADDITIONAL-cost rider on a cast-from-zone
-/// permission — "by paying <N> life in addition to their other costs" (Festival
-/// of Embers). The cost is paid on TOP of the spell's normal mana cost (CR
-/// 601.2f), distinct from the CR 118.9 alternative rider parsed by
-/// `oracle_effect::try_parse_alt_cost_rider`. Composed from nom combinators so
-/// the prefix × quantity × suffix axes stay independent and future shapes
-/// (other costs, "its"/"their" pronoun) extend without permutation blowup.
-/// Returns `None` when the rider shape is absent.
-fn parse_cast_permission_additional_cost_rider(
-    trailing: &str,
-) -> Option<crate::types::ability::AbilityCost> {
-    let lower = trailing.trim_start();
-    // CR 601.2f: "by paying " opens the rider; "in addition to" distinguishes
-    // the additional shape from a CR 118.9 "rather than" alternative.
-    if !nom_primitives::scan_contains(lower, "in addition to") {
-        return None;
+/// permission — "by <cost> in addition to (paying )?(their|its) other costs"
+/// (Festival of Embers pay-life; Dragon Man, Reformed Robot discard). The cost is
+/// paid on TOP of the spell's normal mana cost (CR 601.2f), distinct from the CR
+/// 118.9 "rather than" alternative rider parsed by
+/// `oracle_effect::try_parse_alt_cost_rider`. Cost semantics delegate to
+/// [`parse_gerund_cost`] → the single cost authority, so the whole CR 601.2f
+/// non-mana verb class (pay life, discard, sacrifice, tap, remove counters) is
+/// covered rather than pay-life alone. The mode is fixed to `Additional` by the
+/// "in addition to … other costs" closer. Composed from nom combinators so the
+/// prefix × cost × closer axes stay independent. Returns [`AdditionalCostRider`]
+/// so a present-but-unmodeled rider (`Unmodeled`) is distinguished from an absent
+/// one (`Absent`) — see the enum doc for why the distinction is load-bearing.
+fn parse_cast_permission_additional_cost_rider(trailing: &str) -> AdditionalCostRider {
+    let trimmed = trailing.trim_start();
+    // CR 601.2f: "by " opens the rider (the cost verb follows as a gerund).
+    let Some(rest) = nom_tag_lower(trimmed, trimmed, "by ") else {
+        return AdditionalCostRider::Absent;
+    };
+    // CR 601.2f vs CR 118.9: split the cost phrase off the "in addition to …
+    // other costs" closer. Its absence means this is not an ADDITIONAL rider (it
+    // may be a "rather than" alternative or an unrelated tail) — treat as absent.
+    let Ok((_, (cost_phrase, tail))) = nom_primitives::split_once_on(rest, " in addition to ")
+    else {
+        return AdditionalCostRider::Absent;
+    };
+    // CR 601.2f: consume the closer — optional "paying " gerund (Noctis, Prince
+    // of Lucis) then the required "(their|its) other costs" pronoun. The additive
+    // strip leaves Festival's bare "their other costs" slice unchanged.
+    let tail = nom_tag_lower(tail, tail, "paying ").unwrap_or(tail);
+    let Some(after) = nom_tag_lower(tail, tail, "their other costs")
+        .or_else(|| nom_tag_lower(tail, tail, "its other costs"))
+    else {
+        return AdditionalCostRider::Unmodeled;
+    };
+    let after = after.trim_start();
+    let after = after.strip_prefix('.').unwrap_or(after); // allow-noncombinator: punctuation cleanup on a pre-tokenized chunk, not parsing dispatch.
+    if !after.trim().is_empty() {
+        return AdditionalCostRider::Unmodeled;
     }
-    let rest = nom_tag_lower(lower, lower, "by paying ")?;
-    // CR 119.4: "<N> life" — the only additional-cost shape used by the current
-    // class that this permission carries (Festival of Embers).
-    let (after_num, n) = nom_primitives::parse_number(rest).ok()?;
-    let after_life = nom_tag_lower(after_num, after_num, " life")?;
-    // CR 601.2f: the tail must be the "in addition to (their|its) other costs"
-    // closer — anything else is an unmodeled shape.
-    let after_life = after_life.trim_start();
-    let after_in_addition = nom_tag_lower(after_life, after_life, "in addition to ")?;
-    // CR 601.2f: tolerate the optional "paying" gerund — "in addition to PAYING
-    // their other costs" (Noctis, Prince of Lucis) alongside the bare "in
-    // addition to their other costs" (Festival of Embers). Additive `opt` strip:
-    // Festival (no gerund) keeps the original slice unchanged.
-    let after_in_addition =
-        nom_tag_lower(after_in_addition, after_in_addition, "paying ").unwrap_or(after_in_addition);
-    let after_pronoun = nom_tag_lower(after_in_addition, after_in_addition, "their other costs")
-        .or_else(|| nom_tag_lower(after_in_addition, after_in_addition, "its other costs"))?;
-    // allow-noncombinator: punctuation cleanup (drop the sentence terminator) on a pre-tokenized chunk, not parsing dispatch.
-    let trimmed_pronoun = after_pronoun.trim_start();
-    let after_pronoun = trimmed_pronoun.strip_prefix('.').unwrap_or(trimmed_pronoun); // allow-noncombinator: punctuation cleanup on a pre-tokenized chunk, not parsing dispatch.
-    if !after_pronoun.trim().is_empty() {
-        return None;
+    // CR 601.2f: lower the gerund cost via the single cost authority. An
+    // unmodeled verb yields `Unimplemented` → decline the whole permission.
+    match parse_gerund_cost(cost_phrase) {
+        crate::types::ability::AbilityCost::Unimplemented { .. } => AdditionalCostRider::Unmodeled,
+        cost => AdditionalCostRider::Parsed(cost),
     }
-    Some(crate::types::ability::AbilityCost::PayLife {
-        amount: QuantityExpr::Fixed { value: n as i32 },
-    })
 }
 
 /// CR 607.1 + CR 122.1 + CR 614.1c: Peel the linked "if you cast a spell this
@@ -2285,6 +2321,7 @@ fn usable_disjunctive_permission_filter(filter: &TargetFilter) -> bool {
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::GrantingObject
@@ -2295,11 +2332,13 @@ fn usable_disjunctive_permission_filter(filter: &TargetFilter) -> bool {
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
         | TargetFilter::Neighbor { .. }
         | TargetFilter::ScopedPlayer
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -2830,7 +2869,8 @@ fn strip_self_reference(lower: &str) -> Option<&str> {
 
 /// CR 609.4b: Parse the activation-source-filtered any-color-mana spend static —
 /// "You may spend mana as though it were mana of any color to activate abilities
-/// of <subject>." (Agatha's Soul Cauldron / Joiner Adept). Lowers to
+/// of <subject>." or "... to pay the activation costs of <subject>'s abilities."
+/// (Agatha's Soul Cauldron / Joiner Adept / Manascape Refractor). Lowers to
 /// `StaticMode::SpendManaAsAnyColor { spell_filter: None,
 /// activation_source_filter: Some(filter) }`, scoping the any-color concession to
 /// activated abilities whose source permanent matches the subject filter (CR
@@ -2839,24 +2879,24 @@ fn strip_self_reference(lower: &str) -> Option<&str> {
 /// The unfiltered board-wide form ("you may spend mana as though it were mana of
 /// any color", Chromatic Orrery) and the spell-class-filtered form ("to cast
 /// creature spells", Vizier) are handled separately and must not be swallowed
-/// here — this handler requires the explicit "to activate abilities of <subject>"
-/// scope.
+/// here — this handler requires an explicit activation-source scope.
 pub(crate) fn try_parse_spend_any_color_to_activate_abilities(
     text: &str,
     tp: &TextPair<'_>,
 ) -> Option<StaticDefinition> {
     let rest = nom_tag_tp(
         tp,
-        "you may spend mana as though it were mana of any color to activate abilities of ",
+        "you may spend mana as though it were mana of any color to ",
     )
-    .or_else(|| {
-        nom_tag_tp(
-            tp,
-            "spend mana as though it were mana of any color to activate abilities of ",
-        )
-    })?;
+    .or_else(|| nom_tag_tp(tp, "spend mana as though it were mana of any color to "))?;
 
-    let subject = rest.trim_end().trim_end_matches('.');
+    let subject = nom_tag_tp(&rest, "activate abilities of ").or_else(|| {
+        nom_tag_tp(&rest, "pay the activation costs of ")?
+            .trim_end()
+            .trim_end_matches('.')
+            .strip_suffix("'s abilities") // allow-noncombinator: strips the possessive qualifier after the fixed activation-cost prefix.
+    })?;
+    let subject = subject.trim_end().trim_end_matches('.');
     let activation_source_filter = parse_continuous_subject_filter(subject.original)?;
 
     Some(
@@ -3343,6 +3383,24 @@ mod spend_any_color_to_activate_abilities_tests {
                 "expected SpendManaAsAnyColor {{ activation_source_filter: Some(creatures you control) }}, got {other:?}"
             ),
         }
+    }
+
+    #[test]
+    fn parses_self_activation_cost_scope() {
+        // The production static router normalizes Manascape Refractor's
+        // "this artifact" self-reference to `~` before static parsing.
+        let text = "You may spend mana as though it were mana of any color to pay the activation costs of ~'s abilities.";
+        let def = crate::parser::oracle_static::parse_static_line(text)
+            .expect("self-scoped activation-cost spend line must parse as a static");
+
+        assert_eq!(def.affected, Some(TargetFilter::Player));
+        assert!(matches!(
+            def.mode,
+            StaticMode::SpendManaAsAnyColor {
+                spell_filter: None,
+                activation_source_filter: Some(TargetFilter::SelfRef),
+            }
+        ));
     }
 }
 

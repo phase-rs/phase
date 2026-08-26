@@ -62,8 +62,13 @@ fn collect_proliferate_eligible(state: &GameState) -> Vec<TargetRef> {
         .map(|id| TargetRef::Object(*id))
         .collect();
 
+    // CR 701.34a: proliferate "means to choose any number of permanents and/or players
+    // that have a counter" — a CHOICE, not a target (CR 115.10a), so the seat is judged by
+    // the existence authority and NOT by the targeting-only exclusions.
     for player in &state.players {
-        if !proliferatable_player_counters(player).is_empty() {
+        if !proliferatable_player_counters(player).is_empty()
+            && crate::game::players::player_exists_for_choice(state, player.id)
+        {
             eligible.push(TargetRef::Player(player.id));
         }
     }
@@ -75,6 +80,9 @@ fn emit_empty_proliferate_action(actor: PlayerId, events: &mut Vec<GameEvent>) {
     events.push(GameEvent::PlayerPerformedAction {
         player_id: actor,
         action: PlayerActionKind::Proliferate,
+        look_count: None,
+        scry_bottom_count: None,
+        scry_top_count: None,
     });
 }
 
@@ -93,19 +101,11 @@ fn drive_single_proliferate_action(
         return true;
     }
 
-    if remaining_after_this > 0 {
-        state.push_proliferate_frame(PendingProliferateActions {
-            actor,
-            source_id,
-            remaining: remaining_after_this,
-        });
-    } else {
-        state.push_proliferate_frame(PendingProliferateActions {
-            actor,
-            source_id,
-            remaining: 0,
-        });
-    }
+    state.push_proliferate_frame(PendingProliferateActions {
+        actor,
+        source_id,
+        remaining: remaining_after_this,
+    });
 
     state.waiting_for = WaitingFor::ProliferateChoice {
         player: actor,
@@ -172,6 +172,48 @@ pub fn resume_proliferate_actions(
     )
 }
 
+/// CR 701.34a + CR 608.2c: The single authority for finishing one proliferate
+/// action and continuing to the next.
+///
+/// Publishes the player-action event for the action that just completed — so
+/// "whenever you proliferate" triggers observe each action in the order it
+/// happened — then drives the actions still owed, emitting `EffectResolved`
+/// only once every one of them has finished.
+///
+/// Returns `false` when a further `ProliferateChoice` is now open, in which case
+/// the fresh frame owns finishing the resolution on its own handler cycle.
+///
+/// Both the direct `ProliferateChoice` handler and the
+/// `ContinueProliferateActions` post-action route through here, so a PROMPTED
+/// action's ordering is stated exactly once (issue #7384). CR 701.34a is that
+/// every action emits exactly one player-action event, from one of two sites:
+/// an action with no eligible permanents or players never prompts and is
+/// published by `emit_empty_proliferate_action` instead — do not delete that
+/// emit on the strength of this one.
+pub(crate) fn continue_proliferate_actions(
+    state: &mut GameState,
+    pending: PendingProliferateActions,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let source_id = pending.source_id;
+    events.push(GameEvent::PlayerPerformedAction {
+        player_id: pending.actor,
+        action: PlayerActionKind::Proliferate,
+        look_count: None,
+        scry_bottom_count: None,
+        scry_top_count: None,
+    });
+    if !resume_proliferate_actions(state, pending, events) {
+        return false;
+    }
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::Proliferate,
+        source_id,
+        subject: None,
+    });
+    true
+}
+
 /// CR 614.6 + CR 614.11: Single authority for propose → replace → apply.
 pub(crate) fn proliferate_through_replacement(
     state: &mut GameState,
@@ -226,9 +268,10 @@ pub fn resolve(
     Ok(())
 }
 
-/// CR 701.34a (operation) + CR 122.1: Resolve `Effect::ProliferateTarget` — the
-/// forced single-target form ("for each kind of counter on target permanent or
-/// player, give that permanent or player another counter of that kind").
+/// CR 608.2c + CR 122.1: Resolve `Effect::ProliferateTarget` as its direct
+/// counter instruction ("for each kind of counter on target permanent or player,
+/// give that permanent or player another counter of that kind"). This is not the
+/// CR 701.34a proliferate keyword action.
 ///
 /// Unlike `resolve` (the chooser-driven `Proliferate`), the target is already
 /// fixed in `ability.targets`, so there is no `ProliferateChoice` prompt: it
@@ -241,9 +284,23 @@ pub fn resolve_target(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    apply_proliferate(state, ability.controller, &ability.targets, events);
+    let kind = EffectKind::from(&ability.effect);
+    // CR 614.1a: a counter-placement replacement may pause mid-application. The
+    // completion carries this effect's own identity so the paused path emits the
+    // same single `EffectResolved` the synchronous path does — and no
+    // `PlayerActionKind::Proliferate`, which this forced-target form must never
+    // publish.
+    if !apply_proliferate(
+        state,
+        ability.controller,
+        &ability.targets,
+        PendingEffectResolved::new(kind, ability.source_id),
+        events,
+    ) {
+        return Ok(());
+    }
     events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
+        kind,
         source_id: ability.source_id,
         subject: None,
     });
@@ -252,10 +309,22 @@ pub fn resolve_target(
 
 /// Apply proliferate to the selected targets — adds one counter of each kind
 /// already present. Called from the engine handler after player makes their choice.
+///
+/// `completion` is the work owed once every counter has landed. It is supplied
+/// by the caller rather than assumed here because the two callers owe different
+/// things: the chooser-driven `Proliferate` continues its remaining actions and
+/// publishes `PlayerActionKind::Proliferate`, while `Effect::ProliferateTarget`
+/// must do neither (CR 122.1 — the card spells out the counter-add instead of
+/// using the keyword action, so it must not fire "whenever you proliferate").
+///
+/// Returns `false` when a counter-placement replacement opened a choice; the
+/// remaining additions and `completion` are parked on a `CounterAdditions` frame
+/// and resume through `drain_pending_counter_additions`.
 pub fn apply_proliferate(
     state: &mut GameState,
     actor: PlayerId,
     selected: &[TargetRef],
+    completion: PendingEffectResolved,
     events: &mut Vec<GameEvent>,
 ) -> bool {
     for target in selected {
@@ -267,12 +336,6 @@ pub fn apply_proliferate(
     }
 
     let additions = proliferate_addition_plan(state, actor, selected);
-    let completion = PendingEffectResolved::with_player_action(
-        EffectKind::Proliferate,
-        crate::types::identifiers::ObjectId(0),
-        actor,
-        PlayerActionKind::Proliferate,
-    );
 
     for (index, addition) in additions.iter().cloned().enumerate() {
         if !apply_counter_addition_plan_item(state, addition, events) {
@@ -368,14 +431,16 @@ fn apply_counter_addition_plan_item(
             player_id,
             counter_kind,
             count,
-        } => super::player_counter::add_player_counter_with_replacement(
-            state,
-            actor,
-            player_id,
-            counter_kind,
-            count,
-            events,
-        ),
+        } => {
+            super::player_counter::add_player_counter_with_replacement(
+                state,
+                actor,
+                player_id,
+                counter_kind,
+                count,
+                events,
+            ) != super::player_counter::PlayerCounterAdditionOutcome::NeedsChoice
+        }
         PendingCounterAddition::Energy {
             actor,
             player_id,
@@ -392,6 +457,7 @@ mod tests {
         Effect, QuantityModification, ReplacementDefinition, ReplacementPlayerScope, TargetFilter,
         TypedFilter,
     };
+    use crate::types::game_state::{PendingCounterPostAction, PendingEffectResolutionEvent};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
@@ -399,6 +465,13 @@ mod tests {
 
     fn make_proliferate_ability() -> ResolvedAbility {
         ResolvedAbility::new(Effect::Proliferate, vec![], ObjectId(100), PlayerId(0))
+    }
+
+    /// A completion for rows that exercise counter placement only and never
+    /// reach the paused path. Rows that assert the parked completion's shape
+    /// build the real chooser-driven one instead.
+    fn proliferate_test_completion() -> PendingEffectResolved {
+        PendingEffectResolved::new(EffectKind::Proliferate, ObjectId(100))
     }
 
     /// CR 701.34a + CR 614.1a: Tekuthal-style proliferate replacement doubles
@@ -523,6 +596,7 @@ mod tests {
             &mut state,
             PlayerId(0),
             &[TargetRef::Object(obj1)],
+            proliferate_test_completion(),
             &mut events,
         );
 
@@ -557,6 +631,7 @@ mod tests {
             &mut state,
             PlayerId(0),
             &[TargetRef::Object(obj)],
+            proliferate_test_completion(),
             &mut events,
         );
 
@@ -589,6 +664,7 @@ mod tests {
             &mut state,
             PlayerId(0),
             &[TargetRef::Object(obj)],
+            proliferate_test_completion(),
             &mut events,
         );
 
@@ -619,6 +695,80 @@ mod tests {
         } else {
             panic!("Expected ProliferateChoice");
         }
+    }
+
+    /// R4a — CR 701.34a + CR 102.1 + the CR 702.26b MIRROR: the proliferate offer is a
+    /// production-observable MINT, and item 1 changes what it publishes. A seat that has
+    /// left the game, and a seat that is phased out, are not among the "permanents and/or
+    /// players" a proliferate choice may range over, however many counters they carry.
+    ///
+    /// THE ELIMINATED HALF IS STRICTLY LIVE, independent of phasing: at HEAD this seam had
+    /// ZERO existence conjuncts of any kind, so a poisoned seat that had already lost the
+    /// game was still offered to the chooser.
+    ///
+    /// TOTAL EQUALITY, never `!contains` — exclusion AND identity in one assertion. Four
+    /// discriminators ride on the one `assert_eq!`:
+    ///   * P0 IN — the offer still fires and still reaches valid seats (the reach-guard:
+    ///     `drive_single_proliferate_action` publishes NO prompt at all when the eligible
+    ///     set is empty, so an exclusion-only row could pass on an offer that never fired);
+    ///   * P1 OUT by phasing, P2 OUT by elimination — the two behaviour changes;
+    ///   * P3 IN — a valid seat is not lost along with them;
+    ///   * P4 OUT for having no counters — the COUNTER-DISCRIMINATION control, which proves
+    ///     the list is "seats with counters, narrowed by existence" and not "every seat".
+    ///
+    /// REVERT-PROBE: drop the `player_exists_for_choice` conjunct ⇒ P1 and P2 reappear ⇒
+    /// FAILS. NARROWER PROBE: replace it with bare `is_alive` ⇒ P1 alone reappears ⇒ FAILS,
+    /// which separates the phasing half from the elimination half.
+    #[test]
+    fn proliferate_offer_excludes_eliminated_and_phased_out_seats_and_keeps_the_rest() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::standard(), 5, 42);
+        let mut events = Vec::new();
+
+        // Every seat but P4 is counter-eligible, so EXISTENCE is the only thing that can
+        // exclude P1 and P2 below.
+        for seat in [0usize, 1, 2, 3] {
+            state.players[seat].poison_counters = 1;
+        }
+
+        // Setup anti-vacuity, asserted before anything is measured: the production APIs
+        // report what they transitioned, so a silent no-op fails loudly here.
+        let transitioned =
+            crate::game::phasing::phase_out_player(&mut state, PlayerId(1), &mut events);
+        assert_eq!(
+            transitioned,
+            vec![PlayerId(1)],
+            "phase_out_player must actually transition P1"
+        );
+        assert!(
+            state.players[1].is_phased_out(),
+            "P1 must read as phased out"
+        );
+        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        assert!(state.players[2].is_eliminated, "P2 must read as eliminated");
+        assert!(
+            state.players[1].poison_counters > 0 && state.players[2].poison_counters > 0,
+            "both excluded seats must still CARRY counters, or the counter filter would \
+             drop them first and this row would never reach the existence conjunct"
+        );
+
+        let ability = make_proliferate_ability();
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let WaitingFor::ProliferateChoice { eligible, .. } = &state.waiting_for else {
+            panic!("expected ProliferateChoice, got {:?}", state.waiting_for);
+        };
+        assert_eq!(
+            eligible,
+            &vec![
+                TargetRef::Player(PlayerId(0)),
+                TargetRef::Player(PlayerId(3)),
+            ],
+            "the offer ranges over counter-carrying seats that still exist: P1 is phased \
+             out, P2 has left the game, P4 has no counters"
+        );
     }
 
     #[test]
@@ -672,6 +822,7 @@ mod tests {
             &mut state,
             PlayerId(0),
             &[TargetRef::Player(PlayerId(1))],
+            proliferate_test_completion(),
             &mut events,
         );
 
@@ -755,11 +906,26 @@ mod tests {
         object.counters.insert(CounterType::Plus1Plus1, 1);
         object.counters.insert(CounterType::Stun, 1);
 
+        // The completion the `ProliferateChoice` handler actually supplies: the
+        // player-action event and the remaining actions both ride
+        // `ContinueProliferateActions`, so the completion itself owes neither.
+        let pending_frame = PendingProliferateActions {
+            actor: PlayerId(0),
+            source_id: ObjectId(77),
+            remaining: 1,
+        };
         let mut events = Vec::new();
         assert!(!apply_proliferate(
             &mut state,
             PlayerId(0),
             &[TargetRef::Object(obj)],
+            PendingEffectResolved::with_post_actions_without_effect(
+                EffectKind::Proliferate,
+                pending_frame.source_id,
+                vec![PendingCounterPostAction::ContinueProliferateActions {
+                    pending: pending_frame.clone(),
+                }],
+            ),
             &mut events,
         ));
 
@@ -767,19 +933,36 @@ mod tests {
             state.waiting_for,
             WaitingFor::ReplacementChoice { .. }
         ));
-        let pending = state
+        let queued = state
             .active_counter_additions()
             .expect("remaining proliferate additions should be queued");
-        assert_eq!(pending.remaining.len(), 1);
+        assert_eq!(queued.remaining.len(), 1);
+        let completion = queued
+            .completion
+            .as_ref()
+            .expect("the paused proliferate must park its completion");
+        assert_eq!(completion.kind, EffectKind::Proliferate);
+        assert_eq!(
+            completion.source_id, pending_frame.source_id,
+            "the completion must carry the real source, not ObjectId(0)"
+        );
+        assert!(
+            completion.player_action.is_none(),
+            "the proliferate player action is published by ContinueProliferateActions, \
+             so parking it here too would double-fire proliferate triggers"
+        );
         assert!(matches!(
-            pending.completion,
-            Some(PendingEffectResolved {
-                kind: EffectKind::Proliferate,
-                source_id: ObjectId(0),
-                player_action: Some(_),
-                ..
-            })
+            completion.resolution_event,
+            PendingEffectResolutionEvent::Suppress
         ));
+        assert_eq!(
+            completion.post_actions,
+            vec![PendingCounterPostAction::ContinueProliferateActions {
+                pending: pending_frame
+            }],
+            "the parked completion must carry the resume that keeps the remaining \
+             proliferate actions alive across the replacement choice"
+        );
     }
 
     #[test]
@@ -820,6 +1003,7 @@ mod tests {
             &mut state,
             PlayerId(0),
             &[TargetRef::Object(obj)],
+            proliferate_test_completion(),
             &mut events,
         );
 
@@ -857,6 +1041,7 @@ mod tests {
             &mut state,
             PlayerId(0),
             &[TargetRef::Player(PlayerId(1))],
+            proliferate_test_completion(),
             &mut events,
         );
 
@@ -894,6 +1079,7 @@ mod tests {
             &mut state,
             PlayerId(0),
             &[TargetRef::Player(PlayerId(1))],
+            proliferate_test_completion(),
             &mut events,
         );
 
@@ -987,6 +1173,7 @@ mod tests {
             &mut state,
             PlayerId(0),
             &[TargetRef::Object(obj)],
+            proliferate_test_completion(),
             &mut events,
         );
 
@@ -1046,6 +1233,7 @@ mod tests {
             &mut state,
             PlayerId(0),
             &[TargetRef::Object(obj)],
+            proliferate_test_completion(),
             &mut events,
         );
 

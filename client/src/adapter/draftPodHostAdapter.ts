@@ -11,13 +11,14 @@
  */
 
 import { DraftAdapter } from "./draft-adapter";
-import type { DraftPlayerView, PairingView, PodPolicy, PoolInput, SeatPublicView, TournamentFormat } from "./draft-adapter";
+import type { DraftKind, DraftPlayerView, PairingView, PodPolicy, PoolInput, SeatPublicView, TournamentFormat } from "./draft-adapter";
 import type { MatchScore } from "./types";
 import { P2PDraftHost, type DraftHostEvent } from "./p2p-draft-host";
 import { hostRoom, type HostResult } from "../network/connection";
-import type { DraftMatchLaunch, DraftPauseReason } from "../network/draftProtocol";
+import type { DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from "../network/draftProtocol";
 import type { BrokerClient, RegisterHostRequest } from "../services/brokerClient";
 import { loadDraftHostSession } from "../services/draftPersistence";
+import type { DraftIntergameCommand, DraftIntergameCommandAck } from "../services/intergameCommandLedger";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -54,7 +55,7 @@ export type DraftPodHostEvent =
   | { type: "pairingsGenerated"; round: number; pairings: PairingView[] }
   | { type: "matchStart"; launch: DraftMatchLaunch }
   | { type: "matchResultReceived"; matchId: string; winnerSeat: number | null }
-  | { type: "roundAdvanced"; newRound: number }
+  | { type: "roundAdvanced" }
   | { type: "timerExpired" }
   | {
       type: "bo3SideboardPrompt";
@@ -75,6 +76,7 @@ export type DraftPodHostEvent =
   | { type: "bo3SideboardPromptSent"; matchId: string }
   | { type: "bo3BothSideboardsSubmitted"; matchId: string }
   | { type: "bo3GameStarted"; matchId: string; gameNumber: number }
+  | { type: "bo3AuthorizedCommand"; command: DraftIntergameCommand; acknowledgement: DraftIntergameCommandAck }
   | { type: "error"; message: string };
 
 type DraftPodHostEventListener = (event: DraftPodHostEvent) => void;
@@ -103,7 +105,7 @@ function hostStatusForView(view: DraftPlayerView): DraftPodHostStatus {
 
 export interface DraftPodHostConfig {
   poolInput: PoolInput;
-  kind: "Premier" | "Traditional";
+  kind: Exclude<DraftKind, "Quick">;
   podSize: number;
   hostDisplayName: string;
   /** Swiss (3 rounds) or Single Elimination bracket. */
@@ -129,8 +131,13 @@ export class DraftPodHostAdapter {
   private host: P2PDraftHost | null = null;
   private hostResult: HostResult | null = null;
   private hostEventUnsub: (() => void) | null = null;
+  /** Closes an in-flight local host before a replacement may be created. */
+  private pendingDispose: (() => Promise<void>) | null = null;
+  /** Settles only after a canceled initializer has released every local resource. */
+  private pendingInitialization: Promise<void> | null = null;
   private _status: DraftPodHostStatus = "idle";
   private _roomCode: string | null = null;
+  private disposed = false;
 
   onEvent(listener: DraftPodHostEventListener): () => void {
     this.listeners.push(listener);
@@ -165,13 +172,54 @@ export class DraftPodHostAdapter {
    * accepting guest connections.
    */
   async initialize(config: DraftPodHostConfig): Promise<void> {
+    this.disposed = false;
     this.setStatus("connecting");
+    let finishInitialization!: () => void;
+    const initializationSettled = new Promise<void>((resolve) => {
+      finishInitialization = resolve;
+    });
+    this.pendingInitialization = initializationSettled;
+    let pendingHost: P2PDraftHost | null = null;
+    let pendingHostDisposed = false;
+    let pendingHostResult: HostResult | null = null;
+    let pendingHostResultDestroyed = false;
+
+    const abortIfRequested = () => {
+      if (config.signal?.aborted || this.disposed) {
+        throw new Error("Draft pod host initialization aborted");
+      }
+    };
+    const disposePending = async () => {
+      if (this.hostEventUnsub) {
+        this.hostEventUnsub();
+        this.hostEventUnsub = null;
+      }
+      if (pendingHost && !pendingHostDisposed) {
+        pendingHostDisposed = true;
+        await pendingHost.dispose();
+      }
+      if (pendingHostResult && !pendingHostResultDestroyed) {
+        pendingHostResultDestroyed = true;
+        pendingHostResult.destroy();
+      }
+      if (pendingHostResult) {
+        if (this.hostResult === pendingHostResult) this.hostResult = null;
+        pendingHostResult = null;
+      }
+      this._roomCode = null;
+    };
+    this.pendingDispose = disposePending;
 
     try {
       // 1. Create PeerJS host peer
       const hostResult = await hostRoom(config.signal, {
         preferredRoomCode: config.preferredRoomCode,
       });
+      pendingHostResult = hostResult;
+      // `hostRoom` is only cancellation-aware while it is pending. Once it
+      // resolves, every following async boundary must re-check before making
+      // this peer discoverable or starting its local draft host.
+      abortIfRequested();
       this.hostResult = hostResult;
       this._roomCode = hostResult.roomCode;
       this.emit({ type: "roomCreated", roomCode: hostResult.roomCode });
@@ -190,9 +238,11 @@ export class DraftPodHostAdapter {
             hostPeerId: hostResult.peerId,
           });
         } catch (err) {
+          if (config.signal?.aborted || this.disposed) throw err;
           console.warn("[DraftPodHostAdapter] broker registration failed:", err);
           // Non-fatal: direct room code still works
         }
+        abortIfRequested();
       }
 
       // 3. For cube drafts, the WASM CARD_DB must be populated before
@@ -201,13 +251,18 @@ export class DraftPodHostAdapter {
       //    and never touches CARD_DB.
       if (config.poolInput.type === "Cube") {
         const resp = await fetch(__CARD_DATA_URL__);
+        abortIfRequested();
         if (!resp.ok) {
           throw new Error(`Failed to load card data: ${resp.status}`);
         }
-        await new DraftAdapter().loadCardDatabase(await resp.text());
+        const cardData = await resp.text();
+        abortIfRequested();
+        await new DraftAdapter().loadCardDatabase(cardData);
+        abortIfRequested();
       }
 
       // 4. Create P2PDraftHost
+      abortIfRequested();
       const host = new P2PDraftHost(
         hostResult.peer,
         hostResult.onGuestConnected,
@@ -221,6 +276,7 @@ export class DraftPodHostAdapter {
         config.persistenceId,
         hostResult.roomCode,
       );
+      pendingHost = host;
 
       // 4. Wire host events
       this.hostEventUnsub = host.onEvent((event) => {
@@ -230,8 +286,10 @@ export class DraftPodHostAdapter {
       // 5. Check for persisted session to restore
       if (config.persistenceId) {
         const persisted = await loadDraftHostSession(config.persistenceId);
+        abortIfRequested();
         if (persisted) {
           const view = await host.restoreFromPersisted(persisted);
+          abortIfRequested();
           if (view) {
             this.setStatus(hostStatusForView(view));
             this.emit({ type: "viewUpdated", view });
@@ -241,16 +299,31 @@ export class DraftPodHostAdapter {
 
       // 6. Start accepting connections
       await host.initialize();
+      abortIfRequested();
       this.host = host;
+      pendingHost = null;
+      pendingHostResult = null;
+      if (this.pendingDispose === disposePending) this.pendingDispose = null;
 
       if (this._status === "connecting") {
         this.setStatus("lobby");
       }
     } catch (err) {
+      await disposePending();
+      if (config.signal?.aborted || this.disposed) {
+        this.setStatus("idle");
+        throw err;
+      }
       this.setStatus("error");
       const message = err instanceof Error ? err.message : String(err);
       this.emit({ type: "error", message });
       throw err;
+    } finally {
+      finishInitialization();
+      if (this.pendingDispose === disposePending) this.pendingDispose = null;
+      if (this.pendingInitialization === initializationSettled) {
+        this.pendingInitialization = null;
+      }
     }
   }
 
@@ -290,7 +363,7 @@ export class DraftPodHostAdapter {
         this.emit({ type: "lobbyFull" });
         break;
       case "draftStarted":
-        this.setStatus("drafting");
+        this.setStatus(hostStatusForView(event.view));
         this.emit({ type: "draftStarted", view: event.view });
         break;
       case "pickReceived":
@@ -339,7 +412,7 @@ export class DraftPodHostAdapter {
         break;
       case "roundAdvanced":
         this.setStatus("pairing");
-        this.emit({ type: "roundAdvanced", newRound: event.newRound });
+        this.emit({ type: "roundAdvanced" });
         break;
       case "timerExpired":
         this.emit({ type: "timerExpired" });
@@ -380,6 +453,9 @@ export class DraftPodHostAdapter {
           firstPlayerSeat: event.firstPlayerSeat,
         });
         break;
+      case "bo3AuthorizedCommand":
+        this.emit({ type: "bo3AuthorizedCommand", command: event.command, acknowledgement: event.acknowledgement });
+        break;
     }
   }
 
@@ -395,6 +471,14 @@ export class DraftPodHostAdapter {
     return this.host.submitHostPick(cardInstanceId);
   }
 
+  async submitPickWithDraftEffect(
+    effectCardInstanceId: string,
+    cardInstanceIds: string[],
+  ): Promise<DraftPlayerView> {
+    if (!this.host) throw new Error("Host not initialized");
+    return this.host.submitHostPickWithDraftEffect(effectCardInstanceId, cardInstanceIds);
+  }
+
   async submitDeck(mainDeck: string[]): Promise<DraftPlayerView> {
     if (!this.host) throw new Error("Host not initialized");
     return this.host.submitHostDeck(mainDeck);
@@ -407,9 +491,9 @@ export class DraftPodHostAdapter {
 
   // ── Match coordination ──────────────────────────────────────────────
 
-  async generatePairings(round: number): Promise<void> {
+  async generatePairings(): Promise<void> {
     if (!this.host) throw new Error("Host not initialized");
-    await this.host.generatePairings(round);
+    await this.host.generatePairings();
   }
 
   async advanceRound(): Promise<void> {
@@ -420,6 +504,11 @@ export class DraftPodHostAdapter {
   async overrideMatchResult(matchId: string, winnerSeat: number | null): Promise<void> {
     if (!this.host) throw new Error("Host not initialized");
     await this.host.overrideMatchResult(matchId, winnerSeat);
+  }
+
+  async submitMatchSettlement(settlement: DraftMatchSettlement): Promise<void> {
+    if (!this.host) throw new Error("Host not initialized");
+    await this.host.submitHostMatchSettlement(settlement);
   }
 
   async replaceSeatWithBot(seat: number): Promise<void> {
@@ -441,19 +530,9 @@ export class DraftPodHostAdapter {
     this.host.handleMatchBetweenGames(matchId, gameNumber, score, loserSeat, seatA, seatB);
   }
 
-  handleSideboardSubmit(
-    seat: number,
-    matchId: string,
-    mainDeck: string[],
-    sideboard: Array<{ name: string; count: number }>,
-  ): void {
+  submitAuthorized(seat: number, command: DraftIntergameCommand): void {
     if (!this.host) throw new Error("Host not initialized");
-    this.host.handleSideboardSubmit(seat, matchId, mainDeck, sideboard);
-  }
-
-  handlePlayDrawChosen(seat: number, matchId: string, playFirst: boolean): void {
-    if (!this.host) throw new Error("Host not initialized");
-    this.host.handlePlayDrawChosen(seat, matchId, playFirst);
+    this.host.submitAuthorized(seat, command);
   }
 
   // ── Host controls ──────────────────────────────────────────────────
@@ -488,13 +567,18 @@ export class DraftPodHostAdapter {
   // ── Cleanup ────────────────────────────────────────────────────────
 
   async dispose(options: { preserveSession?: boolean } = {}): Promise<void> {
+    this.disposed = true;
+    const pendingDispose = this.pendingDispose;
+    const pendingInitialization = this.pendingInitialization;
+    if (pendingDispose) await pendingDispose();
+    if (pendingInitialization) await pendingInitialization;
     if (this.hostEventUnsub) {
       this.hostEventUnsub();
       this.hostEventUnsub = null;
     }
     if (this.host) {
       if (options.preserveSession) {
-        this.host.dispose();
+        await this.host.dispose();
       } else {
         await this.host.terminateDraft();
       }

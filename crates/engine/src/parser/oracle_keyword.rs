@@ -1,11 +1,11 @@
 use std::borrow::Cow;
 
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::{alpha1, space0, space1};
+use nom::character::complete::{alpha1, alphanumeric1, space0, space1};
 use nom::combinator::{all_consuming, eof, not, opt, peek, value};
-use nom::sequence::preceded;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::oracle_cost::parse_oracle_cost;
@@ -21,7 +21,7 @@ use crate::types::ability::{
 };
 use crate::types::keywords::{
     normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, DisguiseCost,
-    EmbalmCost, EscapeCost, EternalizeCost, FlashbackCost, Keyword, WardCost,
+    EmbalmCost, EmergeCost, EscapeCost, EternalizeCost, FlashbackCost, Keyword, WardCost,
 };
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::zones::Zone;
@@ -700,6 +700,34 @@ fn parse_ward_cost(cost_text: &str) -> Option<Keyword> {
     Some(Keyword::Ward(cost))
 }
 
+/// CR 702.21a + CR 122.1 + CR 104.3d: "get N <kind> counter(s)" / "get a/an
+/// <kind> counter" — the single grammatical authority for this ward-cost
+/// family. Composes the count/article, kind, and singular/plural axes as
+/// independent nom combinators (this repo's mandated style) rather than
+/// enumerating their product as ad-hoc string dispatch.
+fn parse_get_player_counters_ward_cost(input: &str) -> OracleResult<'_, WardCost> {
+    all_consuming(|i| {
+        let (rest, _) = tag::<_, _, OracleError<'_>>("get ").parse(i)?;
+        let (rest, count) = alt((
+            nom_primitives::parse_number,
+            value(1u32, nom_primitives::parse_article),
+        ))
+        .parse(rest)?;
+        let (rest, _) = space0.parse(rest)?;
+        let (rest, counter_kind) = nom_primitives::parse_player_counter_kind.parse(rest)?;
+        let (rest, _) = tag(" counter").parse(rest)?;
+        let (rest, _) = opt(tag("s")).parse(rest)?;
+        Ok((
+            rest,
+            WardCost::GetPlayerCounters {
+                counter_kind,
+                count,
+            },
+        ))
+    })
+    .parse(input)
+}
+
 /// Parse a single ward cost component (not compound).
 fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
     // CR 702.21a + CR 608.2h + CR 113.7a: Ward's life cost reads the source's
@@ -748,6 +776,30 @@ fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("waterbend").parse(lower) {
         let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(rest.trim());
         return Some(WardCost::Waterbend(cost));
+    }
+
+    // CR 702.21a + CR 122.1 + CR 104.3d: "get N <kind> counter(s)" — a
+    // player-counter ward cost (The Serpent Society: "Ward—Get five poison
+    // counters."). MUST run before the mana-cost fallback below, which
+    // otherwise silently parses unrecognized cost text with no mana
+    // symbols/braces as a free, always-paid Ward (phase-rs/phase#6640).
+    //
+    // One grammatical authority over the count/article, kind, and
+    // singular/plural axes — composed nom combinators, not string-suffix
+    // dispatch — so this parser family has a single production to extend
+    // rather than ad-hoc per-branch string handling.
+    if tag::<_, _, OracleError<'_>>("get ").parse(lower).is_ok() {
+        return match parse_get_player_counters_ward_cost(lower) {
+            Ok((_, cost)) => Some(cost),
+            // CR 702.21a: recognized as counter-shaped ("get ...") but the
+            // count, kind, or "counter(s)" tail didn't parse in full — fail
+            // closed rather than falling through to the mana-cost fallback
+            // below, which would otherwise silently produce a free,
+            // always-paid Ward for unsupported/malformed counter text
+            // (phase-rs/phase#6640's exact bug class, for different
+            // malformed input).
+            Err(_) => None,
+        };
     }
 
     // Fall back to mana cost parsing
@@ -1286,6 +1338,35 @@ fn parse_disguise_keyword_line(text: &str) -> Option<Keyword> {
 /// Oracle text uses space-separated format: "protection from red", "ward {2}",
 /// "flashback {2}{U}". Converts to the colon format that `FromStr` expects,
 /// handling the "from" preposition used by protection keywords.
+/// CR 702.82a / CR 702.82c: "Devour [quality] N".
+///
+/// Plain "Devour N" (CR 702.82a) sacrifices creatures; the qualified form
+/// "Devour [quality] N" (CR 702.82c) sacrifices [quality] permanents. The
+/// optional type qualifier sits between the keyword name and the count, so the
+/// grammar is `"devour " (type_filter " ")? number`. `parse_type_filter_word`
+/// errors on a bare number, so `opt` yields `None` for the plain form and the
+/// quality defaults to `TypeFilter::Creature` (CR 702.82a). The word emits a
+/// canonical-case `Subtype` (e.g. Food), so the synthesized runtime filter's
+/// subtype membership test matches the canonical "Food" name. Returns
+/// `(keyword, unconsumed)`.
+fn parse_devour_keyword_line(text: &str) -> Option<(Keyword, &str)> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("devour ").parse(text).ok()?;
+    let (rest, quality) = opt((
+        crate::parser::oracle_nom::target::parse_type_filter_word,
+        tag::<_, _, OracleError<'_>>(" "),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (unconsumed, n) = nom_primitives::parse_number.parse(rest).ok()?;
+    Some((
+        Keyword::Devour {
+            n,
+            quality: quality.map_or(TypeFilter::Creature, |(q, _)| q),
+        },
+        unconsumed,
+    ))
+}
+
 pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     use crate::types::keywords::PartnerType;
 
@@ -1334,6 +1415,22 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
 
     if let Some(kw) = parse_bloodthirst_keyword_line(text) {
         return Some((kw, ""));
+    }
+
+    // CR 702.82a / CR 702.82c: "Devour [quality] N" — the optional type qualifier
+    // precedes the count, so this must run BEFORE the generic numeric-count path,
+    // which would capture only N and silently drop the quality (the reported bug).
+    if let Some(result) = parse_devour_keyword_line(text) {
+        return Some(result);
+    }
+
+    // CR 702.119b: "Emerge from [quality] {cost}" replaces ordinary Emerge's
+    // creature sacrifice with a permanent matching the parsed quality.
+    if tag::<_, _, OracleError<'_>>("emerge from ")
+        .parse(text)
+        .is_ok()
+    {
+        return parse_emerge_from_quality_keyword_line(text);
     }
 
     if let Some(kw) = parse_firebending_keyword_line(text) {
@@ -1583,7 +1680,7 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
         }
     }
 
-    // CR 702.74a: "hideaway N" — parameterized keyword.
+    // CR 702.75a: "hideaway N" — parameterized keyword.
     // Delegates to nom combinator for number parsing.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("hideaway ").parse(text) {
         if let Ok((rem, n)) = nom_primitives::parse_number.parse(rest.trim()) {
@@ -1639,6 +1736,30 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
             if rem.is_empty() {
                 return Some((Keyword::Discover(n), ""));
             }
+        }
+    }
+
+    // CR 702.174g: "Gift an extra turn". The article is part of the printed form
+    // and this kind takes "an", so the "gift a " scan below never saw it: the
+    // outer keyword scan then fell back to the bare `Gift` form, which defaults
+    // to `Card`, and Perch Protection promised a card draw instead of a turn
+    // (#7286).
+    //
+    // A separate scan rather than an `alt` over both articles, because an
+    // unknown "gift an [something]" must keep falling THROUGH to the outer scan
+    // exactly as it does today. CR 702.174i's Octopus is the live case
+    // (Octomancer, #5975) and has no `GiftKind` yet; folding it into the block
+    // below would turn its silent-`Card` parse into no keyword at all, which is
+    // a different wrong answer, in a card this change has no business touching.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("gift an ").parse(text) {
+        use crate::types::keywords::GiftKind;
+        if let Ok((remainder, _)) = terminated(
+            tag::<_, _, OracleError<'_>>("extra turn"),
+            not(alphanumeric1),
+        )
+        .parse(rest)
+        {
+            return Some((Keyword::Gift(GiftKind::ExtraTurn), remainder));
         }
     }
 
@@ -1826,28 +1947,16 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     // tail is precisely what the strict router must see in order to reject
     // "<kw> N <semantic clause>" (e.g. "crew 2 if it's an artifact").
     let (param, unconsumed): (Cow<'_, str>, &str) = if is_numeric_count_keyword(name) {
-        // CR 702.82c: "Devour [quality] N" is a variant where the count follows a
-        // leading type qualifier — Famished Worldsire's "Devour land 3" enters
-        // with three +1/+1 counters per sacrificed LAND, so the numeric token
-        // sits after "land". Take the count at the head; if a non-numeric
-        // qualifier word precedes it, skip that one word and retry, so the count
-        // is captured rather than lost to the keyword's `FromStr` `unwrap_or(1)`
-        // fallback (which produced the reported Devour 1).
-        let count_src = if nom_primitives::parse_number.parse(rest).is_ok() {
-            rest
-        } else {
-            (
-                take_until::<_, _, OracleError<'_>>(" "),
-                tag::<_, _, OracleError<'_>>(" "),
-            )
-                .parse(rest)
-                .map_or(rest, |(after_qualifier, _)| after_qualifier)
-        };
-        match nom_primitives::parse_number.parse(count_src) {
+        // Bare-integer count keywords (Vanishing/Fading/Renown/Frenzy/Bushido/…):
+        // take only the leading integer and surface the trailing clause as
+        // `unconsumed` so the strict router can reject "<kw> N <semantic clause>".
+        // (CR 702.82c "Devour [quality] N" is handled upstream by
+        // `parse_devour_keyword_line`, so no qualifier-skip is needed here.)
+        match nom_primitives::parse_number.parse(rest) {
             // `remainder` is the clause the permissive contract drops on the
             // floor. Surface it; the strict router turns it into a rejection.
             Ok((remainder, _)) => (
-                Cow::Borrowed(&count_src[..count_src.len() - remainder.len()]),
+                Cow::Borrowed(&rest[..rest.len() - remainder.len()]),
                 remainder,
             ),
             // No leading integer: the whole `rest` goes to `FromStr`, so whatever
@@ -1872,6 +1981,27 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
         return None;
     }
     Some((parsed, unconsumed))
+}
+
+/// CR 702.119b: Parse "emerge from [quality] {cost}" without swallowing a
+/// missing mana cost or semantic suffix. The type parser owns the quality grammar
+/// and the mana combinator leaves any trailing text for the strict router.
+fn parse_emerge_from_quality_keyword_line(text: &str) -> Option<(Keyword, &str)> {
+    let (after_prefix, _) = tag::<_, _, OracleError<'_>>("emerge from ")
+        .parse(text)
+        .ok()?;
+    let (sacrifice_filter, after_quality) = parse_type_phrase(after_prefix);
+    if after_quality.len() == after_prefix.len() {
+        return None;
+    }
+    let (after_cost, _) = space1::<_, OracleError<'_>>.parse(after_quality).ok()?;
+    let upper_cost = after_cost.to_ascii_uppercase();
+    let (upper_remainder, mana_cost) = nom_primitives::parse_mana_cost(&upper_cost).ok()?;
+    let remainder = &after_cost[after_cost.len() - upper_remainder.len()..];
+    Some((
+        Keyword::Emerge(EmergeCost::from_quality(mana_cost, sacrifice_filter)),
+        remainder,
+    ))
 }
 
 /// Permissive, grant-context keyword parser. Returns the typed leading keyword
@@ -2342,6 +2472,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Exploit => "exploit".to_string(),
         Keyword::Explore => "explore".to_string(),
         Keyword::Ascend => "ascend".to_string(),
+        Keyword::Storied => "storied".to_string(),
         Keyword::StartYourEngines => "start your engines!".to_string(),
         Keyword::Soulbond => "soulbond".to_string(),
         Keyword::Banding => "banding".to_string(),
@@ -2413,7 +2544,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Bloodthirst(_) => "bloodthirst".to_string(),
         Keyword::Amplify(_) => "amplify".to_string(),
         Keyword::Graft(_) => "graft".to_string(),
-        Keyword::Devour(_) => "devour".to_string(),
+        Keyword::Devour { .. } => "devour".to_string(),
         Keyword::Toxic(_) => "toxic".to_string(),
         Keyword::Saddle(_) => "saddle".to_string(),
         Keyword::Teamwork(_) => "teamwork".to_string(),
@@ -2685,7 +2816,7 @@ fn type_filter_subject_name(tf: &TypeFilter) -> String {
 /// exactly how a candidate recognizer starts silently swallowing card text.
 ///
 /// CR 702.29e adds the one NON-fixed rule (typecycling), handled separately below.
-pub(crate) const KEYWORD_COST_PREFIXES: [&str; 95] = [
+pub(crate) const KEYWORD_COST_PREFIXES: [&str; 96] = [
     "cycling",
     "basic landcycling",
     "flashback",
@@ -2777,6 +2908,7 @@ pub(crate) const KEYWORD_COST_PREFIXES: [&str; 95] = [
     "spree",
     "casualty",
     "bargain",
+    "storied",
     "demonstrate",
     "strive",
     "exploit",
@@ -2805,6 +2937,122 @@ mod tests {
     use super::*;
     use crate::types::ability::{AbilityCost, SacrificeCost};
     use crate::types::mana::ManaCost;
+    use crate::types::player::PlayerCounterKind;
+
+    #[test]
+    fn parse_keyword_line_core_emerge_from_artifact_preserves_quality() {
+        let (keyword, remainder) = parse_keyword_line_core("emerge from artifact {5}{b}{b}")
+            .expect("artifact-qualified Emerge must parse");
+        assert!(remainder.is_empty());
+        match keyword {
+            Keyword::Emerge(EmergeCost {
+                mana_cost,
+                sacrifice_filter: TargetFilter::Typed(filter),
+            }) => {
+                assert_eq!(
+                    mana_cost,
+                    ManaCost::Cost {
+                        shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                        generic: 5,
+                    }
+                );
+                assert_eq!(filter.type_filters, vec![TypeFilter::Artifact]);
+            }
+            other => panic!("expected artifact-qualified Emerge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_keyword_line_core_emerge_from_creature_preserves_quality() {
+        let (keyword, remainder) = parse_keyword_line_core("emerge from creature {3}{u}")
+            .expect("creature-qualified Emerge must parse");
+        assert!(remainder.is_empty());
+        match keyword {
+            Keyword::Emerge(EmergeCost {
+                mana_cost,
+                sacrifice_filter: TargetFilter::Typed(filter),
+            }) => {
+                assert_eq!(
+                    mana_cost,
+                    ManaCost::Cost {
+                        shards: vec![ManaCostShard::Blue],
+                        generic: 3,
+                    }
+                );
+                assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
+            }
+            other => panic!("expected creature-qualified Emerge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_keyword_line_core_emerge_from_quality_requires_mana_cost() {
+        assert!(parse_keyword_line_core("emerge from artifact").is_none());
+    }
+
+    #[test]
+    fn parse_router_keyword_line_emerge_from_quality_rejects_semantic_suffix() {
+        assert!(
+            parse_router_keyword_line("Emerge from artifact {5} if you control an Island")
+                .is_none(),
+            "a semantic suffix must remain unconsumed so the strict router declines the line"
+        );
+    }
+
+    #[test]
+    fn ward_get_poison_counters_parses_as_player_counter_cost() {
+        // Issue #6640 (The Serpent Society): "Ward—Get five poison counters."
+        // must not silently fall through to the mana-cost fallback.
+        let result = parse_ward_cost("Get five poison counters.");
+        assert_eq!(
+            result,
+            Some(Keyword::Ward(WardCost::GetPlayerCounters {
+                counter_kind: PlayerCounterKind::Poison,
+                count: 5,
+            }))
+        );
+    }
+
+    #[test]
+    fn ward_get_player_counters_accepts_digit_count_and_other_kinds() {
+        // Class-level coverage: digit form, and a non-poison counter kind.
+        let result = parse_ward_cost("Get 3 experience counters.");
+        assert_eq!(
+            result,
+            Some(Keyword::Ward(WardCost::GetPlayerCounters {
+                counter_kind: PlayerCounterKind::Experience,
+                count: 3,
+            }))
+        );
+    }
+
+    #[test]
+    fn ward_get_a_poison_counter_singular_defaults_to_count_one() {
+        let result = parse_ward_cost("Get a poison counter.");
+        assert_eq!(
+            result,
+            Some(Keyword::Ward(WardCost::GetPlayerCounters {
+                counter_kind: PlayerCounterKind::Poison,
+                count: 1,
+            }))
+        );
+    }
+
+    // Issue #6640 follow-up: counter-shaped "get ... counter(s)" text that
+    // fails to parse (malformed count, unknown kind) must fail closed
+    // (`None`) rather than silently falling through to the mana-cost
+    // fallback and becoming a free, always-paid Ward.
+    #[test]
+    fn ward_get_counters_with_unparseable_count_fails_closed() {
+        let result = parse_ward_cost("Get many poison counters.");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn ward_get_counters_with_unknown_kind_fails_closed() {
+        let result = parse_ward_cost("Get five sprocket counters.");
+        assert_eq!(result, None);
+    }
 
     #[test]
     fn parse_granted_keyword_fragment_cascade() {
@@ -2814,22 +3062,42 @@ mod tests {
     }
 
     /// CR 702.82c: "Devour [quality] N" (Famished Worldsire — "Devour land 3")
-    /// puts the count after the type qualifier. The numeric-count extractor must
-    /// skip the leading qualifier word so the count is 3, not the `FromStr`
-    /// `unwrap_or(1)` fallback (which produced the reported Devour 1).
+    /// puts the count after the type qualifier. The parser must capture BOTH the
+    /// count and the quality — the quality axis is the reported bug: dropping it
+    /// yields the CR 702.82a creature default for a land-quality card.
     #[test]
     fn parse_granted_keyword_fragment_devour_quality_qualifier_count() {
+        // CR 702.82c: land quality — the discriminating case. REVERTS to
+        // `quality: Creature` (i.e. this assertion FAILS) if the qualifier is
+        // dropped, which is exactly the reported bug.
         assert_eq!(
             parse_granted_keyword_fragment("devour land 3"),
-            Some(Keyword::Devour(3))
+            Some(Keyword::Devour {
+                n: 3,
+                quality: TypeFilter::Land,
+            })
         );
-        // CR 702.82a: the plain "Devour N" form is unaffected.
+        // CR 702.82a: the plain "Devour N" form defaults to the creature quality.
         assert_eq!(
             parse_granted_keyword_fragment("devour 3"),
-            Some(Keyword::Devour(3))
+            Some(Keyword::Devour {
+                n: 3,
+                quality: TypeFilter::Creature,
+            })
         );
-        // Regression: a sibling numeric-count keyword still extracts its leading
-        // count — the qualifier-skip only fires on the parse_number-fails branch.
+        // CR 702.82c + CR 205.3g: an artifact SUBTYPE quality (Feasting Hobbit —
+        // "Devour Food 3") canonicalizes to `Subtype("Food")` so the runtime
+        // subtype membership test matches the canonical "Food" name.
+        assert_eq!(
+            parse_granted_keyword_fragment("devour food 3"),
+            Some(Keyword::Devour {
+                n: 3,
+                quality: TypeFilter::Subtype("Food".to_string()),
+            })
+        );
+        // Regression (BLOCKING 2): a sibling numeric-count keyword still extracts
+        // its leading count — the devour-qualifier path did not cannibalize the
+        // generic numeric-count branch that Vanishing/Fading/Renown rely on.
         assert_eq!(
             parse_granted_keyword_fragment("vanishing 3"),
             Some(Keyword::Vanishing(3))
@@ -3142,6 +3410,45 @@ mod tests {
     }
 
     #[test]
+    fn parse_oracle_text_extracts_storied_without_mtgjson_keyword_metadata() {
+        use crate::parser::oracle::parse_oracle_text;
+
+        for (name, text, types, subtypes) in [
+            (
+                "Balin, Loremaster",
+                "Storied (If you control three or more artifacts, legendaries, and/or Sagas, you have an enduring story for the rest of the game.)\nWhenever Balin or another Dwarf you control enters, you may discard your hand. Draw X cards, where X is the number of cards discarded this way. If you have an enduring story, Balin deals X damage to each opponent.",
+                &["Creature"],
+                &["Dwarf", "Wizard"],
+            ),
+            (
+                "Ori, Keeper of Songs",
+                "Storied (If you control three or more artifacts, legendaries, and/or Sagas, you have an enduring story for the rest of the game.)\nAs long as you have an enduring story, Ori gets +1/+0 and has vigilance.",
+                &["Creature"],
+                &["Dwarf", "Bard"],
+            ),
+        ] {
+            let parsed = parse_oracle_text(
+                text,
+                name,
+                &[],
+                &types.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                &subtypes.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            );
+
+            assert!(
+                parsed.extracted_keywords.contains(&Keyword::Storied),
+                "{name} must extract Storied when MTGJSON keyword metadata is absent: {:?}",
+                parsed.extracted_keywords
+            );
+            assert!(
+                parsed.abilities.is_empty(),
+                "{name} must not retain Storied as an unimplemented ability: {:?}",
+                parsed.abilities
+            );
+        }
+    }
+
+    #[test]
     fn parse_granted_keyword_fragment_toxic() {
         // CR 702.164: Toxic N — parameterized keyword from Oracle text
         let kw = parse_granted_keyword_fragment("toxic 2").unwrap();
@@ -3351,6 +3658,39 @@ mod tests {
         use crate::types::keywords::GiftKind;
         let kw = parse_granted_keyword_fragment("gift a tapped fish").unwrap();
         assert_eq!(kw, Keyword::Gift(GiftKind::TappedFish));
+    }
+
+    /// CR 702.174g: the article is part of the printed form and this is the one
+    /// kind that takes "an". Matching only "gift a " dropped it, and the outer
+    /// scan fell back to the bare `Gift` form, which defaults to `Card` — Perch
+    /// Protection promised a card draw instead of a turn (#7286).
+    #[test]
+    fn parse_granted_keyword_fragment_gift_an_extra_turn() {
+        use crate::types::keywords::GiftKind;
+        let kw = parse_granted_keyword_fragment("gift an extra turn").unwrap();
+        assert_eq!(kw, Keyword::Gift(GiftKind::ExtraTurn));
+    }
+
+    #[test]
+    fn router_gift_an_extra_turn_preserves_the_tail() {
+        use crate::types::keywords::GiftKind;
+
+        assert!(matches!(
+            parse_router_keyword_line("Gift an extra turn.").and_then(|routed| routed.keyword),
+            Some(Keyword::Gift(GiftKind::ExtraTurn))
+        ));
+        assert!(
+            parse_router_keyword_line("Gift an extra turn if you control a Bird").is_none(),
+            "a semantic suffix must remain unconsumed so the strict router declines the line"
+        );
+    }
+
+    /// The other "an" form, CR 702.174i's Octopus, has no `GiftKind` yet
+    /// (Octomancer, #5975). It must keep falling THROUGH the new scan to the
+    /// same answer it gave before, so this change touches exactly one card.
+    #[test]
+    fn parse_granted_keyword_fragment_gift_an_octopus_is_unchanged() {
+        assert_eq!(parse_granted_keyword_fragment("gift an octopus"), None);
     }
 
     #[test]
@@ -5526,6 +5866,11 @@ mod router_registry_tests {
         RouterKeywordCase {
             prefix: "bargain",
             valid_line: "Bargain",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "storied",
+            valid_line: "Storied",
             reach: ProductionReach::KeywordCostLine,
         },
         RouterKeywordCase {

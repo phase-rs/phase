@@ -655,6 +655,7 @@ fn nowhere_to_run_hexproof_bypass_and_ward_suppression_ship() {
             StaticMode::SuppressTriggers {
                 events,
                 source_filter,
+                ..
             } => Some((events, source_filter)),
             _ => None,
         })

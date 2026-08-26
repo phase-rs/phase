@@ -23,13 +23,11 @@ type ChooseObjectsSelection = Extract<
 // CR 701.56a: Time travel — choose any number of eligible objects for the
 // current remove/add phase; each selected object gets exactly that phase's
 // counter operation.
-// CR 603.7e: ChooseObjectsSelection — choose any number of battlefield
-// permanents (Magnetic Mountain class). These prompts share the same
+// CR 608.2c: ChooseObjectsSelection — choose within the engine-published
+// min/max range of battlefield permanents. These prompts share the same
 // `SelectTargets` dispatch over an engine-provided `eligible` list, so a single
-// modal serves them; `variant` adapts copy and default selection.
-// Engine pre-filters `eligible`; the modal is purely a chooser. Default-select-
-// all is a UX choice (one-click confirm for the common case), not a rules
-// requirement.
+// modal serves them; `variant` adapts copy, bounds, and default selection.
+// Engine pre-filters `eligible`; the modal is purely a chooser.
 type ProliferateModalData =
   | ProliferateChoice["data"]
   | TimeTravelChoice["data"]
@@ -55,10 +53,43 @@ export function ProliferateModal({
   const objects = useGameStore((s) => s.gameState?.objects);
   const playerId = usePlayerId();
   const hoverProps = useInspectHoverProps();
+  const chooseObjectsData =
+    variant === "chooseObjects" ? (data as ChooseObjectsSelection["data"]) : undefined;
+
+  const max = Math.max(
+    0,
+    Math.min(
+      data.eligible.length,
+      chooseObjectsData?.max ?? data.eligible.length,
+    ),
+  );
+  const min = Math.min(max, chooseObjectsData?.min ?? 0);
+
+  const boundedSelection = useCallback(
+    (targets: TargetRef[]) => {
+      const selectedKeys = new Set<string>();
+      const bounded = targets.filter((target) => {
+        const key = targetKey(target);
+        if (selectedKeys.has(key)) return false;
+        selectedKeys.add(key);
+        return true;
+      }).slice(0, max);
+      for (const target of data.eligible) {
+        if (bounded.length >= min) break;
+        const key = targetKey(target);
+        if (!selectedKeys.has(key)) {
+          selectedKeys.add(key);
+          bounded.push(target);
+        }
+      }
+      return bounded;
+    },
+    [data.eligible, max, min],
+  );
 
   const defaultSelection = useCallback(
-    () => (variant === "timeTravelAdd" ? [] : data.eligible),
-    [data.eligible, variant],
+    () => boundedSelection(variant === "timeTravelAdd" ? [] : data.eligible),
+    [boundedSelection, data.eligible, variant],
   );
   const [selected, setSelected] = useState<TargetRef[]>(() => defaultSelection());
 
@@ -68,44 +99,63 @@ export function ProliferateModal({
     setSelected(defaultSelection());
   }, [defaultSelection]);
 
-  const handleToggle = useCallback((target: TargetRef) => {
-    const key = targetKey(target);
-    setSelected((prev) =>
-      prev.some((t) => targetKey(t) === key)
-        ? prev.filter((t) => targetKey(t) !== key)
-        : [...prev, target],
-    );
-  }, []);
+  const handleToggle = useCallback(
+    (target: TargetRef) => {
+      const key = targetKey(target);
+      setSelected((prev) => {
+        const selectedAlready = prev.some((t) => targetKey(t) === key);
+        if (selectedAlready) {
+          return prev.filter((t) => targetKey(t) !== key);
+        }
+        return prev.length < max ? [...prev, target] : prev;
+      });
+    },
+    [max],
+  );
 
   const handleConfirm = useCallback(() => {
     dispatch({ type: "SelectTargets", data: { targets: selected } });
   }, [dispatch, selected]);
 
+  const selectionValid = selected.length >= min && selected.length <= max;
+
   return (
     <ChoiceOverlay
       title={t(`proliferate.${VARIANT_KEYS[variant].title}`)}
       subtitle={t(`proliferate.${VARIANT_KEYS[variant].subtitle}`)}
-      footer={<ConfirmButton onClick={handleConfirm} label={t("proliferate.confirm")} />}
+      footer={
+        <ConfirmButton
+          onClick={handleConfirm}
+          disabled={!selectionValid}
+          label={t("proliferate.confirm")}
+        />
+      }
     >
       {data.eligible.length > 1 && (
         <div className="mb-3 flex flex-wrap gap-2">
           <button
             type="button"
-            onClick={() => setSelected(data.eligible)}
+            onClick={() => setSelected(boundedSelection(data.eligible))}
             className={gameButtonClass({ tone: "neutral", size: "xs" })}
           >
             {t("proliferate.selectAll")}
           </button>
+          {min === 0 && (
+            <button
+              type="button"
+              onClick={() => setSelected([])}
+              className={gameButtonClass({ tone: "neutral", size: "xs" })}
+            >
+              {t("proliferate.selectNone")}
+            </button>
+          )}
           <button
             type="button"
-            onClick={() => setSelected([])}
-            className={gameButtonClass({ tone: "neutral", size: "xs" })}
-          >
-            {t("proliferate.selectNone")}
-          </button>
-          <button
-            type="button"
-            onClick={() => setSelected(filterTargetsByController(data.eligible, objects, playerId))}
+            onClick={() =>
+              setSelected(
+                boundedSelection(filterTargetsByController(data.eligible, objects, playerId)),
+              )
+            }
             className={gameButtonClass({ tone: "neutral", size: "xs" })}
           >
             {t("proliferate.selectMine")}
@@ -116,11 +166,13 @@ export function ProliferateModal({
         {data.eligible.map((target) => {
           const key = targetKey(target);
           const isSelected = selected.some((t) => targetKey(t) === key);
+          const disabled = !isSelected && selected.length >= max;
           return (
             <button
               key={key}
               type="button"
               aria-pressed={isSelected}
+              disabled={disabled}
               {...("Object" in target ? hoverProps(target.Object) : undefined)}
               onClick={() => handleToggle(target)}
               className={

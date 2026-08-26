@@ -1,6 +1,9 @@
 import path from "node:path";
 import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
+import { resolveMultiplayerServerUrls } from "./src/config/multiplayerServerUrls";
+
+const multiplayerServers = resolveMultiplayerServerUrls((name) => process.env[name]);
 
 /**
  * Resolves the @wasm/* aliases to the real WASM build artifacts when present,
@@ -35,8 +38,24 @@ function wasmStubPlugin(): Plugin {
   };
 }
 
+/** `virtual:pwa-register` is supplied by VitePWA in production but Vitest
+ * does not load that plugin. Keep the stub resolvable so updater tests can
+ * replace it with the same module contract. */
+function pwaRegisterStubPlugin(): Plugin {
+  const id = "\0virtual:pwa-register-stub";
+  return {
+    name: "pwa-register-stub",
+    resolveId(source) {
+      return source === "virtual:pwa-register" ? id : undefined;
+    },
+    load(source) {
+      return source === id ? "export const registerSW = () => async () => {};" : undefined;
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [wasmStubPlugin()],
+  plugins: [wasmStubPlugin(), pwaRegisterStubPlugin()],
   define: {
     __SCRYFALL_DATA_URL__: JSON.stringify("/scryfall-data.json"),
     __SCRYFALL_TOKEN_IMAGES_URL__: JSON.stringify("/scryfall-token-images.json"),
@@ -45,14 +64,15 @@ export default defineConfig({
     __DECKS_URL__: JSON.stringify("/decks.json"),
     __CARD_DATA_URL__: JSON.stringify("/card-data.json"),
     __CARD_DATA_LOCALE_URL_TEMPLATE__: JSON.stringify("/card-data.{lng}.json"),
+    __SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE__: JSON.stringify("/scryfall-images.{lng}.json"),
     __CHANGELOG_URL__: JSON.stringify("/changelog.json"),
     __CHANGELOG_META_URL__: JSON.stringify("/changelog-meta.json"),
     __APP_VERSION__: JSON.stringify("0.0.0-test"),
     __BUILD_HASH__: JSON.stringify("testhash"),
     __ENGINE_WASM_URL__: "undefined",
-    __DEFAULT_MULTIPLAYER_SERVER_URL__: JSON.stringify(
-      process.env.DEFAULT_MULTIPLAYER_SERVER_URL || "wss://lobby.phase-rs.dev/ws",
-    ),
+    // Same resolver vite.config.ts uses — the order is single-authority.
+    __OFFICIAL_MULTIPLAYER_SERVER_URL__: JSON.stringify(multiplayerServers.official),
+    __DEFAULT_MULTIPLAYER_SERVER_URL__: JSON.stringify(multiplayerServers.buildDefault),
     __GIT_REPO_URL__: JSON.stringify("https://github.com/phase-rs/phase"),
     __PREVIEW_SITE_URL__: JSON.stringify("https://preview.phase-rs.dev"),
     __RELEASE_SITE_URL__: JSON.stringify("https://phase-rs.dev"),

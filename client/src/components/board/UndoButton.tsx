@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 
-import { isMultiplayerMode, useGameStore } from "../../stores/gameStore.ts";
+import { isAuthorityRemote, useGameStore } from "../../stores/gameStore.ts";
 
 /**
  * Undo button for the local player, rendered attached to the player HUD beside
@@ -10,7 +10,7 @@ import { isMultiplayerMode, useGameStore } from "../../stores/gameStore.ts";
 export function UndoButton() {
   const { t } = useTranslation("game");
   const canUndo = useGameStore(
-    (s) => s.stateHistory.length > 0 && !isMultiplayerMode(s.gameMode),
+    (s) => s.stateHistory.length > 0 && !isAuthorityRemote(s.gameMode),
   );
   const undo = useGameStore((s) => s.undo);
 

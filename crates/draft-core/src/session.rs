@@ -12,6 +12,18 @@ use crate::types::*;
 use crate::validation::validate_limited_deck;
 
 impl DraftSession {
+    /// The round that pairings may next be generated for.
+    ///
+    /// Single authority. `AdvanceRound` deliberately leaves `current_round`
+    /// untouched — it only opens the `Pairing` window — so `current_round` is
+    /// always the last round whose pairings exist, and generating pairings is
+    /// what commits the next one. Crate-internal on purpose: `view.rs`
+    /// publishes its answer on `DraftPlayerView` so clients read it rather than
+    /// re-deriving it; callers outside this crate must never recompute it.
+    pub(crate) fn next_pairing_round(&self) -> u8 {
+        self.current_round + 1
+    }
+
     /// Create a new draft session in Lobby status.
     ///
     /// Timestamps are set to 0 -- callers set them externally since the pure
@@ -41,6 +53,82 @@ impl DraftSession {
             updated_at: 0,
         }
     }
+
+    /// Validate the small set of invariants unique to persisted Sealed events.
+    ///
+    /// This is intentionally an import/restore boundary check. Reducer-created
+    /// sessions establish these properties at start and legacy `SeatFlags`
+    /// snapshots remain compatible because their bitmap lengths are unrelated.
+    pub fn validate_sealed_snapshot(&self) -> Result<(), DraftError> {
+        if self.kind != self.config.kind {
+            return Err(DraftError::InvalidSealedSnapshot {
+                reason: "session kind does not match configuration".to_string(),
+            });
+        }
+        if self.kind != DraftKind::Sealed {
+            return Ok(());
+        }
+        let DraftSource::Set { code } = &self.config.source else {
+            return Err(DraftError::SealedRequiresSetSource);
+        };
+        if code != &self.config.set_code || self.set_code != self.config.set_code {
+            return Err(DraftError::InvalidSealedSnapshot {
+                reason: "set source and session codes must match".to_string(),
+            });
+        }
+        if self.config.pack_count != 6 || self.config.min_deck_size != 40 {
+            return Err(DraftError::InvalidSealedSnapshot {
+                reason: "sealed requires six packs and a 40-card minimum deck".to_string(),
+            });
+        }
+        let valid_size = match self.config.tournament_format {
+            TournamentFormat::Swiss => (2..=8).contains(&(self.seats.len() as u8)),
+            TournamentFormat::SingleElimination => self.seats.len() == 8,
+        };
+        if !valid_size {
+            return Err(DraftError::InvalidSealedSnapshot {
+                reason: "sealed tournament size is invalid".to_string(),
+            });
+        }
+        if self.status == DraftStatus::Drafting {
+            return Err(DraftError::InvalidSealedSnapshot {
+                reason: "sealed sessions cannot be in drafting status".to_string(),
+            });
+        }
+        let seat_count = self.seats.len();
+        if self.config.pod_size as usize != seat_count
+            || self.pools.len() != seat_count
+            || self.current_pack.len() != seat_count
+            || self.packs_by_seat.len() != seat_count
+        {
+            return Err(DraftError::InvalidSealedSnapshot {
+                reason: "per-seat vectors do not match the core seats".to_string(),
+            });
+        }
+        let expected_pool_size =
+            usize::from(self.config.pack_count) * usize::from(self.config.cards_per_pack);
+        if self.status != DraftStatus::Lobby
+            && self
+                .pools
+                .iter()
+                .any(|pool| pool.len() != expected_pool_size)
+        {
+            return Err(DraftError::InvalidSealedSnapshot {
+                reason:
+                    "started sealed pools must contain exactly one card from each configured pack"
+                        .to_string(),
+            });
+        }
+        if self.status != DraftStatus::Lobby
+            && (self.current_pack.iter().any(Option::is_some)
+                || self.packs_by_seat.iter().any(|packs| !packs.is_empty()))
+        {
+            return Err(DraftError::InvalidSealedSnapshot {
+                reason: "sealed packs must be retained only in player pools".to_string(),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Apply a draft action to the session, returning deltas or an error.
@@ -58,8 +146,18 @@ pub fn apply(
             seat,
             card_instance_id,
         } => pick_pass::apply_pick(session, seat, card_instance_id),
+        DraftAction::PickWithDraftEffect {
+            seat,
+            effect_card_instance_id,
+            card_instance_ids,
+        } => pick_pass::apply_pick_with_draft_effect(
+            session,
+            seat,
+            effect_card_instance_id,
+            card_instance_ids,
+        ),
         DraftAction::SubmitDeck { seat, main_deck } => apply_submit_deck(session, seat, main_deck),
-        DraftAction::GeneratePairings { round } => apply_generate_pairings(session, round),
+        DraftAction::GeneratePairings => apply_generate_pairings(session),
         DraftAction::ReportMatchResult {
             match_id,
             winner_seat,
@@ -100,10 +198,7 @@ fn ensure_match_record(
 /// Swiss round count for an 8-player pod.
 const SWISS_ROUNDS: u8 = 3;
 
-fn apply_generate_pairings(
-    session: &mut DraftSession,
-    round: u8,
-) -> Result<Vec<DraftDelta>, DraftError> {
+fn apply_generate_pairings(session: &mut DraftSession) -> Result<Vec<DraftDelta>, DraftError> {
     // Guard: valid status for pairing generation
     let valid = matches!(
         session.status,
@@ -115,7 +210,10 @@ fn apply_generate_pairings(
             action: "GeneratePairings".to_string(),
         });
     }
-    if session.config.tournament_format == TournamentFormat::SingleElimination
+    if matches!(
+        session.kind,
+        DraftKind::Premier | DraftKind::Traditional | DraftKind::Sealed
+    ) && session.config.tournament_format == TournamentFormat::SingleElimination
         && session.seats.len() != 8
     {
         return Err(DraftError::UnsupportedTournamentSize {
@@ -124,17 +222,25 @@ fn apply_generate_pairings(
             actual: session.seats.len() as u8,
         });
     }
+    // Single authority. The round is derived, never supplied, so the old
+    // `round != current_round + 1` guard is unreachable and is gone.
+    let round = session.next_pairing_round();
 
     let mut rng =
         ChaCha20Rng::seed_from_u64(session.config.rng_seed ^ (round as u64 * 0xDEAD_BEEF));
 
-    let new_pairings = match session.config.tournament_format {
+    let (new_pairings, swiss_bye) = match session.config.tournament_format {
         TournamentFormat::Swiss => generate_swiss_pairings(session, round, &mut rng),
-        TournamentFormat::SingleElimination => generate_se_pairings(session, round),
+        TournamentFormat::SingleElimination => (generate_se_pairings(session, round), None),
     };
 
     for p in &new_pairings {
         session.pairings.push(p.clone());
+    }
+    // A Swiss bye counts as a match win for the unpaired player; without this credit an
+    // odd-pod bye scores nothing and Swiss standings (sorted by match_wins) are wrong.
+    if let Some(bye) = swiss_bye {
+        ensure_match_record(&mut session.match_records, bye).match_wins += 1;
     }
     session.status = DraftStatus::MatchInProgress;
     session.current_round = round;
@@ -147,11 +253,48 @@ fn apply_generate_pairings(
     ])
 }
 
+/// Backtracking search for a perfect matching of `pool` in standings order.
+///
+/// The first unpaired player tries partners in pool order (same-bracket
+/// first, since the pool is flattened bracket-by-bracket); a dead end
+/// backtracks instead of settling for a rematch. With `allow_rematch: false`
+/// it succeeds iff a rematch-free perfect matching exists; with `true` it is
+/// an always-succeeding first-fit (even pool). `prior` holds both
+/// orientations of every earlier pairing. Recursion depth is bounded by the
+/// pod size (≤ 8 seats → ≤ 4 frames), not by game input.
+fn pair_pool_avoiding_rematches(
+    pool: &[PlayerId],
+    prior: &HashSet<(PlayerId, PlayerId)>,
+    allow_rematch: bool,
+    out: &mut Vec<(PlayerId, PlayerId)>,
+) -> bool {
+    let Some((&first, candidates)) = pool.split_first() else {
+        return true;
+    };
+    for (i, &partner) in candidates.iter().enumerate() {
+        if !allow_rematch && prior.contains(&(first, partner)) {
+            continue;
+        }
+        let mut rest: Vec<PlayerId> = Vec::with_capacity(candidates.len() - 1);
+        rest.extend_from_slice(&candidates[..i]);
+        rest.extend_from_slice(&candidates[i + 1..]);
+        out.push((first, partner));
+        if pair_pool_avoiding_rematches(&rest, prior, allow_rematch, out) {
+            return true;
+        }
+        out.pop();
+    }
+    false
+}
+
+/// Returns the round's pairings plus the bye player, if any. An odd pod leaves one player
+/// unpaired; in Swiss that player takes a bye, which counts as a match win — the caller
+/// credits it (`Some(pid)`). `None` when every player was paired.
 fn generate_swiss_pairings(
     session: &DraftSession,
     round: u8,
     rng: &mut ChaCha20Rng,
-) -> Vec<DraftPairing> {
+) -> (Vec<DraftPairing>, Option<PlayerId>) {
     let seat_indices: Vec<u8> = session
         .seats
         .iter()
@@ -196,37 +339,53 @@ fn generate_swiss_pairings(
         .flat_map(|p| [(p.players[0], p.players[1]), (p.players[1], p.players[0])])
         .collect();
 
-    // Greedy pair within brackets, carrying unpaired to next bracket
+    // Flatten the shuffled brackets into standings order. Partners are tried
+    // in this order, so same-bracket pairings are still preferred — but a
+    // dead end now backtracks instead of accepting an avoidable rematch
+    // (the old head-first greedy's `unwrap_or(0)` paired a 4-pod's round 3
+    // as two rematches even though the round-robin completion existed).
+    let pool: Vec<PlayerId> = brackets
+        .iter()
+        .flat_map(|bracket| bracket.iter().map(|(pid, _)| *pid))
+        .collect();
+
     let mut paired: Vec<(PlayerId, PlayerId)> = Vec::new();
-    let mut carry: Option<(PlayerId, u8)> = None;
+    let mut bye: Option<PlayerId> = None;
 
-    for bracket in &brackets {
-        let mut pool: Vec<(PlayerId, u8)> = bracket.clone();
-        if let Some(c) = carry.take() {
-            pool.insert(0, c);
+    if pool.len().is_multiple_of(2) {
+        if !pair_pool_avoiding_rematches(&pool, &prior_pairs, false, &mut paired) {
+            // No rematch-free perfect matching exists (e.g. a 2-player pod
+            // from round 2 on) — admit rematches; first-fit always succeeds
+            // on an even pool.
+            paired.clear();
+            pair_pool_avoiding_rematches(&pool, &prior_pairs, true, &mut paired);
         }
-
-        while pool.len() >= 2 {
-            let first = pool.remove(0);
-            // Try to find a non-rematch partner
-            let partner_idx = pool
-                .iter()
-                .position(|(pid, _)| !prior_pairs.contains(&(first.0, *pid)))
-                .unwrap_or(0);
-            let partner = pool.remove(partner_idx);
-            paired.push((first.0, partner.0));
+    } else {
+        // Odd pod: the bye goes as far down the standings as a rematch-free
+        // matching of the remainder allows. Only if no candidate admits one
+        // does the bottom seat take the bye and the rest pair with rematches.
+        // The bye is reported to the caller so it can be credited as a
+        // match win.
+        for idx in (0..pool.len()).rev() {
+            let mut rest = pool.clone();
+            let cand = rest.remove(idx);
+            paired.clear();
+            if pair_pool_avoiding_rematches(&rest, &prior_pairs, false, &mut paired) {
+                bye = Some(cand);
+                break;
+            }
         }
-
-        if pool.len() == 1 {
-            carry = Some(pool[0]);
+        if bye.is_none() {
+            let mut rest = pool.clone();
+            let cand = rest.pop().expect("odd pool is non-empty");
+            paired.clear();
+            pair_pool_avoiding_rematches(&rest, &prior_pairs, true, &mut paired);
+            bye = Some(cand);
         }
     }
 
-    // If there's still an unpaired player (odd count), they get a bye (no pairing generated)
-    // For 8-player pods this shouldn't happen.
-
     // Generate DraftPairing structs
-    paired
+    let pairings = paired
         .iter()
         .enumerate()
         .map(|(table, (p1, p2))| DraftPairing {
@@ -237,7 +396,9 @@ fn generate_swiss_pairings(
             status: PairingStatus::Pending,
             winner: None,
         })
-        .collect()
+        .collect();
+
+    (pairings, bye)
 }
 
 fn generate_se_pairings(session: &DraftSession, round: u8) -> Vec<DraftPairing> {
@@ -474,7 +635,7 @@ fn apply_advance_round(session: &mut DraftSession) -> Result<Vec<DraftDelta>, Dr
         });
     }
 
-    let new_round = session.current_round + 1;
+    let new_round = session.next_pairing_round();
     session.status = DraftStatus::Pairing;
 
     Ok(vec![DraftDelta::RoundAdvanced { new_round }])
@@ -529,11 +690,77 @@ fn apply_start_draft(
         });
     }
 
+    let seat_count = session.seats.len() as u8;
+    if matches!(
+        session.kind,
+        DraftKind::Premier | DraftKind::Traditional | DraftKind::Sealed
+    ) {
+        let valid_size = match session.config.tournament_format {
+            TournamentFormat::Swiss => (2..=8).contains(&seat_count),
+            TournamentFormat::SingleElimination => seat_count == 8,
+        };
+        if !valid_size {
+            return Err(DraftError::UnsupportedTournamentSize {
+                format: session.config.tournament_format,
+                required: if session.config.tournament_format == TournamentFormat::SingleElimination
+                {
+                    8
+                } else {
+                    2
+                },
+                actual: seat_count,
+            });
+        }
+    }
+    if session.kind == DraftKind::Sealed || session.config.kind == DraftKind::Sealed {
+        if session.kind != DraftKind::Sealed || session.config.kind != DraftKind::Sealed {
+            return Err(DraftError::InvalidSealedConfiguration {
+                reason: "session kind does not match configuration".to_string(),
+            });
+        }
+        let DraftSource::Set { code } = &session.config.source else {
+            return Err(DraftError::SealedRequiresSetSource);
+        };
+        if code != &session.config.set_code || session.set_code != session.config.set_code {
+            return Err(DraftError::InvalidSealedConfiguration {
+                reason: "set source and session codes must match".to_string(),
+            });
+        }
+        if session.config.pack_count != 6 || session.config.min_deck_size != 40 {
+            return Err(DraftError::InvalidSealedConfiguration {
+                reason: "sealed requires six packs and a 40-card minimum deck".to_string(),
+            });
+        }
+    }
+
     let pack_source = pack_source.expect("StartDraft requires a PackSource");
-    let pod_size = session.seats.len() as u8;
+    let pod_size = seat_count;
     let mut rng = ChaCha20Rng::seed_from_u64(session.config.rng_seed);
 
     let all_packs = pack_source.generate_packs(&mut rng, &session.config, pod_size)?;
+    if session.kind == DraftKind::Sealed {
+        if all_packs.len() != session.seats.len() || all_packs.iter().any(|packs| packs.len() != 6)
+        {
+            return Err(DraftError::InvalidSealedConfiguration {
+                reason: "pack source did not generate six packs per seat".to_string(),
+            });
+        }
+        let pools = all_packs
+            .into_iter()
+            .map(|packs| packs.into_iter().flat_map(|pack| pack.0).collect())
+            .collect();
+        session.pools = pools;
+        session.current_pack.fill(None);
+        session.packs_by_seat.iter_mut().for_each(Vec::clear);
+        session.status = DraftStatus::Deckbuilding;
+        return Ok(vec![
+            DraftDelta::DraftStarted,
+            DraftDelta::TransitionedTo {
+                status: DraftStatus::Deckbuilding,
+            },
+        ]);
+    }
+
     for (seat, mut seat_packs) in all_packs.into_iter().enumerate() {
         // First pack goes to current_pack, rest go to packs_by_seat
         session.current_pack[seat] = Some(seat_packs.remove(0));
@@ -621,7 +848,7 @@ fn apply_submit_deck(
         // Quick Draft (1 human) completes directly.
         let next_status = match session.kind {
             DraftKind::Quick => DraftStatus::Complete,
-            DraftKind::Premier | DraftKind::Traditional => DraftStatus::Pairing,
+            DraftKind::Premier | DraftKind::Traditional | DraftKind::Sealed => DraftStatus::Pairing,
         };
         session.status = next_status;
         deltas.push(DraftDelta::TransitionedTo {
@@ -666,6 +893,179 @@ mod tests {
         };
         let session = DraftSession::new(config, seats, "TEST-001".to_string());
         (session, source)
+    }
+
+    #[test]
+    fn sealed_atomically_allocates_six_packs_per_seat_and_enters_deckbuilding() {
+        let (mut session, source) = test_session(2);
+        session.kind = DraftKind::Sealed;
+        session.config.kind = DraftKind::Sealed;
+        session.config.pack_count = 6;
+
+        let deltas = apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+
+        assert_eq!(session.status, DraftStatus::Deckbuilding);
+        assert_eq!(session.pools.len(), 2);
+        assert!(session.pools.iter().all(|pool| pool.len() == 84));
+        assert!(session.current_pack.iter().all(Option::is_none));
+        assert!(session.packs_by_seat.iter().all(Vec::is_empty));
+        assert_eq!(
+            deltas,
+            vec![
+                DraftDelta::DraftStarted,
+                DraftDelta::TransitionedTo {
+                    status: DraftStatus::Deckbuilding,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn sealed_rejects_cube_source_without_mutating_pools() {
+        let (mut session, source) = test_session(2);
+        session.kind = DraftKind::Sealed;
+        session.config.kind = DraftKind::Sealed;
+        session.config.pack_count = 6;
+        session.config.source = DraftSource::Cube {
+            id: "cube".to_string(),
+            name: "Cube".to_string(),
+        };
+
+        let before = session.pools.clone();
+        assert_eq!(
+            apply(&mut session, DraftAction::StartDraft, Some(&source)),
+            Err(DraftError::SealedRequiresSetSource)
+        );
+        assert_eq!(session.status, DraftStatus::Lobby);
+        assert_eq!(session.pools, before);
+    }
+
+    #[test]
+    fn tournament_size_limits_apply_to_sealed_boundaries() {
+        for (format, pod_size, accepted) in [
+            (TournamentFormat::Swiss, 1, false),
+            (TournamentFormat::Swiss, 2, true),
+            (TournamentFormat::Swiss, 8, true),
+            (TournamentFormat::Swiss, 9, false),
+            (TournamentFormat::SingleElimination, 7, false),
+            (TournamentFormat::SingleElimination, 8, true),
+            (TournamentFormat::SingleElimination, 9, false),
+        ] {
+            let (mut session, source) = test_session(pod_size);
+            session.kind = DraftKind::Sealed;
+            session.config.kind = DraftKind::Sealed;
+            session.config.pack_count = 6;
+            session.config.tournament_format = format;
+
+            assert_eq!(
+                apply(&mut session, DraftAction::StartDraft, Some(&source)).is_ok(),
+                accepted,
+                "{format:?} with {pod_size} seats"
+            );
+        }
+    }
+
+    #[test]
+    fn quick_cube_allows_single_and_large_pods() {
+        for pod_size in [1, 9, 16] {
+            let (mut session, source) = test_session(pod_size);
+            session.kind = DraftKind::Quick;
+            session.config.kind = DraftKind::Quick;
+            session.config.source = DraftSource::Cube {
+                id: "cube".to_string(),
+                name: "Cube".to_string(),
+            };
+
+            assert!(
+                apply(&mut session, DraftAction::StartDraft, Some(&source)).is_ok(),
+                "Quick Cube with {pod_size} seats should start"
+            );
+        }
+    }
+
+    #[test]
+    fn sealed_rejects_mismatched_set_code_before_generating_packs() {
+        let (mut session, source) = test_session(2);
+        session.kind = DraftKind::Sealed;
+        session.config.kind = DraftKind::Sealed;
+        session.config.pack_count = 6;
+        session.config.source = DraftSource::Set {
+            code: "OTHER".to_string(),
+        };
+
+        assert!(matches!(
+            apply(&mut session, DraftAction::StartDraft, Some(&source)),
+            Err(DraftError::InvalidSealedConfiguration { .. })
+        ));
+        assert_eq!(session.status, DraftStatus::Lobby);
+    }
+
+    #[test]
+    fn sealed_snapshot_rejects_retained_packs_but_allows_legacy_seat_flags() {
+        let (mut session, source) = test_session(2);
+        session.kind = DraftKind::Sealed;
+        session.config.kind = DraftKind::Sealed;
+        session.config.pack_count = 6;
+        apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+        session.seats_picked_this_round = SeatFlags::default();
+        session.connected_seats = SeatFlags::default();
+        assert!(session.validate_sealed_snapshot().is_ok());
+
+        session.packs_by_seat[0].push(DraftPack(Vec::new()));
+        assert!(matches!(
+            session.validate_sealed_snapshot(),
+            Err(DraftError::InvalidSealedSnapshot { .. })
+        ));
+    }
+
+    #[test]
+    fn sealed_snapshot_rejects_started_pool_with_wrong_card_count() {
+        let (mut session, source) = test_session(2);
+        session.kind = DraftKind::Sealed;
+        session.config.kind = DraftKind::Sealed;
+        session.config.pack_count = 6;
+        apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+
+        session.pools[0].pop();
+
+        assert!(matches!(
+            session.validate_sealed_snapshot(),
+            Err(DraftError::InvalidSealedSnapshot { .. })
+        ));
+    }
+
+    #[test]
+    fn sealed_snapshot_rejects_session_and_configuration_kind_mismatch() {
+        let (mut session, _) = test_session(2);
+        session.kind = DraftKind::Sealed;
+
+        assert!(matches!(
+            session.validate_sealed_snapshot(),
+            Err(DraftError::InvalidSealedSnapshot { .. })
+        ));
+    }
+
+    #[test]
+    fn sealed_snapshot_rejects_invalid_tournament_size_and_drafting_status() {
+        let (mut session, _source) = test_session(1);
+        session.kind = DraftKind::Sealed;
+        session.config.kind = DraftKind::Sealed;
+        session.config.pack_count = 6;
+        assert!(matches!(
+            session.validate_sealed_snapshot(),
+            Err(DraftError::InvalidSealedSnapshot { .. })
+        ));
+
+        let (mut session, source) = test_session(2);
+        session.kind = DraftKind::Sealed;
+        session.config.kind = DraftKind::Sealed;
+        session.config.pack_count = 6;
+        apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+        session.status = DraftStatus::Drafting;
+        assert!(matches!(
+            session.validate_sealed_snapshot(),
+            Err(DraftError::InvalidSealedSnapshot { .. })
+        ));
     }
 
     #[test]
@@ -727,6 +1127,7 @@ mod tests {
                 colors: Vec::new(),
                 cmc: 0,
                 type_line: String::new(),
+                draft_effect: None,
             })
             .collect();
 
@@ -758,6 +1159,7 @@ mod tests {
                 colors: Vec::new(),
                 cmc: 0,
                 type_line: String::new(),
+                draft_effect: None,
             })
             .collect();
 
@@ -811,6 +1213,7 @@ mod tests {
                 colors: Vec::new(),
                 cmc: 0,
                 type_line: String::new(),
+                draft_effect: None,
             })
             .collect();
 
@@ -845,6 +1248,7 @@ mod tests {
                     colors: Vec::new(),
                     cmc: 0,
                     type_line: String::new(),
+                    draft_effect: None,
                 })
                 .collect();
         }
@@ -907,12 +1311,7 @@ mod tests {
         let (mut session, _) = test_session(8);
         session.status = DraftStatus::Deckbuilding;
 
-        let deltas = apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        let deltas = apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         assert!(deltas.contains(&DraftDelta::PairingsGenerated { round: 1 }));
         assert!(deltas.contains(&DraftDelta::TransitionedTo {
@@ -945,12 +1344,7 @@ mod tests {
             };
         }
 
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let round_pairings: Vec<_> = session.pairings.iter().filter(|p| p.round == 1).collect();
         assert_eq!(round_pairings.len(), 4);
@@ -970,12 +1364,7 @@ mod tests {
         session.seats[7] = DraftSeat::Bot {
             name: "Bot 7".to_string(),
         };
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
         let pairing = session
             .pairings
             .iter()
@@ -1003,11 +1392,7 @@ mod tests {
         session.status = DraftStatus::Deckbuilding;
         session.config.tournament_format = TournamentFormat::SingleElimination;
 
-        let result = apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        );
+        let result = apply(&mut session, DraftAction::GeneratePairings, None);
 
         assert!(matches!(
             result,
@@ -1027,12 +1412,7 @@ mod tests {
         session.status = DraftStatus::Deckbuilding;
 
         // Generate round 1
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         // Record all round 1 pairings as opponent pairs
         let round1_pairs: Vec<[PlayerId; 2]> = session
@@ -1060,12 +1440,7 @@ mod tests {
         session.status = DraftStatus::RoundComplete;
 
         // Generate round 2
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 2 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let round2_pairs: Vec<[PlayerId; 2]> = session
             .pairings
@@ -1087,6 +1462,159 @@ mod tests {
             rematch_count, 0,
             "round 2 should avoid rematches with 8 players"
         );
+    }
+
+    #[test]
+    fn swiss_four_pod_round_three_completes_the_round_robin() {
+        // #7937: with 4 players and 3 rounds every rematch is avoidable —
+        // round 3 is exactly the two pairs that have not met yet. The
+        // history is CRAFTED (not driven through the rng) so the forcing
+        // shape holds in every shuffle order: the 2-win leader A has already
+        // faced both 1-win players, so any head-first pick without
+        // backtracking rematches deterministically. The only rematch-free
+        // completion is A–D / B–C.
+        let (mut session, _) = test_session(4);
+        let [a, b, c, d] = [0u8, 1, 2, 3].map(|seat| seat_player_id(&session, seat));
+
+        let mk = |round: u8, table: u8, players: [PlayerId; 2], winner: PlayerId| DraftPairing {
+            round,
+            table,
+            players,
+            match_id: format!("r{round}-t{table}"),
+            status: PairingStatus::Complete,
+            winner: Some(winner),
+        };
+        session.pairings = vec![
+            mk(1, 0, [a, b], a),
+            mk(1, 1, [c, d], c),
+            mk(2, 0, [a, c], a),
+            mk(2, 1, [b, d], b),
+        ];
+        for (pid, wins, losses) in [(a, 2, 0), (b, 1, 1), (c, 1, 1), (d, 0, 2)] {
+            let record = ensure_match_record(&mut session.match_records, pid);
+            record.match_wins = wins;
+            record.match_losses = losses;
+        }
+        session.current_round = 2;
+        session.status = DraftStatus::RoundComplete;
+
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
+
+        let round3: HashSet<(PlayerId, PlayerId)> = session
+            .pairings
+            .iter()
+            .filter(|p| p.round == 3)
+            .map(|p| {
+                let [x, y] = p.players;
+                if x.0 <= y.0 {
+                    (x, y)
+                } else {
+                    (y, x)
+                }
+            })
+            .collect();
+        let want: HashSet<(PlayerId, PlayerId)> = [(a, d), (b, c)]
+            .into_iter()
+            .map(|(x, y)| if x.0 <= y.0 { (x, y) } else { (y, x) })
+            .collect();
+        assert_eq!(
+            round3, want,
+            "round 3 must be the round-robin completion A–D / B–C — anything \
+             else contains an avoidable rematch"
+        );
+    }
+
+    /// Crafted-history session for direct `generate_swiss_pairings` calls.
+    /// Distinct win counts put every player in a singleton bracket, so the
+    /// in-bracket shuffle is the identity and the pool order is exactly the
+    /// standings order — the scenarios below are deterministic in every rng.
+    fn crafted_swiss_session(
+        pod_size: u8,
+        wins: &[u8],
+        prior_round_one: &[[usize; 2]],
+    ) -> (DraftSession, Vec<PlayerId>) {
+        let (mut session, _) = test_session(pod_size);
+        let pids: Vec<PlayerId> = (0..pod_size)
+            .map(|seat| seat_player_id(&session, seat))
+            .collect();
+        for (pid, &w) in pids.iter().zip(wins) {
+            ensure_match_record(&mut session.match_records, *pid).match_wins = w;
+        }
+        session.pairings = prior_round_one
+            .iter()
+            .enumerate()
+            .map(|(t, &[x, y])| DraftPairing {
+                round: 1,
+                table: t as u8,
+                players: [pids[x], pids[y]],
+                match_id: format!("r1-t{t}"),
+                status: PairingStatus::Complete,
+                winner: Some(pids[x]),
+            })
+            .collect();
+        (session, pids)
+    }
+
+    fn unordered([x, y]: [PlayerId; 2]) -> (PlayerId, PlayerId) {
+        if x.0 <= y.0 {
+            (x, y)
+        } else {
+            (y, x)
+        }
+    }
+
+    #[test]
+    fn swiss_backtracks_when_the_first_legal_partner_dead_ends() {
+        // Pool order A,B,C,D (wins 3/2/1/0); only C–D is prior. A's FIRST
+        // legal partner is B, but pairing A–B leaves C–D as a forced
+        // rematch — the search must back out and land on A–C / B–D. A
+        // first-legal-partner greedy without backtracking cannot reach
+        // this answer.
+        let (session, p) = crafted_swiss_session(4, &[3, 2, 1, 0], &[[2, 3]]);
+        let mut rng = ChaCha20Rng::seed_from_u64(7);
+        let (pairings, bye) = generate_swiss_pairings(&session, 2, &mut rng);
+        assert_eq!(bye, None);
+        let got: HashSet<(PlayerId, PlayerId)> =
+            pairings.iter().map(|pr| unordered(pr.players)).collect();
+        let want = HashSet::from([unordered([p[0], p[2]]), unordered([p[1], p[3]])]);
+        assert_eq!(
+            got, want,
+            "the dead end behind A–B must back out to A–C / B–D"
+        );
+    }
+
+    #[test]
+    fn swiss_two_player_round_two_admits_the_unavoidable_rematch() {
+        // With two players every later round repeats the only possible
+        // pair — the rematch-free search fails and the fallback must still
+        // produce the pairing instead of an empty round.
+        let (session, p) = crafted_swiss_session(2, &[1, 0], &[[0, 1]]);
+        let mut rng = ChaCha20Rng::seed_from_u64(7);
+        let (pairings, bye) = generate_swiss_pairings(&session, 2, &mut rng);
+        assert_eq!(bye, None);
+        assert_eq!(
+            pairings.len(),
+            1,
+            "the unavoidable rematch must be admitted"
+        );
+        assert_eq!(unordered(pairings[0].players), unordered([p[0], p[1]]));
+    }
+
+    #[test]
+    fn swiss_bye_walks_up_when_the_bottom_bye_forces_a_rematch() {
+        // 3 players, wins 2/1/0, prior A–B. Handing the bye to bottom C
+        // leaves A–B as a forced rematch, so the bye must walk up to B and
+        // pair A–C fresh.
+        let (session, p) = crafted_swiss_session(3, &[2, 1, 0], &[[0, 1]]);
+        let mut rng = ChaCha20Rng::seed_from_u64(7);
+        let (pairings, bye) = generate_swiss_pairings(&session, 2, &mut rng);
+        assert_eq!(
+            bye,
+            Some(p[1]),
+            "the bye walks past the bottom seat to keep the round rematch-free"
+        );
+        assert_eq!(pairings.len(), 1);
+        assert_eq!(unordered(pairings[0].players), unordered([p[0], p[2]]));
     }
 
     #[test]
@@ -1116,12 +1644,7 @@ mod tests {
         let mut session = DraftSession::new(config, seats, "SE-TEST".to_string());
         session.status = DraftStatus::Deckbuilding;
 
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let pairings: Vec<_> = session.pairings.iter().filter(|p| p.round == 1).collect();
         assert_eq!(pairings.len(), 4);
@@ -1160,12 +1683,7 @@ mod tests {
         let mut session = DraftSession::new(config, seats, "SE-TEST".to_string());
         session.status = DraftStatus::Deckbuilding;
 
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         for (match_id, winner_seat) in [("r1-t0", 7), ("r1-t1", 6), ("r1-t2", 2), ("r1-t3", 4)] {
             apply(
@@ -1182,12 +1700,7 @@ mod tests {
         assert_eq!(session.status, DraftStatus::RoundComplete);
 
         apply(&mut session, DraftAction::AdvanceRound, None).unwrap();
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 2 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let pairings: Vec<_> = session.pairings.iter().filter(|p| p.round == 2).collect();
         assert_eq!(pairings.len(), 2);
@@ -1201,12 +1714,7 @@ mod tests {
         session.status = DraftStatus::Deckbuilding;
         session.config.tournament_format = TournamentFormat::SingleElimination;
 
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let result = apply(
             &mut session,
@@ -1228,12 +1736,7 @@ mod tests {
         let (mut session, _) = test_session(8);
         session.status = DraftStatus::Deckbuilding;
 
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let pairing = session
             .pairings
@@ -1278,12 +1781,7 @@ mod tests {
         let (mut session, _) = test_session(8);
         session.status = DraftStatus::Deckbuilding;
 
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let pairing = session
             .pairings
@@ -1338,12 +1836,7 @@ mod tests {
         let (mut session, _) = test_session(8);
         session.status = DraftStatus::Deckbuilding;
 
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let pairing = session
             .pairings
@@ -1393,12 +1886,7 @@ mod tests {
         let (mut session, _) = test_session(8);
         session.status = DraftStatus::Deckbuilding;
 
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let results: Vec<(String, u8)> = session
             .pairings
@@ -1452,12 +1940,7 @@ mod tests {
         let (mut session, _) = test_session(8);
         session.status = DraftStatus::Deckbuilding;
 
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let results: Vec<(String, u8)> = session
             .pairings
@@ -1479,12 +1962,7 @@ mod tests {
         }
 
         apply(&mut session, DraftAction::AdvanceRound, None).unwrap();
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 2 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let result = apply(
             &mut session,
@@ -1506,12 +1984,7 @@ mod tests {
         let (mut session, _) = test_session(8);
         session.status = DraftStatus::Deckbuilding;
 
-        apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        )
-        .unwrap();
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
 
         let results: Vec<(String, u8)> = session
             .pairings
@@ -1608,11 +2081,7 @@ mod tests {
     fn test_generate_pairings_wrong_status() {
         let (mut session, _) = test_session(8);
         // session is in Lobby status
-        let result = apply(
-            &mut session,
-            DraftAction::GeneratePairings { round: 1 },
-            None,
-        );
+        let result = apply(&mut session, DraftAction::GeneratePairings, None);
         assert!(matches!(
             result,
             Err(DraftError::InvalidTransition {
@@ -1720,5 +2189,78 @@ mod tests {
         assert!(!flags.get(1)); // preserved
         assert!(flags.get(2)); // new slot, default true
         assert!(flags.get(3)); // new slot, default true
+    }
+
+    #[test]
+    fn swiss_bye_in_odd_pod_is_credited_a_match_win() {
+        // Odd pod -> exactly one player takes a bye each round.
+        let (mut session, _) = test_session(3);
+        session.status = DraftStatus::Deckbuilding; // satisfy the pairing-generation guard
+        apply_generate_pairings(&mut session).unwrap();
+
+        // Three players: one two-player pairing plus one bye.
+        assert_eq!(
+            session.pairings.iter().filter(|p| p.round == 1).count(),
+            1,
+            "the two paired players get exactly one pairing",
+        );
+        let paired_players = session
+            .pairings
+            .iter()
+            .find(|pairing| pairing.round == 1)
+            .expect("round one pairing")
+            .players;
+        let bye = (0..session.seats.len() as u8)
+            .map(|seat| seat_player_id(&session, seat))
+            .find(|player| !paired_players.contains(player))
+            .expect("one player is unpaired in a three-player pod");
+        assert_eq!(
+            session
+                .match_records
+                .get(&bye)
+                .map(|record| record.match_wins),
+            Some(1),
+            "the specific unpaired player earns exactly one match win",
+        );
+        for paired_player in paired_players {
+            assert_eq!(
+                session
+                    .match_records
+                    .get(&paired_player)
+                    .map_or(0, |record| record.match_wins),
+                0,
+                "a paired player must not receive the bye win",
+            );
+        }
+
+        // With the round guard gone, a RoundComplete session generates the NEXT round.
+        session.status = DraftStatus::RoundComplete;
+        apply_generate_pairings(&mut session).expect("round two generates from RoundComplete");
+        assert_eq!(
+            session
+                .pairings
+                .iter()
+                .filter(|pairing| pairing.round == 1)
+                .count(),
+            1,
+            "generating round two must not append to round one",
+        );
+        assert_eq!(
+            session
+                .pairings
+                .iter()
+                .filter(|pairing| pairing.round == 2)
+                .count(),
+            1,
+            "a three-player pod pairs exactly one table in round two",
+        );
+        assert_eq!(
+            session
+                .match_records
+                .get(&bye)
+                .map(|record| record.match_wins),
+            Some(1),
+            "the round-one bye is not re-credited by round-two generation",
+        );
     }
 }

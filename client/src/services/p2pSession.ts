@@ -15,6 +15,8 @@
 import { createStore, del, get, set } from "idb-keyval";
 
 const STORAGE_PREFIX = "phase-p2p-session:";
+const HOST_LEASE_PREFIX = "phase-p2p-host-lease:";
+const inMemoryHostLeases = new Map<P2PSessionKey, string>();
 /**
  * How long a persisted guest token is valid. Sized for host-resume
  * realism: a host who crashed, reopened the tab, and dialed back in on
@@ -28,7 +30,81 @@ export interface P2PSessionData {
   hostPeerId: string;
   playerToken: string;
   playerId: number;
+  /** Stable identity of the hosted game, retained across host resume. */
+  authority: P2PAuthorityStamp;
   timestamp: number;
+}
+
+/**
+ * Stable, opaque identity for one hosted P2P game. It is deliberately
+ * independent of a PeerJS id: a resumed host may reclaim the room code while
+ * receiving a new PeerJS process/incarnation.
+ */
+export type P2PSessionKey = string;
+
+/**
+ * A host lease is a fencing token. A new host resuming the same session key
+ * replaces the incarnation synchronously; any older host must check this
+ * stamp before it emits a frame, changes authority state, or persists.
+ */
+export interface P2PAuthorityStamp {
+  sessionKey: P2PSessionKey;
+  hostIncarnation: string;
+}
+
+export function createP2PSessionKey(): P2PSessionKey {
+  return crypto.randomUUID();
+}
+
+function leaseStorageKey(sessionKey: P2PSessionKey): string {
+  return HOST_LEASE_PREFIX + sessionKey;
+}
+
+function readHostLease(sessionKey: P2PSessionKey): P2PAuthorityStamp | null {
+  try {
+    const raw = localStorage.getItem(leaseStorageKey(sessionKey));
+    if (!raw) return null;
+    const stamp = JSON.parse(raw) as Partial<P2PAuthorityStamp>;
+    return stamp.sessionKey === sessionKey && typeof stamp.hostIncarnation === "string"
+      ? { sessionKey, hostIncarnation: stamp.hostIncarnation }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Claim the sole local authority lease for a stable P2P session. */
+export function claimP2PHostLease(sessionKey: P2PSessionKey): P2PAuthorityStamp {
+  const authority = { sessionKey, hostIncarnation: crypto.randomUUID() };
+  inMemoryHostLeases.set(sessionKey, authority.hostIncarnation);
+  try {
+    localStorage.setItem(leaseStorageKey(sessionKey), JSON.stringify(authority));
+  } catch (err) {
+    // The in-memory stamp still fences this adapter's frames. Storage failure
+    // only removes cross-tab resume fencing, and must not prevent hosting.
+    console.warn("[p2pSession] host lease write failed:", err);
+  }
+  return authority;
+}
+
+export function ownsP2PHostLease(authority: P2PAuthorityStamp): boolean {
+  const current = readHostLease(authority.sessionKey);
+  if (current) return current.hostIncarnation === authority.hostIncarnation;
+  // Storage can be unavailable (private mode, quota policy). The module-local
+  // fallback preserves same-tab fencing; it intentionally does not revive an
+  // older host after the current incarnation has released its lease.
+  return inMemoryHostLeases.get(authority.sessionKey) === authority.hostIncarnation;
+}
+
+/** Release only the caller's incarnation; never erase a newer resumed host. */
+export function releaseP2PHostLease(authority: P2PAuthorityStamp): void {
+  if (!ownsP2PHostLease(authority)) return;
+  inMemoryHostLeases.delete(authority.sessionKey);
+  try {
+    localStorage.removeItem(leaseStorageKey(authority.sessionKey));
+  } catch {
+    /* best-effort */
+  }
 }
 
 let _store: ReturnType<typeof createStore> | undefined;
@@ -50,12 +126,13 @@ function isFresh(session: P2PSessionData): boolean {
 
 export async function saveP2PSession(
   hostPeerId: string,
-  data: { playerToken: string; playerId: number },
+  data: { playerToken: string; playerId: number; authority: P2PAuthorityStamp },
 ): Promise<void> {
   const session: P2PSessionData = {
     hostPeerId,
     playerToken: data.playerToken,
     playerId: data.playerId,
+    authority: data.authority,
     timestamp: Date.now(),
   };
   try {
@@ -69,7 +146,7 @@ export async function loadP2PSession(hostPeerId: string): Promise<P2PSessionData
   try {
     const session = await get<P2PSessionData>(storageKey(hostPeerId), getSessionStore());
     if (!session) return null;
-    if (!isFresh(session)) {
+    if (!isFresh(session) || !session.authority?.sessionKey || !session.authority.hostIncarnation) {
       await clearP2PSession(hostPeerId);
       return null;
     }

@@ -1,28 +1,134 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::io::Read;
 
 use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
 use engine::game::engine::apply_as_current;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    ChoiceType, Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    ChoiceType, Effect, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{
-    StackEntry, StackEntryKind, TargetSelectionProgress, TargetSelectionSlot, WaitingFor,
+    ManaChoiceContext, ManaChoicePrompt, StackEntry, StackEntryKind, TargetEffectDetail,
+    TargetSelectionProgress, TargetSelectionSlot, WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::log::{LogCategory, LogSegment};
+use engine::types::mana::ManaType;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use phase_ai::auto_play::{run_ai_actions, run_ai_actions_bounded, run_driver_loop, DriverExit};
 use phase_ai::choose_action;
 use phase_ai::config::{create_config, AiConfig, AiDifficulty, Platform};
+use phase_ai::saved_state::load_saved_game_state;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
+
+fn gunzip_fixture(gz: &[u8]) -> String {
+    let mut json = String::new();
+    flate2::read::GzDecoder::new(gz)
+        .read_to_string(&mut json)
+        .expect("fixture .json.gz must inflate to UTF-8 JSON");
+    json
+}
+
+#[test]
+fn saved_cosmic_crucible_mana_prompt_uses_an_issued_action_and_advances() {
+    let raw = gunzip_fixture(include_bytes!(
+        "../fixtures/scenarios/invisible-woman-cosmic-crucible-mana.json.gz"
+    ));
+    let mut state = load_saved_game_state(&raw).expect("saved Cosmic Crucible state deserializes");
+
+    let WaitingFor::ChooseManaColor {
+        player,
+        choice: ManaChoicePrompt::AnyCombination { count, options },
+        context: ManaChoiceContext::ResolvingEffect(resume),
+    } = &state.waiting_for
+    else {
+        panic!("capture must restore at Cosmic Crucible's resolving mana prompt");
+    };
+    let player = *player;
+    assert_eq!(
+        player,
+        PlayerId(2),
+        "Cosmic Crucible's controller owns the prompt"
+    );
+    assert_eq!(
+        resume.source_id,
+        ObjectId(200),
+        "the prompt must come from Cosmic Crucible"
+    );
+    assert_eq!(
+        options,
+        &[
+            ManaType::White,
+            ManaType::Blue,
+            ManaType::Black,
+            ManaType::Red,
+            ManaType::Green
+        ],
+        "the capture must retain all five color options"
+    );
+    assert_eq!(*count, 4, "Cosmic Crucible must produce exactly four mana");
+
+    let contract = engine::ai_support::AiDecisionContract::issue(&state, player);
+    assert_eq!(
+        contract.candidates.len(),
+        64,
+        "the engine must cap this 5^4 mana prompt to its finite issued domain"
+    );
+    let state_before = state.clone();
+    let ai_players = HashSet::from([player]);
+    let ai_configs = HashMap::from([(
+        player,
+        create_config(AiDifficulty::VeryHard, Platform::Native),
+    )]);
+    let mut ai_rng = SmallRng::seed_from_u64(25);
+    let ai_session = phase_ai::session::AiSession::arc_from_game(&state);
+    let run = run_ai_actions_bounded(
+        &mut state,
+        &ai_players,
+        &ai_configs,
+        &mut ai_rng,
+        &ai_session,
+        1,
+    );
+
+    assert_eq!(
+        run.len(),
+        1,
+        "the bounded controller must submit the mana choice"
+    );
+    assert!(matches!(
+        &run.stop,
+        phase_ai::auto_play::AiActionsStop::ActionBudgetReached { limit: 1 }
+    ));
+    assert!(
+        contract.contains_action(&state_before, &run[0].action),
+        "the controller must submit the exact action from player two's contract"
+    );
+    assert_eq!(
+        run[0].action,
+        GameAction::ChooseManaColor {
+            choice: engine::types::game_state::ManaChoice::Combination(vec![
+                ManaType::White,
+                ManaType::White,
+                ManaType::Red,
+                ManaType::Green,
+            ]),
+            count: 1,
+        },
+        "the capped domain still maximizes the captured hand and deck color demand"
+    );
+    assert!(
+        !matches!(state.waiting_for, WaitingFor::ChooseManaColor { .. }),
+        "applying the choice must advance beyond Cosmic Crucible's mana prompt"
+    );
+}
 
 #[test]
 fn scenario_prefers_opponent_target_over_self() {
@@ -36,6 +142,8 @@ fn scenario_prefers_opponent_target_over_self() {
             legal_targets: vec![TargetRef::Player(P0), TargetRef::Player(P1)],
             optional: false,
             chooser: None,
+            effect_kind: EffectKind::NoOp,
+            effect_detail: TargetEffectDetail::None,
         }],
         mode_labels: Vec::new(),
         target_constraints: Vec::new(),
@@ -72,6 +180,8 @@ fn scenario_skips_optional_target_with_no_legal_choices() {
             legal_targets: Vec::new(),
             optional: true,
             chooser: None,
+            effect_kind: EffectKind::NoOp,
+            effect_detail: TargetEffectDetail::None,
         }],
         mode_labels: Vec::new(),
         target_constraints: Vec::new(),
@@ -165,8 +275,18 @@ fn scenario_multiplayer_attacks_to_finish_exposed_player() {
     assert!(attacks.iter().any(|(id, _)| *id == attacker_b));
 }
 
+/// Pins the `prefer_land_drop` **fast path**, not the evaluator.
+///
+/// With exactly one playable land, `prefer_land_drop` short-circuits before the
+/// search ever runs (it terminates on `let only_land = land_actions.next()?;`
+/// followed by a second-`next()` guard), so this test **cannot detect an
+/// evaluator regression** — it passed throughout the period when the evaluator
+/// scored its own land drop as a strict loss. Evaluator coverage lives in
+/// `tests/ai_quality.rs::mana_screwed_ai_ranks_land_drop_above_passing`, which uses
+/// **two or more** playable lands so the shortcut declines and the scored path
+/// is reached. Any replacement for this test must do the same.
 #[test]
-fn scenario_mcts_plays_available_land_deterministically() {
+fn scenario_single_playable_land_uses_deterministic_shortcut() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let land_id = scenario.add_basic_land(P0, engine::types::mana::ManaColor::Green);
@@ -303,8 +423,11 @@ fn run_ai_actions_bounded_stops_exactly_at_budget() {
         "bounded run must take exactly its budget of actions"
     );
     assert!(
-        results.break_reason.is_none(),
-        "budget cut the stream — the loop did not end for a break-door reason"
+        matches!(
+            &results.stop,
+            phase_ai::auto_play::AiActionsStop::ActionBudgetReached { limit: 3 }
+        ),
+        "budget cut the stream — the loop did not end for a driver failure"
     );
 }
 
@@ -773,7 +896,7 @@ fn scenario_very_hard_wasm_passes_on_redundant_removal() {
             source_id: ObjectId(300),
             controller: P0,
             kind: StackEntryKind::Spell {
-                ability: Some(ResolvedAbility::new(
+                ability: Some(Box::new(ResolvedAbility::new(
                     Effect::DealDamage {
                         amount: QuantityExpr::Fixed { value: 3 },
                         target: TargetFilter::Any,
@@ -783,7 +906,7 @@ fn scenario_very_hard_wasm_passes_on_redundant_removal() {
                     vec![TargetRef::Object(target)],
                     ObjectId(300),
                     P0,
-                )),
+                ))),
                 card_id: CardId(300),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
@@ -987,9 +1110,24 @@ fn claws_of_gix_def() -> engine::types::ability::AbilityDefinition {
 }
 
 /// V3 (∃-success): board with 4 artifacts (Mox + 3 others) so sacrificing one
-/// leaves 3 → Metalcraft holds → a witness exists. Driving the AI loop must
-/// COMPLETE without reaching the `fallback_action` panic. The original dead-end
-/// would panic here.
+/// leaves 3 → Metalcraft holds → a witness exists.
+///
+/// **What this test actually pins, measured — the doc it replaces was wrong.** The
+/// activation is legal here (the `activation_legal_for` precondition below), and
+/// the AI then *declines* it: driving the loop on this board yields exactly
+/// `[PassPriority]`. So the load-bearing assertion is the precondition — it fails
+/// the moment a Metalcraft/cost regression stops `legal_actions` surfacing the
+/// activation. The `assert_no_fallback_cancel` that follows is a guard, not the
+/// subject: a board the AI passes on cannot dead-end. The sibling mana-first test
+/// is the one that exercises the completion path end to end (measured:
+/// `[ActivateAbility, SelectCards, PassPriority]`), and it carries the positive
+/// assertion.
+///
+/// That the AI declines a legal, witnessed Claws activation is a real observation
+/// and is out of scope here; it is disclosed in the commit that added this doc
+/// rather than silently papered over. Before the profile-independence fix, this
+/// branch also carried a `debug_assert!(false, …)`, which is why the old doc spoke
+/// of a panic; no profile panics now.
 #[test]
 fn scenario_claws_of_gix_witness_board_does_not_dead_end() {
     let mut scenario = GameScenario::new();
@@ -1003,11 +1141,12 @@ fn scenario_claws_of_gix_witness_board_does_not_dead_end() {
         let mut a = scenario.add_creature(P0, &format!("Artifact {i}"), 0, 1);
         a.as_artifact();
     }
-    {
+    let claws = {
         let mut claws = scenario.add_creature(P0, "Claws of Gix", 0, 1);
         claws.as_artifact();
         claws.with_ability_definition(claws_of_gix_def());
-    }
+        claws.id()
+    };
 
     let mut runner = scenario.build();
     {
@@ -1018,12 +1157,20 @@ fn scenario_claws_of_gix_witness_board_does_not_dead_end() {
         state.waiting_for = WaitingFor::Priority { player: P0 };
     }
 
+    // Precondition, not decoration: `assert_no_fallback_cancel` is a purely
+    // negative assertion, so without this an unrelated break in the activation's
+    // legality (Metalcraft comparator, cost payability) would stop the AI ever
+    // entering a pending cast and leave the test GREEN while the scenario it
+    // names had stopped happening. The mana-first sibling has the same guard.
+    assert!(
+        activation_legal_for(runner.state(), claws),
+        "witness board must surface the Claws activation before the loop runs"
+    );
+
     let ai_players = HashSet::from([P0]);
     let ai_configs = HashMap::from([(P0, create_config(AiDifficulty::VeryHard, Platform::Native))]);
     let mut ai_rng = SmallRng::seed_from_u64(19024);
     let ai_session = phase_ai::session::AiSession::arc_from_game(runner.state());
-    // The assertion is non-panic: a recurrence of the dead-end aborts via the
-    // `fallback_action` debug_assert before this returns.
     let results = run_ai_actions(
         runner.state_mut(),
         &ai_players,
@@ -1031,9 +1178,59 @@ fn scenario_claws_of_gix_witness_board_does_not_dead_end() {
         &mut ai_rng,
         &ai_session,
     );
+    assert_no_fallback_cancel(
+        &results,
+        "witness board must not escape the Claws activation through the fallback",
+    );
+}
+
+/// Dead-end detector for the Claws scenarios, working in BOTH profiles.
+///
+/// These tests used to detect a recurrence via the `debug_assert!(false, …)` that
+/// lived in `search::fallback_action`'s pending-cast branch (their own comments
+/// said so), backed by `assert!(results.len() <= 200)`. That length assertion is
+/// **structurally vacuous**: `run_ai_actions` is hard-capped at
+/// `MAX_AI_ACTIONS_PER_SEQUENCE = 200` (`crates/phase-ai/src/auto_play.rs:20`), so
+/// `<= 200` holds for every possible run and cannot fail on its subject.
+///
+/// `CancelCast` is rejected from the strategic pool (`tactical_gate.rs:205`,
+/// `GameAction::CancelCast => GateDecision::Reject`), so any `CancelCast` the AI
+/// emits comes from `search::fallback_action`. That function has several
+/// `CancelCast` exits — `TargetSelection`, the pending-cast dead-end,
+/// `EquipTarget`, and `Crew/Saddle/StationTarget` — but on these two boards (no
+/// Equipment, no Vehicle, and the only targeting effect is a
+/// `GainLife { player: Controller }` that takes no target) the pending-cast
+/// dead-end is the only reachable one, so a `CancelCast` here IS that dead-end.
+/// Unlike the removed `debug_assert`, this holds in release builds too.
+///
+/// Both outcomes are checked. `run_ai_actions` only pushes an `AiActionResult`
+/// once `apply_interaction` succeeded (`auto_play.rs:214-250`), and the
+/// pending-cast `CancelCast` is offered to the AI only by
+/// `semantic_candidate_actions_with_probe`'s guarded push
+/// (`engine/src/ai_support/candidates.rs`, which requires `has_pending_cast` AND
+/// `allows_cancel_cast`; `candidate_actions_broad_with_probe`, which it calls,
+/// emits `CancelCast` only for Equipment/Vehicle/modal shapes absent from these
+/// boards). A dead-end satisfying only `allows_cancel_cast` therefore never
+/// becomes an applied action — it lands in `break_reason`, and a results-only
+/// assertion would miss it.
+fn assert_no_fallback_cancel(run: &phase_ai::auto_play::AiActionsRun, what: &str) {
+    use phase_ai::auto_play::AiActionsStop;
+
     assert!(
-        results.len() <= 200,
-        "AI loop must stay within its safety cap and never dead-end"
+        !run.results
+            .iter()
+            .any(|r| matches!(r.action, GameAction::CancelCast)),
+        "{what}: AI escaped via fallback CancelCast (actions: {:?})",
+        run.results.iter().map(|r| &r.action).collect::<Vec<_>>(),
+    );
+    assert!(
+        !matches!(
+            &run.stop,
+            AiActionsStop::ApplyFailed { action, .. }
+                if matches!(**action, GameAction::CancelCast)
+        ),
+        "{what}: AI dead-ended on an unapplied fallback CancelCast ({:?})",
+        &run.stop,
     );
 }
 
@@ -1044,9 +1241,13 @@ fn scenario_claws_of_gix_witness_board_does_not_dead_end() {
 /// sacrifice, so the Claws activation is LEGAL and the AI loop completes it
 /// without dead-ending. REVERT-FAILING: reverting the mana-first detour restores
 /// the sacrifice-first ordering, where `can_pay` is rejected (or the activation
-/// dead-ends), so `legal_actions` no longer surfaces the Claws activation and the
-/// pending-cost loop panics at `search.rs` "AI fallback reached during pending
-/// cast (variant PayCost, spell Claws of Gix)" — the baseline seed-19057 abort.
+/// dead-ends), so `legal_actions` no longer surfaces the Claws activation — the
+/// `activation_legal_for` precondition below is what fails, and the pending-cost
+/// loop then escapes through `fallback_action`'s `CancelCast`, which
+/// [`assert_no_fallback_cancel`] catches. (That branch used to `debug_assert!`
+/// with the message "AI fallback reached during pending cast …"; that string no
+/// longer exists — the surviving `tracing::error!` reads "AI fallback cancelled
+/// an uncompletable cast".)
 #[test]
 fn scenario_claws_of_gix_mana_first_board_proposes_and_completes() {
     let mut scenario = GameScenario::new();
@@ -1085,8 +1286,8 @@ fn scenario_claws_of_gix_mana_first_board_proposes_and_completes() {
         "mana-first pays {{1}} on the intact 3-artifact board → Claws activation must be legal"
     );
 
-    // Driving the full loop must COMPLETE without reaching the `fallback_action`
-    // dead-end panic.
+    // Driving the full loop must COMPLETE without escaping through
+    // `fallback_action` — see `assert_no_fallback_cancel`.
     let ai_players = HashSet::from([P0]);
     let ai_configs = HashMap::from([(P0, create_config(AiDifficulty::VeryHard, Platform::Native))]);
     let mut ai_rng = SmallRng::seed_from_u64(19057);
@@ -1098,9 +1299,21 @@ fn scenario_claws_of_gix_mana_first_board_proposes_and_completes() {
         &mut ai_rng,
         &ai_session,
     );
+    assert_no_fallback_cancel(&results, "mana-first board must not dead-end the AI loop");
+    // Positive half: "completes" must mean the activation actually happened, not
+    // merely that nothing cancelled. Without it the test would also pass on a board
+    // the AI simply passes priority on — which is what the witness sibling does.
     assert!(
-        results.len() <= 200,
-        "mana-first board must not dead-end the AI loop"
+        results
+            .results
+            .iter()
+            .any(|r| matches!(r.action, GameAction::ActivateAbility { .. })),
+        "mana-first board must ACTIVATE the Claws (actions: {:?})",
+        results
+            .results
+            .iter()
+            .map(|r| &r.action)
+            .collect::<Vec<_>>(),
     );
 }
 
@@ -1416,8 +1629,8 @@ fn ai_declare_attackers_completion_returns_apply_accepted_legal_action() {
         let mut scenario = GameScenario::new();
         let attacker = {
             let mut b = scenario.add_creature(P0, "Lured Bear", 2, 2);
-            b.with_static_definition(StaticDefinition::new(StaticMode::MustAttackPlayer {
-                player: P1,
+            b.with_static_definition(StaticDefinition::new(StaticMode::MustAttackDefender {
+                defender: P1.into(),
             }));
             b.id()
         };
@@ -1477,5 +1690,131 @@ fn ai_declare_attackers_completion_returns_apply_accepted_legal_action() {
     assert!(
         !results.is_empty(),
         "the host AI loop must take at least one action for the declare step"
+    );
+}
+
+/// CR 506.3 + CR 508.1d: the AI must obey a forced-attack requirement whose
+/// required defender is a PLANESWALKER, not just one naming a player.
+///
+/// The mandatory-attacker sweep in `combat_ai` records only `ObjectId`s, so the
+/// required `AttackTarget` is not carried into target assignment. That is safe
+/// only because every production path routes its heuristic proposal through
+/// `validated_declare_attackers` -> `combat::complete_attacker_proposal`, the
+/// engine's single CR 508.1d authority, which replaces an under-max declaration
+/// with the deterministic maximum-requirement witness. This test is the evidence
+/// for that claim rather than an argument for it: it drives the real
+/// `choose_action` seam on Gideon Jura's "+2" and asserts BOTH that the chosen
+/// action attacks the planeswalker and that the reducer accepts it.
+///
+/// Sibling of `ai_declare_attackers_completion_returns_apply_accepted_legal_action`
+/// (the player-directed lure). If the AI ever returned its raw heuristic
+/// assignment instead of the completed proposal, it would attack P0 here and the
+/// reducer would reject the declaration — both halves fail.
+#[test]
+fn ai_obeys_planeswalker_directed_attack_requirement() {
+    const GIDEON_JURA_ORACLE: &str = concat!(
+        "+2: During target opponent's next turn, creatures that player controls ",
+        "attack Gideon Jura if able.\n",
+        "\u{2212}2: Destroy target tapped creature.\n",
+        "0: Until end of turn, Gideon Jura becomes a 6/6 Human Soldier creature ",
+        "that's still a planeswalker. Prevent all damage that would be dealt to ",
+        "him this turn.",
+    );
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let gideon = scenario
+        .add_planeswalker_from_oracle(P0, "Gideon Jura", "Gideon", 6, GIDEON_JURA_ORACLE)
+        .id();
+    let bear = scenario.add_creature(P1, "Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.turn_number = 2;
+        state.layers_dirty.mark_full();
+    }
+    engine::game::layers::evaluate_layers(runner.state_mut());
+
+    // Resolve the "+2" targeting P1 through the production activation path.
+    runner.activate(gideon, 0).target_player(P1).resolve();
+
+    // Hand the turn to P1 and park at their declare-attackers step.
+    {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.phase = Phase::DeclareAttackers;
+        state.turn_number = 3;
+        // CR 302.6: everything has been under its controller's control since
+        // before this turn began.
+        for id in state.battlefield.clone() {
+            if let Some(obj) = state.objects.get_mut(&id) {
+                obj.summoning_sick = false;
+            }
+        }
+        state.layers_dirty.mark_full();
+    }
+    engine::game::layers::evaluate_layers(runner.state_mut());
+
+    let valid = engine::game::combat::get_valid_attacker_ids(runner.state());
+    assert!(
+        valid.contains(&bear),
+        "reach-guard: P1's creature is an eligible attacker"
+    );
+    let targets = engine::game::combat::get_valid_attack_targets(runner.state());
+    assert!(
+        targets.contains(&AttackTarget::Planeswalker(gideon)),
+        "reach-guard: the engine offers Gideon as an attackable defender: {targets:?}"
+    );
+    runner.state_mut().waiting_for = WaitingFor::DeclareAttackers {
+        player: P1,
+        valid_attacker_ids: valid,
+        valid_attack_targets: targets,
+        valid_attack_targets_by_attacker: None,
+        attacker_constraints: Default::default(),
+    };
+
+    // NON-VACUITY PIN: the raw heuristic genuinely gets this wrong. It records
+    // the creature as mandatory but discards the required `AttackTarget`, so it
+    // proposes the defending PLAYER. This assertion is what makes the
+    // `choose_action` check below meaningful — without it, the test would still
+    // pass if the heuristic happened to pick Gideon for value reasons, and would
+    // prove nothing about the completion seam.
+    //
+    // If a future change teaches the policy to carry the defender itself, this
+    // assertion flips to the planeswalker and should simply be updated — the
+    // seam below is the invariant, not the heuristic's raw answer.
+    let raw = phase_ai::combat_ai::choose_attackers_with_targets(runner.state(), P1);
+    assert_eq!(
+        raw,
+        vec![(bear, AttackTarget::Player(P0))],
+        "the raw policy proposes the defending player — the engine completion is \
+         what repairs it, and that is exactly what this test guards"
+    );
+
+    let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+    let mut rng = SmallRng::seed_from_u64(7);
+    let action = choose_action(runner.state(), P1, &config, &mut rng)
+        .expect("AI must choose a declare-attackers action");
+    let GameAction::DeclareAttackers { attacks, .. } = &action else {
+        panic!("expected DeclareAttackers, got {action:?}");
+    };
+    assert_eq!(
+        attacks,
+        &vec![(bear, AttackTarget::Planeswalker(gideon))],
+        "CR 508.1d: the only maximum-requirement declaration attacks the planeswalker"
+    );
+
+    runner
+        .act(action)
+        .expect("the AI's declaration must be reducer-legal (apply-accepted)");
+    assert!(
+        runner.state().combat.as_ref().is_some_and(|c| c
+            .attackers
+            .iter()
+            .any(|a| a.object_id == bear && a.attack_target == AttackTarget::Planeswalker(gideon))),
+        "combat commits with the creature attacking Gideon"
     );
 }

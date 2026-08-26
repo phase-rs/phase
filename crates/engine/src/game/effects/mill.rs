@@ -745,6 +745,7 @@ mod tests {
             );
             gain.condition = Some(AbilityCondition::ZoneChangedThisWay {
                 filter: TF::Typed(TypedFilter::new(TypeFilter::Subtype("Angel".to_string()))),
+                destination: None,
             });
             gain
         })

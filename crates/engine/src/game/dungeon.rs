@@ -79,7 +79,14 @@ pub struct DungeonProgress {
 
 /// Static room definition within a dungeon graph.
 pub struct RoomDefinition {
+    /// CR 309.4b: The room's printed name. Flavor text — it never affects play,
+    /// but it is how players and the UI identify a room.
     pub name: &'static str,
+    /// CR 309.4c: The room ability's printed effect — the "[effect]" half of
+    /// "When you move your venture marker into this room, [effect]". Verbatim
+    /// Oracle text minus the "(Leads to: ...)" reminder, which `next_rooms`
+    /// already encodes.
+    pub text: &'static str,
     /// Indices of rooms this room leads to (empty = bottommost room).
     pub next_rooms: &'static [u8],
 }
@@ -120,6 +127,66 @@ pub fn next_rooms(id: DungeonId, room: u8) -> &'static [u8] {
 pub fn room_name(id: DungeonId, room: u8) -> &'static str {
     let def = get_definition(id);
     def.rooms.get(room as usize).map_or("Unknown", |r| r.name)
+}
+
+/// CR 309.4c: Get the printed effect text of a room's room ability.
+pub fn room_text(id: DungeonId, room: u8) -> &'static str {
+    let def = get_definition(id);
+    def.rooms.get(room as usize).map_or("", |r| r.text)
+}
+
+/// CR 309.4: How many rooms the dungeon card has, so a display can place the
+/// venture marker's room within the whole dungeon ("room 3 of 7").
+pub fn room_count(id: DungeonId) -> u8 {
+    get_definition(id).rooms.len() as u8
+}
+
+/// CR 309.4b + CR 309.4c: A room as the UI presents it — index, printed name,
+/// and printed effect.
+///
+/// SINGLE AUTHORITY for "what does this room do" at the client boundary. Every
+/// surface that names a room to a player (the dungeon prompt, the branch-point
+/// room prompt, the dungeon HUD badge, the game log) reads this, so a room's
+/// description can never disagree between surfaces. Per the display-layer rule,
+/// the frontend renders these strings rather than carrying its own room table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomPreview {
+    /// Index of this room within its dungeon — the value a
+    /// `GameAction::ChooseDungeonRoom` carries.
+    pub index: u8,
+    pub name: String,
+    pub text: String,
+}
+
+/// CR 309.4b + CR 309.4c: Build the preview for one room of a dungeon.
+pub fn room_preview(id: DungeonId, room: u8) -> RoomPreview {
+    RoomPreview {
+        index: room,
+        name: room_name(id, room).to_string(),
+        text: room_text(id, room).to_string(),
+    }
+}
+
+/// CR 309.2a + CR 309.4a: A dungeon as the UI presents it at the point of
+/// choosing one — its name plus the topmost room, which the venturing player
+/// enters immediately and unavoidably on making this choice. Without
+/// `entry_room` the choice is between five bare names with no visible
+/// consequence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DungeonPreview {
+    pub dungeon: DungeonId,
+    pub name: String,
+    /// CR 309.4a: The topmost room — where the venture marker lands.
+    pub entry_room: RoomPreview,
+}
+
+/// CR 309.2a + CR 309.4a: Build the preview for a choosable dungeon.
+pub fn dungeon_preview(id: DungeonId) -> DungeonPreview {
+    DungeonPreview {
+        dungeon: id,
+        name: get_definition(id).name.to_string(),
+        entry_room: room_preview(id, 0),
+    }
 }
 
 /// CR 701.49a / CR 701.49d: Get available dungeons for a new venture.
@@ -311,6 +378,7 @@ pub fn room_effects(
                     ])],
                     duration: None,
                     target: Some(TargetFilter::Typed(TypedFilter::creature())),
+                    end_cost: None,
                 },
                 source_id,
                 controller,
@@ -339,6 +407,7 @@ pub fn room_effects(
                 Effect::ExileTop {
                     player: TargetFilter::Controller,
                     count: fixed(2),
+                    position: crate::types::ability::LibraryPosition::Top,
                     face_down: false,
                 },
                 source_id,
@@ -864,6 +933,8 @@ pub fn room_effects(
                         source_controller: None,
                         source_object: None,
                         bypass_beneficiary: None,
+                        protection_does_not_remove: None,
+                        room_door: None,
                     }],
                     triggers: Vec::new(),
                 },
@@ -1166,36 +1237,43 @@ static LOST_MINE_OF_PHANDELVER: DungeonDefinition = DungeonDefinition {
         // 0: Cave Entrance → {Goblin Lair, Mine Tunnels}
         RoomDefinition {
             name: "Cave Entrance",
+            text: "Scry 1.",
             next_rooms: &[1, 2],
         },
         // 1: Goblin Lair → {Storeroom, Dark Pool}
         RoomDefinition {
             name: "Goblin Lair",
+            text: "Create a 1/1 red Goblin creature token.",
             next_rooms: &[3, 4],
         },
         // 2: Mine Tunnels → {Dark Pool, Fungi Cavern}
         RoomDefinition {
             name: "Mine Tunnels",
+            text: "Create a Treasure token.",
             next_rooms: &[4, 5],
         },
         // 3: Storeroom → Temple of Dumathoin
         RoomDefinition {
             name: "Storeroom",
+            text: "Put a +1/+1 counter on target creature.",
             next_rooms: &[6],
         },
         // 4: Dark Pool → Temple of Dumathoin
         RoomDefinition {
             name: "Dark Pool",
+            text: "Each opponent loses 1 life and you gain 1 life.",
             next_rooms: &[6],
         },
         // 5: Fungi Cavern → Temple of Dumathoin
         RoomDefinition {
             name: "Fungi Cavern",
+            text: "Target creature gets -4/-0 until your next turn.",
             next_rooms: &[6],
         },
         // 6: Temple of Dumathoin (bottommost)
         RoomDefinition {
             name: "Temple of Dumathoin",
+            text: "Draw a card.",
             next_rooms: &[],
         },
     ],
@@ -1210,46 +1288,55 @@ static DUNGEON_OF_THE_MAD_MAGE: DungeonDefinition = DungeonDefinition {
         // 0: Yawning Portal → Dungeon Level
         RoomDefinition {
             name: "Yawning Portal",
+            text: "You gain 1 life.",
             next_rooms: &[1],
         },
         // 1: Dungeon Level → {Goblin Bazaar, Twisted Caverns}
         RoomDefinition {
             name: "Dungeon Level",
+            text: "Scry 1.",
             next_rooms: &[2, 3],
         },
         // 2: Goblin Bazaar → Lost Level
         RoomDefinition {
             name: "Goblin Bazaar",
+            text: "Create a Treasure token.",
             next_rooms: &[4],
         },
         // 3: Twisted Caverns → Lost Level
         RoomDefinition {
             name: "Twisted Caverns",
+            text: "Target creature can't attack until your next turn.",
             next_rooms: &[4],
         },
         // 4: Lost Level → {Runestone Caverns, Muiral's Graveyard}
         RoomDefinition {
             name: "Lost Level",
+            text: "Scry 2.",
             next_rooms: &[5, 6],
         },
         // 5: Runestone Caverns → Deep Mines
         RoomDefinition {
             name: "Runestone Caverns",
+            text: "Exile the top two cards of your library. You may play them.",
             next_rooms: &[7],
         },
         // 6: Muiral's Graveyard → Deep Mines
         RoomDefinition {
             name: "Muiral's Graveyard",
+            text: "Create two 1/1 black Skeleton creature tokens.",
             next_rooms: &[7],
         },
         // 7: Deep Mines → Mad Wizard's Lair
         RoomDefinition {
             name: "Deep Mines",
+            text: "Scry 3.",
             next_rooms: &[8],
         },
         // 8: Mad Wizard's Lair (bottommost)
         RoomDefinition {
             name: "Mad Wizard's Lair",
+            text: "Draw three cards and reveal them. You may cast one of them without paying its mana cost.",
             next_rooms: &[],
         },
     ],
@@ -1264,26 +1351,31 @@ static TOMB_OF_ANNIHILATION: DungeonDefinition = DungeonDefinition {
         // 0: Trapped Entry → {Veils of Fear, Oubliette}
         RoomDefinition {
             name: "Trapped Entry",
+            text: "Each player loses 1 life.",
             next_rooms: &[1, 2],
         },
         // 1: Veils of Fear → Sandfall Cell
         RoomDefinition {
             name: "Veils of Fear",
+            text: "Each player loses 2 life unless they discard a card.",
             next_rooms: &[3],
         },
         // 2: Oubliette → Cradle of the Death God
         RoomDefinition {
             name: "Oubliette",
+            text: "Discard a card and sacrifice a creature, an artifact, and a land.",
             next_rooms: &[4],
         },
         // 3: Sandfall Cell → Cradle of the Death God
         RoomDefinition {
             name: "Sandfall Cell",
+            text: "Each player loses 2 life unless they sacrifice a creature, artifact, or land of their choice.",
             next_rooms: &[4],
         },
         // 4: Cradle of the Death God (bottommost)
         RoomDefinition {
             name: "Cradle of the Death God",
+            text: "Create The Atropal, a legendary 4/4 black God Horror creature token with deathtouch.",
             next_rooms: &[],
         },
     ],
@@ -1298,46 +1390,55 @@ static UNDERCITY: DungeonDefinition = DungeonDefinition {
         // 0: Secret Entrance → {Forge, Lost Well}
         RoomDefinition {
             name: "Secret Entrance",
+            text: "Search your library for a basic land card, reveal it, put it into your hand, then shuffle.",
             next_rooms: &[1, 2],
         },
         // 1: Forge → {Trap!, Arena}
         RoomDefinition {
             name: "Forge",
+            text: "Put two +1/+1 counters on target creature.",
             next_rooms: &[3, 4],
         },
         // 2: Lost Well → {Arena, Stash}
         RoomDefinition {
             name: "Lost Well",
+            text: "Scry 2.",
             next_rooms: &[4, 5],
         },
         // 3: Trap! → Archives
         RoomDefinition {
             name: "Trap!",
+            text: "Target player loses 5 life.",
             next_rooms: &[6],
         },
         // 4: Arena → {Archives, Catacombs}
         RoomDefinition {
             name: "Arena",
+            text: "Goad target creature.",
             next_rooms: &[6, 7],
         },
         // 5: Stash → Catacombs
         RoomDefinition {
             name: "Stash",
+            text: "Create a Treasure token.",
             next_rooms: &[7],
         },
         // 6: Archives → Throne of the Dead Three
         RoomDefinition {
             name: "Archives",
+            text: "Draw a card.",
             next_rooms: &[8],
         },
         // 7: Catacombs → Throne of the Dead Three
         RoomDefinition {
             name: "Catacombs",
+            text: "Create a 4/1 black Skeleton creature token with menace.",
             next_rooms: &[8],
         },
         // 8: Throne of the Dead Three (bottommost)
         RoomDefinition {
             name: "Throne of the Dead Three",
+            text: "Reveal the top ten cards of your library. Put a creature card from among them onto the battlefield with three +1/+1 counters on it. It gains hexproof until your next turn. Then shuffle.",
             next_rooms: &[],
         },
     ],
@@ -1354,103 +1455,122 @@ static BALDURS_GATE_WILDERNESS: DungeonDefinition = DungeonDefinition {
         // 0: Crash Landing → {Goblin Camp, Emerald Grove}
         RoomDefinition {
             name: "Crash Landing",
+            text: "Search your library for a basic land card, reveal it, put it into your hand, then shuffle.",
             next_rooms: &[1, 2],
         },
         // Row 2
         // 1: Goblin Camp → {Auntie's Teahouse, Defiled Temple}
         RoomDefinition {
             name: "Goblin Camp",
+            text: "Create a Treasure token.",
             next_rooms: &[3, 4],
         },
         // 2: Emerald Grove → {Defiled Temple, Mountain Pass}
         RoomDefinition {
             name: "Emerald Grove",
+            text: "Create a 2/2 white Knight creature token.",
             next_rooms: &[4, 5],
         },
         // Row 3
         // 3: Auntie's Teahouse → {Ebonlake Grotto, Grymforge}
         RoomDefinition {
             name: "Auntie's Teahouse",
+            text: "Scry 3.",
             next_rooms: &[6, 7],
         },
         // 4: Defiled Temple → {Grymforge, Githyanki Crèche}
         RoomDefinition {
             name: "Defiled Temple",
+            text: "You may sacrifice a permanent. If you do, draw a card.",
             next_rooms: &[7, 8],
         },
         // 5: Mountain Pass → {Githyanki Crèche, Last Light Inn}
         RoomDefinition {
             name: "Mountain Pass",
+            text: "You may put a land card from your hand onto the battlefield.",
             next_rooms: &[8, 9],
         },
         // Row 4 (widest)
         // 6: Ebonlake Grotto → {Reithwin Tollhouse, Moonrise Towers}
         RoomDefinition {
             name: "Ebonlake Grotto",
+            text: "Create two 1/1 blue Faerie Dragon creature tokens with flying.",
             next_rooms: &[10, 11],
         },
         // 7: Grymforge → {Reithwin Tollhouse, Moonrise Towers}
         RoomDefinition {
             name: "Grymforge",
+            text: "For each opponent, goad up to one target creature that player controls.",
             next_rooms: &[10, 11],
         },
         // 8: Githyanki Crèche → {Moonrise Towers, Gauntlet of Shar}
         RoomDefinition {
             name: "Githyanki Crèche",
+            text: "Distribute three +1/+1 counters among up to three target creatures you control.",
             next_rooms: &[11, 12],
         },
         // 9: Last Light Inn → {Moonrise Towers, Gauntlet of Shar}
         RoomDefinition {
             name: "Last Light Inn",
+            text: "Draw two cards.",
             next_rooms: &[11, 12],
         },
         // Row 5
         // 10: Reithwin Tollhouse → {Balthazar's Lab, Circus of the Last Days}
         RoomDefinition {
             name: "Reithwin Tollhouse",
+            text: "Roll 2d4 and create that many Treasure tokens.",
             next_rooms: &[13, 14],
         },
         // 11: Moonrise Towers → {Circus of the Last Days, Undercity Ruins}
         RoomDefinition {
             name: "Moonrise Towers",
+            text: "Instant and sorcery spells you cast this turn cost {3} less to cast.",
             next_rooms: &[14, 15],
         },
         // 12: Gauntlet of Shar → {Undercity Ruins}
         RoomDefinition {
             name: "Gauntlet of Shar",
+            text: "Each opponent loses 5 life.",
             next_rooms: &[15],
         },
         // Row 6
         // 13: Balthazar's Lab → {Steel Watch Foundry}
         RoomDefinition {
             name: "Balthazar's Lab",
+            text: "Return up to two target creature cards from your graveyard to your hand.",
             next_rooms: &[16],
         },
         // 14: Circus of the Last Days → {Steel Watch Foundry, Ansur's Sanctum}
         RoomDefinition {
             name: "Circus of the Last Days",
+            text: "Create a token that's a copy of one of your commanders, except it's not legendary.",
             next_rooms: &[16, 17],
         },
         // 15: Undercity Ruins → {Ansur's Sanctum}
         RoomDefinition {
             name: "Undercity Ruins",
+            text: "Create three 4/1 black Skeleton creature tokens with menace.",
             next_rooms: &[17],
         },
         // Row 7
         // 16: Steel Watch Foundry → Temple of Bhaal
         RoomDefinition {
             name: "Steel Watch Foundry",
+            text: "You get an emblem with \"Creatures you control get +2/+2 and have trample.\"",
             next_rooms: &[18],
         },
         // 17: Ansur's Sanctum → Temple of Bhaal
         RoomDefinition {
             name: "Ansur's Sanctum",
+            text: "Reveal the top four cards of your library and put them into your hand. Each opponent loses life equal to those cards' total mana value.",
             next_rooms: &[18],
         },
         // Row 8 (bottom)
         // 18: Temple of Bhaal (bottommost)
         RoomDefinition {
             name: "Temple of Bhaal",
+            text: "Creatures your opponents control get -5/-5 until end of turn.",
             next_rooms: &[],
         },
     ],
@@ -1485,6 +1605,89 @@ pub fn has_completed_dungeon(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ALL_DUNGEONS: [DungeonId; 5] = [
+        DungeonId::LostMineOfPhandelver,
+        DungeonId::DungeonOfTheMadMage,
+        DungeonId::TombOfAnnihilation,
+        DungeonId::Undercity,
+        DungeonId::BaldursGateWilderness,
+    ];
+
+    /// CR 309.4c: Every room has a room ability, so every room must carry its
+    /// printed effect — the prompts, stack entry, and game log all render it.
+    #[test]
+    fn every_room_has_printed_effect_text() {
+        for id in ALL_DUNGEONS {
+            let def = get_definition(id);
+            for (index, room) in def.rooms.iter().enumerate() {
+                assert!(
+                    !room.text.is_empty(),
+                    "{id} room {index} ({}) has no printed effect text",
+                    room.name
+                );
+                assert!(
+                    !room.text.contains("Leads to"),
+                    "{id} room {index} ({}) kept the (Leads to: ...) reminder; \
+                     next_rooms already encodes it",
+                    room.name
+                );
+            }
+        }
+    }
+
+    /// The previews handed to the client must agree with the static definitions
+    /// they are built from — the client has no room table of its own.
+    #[test]
+    fn previews_mirror_the_static_definitions() {
+        for id in ALL_DUNGEONS {
+            let def = get_definition(id);
+
+            let dungeon = dungeon_preview(id);
+            assert_eq!(dungeon.dungeon, id);
+            assert_eq!(dungeon.name, def.name);
+            // CR 309.4a: the entry room is always the topmost room.
+            assert_eq!(dungeon.entry_room, room_preview(id, 0));
+
+            for index in 0..def.rooms.len() as u8 {
+                let preview = room_preview(id, index);
+                assert_eq!(preview.index, index);
+                assert_eq!(preview.name, room_name(id, index));
+                assert_eq!(preview.text, room_text(id, index));
+            }
+        }
+    }
+
+    /// Spot-check the Oracle text of one room per dungeon against the printed
+    /// card, so a bad bulk edit cannot silently shift every room's description.
+    #[test]
+    fn room_text_matches_printed_oracle_text() {
+        assert_eq!(
+            room_text(DungeonId::LostMineOfPhandelver, 4),
+            "Each opponent loses 1 life and you gain 1 life.",
+            "Lost Mine — Dark Pool"
+        );
+        assert_eq!(
+            room_text(DungeonId::DungeonOfTheMadMage, 8),
+            "Draw three cards and reveal them. You may cast one of them without paying its mana cost.",
+            "Mad Mage — Mad Wizard's Lair"
+        );
+        assert_eq!(
+            room_text(DungeonId::TombOfAnnihilation, 0),
+            "Each player loses 1 life.",
+            "Tomb — Trapped Entry"
+        );
+        assert_eq!(
+            room_text(DungeonId::Undercity, 3),
+            "Target player loses 5 life.",
+            "Undercity — Trap!"
+        );
+        assert_eq!(
+            room_text(DungeonId::BaldursGateWilderness, 12),
+            "Each opponent loses 5 life.",
+            "Baldur's Gate Wilderness — Gauntlet of Shar"
+        );
+    }
 
     /// Verify all dungeons have valid graph structure:
     /// - Every room index in `next_rooms` is a valid room index

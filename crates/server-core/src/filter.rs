@@ -453,9 +453,7 @@ mod tests {
         source_id: ObjectId,
         description: &str,
     ) -> engine::game::triggers::PendingTriggerContext {
-        use engine::game::triggers::{
-            PendingTrigger, PendingTriggerContext, PendingTriggerDispatchOrigin,
-        };
+        use engine::game::triggers::{PendingTrigger, PendingTriggerContext};
         use engine::types::ability::{ModalChoice, PlayerFilter, ResolvedAbility};
         use engine::types::events::GameEvent;
 
@@ -488,7 +486,7 @@ mod tests {
             source_id,
             controller,
             condition: None,
-            ability,
+            ability: Box::new(ability),
             timestamp: 0,
             target_constraints: Vec::new(),
             distribute: None,
@@ -506,12 +504,9 @@ mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         };
-        PendingTriggerContext {
-            pending,
-            trigger_events: vec![event],
-            dispatch_origin: PendingTriggerDispatchOrigin::Normal,
-        }
+        PendingTriggerContext::single(pending)
     }
 
     /// CR 603.3b + CR 400.2: A single-group `pending_trigger_order` (one
@@ -713,7 +708,7 @@ mod tests {
         );
 
         let mut state = GameState::new_two_player(42);
-        state.pending_trigger = Some(ctx.pending.clone());
+        state.pending_trigger = Some(Box::new(ctx.pending.clone()));
         state.pending_trigger_event_batch = vec![GameEvent::GameStarted];
 
         // Controller view: payload intact, batch intact.

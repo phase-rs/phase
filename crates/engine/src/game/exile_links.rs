@@ -10,6 +10,7 @@ const LINKED_EXILE_CONSUMER_TAGS: &[&str] = &[
     "OwnersOfCardsExiledBySource",
     "ChoiceAmongExiledColors",
     "TargetSharesNameWithOtherExiledThisWay",
+    "SameNameAsExiledBySource",
     // CR 700.3: PileSource::ExiledThisWay — the pile-separation effect
     // consumes cards exiled earlier in the same resolution chain.
     "ExiledThisWay",

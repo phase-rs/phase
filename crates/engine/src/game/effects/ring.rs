@@ -26,10 +26,12 @@ pub fn resolve(
         *level += 1;
     }
 
-    // Emit the event so triggers can fire.
-    events.push(GameEvent::RingTemptsYou {
-        player_id: controller,
-    });
+    // CR 701.54a + CR 701.54d: the temptation's actions INCLUDE choosing the
+    // Ring-bearer, and the "whenever the Ring tempts you" event occurs only
+    // once those actions are complete. The trigger-visible event is therefore
+    // emitted AFTER the bearer choice (in the `ChooseRingBearer` completion
+    // arm), carrying the completed choice — or right below with no bearer when
+    // the player controls no creatures and no choice happens.
 
     // CR 701.54a: Collect candidate creatures controlled by this player.
     let candidates: Vec<_> = state
@@ -55,14 +57,25 @@ pub fn resolve(
     });
 
     if candidates.is_empty() {
-        // No creatures — ring tempts but no ring-bearer selection.
+        // No creatures — ring tempts but no ring-bearer selection (CR 701.54a).
+        // The temptation is still complete: emit the trigger-visible event with
+        // no chosen bearer.
+        events.push(GameEvent::RingTemptsYou {
+            player_id: controller,
+            chosen_bearer: None,
+        });
         return Ok(());
     }
 
     if candidates.len() == 1 {
-        // Only one creature — auto-select as ring-bearer.
+        // Only one creature — auto-select as ring-bearer. The temptation's
+        // actions are complete here, so the event carries the choice.
         state.ring_bearer.insert(controller, Some(candidates[0]));
         crate::game::layers::mark_layers_full(state);
+        events.push(GameEvent::RingTemptsYou {
+            player_id: controller,
+            chosen_bearer: Some(candidates[0]),
+        });
         return Ok(());
     }
 

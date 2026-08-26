@@ -9,15 +9,15 @@ function tracePeerSession(event: string, data?: Record<string, unknown>): void {
 
 export interface PeerSession {
   /**
-   * Queue a message for the wire. Resolves after the encoded bytes have been
-   * written to the underlying RTCDataChannel (or after the queue entry is
-   * dropped due to channel closure). The encode is async (CompressionStream),
-   * so production callers awaiting this promise get a real "bytes are out"
-   * guarantee — useful for fan-out broadcast sites that need to settle all
-   * sends before returning, and for deterministic test assertions. Callers
-   * that don't care about timing can ignore the promise.
+   * Queue a message for the wire. Resolves `true` after the encoded bytes have
+   * been handed to the underlying RTCDataChannel, or `false` if the queue entry
+   * cannot be written because the channel closed, encoding failed, or the write
+   * threw. The encode is async (CompressionStream), so production callers
+   * awaiting this promise get a real "bytes are out" outcome — useful for
+   * reconnect handshakes that must not promote a dead channel. Callers that
+   * don't care about timing can ignore the promise.
    */
-  send(msg: P2PMessage): Promise<void>;
+  send(msg: P2PMessage): Promise<boolean>;
   onMessage(handler: (msg: P2PMessage) => void | Promise<void>): () => void;
   onDisconnect(handler: (reason: string) => void): () => void;
   close(reason?: string): void;
@@ -62,20 +62,19 @@ export function createPeerSession(
   // hit the DataChannel in submission order. Applied identically on receive.
   let sendQueue: Promise<void> = Promise.resolve();
 
-  // Returns the promise representing this entry's slot in the queue — resolves
-  // after the encoded bytes hit `conn.send` (or after the entry is dropped
-  // because the channel closed). Production callers that don't care about
-  // timing simply ignore the promise. Channel-level send failures still
-  // trigger `handleDisconnect` from inside the queue.
-  const trySend = (msg: P2PMessage): Promise<void> => {
-    if (closed || !conn.open) return Promise.resolve();
+  // Returns the promise representing this entry's slot in the queue. `true`
+  // means `conn.send` accepted the encoded bytes; `false` means this entry
+  // could not reach the channel. Channel-level send failures still trigger
+  // `handleDisconnect` from inside the queue.
+  const trySend = (msg: P2PMessage): Promise<boolean> => {
+    if (closed || !conn.open) return Promise.resolve(false);
     const entry = sendQueue.then(async () => {
       // Only gate on `conn.open` here, NOT `closed`. `close()` flips `closed`
       // to true synchronously so subsequent NEW `trySend` calls bail (the
       // outer guard above), but already-queued entries — including the
       // `disconnect` farewell `close()` itself enqueues — still need to
       // flush before the channel is disposed.
-      if (!conn.open) return;
+      if (!conn.open) return false;
       let bytes: Uint8Array;
       try {
         bytes = await encodeWireMessage(msg);
@@ -83,7 +82,7 @@ export function createPeerSession(
         // Encode failure is a programmer bug, not a channel failure. Log loud
         // but keep the channel alive for other (working) messages.
         console.error("[PeerSession] encode failed:", err, msg);
-        return;
+        return false;
       }
       if (msg.type !== "ping" && msg.type !== "pong") {
         const rawSize = JSON.stringify(msg).length;
@@ -95,12 +94,14 @@ export function createPeerSession(
       }
       try {
         conn.send(bytes);
+        return true;
       } catch (err) {
         console.warn("[PeerSession] send failed:", err);
         handleDisconnect("Channel send failed");
+        return false;
       }
     });
-    sendQueue = entry;
+    sendQueue = entry.then(() => undefined);
     return entry;
   };
 

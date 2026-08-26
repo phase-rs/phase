@@ -1,12 +1,29 @@
 import { create } from "zustand";
 import type {
-  GameAction,
+  ObjectAction,
   ObjectId,
   PlayerId,
+  TurnOrderSlotView,
 } from "../adapter/types";
 import { DICE_ROLL_DURATION_MS, TURN_BANNER_DURATION_MS } from "../animation/types";
 import { usePreferencesStore } from "./preferencesStore";
 import type { FilterKey } from "../components/modal/cardChoice/gridSelection";
+
+/**
+ * Ephemeral, player-selected blocker pairs. A creature can block more than one
+ * attacker, so the value is a set rather than a single attacker id.
+ */
+export type BlockerAssignments = Map<ObjectId, Set<ObjectId>>;
+export type PreviewPlacement = "cursor" | "side";
+
+/** Flatten the UI's per-blocker representation at the engine action boundary. */
+export function blockerAssignmentPairs(
+  assignments: ReadonlyMap<ObjectId, ReadonlySet<ObjectId>>,
+): [ObjectId, ObjectId][] {
+  return Array.from(assignments, ([blockerId, attackerIds]) =>
+    Array.from(attackerIds, (attackerId): [ObjectId, ObjectId] => [blockerId, attackerId]),
+  ).flat();
+}
 
 /**
  * A dice-roll / coin-flip moment to animate, surfaced from engine-authored
@@ -25,6 +42,12 @@ export type DiceRollPayload =
       context: "startingPlayer" | "ability";
       /** Starting-player contest: the high roller who takes the first turn. */
       winner?: PlayerId;
+      /** Engine-authored opening turn sequence for multiplayer games. The
+       *  overlay renders this directly so every seat can see its first-turn
+       *  position without reconstructing turn order from raw state. */
+      turnOrder?: TurnOrderSlotView[];
+      /** Engine-authored one-based turn position for the current viewer. */
+      viewerTurnNumber?: number;
       /** Starting-player contest only (CR 103.1): the roll-off by round. Round 0
        *  is every seat; each later round is the previous round's tied-max group
        *  that rerolled. Rendered round-by-round so the winner is always the high
@@ -41,6 +64,14 @@ export type DiceRollPayload =
       won: boolean;
       context: "startingPlayer" | "ability";
     };
+
+/** A completed, public scry outcome. Counts originate in the engine event; the
+ * UI only controls how long the outcome remains visible. */
+export interface ScryOutcomePayload {
+  playerId: PlayerId;
+  topCount: number;
+  bottomCount: number;
+}
 
 /** Direct-manipulation state for the mobile hand's held-card preview. The
  * engine-authored action set determines `playable` / whether `castReady` may
@@ -89,17 +120,14 @@ function flushPendingShow(): void {
   pendingShow = null;
   apply();
 }
-let lastPointer = { x: 0, y: 0 };
-if (typeof window !== "undefined") {
-  window.addEventListener("pointermove", (e) => { lastPointer = { x: e.clientX, y: e.clientY }; }, { passive: true });
-}
 
-// Serial FIFO for dice/coin overlays. Full-screen "moment" overlays are mutually
-// exclusive (you can't show two rolls at once), so simultaneous/back-to-back
-// rolls play one after another rather than clobbering. `diceRoll` is the active
-// payload; `diceRollQueue` holds the pending ones. Distinct from the board-event
-// step queue (animationStore) — that coordinates spatial per-object effects.
+// Serial FIFOs for transient game outcomes. Full-screen dice/coin overlays and
+// board-visible scry notices each show one payload at a time, so simultaneous
+// outcomes play in event order instead of clobbering one another. The queues are
+// distinct from the board-event step queue (animationStore), which coordinates
+// spatial per-object effects.
 let diceAdvanceTimer: ReturnType<typeof setTimeout> | null = null;
+let scryOutcomeTimer: ReturnType<typeof setTimeout> | null = null;
 
 // CR 103.1: the starting-player contest determines who's on the play — a moment
 // the player should acknowledge, not one that flashes by. It holds on screen
@@ -139,11 +167,32 @@ function advanceDiceQueue(): void {
   scheduleDiceAdvance(next);
 }
 
+function scheduleScryOutcomeAdvance(): void {
+  if (scryOutcomeTimer) {
+    clearTimeout(scryOutcomeTimer);
+  }
+  scryOutcomeTimer = setTimeout(advanceScryOutcomeQueue, 4_000);
+}
+
+function advanceScryOutcomeQueue(): void {
+  const queue = useUiStore.getState().scryOutcomeQueue;
+  if (queue.length === 0) {
+    useUiStore.setState({ scryOutcome: null });
+    scryOutcomeTimer = null;
+    return;
+  }
+  const next = queue[0];
+  useUiStore.setState({ scryOutcome: next, scryOutcomeQueue: queue.slice(1) });
+  scheduleScryOutcomeAdvance();
+}
+
 interface UiStoreState {
   selectedObjectId: ObjectId | null;
   hoveredObjectId: ObjectId | null;
   inspectedObjectId: ObjectId | null;
   inspectedFaceIndex: number;
+  /** Presentation requested by the element that opened the current preview. */
+  previewPlacement: PreviewPlacement;
   altHeld: boolean;
   /** Whether the Shift key is currently held. Drives the "shift" card-preview
    *  mode (preview shows only while Shift is down). Tracked as held-state via
@@ -157,7 +206,7 @@ interface UiStoreState {
   /** CR 702.22c: attacking bands declared this combat (each inner array is one
    *  band of attacker ids). Empty when no bands are declared. */
   attackerBands: ObjectId[][];
-  blockerAssignments: Map<ObjectId, ObjectId>;
+  blockerAssignments: BlockerAssignments;
   combatClickHandler: ((id: ObjectId) => void) | null;
   previewSticky: boolean;
   isDragging: boolean;
@@ -170,8 +219,12 @@ interface UiStoreState {
   /** Pending dice/coin overlays behind the active one. Simultaneous or
    *  back-to-back rolls play serially instead of clobbering. */
   diceRollQueue: DiceRollPayload[];
+  /** Active engine-authored public scry result, temporarily shown on board. */
+  scryOutcome: ScryOutcomePayload | null;
+  /** Pending public scry notices, shown FIFO after the active outcome. */
+  scryOutcomeQueue: ScryOutcomePayload[];
   focusedOpponent: number | null;
-  pendingAbilityChoice: { objectId: ObjectId; actions: GameAction[] } | null;
+  pendingAbilityChoice: { objectId: ObjectId; actions: ObjectAction[] } | null;
   /** When non-null, the AttachmentsDialog is open showing every Aura
    *  enchanting this player. Lives in uiStore (not local React state inside
    *  the badge) so the dialog can be rendered as a child of `<DialogHost>`
@@ -201,6 +254,8 @@ interface UiStoreState {
    *  local state so entry points (Sandbox Tools nudge/button) can open the
    *  panel straight to "actions" instead of the default "console" log view. */
   debugPanelTab: "console" | "actions";
+  /** Local, non-persistent capture control for AI decision diagnostics. */
+  aiDecisionCaptureEnabled: boolean;
   debugInteractionMode: boolean;
   /** Whether the quick floating Click Mode control is pinned on-screen. The
    *  mode itself stays in `debugInteractionMode`; this only controls access to
@@ -242,7 +297,12 @@ interface UiStoreActions {
   hoverObject: (id: ObjectId | null) => void;
   /** `timing` defaults to "hover" (subject to the configurable preview latency);
    *  "immediate" bypasses the delay for explicit-intent triggers (long-press). */
-  inspectObject: (id: ObjectId | null, faceIndex?: number, timing?: "hover" | "immediate") => void;
+  inspectObject: (
+    id: ObjectId | null,
+    faceIndex?: number,
+    timing?: "hover" | "immediate",
+    placement?: PreviewPlacement,
+  ) => void;
   dismissPreview: () => void;
   setAltHeld: (held: boolean) => void;
   setShiftHeld: (held: boolean) => void;
@@ -259,7 +319,7 @@ interface UiStoreActions {
   selectAllAttackers: (ids: ObjectId[]) => void;
   setAttackerBands: (bands: ObjectId[][]) => void;
   assignBlocker: (blockerId: ObjectId, attackerId: ObjectId) => void;
-  removeBlockerAssignment: (blockerId: ObjectId) => void;
+  removeBlockerAssignment: (blockerId: ObjectId, attackerId?: ObjectId) => void;
   clearCombatSelection: () => void;
   setCombatClickHandler: (handler: ((id: ObjectId) => void) | null) => void;
   setPreviewSticky: (sticky: boolean) => void;
@@ -274,8 +334,12 @@ interface UiStoreActions {
   /** Dismiss the current dice/coin overlay immediately (user tap-to-skip),
    *  advancing to the next queued roll if any. */
   skipDiceRoll: () => void;
+  /** Queue one public scry outcome for a short, non-interactive board notice. */
+  flashScryOutcome: (payload: ScryOutcomePayload) => void;
+  /** Clear the active and queued scry results on a game-session boundary. */
+  resetScryOutcome: () => void;
   setFocusedOpponent: (id: number | null) => void;
-  setPendingAbilityChoice: (choice: { objectId: ObjectId; actions: GameAction[] } | null) => void;
+  setPendingAbilityChoice: (choice: { objectId: ObjectId; actions: ObjectAction[] } | null) => void;
   setEnchantmentsDialogPlayer: (id: number | null) => void;
   setAttachmentFanHost: (id: ObjectId | null) => void;
   setMobileHandOpen: (open: boolean) => void;
@@ -283,6 +347,7 @@ interface UiStoreActions {
   setHandFilter: (filter: FilterKey) => void;
   toggleDebugPanel: () => void;
   setDebugPanelTab: (tab: "console" | "actions") => void;
+  setAiDecisionCaptureEnabled: (enabled: boolean) => void;
   /** Open the debug panel directly to the Actions ("Sandbox Tools") tab. */
   openSandboxTools: () => void;
   toggleDebugInteractionMode: () => void;
@@ -314,6 +379,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   hoveredObjectId: null,
   inspectedObjectId: null,
   inspectedFaceIndex: 0,
+  previewPlacement: "cursor",
   altHeld: false,
   shiftHeld: false,
   selectedCardIds: [],
@@ -331,6 +397,8 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   turnBannerNumber: null,
   diceRoll: null,
   diceRollQueue: [],
+  scryOutcome: null,
+  scryOutcomeQueue: [],
   focusedOpponent: null,
   pendingAbilityChoice: null,
   enchantmentsDialogPlayer: null,
@@ -340,6 +408,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   handFilter: "none",
   debugPanelOpen: false,
   debugPanelTab: "console",
+  aiDecisionCaptureEnabled: false,
   debugInteractionMode: false,
   debugClickModeButtonVisible: false,
   debugContextMenu: null,
@@ -358,7 +427,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   setDebugHighlightedPlayerId: (id) => set({ debugHighlightedPlayerId: id }),
   setAltHeld: (held) => set({ altHeld: held }),
   setShiftHeld: (held) => set({ shiftHeld: held }),
-  inspectObject: (id, faceIndex, timing = "hover") => {
+  inspectObject: (id, faceIndex, timing = "hover", placement = "cursor") => {
     if (id != null) {
       // Setting a new inspection target: cancel any pending clear, and drop a
       // pending delayed-show for a previous target before scheduling this one.
@@ -368,7 +437,17 @@ export const useUiStore = create<UiStore>()((set, get) => ({
       }
       cancelPendingShow();
       const applyInspect = () =>
-        set({ inspectedObjectId: id, inspectedFaceIndex: faceIndex ?? 0 });
+        set((s) => ({
+          inspectedObjectId: id,
+          inspectedFaceIndex: faceIndex ?? 0,
+          previewPlacement: placement,
+          // Inspecting a DIFFERENT object replaces (dismisses) the previous
+          // preview, so a pinned Alt state must not leak onto the new card —
+          // Alt has to be pressed again to expand it. Re-inspecting the SAME
+          // object (e.g. a face flip or a re-hover) preserves the pin so the
+          // reader isn't kicked out mid-scroll.
+          altHeld: s.inspectedObjectId === id ? s.altHeld : false,
+        }));
       // Configurable hover latency (cardPreviewHoverDelayMs). The delay gates only
       // the FIRST appearance on a hover-capable device: while a preview is already
       // open, sweeping to an adjacent card switches instantly, and the "shift"
@@ -422,16 +501,29 @@ export const useUiStore = create<UiStore>()((set, get) => ({
         // traverse the gap from the card to the panel and click "Report a Problem"
         // or scroll rulings. Toggling Alt off (or a click outside) still dismisses.
         if (get().altHeld) return;
-        const el = document.elementFromPoint(lastPointer.x, lastPointer.y);
         // Keep the preview (and finish a delay that already elapsed) when the
-        // pointer is still over an inspectable card or the preview panel. This
-        // makes stale leaves from Framer Motion layout updates harmless.
-        if (el?.closest("[data-card-hover], [data-card-preview]")) {
+        // pointer is still over an inspectable card. Ask the browser for its own
+        // `:hover` element rather than sampling elementFromPoint() against a
+        // JS-tracked pointer: that coordinate is only as fresh as the last
+        // `pointermove`, and over sparse/coalesced streams (remote-desktop / RDP
+        // webviews) it lands a few px off the card while the OS cursor is still
+        // on it — so a spurious Framer-Motion mouseleave's 50ms clear would
+        // false-fire and cancel a live preview (visible only with a non-zero
+        // hover delay, where the re-show is deferred rather than instant).
+        // `:hover` is the engine's continuous hit-test, correct with no
+        // pointermove event at all.
+        if (document.querySelector("[data-card-hover]:hover") != null) {
           flushPendingShow();
           return;
         }
         cancelPendingShow();
-        set({ inspectedObjectId: null, inspectedFaceIndex: 0, previewSticky: false, altHeld: false });
+        set({
+          inspectedObjectId: null,
+          inspectedFaceIndex: 0,
+          previewPlacement: "cursor",
+          previewSticky: false,
+          altHeld: false,
+        });
       }, 50);
     }
   },
@@ -445,6 +537,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
     set({
       inspectedObjectId: null,
       inspectedFaceIndex: 0,
+      previewPlacement: "cursor",
       previewSticky: false,
       altHeld: false,
       mobileHandGesture: null,
@@ -529,14 +622,26 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   assignBlocker: (blockerId, attackerId) =>
     set((state) => {
       const next = new Map(state.blockerAssignments);
-      next.set(blockerId, attackerId);
+      const attackerIds = new Set(next.get(blockerId));
+      attackerIds.add(attackerId);
+      next.set(blockerId, attackerIds);
       return { blockerAssignments: next };
     }),
 
-  removeBlockerAssignment: (blockerId) =>
+  removeBlockerAssignment: (blockerId, attackerId) =>
     set((state) => {
       const next = new Map(state.blockerAssignments);
-      next.delete(blockerId);
+      if (attackerId === undefined) {
+        next.delete(blockerId);
+      } else {
+        const attackerIds = new Set(next.get(blockerId));
+        attackerIds.delete(attackerId);
+        if (attackerIds.size === 0) {
+          next.delete(blockerId);
+        } else {
+          next.set(blockerId, attackerIds);
+        }
+      }
       return { blockerAssignments: next };
     }),
 
@@ -603,6 +708,21 @@ export const useUiStore = create<UiStore>()((set, get) => ({
     }
     advanceDiceQueue();
   },
+  flashScryOutcome: (payload) => {
+    if (get().scryOutcome === null) {
+      set({ scryOutcome: payload });
+      scheduleScryOutcomeAdvance();
+    } else {
+      set({ scryOutcomeQueue: [...get().scryOutcomeQueue, payload] });
+    }
+  },
+  resetScryOutcome: () => {
+    if (scryOutcomeTimer) {
+      clearTimeout(scryOutcomeTimer);
+      scryOutcomeTimer = null;
+    }
+    set({ scryOutcome: null, scryOutcomeQueue: [] });
+  },
   setFocusedOpponent: (id) => set({ focusedOpponent: id }),
   setPendingAbilityChoice: (choice) => set({ pendingAbilityChoice: choice }),
   setEnchantmentsDialogPlayer: (id) => set({ enchantmentsDialogPlayer: id }),
@@ -612,6 +732,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   setHandFilter: (filter) => set({ handFilter: filter }),
   toggleDebugPanel: () => set((state) => ({ debugPanelOpen: !state.debugPanelOpen })),
   setDebugPanelTab: (tab) => set({ debugPanelTab: tab }),
+  setAiDecisionCaptureEnabled: (enabled) => set({ aiDecisionCaptureEnabled: enabled }),
   openSandboxTools: () => set({ debugPanelOpen: true, debugPanelTab: "actions" }),
   toggleDebugInteractionMode: () => set((state) => ({
     debugInteractionMode: !state.debugInteractionMode,

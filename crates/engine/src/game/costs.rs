@@ -50,7 +50,7 @@ use crate::types::game_state::{
     CostResume, GameState, ManaAbilityResume, PayCostKind, PendingCostMoveCompletion,
     PendingCostMoveResume, WaitingFor,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
@@ -201,11 +201,10 @@ fn find_eligible_tap_creatures_targets(
 pub(crate) enum PaymentScope<'a> {
     Activation {
         excluded_sources: &'a HashSet<ObjectId>,
-        /// CR 106.6: Keyword tag of the activated ability whose cost is being
-        /// paid. Threaded into `PaymentContext::Activation` so tag-scoped mana
-        /// spend restrictions (Quinjet → power-up) gate eligible mana. Resolution
-        /// scope never carries a tag (resolution-time costs aren't activations).
-        ability_tag: Option<crate::types::ability::AbilityTag>,
+        /// CR 106.6: Exact activated ability whose mana cost is being paid.
+        /// This builds the live activation payment context, including any
+        /// source-chosen-color rider and keyword tag.
+        ability_index: Option<usize>,
     },
     /// `ability` is normally the PAYER-ADJUSTED `ResolvedAbility` clone
     /// (controller swapped to the resolved payer, per `effects/pay.rs`). All
@@ -263,8 +262,8 @@ fn payment_failed(reason: impl Into<String>) -> PaymentOutcome {
 pub enum PaymentOutcome {
     /// The cost was paid in full.
     Paid,
-    /// CR 616.1: a replacement-effect choice interrupted payment. Reserved
-    /// exclusively for the `pause_cost_payment_for_replacement_choice` path.
+    /// CR 614.6 + CR 616.1: replacement processing interrupted payment,
+    /// either for replacement ordering or for an interactive substitute.
     Paused { remaining_cost: Option<AbilityCost> },
     /// CR 601.2h / CR 118.12: the cost was not (fully) paid. The caller maps
     /// this to the scope-appropriate failure channel (see [`PaymentScope`]).
@@ -312,6 +311,26 @@ fn resume_cost_with_concrete_mana(
     }
     *first = concrete;
     combine_remaining_costs(None, &flattened).expect("a concrete mana suffix is never empty")
+}
+
+/// CR 118.12 + CR 605.3b + CR 616.1: A deferred Phyrexian-style life
+/// replacement begins only after the leading mana component was spent. Remove
+/// that committed prefix while retaining every later composite component.
+pub(crate) fn remaining_cost_after_paid_mana_prefix(cost: &AbilityCost) -> Option<AbilityCost> {
+    let mut flattened = Vec::new();
+    flatten_cost_components(cost, &mut flattened);
+    let first = flattened
+        .first()
+        .expect("a deferred mana-payment root is never empty");
+    assert!(
+        matches!(
+            first,
+            AbilityCost::Mana { .. } | AbilityCost::ManaDynamic { .. }
+        ),
+        "a deferred mana-payment root must begin with mana"
+    );
+    flattened.remove(0);
+    combine_remaining_costs(None, &flattened)
 }
 
 /// Flatten nested Composite nodes only while constructing a serialized payment
@@ -404,6 +423,11 @@ fn effect_pay_cost_mana_resume(
     if let WaitingFor::ManaPayment {
         player,
         convoke_mode,
+    }
+    | WaitingFor::ManaSourceSelection {
+        player,
+        convoke_mode,
+        ..
     } = &state.waiting_for
     {
         return Some(ManaAbilityResume::ManaPayment {
@@ -573,7 +597,7 @@ pub fn pay_ability_cost_for_activation(
     player: PlayerId,
     source_id: ObjectId,
     cost: &AbilityCost,
-    ability_tag: Option<crate::types::ability::AbilityTag>,
+    ability_index: Option<usize>,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
     pay_ability_cost_for_activation_with_cost_move_replacement(
@@ -581,7 +605,7 @@ pub fn pay_ability_cost_for_activation(
         player,
         source_id,
         cost,
-        ability_tag,
+        ability_index,
         events,
     )
 }
@@ -591,7 +615,7 @@ fn pay_ability_cost_for_activation_with_cost_move_replacement(
     player: PlayerId,
     source_id: ObjectId,
     cost: &AbilityCost,
-    ability_tag: Option<crate::types::ability::AbilityTag>,
+    ability_index: Option<usize>,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
     let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
@@ -603,7 +627,7 @@ fn pay_ability_cost_for_activation_with_cost_move_replacement(
         events,
         &PaymentScope::Activation {
             excluded_sources: &excluded_sources,
-            ability_tag,
+            ability_index,
         },
         None,
     )?;
@@ -627,14 +651,25 @@ pub(crate) fn pay_ability_cost_for_resolution(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
-    pay_ability_cost_for_resolution_with_cost_move_root(
+    let outcome = pay_ability_cost_for_resolution_with_cost_move_root(
         state,
         payer,
         cost,
         ability,
         ResolutionCostMoveRoot::EffectPayCost,
         events,
-    )
+    )?;
+    // CR 118.1 + CR 119.4b: `effects::pay` records a concrete life component
+    // on its continuation-owned ability before this authority can pause. Stamp
+    // it only after the entire cost finishes, including a mana-root resume.
+    // `None` is deliberately distinct from `Some(0)`: mana-only costs retain
+    // their preceding amount, while a completed zero-life cost reports zero.
+    if outcome == PaymentOutcome::Paid {
+        if let Some(amount) = ability.context.pay_cost_paid_life_amount {
+            state.last_effect_amount = Some(amount as i32);
+        }
+    }
+    Ok(outcome)
 }
 
 /// Pays a replacement's MayCost. Its dedicated root owns the outer
@@ -760,23 +795,46 @@ fn pay_ability_cost_inner(
             // source permanent's types.
             PaymentScope::Activation {
                 excluded_sources,
-                ability_tag,
+                ability_index,
                 ..
             } => {
-                if excluded_sources.is_empty() {
-                    pay_ability_mana_cost(state, player, source_id, cost, *ability_tag, events)?;
+                let resume_at_resolution_depth = state.resolution_stack.len();
+                let payment = if excluded_sources.is_empty() {
+                    pay_ability_mana_cost(state, player, source_id, *ability_index, cost, events)?
                 } else {
                     pay_ability_mana_cost_excluding(
                         state,
                         player,
                         source_id,
+                        *ability_index,
                         cost,
-                        *ability_tag,
                         events,
                         excluded_sources,
                         // Top-level ability cost payment: no outer cost on the stack.
                         None,
-                    )?;
+                    )?
+                };
+                match payment {
+                    super::casting::ManaCostPayment::Paid(()) => {}
+                    super::casting::ManaCostPayment::Paused {
+                        remaining_life_payments,
+                        ..
+                    } => {
+                        // CR 107.4f + CR 118.3b + CR 119.4 + CR 616.1: The
+                        // announcing caller attaches its complete activation
+                        // root before returning control to a player.
+                        state.pending_deferred_life_cost_resume = Some(
+                            crate::types::game_state::DeferredLifeCostResume::Cast {
+                                player,
+                                pending: None,
+                                remaining_life_payments,
+                                resume_at_resolution_depth,
+                            },
+                        );
+                        return Ok(PaymentOutcome::Paused {
+                            remaining_cost: None,
+                        });
+                    }
                 }
             }
             // CR 118.12: Resolution-time mana payment uses the effect-context
@@ -805,7 +863,9 @@ fn pay_ability_cost_inner(
                     // CR 118.12 + CR 605.3b + CR 616.1: The mana ability
                     // cursor, rather than the unless-payment handler, owns
                     // the replacement choice and exact resume state.
-                    if mana_ability_cost_payment_is_paused(state) {
+                    if mana_ability_cost_payment_is_paused(state)
+                        || state.pending_deferred_life_cost_resume.is_some()
+                    {
                         return Ok(PaymentOutcome::Paused {
                             remaining_cost: None,
                         });
@@ -849,7 +909,9 @@ fn pay_ability_cost_inner(
                     // CR 118.12 + CR 605.3b + CR 616.1: See the concrete
                     // mana-cost arm above; the replacement-aware cursor owns
                     // this pause as well.
-                    if mana_ability_cost_payment_is_paused(state) {
+                    if mana_ability_cost_payment_is_paused(state)
+                        || state.pending_deferred_life_cost_resume.is_some()
+                    {
                         return Ok(PaymentOutcome::Paused {
                             remaining_cost: None,
                         });
@@ -903,7 +965,8 @@ fn pay_ability_cost_inner(
                         // continuation: it would retry a paid prefix or let the
                         // rider run before the unpaid cost is settled.
                         if matches!(scope, PaymentScope::Resolution { .. })
-                            && mana_ability_cost_payment_is_paused(state)
+                            && (mana_ability_cost_payment_is_paused(state)
+                                || state.pending_deferred_life_cost_resume.is_some())
                         {
                             return Ok(PaymentOutcome::Paused {
                                 remaining_cost: None,
@@ -943,6 +1006,12 @@ fn pay_ability_cost_inner(
             };
             match result {
                 super::life_costs::PayLifeCostResult::Paid { .. } => {}
+                super::life_costs::PayLifeCostResult::PaidWithDeferredSubstitution { .. }
+                | super::life_costs::PayLifeCostResult::DeferredReplacementChoice { .. } => {
+                    return Ok(PaymentOutcome::Paused {
+                        remaining_cost: None,
+                    });
+                }
                 super::life_costs::PayLifeCostResult::InsufficientLife
                 | super::life_costs::PayLifeCostResult::Prohibited => {
                     return Ok(payment_failed("Cannot pay life cost"));
@@ -1036,6 +1105,7 @@ fn pay_ability_cost_inner(
                     effect_kind: EffectKind::PayCost,
                     up_to: false,
                     unless_filter: None,
+                    discard_frame: None,
                 };
             }
         }
@@ -1052,13 +1122,30 @@ fn pay_ability_cost_inner(
                 unreachable!("guarded above");
             };
             let eligible = find_eligible_tap_creatures_targets(state, player, ability, filter);
-            let (kind, count) = match requirement {
+            // CR 107.3a + CR 118.3 + CR 601.2h: Resolution-time TapCreatures costs
+            // use the same `u32::MAX` X-sentinel encoding as activation-time costs,
+            // so the payable range must come from the single bounds authority
+            // (`sacrifice_cost_bounds`) rather than a raw `as usize` cast on
+            // `count`. A fixed (non-X) count degrades to `(count, count)`,
+            // preserving the CR 601.2h exact-payment requirement for every
+            // existing card (Kitt Kanto's `count: 2`, Meanders Guide's
+            // `count: 1`) unchanged, while correcting the previously-hardcoded
+            // `min_count: 0` that silently allowed partial payment once the
+            // shared selection validator (`pay_tap_creatures_selection`)
+            // switched from an exact-match check to a `[min_count, count]`
+            // range check.
+            //
+            // CR 107.3a: compute the selection semantics once from the
+            // requirement and carry them verbatim to the completion handler.
+            let mode = requirement.selection_mode();
+            let (kind, count, min_count) = match requirement {
                 crate::types::ability::TapCreaturesRequirement::Count { count } => {
-                    let count = *count as usize;
-                    if eligible.len() < count {
+                    let (min_count, max_count) =
+                        super::casting::sacrifice_cost_bounds(*count, eligible.len());
+                    if eligible.len() < min_count {
                         return Ok(payment_failed("not enough creatures to tap"));
                     }
-                    (PayCostKind::TapCreatures { aggregate: None }, count)
+                    (PayCostKind::TapCreatures { mode }, max_count, min_count)
                 }
                 crate::types::ability::TapCreaturesRequirement::Aggregate {
                     stat,
@@ -1077,12 +1164,14 @@ fn pay_ability_cost_inner(
                             "eligible creatures do not satisfy tap-creatures aggregate cost",
                         ));
                     }
-                    (
-                        PayCostKind::TapCreatures {
-                            aggregate: Some(aggregate),
-                        },
-                        eligible.len(),
-                    )
+                    // CR 208.1 + CR 601.2f (Crew CR 702.122a / Saddle CR 702.171a /
+                    // Teamwork CR 702.194a): the aggregate form taps ANY number of
+                    // creatures whose total positive power satisfies the
+                    // comparator, so every subset size is admissible and the floor
+                    // stays 0. `pay_tap_creatures_selection`'s `Aggregate(_)`
+                    // branch validates the comparator instead of the
+                    // `[min_count, count]` range.
+                    (PayCostKind::TapCreatures { mode }, eligible.len(), 0)
                 }
             };
             if count == 0 {
@@ -1094,7 +1183,7 @@ fn pay_ability_cost_inner(
                 kind,
                 choices: eligible,
                 count,
-                min_count: 0,
+                min_count,
                 resume: CostResume::Resolution,
             };
             return Ok(PaymentOutcome::Paused {
@@ -1248,9 +1337,16 @@ fn pay_ability_cost_inner(
         AbilityCost::ExileMaterials { .. } => {}
         // Waterbend cost was already paid via ManaPayment before reaching pay_ability_cost.
         AbilityCost::Waterbend { .. } => {}
-        // CR 118.3: An effect performed as a cost. Resolve the effect on the
-        // source before the ability's own effect fires. Currently handles
-        // PutCounter on self (Devoted Druid, Chainbreaker, etc.).
+        // CR 118.1: An effect performed as a cost — "a cost is an action or
+        // payment necessary to take another action … to pay a cost, a player
+        // carries out the instructions specified". (NOT CR 118.3, which is the
+        // resources rule and says nothing about an effect-as-cost.) Resolve the
+        // effect on the source before the ability's own effect fires. The shared
+        // support predicate admits only deterministic source-counter and
+        // fixed-mana forms, so the effect shape itself asks the payer nothing.
+        // A replacement on the resulting event can still require a player
+        // choice, which parks the payment as `Paused` in the `PutCounter` arm
+        // below.
         AbilityCost::EffectCost { effect } => {
             use crate::types::ability::Effect;
             match effect.as_ref() {
@@ -1260,17 +1356,97 @@ fn pay_ability_cost_inner(
                     target: TargetFilter::SelfRef,
                 } => {
                     let count = resolve_cost_quantity(state, count, player, source_id, scope);
+                    // CR 614.17b: "If an event can't happen, a player can't
+                    // choose to pay a cost that includes that event" — a
+                    // prevented counter placement pays none of this cost. The
+                    // shared add primitive reports both a delivered and
+                    // prevented event as complete because effect resolution
+                    // needs that distinction only for continuation; payment must
+                    // reject the prevented case before executing it.
+                    //
+                    // The gate is `replacement::mandatory_prevention_applies`
+                    // (CR 614.17: "some effects state that something can't
+                    // happen"): a candidate definition on the governing event
+                    // whose `quantity_modification` is `Prevent` and whose mode
+                    // is not optional. Only that pair can reach this refusal.
+                    // CR 614.17c ("if an event can't happen, it can only be
+                    // replaced by a self-replacement effect … other replacement
+                    // and/or prevention effects can't modify or replace it") is
+                    // implemented by `replacement::pipeline_loop`'s
+                    // short-circuit, which fires ahead of any CR 616.1 ordering
+                    // prompt. Its `AddCounter` replacement choice — a single
+                    // optional candidate, or a CR 616.1 ordering — instead
+                    // returns `CounterAdditionPreview::ChoiceRequired`, falls
+                    // through, parks, and is settled as PAID by
+                    // `engine_payment_choices::resume_counter_addition_unless_payment`
+                    // (CR 118.12). The two legs partition the space; they do not
+                    // disagree.
+                    //
+                    // CR 614.17b + CR 119.8 (analogue): the CHOICE is refused upstream at every
+                    // RESOLUTION-scope site that consumes
+                    // `resolution_cost_includes_impossible_event`, but that predicate is never
+                    // consulted at `PaymentScope::Activation` — `is_payable_for_activation` admits
+                    // every `EffectCost` unconditionally, and `can_pay` dry-runs this arm — so here
+                    // it is the only CR 614.17b gate an activated counter cost meets.
+                    let prevented = self_counter_placement_is_prohibited(
+                        state,
+                        player,
+                        source_id,
+                        counter_type.clone(),
+                        counter_cost_count(count),
+                    );
+                    if prevented {
+                        return Ok(payment_failed(
+                            "Counter-placement cost prevented by a replacement effect",
+                        ));
+                    }
                     if !super::effects::counters::add_counter_with_replacement(
                         state,
                         player,
                         source_id,
                         counter_type.clone(),
-                        count.unsigned_abs(),
+                        counter_cost_count(count),
                         events,
                     ) {
                         return Ok(PaymentOutcome::Paused {
                             remaining_cost: None,
                         });
+                    }
+                }
+                // CR 106.3 + CR 106.4: A Braid of Fire-style cost performs
+                // fixed mana production directly into the payer's pool. This
+                // uses the ordinary replacement-aware mana primitive but does
+                // not resolve a separate ability or change priority mid-cost.
+                Effect::Mana {
+                    produced:
+                        produced @ crate::types::ability::ManaProduction::Fixed { colors, .. },
+                    restrictions,
+                    grants,
+                    expiry,
+                    target: None,
+                } => {
+                    let restrictions = super::effects::mana::resolve_restrictions(
+                        restrictions,
+                        state,
+                        source_id,
+                    );
+                    let source_could_produce_two_or_more_colors =
+                        super::mana_sources::mana_production_could_produce_two_or_more_colors(
+                            state, player, source_id, produced,
+                        );
+                    for color in colors {
+                        super::mana_payment::produce_mana_with_attributes_from_source_quality(
+                            state,
+                            source_id,
+                            super::mana_sources::mana_color_to_type(color),
+                            player,
+                            false,
+                            source_could_produce_two_or_more_colors,
+                            &restrictions,
+                            grants,
+                            *expiry,
+                            events,
+                        );
                     }
                 }
                 _ => {
@@ -1323,6 +1499,61 @@ fn pay_ability_cost_inner(
                 player,
                 delta: -(amount as i32),
             });
+        }
+        // CR 702.21a + CR 122.1 + CR 104.3d: Ward cost paid by giving the
+        // paying player counters of a kind (The Serpent Society). No
+        // affordability check (see `can_pay_resolution`) — a player may
+        // always choose to accept more counters. Routes through
+        // `add_player_counter_with_replacement` — not a raw
+        // `resolve_and_apply_player_edit` call — so "players can't get
+        // counters" replacement effects still apply, mirroring the
+        // `EffectCost`/`PutCounter` arm's use of the sibling
+        // `effects::counters::add_counter_with_replacement` above. A
+        // replacement that PREVENTS the addition (Solemnity) is a genuinely
+        // FAILED payment here, not a paused one: unlike effect resolution
+        // (where "prevented" and "applied" both just mean the pending item is
+        // resolved), a cost that silently gives zero counters must not be
+        // mistaken for having actually been paid, or Ward's deterrent is
+        // bypassed for free.
+        //
+        // CR 614.17b is the rule ("if an event can't happen, a player can't
+        // choose to pay a cost that includes that event"). The gate that reaches
+        // it is `replacement::mandatory_prevention_applies` (CR 614.17:
+        // "some effects state that something can't happen"): a candidate
+        // definition on the governing event whose `quantity_modification`
+        // is `Prevent` and whose mode is not optional — not a semantic
+        // can't-effect test. CR 614.17c is why the CR 616.1
+        // ordering step never intervenes: an impossible event "can only be
+        // replaced by a self-replacement effect … other replacement and/or
+        // prevention effects can't modify or replace it", so
+        // `replacement::pipeline_loop` short-circuits it ahead of any CR 616.1
+        // prompt. Its `AddCounter` replacement choice — a single optional
+        // candidate, or a CR 616.1 ordering — instead returns `NeedsChoice`,
+        // parks, and is settled as PAID by
+        // `engine_payment_choices::resume_counter_addition_unless_payment`
+        // (CR 118.12). Same partition as the `EffectCost`/`PutCounter` cost
+        // arm. `resolution_cost_includes_impossible_event` refuses the CHOICE
+        // at every site that consumes it, so this refusal is defense in depth
+        // for the CR 614.17a mid-window case rather than the only gate.
+        AbilityCost::GetPlayerCounters {
+            counter_kind,
+            count,
+        } => {
+            match super::effects::player_counter::add_player_counter_with_replacement(
+                state, player, player, *counter_kind, *count, events,
+            ) {
+                super::effects::player_counter::PlayerCounterAdditionOutcome::Applied => {}
+                super::effects::player_counter::PlayerCounterAdditionOutcome::Prevented => {
+                    return Ok(payment_failed(
+                        "Player-counter cost prevented by a replacement effect",
+                    ));
+                }
+                super::effects::player_counter::PlayerCounterAdditionOutcome::NeedsChoice => {
+                    return Ok(PaymentOutcome::Paused {
+                        remaining_cost: None,
+                    });
+                }
+            }
         }
         AbilityCost::PaySpeed { amount } => {
             let amount = resolve_cost_quantity(state, amount, player, source_id, scope);
@@ -1596,10 +1827,10 @@ fn pay_ability_cost_inner(
     Ok(PaymentOutcome::Paid)
 }
 
-/// CR 118.3 + CR 601.2h: The single affordability authority. Returns whether
+/// CR 118.3 + CR 601.2h: The single payability authority. Returns whether
 /// `payer` could pay `cost` right now in the active [`PaymentScope`].
 ///
-/// Activation scope reproduces the A2 aggregate (relocated from
+/// Activation scope reproduces the aggregate (relocated from
 /// `casting::can_pay_ability_cost_now`): the [`AbilityCost::is_payable`]
 /// choice-eligibility/resource gate plus a clone-and-dry-run of
 /// `pay_ability_cost_inner`, which is the affordability oracle for every
@@ -1614,10 +1845,11 @@ fn pay_ability_cost_inner(
 /// Composite containing a Waterbend leg, so gating on the class would wrongly
 /// suppress the dry run that checks the `{T}` leg's tapped-source state.
 ///
-/// Resolution scope answers CR 118.12 affordability: a resource/eligibility
-/// match per `AbilityCost` (relocated from the deleted
-/// `effects::pay::can_pay_resolution_ability_cost`, A3). It is exhaustive with
-/// no wildcard so a new `AbilityCost` variant forces a deliberate decision.
+/// Resolution scope answers CR 118.12 payability per `AbilityCost` (relocated
+/// from the deleted `effects::pay::can_pay_resolution_ability_cost`): a resource
+/// match, plus — for the two counter-placement arms — CR 614.17b event
+/// possibility. It is exhaustive with no wildcard so a new `AbilityCost` variant
+/// forces a deliberate decision.
 pub(crate) fn can_pay(
     state: &GameState,
     payer: PlayerId,
@@ -1626,8 +1858,8 @@ pub(crate) fn can_pay(
     scope: &PaymentScope,
 ) -> bool {
     match scope {
-        PaymentScope::Activation { .. } => {
-            if !cost.is_payable(state, payer, source_id) {
+        PaymentScope::Activation { ability_index, .. } => {
+            if !cost.is_payable_for_activation(state, payer, source_id, *ability_index) {
                 return false;
             }
             // CR 118.12a: disjunctive activation costs resolve via
@@ -1701,7 +1933,7 @@ pub(crate) fn can_pay(
 /// cost as `Paid` (`Waterbend`, `ExileMaterials`, non-self `Sacrifice`, targeted
 /// `RemoveCounter`) or perform an effect that was never meant to fire at
 /// resolution (singleton `Tap`, self-ref `Sacrifice`/`Exile`, `Loyalty`,
-/// `RemoveCounter { target: None }`, `Exert`, `Unattach`, `EffectCost`,
+/// `RemoveCounter { target: None }`, `Exert`, `Unattach`, arbitrary `EffectCost`,
 /// source-card `Discard`). Both outcomes violate CR 118.3 / CR 601.2h, so the
 /// guard refuses them with `Failed`.
 pub(crate) fn supported_at_resolution(cost: &AbilityCost) -> bool {
@@ -1714,6 +1946,9 @@ pub(crate) fn supported_at_resolution(cost: &AbilityCost) -> bool {
         | AbilityCost::PaySpeed { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::Composite { .. }
+        // CR 702.21a + CR 122.1: Ward's unless-pay always resolves at
+        // resolution time (never activation), so this must be true here.
+        | AbilityCost::GetPlayerCounters { .. }
         | AbilityCost::OneOf { .. } => true,
         // Only the chosen-from-hand discard has a resolution arm (the
         // `WaitingFor::DiscardChoice` / forced-choice fast path). The source-card
@@ -1727,6 +1962,9 @@ pub(crate) fn supported_at_resolution(cost: &AbilityCost) -> bool {
         // "exile two creature cards from graveyards"). The interactive choice is
         // surfaced via WaitingFor::PayCost before this resume runs.
         AbilityCost::Exile { filter, .. } if !matches!(filter, Some(TargetFilter::SelfRef)) => true,
+        // CR 118.3: The shared effect-cost predicate admits only deterministic
+        // payment effects that the authority resolves directly.
+        AbilityCost::EffectCost { .. } if cost.supports_effect_cost_payment() => true,
         AbilityCost::Discard { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
@@ -1761,10 +1999,193 @@ pub(crate) fn supported_at_resolution(cost: &AbilityCost) -> bool {
     }
 }
 
-/// CR 118.3 + CR 118.12: Resolution-time affordability (relocated A3). A player
-/// can't pay a cost without the resources to pay it fully; used as the
-/// `Composite` pre-flight so the resolver never commits a sub-cost before
-/// discovering a later sub-cost is unpayable. Exhaustive over `AbilityCost`.
+/// CR 614.17b: would a mandatory can't-effect stop this player-counter gain?
+fn player_counter_gain_is_prohibited(
+    state: &GameState,
+    payer: PlayerId,
+    counter_kind: crate::types::player::PlayerCounterKind,
+    count: u32,
+) -> bool {
+    super::effects::player_counter::preview_player_counter_addition(
+        state,
+        payer,
+        payer,
+        counter_kind,
+        count,
+    )
+    .is_prohibited()
+}
+
+/// CR 614.17b: object-counter sibling, for the `EffectCost`/`PutCounter{SelfRef}` shape.
+fn self_counter_placement_is_prohibited(
+    state: &GameState,
+    payer: PlayerId,
+    source_id: ObjectId,
+    counter_type: crate::types::counter::CounterType,
+    count: u32,
+) -> bool {
+    state.objects.get(&source_id).is_some_and(|object| {
+        super::effects::counters::preview_counter_addition(
+            state,
+            payer,
+            ObjectIncarnationRef::from_object(object),
+            counter_type,
+            count,
+        )
+        .is_some_and(super::effects::counters::CounterAdditionPreview::is_prohibited)
+    })
+}
+
+/// CR 118.5 + CR 702.24a: how many counters a resolution-time counter cost
+/// places, from its resolved `QuantityExpr`.
+///
+/// CR 107.1b: "If a calculation that would determine the result of an effect
+/// yields a negative number, zero is used instead, unless that effect doubles,
+/// triples, or sets to a specific value a player's life total or the power
+/// and/or toughness of a creature or creature card." A counter count is in
+/// none of those exception classes, so a negative resolved quantity places
+/// ZERO counters — never its magnitude, which would turn a cost that performs
+/// no event into one that places counters the rules never asked for.
+///
+/// The resolver really can hand this function a negative value: `fold_compose`
+/// evaluates `QuantityExpr::Offset` as an unfloored `inner + offset` and
+/// `QuantityExpr::Multiply` with a signed factor, so any cost quantity whose
+/// dynamic inner falls below its offset arrives here negative. `ClampMin` is
+/// the *expression-level* opt-in to the same rule; a cost consumer cannot
+/// assume its quantity was built with one.
+///
+/// `.max(0)` is the clamp every other resolved-quantity consumer in this file
+/// uses (`Discard`, `PayLife`, `PayEnergy`, the dynamic generic mana cost).
+///
+/// Single authority on purpose. The choice-time predicate
+/// (`resolution_cost_includes_impossible_event`) and the payment path
+/// (`pay_ability_cost_inner`) must preview the SAME count: if they disagree, a
+/// count the predicate reads as 0 short-circuits both previews to
+/// `Applied { count: 0 }`, the pay branch is offered, and the payment then
+/// refuses it — the exact offered-then-rejected defect CR 614.17b forbids.
+fn counter_cost_count(resolved: i32) -> u32 {
+    u32::try_from(resolved.max(0)).unwrap_or(0)
+}
+
+/// CR 614.17b: "If an event can't happen, a player can't choose to pay a cost
+/// that includes that event." Answers exactly that, for a resolution-time cost.
+///
+/// NOT an affordability test. CR 118.3 (resources) is answered by `can_pay`; an
+/// unaffordable cost may still legally be CHOSEN, because the unless-payment
+/// window exists so the payer can produce the resources (CR 118.2: "the player
+/// paying the cost has a chance to activate mana abilities"; CR 117.1d: mana
+/// abilities may be activated "whenever a rule or effect asks for a mana
+/// payment"). An impossible event admits no such window.
+///
+/// The verdict comes from the live replacement pipeline
+/// (`replacement::pipeline_loop`'s CR 614.17c short-circuit via
+/// `mandatory_prevention_applies`), reached through the read-only
+/// `preview_*_counter_addition` primitives — never from a per-card test.
+pub(crate) fn resolution_cost_includes_impossible_event(
+    state: &GameState,
+    payer: PlayerId,
+    cost: &AbilityCost,
+    ability: &ResolvedAbility,
+) -> bool {
+    use crate::types::ability::Effect;
+    match cost {
+        // CR 614.17b + CR 702.21a + CR 122.1: Ward's player-counter cost places the event.
+        AbilityCost::GetPlayerCounters {
+            counter_kind,
+            count,
+        } => player_counter_gain_is_prohibited(state, payer, *counter_kind, *count),
+        AbilityCost::EffectCost { effect } => match effect.as_ref() {
+            // CR 614.17b + CR 702.24a: cumulative upkeep's source-counter effect-cost shape.
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target: TargetFilter::SelfRef,
+            } => {
+                let resolved = resolve_quantity_with_targets(state, count, ability);
+                self_counter_placement_is_prohibited(
+                    state,
+                    payer,
+                    ability.source_id,
+                    counter_type.clone(),
+                    counter_cost_count(resolved),
+                )
+            }
+            // CR 118.1: producing mana performs no counter placement, so nothing to prohibit.
+            Effect::Mana {
+                produced: crate::types::ability::ManaProduction::Fixed { .. },
+                ..
+            } => false,
+            // `supports_effect_cost_payment` refuses every other effect-cost shape upstream.
+            // CR 614.17b: this arm swallows ANY widening of that predicate, not just a further
+            // counter-placing one, so admitting any new effect-cost shape owes a matching arm
+            // here in the same change — otherwise the new shape answers "no impossible event"
+            // and silently loses this refusal. An `EffectCost { LoseLife }` shape is the nearest
+            // example: CR 119.8 ("a cost that involves having that player pay life can't be
+            // paid") is the direct analogue, and nothing else catches it, because
+            // `can_pay_resolution` reaches that refusal only through `can_pay_life_cost` from its
+            // `AbilityCost::PayLife` arm, which an effect-cost never matches.
+            _ => false,
+        },
+        // Prohibition is the De Morgan dual of payability: `can_pay_resolution` answers
+        // `Composite` with `.all()` and `OneOf` with `.any()`; this predicate answers them
+        // with `.any()` and `.all()`. Copying one arm from the other is a rules bug in
+        // whichever direction it is copied.
+        // CR 614.17b: every component must be paid, so a cost that INCLUDES an impossible
+        // component is itself unchoosable.
+        AbilityCost::Composite { costs } => costs
+            .iter()
+            .any(|c| resolution_cost_includes_impossible_event(state, payer, c, ability)),
+        // CR 614.17b + CR 118.12a: exactly one option is paid, so the cost is unchoosable
+        // only if EVERY option includes an impossible event.
+        // Only the offending index is refused at the pick; whether the WHOLE disjunctive
+        // cost is unchoosable is this arm's question — `.all()`, not `.any()`.
+        AbilityCost::OneOf { costs } => costs
+            .iter()
+            .all(|c| resolution_cost_includes_impossible_event(state, payer, c, ability)),
+        // CR 702.24a: `expand_per_counter` resolves this into a concrete cost before the
+        // predicate is consulted.
+        AbilityCost::PerCounter { .. } => false,
+        // No counter-placement event is performed while paying any remaining variant.
+        AbilityCost::Mana { .. }
+        | AbilityCost::ManaDynamic { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::Sacrifice(_)
+        | AbilityCost::PayLife { .. }
+        | AbilityCost::Discard { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Blight { .. }
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::KeywordCostOfCastSpell { .. }
+        | AbilityCost::Unimplemented { .. } => false,
+    }
+}
+
+/// CR 118.3 + CR 118.12: resolution-time payability. A player can't pay a cost
+/// without the resources to pay it fully; used as the `Composite` pre-flight so
+/// the resolver never commits a sub-cost before discovering a later sub-cost is
+/// unpayable. Exhaustive over `AbilityCost`.
+///
+/// CR 614.17b: the counter-placement arms additionally refuse a cost whose
+/// payment includes an event a mandatory can't-effect forbids — impossibility,
+/// not affordability. `resolution_cost_includes_impossible_event` owns that
+/// question; this function only folds its answer into those two leaves.
 fn can_pay_resolution(
     state: &GameState,
     payer: PlayerId,
@@ -1857,7 +2278,14 @@ fn can_pay_resolution(
             let eligible = find_eligible_tap_creatures_targets(state, payer, ability, filter);
             match requirement {
                 crate::types::ability::TapCreaturesRequirement::Count { count } => {
-                    eligible.len() >= *count as usize
+                    // CR 107.3a: route the floor through the single bounds
+                    // authority so the `u32::MAX` X-sentinel is not compared as a
+                    // literal minimum (which is unsatisfiable for any real board).
+                    // A fixed (non-X) count degrades to `(count, count)`, leaving
+                    // every existing card's payability verdict unchanged.
+                    let (min_count, _) =
+                        super::casting::sacrifice_cost_bounds(*count, eligible.len());
+                    eligible.len() >= min_count
                 }
                 crate::types::ability::TapCreaturesRequirement::Aggregate {
                     stat,
@@ -1885,6 +2313,23 @@ fn can_pay_resolution(
         AbilityCost::OneOf { costs } => costs
             .iter()
             .any(|cost| can_pay_resolution(state, payer, cost, ability)),
+        // CR 118.3 + CR 104.3d: no RESOURCE limit on giving yourself counters — the
+        // ten-or-more poison loss condition is a state-based action, not a
+        // payment-time affordability gate.
+        // CR 614.17b: the one bar is a mandatory can't-effect on the counter
+        // placement, which `resolution_cost_includes_impossible_event` answers.
+        AbilityCost::GetPlayerCounters {
+            counter_kind,
+            count,
+        } => !player_counter_gain_is_prohibited(state, payer, *counter_kind, *count),
+        // CR 118.3: every deterministic effect-cost payment admitted by the shared
+        // support predicate has the resources to be paid; its resolver handles any
+        // replacement effects while paying it.
+        // CR 614.17b: it is offerable only if paying it does not require an event a
+        // mandatory can't-effect forbids.
+        AbilityCost::EffectCost { .. } if cost.supports_effect_cost_payment() => {
+            !resolution_cost_includes_impossible_event(state, payer, cost, ability)
+        }
         // Variants below have no resolution-time payment arm
         // (`supported_at_resolution` is the shared membership authority).
         // Refusing here is the conservative affordability answer (treat as
@@ -1940,6 +2385,7 @@ mod tests {
     use crate::types::ability::{
         BeholdCostAction, CardSelectionMode, CostObjectCount, DiscardSelfScope, Effect,
         NinjutsuVariant, QuantityExpr, SacrificeCost, TapCreaturesRequirement,
+        TapCreaturesSelectionMode,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::mana::ManaCost;
@@ -2065,6 +2511,10 @@ mod tests {
             AbilityCost::KeywordCostOfCastSpell { .. } => AbilityCost::KeywordCostOfCastSpell {
                 keyword: crate::types::keywords::KeywordKind::Suspend,
             },
+            AbilityCost::GetPlayerCounters { .. } => AbilityCost::GetPlayerCounters {
+                counter_kind: crate::types::player::PlayerCounterKind::Poison,
+                count: 1,
+            },
             AbilityCost::Unimplemented { .. } => AbilityCost::Unimplemented {
                 description: "test".to_string(),
             },
@@ -2178,6 +2628,10 @@ mod tests {
             AbilityCost::KeywordCostOfCastSpell {
                 keyword: crate::types::keywords::KeywordKind::Suspend,
             },
+            AbilityCost::GetPlayerCounters {
+                counter_kind: crate::types::player::PlayerCounterKind::Poison,
+                count: 1,
+            },
             AbilityCost::Unimplemented {
                 description: String::new(),
             },
@@ -2241,7 +2695,7 @@ mod tests {
             let excluded = ability_mana_payment_excluded_sources(&cost, src);
             let scope = PaymentScope::Activation {
                 excluded_sources: &excluded,
-                ability_tag: None,
+                ability_index: Some(0),
             };
             assert!(
                 can_pay(&scenario.state, P0, src, &cost, &scope),
@@ -2270,7 +2724,7 @@ mod tests {
         let excluded = ability_mana_payment_excluded_sources(&cost, src);
         let scope = PaymentScope::Activation {
             excluded_sources: &excluded,
-            ability_tag: None,
+            ability_index: Some(0),
         };
         let mut events = Vec::new();
         let outcome = pay_ability_cost_inner(
@@ -2323,7 +2777,7 @@ mod tests {
             P0,
             src,
             &graveyard_cost,
-            None,
+            Some(0),
             &mut Vec::new(),
         );
         assert!(matches!(rejected, Err(EngineError::ActionNotAllowed(_))));
@@ -2339,7 +2793,7 @@ mod tests {
             P0,
             src,
             &battlefield_cost,
-            None,
+            Some(0),
             &mut Vec::new(),
         )
         .expect("battlefield self-return cost should be payable");
@@ -2356,7 +2810,7 @@ mod tests {
             cost,
             &PaymentScope::Activation {
                 excluded_sources: &excluded,
-                ability_tag: None,
+                ability_index: Some(0),
             },
         )
     }
@@ -2976,6 +3430,716 @@ mod tests {
         assert!(
             !scenario.state.objects.get(&src).unwrap().tapped,
             "Tap at Resolution must not tap the source"
+        );
+    }
+
+    /// Installs a synthetic MANDATORY `Prevent`-on-`AddCounter` replacement
+    /// scoped `AnyPlayer` on a fresh P0 permanent — the unit-side sibling of
+    /// `serpent_society_ward_poison_cost.rs`'s installers. No printed card
+    /// produces an OPTIONAL `AddCounter` replacement, and CR 614.17c
+    /// short-circuits every MANDATORY one ahead of the CR 616.1 prompt.
+    fn install_any_player_counter_prohibition(scenario: &mut GameScenario) {
+        let source = scenario.add_creature(P0, "Poison Warden", 1, 1).id();
+        let mut def = crate::types::ability::ReplacementDefinition::new(
+            crate::types::replacements::ReplacementEvent::AddCounter,
+        );
+        def.mode = crate::types::ability::ReplacementMode::Mandatory;
+        def.quantity_modification = Some(crate::types::ability::QuantityModification::Prevent);
+        def.valid_player = Some(crate::types::ability::ReplacementPlayerScope::AnyPlayer);
+        let reps = vec![def];
+        let obj = scenario.state.objects.get_mut(&source).unwrap();
+        obj.replacement_definitions = reps.clone().into();
+        obj.base_replacement_definitions = std::sync::Arc::new(reps);
+    }
+
+    /// CR 614.17b: the aggregate arms of
+    /// `resolution_cost_includes_impossible_event`, pinned from both sides.
+    ///
+    /// `Composite` is `.any()` — CR 614.17b's "a cost that INCLUDES that event"
+    /// — and `OneOf` is `.all()`, because CR 118.12a pays exactly one option, so
+    /// a disjunctive cost is unchoosable only when EVERY option is. The two are
+    /// the De Morgan dual of `can_pay_resolution`'s `.all()` / `.any()`.
+    ///
+    /// Affordability is held CONSTANT across the pair: every leg is affordable
+    /// at life 20, and the row asserts the life totals so that stays true.
+    ///
+    /// Revert probe: writing the `OneOf` arm as `.any()` makes `mixed_oneof`
+    /// answer `true` and fails assertion (iii) on the same board that keeps
+    /// `counter_composite` answering `true`.
+    #[test]
+    fn resolution_cost_prohibition_covers_composite_and_disjunctive_shapes() {
+        use crate::types::player::PlayerCounterKind;
+
+        let poison5 = AbilityCost::GetPlayerCounters {
+            counter_kind: PlayerCounterKind::Poison,
+            count: 5,
+        };
+        let poison3 = AbilityCost::GetPlayerCounters {
+            counter_kind: PlayerCounterKind::Poison,
+            count: 3,
+        };
+        let pay_life_1 = AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+        };
+        let counter_composite = AbilityCost::Composite {
+            costs: vec![poison5.clone(), pay_life_1.clone()],
+        };
+        let control_composite = AbilityCost::Composite {
+            costs: vec![pay_life_1.clone(), pay_life_1.clone()],
+        };
+        let mixed_oneof = AbilityCost::OneOf {
+            costs: vec![poison5.clone(), pay_life_1.clone()],
+        };
+        let all_impossible_oneof = AbilityCost::OneOf {
+            costs: vec![poison5, poison3],
+        };
+
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Source", 1, 1).id();
+        let ability = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+            Vec::new(),
+            src,
+            P0,
+        );
+        let scope = PaymentScope::Resolution {
+            ability: &ability,
+            cost_move_root: ResolutionCostMoveRoot::EffectPayCost,
+        };
+
+        // (v) + (vi) CLEAN board: the instrument fires only on the prohibition,
+        // and every leg is affordable at life 20.
+        assert_eq!(
+            scenario.state.players[P0.0 as usize].life, 20,
+            "affordability is held constant across the pair"
+        );
+        for (name, cost) in [
+            ("counter_composite", &counter_composite),
+            ("control_composite", &control_composite),
+            ("mixed_oneof", &mixed_oneof),
+            ("all_impossible_oneof", &all_impossible_oneof),
+        ] {
+            assert!(
+                !resolution_cost_includes_impossible_event(&scenario.state, P0, cost, &ability),
+                "{name} must not be prohibited on a clean board"
+            );
+            assert!(
+                can_pay(&scenario.state, P0, src, cost, &scope),
+                "{name} must be payable on a clean board"
+            );
+        }
+
+        install_any_player_counter_prohibition(&mut scenario);
+        assert_eq!(
+            scenario.state.players[P0.0 as usize].life, 20,
+            "installing the prohibition must not change affordability"
+        );
+
+        // (i) `Composite` INCLUDES an impossible component ⇒ prohibited.
+        assert!(
+            resolution_cost_includes_impossible_event(
+                &scenario.state,
+                P0,
+                &counter_composite,
+                &ability
+            ),
+            "a Composite including a prohibited counter gain must be prohibited"
+        );
+        // Control cost: same board, same prohibition, same affordability.
+        assert!(
+            !resolution_cost_includes_impossible_event(
+                &scenario.state,
+                P0,
+                &control_composite,
+                &ability
+            ),
+            "a Composite with no counter component must not be prohibited"
+        );
+
+        // (ii) The payability oracle follows the leaves.
+        assert!(
+            !can_pay(&scenario.state, P0, src, &counter_composite, &scope),
+            "can_pay must refuse a Composite whose payment includes an impossible event"
+        );
+        assert!(
+            can_pay(&scenario.state, P0, src, &control_composite, &scope),
+            "can_pay must still accept the control Composite"
+        );
+
+        // (iii) The `.any()`-leak guard: one payable option keeps the whole
+        // disjunctive cost choosable (CR 118.12a).
+        assert!(
+            !resolution_cost_includes_impossible_event(&scenario.state, P0, &mixed_oneof, &ability),
+            "a OneOf with one payable option must not be prohibited"
+        );
+        assert!(
+            can_pay(&scenario.state, P0, src, &mixed_oneof, &scope),
+            "a OneOf with one payable option must stay payable"
+        );
+
+        // (iv) Its paired opposite: every option impossible ⇒ prohibited.
+        assert!(
+            resolution_cost_includes_impossible_event(
+                &scenario.state,
+                P0,
+                &all_impossible_oneof,
+                &ability
+            ),
+            "a OneOf whose every option is impossible must be prohibited"
+        );
+        assert!(
+            !can_pay(&scenario.state, P0, src, &all_impossible_oneof, &scope),
+            "a OneOf whose every option is impossible must not be payable"
+        );
+    }
+
+    /// CR 614.17b: "If an event can't happen, a player can't choose to pay a
+    /// cost that includes that event" — at `PaymentScope::Activation`.
+    ///
+    /// Wall of Roots' mana ability costs `EffectCost { PutCounter { SelfRef } }`;
+    /// Solemnity's second sentence is a CR 614.17 can't-effect on exactly that
+    /// placement. Activation never consults
+    /// `resolution_cost_includes_impossible_event` and
+    /// `is_payable_for_activation` admits every `EffectCost` unconditionally, so
+    /// the refusal inside the payment arm is the only answer available here.
+    ///
+    /// Revert probe: rewriting that arm's `let prevented =
+    /// self_counter_placement_is_prohibited(…)` as `let prevented = false` makes
+    /// the payer answer `Paid` on a board where the counter is prevented, failing
+    /// (ii) and (iii).
+    #[test]
+    fn activation_self_counter_cost_under_solemnity_is_refused() {
+        let mut scenario = GameScenario::new();
+        let wall = scenario.add_creature(P0, "Wall of Roots", 0, 5).id();
+        let cost = AbilityCost::EffectCost {
+            effect: Box::new(Effect::PutCounter {
+                counter_type: CounterType::PowerToughness {
+                    power: 0,
+                    toughness: -1,
+                },
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            }),
+        };
+
+        // (i) Reach guard: the same cost on the same board is payable before the
+        // prohibition exists, so (ii) and (iii) cannot pass upstream of the arm.
+        assert!(
+            can_pay_activation(&scenario.state, wall, &cost),
+            "an unprohibited self-counter activation cost must be payable"
+        );
+
+        scenario.add_enchantment_from_oracle(
+            P0,
+            "Solemnity",
+            "Players can't get counters.\n\
+             Counters can't be put on artifacts, creatures, enchantments, or lands.",
+        );
+
+        // (ii) The ability is no longer activatable.
+        assert!(
+            !can_pay_activation(&scenario.state, wall, &cost),
+            "a prevented counter placement must make the activation cost unpayable"
+        );
+
+        // (iii) CR 601.2h: the payer refuses rather than reporting a cost whose
+        // event the replacement swallowed.
+        let refused = pay_ability_cost_for_activation(
+            &mut scenario.state,
+            P0,
+            wall,
+            &cost,
+            Some(0),
+            &mut Vec::new(),
+        );
+        assert!(
+            matches!(refused, Err(EngineError::ActionNotAllowed(_))),
+            "a prevented counter-placement cost must refuse activation, got {refused:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Resolution-scope `AbilityCost::TapCreatures` payment bounds.
+    //
+    // The resolution registration site below (`pay_ability_cost_inner`'s
+    // `TapCreatures` @ `PaymentScope::Resolution` arm) emits the
+    // `WaitingFor::PayCost { count, min_count }` window that
+    // `casting_costs::pay_tap_creatures_selection` later validates against.
+    // That validator is SHARED with the activation/casting path, which moved
+    // from an exact-match check to a `[min_count, count]` range check to
+    // support the CR 107.3a X-sentinel ("Tap X untapped …"). The hardcoded
+    // `min_count: 0` here was harmless under exact-match and load-bearing
+    // (and wrong — CR 601.2h forbids partial payment) under the range check.
+    // ---------------------------------------------------------------------
+
+    /// Stub resolution ability for the tap-cost arm. The effect body is never
+    /// read by the `TapCreatures` arm (it only uses the ability for
+    /// `FilterContext`), so a trivial self-counter effect suffices.
+    fn tap_cost_stub_ability(src: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+            Vec::new(),
+            src,
+            P0,
+        )
+    }
+
+    /// Drive the real resolution-time payment entry point
+    /// (`pay_ability_cost_inner` @ `PaymentScope::Resolution`, the path
+    /// `effects::pay` takes for a reflexive "you may tap N creatures" cost).
+    fn pay_tap_cost_at_resolution(
+        state: &mut GameState,
+        src: ObjectId,
+        ability: &ResolvedAbility,
+        requirement: TapCreaturesRequirement,
+    ) -> PaymentOutcome {
+        let cost = AbilityCost::TapCreatures {
+            requirement,
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+        };
+        pay_ability_cost_inner(
+            state,
+            P0,
+            src,
+            &cost,
+            &mut Vec::new(),
+            &PaymentScope::Resolution {
+                ability,
+                cost_move_root: ResolutionCostMoveRoot::EffectPayCost,
+            },
+            None,
+        )
+        .expect("resolution-time tap-creatures payment must not error")
+    }
+
+    /// Read the emitted `[min_count, count]` payment window plus the offered
+    /// choices out of `state.waiting_for`, failing loudly if the arm did not
+    /// surface a `TapCreatures` PayCost prompt at all.
+    fn emitted_tap_cost_window(state: &GameState) -> (usize, usize, Vec<ObjectId>) {
+        match &state.waiting_for {
+            WaitingFor::PayCost {
+                kind: PayCostKind::TapCreatures { .. },
+                choices,
+                count,
+                min_count,
+                resume: CostResume::Resolution,
+                ..
+            } => (*min_count, *count, choices.clone()),
+            other => panic!("expected a resolution TapCreatures PayCost prompt, got {other:?}"),
+        }
+    }
+
+    /// CR 601.2h ("Partial payments are not allowed") regression discriminator
+    /// for the resolution-scope registration site. Kitt-Kanto-shaped: a fixed
+    /// `count: 2` reflexive tap cost with exactly two eligible untapped
+    /// creatures.
+    ///
+    /// Reverting the `min_count` fix (back to the hardcoded `min_count: 0`)
+    /// flips BOTH assertions below: the emitted floor becomes `0`, and the
+    /// shared range validator then returns `Ok(())` for a one-creature
+    /// selection — silently letting a "tap two creatures" cost be paid by
+    /// tapping one.
+    #[test]
+    fn resolution_fixed_tap_cost_rejects_partial_payment() {
+        let mut scenario = GameScenario::new();
+        let src = scenario
+            .add_creature(P0, "Kitt Kanto, Mayhem Diva", 2, 3)
+            .id();
+        scenario.add_creature(P0, "Helper", 1, 1);
+        let ability = tap_cost_stub_ability(src);
+
+        let outcome = pay_tap_cost_at_resolution(
+            &mut scenario.state,
+            src,
+            &ability,
+            TapCreaturesRequirement::count(2),
+        );
+        assert!(
+            matches!(outcome, PaymentOutcome::Paused { .. }),
+            "a payable fixed tap cost must pause for the player's selection, got {outcome:?}"
+        );
+
+        let (min_count, count, choices) = emitted_tap_cost_window(&scenario.state);
+        assert_eq!(choices.len(), 2, "both untapped creatures must be offered");
+
+        // Positive reach guard: the one-creature selection really is drawn from
+        // the offered choice set, so the rejection below is the range check
+        // firing and not the eligibility pre-check.
+        let partial = vec![choices[0]];
+        assert!(
+            choices.contains(&partial[0]),
+            "reach guard: the partial selection must be an eligible choice"
+        );
+
+        // BEHAVIORAL discriminator, asserted BEFORE the shape assertions so a
+        // revert fails here on the real consequence rather than on the window
+        // shape: the emitted `[min_count, count]` window is threaded verbatim
+        // into the shared validator exactly as `engine.rs`'s
+        // `CostResume::Resolution` handler threads it. With the hardcoded
+        // `min_count: 0` this call returns `Ok(())` and TAPS ONE CREATURE to
+        // pay a "tap two creatures" cost.
+        let err = crate::game::casting_costs::pay_tap_creatures_selection(
+            &mut scenario.state,
+            min_count,
+            count,
+            TapCreaturesSelectionMode::Fixed,
+            &choices,
+            &partial,
+            &mut Vec::new(),
+        )
+        .expect_err("CR 601.2h: tapping 1 of a required 2 creatures is a partial payment");
+        assert!(
+            matches!(err, EngineError::InvalidAction(_)),
+            "partial payment must be an InvalidAction, got {err:?}"
+        );
+        assert!(
+            !scenario.state.objects[&partial[0]].tapped,
+            "a rejected partial payment must not tap anything"
+        );
+
+        // Secondary shape pin on the emitted window itself.
+        assert_eq!(
+            count, 2,
+            "the fixed requirement's upper bound is the printed count"
+        );
+        assert_eq!(
+            min_count, 2,
+            "CR 601.2h: a fixed `count: 2` cost must advertise a floor of 2, not 0"
+        );
+    }
+
+    /// Sibling of the discriminator: full payment of the same fixed cost is
+    /// still accepted and actually taps both creatures (the fix narrows the
+    /// window, it must not break the legal payment).
+    #[test]
+    fn resolution_fixed_tap_cost_accepts_full_payment() {
+        let mut scenario = GameScenario::new();
+        let src = scenario
+            .add_creature(P0, "Kitt Kanto, Mayhem Diva", 2, 3)
+            .id();
+        scenario.add_creature(P0, "Helper", 1, 1);
+        let ability = tap_cost_stub_ability(src);
+
+        pay_tap_cost_at_resolution(
+            &mut scenario.state,
+            src,
+            &ability,
+            TapCreaturesRequirement::count(2),
+        );
+        let (min_count, count, choices) = emitted_tap_cost_window(&scenario.state);
+
+        crate::game::casting_costs::pay_tap_creatures_selection(
+            &mut scenario.state,
+            min_count,
+            count,
+            TapCreaturesSelectionMode::Fixed,
+            &choices,
+            &choices,
+            &mut Vec::new(),
+        )
+        .expect("CR 601.2h: tapping exactly the required 2 creatures is a legal full payment");
+        assert!(
+            choices.iter().all(|id| scenario.state.objects[id].tapped),
+            "a full payment must tap every chosen creature"
+        );
+    }
+
+    /// `count: 1` boundary, the other real resolution-scope card shape today —
+    /// Meanders Guide ("you may tap another untapped Merfolk you control").
+    /// Only the COUNT axis is reproduced here; the card's `Merfolk`/`Another`
+    /// filter is orthogonal to the payment window under test, and the wider
+    /// `creature` filter deliberately offers TWO eligible creatures so the
+    /// `(1, 1)` window is proven to come from the requirement rather than from
+    /// coinciding with the eligible-set size.
+    ///
+    /// Reverting the fix makes the empty selection legal — a "tap an untapped
+    /// creature you control" cost paid by tapping nothing.
+    #[test]
+    fn resolution_single_tap_cost_rejects_empty_selection() {
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Meanders Guide", 1, 2).id();
+        scenario.add_creature(P0, "Helper", 1, 1);
+        let ability = tap_cost_stub_ability(src);
+
+        pay_tap_cost_at_resolution(
+            &mut scenario.state,
+            src,
+            &ability,
+            TapCreaturesRequirement::count(1),
+        );
+        let (min_count, count, choices) = emitted_tap_cost_window(&scenario.state);
+
+        // BEHAVIORAL discriminator first: with the hardcoded `min_count: 0`
+        // this returns `Ok(())`, paying a "tap an untapped creature you
+        // control" cost by tapping nothing at all.
+        let err = crate::game::casting_costs::pay_tap_creatures_selection(
+            &mut scenario.state,
+            min_count,
+            count,
+            TapCreaturesSelectionMode::Fixed,
+            &choices,
+            &[],
+            &mut Vec::new(),
+        )
+        .expect_err(
+            "CR 601.2h: paying a `count: 1` tap cost with zero creatures is a partial payment",
+        );
+        assert!(
+            matches!(err, EngineError::InvalidAction(_)),
+            "empty selection must be an InvalidAction, got {err:?}"
+        );
+        assert!(
+            choices.iter().all(|id| !scenario.state.objects[id].tapped),
+            "a rejected empty payment must not tap anything"
+        );
+
+        // Secondary shape pin on the emitted window.
+        assert_eq!(
+            (min_count, count),
+            (1, 1),
+            "CR 601.2h: a `count: 1` cost is an exact-1 window even with 2 eligible creatures"
+        );
+
+        // The legal one-creature payment still works.
+        crate::game::casting_costs::pay_tap_creatures_selection(
+            &mut scenario.state,
+            min_count,
+            count,
+            TapCreaturesSelectionMode::Fixed,
+            &choices,
+            &choices[..1],
+            &mut Vec::new(),
+        )
+        .expect("tapping exactly 1 creature satisfies a `count: 1` cost");
+        assert!(
+            scenario.state.objects[&choices[0]].tapped,
+            "the chosen creature must be tapped by the accepted payment"
+        );
+    }
+
+    /// CR 208.1 + CR 601.2f (Crew CR 702.122a / Saddle CR 702.171a / Teamwork):
+    /// the aggregate (Crew/Saddle/Teamwork) shape taps ANY
+    /// number of creatures whose total positive power satisfies the comparator,
+    /// so its floor stays 0 — unchanged by this fix. This pins that the widened
+    /// `(kind, count, min_count)` binding did not leak the fixed-count floor
+    /// into the aggregate arm.
+    #[test]
+    fn resolution_aggregate_tap_cost_keeps_zero_floor() {
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Crewed Vehicle", 1, 1).id();
+        scenario.add_creature(P0, "Helper", 1, 1);
+        let ability = tap_cost_stub_ability(src);
+
+        let outcome = pay_tap_cost_at_resolution(
+            &mut scenario.state,
+            src,
+            &ability,
+            TapCreaturesRequirement::total_power_at_least(2),
+        );
+        assert!(
+            matches!(outcome, PaymentOutcome::Paused { .. }),
+            "two 1-power creatures satisfy total power >= 2, got {outcome:?}"
+        );
+
+        match &scenario.state.waiting_for {
+            WaitingFor::PayCost {
+                kind:
+                    PayCostKind::TapCreatures {
+                        mode: TapCreaturesSelectionMode::Aggregate(aggregate),
+                    },
+                count,
+                min_count,
+                ..
+            } => {
+                assert_eq!(
+                    *min_count, 0,
+                    "CR 601.2f: the aggregate form admits any subset size, so the floor is 0"
+                );
+                assert_eq!(*count, 2, "the aggregate ceiling is the eligible count");
+                assert_eq!(
+                    aggregate.value, 2,
+                    "the advertised comparator value is carried through"
+                );
+            }
+            other => panic!("expected an aggregate TapCreatures PayCost prompt, got {other:?}"),
+        }
+    }
+
+    /// CR 118.3 + CR 601.2h: the aggregate arm is the case the dedup guard
+    /// actually protects. `tap_creatures_total_power` sums `chosen` with NO
+    /// dedup, so a repeated id double-counts its power: `[c0, c0]` on a
+    /// 1-power creature sums to 2 and spuriously satisfies "total power >= 2"
+    /// with only ONE real creature. Without the guard in
+    /// `pay_tap_creatures_selection` this returns `Ok(())` and taps a single
+    /// 1-power creature to pay a 2-power crew-shaped cost.
+    #[test]
+    fn resolution_aggregate_tap_cost_rejects_duplicate_creature() {
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Crewed Vehicle", 1, 1).id();
+        scenario.add_creature(P0, "Helper", 1, 1);
+        let ability = tap_cost_stub_ability(src);
+
+        pay_tap_cost_at_resolution(
+            &mut scenario.state,
+            src,
+            &ability,
+            TapCreaturesRequirement::total_power_at_least(2),
+        );
+
+        let (min_count, count, choices) = emitted_tap_cost_window(&scenario.state);
+        let mode = match &scenario.state.waiting_for {
+            WaitingFor::PayCost {
+                kind: PayCostKind::TapCreatures { mode },
+                ..
+            } => *mode,
+            other => panic!("expected a TapCreatures PayCost prompt, got {other:?}"),
+        };
+        assert!(
+            matches!(mode, TapCreaturesSelectionMode::Aggregate(_)),
+            "reach guard: this test must exercise the Aggregate arm, got {mode:?}"
+        );
+
+        // Positive reach guard: ONE creature's power alone does not satisfy the
+        // threshold, but the duplicated pair sums to exactly the threshold — so
+        // the aggregate check PASSES on this submission and the rejection below
+        // can only be the dedup guard firing, not "does not satisfy".
+        let single = [choices[0]];
+        assert_eq!(
+            crate::game::casting_costs::tap_creatures_total_power(&scenario.state, &single),
+            1,
+            "reach guard: one eligible creature contributes only 1 power"
+        );
+        let duplicated = vec![choices[0], choices[0]];
+        assert_eq!(
+            crate::game::casting_costs::tap_creatures_total_power(&scenario.state, &duplicated),
+            2,
+            "reach guard: the duplicate double-counts to exactly the threshold, so the aggregate \
+             check cannot be what rejects this submission"
+        );
+        assert!(
+            duplicated.iter().all(|id| choices.contains(id)),
+            "reach guard: the submitted id must be an eligible choice"
+        );
+
+        let err = crate::game::casting_costs::pay_tap_creatures_selection(
+            &mut scenario.state,
+            min_count,
+            count,
+            mode,
+            &choices,
+            &duplicated,
+            &mut Vec::new(),
+        )
+        .expect_err("CR 601.2h: one creature cannot pay an aggregate tap cost twice");
+        let EngineError::InvalidAction(message) = &err else {
+            panic!("a duplicate selection must be an InvalidAction, got {err:?}");
+        };
+        assert!(
+            message.contains("Cannot tap the same creature twice"),
+            "the dedup guard must reject this, not the aggregate comparator, got {message:?}"
+        );
+        assert!(
+            choices.iter().all(|id| !scenario.state.objects[id].tapped),
+            "a rejected duplicate payment must not tap anything"
+        );
+    }
+
+    /// Hostile fixture: fewer eligible creatures than the fixed requirement.
+    /// The `eligible.len() < min_count` pre-check (CR 118.3) must fail the
+    /// payment outright — no `WaitingFor::PayCost` prompt may be surfaced at
+    /// all, or the player would be handed an unsatisfiable selection window.
+    #[test]
+    fn resolution_fixed_tap_cost_fails_without_enough_eligible() {
+        let mut scenario = GameScenario::new();
+        let src = scenario
+            .add_creature(P0, "Kitt Kanto, Mayhem Diva", 2, 3)
+            .id();
+        // A creature controlled by the OPPONENT and a TAPPED one of P0's own are
+        // both ineligible, so only the source itself is a legal choice (1 < 2).
+        scenario.add_creature(PlayerId(1), "Opposing Bear", 2, 2);
+        let dozing = scenario.add_creature(P0, "Already Tapped", 1, 1).id();
+        scenario.state.objects.get_mut(&dozing).unwrap().tapped = true;
+        let ability = tap_cost_stub_ability(src);
+        let before = scenario.state.waiting_for.clone();
+
+        let outcome = pay_tap_cost_at_resolution(
+            &mut scenario.state,
+            src,
+            &ability,
+            TapCreaturesRequirement::count(2),
+        );
+        assert!(
+            matches!(outcome, PaymentOutcome::Failed { .. }),
+            "CR 118.3: 1 eligible creature cannot pay a `count: 2` tap cost, got {outcome:?}"
+        );
+        assert_eq!(
+            scenario.state.waiting_for, before,
+            "a failed tap cost must not surface an unsatisfiable PayCost prompt"
+        );
+    }
+
+    /// CR 107.3a: the resolution-scope payability ORACLE (`can_pay_resolution`,
+    /// reached in production through the `can_pay_cost` scope dispatcher) must
+    /// route the `u32::MAX` X-sentinel through `sacrifice_cost_bounds` like every
+    /// other checkpoint. X=0 is a legal announcement, so the cost is payable even
+    /// with ZERO eligible creatures on the battlefield.
+    ///
+    /// Reverting the `can_pay_resolution` fix restores
+    /// `eligible.len() >= *count as usize`, i.e. `0 >= u32::MAX as usize`, and
+    /// the first assertion below flips to `false`.
+    #[test]
+    fn resolution_x_sentinel_tap_cost_is_payable_with_zero_eligible() {
+        let mut scenario = GameScenario::new();
+        // The only permanent is a non-creature, so the creature-typed tap cost
+        // has an empty eligible set — the exact hostile shape the sentinel
+        // comparison used to fail on.
+        let src = scenario.add_artifact_from_oracle(P0, "Powerstone", "").id();
+        let ability = tap_cost_stub_ability(src);
+        let x_sentinel = AbilityCost::TapCreatures {
+            requirement: TapCreaturesRequirement::Count { count: u32::MAX },
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+        };
+
+        // Positive reach guard: prove the eligible set really is empty, so the
+        // verdict below is the sentinel bound and not an accidental hit.
+        assert!(
+            find_eligible_tap_creatures_targets(
+                &scenario.state,
+                P0,
+                &ability,
+                &TargetFilter::Typed(TypedFilter::creature()),
+            )
+            .is_empty(),
+            "reach guard: the fixture must have zero eligible creatures"
+        );
+
+        assert!(
+            can_pay_resolution(&scenario.state, P0, &x_sentinel, &ability),
+            "CR 107.3a: X=0 is a legal announcement, so an X-sentinel resolution \
+             tap cost is payable with no eligible creatures"
+        );
+
+        // Sibling/negative: a FIXED count is still gated by the eligible set, so
+        // the fix widens only the sentinel case.
+        assert!(
+            !can_pay_resolution(
+                &scenario.state,
+                P0,
+                &AbilityCost::TapCreatures {
+                    requirement: TapCreaturesRequirement::count(1),
+                    filter: TargetFilter::Typed(TypedFilter::creature()),
+                },
+                &ability,
+            ),
+            "CR 601.2h: a fixed `count: 1` tap cost is NOT payable with zero eligible creatures"
         );
     }
 }

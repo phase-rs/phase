@@ -10,8 +10,7 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: write
+permissions: {}
 
 concurrency:
   group: shell-release-${{ inputs.tag || github.ref_name }}
@@ -23,6 +22,8 @@ jobs:
     if: github.repository == 'phase-rs/phase'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
     outputs:
       release_tag: ${{ steps.resolve.outputs.release_tag }}
       release_sha: ${{ steps.resolve.outputs.release_sha }}
@@ -64,6 +65,8 @@ jobs:
     needs: [resolve-shell-ref]
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
     env:
       RELEASE_SHA: ${{ needs.resolve-shell-ref.outputs.release_sha }}
       SHELL_VERSION: ${{ needs.resolve-shell-ref.outputs.shell_version }}
@@ -150,6 +153,8 @@ jobs:
     needs: [resolve-shell-ref, shell-preflight]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    permissions:
+      contents: read
     env:
       RELEASE_SHA: ${{ needs.resolve-shell-ref.outputs.release_sha }}
       SHELL_VERSION: ${{ needs.resolve-shell-ref.outputs.shell_version }}
@@ -318,18 +323,260 @@ jobs:
           path: staging/*
           retention-days: 90
 
+  build-android:
+    name: Build Signed Android APKs
+    needs: [resolve-shell-ref, shell-preflight]
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    outputs:
+      apk_available: ${{ steps.android-artifacts.outputs.available }}
+    env:
+      RELEASE_SHA: ${{ needs.resolve-shell-ref.outputs.release_sha }}
+      SHELL_VERSION: ${{ needs.resolve-shell-ref.outputs.shell_version }}
+    steps:
+      - name: Detect Android signing configuration
+        id: android-signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_CERTIFICATE_SHA256: ${{ secrets.ANDROID_CERTIFICATE_SHA256 }}
+        run: |
+          set -euo pipefail
+          present=0
+          for variable in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD ANDROID_CERTIFICATE_SHA256; do
+            if [ -n "${!variable}" ]; then present=$((present + 1)); fi
+          done
+          if [ "$present" -eq 0 ]; then
+            echo '::notice::Android signing is not configured; desktop release will continue without APKs'
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$present" -ne 5 ]; then
+            echo '::error::Android signing is partially configured; provide all five Android secrets or none'
+            exit 1
+          fi
+          echo 'available=true' >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: steps.android-signing.outputs.available == 'true'
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+
+      - name: Validate Gradle wrapper
+        if: steps.android-signing.outputs.available == 'true'
+        uses: gradle/actions/wrapper-validation@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        if: steps.android-signing.outputs.available == 'true'
+        with:
+          version: 9.15.9
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: steps.android-signing.outputs.available == 'true'
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        if: steps.android-signing.outputs.available == 'true'
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
+        if: steps.android-signing.outputs.available == 'true'
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        if: steps.android-signing.outputs.available == 'true'
+        with:
+          target: aarch64-linux-android,armv7-linux-androideabi
+          cache: false
+
+      - name: Install pinned Android SDK and NDK
+        if: steps.android-signing.outputs.available == 'true'
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;28.2.13676358"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+
+      - name: Stamp shell version
+        if: steps.android-signing.outputs.available == 'true'
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+          const version = process.env.SHELL_VERSION;
+          const configPath = "client/src-tauri/tauri.conf.json";
+          const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+          config.version = version;
+          fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+
+          const cargoPath = "client/src-tauri/Cargo.toml";
+          const cargo = fs.readFileSync(cargoPath, "utf8");
+          const cargoPattern = /^version = "[^"]+"$/m;
+          if (!cargoPattern.test(cargo)) throw new Error("expected phase-tauri package version");
+          fs.writeFileSync(cargoPath, cargo.replace(cargoPattern, `version = "${version}"`));
+
+          const lockPath = "client/src-tauri/Cargo.lock";
+          const lock = fs.readFileSync(lockPath, "utf8");
+          const lockPattern = /(\[\[package\]\]\nname = "phase-tauri"\nversion = ")[^"]+(")/;
+          if (!lockPattern.test(lock)) throw new Error("expected phase-tauri lockfile entry");
+          fs.writeFileSync(lockPath, lock.replace(lockPattern, `$1${version}$2`));
+          NODE
+
+      - name: Configure fail-closed Android signing
+        if: steps.android-signing.outputs.available == 'true'
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          PHASE_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          PHASE_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          PHASE_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for variable in ANDROID_KEYSTORE_BASE64 PHASE_ANDROID_KEYSTORE_PASSWORD PHASE_ANDROID_KEY_ALIAS PHASE_ANDROID_KEY_PASSWORD; do
+            test -n "${!variable:-}" || { echo "::error::Missing required Android signing secret: $variable"; exit 1; }
+          done
+          KEYSTORE_FILE="$RUNNER_TEMP/phase-android-release.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_FILE"
+          test -s "$KEYSTORE_FILE"
+          chmod 600 "$KEYSTORE_FILE"
+
+      - name: Install frozen client dependencies
+        if: steps.android-signing.outputs.available == 'true'
+        run: cd client && pnpm install --frozen-lockfile
+
+      - name: Build signed ARM64 and ARMv7 APKs through the project CLI
+        if: steps.android-signing.outputs.available == 'true'
+        env:
+          PHASE_ANDROID_KEYSTORE_FILE: ${{ runner.temp }}/phase-android-release.jks
+          PHASE_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          PHASE_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          PHASE_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          NODE_BIN=$(realpath "$(command -v node)")
+          TAURI_JS="$GITHUB_WORKSPACE/client/node_modules/@tauri-apps/cli/tauri.js"
+          test -f "$NODE_BIN"
+          test -x "$NODE_BIN"
+          test -f "$TAURI_JS"
+          export ORG_GRADLE_PROJECT_phaseNodeExecutable="$NODE_BIN"
+          "$NODE_BIN" "$TAURI_JS" android build --target aarch64 armv7 --split-per-abi --apk
+
+      - name: Inspect and stage signed Android APKs
+        if: steps.android-signing.outputs.available == 'true'
+        env:
+          ANDROID_CERTIFICATE_SHA256: ${{ secrets.ANDROID_CERTIFICATE_SHA256 }}
+        run: |
+          set -euo pipefail
+          AAPT2="$ANDROID_HOME/build-tools/36.0.0/aapt2"
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          mkdir -p staging
+          ARM64_APK=''
+          ARMV7_APK=''
+          for apk in $(find client/src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk' -print); do
+            mapfile -t ABIS < <(unzip -Z1 "$apk" | sed -nE 's#^lib/([^/]+)/.*\.so$#\1#p' | sort -u)
+            test "${#ABIS[@]}" -eq 1
+            case "${ABIS[0]}" in
+              arm64-v8a) ARM64_APK="$apk" ;;
+              armeabi-v7a) ARMV7_APK="$apk" ;;
+              *) echo "Unexpected release APK ABI: ${ABIS[0]}"; exit 1 ;;
+            esac
+          done
+          test -n "$ARM64_APK"
+          test -n "$ARMV7_APK"
+
+          TAURI_PROPERTIES='client/src-tauri/gen/android/app/tauri.properties'
+          test -f "$TAURI_PROPERTIES"
+          TAURI_VERSION_NAME=$(sed -n 's/^tauri.android.versionName=//p' "$TAURI_PROPERTIES")
+          TAURI_VERSION_CODE=$(sed -n 's/^tauri.android.versionCode=//p' "$TAURI_PROPERTIES")
+          test "$TAURI_VERSION_NAME" = "$SHELL_VERSION"
+          [[ "$TAURI_VERSION_CODE" =~ ^[0-9]+$ ]]
+
+          expected_digest=$(printf '%s' "${ANDROID_CERTIFICATE_SHA256:-}" | tr -d '[:space:]:' | tr '[:lower:]' '[:upper:]')
+          if ! [[ "$expected_digest" =~ ^[0-9A-F]{64}$ ]]; then
+            echo '::error::ANDROID_CERTIFICATE_SHA256 must be the protected release certificate SHA-256 digest'
+            exit 1
+          fi
+          signer_digest=''
+          for apk in "$ARM64_APK" "$ARMV7_APK"; do
+            BADGING=$($AAPT2 dump badging "$apk")
+            grep -F "package: name='rs.phase.app' versionCode='$TAURI_VERSION_CODE' versionName='$SHELL_VERSION'" <<<"$BADGING"
+            grep -F "minSdkVersion:'24'" <<<"$BADGING"
+            grep -F "targetSdkVersion:'36'" <<<"$BADGING"
+            SIGNING=$($APKSIGNER verify --verbose --print-certs "$apk")
+            grep -F 'Verified using v2 scheme (APK Signature Scheme v2): true' <<<"$SIGNING"
+            if grep -Fq 'CN=Android Debug' <<<"$SIGNING"; then
+              echo "::error::Release APK is debug-signed: $apk"
+              exit 1
+            fi
+            digest=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' <<<"$SIGNING" | tr -d '[:space:]:' | tr '[:lower:]' '[:upper:]')
+            test "$digest" = "$expected_digest"
+            if [ -z "$signer_digest" ]; then signer_digest="$digest"; else test "$digest" = "$signer_digest"; fi
+            if unzip -Z1 "$apk" | grep -Eq '(^|/)(update\.json|.*\.sig)$'; then
+              echo 'Android release APK unexpectedly contains updater material'
+              exit 1
+            fi
+          done
+          cp "$ARM64_APK" staging/Phase-Android-ARM64.apk
+          cp "$ARMV7_APK" staging/Phase-Android-ARMv7.apk
+
+      - name: Upload signed Android artifacts
+        id: upload-android-artifacts
+        if: steps.android-signing.outputs.available == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: shell-tauri-android
+          path: staging/*.apk
+          retention-days: 90
+
+      - name: Record signed Android artifact availability
+        id: android-artifacts
+        if: always()
+        env:
+          SIGNING_AVAILABLE: ${{ steps.android-signing.outputs.available }}
+          UPLOAD_OUTCOME: ${{ steps.upload-android-artifacts.outcome }}
+        run: |
+          if [ "$SIGNING_AVAILABLE" = 'true' ] && [ "$UPLOAD_OUTCOME" = 'success' ]; then
+            echo 'available=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+          fi
+
   release-shell:
     name: Create Shell Release
-    needs: [resolve-shell-ref, build-shell]
+    needs: [resolve-shell-ref, build-shell, build-android]
+    if: ${{ always() && needs.resolve-shell-ref.result == 'success' && needs.build-shell.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
     env:
       SHELL_TAG: ${{ needs.resolve-shell-ref.outputs.release_tag }}
       SHELL_VERSION: ${{ needs.resolve-shell-ref.outputs.shell_version }}
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download Linux shell artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          path: artifacts
+          name: shell-tauri-linux
+          path: artifacts/shell-tauri-linux
+
+      - name: Download macOS shell artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: shell-tauri-macos
+          path: artifacts/shell-tauri-macos
+
+      - name: Download Windows shell artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: shell-tauri-windows
+          path: artifacts/shell-tauri-windows
 
       - name: Generate updater manifest
         run: |
@@ -357,7 +604,6 @@ jobs:
           LINUX_PAYLOAD=$(first_match "artifacts/shell-tauri-linux/Phase-Desktop-Linux-x86_64.AppImage")
           MACOS_PAYLOAD=$(first_match "artifacts/shell-tauri-macos/Phase-Desktop-macOS-Apple-Silicon.app.tar.gz")
           WINDOWS_PAYLOAD=$(first_match "artifacts/shell-tauri-windows/Phase-Desktop-Windows-x64-Setup.exe")
-
           LINUX_SIG=""
           MACOS_SIG=""
           WINDOWS_SIG=""
@@ -382,20 +628,26 @@ jobs:
           echo "{\"version\":\"${SHELL_VERSION}\",\"notes\":\"Shell release ${TAG}\",\"pub_date\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"platforms\":${PLATFORMS}}" \
             | jq . > artifacts/update.json
           test -s artifacts/update.json
+          test "$(jq -r '.platforms | keys | sort | join(",")' artifacts/update.json)" = 'darwin-aarch64,linux-x86_64,windows-x86_64'
+          ! grep -qi 'android' artifacts/update.json
 
       - name: Create shell release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ env.SHELL_TAG }}
-          name: Phase Desktop v${{ env.SHELL_VERSION }}
+          name: phase.rs Desktop v${{ env.SHELL_VERSION }}
+          # The installer is the only thing a human comes to /releases for, so
+          # it holds the "Latest" badge; web releases opt out (release.yml).
+          make_latest: "true"
           body: |
-            ## Install Phase Desktop
+            ## Install phase.rs Desktop
 
             Download the installer for your platform:
 
             - **Windows:** `Phase-Desktop-Windows-x64-Setup.exe`
             - **macOS (Apple Silicon):** `Phase-Desktop-macOS-Apple-Silicon.dmg`
             - **Linux:** `Phase-Desktop-Linux-x86_64.deb` or `Phase-Desktop-Linux-x86_64.AppImage`
+            - **Android:** ARM64 and ARMv7 APKs are attached when release signing is configured.
 
             This is the official desktop app for [phase-rs.dev](https://phase-rs.dev).
             `update.json` is used by automatic updates; it is not a manual download.
@@ -407,3 +659,21 @@ jobs:
             artifacts/shell-tauri-macos/Phase-Desktop-macOS-Apple-Silicon.app.tar.gz
             artifacts/shell-tauri-windows/Phase-Desktop-Windows-x64-Setup.exe
             artifacts/update.json
+
+      - name: Download signed Android APKs
+        if: needs.build-android.outputs.apk_available == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: shell-tauri-android
+          path: artifacts/shell-tauri-android
+
+      - name: Attach signed Android APKs
+        if: needs.build-android.outputs.apk_available == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "$SHELL_TAG" \
+            artifacts/shell-tauri-android/Phase-Android-ARM64.apk \
+            artifacts/shell-tauri-android/Phase-Android-ARMv7.apk \
+            --clobber

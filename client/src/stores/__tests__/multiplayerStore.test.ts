@@ -31,15 +31,22 @@ import {
   FORMAT_DEFAULTS,
   isServerCompatible,
   migrateOfficialServerAddress,
+  migratePersistedMultiplayerState,
   type HostingSettings,
   useMultiplayerStore,
 } from "../multiplayerStore";
-import { PROTOCOL_VERSION, type ServerInfo } from "../../adapter/ws-adapter";
+import {
+  LOBBY_PROTOCOL_VERSION,
+  PROTOCOL_VERSION,
+  type ServerInfo,
+} from "../../adapter/ws-adapter";
+import { DEFAULT_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import {
   clearWsSession,
   loadWsSession,
   saveWsSession,
 } from "../../services/multiplayerSession";
+import { openPhaseSocket, withReconnect } from "../../services/openPhaseSocket";
 
 const p2pMocks = vi.hoisted(() => ({
   hostDestroy: vi.fn(),
@@ -49,6 +56,17 @@ const p2pMocks = vi.hoisted(() => ({
   startPregameGame: vi.fn(async () => undefined),
   getPlayerSlots: vi.fn(() => []),
   dispose: vi.fn(),
+}));
+
+const brokerMocks = vi.hoisted(() => ({
+  openBrokerClient: vi.fn(),
+  registerHost: vi.fn(async () => ({
+    gameCode: "ABCDE",
+    playerToken: "host-token",
+  })),
+  updateMetadata: vi.fn(),
+  unregister: vi.fn(async () => undefined),
+  close: vi.fn(),
 }));
 
 const socketMocks = vi.hoisted(() => ({
@@ -84,6 +102,10 @@ vi.mock("../../adapter/p2p-adapter", () => ({
       dispose: p2pMocks.dispose,
     };
   }),
+}));
+
+vi.mock("../../services/brokerClient", () => ({
+  openBrokerClient: brokerMocks.openBrokerClient,
 }));
 
 vi.mock("../../services/openPhaseSocket", () => ({
@@ -141,6 +163,13 @@ describe("multiplayerStore", () => {
   beforeEach(() => {
     useMultiplayerStore.getState().cancelHosting();
     vi.clearAllMocks();
+    brokerMocks.openBrokerClient.mockResolvedValue({
+      serverInfo: { mode: "LobbyOnly", protocolVersion: 14 },
+      registerHost: brokerMocks.registerHost,
+      updateMetadata: brokerMocks.updateMetadata,
+      unregister: brokerMocks.unregister,
+      close: brokerMocks.close,
+    });
     socketMocks.currentWs = null;
     localStorageItems.clear();
     clearWsSession();
@@ -160,18 +189,91 @@ describe("multiplayerStore", () => {
     expect(id2).toBe(id1);
   });
 
-  it("keeps LobbyOnly compatibility to the derived one-version rollout window", () => {
-    const server = (mode: ServerInfo["mode"], protocolVersion: number): ServerInfo => ({
-      version: "test",
-      buildCommit: "test",
-      mode,
-      protocolVersion,
-    });
+  const server = (
+    mode: ServerInfo["mode"],
+    protocolVersion: number,
+    lobbyProtocolVersion?: number,
+  ): ServerInfo => ({
+    version: "test",
+    buildCommit: "test",
+    mode,
+    protocolVersion,
+    lobbyProtocolVersion,
+  });
 
+  // LEGACY PATH: brokers that advertise no lobby version keep the derived
+  // one-version window, so already-deployed brokers stay reachable.
+  it("keeps LobbyOnly compatibility to the derived one-version rollout window", () => {
     expect(isServerCompatible(server("LobbyOnly", PROTOCOL_VERSION))).toBe(true);
     expect(isServerCompatible(server("LobbyOnly", PROTOCOL_VERSION - 1))).toBe(true);
     expect(isServerCompatible(server("LobbyOnly", PROTOCOL_VERSION - 2))).toBe(false);
     expect(isServerCompatible(server("Full", PROTOCOL_VERSION - 1))).toBe(false);
+  });
+
+  it("judges a lobby broker by its lobby version, not its full-game version", () => {
+    // The badge must agree with the handshake: a broker whose full-game number
+    // is many bumps stale is still fully usable when the lobby surface matches.
+    expect(
+      isServerCompatible(
+        server("LobbyOnly", PROTOCOL_VERSION - 9, LOBBY_PROTOCOL_VERSION),
+      ),
+    ).toBe(true);
+    // No ceiling — a newer broker must not strand this client.
+    expect(
+      isServerCompatible(
+        server("LobbyOnly", PROTOCOL_VERSION, LOBBY_PROTOCOL_VERSION + 5),
+      ),
+    ).toBe(true);
+    // The floor still bites.
+    expect(
+      isServerCompatible(
+        server("LobbyOnly", PROTOCOL_VERSION, LOBBY_PROTOCOL_VERSION - 1),
+      ),
+    ).toBe(false);
+    // Full servers ignore the lobby field entirely.
+    expect(
+      isServerCompatible(server("Full", PROTOCOL_VERSION - 1, LOBBY_PROTOCOL_VERSION)),
+    ).toBe(false);
+  });
+
+  // Guards the wiring, not the window: `serverProtocolRejection` can be
+  // surface-aware and the lobby still unreachable if the one socket that
+  // browses it forgets to say which surface it is on.
+  it("opens the shared subscription socket on the lobby surface", async () => {
+    const socket = {
+      serverInfo: {
+        version: "test",
+        buildCommit: "test",
+        mode: "Full" as const,
+        protocolVersion: PROTOCOL_VERSION - 2,
+        lobbyProtocolVersion: LOBBY_PROTOCOL_VERSION,
+      },
+      ws: { readyState: 1, addEventListener: vi.fn(), removeEventListener: vi.fn(), send: vi.fn() },
+      close: vi.fn(),
+    };
+    vi.mocked(withReconnect).mockImplementationOnce((factory, opts) => {
+      let current: Awaited<ReturnType<typeof factory>> | null = null;
+      // The real implementation notifies from an async continuation, after it
+      // has returned the handle the store stores. Reproduce that ordering —
+      // notifying synchronously would find no handle to read `current()` from.
+      void (async () => {
+        current = await factory(0);
+        opts?.onStateChange?.("open");
+      })();
+      return { current: () => current, close: vi.fn() };
+    });
+    vi.mocked(openPhaseSocket).mockResolvedValueOnce(
+      socket as unknown as Awaited<ReturnType<typeof openPhaseSocket>>,
+    );
+
+    const opened = await useMultiplayerStore.getState().ensureSubscriptionSocket();
+
+    expect(opened).toBe(socket);
+    expect(openPhaseSocket).toHaveBeenCalledWith(
+      "ws://localhost:8787",
+      expect.objectContaining({ surface: "lobby" }),
+    );
+    useMultiplayerStore.getState().closeSubscriptionSocket();
   });
 
   it("persists displayName across store resets", () => {
@@ -228,6 +330,52 @@ describe("multiplayerStore", () => {
     ).toBe("wss://play.example.com/ws");
   });
 
+  // Every channel's broker is an official host. A returning preview browser
+  // holds a persisted PRODUCTION address, and detectServerUrl honours any
+  // stored address whose /health answers — production's does — so without this
+  // it stays pinned to a lobby its build cannot handshake with.
+  it("migrates the other channel's official lobby to this build's default", () => {
+    expect(
+      migrateOfficialServerAddress(
+        "wss://lobby.phase-rs.dev/ws",
+        "wss://lobby-preview.phase-rs.dev/ws",
+      ),
+    ).toBe("wss://lobby-preview.phase-rs.dev/ws");
+    expect(
+      migrateOfficialServerAddress(
+        "wss://lobby-preview.phase-rs.dev/ws",
+        "wss://lobby.phase-rs.dev/ws",
+      ),
+    ).toBe("wss://lobby.phase-rs.dev/ws");
+  });
+
+  it("re-runs the official-address migration for v2 stores (v2 -> v3)", () => {
+    expect(
+      migratePersistedMultiplayerState(
+        { serverAddress: "wss://lobby.phase-rs.dev/ws" },
+        2,
+      ),
+    ).toEqual({ serverAddress: DEFAULT_MULTIPLAYER_SERVER_URL });
+  });
+
+  it("leaves a user-typed address alone across the v3 migration", () => {
+    expect(
+      migratePersistedMultiplayerState(
+        { serverAddress: "wss://play.example.com/ws" },
+        2,
+      ),
+    ).toEqual({ serverAddress: "wss://play.example.com/ws" });
+  });
+
+  it("does not re-migrate a store already at v3", () => {
+    expect(
+      migratePersistedMultiplayerState(
+        { serverAddress: "wss://lobby.phase-rs.dev/ws" },
+        3,
+      ),
+    ).toEqual({ serverAddress: "wss://lobby.phase-rs.dev/ws" });
+  });
+
   it("strips AI seats from team-based server host settings", async () => {
     useMultiplayerStore.getState().startHosting(
       hostingSettings({
@@ -280,11 +428,13 @@ describe("multiplayerStore", () => {
     emitServerMessage("GameCreated", {
       game_code: "ABCDE",
       player_token: "host-token",
+      full_key: { game_code: "ABCDE", generation: 1 },
     });
 
     expect(loadWsSession()).toMatchObject({
       gameCode: "ABCDE",
       playerToken: "host-token",
+      fullKey: { game_code: "ABCDE", generation: 1 },
       serverUrl: "ws://localhost:8787",
       hostIsPublic: true,
       hostSession: {
@@ -299,6 +449,7 @@ describe("multiplayerStore", () => {
     saveWsSession({
       gameCode: "ABCDE",
       playerToken: "host-token",
+      fullKey: { game_code: "ABCDE", generation: 1 },
       serverUrl: "ws://localhost:8787",
       timestamp: Date.now(),
       hostIsPublic: true,
@@ -317,6 +468,7 @@ describe("multiplayerStore", () => {
       data: {
         game_code: "ABCDE",
         player_token: "host-token",
+        full_key: { game_code: "ABCDE", generation: 1 },
       },
     });
 
@@ -327,6 +479,7 @@ describe("multiplayerStore", () => {
     emitServerMessage("GameCreated", {
       game_code: "ABCDE",
       player_token: "host-token",
+      full_key: { game_code: "ABCDE", generation: 1 },
     });
     emitServerMessage("PlayerSlotsUpdate", { slots });
 
@@ -349,6 +502,7 @@ describe("multiplayerStore", () => {
     saveWsSession({
       gameCode: "ABCDE",
       playerToken: "host-token",
+      fullKey: { game_code: "ABCDE", generation: 1 },
       serverUrl: "ws://localhost:8787",
       timestamp: Date.now(),
     });
@@ -370,6 +524,7 @@ describe("multiplayerStore", () => {
     emitServerMessage("GameCreated", {
       game_code: "ABCDE",
       player_token: "host-token",
+      full_key: { game_code: "ABCDE", generation: 1 },
     });
 
     emitServerMessage("GameStarted", {});
@@ -377,6 +532,7 @@ describe("multiplayerStore", () => {
     expect(loadWsSession()).toMatchObject({
       gameCode: "ABCDE",
       playerToken: "host-token",
+      fullKey: { game_code: "ABCDE", generation: 1 },
       serverUrl: "ws://localhost:8787",
     });
     expect(loadWsSession()?.hostSession).toBeUndefined();
@@ -439,6 +595,28 @@ describe("multiplayerStore", () => {
     expect(p2pMocks.applySeatMutation).not.toHaveBeenCalled();
   });
 
+  it.each([false, true])(
+    "uses the P2P host visibility setting when listing in the broker: %s",
+    async (isPublic) => {
+      const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+        hostingSettings({ public: isPublic }),
+        {
+          main_deck: ["Forest"],
+          sideboard: [],
+          commander: ["Goreclaw, Terror of Qal Sisma"],
+        },
+        { useBroker: true },
+      );
+
+      expect(ok).toBe(true);
+      expect(useMultiplayerStore.getState().hostIsPublic).toBe(isPublic);
+      expect(brokerMocks.registerHost).toHaveBeenCalledOnce();
+      expect(brokerMocks.registerHost).toHaveBeenCalledWith(
+        expect.objectContaining({ public: isPublic }),
+      );
+    },
+  );
+
   it("removes open P2P seats in order before starting with current players", async () => {
     const ok = await useMultiplayerStore.getState().startP2PHostingSession(
       hostingSettings(),
@@ -471,6 +649,56 @@ describe("multiplayerStore", () => {
     });
     expect(p2pMocks.startNow).toHaveBeenCalledOnce();
     expect(p2pMocks.startPregameGame).toHaveBeenCalledOnce();
+  });
+
+  it("transfers a started P2P host to the game route exactly once", async () => {
+    useMultiplayerStore.setState({ activePlayerId: 2 });
+    const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+      hostingSettings(),
+      {
+        main_deck: ["Forest"],
+        sideboard: [],
+        commander: ["Goreclaw, Terror of Qal Sisma"],
+      },
+      { useBroker: false },
+    );
+    expect(ok).toBe(true);
+
+    await useMultiplayerStore.getState().startLobbyWithCurrentPlayers();
+    const route = useMultiplayerStore.getState().pendingGameRoute;
+    expect(route).toMatch(/^\/game\/[^?]+\?mode=p2p-host$/);
+    expect(useMultiplayerStore.getState().activePlayerId).toBe(0);
+    const gameId = route!.slice("/game/".length, -"?mode=p2p-host".length);
+
+    // A different route cannot steal the active host; the correct route can
+    // still claim it afterwards.
+    expect(useMultiplayerStore.getState().takeActiveP2PHost("different-game")).toBeNull();
+    const adapter = useMultiplayerStore.getState().takeActiveP2PHost(gameId);
+    expect(adapter).not.toBeNull();
+    expect(useMultiplayerStore.getState().takeActiveP2PHost(gameId)).toBeNull();
+
+    // The game route owns the transferred adapter. Lobby cancellation cannot
+    // dispose it before the route's own cleanup runs.
+    useMultiplayerStore.getState().cancelHosting();
+    expect(p2pMocks.dispose).not.toHaveBeenCalled();
+  });
+
+  it("does not assign the host seat until the P2P game has started", async () => {
+    const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+      hostingSettings(),
+      { main_deck: ["Forest"], sideboard: [], commander: [] },
+      { useBroker: false },
+    );
+    expect(ok).toBe(true);
+    useMultiplayerStore.setState({ activePlayerId: 2 });
+    p2pMocks.startPregameGame.mockRejectedValueOnce(new Error("start failed"));
+
+    await expect(useMultiplayerStore.getState().startLobbyWithCurrentPlayers()).rejects.toThrow(
+      "start failed",
+    );
+
+    expect(useMultiplayerStore.getState().activePlayerId).toBe(2);
+    expect(useMultiplayerStore.getState().pendingGameRoute).toBeNull();
   });
 
   it("reports a server host connection error instead of falling through to P2P", async () => {

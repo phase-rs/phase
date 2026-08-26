@@ -29,6 +29,7 @@ fn reflection_back_face() -> BackFaceData {
         power: Some(2),
         toughness: Some(2),
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: CardType {
             supertypes: vec![],
@@ -49,6 +50,7 @@ fn reflection_back_face() -> BackFaceData {
         casting_restrictions: vec![],
         casting_options: vec![],
         layout_kind: None,
+        parse_warnings: vec![],
     }
 }
 
@@ -58,6 +60,7 @@ fn etching_back_face() -> BackFaceData {
         power: Some(2),
         toughness: Some(2),
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: CardType {
             supertypes: vec![],
@@ -78,6 +81,7 @@ fn etching_back_face() -> BackFaceData {
         casting_restrictions: vec![],
         casting_options: vec![],
         layout_kind: None,
+        parse_warnings: vec![],
     }
 }
 

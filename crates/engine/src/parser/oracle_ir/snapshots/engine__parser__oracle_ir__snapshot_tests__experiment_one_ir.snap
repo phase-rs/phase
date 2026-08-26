@@ -22,22 +22,13 @@ expression: "&ir"
         "fragment": "Evolve (Whenever a creature you control enters, if that creature has greater power or toughness than ~, put a +1/+1 counter on ~.)"
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "Unimplemented",
-            "name": "unknown",
+        "Unsupported": {
+          "unsupported": {
+            "category": "Unknown",
+            "fragment": "Evolve",
             "description": "Evolve"
           },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": "Evolve",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "min_x_value": 0
         }
       }
     },
@@ -59,32 +50,91 @@ expression: "&ir"
         "fragment": "Remove two +1/+1 counters from ~: Regenerate it. (The next time ~ would be destroyed this turn, instead tap it, remove it from combat, and heal all damage on it.)"
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "Regenerate",
-            "target": {
-              "type": "ParentTarget"
-            }
+        "Spell": {
+          "source_text": "Regenerate it",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 13,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Regenerate it"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Regenerate",
+                    "target": {
+                      "type": "ParentTarget"
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": null,
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              }
+            ],
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
           },
-          "cost": {
-            "type": "RemoveCounter",
-            "count": 2,
-            "counter_type": {
-              "type": "OfType",
-              "data": "P1P1"
+          "shell": {
+            "sub_link": null,
+            "cost": {
+              "type": "RemoveCounter",
+              "count": 2,
+              "counter_type": {
+                "type": "OfType",
+                "data": "P1P1"
+              },
+              "target": null,
+              "selection": "SingleObject"
             },
-            "target": null,
-            "selection": "SingleObject"
+            "description": "Remove two +1/+1 counters from ~: Regenerate it.",
+            "stages": [
+              "NormalizeActivatedManaInstead",
+              "ExtractCostReduction",
+              "ExtractManaSpendTrigger"
+            ]
           },
-          "sub_ability": null,
-          "duration": null,
-          "description": "Remove two +1/+1 counters from ~: Regenerate it.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "die_results": [],
+          "root_transforms": []
         }
       }
     }

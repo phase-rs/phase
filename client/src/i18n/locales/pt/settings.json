@@ -29,6 +29,7 @@
     "logDefault": "Registro Padrão",
     "spellPayment": "Pagamento de Mágicas",
     "manualManaPayment": "Pagamento manual de mana para mágicas",
+    "spellPaymentOptions": { "auto": "Automático", "autoExceptSacrificialMana": "Perguntar antes de sacrificar", "manual": "Manual" },
     "nativeEngine": "Usar o motor nativo para partidas locais e multijogador hospedado",
     "nativeEngineDescription": "Use o motor baixado para partidas locais contra IA e partidas hospedadas por você em um lobby. Os convidados continuam a se conectar pela conexão ponto a ponto do lobby. Usa o motor integrado quando não está disponível.",
     "boardBackground": "Plano de Fundo do Tabuleiro",
@@ -69,6 +70,7 @@
     "showOpponentBoard": "Mostrar o tabuleiro do oponente ao passar o mouse sobre o HUD",
     "multiplayerBoardLayout": "Layout do campo multijogador",
     "multiplayerBoardLayoutOptions": {
+      "auto": "Automático",
       "focused": "Oponente em foco",
       "split": "Mesa dividida"
     },
@@ -166,9 +168,10 @@
     "lastSynced": "Última sincronização {{time}}",
     "never": "nunca",
     "conflictTitle": "Ambas as cópias têm alterações",
-    "conflictBody": "Este dispositivo e a sua conta na nuvem têm dados e não conseguimos determinar qual está atualizada. Escolha qual cópia manter; a outra será substituída.",
+    "conflictBody": "Este dispositivo e a sua conta na nuvem têm dados e não conseguimos determinar qual está atualizada. Escolha uma cópia ou mantenha ambas as coleções de decks.",
     "keepCloud": "Usar a nuvem",
     "keepLocal": "Manter este dispositivo",
+    "keepBothDecks": "Manter ambas as coleções de decks",
     "savesNote": "Os jogos guardados e as caches permanecem neste dispositivo.",
     "diffDecks": "Decks: {{added}} adicionados, {{modified}} alterados, {{removed}} removidos",
     "diffPrefs": "As preferências diferem",

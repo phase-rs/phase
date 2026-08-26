@@ -227,6 +227,21 @@ describe("DialogHost", () => {
     expect(wrapper?.style.pointerEvents).toBe("none");
   });
 
+  it.each([
+    { type: "UntapChoice", data: { player: 0, candidates: [1] } },
+    { type: "ChooseUntapSubset", data: { player: 0, group: [1, 2], max: 1 } },
+  ] as const)("anchors native $type board choices but leaves them click-through", (waitingFor) => {
+    setWaitingFor(waitingFor as never);
+    const { container } = render(
+      <DialogHost>
+        <div data-testid="child" />
+      </DialogHost>,
+    );
+    const wrapper = container.firstElementChild as HTMLElement | null;
+    expect(wrapper?.className ?? "").toMatch(/fixed/);
+    expect(wrapper?.style.pointerEvents).toBe("none");
+  });
+
   it("anchors ward sacrifice choices but leaves them click-through", () => {
     setWaitingFor({
       type: "WardSacrificeChoice",
@@ -246,6 +261,29 @@ describe("DialogHost", () => {
     expect(wrapper?.className ?? "").toMatch(/fixed/);
     expect(wrapper?.className ?? "").toMatch(/z-40/);
     expect(wrapper?.style.pointerEvents).toBe("none");
+  });
+
+  it("keeps all-target retarget dialogs interactive", () => {
+    // CR 115.7: a single target is selected on the battlefield, but an `All`
+    // retarget uses RetargetChoiceModal. The host must not make that modal's
+    // target cards and Confirm button inherit `pointer-events: none`.
+    setWaitingFor({
+      type: "RetargetChoice",
+      data: {
+        player: 0,
+        stack_entry_index: 0,
+        scope: { type: "All" },
+        current_targets: [{ Object: 71 }],
+        legal_new_targets: [{ Object: 27 }, { Object: 43 }],
+      },
+    });
+    const { container } = render(
+      <DialogHost>
+        <div data-testid="retarget-modal" />
+      </DialogHost>,
+    );
+    const wrapper = container.firstElementChild as HTMLElement | null;
+    expect(wrapper?.style.pointerEvents).not.toBe("none");
   });
 
   it("resets peek to false when WaitingFor changes (regression)", () => {

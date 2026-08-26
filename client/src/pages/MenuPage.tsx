@@ -7,7 +7,7 @@ import { useAudioContext } from "../audio/useAudioContext";
 import { PreviewBadge } from "../components/chrome/PreviewBadge";
 import { LoadGameStateModal } from "../components/menu/LoadGameStateModal";
 import { HomeDashboard } from "../components/menu/home/HomeDashboard";
-import { isTauri } from "../services/platform";
+import { isDesktopTauri } from "../services/platform";
 import { buildLegalAiDeckCatalog } from "../services/aiDeckCatalog";
 import { saveActiveGame, saveGame, useGameStore } from "../stores/gameStore";
 import { useCardDataStore } from "../stores/cardDataStore";
@@ -81,7 +81,7 @@ export function MenuPage() {
           {t("home.alpha.message")}
         </div>
 
-        {isTauri() && (
+        {isDesktopTauri() && (
           <button
             onClick={() => {
               import("@tauri-apps/plugin-process").then((m) => m.exit(0));

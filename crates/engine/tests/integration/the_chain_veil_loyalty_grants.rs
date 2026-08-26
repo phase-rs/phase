@@ -27,8 +27,8 @@ use engine::game::planeswalker;
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CopyCountStatus, Effect, QuantityExpr,
-    QuantityModification, ReplacementDefinition, ResolvedAbility, SubAbilityLink, TargetFilter,
-    TargetRef, TargetSelectionMode,
+    QuantityModification, ReplacementDefinition, ResolvedAbility, SiblingCondition, SubAbilityLink,
+    TargetFilter, TargetRef, TargetSelectionMode,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -143,6 +143,7 @@ fn install_competing_counter_addition_replacements(state: &mut GameState) {
 
 fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility {
     ResolvedAbility {
+        detached_remainder: engine::types::ability::DetachedRemainder::NoProducer,
         effect: Effect::GrantExtraLoyaltyActivations {
             amount: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Controller,
@@ -155,6 +156,9 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         source_incarnation: None,
         trigger_source: None,
         trigger_definition_ref: None,
+        force_block_attacker: None,
+        target_incarnations: Vec::new(),
+        selected_target_incarnations: Vec::new(),
         targets: vec![],
         kind: AbilityKind::Activated,
         sub_ability: None,
@@ -165,16 +169,19 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         replacement_applied: Default::default(),
         optional_targeting: false,
         optional: false,
+        optional_player: None,
         optional_for: None,
         multi_target: None,
         target_constraints: Vec::new(),
         target_choice_timing: engine::types::ability::TargetChoiceTiming::Stack,
         description: None,
         selected_mode_labels: Vec::new(),
+        modal_instruction_ordinal: None,
         player_scope: None,
         starting_with: None,
         chosen_x: None,
         cost_paid_object: None,
+        noted_mana_payment: None,
         cost_paid_object_ids: Vec::new(),
         effect_context_object: None,
         amassed_army_object: None,
@@ -188,10 +195,12 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         forward_result: false,
         unless_pay: None,
         distribution: None,
+        distribute: None,
         target_selection_mode: TargetSelectionMode::Chosen,
         chosen_players: Vec::new(),
         repeat_until: None,
         sub_link: SubAbilityLink::ContinuationStep,
+        sibling_condition: SiblingCondition::Dependent,
         modal: None,
         mode_abilities: vec![],
         parent_target_missing_reason: None,

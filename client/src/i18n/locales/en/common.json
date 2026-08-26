@@ -5,11 +5,22 @@
     "close": "Close",
     "closeNamed": "Close {{name}}"
   },
+  "quantityRef": {
+    "highestNumber": "the highest number",
+    "lowestNumber": "the lowest number",
+    "chosenNumber": "the chosen number"
+  },
+  "scryOutcome": {
+    "title": "Scry complete",
+    "you": "You",
+    "result": "{{player}} — {{top}} on top · {{bottom}} on bottom"
+  },
   "modal": {
     "defaultEyebrow": "Workspace Tool"
   },
   "pausedBanner": {
-    "message": "Game paused — {{reason}}"
+    "message": "Game paused — {{reason}}",
+    "resume": "Resume"
   },
   "fullscreen": {
     "enter": "Enter fullscreen",
@@ -24,6 +35,14 @@
     "spawning": "Starting local server…",
     "ready": "Native engine ready",
     "failed": "Unable to prepare native engine"
+  },
+  "engineBadge": {
+    "native": "Native engine",
+    "nativeTooltip": "This game is running on the desktop app's native engine.",
+    "inBrowser": "In-browser engine",
+    "inBrowserTooltip": "Native engine unavailable — this game is running in-browser.",
+    "versionMismatchTooltip": "Native engine version mismatch — this game is running in-browser.",
+    "notAttemptedTooltip": "This game is running in-browser — the native engine wasn't used for it."
   },
   "buildBadge": {
     "downloading": "downloading… {{progress}}%",
@@ -40,7 +59,7 @@
     "updated": "updated"
   },
   "comboDetector": {
-    "label": "Combo Detector",
+    "label": "Combo Detector (experimental)",
     "title": "Detect infinite loops: end mandatory loops automatically and show ∞ resources (off by default)",
     "on": "On",
     "off": "Off",
@@ -66,10 +85,16 @@
     "boardLayoutLegacy": "Legacy",
     "switchToSplitView": "Switch to split table view",
     "switchToLegacyView": "Switch to legacy focused view",
+    "multiplayerSplitLayoutNudge": {
+      "message": "See every opponent at once with split table view.",
+      "trySplit": "Try split view",
+      "dismiss": "Not now"
+    },
     "helpShortcuts": "Help & Shortcuts",
     "showAiHand": "Show AI Hand",
     "hideAiHand": "Hide AI Hand",
     "requestTakeback": "Request Takeback",
+    "undoLastAction": "Undo Last Action",
     "concede": "Concede",
     "backToDraft": "Back to Draft",
     "mainMenu": "Main Menu",
@@ -77,6 +102,7 @@
     "cardDataTitle": "Card data: {{date}}"
   },
   "volume": {
+    "deviceBlocked": "Audio unavailable — system audio server is not responding. Restart the app to retry.",
     "mute": "Mute",
     "unmute": "Unmute",
     "volume": "Volume"
@@ -257,7 +283,13 @@
     "youPlayFirst": "You play first",
     "playerPlaysFirst": "{{name}} plays first",
     "heads": "Heads",
-    "tails": "Tails"
+    "tails": "Tails",
+    "coinFlip": "Coin flip",
+    "wonCoinFlip": "{{name}} won the flip",
+    "lostCoinFlip": "{{name}} lost the flip",
+    "turnOrder": "Turn order",
+    "turnOrderItem": "Turn {{turn}}: {{name}}",
+    "youTakeTurn": "You take turn {{turn}}"
   },
   "chrome": {
     "back": "Back",

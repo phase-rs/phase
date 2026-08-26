@@ -15,6 +15,10 @@ use engine::types::zones::Zone;
 
 use super::context::PolicyContext;
 
+/// Player-impact magnitude above which target selection has a directional
+/// preference rather than falling back to the spell's broader polarity.
+pub(crate) const PLAYER_IMPACT_PREFERENCE_BAND: f64 = 0.25;
+
 /// Three-valued polarity: whether an effect benefits or harms its target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EffectPolarity {
@@ -72,6 +76,16 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         Effect::PutCounter { counter_type, .. } | Effect::PutCounterAll { counter_type, .. } => {
             counter_sign_polarity(counter_type)
         }
+        // CR 122.1: the reproduced counter KIND is event-derived at resolution —
+        // there is no static `counter_type` to sign, and the triggering event can
+        // carry a harmful kind (e.g. -1/-1). The `target` is also not necessarily
+        // self: Aragorn, Company Leader reproduces onto "up to one OTHER target
+        // creature", so the effect can land on a creature the controller does not
+        // want buffed/debuffed. Neither the sign nor the recipient is knowable
+        // until the policy holds the selected target and the triggering multiset,
+        // so classify as Contextual and let the call site (e.g. anti_self_harm)
+        // inspect both rather than assuming a self-buff.
+        Effect::ReproduceEventCounters { .. } => EffectPolarity::Contextual,
         // CR 122.1 + CR 121: Removing counters inverts the placement polarity —
         // removing a +1/+1 counter harms the bearer, removing a -1/-1 counter
         // helps it (Hexcaster's Mark, Solemnity-style interactions, Vampire
@@ -136,7 +150,14 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::SearchLibrary { .. }
         | Effect::Surveil { .. }
         | Effect::Connive { .. }
-        | Effect::BecomeMonarch
+        // CR 725.1 + CR 725.2: the monarch draws an extra card each turn, so
+        // crowning YOURSELF is beneficial. Crowning someone else ("target
+        // opponent becomes the monarch") hands that advantage away and is NOT,
+        // so every other subject scope falls through to the `Contextual`
+        // catch-all rather than inheriting this arm.
+        | Effect::BecomeMonarch {
+            target: TargetFilter::Controller,
+        }
         | Effect::ExtraTurn { .. } => EffectPolarity::Beneficial,
         // CR 701.26a: tapping a single permanent is harmful (denies its use).
         // The mass (`All`) scope is left Contextual via the catch-all, matching
@@ -244,6 +265,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::ChooseFromZone { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseOneOf { .. }
+        | Effect::ChoosePermanent { .. }
         | Effect::Clash
         | Effect::Cleanup { .. }
         | Effect::Cloak { .. }
@@ -282,12 +304,14 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::ExileHaunting { .. }
         | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
         | Effect::Exploit { .. }
         | Effect::ExploreAll { .. }
         | Effect::FlipCoin { .. }
         | Effect::FlipCoins { .. }
         | Effect::FlipCoinUntilLose { .. }
         | Effect::Forage
+        | Effect::CompletePlayerAction { .. }
         | Effect::ForceAttack { .. }
         | Effect::ForEachCategory { .. }
         | Effect::FreeCastFromZones { .. }
@@ -315,6 +339,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::Monstrosity { .. }
         | Effect::Myriad
         | Effect::NoOp
+        | Effect::NoteManaSpent
         | Effect::OpenAttractions { .. }
         | Effect::OpponentGuess { .. }
         | Effect::PairWith { .. }
@@ -337,9 +362,19 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::RememberCard { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
+        // CR 725.1: crowning a player OTHER than yourself ("target opponent
+        // becomes the monarch"). Whether handing out the designation helps you
+        // is card-specific — Jared Carthalion wants an opponent crowned so it
+        // can take it back — so it is Contextual, never the `Beneficial` arm
+        // above, which is scoped to `PlayerScope::Controller`.
+        | Effect::BecomeMonarch { .. }
         | Effect::Renown { .. }
         | Effect::ReturnAsAura { .. }
         | Effect::Reveal { .. }
+        // CR 101.4: publishing already-chosen numbers moves no card and changes
+        // no board state, so it is neither good nor bad on its own — the damage
+        // and wheel clauses that READ those numbers carry the polarity.
+        | Effect::RevealChosenNumbers { .. }
         | Effect::RevealFromHand { .. }
         | Effect::RevealHand { .. }
         | Effect::RevealTop { .. }
@@ -368,6 +403,9 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::TargetOnly { .. }
         | Effect::TimeTravel
         | Effect::Transform { .. }
+        // CR 710.4: like Transform, flipping swaps a permanent's characteristics
+        // wholesale — whether the alternative half is better is card-specific.
+        | Effect::FlipPermanent { .. }
         | Effect::Tribute { .. }
         | Effect::TurnFaceDown { .. }
         | Effect::TurnFaceUp { .. }
@@ -585,10 +623,10 @@ pub(crate) fn is_spell_beneficial(ctx: &PolicyContext<'_>) -> bool {
     }
 
     let player_impact = aggregate_player_impact(ctx);
-    if player_impact > 0.25 {
+    if player_impact > PLAYER_IMPACT_PREFERENCE_BAND {
         return true;
     }
-    if player_impact < -0.25 {
+    if player_impact < -PLAYER_IMPACT_PREFERENCE_BAND {
         return false;
     }
 
@@ -625,26 +663,44 @@ pub(crate) fn is_spell_beneficial(ctx: &PolicyContext<'_>) -> bool {
 }
 
 pub(crate) fn aggregate_player_impact(ctx: &PolicyContext<'_>) -> f64 {
-    ctx.effects()
-        .iter()
-        .map(|effect| player_impact(effect))
-        .sum()
+    aggregate_player_impact_in(&ctx.effects())
+}
+
+pub(crate) fn aggregate_player_impact_in(effects: &[&Effect]) -> f64 {
+    effects.iter().map(|effect| player_impact(effect)).sum()
 }
 
 pub(crate) fn targeted_player_impact(ctx: &PolicyContext<'_>, player: PlayerId) -> Option<f64> {
-    let source_controller = ctx.source_object().map(|object| object.controller);
+    let source = ctx.source_object();
+    targeted_player_impact_in(
+        ctx.state,
+        source.map(|object| object.controller),
+        source.map(|object| object.id),
+        &ctx.effects(),
+        player,
+    )
+}
+
+pub(crate) fn targeted_player_impact_in(
+    state: &GameState,
+    source_controller: Option<PlayerId>,
+    source_id: Option<ObjectId>,
+    effects: &[&Effect],
+    player: PlayerId,
+) -> Option<f64> {
     let mut found_targeted_effect = false;
     let mut impact = 0.0;
 
-    for effect in ctx.effects() {
+    for effect in effects {
         let Some(filter) = extract_target_filter(effect) else {
             continue;
         };
         if engine::game::filter::player_matches_target_filter_in_state(
-            ctx.state,
+            state,
             filter,
             player,
             source_controller,
+            source_id,
         ) {
             found_targeted_effect = true;
             impact += player_impact(effect);
@@ -1138,6 +1194,7 @@ mod grant_trigger_polarity_tests {
                 }])],
             target: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))),
             duration: None,
+            end_cost: None,
         }
     }
 

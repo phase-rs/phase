@@ -80,7 +80,10 @@
 //! QuantityRef ∩ ParsedCondition          = {BattlefieldEntriesThisTurn}
 //! QuantityRef ∩ ChooseFromZoneConstraint = {DistinctCardTypes}
 //! QuantityRef ∩ ManaCost                 = {SelfManaValue}
-//! QuantityRef ∩ ManaProduction           = {DistinctColorsAmongPermanents}
+//! QuantityRef ∩ ManaProduction           = {} (was {DistinctColorsAmongPermanents}
+//!                                          until the QuantityRef side was renamed
+//!                                          to DistinctColorsAmong; the two enums no
+//!                                          longer share a variant name)
 //! QuantityRef ∩ SolveCondition           = {ObjectCount}
 //! QuantityRef ∩ QuantityExpr             = {Power}
 //! ```
@@ -255,6 +258,14 @@ const DESCRIPTION_KEY: &str = "description";
 /// `"`), so the marker was blind to every damage-prevention shield's duration.
 const DURATION_KEYS: &[&str] = &["duration", "prevention_duration"];
 
+/// The JSON key at which a `WheneverEventExpiry`-typed field is serialized
+/// (`DelayedTriggerCondition::WheneverEvent.expiry`). Externally tagged, same
+/// anchoring requirement as [`DURATION_KEYS`]. The key `"expiry"` also carries
+/// `RestrictionExpiry` values elsewhere, but the two cannot be confused: only the
+/// `UntilControllersNextTurn` variant name is unique to `WheneverEventExpiry`, and
+/// a `RestrictionExpiry` value fails `WheneverEventExpiry::deserialize` for it.
+const WHENEVER_EVENT_EXPIRY_KEYS: &[&str] = &["expiry"];
+
 /// Every JSON key at which a `StaticMode`-typed field is serialized. Externally tagged,
 /// same anchoring requirement as [`DURATION_KEYS`].
 ///
@@ -296,7 +307,9 @@ const STATIC_MODE_KEYS: &[&str] = &["mode"];
 ///     QuantityRef ∩ ParsedCondition          BattlefieldEntriesThisTurn
 ///     QuantityRef ∩ ChooseFromZoneConstraint DistinctCardTypes
 ///     QuantityRef ∩ ManaCost                 SelfManaValue
-///     QuantityRef ∩ ManaProduction           DistinctColorsAmongPermanents
+///     QuantityRef ∩ ManaProduction           (was DistinctColorsAmongPermanents;
+///                                             now empty — the QuantityRef side is
+///                                             DistinctColorsAmong)
 ///     QuantityRef ∩ SolveCondition           ObjectCount
 ///     QuantityRef ∩ QuantityExpr             Power
 ///     ```
@@ -532,6 +545,16 @@ impl UnitEvidence {
         pred: impl Fn(&crate::types::ability::Duration) -> bool,
     ) -> bool {
         self.any_at(DURATION_KEYS, pred)
+    }
+
+    /// Does any `WheneverEventExpiry` carrier satisfy `pred`? Key-anchored per
+    /// [`WHENEVER_EVENT_EXPIRY_KEYS`]. A delayed `WheneverEvent`'s stated duration
+    /// ("until your next turn") lives here, not on a `Duration` slot.
+    pub(super) fn any_whenever_event_expiry(
+        &self,
+        pred: impl Fn(&crate::types::ability::WheneverEventExpiry) -> bool,
+    ) -> bool {
+        self.any_at(WHENEVER_EVENT_EXPIRY_KEYS, pred)
     }
 
     /// Does any `QuantityRef` carrier satisfy `pred`? Key-anchored per [`QUANTITY_KEYS`].

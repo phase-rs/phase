@@ -9,7 +9,7 @@ use crate::game::functioning_abilities::{
 use crate::game::game_object::GameObject;
 use crate::game::layers::{evaluate_condition, evaluate_condition_with_recipient};
 use crate::types::ability::{
-    ContinuousModification, ControllerRef, Duration, StaticDefinition, TargetFilter, TypedFilter,
+    ContinuousModification, ControllerRef, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -105,6 +105,7 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // Note: ReduceAbilityCost runtime checks are in game/keywords.rs::apply_ability_cost_reduction().
     registry.insert(StaticMode::CantGainLife, handle_rule_mod);
     registry.insert(StaticMode::CantLoseLife, handle_rule_mod);
+    registry.insert(StaticMode::UnspentManaLossCausesLifeLoss, handle_rule_mod);
     registry.insert(StaticMode::MustAttack, handle_rule_mod);
     registry.insert(StaticMode::MustBlock, handle_rule_mod);
     // Note: CantDraw is a data-carrying variant — runtime enforcement is in
@@ -196,7 +197,7 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // CR 508.1d + CR 701.15b: MustAttackAwayFromSource — the goad requirement
     // pair without the designation (Kardur, Doomscourge; Maximum Carnage I).
     // Nullary, so it is registry-keyable (unlike the data-carrying
-    // `MustAttackPlayer`). Runtime enforcement lives in combat.rs. The registry
+    // `MustAttackDefender`). Runtime enforcement lives in combat.rs. The registry
     // key is ALSO what keeps `coverage::unimplemented_mechanics` quiet for every
     // creature this grafts onto — it is load-bearing for the client, not
     // decoration.
@@ -845,15 +846,13 @@ pub(crate) fn transient_grants_static_mode_to_player(
         if affected_id != player_id {
             continue;
         }
-        if let Duration::ForAsLongAs { ref condition } = tce.duration {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
-        }
-        if let Some(ref condition) = tce.condition {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
+        // CR 611.2b + CR 611.3a: every gate of a resolution-created effect must
+        // hold for it to apply; `transient_gate_conditions` is the authority over
+        // which those are.
+        if !crate::game::layers::transient_gate_conditions(tce)
+            .all(|condition| evaluate_condition(state, condition, tce.controller, tce.source_id))
+        {
+            continue;
         }
         let grants_mode = tce.modifications.iter().any(|m| {
             matches!(m, ContinuousModification::AddStaticMode { mode: m_mode } if m_mode == mode)
@@ -893,15 +892,13 @@ pub(crate) fn transient_grants_static_mode_to_object(
         ) {
             continue;
         }
-        if let Duration::ForAsLongAs { ref condition } = tce.duration {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
-        }
-        if let Some(ref condition) = tce.condition {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
+        // CR 611.2b + CR 611.3a: every gate of a resolution-created effect must
+        // hold for it to apply; `transient_gate_conditions` is the authority over
+        // which those are.
+        if !crate::game::layers::transient_gate_conditions(tce)
+            .all(|condition| evaluate_condition(state, condition, tce.controller, tce.source_id))
+        {
+            continue;
         }
         let grants_mode = tce.modifications.iter().any(|m| {
             matches!(m, ContinuousModification::AddStaticMode { mode: m_mode } if m_mode == mode)
@@ -931,22 +928,12 @@ pub(crate) fn transient_grants_static_mode_to_object(
 /// deliberately skips); (2) any filter-scoped transient grant; and (3) a printed
 /// static (parity with the `CantUntap` intrinsic path, future-proofing).
 pub(crate) fn object_has_active_cant_phase_in(state: &GameState, object_id: ObjectId) -> bool {
-    let condition_holds = |duration: &Duration,
-                           condition: &Option<crate::types::ability::StaticCondition>,
-                           controller: PlayerId,
-                           source_id: ObjectId|
-     -> bool {
-        if let Duration::ForAsLongAs { condition } = duration {
-            if !evaluate_condition(state, condition, controller, source_id) {
-                return false;
-            }
-        }
-        if let Some(condition) = condition {
-            if !evaluate_condition(state, condition, controller, source_id) {
-                return false;
-            }
-        }
-        true
+    // CR 611.2b + CR 611.3a: every gate of a resolution-created effect must
+    // hold for it to apply; `transient_gate_conditions` is the authority over
+    // which those are.
+    let condition_holds = |tce: &crate::types::game_state::TransientContinuousEffect| {
+        crate::game::layers::transient_gate_conditions(tce)
+            .all(|condition| evaluate_condition(state, condition, tce.controller, tce.source_id))
     };
 
     // (1) SpecificObject-pinned transient grant — the Pandorica lock.
@@ -960,7 +947,7 @@ pub(crate) fn object_has_active_cant_phase_in(state: &GameState, object_id: Obje
                     }
                 )
             })
-            && condition_holds(&tce.duration, &tce.condition, tce.controller, tce.source_id)
+            && condition_holds(tce)
     });
     if pinned {
         return true;
@@ -1244,6 +1231,20 @@ pub fn player_has_cant_lose_life(state: &GameState, player_id: PlayerId) -> bool
                 .any(|teammate| life_lock_active_for(state, teammate, StaticMode::CantLoseLife)))
 }
 
+/// CR 106.4 + CR 119.3 + CR 604.1: Whether losing unspent mana causes this
+/// player to lose the same amount of life. This is an existence query so
+/// multiple active Yurlok-class statics do not multiply the result.
+pub fn player_unspent_mana_loss_causes_life_loss(state: &GameState, player_id: PlayerId) -> bool {
+    check_static_ability(
+        state,
+        StaticMode::UnspentManaLossCausesLifeLoss,
+        &StaticCheckContext {
+            player_id: Some(player_id),
+            ..Default::default()
+        },
+    )
+}
+
 /// CR 702.11b + CR 702.11e: Check if `player_id` may target creatures as though
 /// they didn't have hexproof, including "hexproof from [quality]" variants
 /// (CR 702.11e: an "as though it didn't have hexproof" effect also defeats
@@ -1464,15 +1465,13 @@ pub fn player_has_protection_from_everything(state: &GameState, player_id: Playe
             continue;
         }
         // CR 611.2b: ForAsLongAs durations re-evaluate their condition each cycle.
-        if let crate::types::ability::Duration::ForAsLongAs { ref condition } = tce.duration {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
-        }
-        if let Some(ref condition) = tce.condition {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
+        // CR 611.2b + CR 611.3a: every gate of a resolution-created effect must
+        // hold for it to apply; `transient_gate_conditions` is the authority over
+        // which those are.
+        if !crate::game::layers::transient_gate_conditions(tce)
+            .all(|condition| evaluate_condition(state, condition, tce.controller, tce.source_id))
+        {
+            continue;
         }
         let grants_everything = tce.modifications.iter().any(|m| {
             matches!(
@@ -1580,6 +1579,27 @@ pub fn player_protection_from(
     player_id: PlayerId,
     source: Option<ObjectId>,
 ) -> bool {
+    player_protection_from_object(
+        state,
+        player_id,
+        source.and_then(|id| state.objects.get(&id)),
+    )
+}
+
+/// CR 702.16 + CR 614.12: [`player_protection_from`] against an explicitly
+/// supplied source object.
+///
+/// Every source-side read in this authority is a characteristic read (card type
+/// for CR 702.16 + CR 205.2, controller for CR 702.16k), so a source that is not
+/// yet the object stored under its id — a meld or liminal ENTRANT, whose id still
+/// holds the pre-entry component — must be read from its projection instead of
+/// from `state.objects`. `None` means "no concrete source object", for which only
+/// the CR 702.16j `Everything` short-circuit can fire.
+pub fn player_protection_from_object(
+    state: &GameState,
+    player_id: PlayerId,
+    source: Option<&crate::game::game_object::GameObject>,
+) -> bool {
     use crate::game::keywords::source_matches_card_type;
     use crate::types::ability::ControllerRef;
     use crate::types::keywords::ProtectionTarget;
@@ -1588,7 +1608,7 @@ pub fn player_protection_from(
     if player_has_protection_from_everything(state, player_id) {
         return true;
     }
-    let Some(source_id) = source else {
+    let Some(source_obj) = source else {
         return false;
     };
     let context = StaticCheckContext {
@@ -1625,36 +1645,28 @@ pub fn player_protection_from(
                 ProtectionTarget::Everything => false,
                 // CR 702.16 + CR 205.2: protection from the card type
                 // chosen as the granting permanent (e.g. Serra's Emissary) entered.
-                ProtectionTarget::ChosenCardType => {
-                    state.objects.get(&source_id).is_some_and(|src| {
-                        src_obj
-                            .chosen_card_type()
-                            .and_then(|ct| ct.protection_quality_str())
-                            .is_some_and(|quality| source_matches_card_type(src, quality))
-                    })
-                }
+                ProtectionTarget::ChosenCardType => src_obj
+                    .chosen_card_type()
+                    .and_then(|ct| ct.protection_quality_str())
+                    .is_some_and(|quality| source_matches_card_type(source_obj, quality)),
                 // CR 702.16k: "Protection from [a player]" at the player level — the
                 // protected player has protection from each object the specified
                 // player(s) control. "Each of your opponents" (CR 702.16i) → the
                 // `Opponent` scope: any source NOT controlled by the protected
                 // player is an opponent's object in 1v1 and free-for-all. Mirrors the
                 // object-level arm in `game/keywords.rs::source_matches_protection_target`.
-                ProtectionTarget::FromPlayer(scope) => {
-                    state
-                        .objects
-                        .get(&source_id)
-                        .is_some_and(|src| match scope {
-                            ControllerRef::Opponent => src.controller != player_id,
-                            ControllerRef::You => src.controller == player_id,
-                            // Target/chosen player refs have no static context here —
-                            // fail closed (the parser never emits them for protection).
-                            _ => false,
-                        })
-                }
+                ProtectionTarget::FromPlayer(scope) => match scope {
+                    ControllerRef::Opponent => source_obj.controller != player_id,
+                    ControllerRef::You => source_obj.controller == player_id,
+                    // Target/chosen player refs have no static context here —
+                    // fail closed (the parser never emits them for protection).
+                    _ => false,
+                },
                 // Truly inert at the player level — no card grants these qualities to
                 // a player; object-level grants of these qualities flow through the
                 // `AddKeyword(Protection)` continuous path, not `PlayerProtection`.
                 ProtectionTarget::ChosenColor
+                | ProtectionTarget::ChosenPlayer
                 | ProtectionTarget::Color(_)
                 | ProtectionTarget::Multicolored
                 | ProtectionTarget::Quality(_)
@@ -1790,15 +1802,13 @@ fn transient_grants_other_static_to_context(
             continue;
         }
         // CR 611.2b: ForAsLongAs durations re-evaluate their condition each cycle.
-        if let Duration::ForAsLongAs { ref condition } = tce.duration {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
-        }
-        if let Some(ref condition) = tce.condition {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
+        // CR 611.2b + CR 611.3a: every gate of a resolution-created effect must
+        // hold for it to apply; `transient_gate_conditions` is the authority over
+        // which those are.
+        if !crate::game::layers::transient_gate_conditions(tce)
+            .all(|condition| evaluate_condition(state, condition, tce.controller, tce.source_id))
+        {
+            continue;
         }
         let grants_named_other = tce.modifications.iter().any(|m| {
             matches!(
@@ -1985,6 +1995,11 @@ pub(crate) fn static_filter_matches(
                         crate::types::ability::ControllerRef::ActivePlayer => {
                             state.active_player == player_id
                         }
+                        // CR 109.4 + CR 611.2: a snapshotted id, resolvable
+                        // directly (mirrors the ActivePlayer arm above).
+                        crate::types::ability::ControllerRef::SpecificPlayer { id } => {
+                            *id == player_id
+                        }
                     };
                 }
                 return true;
@@ -2084,15 +2099,13 @@ fn transient_additional_land_drops(state: &GameState, player: PlayerId) -> u8 {
             continue;
         }
         // CR 611.2b: ForAsLongAs durations re-evaluate their condition each cycle.
-        if let Duration::ForAsLongAs { ref condition } = tce.duration {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
-        }
-        if let Some(ref condition) = tce.condition {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
+        // CR 611.2b + CR 611.3a: every gate of a resolution-created effect must
+        // hold for it to apply; `transient_gate_conditions` is the authority over
+        // which those are.
+        if !crate::game::layers::transient_gate_conditions(tce)
+            .all(|condition| evaluate_condition(state, condition, tce.controller, tce.source_id))
+        {
+            continue;
         }
         for m in &tce.modifications {
             if let ContinuousModification::AddStaticMode { mode } = m {
@@ -3414,6 +3427,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -3424,7 +3438,10 @@ mod tests {
             PlayerId(0),
         ));
 
-        state.resolving_stack_entry = None;
+        crate::game::stack::finish_resolving_stack_entry(
+            &mut state,
+            crate::game::lifecycle::DelayedTerminalDisposition::Resolved,
+        );
         assert!(!triggered_cause_sacrifice_or_exile_muzzled(
             &state,
             &ability,

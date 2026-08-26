@@ -5,6 +5,7 @@ import type {
   ActiveSearchDecisionControls,
   GameEvent,
   ObjectIncarnationRef,
+  WaitingFor,
 } from "../types";
 
 describe("search-control wire types", () => {
@@ -49,6 +50,26 @@ describe("search-control wire types", () => {
     expect(searches["1"]?.effective_library_owner).toBeUndefined();
     expect(controls["0"]?.searched_zone_owner).toBe(2);
     expect(controls["0"]?.searched_zone_owner).not.toBe(controls["0"]?.searcher);
+  });
+
+  it("preserves search ordering hints across JSON round trips", () => {
+    const choices: WaitingFor[] = [
+      {
+        type: "SearchChoice",
+        data: { player: 0, cards: [21], count: 1, ordering_hint: "Unordered" },
+      },
+      {
+        type: "SearchChoice",
+        data: {
+          player: 0,
+          cards: [21, 22],
+          count: 2,
+          ordering_hint: "OrderedToLibraryTop",
+        },
+      },
+    ];
+
+    expect(JSON.parse(JSON.stringify(choices))).toEqual(choices);
   });
 
   it("rejects malformed keys and raw object ids at compile time", () => {

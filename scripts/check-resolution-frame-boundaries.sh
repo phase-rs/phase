@@ -5,9 +5,34 @@
 # ResolutionStateWire v1 reader, its legacy wire structures/inventory, or test
 # fixtures. Runtime resolution work is represented by typed ResolutionFrame
 # payloads; identically named typed payload members are not wire keys. The
-# frame stack also permits only top access or a captured adjacent-pair boundary:
-# searching the vector for a frame or removing an arbitrary index breaks that
-# authority.
+# frame stack permits top access, a captured adjacent-pair boundary, or
+# identity-addressed access. Removing an arbitrary index, or searching the
+# vector to decide what to mutate, breaks that authority.
+#
+# That rule is enforced by the type system, with one residual structural guard
+# here. `ResolutionStack::frames` is a `FrameVec` whose backing `Vec` is
+# private to `crates/engine/src/types/resolution/frame_vec.rs`, every operation
+# that addresses a frame for mutation takes an opaque `FrameSlot` or an opaque
+# `ChildStackDepth`, and the removal operations have no wrapper. A positional
+# scan still compiles, and the one method that accepts the `usize` it yields is
+# `frame_at_offset`, which hands back a frame to read and never a position to
+# address. The distinction being drawn is unchanged —
+# positional/adjacency-inferred access GUESSES a structural relationship the
+# stack does not guarantee, while identity-addressed access asserts one, since
+# ids come from a monotonic allocator that never rewinds and a stale id matches
+# nothing rather than aliasing a later frame. It mirrors
+# `DrawSequenceStack::frame_mut` / `active_if` / `pop`, the same access mode on
+# a sibling frame stack.
+#
+# This script previously grepped for that rule because `frames` was private to
+# a 7,000-line module and Rust privacy is module-scoped, so "private" bought
+# nothing against the code beside it. Shrinking the module to ~230 lines is what
+# made the privacy real. This script carries five structural checks that the
+# design itself is intact: `FrameSlot` and `ChildStackDepth` must each be
+# mintable only by their documented methods, the two depth-addressed doors
+# must each take a `ChildStackDepth`, and `frame_at_offset` must stay the
+# module's only bare-`usize` parameter — any of those breaking would reopen
+# positional addressing without any compiler error to show for it.
 
 set -euo pipefail
 
@@ -22,6 +47,7 @@ from pathlib import Path
 
 root = Path(sys.argv[1])
 resolution_path = Path("crates/engine/src/types/resolution.rs")
+game_state_path = Path("crates/engine/src/types/game_state.rs")
 legacy_keys = {
     "pending_continuation",
     "search_continuation_attach_host",
@@ -207,7 +233,10 @@ def line_number(source: str, offset: int) -> int:
 
 
 def legacy_allowlist_spans(source: str) -> list[tuple[int, int]]:
-    v1_match = re.search(r"\bLEGACY_RESOLUTION_STATE_WIRE_VERSION\s*=>\s*\{", source)
+    # The version discriminator maps numeric wire versions to the typed decode
+    # mode before the reader match. Anchor the allowlist to that typed v1 arm,
+    # which is the sole branch that consumes legacy resolution fields.
+    v1_match = re.search(r"\bGameStateDecodeMode::ResolutionWireV1\s*=>\s*\{", source)
     if v1_match is None:
         raise ValueError("missing ResolutionStateWire v1 reader arm")
 
@@ -215,7 +244,21 @@ def legacy_allowlist_spans(source: str) -> list[tuple[int, int]]:
     if inventory_match is None:
         raise ValueError("missing legacy resolution key inventory")
 
-    spans = [block_span(source, v1_match), block_span(source, inventory_match)]
+    live_roots_match = re.search(
+        r"\bconst\s+LEGACY_LIVE_ZONE_CHANGED_EVENT_ROOTS\s*:\s*&\[&str\]\s*=\s*&\[",
+        source,
+    )
+    if live_roots_match is None:
+        raise ValueError("missing legacy live ZoneChanged root census")
+    live_roots_end = source.find("];", live_roots_match.end())
+    if live_roots_end == -1:
+        raise ValueError("unterminated legacy live ZoneChanged root census")
+
+    spans = [
+        block_span(source, v1_match),
+        block_span(source, inventory_match),
+        (live_roots_match.start(), live_roots_end + 2),
+    ]
     legacy_struct = re.compile(r"\bstruct\s+Legacy\w+Wire\b[^\{]*\{")
     spans.extend(block_span(source, match) for match in legacy_struct.finditer(source))
     return spans
@@ -226,6 +269,70 @@ def function_span(source: str, function_name: str) -> tuple[int, int]:
     if match is None:
         raise ValueError(f"missing {function_name} function")
     return block_span(source, match)
+
+
+def rust_fn_signatures(source: str) -> list[tuple[str, str, str]]:
+    """`(name, params, tail)` for every `fn` in `source`.
+
+    `params` is the parameter list with the contents of every APPLIED group
+    elided -- a bracket whose opener directly follows an identifier, i.e.
+    `Fn(..)` / `fn(..)` / `Foo[..]`.  A bare tuple type `(usize, u8)` is not
+    applied, so its contents are kept.  `tail` is the text between the
+    parameter list and the body's `{` (or a `;`): the return type and any
+    `where` clause.
+
+    This is a text scan, not a parser: it does not see, for example, a `usize`
+    behind a type alias, a method a macro generated, or a raw identifier.
+    """
+    out: list[tuple[str, str, str]] = []
+    n = len(source)
+    for match in re.finditer(r"\bfn\s+(\w+)", source):
+        i = match.end()
+        while i < n and source[i].isspace():
+            i += 1
+        if i < n and source[i] == "<":  # skip a generic parameter list
+            angle = 0
+            while i < n:
+                if source[i] == "<":
+                    angle += 1
+                elif source[i] == ">" and source[i - 1] != "-":  # not the `>` of `->`
+                    angle -= 1
+                    if angle == 0:
+                        i += 1
+                        break
+                i += 1
+            while i < n and source[i].isspace():
+                i += 1
+        if i >= n or source[i] != "(":
+            continue
+        depth = 0
+        elide_from = 0
+        params: list[str] = []
+        while i < n:
+            char = source[i]
+            if char in "([{":
+                depth += 1
+                if depth > 1 and not elide_from and re.match(r"\w", source[i - 1]):
+                    elide_from = depth
+                i += 1
+                continue
+            if char in ")]}":
+                if elide_from == depth:
+                    elide_from = 0
+                depth -= 1
+                i += 1
+                if depth == 0:
+                    break
+                continue
+            if not elide_from:
+                params.append(char)
+            i += 1
+        tail: list[str] = []
+        while i < n and source[i] not in "{;":
+            tail.append(source[i])
+            i += 1
+        out.append((match.group(1), "".join(params), "".join(tail)))
+    return out
 
 
 def fail(failures: list[str], path: Path, source: str, offset: int, message: str) -> None:
@@ -292,6 +399,12 @@ for file_name in files:
     allowed_spans = test_spans[:]
     if path == resolution_path:
         allowed_spans.extend(allowed_legacy_spans)
+    if path == game_state_path:
+        # GameStateDecode owns the canonicalization shared by persisted-state
+        # and v1 resolution-wire reads. Its firing migration may inspect the
+        # v1 child continuation before ResolutionStateWire projects it into a
+        # typed resolution frame.
+        allowed_spans.append(function_span(source, "migrate_legacy_trigger_firing_carriers"))
 
     for offset, key in string_literals(source):
         if key not in legacy_keys or in_any_span(offset, allowed_spans):
@@ -313,24 +426,95 @@ for file_name in files:
     if path != resolution_path:
         continue
 
-    production_spans = test_spans
-    remove_pattern = re.compile(
-        r"\b(?:self\s*\.\s*)?frames\s*\.\s*"
-        r"(?:remove|swap_remove|retain|drain|truncate|clear)\s*\("
-    )
-    search_pattern = re.compile(
-        r"\b(?:self\s*\.\s*)?frames\s*\.\s*iter(?:_mut)?\s*\(\s*\)"
-        r"(?:\s*\.\s*\w+\s*\([^;{}]*\))*?"
-        r"\s*\.\s*(?:position|rposition|find|find_map|any|next|nth)\s*\(",
-        re.DOTALL,
-    )
-    for pattern, message in [
-        (remove_pattern, "arbitrary ResolutionStack frame removal is forbidden; use a checked top-only API"),
-        (search_pattern, "generic ResolutionStack frame search is forbidden; use top or adjacent-pair access"),
-    ]:
-        for match in pattern.finditer(source):
-            if not in_any_span(match.start(), production_spans):
-                fail(failures, path, source, match.start(), message)
+    # The frame-search and frame-removal scans that used to run here are gone,
+    # because the type system now enforces what they policed.
+    # `ResolutionStack::frames` is a `FrameVec` whose backing `Vec` is private
+    # to `types/resolution/frame_vec.rs`; every operation that addresses a
+    # frame for mutation takes an opaque `FrameSlot` or an opaque
+    # `ChildStackDepth`, and the removal operations have no wrapper at all. A
+    # positional scan still compiles, and the one method that accepts the
+    # `usize` it yields is `frame_at_offset`, which hands back a frame to read
+    # and never a position to address.
+    #
+    # That argument holds only while `FrameSlot` and `ChildStackDepth` values
+    # come from their minting methods, and while `frame_at_offset` stays the
+    # only bare-`usize` parameter in that module. A new
+    # `fn ... -> Option<FrameSlot>`, a second mint of a depth, or a new
+    # bare-`usize` parameter would each reopen positional addressing with no
+    # compiler error to show for it, so that -- and only that -- is what a grep
+    # still has to protect: five structural checks on a ~270-line module rather
+    # than a search-shape scan over 7,000 lines.
+    #
+    # `slot_at_captured_depth` stays on this list, and its argument is no
+    # longer a bare `usize`: the captured depth has its own opaque type,
+    # `ChildStackDepth`, minted only by `FrameVec::capture_depth`. The deferral
+    # this comment used to record -- giving that captured depth its own type at
+    # all of its origins -- has been taken, so the sanctioned `FrameSlot`
+    # minting set is unchanged while the one door it names is closed at the
+    # type.
+    frame_vec_source = (root / "crates/engine/src/types/resolution/frame_vec.rs").read_text()
+    minting = set(re.findall(r"fn\s+(\w+)\s*\([^)]*\)\s*->[^{;]*\bFrameSlot\b", frame_vec_source))
+    sanctioned_minting = {"top", "below", "above", "by_id", "slot_at_captured_depth"}
+    if minting != sanctioned_minting:
+        added = ", ".join(sorted(minting - sanctioned_minting)) or "none"
+        missing = ", ".join(sorted(sanctioned_minting - minting)) or "none"
+        failures.append(
+            "  crates/engine/src/types/resolution/frame_vec.rs: FrameSlot may be "
+            f"minted only by {', '.join(sorted(sanctioned_minting))}; "
+            f"unexpected: {added}; missing: {missing}"
+        )
+
+    # Four more structural checks, on the second opaque value this module
+    # mints. (1) `ChildStackDepth` may be minted only by `capture_depth`.
+    # (2) `slot_at_captured_depth` and (3) `insert_at_child_boundary` must each
+    # take one. (4) `frame_at_offset` must remain the module's only
+    # bare-`usize` parameter, since a new one would reopen positional mutation
+    # with no compiler error to show for it -- the same hazard the `FrameSlot`
+    # minting check exists for, on the parameter axis instead of the return
+    # axis.
+    #
+    # All four read `rust_fn_signatures`, which splits a signature into its
+    # top-level parameter list and its return text, so a `usize` sitting after
+    # a nested `)` -- `pick: impl Fn(&ResolutionFrame) -> bool, depth: usize`
+    # -- is still seen. It is a text scan, not a compiler: it does not see, for
+    # example, a `usize` renamed by a type alias or a method a macro generated.
+    signatures = rust_fn_signatures(frame_vec_source)
+
+    depth_minting = {
+        name for name, _params, tail in signatures
+        if re.search(r"\bChildStackDepth\b", tail)
+    }
+    if depth_minting != {"capture_depth"}:
+        added = ", ".join(sorted(depth_minting - {"capture_depth"})) or "none"
+        missing = "none" if "capture_depth" in depth_minting else "capture_depth"
+        failures.append(
+            "  crates/engine/src/types/resolution/frame_vec.rs: ChildStackDepth may "
+            f"be minted only by capture_depth; unexpected: {added}; missing: {missing}"
+        )
+
+    depth_typed = {
+        name for name, params, _tail in signatures
+        if re.search(r"\bChildStackDepth\b", params)
+    }
+    for door in ("slot_at_captured_depth", "insert_at_child_boundary"):
+        if door not in depth_typed:
+            failures.append(
+                "  crates/engine/src/types/resolution/frame_vec.rs: "
+                f"{door} must take a ChildStackDepth, not a bare usize"
+            )
+
+    usize_params = {
+        name for name, params, _tail in signatures
+        if re.search(r"\busize\b", params)
+    }
+    if usize_params != {"frame_at_offset"}:
+        added = ", ".join(sorted(usize_params - {"frame_at_offset"})) or "none"
+        missing = "none" if "frame_at_offset" in usize_params else "frame_at_offset"
+        failures.append(
+            "  crates/engine/src/types/resolution/frame_vec.rs: frame_at_offset must "
+            "be the only method taking a bare usize (it returns a frame, never a "
+            f"slot); unexpected: {added}; missing: {missing}"
+        )
 
 if failures:
     print("Resolution-frame boundary guard failed:", file=sys.stderr)

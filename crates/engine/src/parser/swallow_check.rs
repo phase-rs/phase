@@ -34,8 +34,12 @@ use crate::types::ability::{
     ContinuousModification, CopyRetargetPermission, DamageModification, DelayedTriggerCondition,
     DoubleTarget, Duration, Effect, FilterProp, ManaProduction, ModalSelectionConstraint,
     OpponentMayScope, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
-    ReplacementCondition, ReplacementMode, RestrictionExpiry, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, UnlessPayScaling,
+    ReplacementCondition, ReplacementDefinition, ReplacementMode, RestrictionExpiry,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, UnlessPayScaling,
+};
+use crate::types::ability_visit::{
+    visit_ability_def, visit_replacement, visit_static, visit_trigger,
 };
 use crate::types::game_state::RetargetScope;
 use crate::types::keywords::Keyword;
@@ -52,6 +56,7 @@ use nom::{
     combinator::{opt, value},
     Parser,
 };
+use std::ops::ControlFlow;
 
 /// Strip parenthesized reminder text. Reminder text is the parser's
 /// responsibility to ignore at the keyword level — keywords themselves are
@@ -356,10 +361,10 @@ fn detect_replacement(
     // FALSE POSITIVES pool-wide: chocobo camp, kumano faces kakkazan, osteomancer adept,
     // summon: fenrir, yuna.
     //
-    // It must be probed via the tree-global typed evidence, NOT via the structural
-    // `effect_is_replacement_carrier` walk: that walk descends `sub_ability` / `else_ability`
-    // / `mode_abilities` only, so it cannot see a carrier nested inside an EFFECT — and
-    // Yuna's carrier lives inside `Effect::CreateDelayedTrigger`'s inner definition.
+    // It must be probed via tree-global typed evidence, not the structural
+    // `effect_is_replacement_carrier` matcher: that deliberately finite matcher does
+    // not enumerate these CR 614.1c carrier variants. Typed evidence reaches all
+    // fields, including Yuna's `Effect::CreateDelayedTrigger` inner definition.
     if evidence.any_static_mode(|m| {
         matches!(
             m,
@@ -779,6 +784,15 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
         // Veil's "you may activate one of its loyalty abilities once this turn"
         // is the permission itself; the player still decides each activation.
         | Effect::GrantExtraLoyaltyActivations { .. } => true,
+        // CR 111.3 + CR 603.5: a token's quoted text is part of its
+        // characteristics, including optional triggered abilities. The
+        // optionality therefore lives inside the Token's static-ability grant,
+        // not on the token-creation definition itself (Mole Man / Moloid class).
+        // Walk the same StaticDefinition carrier as GenericEffect below so the
+        // audit follows the runtime shape instead of card-specific wording.
+        Effect::Token {
+            static_abilities, ..
+        } => static_abilities.iter().any(static_definition_has_optional),
         // CR 601.3b + CR 702.8a + CR 609.4: a `GenericEffect` whose statics
         // encode a "you may" opt-in accounts for the marker in two ways:
         //
@@ -797,9 +811,30 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
         // STILL NARROW: `static_definition_has_optional` only exempts permission
         // modes and optional modifications — statics that are neither (CantGainLife,
         // +1/+1, MustAttack, etc.) remain subject to Optional_YouMay detection.
+        //
+        // CR 116.2c + CR 117.3a: `end_cost` is a THIRD carrier of the "you may" on
+        // this variant. "You may pay {W} to end this effect" grants a later
+        // SPECIAL ACTION (CR 116.2c: "any time they have priority"), so the clause
+        // emits no def of its own and sets no `optional` flag; the permission
+        // lives on the continuous effect the same resolution installs. This
+        // replaces the mandatory `Effect::PayCost` def that used to be the only
+        // AST evidence satisfying this detector for the Licid cycle — evidence
+        // that was flatly wrong at runtime, because it force-paid the cost on
+        // resolution.
+        //
+        // EXTENDS the existing arm rather than adding a sibling: a second
+        // `Effect::GenericEffect` arm after this one would be an
+        // `unreachable_patterns` lint (a hard failure under `-D warnings`), and
+        // placed before it would shadow the statics walk for every
+        // `GenericEffect` carrying an `end_cost`.
+        //
+        // STILL NARROW: `end_cost.is_some()` is exactly "this effect carries a
+        // printed CR 116.2c permission" — no other `GenericEffect` is affected.
         Effect::GenericEffect {
-            static_abilities, ..
-        } => static_abilities.iter().any(static_definition_has_optional),
+            static_abilities,
+            end_cost,
+            ..
+        } => end_cost.is_some() || static_abilities.iter().any(static_definition_has_optional),
         Effect::ChooseOneOf { branches, .. } => branches.iter().any(def_tree_has_optional),
         Effect::CreateDelayedTrigger { effect, .. } => def_tree_has_optional(effect),
         Effect::CreateEmblem { statics, triggers } => {
@@ -871,6 +906,11 @@ fn def_tree_has_target_replacement(def: &AbilityDefinition) -> bool {
             ..
         } if flip_branch_has_target_replacement(win_effect, lose_effect) => return true,
         _ => {}
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_target_replacement(effect) {
+            return true;
+        }
     }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_target_replacement(sub) {
@@ -948,7 +988,7 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // cast an instant" is an activation-timing permission, not an
             // optional effect to execute during resolution.
             | StaticMode::ActivateAsInstant { .. }
-            // CR 117.3a: "You may play lands from your graveyard"
+            // CR 305.1 + CR 611.3d: "You may play lands from your graveyard"
             // (Crucible, Ramunap Excavator, etc.) — graveyard-as-zone
             // cast permission, structurally opt-in.
             | StaticMode::GraveyardCastPermission { .. }
@@ -1006,55 +1046,59 @@ fn any_static_has_granted_trigger_with_optional(parsed: &ParsedAbilities) -> boo
 /// original text — that is itself a coverage signal. Suppressing swallow
 /// detectors for these cards prevents double-reporting the same gap.
 fn def_tree_has_unimplemented(def: &AbilityDefinition) -> bool {
-    if matches!(*def.effect, Effect::Unimplemented { .. }) {
-        return true;
-    }
-    if let Some(ref sub) = def.sub_ability {
-        if def_tree_has_unimplemented(sub) {
-            return true;
+    visit_ability_def(def, &mut |effect| {
+        if matches!(effect, Effect::Unimplemented { .. }) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
         }
-    }
-    if let Some(ref else_ab) = def.else_ability {
-        if def_tree_has_unimplemented(else_ab) {
-            return true;
-        }
-    }
-    def.mode_abilities.iter().any(def_tree_has_unimplemented)
-}
-
-fn trigger_tree_has_unimplemented(trigger: &TriggerDefinition) -> bool {
-    trigger
-        .execute
-        .as_deref()
-        .is_some_and(def_tree_has_unimplemented)
-}
-
-fn static_definition_has_unimplemented(s: &StaticDefinition) -> bool {
-    s.modifications.iter().any(|m| match m {
-        ContinuousModification::GrantTrigger { trigger } => trigger_tree_has_unimplemented(trigger),
-        ContinuousModification::GrantAbility { definition } => {
-            def_tree_has_unimplemented(definition)
-        }
-        // CR 113.3d + CR 613.1f: Parallel to static_carries_optional_modification —
-        // recurse into GrantStaticAbility so an Unimplemented-carrying granted static
-        // suppresses swallow detectors rather than double-reporting the parse gap.
-        ContinuousModification::GrantStaticAbility { definition } => {
-            static_definition_has_unimplemented(definition)
-        }
-        _ => false,
     })
+    .is_break()
+}
+
+/// Apply the authoritative nested-effect traversal to a trigger root.
+fn trigger_tree_has_unimplemented(trigger: &TriggerDefinition) -> bool {
+    visit_trigger(trigger, &mut |effect| {
+        if matches!(effect, Effect::Unimplemented { .. }) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+    .is_break()
+}
+
+/// Apply the authoritative nested-effect traversal to a replacement root.
+fn replacement_tree_has_unimplemented(replacement: &ReplacementDefinition) -> bool {
+    visit_replacement(replacement, &mut |effect| {
+        if matches!(effect, Effect::Unimplemented { .. }) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+    .is_break()
+}
+
+/// Apply the authoritative nested-effect traversal to a static root.
+fn static_definition_has_unimplemented(s: &StaticDefinition) -> bool {
+    visit_static(s, &mut |effect| {
+        if matches!(effect, Effect::Unimplemented { .. }) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+    .is_break()
 }
 
 fn any_ability_has_unimplemented(parsed: &ParsedAbilities) -> bool {
     parsed.abilities.iter().any(def_tree_has_unimplemented)
-        || parsed
-            .triggers
-            .iter()
-            .any(|t| t.execute.as_deref().is_some_and(def_tree_has_unimplemented))
+        || parsed.triggers.iter().any(trigger_tree_has_unimplemented)
         || parsed
             .replacements
             .iter()
-            .any(|r| r.execute.as_deref().is_some_and(def_tree_has_unimplemented))
+            .any(replacement_tree_has_unimplemented)
         || parsed.statics.iter().any(static_definition_has_unimplemented)
         // CR 603: A `TriggerMode::Unknown(_)` is the trigger-side equivalent
         // of `Effect::Unimplemented` — the parser preserved the original
@@ -1099,6 +1143,11 @@ fn def_tree_has_exile_parent_rider(def: &AbilityDefinition) -> bool {
     {
         return true;
     }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_exile_parent_rider(effect) {
+            return true;
+        }
+    }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_exile_parent_rider(sub) {
             return true;
@@ -1142,6 +1191,11 @@ fn def_tree_has_cast_graveyard_redirect_rider(def: &AbilityDefinition) -> bool {
             .is_some_and(def_is_graveyard_redirect_to_parent))
     {
         return true;
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_cast_graveyard_redirect_rider(effect) {
+            return true;
+        }
     }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_cast_graveyard_redirect_rider(sub) {
@@ -1202,6 +1256,11 @@ fn def_tree_has_parent_target_cant_gain_life(def: &AbilityDefinition) -> bool {
             return true;
         }
     }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_parent_target_cant_gain_life(effect) {
+            return true;
+        }
+    }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_parent_target_cant_gain_life(sub) {
             return true;
@@ -1253,6 +1312,11 @@ fn def_tree_has_parent_target_discard(def: &AbilityDefinition) -> bool {
         }
     ) {
         return true;
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_parent_target_discard(effect) {
+            return true;
+        }
     }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_parent_target_discard(sub) {
@@ -1314,6 +1378,11 @@ fn def_tree_has_graveyard_cast_from_zone(def: &AbilityDefinition) -> bool {
             return true;
         }
     }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_graveyard_cast_from_zone(effect) {
+            return true;
+        }
+    }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_graveyard_cast_from_zone(sub) {
             return true;
@@ -1362,6 +1431,11 @@ fn def_tree_has_instead_condition(def: &AbilityDefinition) -> bool {
         .is_some_and(condition_has_instead_semantics)
     {
         return true;
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_instead_condition(effect) {
+            return true;
+        }
     }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_instead_condition(sub) {
@@ -1458,6 +1532,11 @@ fn def_tree_has_replacement_carrier(def: &AbilityDefinition) -> bool {
     if effect_is_replacement_carrier(&def.effect) || def_is_represented_instead_branch(def) {
         return true;
     }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_replacement_carrier(effect) {
+            return true;
+        }
+    }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_replacement_carrier(sub) {
             return true;
@@ -1546,6 +1625,11 @@ fn def_tree_has_conditional_mana_spell_grant(def: &AbilityDefinition) -> bool {
             return true;
         }
     }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_conditional_mana_spell_grant(effect) {
+            return true;
+        }
+    }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_conditional_mana_spell_grant(sub) {
             return true;
@@ -1582,6 +1666,11 @@ fn def_tree_has_cast_from_zone_alt_ability_cost(def: &AbilityDefinition) -> bool
         }
     ) {
         return true;
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_cast_from_zone_alt_ability_cost(effect) {
+            return true;
+        }
     }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_cast_from_zone_alt_ability_cost(sub) {
@@ -1768,11 +1857,17 @@ fn parsed_has_conditional_modal_max(parsed: &ParsedAbilities) -> bool {
 }
 
 fn def_tree_has_conditional_modal_max(def: &AbilityDefinition) -> bool {
-    def.modal.as_ref().is_some_and(modal_has_conditional_max)
-        || def
-            .sub_ability
-            .as_ref()
-            .is_some_and(|sub| def_tree_has_conditional_modal_max(sub))
+    if def.modal.as_ref().is_some_and(modal_has_conditional_max) {
+        return true;
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_conditional_modal_max(effect) {
+            return true;
+        }
+    }
+    def.sub_ability
+        .as_ref()
+        .is_some_and(|sub| def_tree_has_conditional_modal_max(sub))
         || def
             .else_ability
             .as_ref()
@@ -1841,6 +1936,11 @@ fn unit_has_end_of_turn_mana_expiry(parsed: &ParsedAbilities) -> bool {
         } = &*def.effect
         {
             if mana_expiry_is_end_of_turn(expiry) {
+                return true;
+            }
+        }
+        if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+            if def_has(effect) {
                 return true;
             }
         }
@@ -1934,6 +2034,11 @@ fn def_tree_has_activation_limit(def: &AbilityDefinition) -> bool {
     {
         return true;
     }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_activation_limit(effect) {
+            return true;
+        }
+    }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_activation_limit(sub) {
             return true;
@@ -1975,6 +2080,11 @@ fn def_tree_has_apnap_ordering(def: &AbilityDefinition) -> bool {
     // variant's presence IS the ordering fact.
     if matches!(&*def.effect, Effect::Vote { .. }) {
         return true;
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_apnap_ordering(effect) {
+            return true;
+        }
     }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_apnap_ordering(sub) {
@@ -2161,10 +2271,15 @@ fn detect_dynamic_qty(
     //   "For each color among permanents you control, add one mana of that color."
     //
     // This leg exists BECAUSE the probes above are anchored. Unanchored, they "saw" this
-    // carrier only by ACCIDENT: `DistinctColorsAmongPermanents` is also a `QuantityRef`
-    // variant name, so the `ManaProduction` node deserialized as a `QuantityRef` by cross-enum
-    // collision. Right answer, wrong reason — and the same collision suppressed Boing! and
-    // Siren's Call. Anchoring removed the accident; this restores the fact, typed.
+    // carrier only by ACCIDENT: `DistinctColorsAmongPermanents` USED TO BE a `QuantityRef`
+    // variant name too, so the `ManaProduction` node deserialized as a `QuantityRef` by
+    // cross-enum collision. Right answer, wrong reason — and the same collision suppressed
+    // Boing! and Siren's Call. Anchoring removed the accident; this restores the fact, typed.
+    //
+    // The collision itself is now GONE: the `QuantityRef` side was renamed to
+    // `DistinctColorsAmong` when it was parameterized onto `CardTypeSetSource`. That makes
+    // this leg strictly load-bearing rather than belt-and-braces — an unanchored probe could
+    // no longer reach this carrier even by accident.
     //
     // ONE variant, and that is a MEASURED bound, not a guess: over the full 35,396-face pool,
     // `DistinctColorsAmongPermanents` is the only `ManaProduction` on a face where the marker
@@ -2664,6 +2779,11 @@ fn def_tree_has_plotted_grant(def: &AbilityDefinition) -> bool {
     {
         return true;
     }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_plotted_grant(effect) {
+            return true;
+        }
+    }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_plotted_grant(sub) {
             return true;
@@ -2700,6 +2820,11 @@ fn plotted_grant_linkage_is_only_if_marker(stripped: &str) -> bool {
 fn def_tree_has_dig(def: &AbilityDefinition) -> bool {
     if matches!(&*def.effect, Effect::Dig { .. }) {
         return true;
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_dig(effect) {
+            return true;
+        }
     }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_dig(sub) {
@@ -2770,6 +2895,11 @@ fn def_tree_has_exile_resolving_rider(def: &AbilityDefinition) -> bool {
         Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile: Some(_) }
     ) {
         return true;
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_exile_resolving_rider(effect) {
+            return true;
+        }
     }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_exile_resolving_rider(sub) {
@@ -2997,23 +3127,35 @@ fn strip_represented_replacement_instead_sentences(
     out
 }
 
-/// CR 122.1 + CR 614.1c + CR 608.2c + CR 400.7: "If you put a[n] <type> onto the
-/// battlefield this way, put [N] +1/+1 counters on it" (Oviya, Automech Artisan)
-/// is represented by the typed `Effect::ChangeZone.conditional_enter_with_counters`
-/// gate — the moved object's entry-time counters are applied only when it matches
-/// the carried filter (runtime-verified in
-/// `change_zone::enter_with_counters_for_object`), so the leading "if" is a
-/// representation marker, not a swallowed condition.
+/// CR 122.1 + CR 614.1c + CR 608.2c + CR 400.7: a reflexive battlefield-entry
+/// "this way" conditional with a counter payoff — "If you put a[n] <type> onto the
+/// battlefield this way, put [N] +1/+1 counters on it" (Oviya, Automech Artisan) or
+/// the present-tense "If a Hero enters this way, it enters with two additional
+/// +1/+1 counters on it" (Heroic Return, Recommission, Winter Soldier Reborn
+/// Avenger) — is represented by the typed
+/// `Effect::ChangeZone.conditional_enter_with_counters` gate. The moved object's
+/// entry-time counters are applied only when it matches the carried filter
+/// (runtime-verified in `change_zone::enter_with_counters_for_object`), so the
+/// leading "if" is a representation marker, not a swallowed condition.
 ///
 /// Mirrors `enters_modified_if_is_only_if_marker`: an inside AST probe
 /// (`conditional_enter_with_counters` carries `skip_serializing_if = Vec::is_empty`,
 /// so the key serializes ONLY when non-empty — keying tightly on the
 /// ChangeScope→Battlefield-with-counters shape the resolver handles) plus
-/// text-scoping — the represented put-onto-battlefield-this-way counter clause is
-/// located via the shared `is_moved_object_put_onto_battlefield_counters_clause`
-/// combinator and dropped sentence-by-sentence, and suppression fires ONLY when no
-/// OTHER bare " if " survives, so a compound card carrying the gate AND a separate
-/// unrelated " if " still flags.
+/// text-scoping — the represented entry-this-way counter clause is located via the
+/// shared `is_moved_object_entry_this_way_counters_clause` combinator and dropped
+/// sentence-by-sentence, and suppression fires ONLY when no OTHER bare " if "
+/// survives, so a compound card carrying the gate AND a separate unrelated " if "
+/// still flags.
+///
+/// Two axes are deliberately NOT widened, because the typed slot cannot represent
+/// what they would newly silence:
+///   * conditional voice is fixed at `if ` — a trigger-voiced rider ("When an
+///     Equipment enters this way, …") keeps flagging;
+///   * polarity is affirmative-only — `enter_with_counters_for_object` pushes
+///     counters when `matches_target_filter` is TRUE, so a negated gate ("if a
+///     creature wasn't put onto the battlefield this way, …") is unrepresentable
+///     and keeps flagging.
 fn conditional_enter_counters_if_is_only_if_marker(
     stripped: &str,
     evidence: &UnitEvidence,
@@ -3021,15 +3163,20 @@ fn conditional_enter_counters_if_is_only_if_marker(
     if !evidence.has_slot("conditional_enter_with_counters") {
         return false;
     }
-    let residual: String = stripped
-        .split('.')
+    // Segmentation delegates to `nom_primitives::split_sentence_units`, the single
+    // period-sentence authority shared with the classifier's rider head-scoper, so
+    // the two cannot decide "is THIS sentence the represented rider?" with
+    // divergent sentence models. Units keep their terminal '.' and carry no leading
+    // whitespace, so the residual is rejoined with a single space.
+    let residual: String = crate::parser::oracle_nom::primitives::split_sentence_units(stripped)
+        .into_iter()
         .filter(|sentence| {
-            !crate::parser::oracle_effect::sequence::is_moved_object_put_onto_battlefield_counters_clause(
+            !crate::parser::oracle_effect::sequence::is_moved_object_entry_this_way_counters_clause(
                 sentence,
             )
         })
         .collect::<Vec<_>>()
-        .join(".");
+        .join(" ");
     let has_other_if = residual.contains(" if ") // allow-noncombinator: swallow detector marker scan on classified text
         && !residual.contains(" as if ") // allow-noncombinator: swallow detector marker scan on classified text
         && !residual.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
@@ -3059,16 +3206,17 @@ fn enters_with_finality_this_way_is_only_if_marker(
         return false;
     }
 
-    let residual: String = stripped
-        .split('.')
+    // Same single segmentation authority as the sibling detector above;
+    // `parse_cast_this_way_enters_with_counter` trims its own leading whitespace
+    // and does not require full consumption, so a unit's terminal '.' is inert.
+    let residual: String = crate::parser::oracle_nom::primitives::split_sentence_units(stripped)
+        .into_iter()
         .filter(|sentence| {
-            crate::parser::oracle_effect::parse_cast_this_way_enters_with_counter(
-                sentence.trim_start(),
-            )
-            .is_none()
+            crate::parser::oracle_effect::parse_cast_this_way_enters_with_counter(sentence)
+                .is_none()
         })
         .collect::<Vec<_>>()
-        .join(".");
+        .join(" ");
     let has_other_if = residual.contains(" if ") // allow-noncombinator: swallow detector marker scan on classified text
         && !residual.contains(" as if ") // allow-noncombinator: swallow detector marker scan on classified text
         && !residual.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
@@ -3225,9 +3373,14 @@ fn detect_condition_if(
     if enters_modified_if_is_only_if_marker(&stripped, evidence) {
         return;
     }
-    // CR 122.1 + CR 614.1c + CR 608.2c: "If you put a[n] <type> onto the
-    // battlefield this way, put [N] +1/+1 counters on it" (Oviya) is represented
-    // by `Effect::ChangeZone.conditional_enter_with_counters`.
+    // CR 122.1 + CR 614.1c + CR 608.2c: an affirmative `if `-voiced reflexive
+    // battlefield-entry "this way" clause with a counter payoff — active
+    // ("If you put a[n] <type> onto the battlefield this way, put [N] +1/+1
+    // counters on it" — Oviya) or present-tense ("If a Hero enters this way, it
+    // enters with two additional +1/+1 counters on it" — Heroic Return,
+    // Recommission, Winter Soldier) — is represented by
+    // `Effect::ChangeZone.conditional_enter_with_counters`. Trigger-voiced and
+    // negated riders are NOT suppressed; see the function doc.
     if conditional_enter_counters_if_is_only_if_marker(&stripped, evidence) {
         return;
     }
@@ -3333,6 +3486,7 @@ fn detect_condition_if(
     // probes below are deliberately type-agnostic.
     if evidence.has_slot("condition")
         || evidence.has_slot("constraint")
+        || evidence.has_slot("target_condition")
         || evidence.has_slot("unless_filter")
         || evidence.has_slot("unless_pay")
         || evidence.has_slot("if_clause")
@@ -3998,6 +4152,7 @@ fn detect_duration_this_turn(
             x,
             QuantityRef::LifeLostThisTurn { .. }
                 | QuantityRef::SpellsCastThisTurn { .. }
+                | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
                 | QuantityRef::EnteredThisTurn { .. }
                 | QuantityRef::SacrificedThisTurn { .. }
                 | QuantityRef::CrimesCommittedThisTurn
@@ -4283,6 +4438,17 @@ fn detect_duration_next_turn(
     }) {
         return;
     }
+    // CR 603.7b: "until your next turn" on a multi-fire delayed trigger is carried
+    // by `WheneverEventExpiry::UntilControllersNextTurn`, not a `Duration` slot
+    // (Kang Dynasty). Discharge the expectation off that typed carrier too.
+    if evidence.any_whenever_event_expiry(|e| {
+        matches!(
+            e,
+            crate::types::ability::WheneverEventExpiry::UntilControllersNextTurn { .. }
+        )
+    }) {
+        return;
+    }
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::DurationNextTurn.detector_label(),
         truncate(original, 140),
@@ -4519,18 +4685,19 @@ mod tests {
 
     use super::{
         any_ability_has_unimplemented, def_tree_has_optional, def_tree_has_unimplemented,
-        trigger_tree_has_optional, twice_is_activation_limit,
+        effect_has_internal_optionality, trigger_tree_has_optional, twice_is_activation_limit,
     };
     use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, DamageModification, Effect, OutsideGameSourcePool,
-        QuantityExpr, TargetFilter,
+        AbilityDefinition, AbilityKind, ContinuousModification, DamageModification, Effect,
+        OutsideGameSourcePool, PlayerFilter, QuantityExpr, TargetFilter, TriggerCondition,
     };
     use crate::types::identifiers::TrackedSetId;
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaCost;
     use crate::types::statics::StaticMode;
+    use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
     fn parse(text: &str, types: &[&str]) -> crate::parser::oracle::ParsedAbilities {
@@ -4809,6 +4976,91 @@ mod tests {
         );
     }
 
+    /// CR 603.4 + CR 700.4 + CR 120.1: Hawkeye, Avenging Archer's death-trigger
+    /// intervening-if "if Hawkeye dealt damage to it this turn" is now hoisted to
+    /// a `TriggerCondition::DealtDamageBySourceThisTurn`. Detector G (Condition_If)
+    /// clears because the trigger's `condition` slot is populated
+    /// (`has_slot("condition")`), and Detector J (Duration_ThisTurn) clears via
+    /// the damage-history whitelist. Both fired before the parser arm existed —
+    /// the audit-flagged DroppedCondition — so reverting the arm re-surfaces both.
+    #[test]
+    fn hawkeye_dealt_damage_intervening_if_not_swallowed() {
+        let parsed = parse_named(
+            "Reach\nWhenever a creature an opponent controls dies, if Hawkeye dealt \
+             damage to it this turn, draw a card.\n{T}: Hawkeye deals 1 damage to any \
+             target.",
+            "Hawkeye, Avenging Archer",
+            &["Legendary", "Creature"],
+        );
+        // Positive reach-guard: the negative diagnostic assertions below are only
+        // meaningful if the typed carrier is actually present. Assert the dies
+        // trigger carries `DealtDamageBySourceThisTurn` AND a `Draw` effect FIRST,
+        // so a broad suppression or an unrelated carrier that merely silences the
+        // detectors cannot make this test pass while the Hawkeye condition is
+        // absent or misclassified.
+        let dies_trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| t.mode == TriggerMode::ChangesZone)
+            .expect("Hawkeye's dies trigger must parse");
+        assert_eq!(
+            dies_trigger.condition,
+            Some(TriggerCondition::DealtDamageBySourceThisTurn),
+            "the dies trigger must carry the hoisted intervening-if condition: {:?}",
+            dies_trigger.condition
+        );
+        assert!(
+            matches!(
+                dies_trigger.execute.as_deref().map(|a| a.effect.as_ref()),
+                Some(Effect::Draw { .. })
+            ),
+            "the dies trigger must retain its `draw a card` effect after the clause is stripped: {:?}",
+            dies_trigger.execute
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "Hawkeye's hoisted intervening-if must not surface as a swallowed \
+             Condition_If: {:?}",
+            parsed.parse_warnings
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Duration_ThisTurn"),
+            "Hawkeye's hoisted 'this turn' clause must not surface as a swallowed \
+             Duration_ThisTurn: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// CR 603.4: the paired trailing-resolution-time case. When the same
+    /// "if ~ dealt damage to it this turn" clause appears in TRAILING position
+    /// ("draw a card if …") it is a resolution-time conditional, not an
+    /// intervening-if, so it must NOT be hoisted to the trigger `condition`
+    /// (leading-position guard in `extract_if_condition_with_card_name`). This
+    /// pairs with `hawkeye_dealt_damage_intervening_if_not_swallowed` above —
+    /// same clause, LEADING position -> condition Some — so the `None` assertion
+    /// here is non-vacuous: it proves the position guard, not that the phrase is
+    /// unparseable.
+    #[test]
+    fn hawkeye_trailing_dealt_damage_if_not_hoisted() {
+        let parsed = parse_named(
+            "Reach\nWhenever a creature an opponent controls dies, draw a card if \
+             Hawkeye dealt damage to it this turn.\n{T}: Hawkeye deals 1 damage to \
+             any target.",
+            "Hawkeye, Avenging Archer",
+            &["Legendary", "Creature"],
+        );
+        let dies_trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| t.mode == TriggerMode::ChangesZone)
+            .expect("the dies trigger must parse");
+        assert_eq!(
+            dies_trigger.condition, None,
+            "a trailing resolution-time `if` must not be hoisted to an intervening-if (CR 603.4): {:?}",
+            dies_trigger.condition
+        );
+    }
+
     fn find_search_outside_game(def: &AbilityDefinition) -> Option<&Effect> {
         if matches!(&*def.effect, Effect::SearchOutsideGame { .. }) {
             return Some(&def.effect);
@@ -5039,6 +5291,12 @@ mod tests {
             "Bronze Horse replacement must parse without Unimplemented"
         );
         let as_long_as = "as long as";
+        // CR 611.3: Bronze Horse's "as long as" prevention is a CONTINUOUS
+        // shield — the exact `Prevention { .. }` assertion (no
+        // `PreventionOneShot`) pins the one-shot classification from leaking
+        // onto a duration-bound "as long as" shield: if an implementation
+        // misclassified this card as `PreventionOneShot` ("the next time"
+        // single opportunity, CR 615.3), the assertion fails.
         assert!(
             bronze.replacements.iter().any(|r| {
                 r.event == ReplacementEvent::DamageDone
@@ -5050,6 +5308,42 @@ mod tests {
             }),
             "expected gated damage-prevention replacement, got {:#?}",
             bronze.replacements
+        );
+        // CR 615.3: the Awe Strike class — "the next time [target creature]
+        // would deal damage this turn, prevent that damage" — is the one-shot
+        // counterpart of the same shield axis. The spell-side sentence lowers
+        // to `Effect::PreventDamage` carrying the exact one-shot
+        // `And{[ParentTargetSlot{0}, Typed(creature)]}` source filter (the
+        // `is_oneshot_target_source_prevent_shape` discriminator — the single
+        // authority that classifies the shield as `PreventionOneShot` at
+        // resolution). The exact-shape assertions for both classes in this
+        // test prove the parser discriminates continuous ("as long as") from
+        // one-shot ("the next time") prevention and cannot swap one for the
+        // other without failing here.
+        let one_shot = parse_named(
+            "The next time target creature would deal damage this turn, prevent that damage.",
+            "Awe Strike",
+            &["Instant"],
+        );
+        assert!(
+            one_shot.abilities.iter().any(|a| matches!(
+                &*a.effect,
+                Effect::PreventDamage {
+                    damage_source_filter: Some(filter),
+                    ..
+                } if crate::types::ability::is_oneshot_target_source_prevent_shape(filter)
+            )),
+            "the 'the next time' target-source prevention must lower to the one-shot \
+             source-filter shape, got {:#?}",
+            one_shot.abilities
+        );
+        assert!(
+            !one_shot
+                .replacements
+                .iter()
+                .any(|r| r.shield_kind.is_shield()),
+            "the one-shot spell sentence must NOT lower to a replacement definition, got {:#?}",
+            one_shot.replacements
         );
         // KNOWN GAP, pinned deliberately. Bronze Horse DOES report a swallowed
         // `Condition_AsLongAs` — and did so in the shipped card data long before this
@@ -5187,6 +5481,127 @@ mod tests {
             parsed.statics
         );
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn mole_man_token_trigger_accounts_for_optional_you_may() {
+        // CR 111.3: the quoted trigger is part of Moloid's token text.
+        // CR 603.5: its controller makes the "may mill" choice on resolution.
+        // Reverting the Effect::Token static-ability walk restores the exact
+        // Optional_YouMay coverage gap this production Oracle text exposed.
+        let parsed = parse_named(
+            "You may play lands from your graveyard.\n\
+             Landfall — Whenever a land you control enters, create a 1/1 green Minion creature token named Moloid with \"Whenever this token attacks, you may mill a card.\"",
+            "Mole Man, Moloid Master",
+            &["Creature"],
+        );
+
+        assert!(
+            !any_ability_has_unimplemented(&parsed),
+            "Mole Man reach guard: production parse must contain zero Unimplemented: {parsed:#?}"
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Optional_YouMay"),
+            "Moloid's granted optional trigger must account for its printed 'you may'"
+        );
+    }
+
+    #[test]
+    fn token_granted_optional_trigger_is_a_general_building_block() {
+        let parsed = parse(
+            "Create a 1/1 green Minion creature token named Moloid with \"Whenever this token attacks, you may mill a card.\"",
+            &["Sorcery"],
+        );
+        let create = parsed.abilities.first().expect("token creation ability");
+
+        assert!(
+            !def_tree_has_unimplemented(create),
+            "synthetic token-grant reach guard: {create:#?}"
+        );
+        assert!(
+            def_tree_has_optional(create),
+            "Token.static_abilities -> GrantTrigger must expose nested optionality"
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn token_granted_mandatory_trigger_is_not_optional() {
+        let parsed = parse(
+            "Create a 1/1 green Minion creature token named Moloid with \"Whenever this token attacks, mill a card.\"",
+            &["Sorcery"],
+        );
+        let create = parsed.abilities.first().expect("token creation ability");
+
+        assert!(
+            !def_tree_has_unimplemented(create),
+            "mandatory token-grant reach guard: {create:#?}"
+        );
+        assert!(
+            !effect_has_internal_optionality(create.effect.as_ref()),
+            "a mandatory granted trigger must not become optional"
+        );
+    }
+
+    #[test]
+    fn token_granted_unimplemented_trigger_is_reached_by_def_tree_walker() {
+        let parsed = parse(
+            "Create a 1/1 green Minion creature token named Moloid with \"Whenever this token attacks, perform an impossible action.\"",
+            &["Sorcery"],
+        );
+        let create = parsed.abilities.first().expect("token creation ability");
+
+        assert!(
+            def_tree_has_unimplemented(create),
+            "Token.static_abilities -> GrantTrigger -> execute must expose nested Unimplemented: {create:#?}"
+        );
+    }
+
+    #[test]
+    fn choice_branch_token_granted_unimplemented_is_reached_by_def_tree_walker() {
+        let mut parsed = parse(
+            "Create a 1/1 green Minion creature token named Moloid with \"Whenever this token attacks, perform an impossible action.\"",
+            &["Sorcery"],
+        );
+        let create = parsed.abilities.remove(0);
+        let Effect::Token {
+            static_abilities, ..
+        } = create.effect.as_ref()
+        else {
+            panic!("reach guard: expected Token, got {create:#?}");
+        };
+        let trigger = static_abilities
+            .iter()
+            .flat_map(|definition| definition.modifications.iter())
+            .find_map(|modification| match modification {
+                ContinuousModification::GrantTrigger { trigger } => Some(trigger),
+                _ => None,
+            })
+            .expect("reach guard: expected Token.static_abilities -> GrantTrigger");
+        let execute = trigger.execute.as_deref().expect("granted trigger execute");
+        assert!(
+            matches!(execute.effect.as_ref(), Effect::Unimplemented { .. }),
+            "reach guard: granted trigger must contain Unimplemented"
+        );
+
+        let modal = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![create],
+            },
+        );
+        let Effect::ChooseOneOf { branches, .. } = modal.effect.as_ref() else {
+            panic!("reach guard: expected outer ChooseOneOf, got {modal:#?}");
+        };
+        assert!(
+            matches!(branches[0].effect.as_ref(), Effect::Token { .. }),
+            "reach guard: choice branch must contain Token"
+        );
+        assert!(
+            def_tree_has_unimplemented(&modal),
+            "ChooseOneOf -> Token.static_abilities -> GrantTrigger -> Unimplemented must be visible: {modal:#?}"
+        );
     }
 
     #[test]
@@ -5864,6 +6279,18 @@ mod tests {
     }
 
     #[test]
+    fn replacement_instead_accepts_power_pack_delayed_payload_rider() {
+        let parsed = parse_named(
+            "Flying, vigilance, trample, haste\n\
+             Whenever Power Pack deals combat damage to a player, exile target instant or sorcery card from your graveyard chosen at random. At the beginning of your next upkeep, you may cast that card without paying its mana cost. If that spell would be put into your graveyard, exile it instead.",
+            "Power Pack",
+            &["Creature"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Replacement_Instead"));
+    }
+
+    #[test]
     fn condition_if_accepts_graveyard_cast_exile_rider() {
         let parsed = parse_named(
             "Trample\n\
@@ -6102,6 +6529,159 @@ mod tests {
             &["Artifact"],
         );
 
+        assert!(
+            has_swallowed_detector(&parsed, "Condition_If"),
+            "a separate unrelated if line must remain visible to Condition_If, got {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// V5 (CR 122.1 + CR 614.1c + CR 608.2c): the present-tense reflexive
+    /// battlefield-entry counter rider is represented by
+    /// `Effect::ChangeZone.conditional_enter_with_counters`, so its leading "if"
+    /// is a representation marker, not a swallowed condition.
+    ///
+    /// Winter Soldier is the independently-reachable member: its head instruction
+    /// survives the classifier gates on its own (the trigger-voiced head carries no
+    /// "enters with" of its own once the rider sentence is scoped off), so this
+    /// assertion fails on revert of Unit 2 alone, without Unit 1.
+    ///
+    /// Fixture text is the VERBATIM printed Oracle text from
+    /// `data/mtgjson/AtomicCards.json` (`"Winter Soldier, Reborn Avenger"`), so the
+    /// pinned `ChangeZone` shape is the real card's dynamic
+    /// `Cmc LE Ref(Power{Source})` subject, not a synthetic fixed-mana-value one.
+    #[test]
+    fn condition_if_accepts_present_tense_enters_this_way_counter_rider() {
+        let parsed = parse_named(
+            "Whenever Winter Soldier attacks, return target creature card with mana value \
+             less than or equal to Winter Soldier's power from your graveyard to the \
+             battlefield. If a Hero enters this way, it enters with an additional +1/+1 \
+             counter on it.",
+            "Winter Soldier, Reborn Avenger",
+            &["Creature"],
+        );
+        // Reach-guard: `check_swallowed_clauses` early-returns on Unimplemented,
+        // so a bare negative would be vacuous. Prove the rider really is
+        // represented by the typed slot before asserting the absence.
+        let carries_slot = parsed.triggers.iter().any(|t| {
+            t.execute.as_ref().is_some_and(|e| {
+                matches!(
+                    e.effect.as_ref(),
+                    Effect::ChangeZone {
+                        conditional_enter_with_counters,
+                        ..
+                    } if !conditional_enter_with_counters.is_empty()
+                )
+            })
+        });
+        assert!(
+            carries_slot,
+            "premise: the rider must be represented by conditional_enter_with_counters: {parsed:?}"
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "a represented present-tense entry rider must not report a swallowed \
+             condition: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// V5: the two axes Unit 2 deliberately did NOT widen. Both fixtures carry the
+    /// same represented slot, so a blanket-widening regression flips them silently.
+    #[test]
+    fn condition_if_still_flags_unrepresented_entry_this_way_voices() {
+        // Conditional voice: `tag("if ")` is mandatory. A trigger-voiced rider is
+        // a different, unrepresented shape and must keep flagging.
+        assert!(
+            !crate::parser::oracle_effect::sequence::is_moved_object_entry_this_way_counters_clause(
+                "When an Equipment enters this way, put a +1/+1 counter on it"
+            ),
+            "trigger-voiced rider must not be treated as represented"
+        );
+        // Polarity: `conditional_enter_with_counters` represents an AFFIRMATIVE
+        // filter match only, so a negated gate is unrepresentable.
+        assert!(
+            !crate::parser::oracle_effect::sequence::is_moved_object_entry_this_way_counters_clause(
+                "If a creature wasn't put onto the battlefield this way, put a +1/+1 counter on it"
+            ),
+            "negated gate must not be treated as represented"
+        );
+        // Non-vacuous positive on the same seam: the affirmative `if` voice IS
+        // represented, so a blanket-`false` regression fails here.
+        assert!(
+            crate::parser::oracle_effect::sequence::is_moved_object_entry_this_way_counters_clause(
+                "If a Hero enters this way, it enters with two additional +1/+1 counters on it"
+            )
+        );
+        // The retained "counter" payoff gate: Silver Surfer's `enters tapped`
+        // rider is genuinely unrepresented and must stay visible to the audit.
+        assert!(
+            !crate::parser::oracle_effect::sequence::is_moved_object_entry_this_way_counters_clause(
+                "If a land enters this way, it enters tapped"
+            )
+        );
+        // Subject: the bare-pronoun voice carries no typed filter, so nothing
+        // lowers it to `ZoneChangedThisWay { filter }` and
+        // `fold_enters_this_way_counter_rider` never folds it into
+        // `conditional_enter_with_counters`. Treating it as represented would let
+        // a compound card whose OTHER rider populates the slot strip this
+        // unrepresented one out of the residual below.
+        assert!(
+            !crate::parser::oracle_effect::sequence::is_moved_object_entry_this_way_counters_clause(
+                "If it enters this way, it enters with a +1/+1 counter on it"
+            ),
+            "the filter-less pronoun subject must not be treated as represented"
+        );
+    }
+
+    /// V5: the pronoun exclusion is not merely a combinator property — it must
+    /// survive to the detector. A card carrying the represented typed rider AND an
+    /// unrepresented bare-pronoun rider must still flag, because only the typed one
+    /// reaches `conditional_enter_with_counters`. Before the subject restriction,
+    /// the pronoun sentence was stripped from the residual alongside the typed one
+    /// and its warning vanished with it.
+    #[test]
+    fn represented_typed_rider_does_not_hide_an_unrepresented_pronoun_rider() {
+        let parsed = parse_named(
+            "Return target creature card from your graveyard to the battlefield. \
+             If a Hero enters this way, it enters with two additional +1/+1 counters on it. \
+             If it enters this way, draw a card.",
+            "Pronoun Rider Compound Fixture",
+            &["Instant"],
+        );
+        // Reach-guard: the typed rider really is represented, so the assertion
+        // below is about the pronoun sentence and not about a total parse failure.
+        let carries_slot = parsed.abilities.iter().any(|a| {
+            matches!(
+                a.effect.as_ref(),
+                Effect::ChangeZone {
+                    conditional_enter_with_counters,
+                    ..
+                } if !conditional_enter_with_counters.is_empty()
+            )
+        });
+        assert!(
+            carries_slot,
+            "premise: the typed rider must be represented by the slot: {parsed:?}"
+        );
+        assert!(
+            has_swallowed_detector(&parsed, "Condition_If"),
+            "the unrepresented pronoun rider must stay visible to Condition_If, got {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// V5: a card carrying the represented gate PLUS an unrelated bare " if "
+    /// must still flag — exercising the `has_other_if` residual branch.
+    #[test]
+    fn represented_entry_this_way_counter_rider_does_not_hide_unrelated_if() {
+        let parsed = parse_named(
+            "Return target creature card from your graveyard to the battlefield. \
+             If a Hero enters this way, it enters with two additional +1/+1 counters on it.\n\
+             Draw a card if the moon is bright.",
+            "Heroic Return Compound Fixture",
+            &["Instant"],
+        );
         assert!(
             has_swallowed_detector(&parsed, "Condition_If"),
             "a separate unrelated if line must remain visible to Condition_If, got {:?}",

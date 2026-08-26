@@ -33,16 +33,6 @@
 </p>
 <!-- coverage-badges:end -->
 
-<p align="center">
-  <a href="https://gittensor.io/miners/repository?name=phase-rs%2Fphase">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/phase-rs/phase/gittensor-impact-assets/gittensor-impact-dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/phase-rs/phase/gittensor-impact-assets/gittensor-impact-light.svg">
-      <img src="https://raw.githubusercontent.com/phase-rs/phase/gittensor-impact-assets/gittensor-impact-light.svg" alt="Gittensor contributor impact for phase.rs" width="600">
-    </picture>
-  </a>
-</p>
-
 ---
 
 <p align="center">
@@ -84,6 +74,8 @@ Read https://raw.githubusercontent.com/phase-rs/phase/main/docs/AI-CONTRIBUTOR.m
 and follow it end-to-end to implement {a card I name, or pick one for me}.
 Use the $engine-implementer skill. Use high thinking. Don't stop for my input.
 Open a PR when done.
+Use the repository's .github/PULL_REQUEST_TEMPLATE.md for the PR body and fill
+every section.
 ```
 
 Full procedure, two tracks (developer / non-developer), and copy-paste prompts for LLM UIs without web fetch: [docs/AI-CONTRIBUTOR.md](docs/AI-CONTRIBUTOR.md).
@@ -136,6 +128,70 @@ If `tilt` is installed, `setup.sh` skips the eager WASM + card-data build and `t
 cd client && pnpm install && pnpm dev # Start frontend
 ```
 
+### Android APKs
+
+Android builds require Node.js 22, pnpm 9.15.9, JDK 17, Android SDK platform
+36/build-tools 36.0.0, Android NDK 28.2.13676358, and the Rust Android targets:
+
+```bash
+rustup target add aarch64-linux-android armv7-linux-androideabi
+sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358"
+```
+
+Install dependencies and invoke only the lock-installed Tauri CLI through an
+absolute Node executable. Initialization is deterministic and reapplies the
+maintained Gradle integration:
+
+```bash
+cd client
+corepack pnpm@9.15.9 install --frozen-lockfile
+NODE_BIN="$(realpath "$(command -v node)")"
+TAURI_JS="$(pwd)/node_modules/@tauri-apps/cli/tauri.js"
+export ORG_GRADLE_PROJECT_phaseNodeExecutable="$NODE_BIN"
+"$NODE_BIN" "$TAURI_JS" android build --debug --target aarch64 --apk
+```
+
+The generated Android project is checked in at `client/src-tauri/gen/android`
+and its Gradle/Rust integration is maintained by the repository. Do not run
+`android init` during normal development. If a Tauri upgrade requires
+regeneration, do it on a throwaway branch, review the complete generated diff,
+and explicitly preserve the signing/version guards in `app/build.gradle.kts`.
+The Rust test `generated_android_gradle_keeps_release_invariants` fails if those
+load-bearing edits are lost.
+
+Debug APKs are written below
+`client/src-tauri/gen/android/app/build/outputs/apk/`. Install and cold-launch
+the ARM64 build on a selected device without relying on adb's implicit target:
+
+```bash
+adb -s <serial> install -r path/to/debug.apk
+adb -s <serial> shell am force-stop rs.phase.app.debug
+adb -s <serial> shell monkey -p rs.phase.app.debug -c android.intent.category.LAUNCHER 1
+```
+
+Official releases publish separately signed `Phase-Android-ARM64.apk` and
+`Phase-Android-ARMv7.apk` files. Release builds fail closed unless all four
+local signing inputs are nonempty: `PHASE_ANDROID_KEYSTORE_FILE`,
+`PHASE_ANDROID_KEYSTORE_PASSWORD`, `PHASE_ANDROID_KEY_ALIAS`, and
+`PHASE_ANDROID_KEY_PASSWORD` (equivalent Gradle properties use the
+`phase.android.*` names in `app/build.gradle.kts`). The local keystore path must
+name an existing file. CI builds release APKs when all five Android secrets are
+configured, skips APK attachment when none are configured, and fails on a
+partial configuration without blocking publication of the desktop release.
+The required secret names are `ANDROID_KEYSTORE_BASE64`,
+`ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`
+plus `ANDROID_CERTIFICATE_SHA256`. CI decodes the first into a runner-local
+keystore, maps the next three to the Gradle inputs, and verifies that both APKs
+use the certificate identified by the final digest. Secret values are never
+committed.
+
+Android `versionCode` is derived strictly from `major.minor.patch` as
+`major * 1_000_000 + minor * 1_000 + patch`; minor and patch must each fit a
+three-digit slot and overflow is rejected (`0.60.0` maps to `60000`). Android
+supports APK delivery only (ARM64 and ARMv7): AAB/Play Store publishing and
+automatic updater manifests/keys are intentionally not supported. Desktop
+artifacts continue to use the existing signed `update.json` flow.
+
 ## Dedicated Server
 
 The easiest way to run a dedicated multiplayer server is the Docker image:
@@ -143,7 +199,6 @@ The easiest way to run a dedicated multiplayer server is the Docker image:
 ```bash
 docker volume create phase-server-data
 docker run -d \
-  --platform linux/amd64 \
   --name phase-server \
   --restart unless-stopped \
   -p 9374:9374 \
@@ -153,7 +208,8 @@ docker run -d \
   ghcr.io/phase-rs/phase-server:latest
 ```
 
-The image includes the server binary and generated card data. It exposes:
+The image (linux/amd64 and linux/arm64) includes the server binary; card data is
+downloaded into the data volume on first boot. It exposes:
 
 - `http://localhost:9374/health` for health checks
 - `ws://localhost:9374/ws` for WebSocket clients
@@ -178,7 +234,7 @@ Docker uses environment variables for the common options:
 You can also pass server flags after the image name:
 
 ```bash
-docker run --rm --platform linux/amd64 -p 9374:9374 ghcr.io/phase-rs/phase-server:latest --lobby-only --cors-origin '*'
+docker run --rm -p 9374:9374 ghcr.io/phase-rs/phase-server:latest --lobby-only --cors-origin '*'
 ```
 
 For public internet play, put the container behind a TLS reverse proxy and give
@@ -187,7 +243,6 @@ same host, bind Docker to localhost instead:
 
 ```bash
 docker run -d \
-  --platform linux/amd64 \
   --name phase-server \
   --restart unless-stopped \
   -p 127.0.0.1:9374:9374 \
@@ -198,6 +253,17 @@ docker run -d \
 ```
 
 The same flags work when running the `phase-server` release binary directly.
+
+To build the image yourself (cross-compiles on the build host, no emulated
+cargo):
+
+```bash
+docker buildx create --use   # once: multi-platform builds need a docker-container builder
+docker buildx build --platform linux/amd64,linux/arm64 --build-arg PHASE_CHANNEL=release \
+  -t <registry>/phase-server:latest --push .
+```
+
+For Kubernetes, see the Helm chart in [`deploy/helm/phase-server`](deploy/helm/phase-server).
 
 ## Architecture
 

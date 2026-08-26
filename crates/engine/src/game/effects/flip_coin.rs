@@ -913,6 +913,7 @@ mod tests {
             power: None,
             toughness: None,
             loyalty: Some(3),
+            printed_loyalty: None,
             defense: None,
             card_types: CardType {
                 supertypes: vec![],
@@ -933,6 +934,7 @@ mod tests {
             casting_restrictions: vec![],
             casting_options: vec![],
             layout_kind: None,
+            parse_warnings: vec![],
         });
         id
     }
@@ -1235,6 +1237,7 @@ mod tests {
             controller: PlayerId(0),
             object_id: spell_id,
             card_id: CardId(2),
+            cast_mana_value: None,
         });
 
         let ability = build_resolved_from_def(execute, krark_id, PlayerId(0));
@@ -1318,6 +1321,7 @@ mod tests {
             controller: PlayerId(0),
             object_id: spell_id,
             card_id: CardId(2),
+            cast_mana_value: None,
         });
 
         let ability = build_resolved_from_def(execute, krark_id, PlayerId(0));
@@ -1443,6 +1447,7 @@ mod tests {
             controller: PlayerId(1),
             object_id: ObjectId(999),
             card_id: CardId(2),
+            cast_mana_value: None,
         });
 
         let ability =
@@ -1482,6 +1487,7 @@ mod tests {
             controller: PlayerId(1),
             object_id: ObjectId(999),
             card_id: CardId(2),
+            cast_mana_value: None,
         });
 
         // Lose branch: "that player loses 3 life" — bound to TriggeringPlayer so

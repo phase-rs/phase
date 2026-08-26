@@ -85,9 +85,11 @@ fn hideaway_trigger(n: u32) -> TriggerDefinition {
             filter: TargetFilter::Any,
             // CR 702.75a: "put the rest on the bottom of your library."
             rest_destination: Some(Zone::Library),
+            rest_order: crate::types::ability::DigRestOrder::Random,
             // CR 701.20e: the cards are looked at privately, not revealed.
             reveal: false,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         },
     )

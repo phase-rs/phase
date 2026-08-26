@@ -44,6 +44,7 @@ client/public/card-names.json
 client/public/coverage-data.json
 client/public/coverage-summary.json
 client/public/scryfall-data.json
+client/public/scryfall-images.*.json
 client/public/scryfall-printings.json
 client/public/scryfall-sets.json
 client/public/scryfall-token-images.json
@@ -55,6 +56,13 @@ client/public/parser-warning-patterns.json
 # Atomic-write staging files from gen-card-data.sh (cleaned on normal exit,
 # but may linger after SIGKILL / power loss).
 client/public/*.tmp
+# The same, for callers that stage through mktemp and so carry a random tail
+# after `.tmp` (gen-scryfall-token-images.sh). The template cannot be
+# `.XXXXXX.tmp` instead: BSD/macOS mktemp rejects anything after the X run.
+client/public/*.tmp.*
+# scryfall_finalize_download stages its rename diagnostic beside the target;
+# gen-scryfall-token-images.sh is the first caller to aim it at a tracked dir.
+client/public/*.mv-error.*
 
 # Coverage
 client/coverage/
@@ -63,7 +71,6 @@ client/coverage/
 data/*
 !data/standard-cards.txt
 !data/mtgjson/
-!data/mtgish-cards.json
 data/mtgjson/AtomicCards.json
 data/mtgjson/CardTypes.json
 data/mtgjson/Meta.json
@@ -71,6 +78,8 @@ data/mtgjson/SetList.json
 data/mtgjson/.refresh-week
 data/mtgjson/decks/
 data/mtgjson/sets/
+data/mtgjson/AllSetFiles.tar
+data/mtgjson/allsets/
 !data/abilities/
 !data/precons/
 !data/learned-weights.json
@@ -108,10 +117,6 @@ replay_dtypes.py
 parser-batch-plan.md
 parser-fallback-plan.md
 tmp/
-
-# External reference / scratch
-mtgish/
-mtgish*.tgz
 
 # Python bytecode cache
 __pycache__/

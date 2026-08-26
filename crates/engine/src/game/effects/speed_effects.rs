@@ -337,6 +337,33 @@ pub(crate) fn players_for_filter(
                 .map(|player| player.id)
                 .collect()
         }
+        // CR 608.2c + CR 608.2h + CR 109.4: "each [player class] who
+        // controlled/owned a [filter] this way" — candidates satisfying both
+        // `relation` and possession of a member of the most recent tracked
+        // object set. Delegates to the shared possession authority.
+        PlayerFilter::TrackedSetPossessor {
+            relation,
+            possession,
+            filter,
+            caused_by,
+        } => state
+            .players
+            .iter()
+            .filter(|player| !player.is_eliminated)
+            .filter(|player| {
+                crate::game::players::matches_relation(state, player.id, controller, *relation)
+                    && crate::game::quantity::possessed_tracked_set_member(
+                        state,
+                        player.id,
+                        *possession,
+                        filter,
+                        *caused_by,
+                        controller,
+                        source_id,
+                    )
+            })
+            .map(|player| player.id)
+            .collect(),
     }
 }
 

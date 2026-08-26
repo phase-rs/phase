@@ -214,7 +214,14 @@ pub fn resolve(
             DestroyOutcome::NeedsChoice => return Ok(()),
         }
     }
-    for target in &ability.targets {
+    // CR 400.7 + CR 603.7c: a delayed destroy's pinned referent that became a
+    // new object is dropped. The SelfRef fallback above still reads the RAW
+    // `ability.targets`, so dropping every element here cannot re-bind the
+    // destroy to the source, and there is no pool fallback below this loop —
+    // substitution alone is sufficient and no early return is needed.
+    // Bound before the loop: `destroy_single_object` takes `&mut GameState`.
+    let live_targets = ability.live_object_targets(state);
+    for target in &live_targets {
         if let TargetRef::Object(obj_id) = target {
             match destroy_single_object(state, *obj_id, ability.source_id, cant_regenerate, events)
             {

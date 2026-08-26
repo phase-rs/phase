@@ -21,10 +21,13 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (chooser_filter, filter) = match &ability.effect {
+    let (chooser_filter, filter, min, max) = match &ability.effect {
         Effect::ChooseObjectsIntoTrackedSet {
-            chooser, filter, ..
-        } => (chooser.clone(), filter.clone()),
+            chooser,
+            filter,
+            min,
+            max,
+        } => (chooser.clone(), filter.clone(), *min, *max),
         _ => {
             return Err(EffectError::MissingParam(
                 "ChooseObjectsIntoTrackedSet".to_string(),
@@ -57,6 +60,14 @@ pub fn resolve(
         .map(|&obj_id| TargetRef::Object(obj_id))
         .collect();
 
+    // CR 609.3: If a resolving effect asks for more objects than are
+    // available, the player chooses all that are available. Publish an
+    // achievable runtime range at this trust seam so every consumer (engine,
+    // AI, and client) sees the same liveness-preserving cardinality.
+    let available = u32::try_from(eligible.len()).unwrap_or(u32::MAX);
+    let max = max.map(|maximum| maximum.min(available));
+    let min = min.min(max.unwrap_or(available));
+
     // CR 608.2c: Surface the interactive selection. Even with an empty
     // `eligible` set the prompt is raised — the player's act of submitting an
     // empty selection IS a legal resolution-time choice (CR 608.2d: choosing
@@ -70,6 +81,8 @@ pub fn resolve(
     state.waiting_for = WaitingFor::ChooseObjectsSelection {
         player: chooser,
         eligible,
+        min,
+        max,
         trigger_event: state.current_trigger_event.clone(),
     };
 
@@ -80,7 +93,9 @@ pub fn resolve(
 mod tests {
     use crate::game::scenario::GameScenario;
     use crate::parser::oracle_effect::parse_effect_chain;
-    use crate::types::ability::AbilityKind;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, TargetFilter, TypedFilter,
+    };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::game_state::WaitingFor;
@@ -91,6 +106,51 @@ mod tests {
 
     const P0: PlayerId = PlayerId(0);
     const P1: PlayerId = PlayerId(1);
+
+    #[test]
+    fn required_choice_clamps_to_the_objects_that_exist() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let required_choice = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::ChooseObjectsIntoTrackedSet {
+                chooser: TargetFilter::Controller,
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                min: 2,
+                max: Some(2),
+            },
+        );
+        let host = {
+            let mut builder = scenario.add_artifact_from_oracle(P0, "Required Choice Host", "");
+            builder.with_ability_definition(required_choice);
+            builder.id()
+        };
+        let only_eligible = scenario
+            .add_creature(P0, "Only Eligible Creature", 1, 1)
+            .id();
+
+        let mut runner = scenario.build();
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: host,
+                ability_index: 0,
+            })
+            .expect("activate required-choice ability");
+        runner.advance_until_stack_empty();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseObjectsSelection {
+                min: 1,
+                max: Some(1),
+                ..
+            }
+        ));
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![crate::types::ability::TargetRef::Object(only_eligible)],
+            })
+            .expect("CR 609.3 permits choosing the sole available object");
+    }
 
     /// CR 608.2c + CR 608.2d + official ruling: The Day of the Doctor IV — "Choose
     /// up to three Doctors. You may exile all other creatures." — when the

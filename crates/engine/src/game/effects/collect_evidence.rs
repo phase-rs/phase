@@ -256,6 +256,9 @@ fn complete_cost_payment(
     events.push(GameEvent::PlayerPerformedAction {
         player_id: player,
         action: PlayerActionKind::CollectEvidence,
+        look_count: None,
+        scry_bottom_count: None,
+        scry_top_count: None,
     });
 
     match resume {
@@ -285,7 +288,7 @@ fn complete_cost_payment(
                 player,
                 pending.object_id,
                 pending.card_id,
-                pending.ability,
+                *pending.ability,
                 &pending.cost,
                 base_cost,
                 pending.casting_variant,
@@ -491,6 +494,7 @@ mod tests {
             GameEvent::PlayerPerformedAction {
                 player_id,
                 action: PlayerActionKind::CollectEvidence,
+                ..
             } if *player_id == PlayerId(0)
         )));
     }
@@ -611,7 +615,7 @@ mod tests {
         PendingManaAbility {
             player: PlayerId(0),
             source_id,
-            ability_index: 0,
+            ability_index: None,
             rules_execution_node: None,
             ability_snapshot: None,
             color_override: None,

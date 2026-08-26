@@ -3,8 +3,12 @@
 //!
 //! Parser AST verification — VERIFIED (no parser remediation required; every
 //! axis classifies from the existing typed AST, never by card name):
-//! - Reanimation payoff: `Effect::ChangeZone { origin: Some(Zone::Graveyard),
-//!   destination: Zone::Battlefield, target, .. }` at `ability.rs:7147` —
+//! - Reanimation payoff: `Effect::ChangeZone` (in `engine::types::ability`) with
+//!   `destination: Zone::Battlefield` and the graveyard **positively asserted** —
+//!   either by `origin: Some(Zone::Graveyard)` or, when the parser leaves
+//!   `origin` unset, by the target filter's `FilterProp::InZone { Graveyard }`
+//!   ("from an opponent's graveyard"). [`change_zone_leaves_graveyard`] is the
+//!   single authority for that question —
 //!   CR 404.1 (graveyard is the discard pile) + CR 110.1 (the card becomes a
 //!   permanent as it enters the battlefield). The reanimated body is a creature
 //!   (`TypeFilter::Creature`) or a Vehicle (`TypeFilter::Subtype("Vehicle")`,
@@ -69,7 +73,10 @@ const ENABLER_BONUS_CAP: f32 = 0.20;
 /// CR 205.3 / CR 301.7: the artifact subtype a reanimation target/payoff can be
 /// besides a creature. Compared case-insensitively against `TypeFilter::Subtype`
 /// and `CardType.subtypes`.
-const VEHICLE_SUBTYPE: &str = "Vehicle";
+/// `pub(crate)` so `features::vehicles` matches on the SAME string rather than
+/// redefining it — two features disagreeing about what a Vehicle is would be a
+/// silent classification split.
+pub(crate) const VEHICLE_SUBTYPE: &str = "Vehicle";
 
 /// Per-deck reanimator classification.
 ///
@@ -219,44 +226,109 @@ pub(crate) fn ability_is_discard_outlet(ability: &AbilityDefinition) -> bool {
     ability.cost_categories().contains(&CostCategory::Discards)
 }
 
+/// Single authority — CR 404.1: does this zone change take its object **out of a
+/// graveyard**, whichever AST home carries the constraint?
+///
+/// The "this comes from a graveyard" fact has two homes in the AST, chosen by
+/// Oracle phrasing, and they are the same fact:
+///
+/// - `"from a graveyard"` (Reanimate, Rise from the Grave) sets
+///   `ChangeZone.origin = Some(Zone::Graveyard)`.
+/// - `"from an opponent's graveyard"` (Ashen Powder), `"from graveyards"`
+///   (Ancient Brass Dragon), `"in your graveyard"` (Moira, Urborg Haunt) and
+///   the player-relative possessive `"from the graveyard of the player who
+///   controlled that creature"` (Glyph of Reincarnation) all leave `origin`
+///   unset and carry the constraint on the **target filter** as
+///   `FilterProp::InZone { Graveyard }`. CR 115.2: a graveyard card is only a
+///   legal target because the filter says so, which is why target enumeration
+///   and resolution-time re-legality read the filter and not `origin`.
+///
+/// `TargetFilter::extract_in_zone` is the engine's own authority for "which zone
+/// does this filter select from" — the parser gates its `assimilate` production
+/// on this very call, and `game::layers`, `game::triggers`, `game::quantity` and
+/// `game::effects::change_zone` all consult it. Re-deriving the zone here would
+/// create a second source of truth.
+///
+/// An unset `origin` alone never qualifies: both disjuncts positively assert
+/// `Zone::Graveyard`.
+pub(crate) fn change_zone_leaves_graveyard(origin: &Option<Zone>, target: &TargetFilter) -> bool {
+    *origin == Some(Zone::Graveyard) || target.extract_in_zone() == Some(Zone::Graveyard)
+}
+
 /// CR 404.1 + CR 110.1: a reanimation effect moves a creature/Vehicle card from
-/// a graveyard onto the battlefield. Origin must be the graveyard; destination
-/// the battlefield. An unset origin (`None`) is "from anywhere" and does not
-/// qualify as a *reanimation* signature on its own.
+/// a graveyard onto the battlefield. The destination must be the battlefield and
+/// the graveyard must be **positively asserted** — by `origin`, or by the target
+/// filter's zone (see [`change_zone_leaves_graveyard`]).
+///
+/// An unset `origin` *alone* is "from anywhere" and must never qualify:
+/// Treacherous Urge and Zara, Renegade Recruiter put a creature onto the
+/// battlefield from an opponent's **hand** with exactly `origin: None` and a
+/// zone-less filter. Those stay rejected.
 fn effect_is_reanimation(effect: &Effect) -> bool {
     matches!(
         effect,
         Effect::ChangeZone {
-            origin: Some(Zone::Graveyard),
+            origin,
             destination: Zone::Battlefield,
             target,
             ..
-        } if target_filter_is_reanimatable_body(target)
+        } if change_zone_leaves_graveyard(origin, target)
+            && target_filter_is_reanimatable_body(target)
     )
 }
 
-/// CR 701.17a / CR 701.9a: an effect that fills the controller's own graveyard.
+/// CR 701.17a / CR 701.9a / CR 701.25a / CR 701.20e: an effect that fills the
+/// controller's own graveyard.
+///
+/// **Single authority for "does this effect load my own graveyard".** Shared by
+/// the reanimator axis (what is there to bring back) and the graveyard
+/// type-diversity axis (how wide the graveyard's type spread is). Those axes
+/// measure different resources but ask this one question identically, so they
+/// must not answer it from two divergent local copies.
+///
 /// A self-mill must deposit into the graveyard (not exile); a discard always
-/// goes to the graveyard. Both must be controller-scoped — a `Player`-targeted
-/// mill/discard is opponent disruption (Mind Rot, Glimpse the Unthinkable), not
-/// a self-enabler.
-fn effect_fills_own_graveyard(effect: &Effect) -> bool {
+/// goes there. `Surveil` (CR 701.25a) and a `Dig` whose *rest* goes to the
+/// graveyard (CR 701.20e — "look at N, put one in hand, the rest into your
+/// graveyard") both deposit as well, and the latter is the densest type-spread
+/// filler on the board. Every form must be controller-scoped — a
+/// `Player`-targeted mill/discard is opponent disruption (Mind Rot, Glimpse the
+/// Unthinkable), not a self-enabler.
+pub(crate) fn effect_fills_own_graveyard(effect: &Effect) -> bool {
     match effect {
         Effect::Mill {
             target,
             destination,
             ..
         } => *destination == Zone::Graveyard && target_fills_own_graveyard(target),
-        Effect::Discard { target, .. } => target_fills_own_graveyard(target),
+        Effect::Discard { target, .. } | Effect::DiscardCard { target, .. } => {
+            target_fills_own_graveyard(target)
+        }
+        Effect::Surveil { target, .. } => target_fills_own_graveyard(target),
+        // CR 701.20e: only the rest-to-graveyard form deposits; a Dig whose
+        // remainder goes to the bottom of the library fills nothing.
+        Effect::Dig {
+            player,
+            rest_destination,
+            ..
+        } => *rest_destination == Some(Zone::Graveyard) && target_fills_own_graveyard(player),
         _ => false,
     }
 }
 
-/// CR 608.2c: "you mill/discard" (`Controller`) and the unspecified default
-/// (`Any`, e.g. "discard two cards" / "mill three cards") load the resolving
-/// player's own graveyard. An explicitly targeted `Player` is opponent-facing.
+/// CR 608.2c: "you mill/discard" (`Controller`), the source itself (`SelfRef`),
+/// an explicitly you-controlled scope (`Typed { controller: You }`), and the
+/// unspecified default (`Any`, e.g. "discard two cards" / "mill three cards")
+/// all load the resolving player's own graveyard. An explicitly targeted
+/// `Player` is opponent-facing.
 fn target_fills_own_graveyard(filter: &TargetFilter) -> bool {
-    matches!(filter, TargetFilter::Controller | TargetFilter::Any)
+    match filter {
+        TargetFilter::Controller | TargetFilter::Any | TargetFilter::SelfRef => true,
+        TargetFilter::Typed(typed) => matches!(typed.controller, Some(ControllerRef::You)),
+        TargetFilter::Or { filters } => filters.iter().any(target_fills_own_graveyard),
+        // Every constraint of a conjunction must hold for the match.
+        TargetFilter::And { filters } => filters.iter().all(target_fills_own_graveyard),
+        _ => false,
+    }
 }
 
 /// CR 608.2b: unwrap a reanimation target filter. Accepts a filter that

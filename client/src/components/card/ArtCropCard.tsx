@@ -5,11 +5,13 @@ import type { PTColor } from "../../viewmodel/cardProps";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
+import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
+import { faceDownMarkerName, faceDownMarkerRef } from "./faceDownMarker.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { COUNTER_COLORS, computePTDisplay, toRoman } from "../../viewmodel/cardProps.ts";
+import { COUNTER_COLORS, computePTDisplay, hasOtherPrintedFace, toRoman } from "../../viewmodel/cardProps.ts";
 import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 import { LoyaltyBadge } from "../ui/LoyaltyBadge.tsx";
 import { CardArtFallback } from "./CardArtFallback.tsx";
@@ -25,19 +27,10 @@ const PT_COLORS: Record<PTColor, string> = {
   white: "text-[#111]",
 };
 
-// Stable empty ref so the unbounded-counter selector returns the same value when
-// absent, avoiding a spurious re-render every state tick (mirrors PermanentCard).
-const EMPTY_UNBOUNDED_COUNTERS: string[] = [];
-
 export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardProps) {
   const { t } = useTranslation("game");
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
-  // CR 732.2a / CR 701.34a: the counter-type keys the engine marks as ∞ (unbounded
-  // counter-growth loop) for this object. Same channel PermanentCard's full-card pill
-  // reads — both battlefield display modes must agree, or the ∞ silently drops in one.
-  const unboundedCounterTypes = useGameStore(
-    (s) => s.gameState?.derived?.unbounded_counters?.[String(objectId)] ?? EMPTY_UNBOUNDED_COUNTERS,
-  );
+  const counterDisplay = useCounterDisplay(objectId);
   const isMobile = useIsMobile();
   const inspectObject = useUiStore((s) => s.inspectObject);
   const isCompactHeight = useIsCompactHeight();
@@ -45,19 +38,33 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
   );
 
-  const cardName = obj?.face_down ? t("card.faceDownName") : (obj?.name ?? "");
+  // Same rule as `PermanentCard`: the tile always backs a face-down
+  // permanent (the live face is blanked per CR 708.2a); the controller's peek
+  // is the hover preview (#7547).
+  const renderCardBack = obj?.face_down === true;
+  const cardName = renderCardBack
+    ? (faceDownMarkerName(true, obj?.face_down_cause) ?? t("card.faceDownName"))
+    : (obj?.name ?? "");
   const imageLookup = obj
     ? cardImageLookup(obj)
     : { name: "", faceIndex: 0, oracleId: undefined, faceName: undefined };
   const isToken = obj?.display_source === "Token";
-  const { src: cardSrc, isLoading: cardLoading } = useCardImage(obj?.face_down ? "" : imageLookup.name, {
+  // A face-down permanent shows the marker token for the ability that turned it
+  // face down (Morph / Manifest / A Mysterious Creature), the way paper play
+  // does. Without a marker the card back is rendered exactly as before.
+  const faceDownMarker = faceDownMarkerRef(obj?.face_down ?? false, obj?.face_down_cause);
+  const { src: cardSrc, isLoading: cardLoading } = useCardImage(renderCardBack ? "" : imageLookup.name, {
     size: "art_crop",
     faceIndex: imageLookup.faceIndex,
-    isToken: obj?.face_down ? false : isToken,
-    tokenFilters: !obj?.face_down && isToken && obj ? tokenFiltersForObject(obj) : undefined,
-    tokenImageRef: !obj?.face_down && isToken && obj ? obj.token_image_ref : undefined,
-    oracleId: obj?.face_down ? undefined : imageLookup.oracleId,
-    faceName: obj?.face_down ? undefined : imageLookup.faceName,
+    isToken: renderCardBack ? faceDownMarker !== null : isToken,
+    tokenFilters: !renderCardBack && isToken && obj ? tokenFiltersForObject(obj) : undefined,
+    tokenImageRef: renderCardBack
+      ? (faceDownMarker ?? undefined)
+      : isToken && obj
+        ? obj.token_image_ref
+        : undefined,
+    oracleId: renderCardBack ? undefined : imageLookup.oracleId,
+    faceName: renderCardBack ? undefined : imageLookup.faceName,
   });
 
   // A resolved URL can still 404 (future-dated sets not yet on the CDN, stale
@@ -81,11 +88,15 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
 
   if (!obj) return null;
 
-  const src = obj.face_down ? CARD_BACK_URL : cardSrc;
-  const isLoading = obj.face_down ? false : cardLoading;
-  const hasDfc = !obj.face_down && obj.back_face != null;
-  // Filter out loyalty counters — shown separately as the loyalty badge
-  const counters = Object.entries(obj.counters).filter((entry): entry is [string, number] => entry[1] != null && entry[0] !== "loyalty");
+  const src = renderCardBack ? (cardSrc ?? CARD_BACK_URL) : cardSrc;
+  const isLoading = renderCardBack ? false : cardLoading;
+  // CR 712 vs CR 710: `back_face != null` is NOT "has a second face" — a
+  // Kamigawa flip card stores its alternative half in the same slot and has no
+  // face 1 to inspect. Use the engine-provided layout discriminant.
+  const hasDfc = !renderCardBack && hasOtherPrintedFace(obj);
+  // CR 306.5c: the engine already split the loyalty TOTAL out of the pill strip, so this site
+  // classifies nothing — it renders the rows it is given, in the order it is given them.
+  const counters = pillsOf(counterDisplay);
   const devotionValue = obj.devotion ?? null;
   // --- Dynamic Text Sizing Logic ---
   let ptNumClass = "text-[14px]";
@@ -103,7 +114,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
   }
 
   // Genuinely still resolving art — pulse until the async lookup settles.
-  if (!obj.face_down && isLoading) {
+  if (!renderCardBack && isLoading) {
     return (
       <div className="relative" style={{ width: "var(--art-crop-w)", height: "var(--art-crop-h)" }}>
         <div className="absolute inset-0 rounded-[6px] bg-[#151515] p-[3px] shadow-md">
@@ -113,7 +124,13 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     );
   }
 
-  const renderedSrc = obj.face_down ? CARD_BACK_URL : (src ?? "");
+  // The card back is the fallback in BOTH directions: a marker that never
+  // resolves and a marker URL whose `<img>` fails to load both land here. The
+  // artless text tile below is for face-UP cards with no printing; a face-down
+  // permanent always has the card back to fall back to.
+  const renderedSrc = renderCardBack
+    ? (artError ? CARD_BACK_URL : (src ?? CARD_BACK_URL))
+    : (src ?? "");
   const headerHeight = isCompactHeight
     ? "clamp(8px, calc(var(--art-crop-h) * 0.16), 12px)"
     : "clamp(8px, calc(var(--art-crop-h) * 0.18), 20px)";
@@ -188,7 +205,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
                   an artless permanent loses its picture but never its game
                   state. `src` is non-null for face-down cards (CARD_BACK_URL),
                   so those still render the card back here. */}
-              {src && !artError ? (
+              {renderCardBack || (src && !artError) ? (
                 <img
                   src={renderedSrc}
                   alt={cardName}
@@ -209,22 +226,23 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
               {/* Top-right overlay stack: counter badges kept clear of the
                   bottom P/T and loyalty badges. */}
               <div className="absolute top-0.5 right-0.5 z-[60] flex flex-col items-end gap-0.5">
-                {counters.map(([type, count]) => {
+                {counters.map((row) => {
+                  const type = row.counter;
                   // CR 732.2a / CR 701.34a: an accepted counter-growth loop pumps this
                   // counter unboundedly — render ∞ instead of the (still-finite) real count.
-                  const isUnbounded = unboundedCounterTypes.includes(type);
+                  const unbounded = isUnbounded(row);
                   return (
                     <CounterTooltip
                       key={type}
                       type={type}
-                      count={count}
-                      isUnbounded={isUnbounded}
+                      count={row.count}
+                      isUnbounded={unbounded}
                     >
                       <span
                         className={`rounded-full flex items-center justify-center font-bold text-white shadow-md border border-black/50 ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
                         style={counterStyle}
                       >
-                        {isUnbounded ? "∞" : count}
+                        {unbounded ? "∞" : row.count}
                       </span>
                     </CounterTooltip>
                   );
@@ -306,6 +324,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
         <LoyaltyBadge
           amount={obj.loyalty}
           kind="total"
+          isUnbounded={isUnbounded(counterDisplay.loyalty)}
           size="battlefield"
           reinforcedTopRim
           className="absolute z-30"

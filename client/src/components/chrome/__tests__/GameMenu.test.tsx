@@ -72,6 +72,31 @@ describe("GameMenu", () => {
     expect(screen.getByRole("button", { name: "Switch to split table view Legacy" })).toBeInTheDocument();
   });
 
+  it("routes the split-layout nudge through its supplied callbacks", () => {
+    const onTryMultiplayerSplitLayout = vi.fn();
+    const onDismissMultiplayerSplitLayoutNudge = vi.fn();
+    renderGameMenu({
+      showMultiplayerSplitLayoutNudge: true,
+      onTryMultiplayerSplitLayout,
+      onDismissMultiplayerSplitLayoutNudge,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+    fireEvent.click(screen.getByRole("button", { name: "Try split view" }));
+
+    expect(onTryMultiplayerSplitLayout).toHaveBeenCalledOnce();
+    expect(onDismissMultiplayerSplitLayoutNudge).not.toHaveBeenCalled();
+  });
+
+  it("hides the split-layout nudge without its complete callback contract", () => {
+    renderGameMenu({ showMultiplayerSplitLayoutNudge: true });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+
+    expect(screen.queryByRole("button", { name: "Try split view" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Not now" })).toBeNull();
+  });
+
   it("opens sandbox tools from the collapsed menu", () => {
     const onSandboxToolsClick = vi.fn();
     renderGameMenu({ showSandboxTools: true, onSandboxToolsClick });
@@ -112,4 +137,74 @@ describe("GameMenu", () => {
       "true",
     );
   });
+
+  // The takeback item's gate used to be `isOnlineMode && onRequestTakeback`,
+  // which hid it for desktop solo-vs-AI (`native-ai` reaches GamePage as
+  // `mode=ai`, so `isOnlineMode` is false) even though that game has a real
+  // server-authoritative takeback and no client-side undo. GamePage is now the
+  // single authority and gates on the transport; the menu only asks whether it
+  // was given a handler.
+  it("offers takeback whenever a handler is supplied, even outside online mode", () => {
+    const onRequestTakeback = vi.fn();
+    // `isOnlineMode: false` is the whole point — this is the desktop-solo
+    // shape, and it is what fails if the `isOnlineMode &&` gate comes back.
+    renderGameMenu({ isOnlineMode: false, onRequestTakeback });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+    fireEvent.click(screen.getByRole("button", { name: "Request Takeback" }));
+
+    expect(onRequestTakeback).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides takeback when no handler is supplied", () => {
+    // Paired negative: without it, "render always" would pass the test above.
+    renderGameMenu({ isOnlineMode: true, onRequestTakeback: undefined });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+
+    // Reach guard: the menu really did open, so the absence below is the gate
+    // rather than an unrendered menu.
+    expect(screen.getByRole("button", { name: "Concede" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Request Takeback" })).toBeNull();
+  });
+
+  // F4. "Request Takeback" is a proposal addressed to other humans. Solo vs.
+  // AI there is nobody to ask and the server auto-approves, so the same entry
+  // must read as a plain undo. Only the label changes — the handler and the
+  // wire frame are identical.
+  it("labels the rollback entry as an undo when the audience is solo", () => {
+    const onRequestTakeback = vi.fn();
+    renderGameMenu({ onRequestTakeback, takebackAudience: "solo" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+
+    expect(screen.getByRole("button", { name: "Undo Last Action" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Request Takeback" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Undo Last Action" }));
+    expect(onRequestTakeback).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the table wording when other humans are present", () => {
+    // Paired positive. Also covers the default: `takebackAudience` is omitted
+    // here, and the default must be the pre-existing wording.
+    renderGameMenu({ onRequestTakeback: vi.fn() });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+
+    expect(screen.getByRole("button", { name: "Request Takeback" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Undo Last Action" })).toBeNull();
+  });
+
+  it("renders no rollback entry at all without a handler, whatever the audience", () => {
+    // Hostile: the audience must not become a second render gate.
+    renderGameMenu({ onRequestTakeback: undefined, takebackAudience: "solo" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+
+    expect(screen.getByRole("button", { name: "Concede" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Undo Last Action" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Request Takeback" })).toBeNull();
+  });
+
 });

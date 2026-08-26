@@ -8,12 +8,19 @@ import init, {
   ping,
   take_last_panic_message,
   initialize_game,
+  initialize_multiplayer_host_game,
   submit_action,
+  submit_interaction_js,
   get_game_state,
   get_filtered_game_state,
-  get_ai_action,
+  get_ai_action_proposal,
+  get_ai_action_proposal_with_diagnostics,
+  get_ai_tactical_action_proposal,
+  get_ai_tactical_action_proposal_with_diagnostics,
+  get_ai_action_proposal_from_scores,
+  get_ai_action_proposal_from_scores_with_diagnostics,
   get_ai_scored_candidates,
-  select_action_from_scores,
+  submit_ai_action_proposal,
   get_legal_actions_js,
   get_legal_actions_for_viewer_js,
   get_viewer_snapshot_js,
@@ -42,8 +49,10 @@ import init, {
   get_card_rulings,
 } from "@wasm/engine";
 
-import type { GameAction } from "./types";
+import type { AiActionProposal, GameAction } from "./types";
+import type { InteractionSubmission } from "./generated/interaction";
 import type { BracketDeckRequest } from "../types/bracketEstimate";
+import { classifyInitFailure, type InitFailure } from "./init-envelope";
 
 // ── Message Protocol ─────────────────────────────────────────────────────
 
@@ -60,7 +69,18 @@ type EngineRequest =
       playerCount?: number;
       firstPlayer?: number;
     }
+  | {
+      type: "initializeMultiplayerHostGame";
+      id: number;
+      deckData: unknown | null;
+      seed: number;
+      formatConfig: unknown | null;
+      matchConfig: unknown | null;
+      playerCount?: number;
+      firstPlayer?: number;
+    }
   | { type: "submitAction"; id: number; actor: number; action: GameAction }
+  | { type: "submitInteraction"; id: number; actor: number; submission: InteractionSubmission }
   | { type: "previewManaPayment"; id: number; actor: number; action: GameAction }
   | { type: "getState"; id: number }
   | { type: "getFilteredState"; id: number; viewerId: number }
@@ -68,21 +88,14 @@ type EngineRequest =
   | { type: "getSnapshot"; id: number }
   | { type: "getLegalActionsForViewer"; id: number; viewerId: number }
   | { type: "getViewerSnapshot"; id: number; viewerId: number }
-  | { type: "getAiAction"; id: number; difficulty: string; playerId: number }
-  | {
-      type: "getAiScoredCandidates";
-      id: number;
-      difficulty: string;
-      playerId: number;
-      seed: number;
-    }
-  | {
-      type: "selectActionFromScores";
-      id: number;
-      scoresJson: string;
-      difficulty: string;
-      seed: number;
-    }
+  | { type: "getAiActionProposal"; id: number; difficulty: string; playerId: number }
+  | { type: "getAiActionProposalWithDiagnostics"; id: number; difficulty: string; playerId: number }
+  | { type: "getAiTacticalActionProposal"; id: number; difficulty: string; playerId: number }
+  | { type: "getAiTacticalActionProposalWithDiagnostics"; id: number; difficulty: string; playerId: number }
+  | { type: "getAiScoredCandidates"; id: number; difficulty: string; playerId: number; seed: number }
+  | { type: "getAiActionProposalFromScores"; id: number; scoresJson: string; difficulty: string; playerId: number; seed: number }
+  | { type: "getAiActionProposalFromScoresWithDiagnostics"; id: number; scoresJson: string; difficulty: string; playerId: number; seed: number }
+  | { type: "submitAiActionProposal"; id: number; proposal: AiActionProposal }
   | { type: "restoreState"; id: number; stateJson: string }
   | { type: "resumeMultiplayerHostState"; id: number; stateJson: string }
   | { type: "exportState"; id: number }
@@ -110,7 +123,13 @@ type EngineRequest =
 
 type EngineResponse =
   | { type: "result"; id: number; data: unknown }
-  | { type: "error"; id: number; message: string; bracketViolation?: true };
+  | {
+      type: "error";
+      id: number;
+      message: string;
+      bracketViolation?: true;
+      engineOccupied?: true;
+    };
 
 // ── State ────────────────────────────────────────────────────────────────
 
@@ -128,8 +147,23 @@ function error(id: number, message: string): void {
   respond({ type: "error", id, message });
 }
 
-function bracketViolationError(id: number, message: string): void {
-  respond({ type: "error", id, message, bracketViolation: true });
+/**
+ * Raise an initialize-envelope failure, preserving its typed discriminator so
+ * `EngineWorkerClient` can rebuild a typed `AdapterError` on the main thread
+ * rather than matching on the message text.
+ */
+function initFailureError(id: number, failure: InitFailure): void {
+  switch (failure.kind) {
+    case "bracketViolation":
+      respond({ type: "error", id, message: failure.message, bracketViolation: true });
+      break;
+    case "engineOccupied":
+      respond({ type: "error", id, message: failure.message, engineOccupied: true });
+      break;
+    case "deckValidation":
+      error(id, failure.message);
+      break;
+  }
 }
 
 // ── Message Handler ──────────────────────────────────────────────────────
@@ -171,13 +205,9 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "buildAiCardSubset": {
         if (!cardDbLoaded) {
-          error(
-            msg.id,
-            "Card database not loaded. Call loadCardDb or loadCardDbFromUrl first.",
-          );
+          error(msg.id, "Card database not loaded. Call loadCardDb or loadCardDbFromUrl first.");
           break;
         }
-        // Returns the serialized AiCardSubsetResult tagged union as a string.
         result(msg.id, build_ai_card_subset());
         break;
       }
@@ -226,24 +256,40 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           msg.playerCount ?? undefined,
           msg.firstPlayer ?? undefined,
         );
-        // Engine returns { error: true, cedh_bracket_violation: true, reasons: [...] }
-        // when the cEDH bracket lock fires. Preserve the violation flag so the
-        // client can throw a typed BracketViolationError rather than matching
-        // on a raw string substring.
-        if (
-          gameResult &&
-          typeof gameResult === "object" &&
-          "error" in gameResult &&
-          gameResult.error
-        ) {
-          const envelope = gameResult as { reasons?: string[]; cedh_bracket_violation?: boolean };
-          const reasons = envelope.reasons ?? [];
-          const message = `Deck validation failed: ${reasons.join("; ")}`;
-          if (envelope.cedh_bracket_violation) {
-            bracketViolationError(msg.id, message);
-          } else {
-            error(msg.id, message);
-          }
+        const failure = classifyInitFailure(gameResult);
+        if (failure) {
+          initFailureError(msg.id, failure);
+          break;
+        }
+        result(msg.id, {
+          events: gameResult.events ?? [],
+          log_entries: gameResult.log_entries ?? [],
+        });
+        break;
+      }
+
+      case "initializeMultiplayerHostGame": {
+        if (!cardDbLoaded && msg.deckData) {
+          error(
+            msg.id,
+            "Card database not loaded. Call loadCardDb or loadCardDbFromUrl first.",
+          );
+          break;
+        }
+        // The host entry point refuses an engine that already holds a game and
+        // claims the multiplayer flag alongside the install — both inside this
+        // one synchronous handler, so no other posted message can interleave.
+        const gameResult = initialize_multiplayer_host_game(
+          msg.deckData ?? null,
+          msg.seed,
+          msg.formatConfig ?? null,
+          msg.matchConfig ?? null,
+          msg.playerCount ?? undefined,
+          msg.firstPlayer ?? undefined,
+        );
+        const failure = classifyInitFailure(gameResult);
+        if (failure) {
+          initFailureError(msg.id, failure);
           break;
         }
         result(msg.id, {
@@ -254,23 +300,24 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
 
       case "submitAction": {
-        if (
-          !cardDbLoaded &&
-          msg.action?.type === "Debug" &&
-          msg.action?.data?.type === "CreateCard"
-        ) {
-          const resp = await fetch(__CARD_DATA_URL__);
-          if (resp.ok) {
-            const text = await resp.text();
-            load_card_database(text);
-            cardDbLoaded = true;
-          }
-        }
         const actionResult = submit_action(msg.actor, msg.action);
         if (typeof actionResult === "string") {
           // Rust's submit_action error contract: returns the error string
           // on failure. `NOT_INITIALIZED:` prefix signals state-loss —
           // forward verbatim so the adapter can classify it as STATE_LOST.
+          error(msg.id, actionResult);
+          break;
+        }
+        result(msg.id, {
+          events: actionResult.events ?? [],
+          log_entries: actionResult.log_entries ?? [],
+        });
+        break;
+      }
+
+      case "submitInteraction": {
+        const actionResult = submit_interaction_js(msg.actor, msg.submission);
+        if (typeof actionResult === "string") {
           error(msg.id, actionResult);
           break;
         }
@@ -365,29 +412,57 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         break;
       }
 
-      case "getAiAction": {
-        const aiResult = get_ai_action(msg.difficulty, msg.playerId);
-        result(msg.id, aiResult ?? null);
+      case "getAiActionProposal": {
+        const proposal = get_ai_action_proposal(msg.difficulty, msg.playerId);
+        result(msg.id, proposal ?? null);
+        break;
+      }
+
+      case "getAiActionProposalWithDiagnostics": {
+        result(msg.id, get_ai_action_proposal_with_diagnostics(msg.difficulty, msg.playerId) ?? null);
+        break;
+      }
+
+      case "getAiTacticalActionProposal": {
+        result(msg.id, get_ai_tactical_action_proposal(msg.difficulty, msg.playerId) ?? null);
+        break;
+      }
+
+      case "getAiTacticalActionProposalWithDiagnostics": {
+        result(msg.id, get_ai_tactical_action_proposal_with_diagnostics(msg.difficulty, msg.playerId) ?? null);
         break;
       }
 
       case "getAiScoredCandidates": {
-        const scored = get_ai_scored_candidates(
-          msg.difficulty,
-          msg.playerId,
-          BigInt(msg.seed),
-        );
-        result(msg.id, scored ?? []);
+        result(msg.id, get_ai_scored_candidates(msg.difficulty, msg.playerId, BigInt(msg.seed)) ?? []);
         break;
       }
 
-      case "selectActionFromScores": {
-        const selected = select_action_from_scores(
-          msg.scoresJson,
-          msg.difficulty,
-          BigInt(msg.seed),
+      case "getAiActionProposalFromScores": {
+        result(
+          msg.id,
+          get_ai_action_proposal_from_scores(
+            msg.scoresJson,
+            msg.difficulty,
+            msg.playerId,
+            BigInt(msg.seed),
+          ) ?? null,
         );
-        result(msg.id, selected ?? null);
+        break;
+      }
+
+      case "getAiActionProposalFromScoresWithDiagnostics": {
+        result(msg.id, get_ai_action_proposal_from_scores_with_diagnostics(msg.scoresJson, msg.difficulty, msg.playerId, BigInt(msg.seed)) ?? null);
+        break;
+      }
+
+      case "submitAiActionProposal": {
+        const outcome = submit_ai_action_proposal(
+          msg.proposal.token,
+          msg.proposal.actor,
+          msg.proposal.action,
+        );
+        result(msg.id, outcome);
         break;
       }
 

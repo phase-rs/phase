@@ -34,6 +34,7 @@ import type {
   CommandZoneDisplay,
   LogDefaultState,
   MultiplayerBoardLayout,
+  SpellPaymentMode,
   ZoneCollapseMode,
 } from "../../stores/preferencesStore.ts";
 import type { SupportedLng } from "../../i18n/resources.ts";
@@ -44,7 +45,7 @@ import { ConfirmDialog } from "../ui/ConfirmDialog.tsx";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
 import { MenuSelect } from "../ui/MenuSelect";
 import { downloadBackup, importBackupFromFile, type ImportMode } from "../../services/backup.ts";
-import { isTauri } from "../../services/platform.ts";
+import { isDesktopTauri } from "../../services/platform.ts";
 import { useCloudSyncStore } from "../../stores/cloudSyncStore.ts";
 import { DiscordIcon, GoogleIcon } from "../ui/ProviderIcons";
 
@@ -72,9 +73,10 @@ const CARD_SIZES: CardSizePreference[] = ["small", "medium", "large"];
 const COMMAND_ZONE_DISPLAYS: CommandZoneDisplay[] = ["auto", "inline", "compact"];
 const ZONE_COLLAPSE_MODES: ZoneCollapseMode[] = ["auto", "on", "off"];
 const CARD_PREVIEW_MODES: CardPreviewMode[] = ["follow", "side", "shift"];
+const SPELL_PAYMENT_MODES: SpellPaymentMode[] = ["auto", "autoExceptSacrificialMana", "manual"];
 const LOG_DEFAULTS: LogDefaultState[] = ["open", "closed"];
 const VFX_QUALITIES: VfxQuality[] = ["full", "reduced", "minimal"];
-const MULTIPLAYER_BOARD_LAYOUTS: MultiplayerBoardLayout[] = ["focused", "split"];
+const MULTIPLAYER_BOARD_LAYOUTS: MultiplayerBoardLayout[] = ["auto", "focused", "split"];
 
 /** Format a speed value as a user-facing label. The slider goes 0→max where
  *  max = instant (skip animations). `0` = slowest, `1` = normal. The endpoint
@@ -428,18 +430,15 @@ export function PreferencesModal({
                   </SettingGroup>
 
                   <SettingGroup label={t("gameplay.spellPayment")}>
-                    <label className="flex min-h-11 items-center gap-2">
-                      <input
-                        type="checkbox"
-                        checked={spellPaymentMode === "manual"}
-                        onChange={(e) => setSpellPaymentMode(e.target.checked ? "manual" : "auto")}
-                        className="accent-cyan-500"
-                      />
-                      <span className="text-sm text-slate-200">{t("gameplay.manualManaPayment")}</span>
-                    </label>
+                    <SegmentedControl
+                      options={SPELL_PAYMENT_MODES}
+                      value={spellPaymentMode}
+                      onChange={setSpellPaymentMode}
+                      renderLabel={(option) => t(`gameplay.spellPaymentOptions.${option}`)}
+                    />
                   </SettingGroup>
 
-                  {isTauri() && (
+                  {isDesktopTauri() && (
                     <label className="mt-1 flex min-h-11 items-start gap-2">
                       <input
                         type="checkbox"
@@ -723,7 +722,7 @@ export function PreferencesModal({
                           type="button"
                           onClick={handleImportTheme}
                           disabled={themeImportStatus === "loading" || !themeImportUrl.trim()}
-                          className="rounded-[14px] border border-white/10 bg-sky-600/30 px-4 py-2 text-sm text-slate-100 hover:bg-sky-600/50 disabled:opacity-50"
+                          className="rounded-[14px] border border-white/10 bg-sky-600/30 px-4 py-2 text-sm text-white hover:bg-sky-600/50 disabled:opacity-50"
                         >
                           {themeImportStatus === "loading" ? t("audioTheme.loading") : t("audioTheme.import")}
                         </button>
@@ -1014,6 +1013,12 @@ function CloudSyncSection() {
                   onClick={() => void resolveConflict("local")}
                 >
                   {t("sync.keepLocal")}
+                </button>
+                <button
+                  className={SYNC_BUTTON_CLASS}
+                  onClick={() => void resolveConflict("merge")}
+                >
+                  {t("sync.keepBothDecks")}
                 </button>
               </div>
             </div>
@@ -1537,7 +1542,7 @@ function ArtChainEditor({
             type="button"
             onClick={handleAddSet}
             disabled={!resolveSetCode(setInput)}
-            className="rounded-[14px] border border-white/10 bg-sky-600/30 px-4 py-2 text-sm text-slate-100 hover:bg-sky-600/50 disabled:opacity-50"
+            className="rounded-[14px] border border-white/10 bg-sky-600/30 px-4 py-2 text-sm text-white hover:bg-sky-600/50 disabled:opacity-50"
           >
             {t("artChain.addSet")}
           </button>
