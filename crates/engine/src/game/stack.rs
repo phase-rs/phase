@@ -3141,7 +3141,6 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
     let ResolvedAbility {
         effect,
         targets,
-        attach_target_bindings,
         source_id: _,
         source_incarnation,
         trigger_source,
@@ -3211,7 +3210,6 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
 
     self_counter
         && targets.is_empty()
-        && attach_target_bindings.is_empty()
         && source_incarnation.is_none()
         && trigger_source.is_none()
         && trigger_definition_ref.is_none()
@@ -3371,7 +3369,6 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
     let ResolvedAbility {
         effect,
         targets,
-        attach_target_bindings,
         source_id: _,
         source_incarnation: _,
         trigger_source: _,
@@ -3440,7 +3437,6 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
 
     fixed_controller_gain_life
         && targets.is_empty()
-        && attach_target_bindings.is_empty()
         && scoped_player.is_none()
         && matches!(kind, AbilityKind::Spell | AbilityKind::Database)
         && sub_ability.is_none()
@@ -3581,7 +3577,6 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
     let ResolvedAbility {
         effect,
         targets,
-        attach_target_bindings,
         source_id: _,
         source_incarnation: _,
         trigger_source: _,
@@ -3654,7 +3649,6 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
 
     fixed_opponent_effect
         && targets.is_empty()
-        && attach_target_bindings.is_empty()
         && scoped_player.is_none()
         && matches!(kind, AbilityKind::Spell | AbilityKind::Database)
         && sub_ability.is_none()
@@ -4243,7 +4237,6 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
     let ResolvedAbility {
         effect: a_effect,
         targets: a_targets,
-        attach_target_bindings: a_attach_target_bindings,
         source_id: _,
         source_incarnation: _,
         trigger_source: _,
@@ -4316,7 +4309,6 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
     let ResolvedAbility {
         effect: b_effect,
         targets: b_targets,
-        attach_target_bindings: b_attach_target_bindings,
         source_id: _,
         source_incarnation: _,
         trigger_source: _,
@@ -4389,7 +4381,6 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
 
     a_effect == b_effect
         && a_targets == b_targets
-        && a_attach_target_bindings == b_attach_target_bindings
         && a_force_block_attacker == b_force_block_attacker
         // CR 400.7 + CR 603.7c: two otherwise-identical abilities pinned to
         // DIFFERENT incarnations are not the same ability. Participating here

@@ -4032,7 +4032,6 @@ fn walk_ability(
         modal,
         mode_abilities,
         targets: _,
-        attach_target_bindings: _, // concrete attachment role bindings, no read/write effect
         source_id: _,
         source_incarnation: _, // self-transform epoch latch, no read/write effect
         trigger_source: _,     // exact triggered-source authority, no read/write effect

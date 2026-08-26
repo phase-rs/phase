@@ -779,7 +779,6 @@ mod tests {
 
         let ability = ResolvedAbility {
             detached_remainder: crate::types::ability::DetachedRemainder::NoProducer,
-            attach_target_bindings: Default::default(),
             effect: Effect::Vote {
                 choices: vec!["evidence".to_string(), "bribery".to_string()],
                 per_choice_effect: vec![Box::new(inv_def), Box::new(token_def)],
@@ -895,7 +894,6 @@ mod tests {
             .collect();
         ResolvedAbility {
             detached_remainder: crate::types::ability::DetachedRemainder::NoProducer,
-            attach_target_bindings: Default::default(),
             effect: Effect::Vote {
                 choices,
                 per_choice_effect,
@@ -1344,7 +1342,6 @@ mod tests {
         // Build a ResolvedAbility from the parsed AbilityDefinition.
         let ability = ResolvedAbility {
             detached_remainder: crate::types::ability::DetachedRemainder::NoProducer,
-            attach_target_bindings: Default::default(),
             effect: (*parsed_def.effect).clone(),
             targets: vec![],
             source_id: ObjectId(1),
@@ -1509,7 +1506,6 @@ mod tests {
             .collect();
         let ability = ResolvedAbility {
             detached_remainder: crate::types::ability::DetachedRemainder::NoProducer,
-            attach_target_bindings: Default::default(),
             effect: Effect::Vote {
                 choices: vec!["friend".to_string(), "foe".to_string()],
                 per_choice_effect,
