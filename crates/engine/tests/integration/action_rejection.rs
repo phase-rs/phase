@@ -446,6 +446,48 @@ fn rich_debug_preflight_is_safe_and_does_not_mutate_state() {
 }
 
 #[test]
+fn rich_debug_permission_rejections_preserve_visible_object_ids() {
+    let mut state = GameState::new_two_player(1);
+    state.debug_mode = true;
+    state.debug_permitted.insert(P1);
+    let object_id = create_object(
+        &mut state,
+        CardId(3),
+        P0,
+        "Visible debug object".to_string(),
+        Zone::Battlefield,
+    );
+    let action = DebugAction::RemoveObject { object_id };
+    let before = state.clone();
+
+    let apply_rejection = apply_with_rejection(&mut state, P0, GameAction::Debug(action.clone()))
+        .expect_err("an unlisted actor cannot apply a debug action");
+    let preflight_rejection = preflight_debug_action_with_rejection(&state, P0, &action)
+        .expect_err("an unlisted actor cannot preflight a debug action");
+
+    for rejection in [apply_rejection, preflight_rejection] {
+        assert_eq!(rejection.code, ActionRejectionCode::DebugPermissionDenied);
+        assert_eq!(
+            rejection.disposition,
+            ActionRejectionDisposition::Unauthorized
+        );
+        assert_eq!(
+            rejection.message,
+            "You are not authorized to use debug actions."
+        );
+        assert_eq!(rejection.related_object_ids, vec![object_id]);
+    }
+    assert_eq!(state, before);
+
+    state.debug_permitted.insert(P0);
+    preflight_debug_action_with_rejection(&state, P0, &action)
+        .expect("a listed actor can preflight a debug action");
+    apply_with_rejection(&mut state, P0, GameAction::Debug(action))
+        .expect("a listed actor can apply a debug action");
+    assert!(!state.objects.contains_key(&object_id));
+}
+
+#[test]
 fn explicit_debug_permission_allows_an_empty_permission_list_without_mutation() {
     let state = GameState::new_two_player(1);
     let before = state.clone();

@@ -888,6 +888,13 @@ pub fn apply_with_rejection(
     action: GameAction,
 ) -> Result<ActionResult, ActionRejection> {
     let related_object_ids = action.related_object_ids();
+    if matches!(&action, GameAction::Debug(_)) {
+        if let Some(rejection) =
+            explicit_debug_permission_rejection(state, actor, related_object_ids.clone())
+        {
+            return Err(rejection);
+        }
+    }
     apply(state, actor, action).map_err(|error| {
         super::visibility::filter_action_rejection_for_viewer(
             state,
@@ -904,6 +911,11 @@ pub fn preflight_debug_action_with_rejection(
     action: &DebugAction,
 ) -> Result<(), ActionRejection> {
     let related_object_ids = GameAction::Debug(action.clone()).related_object_ids();
+    if let Some(rejection) =
+        explicit_debug_permission_rejection(state, actor, related_object_ids.clone())
+    {
+        return Err(rejection);
+    }
     preflight_debug_action(state, actor, action).map_err(|error| {
         super::visibility::filter_action_rejection_for_viewer(
             state,
@@ -911,6 +923,30 @@ pub fn preflight_debug_action_with_rejection(
             &action_rejection_for_engine_error(&error, related_object_ids),
         )
     })
+}
+
+/// Returns the viewer-filtered permission rejection for a debug action when
+/// debug mode is enabled. Disabled debug mode continues through the ordinary
+/// preflight path so it remains an invalid action rather than an authorization
+/// failure.
+fn explicit_debug_permission_rejection(
+    state: &GameState,
+    actor: PlayerId,
+    related_object_ids: Vec<ObjectId>,
+) -> Option<ActionRejection> {
+    if !state.debug_mode {
+        return None;
+    }
+
+    require_explicit_debug_permission(state, actor)
+        .err()
+        .map(|rejection| {
+            super::visibility::filter_action_rejection_for_viewer(
+                state,
+                actor,
+                &ActionRejection::from_code(rejection.code, related_object_ids),
+            )
+        })
 }
 
 /// Checks the transport-level explicit debug permission policy without
