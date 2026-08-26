@@ -10303,7 +10303,7 @@ fn reorder_hand_rejects_non_permutation() {
     // Wrong length.
     let err = apply(&mut state, p0, GameAction::ReorderHand { order: vec![a] })
         .expect_err("wrong length must error");
-    assert!(matches!(err, EngineError::InvalidAction(_)));
+    assert!(matches!(err, EngineError::StaleAction));
     assert_eq!(
         state, before,
         "a reducer rejection must restore transient boundary state as well as the hand"
@@ -10319,7 +10319,7 @@ fn reorder_hand_rejects_non_permutation() {
         },
     )
     .expect_err("stranger id must error");
-    assert!(matches!(err, EngineError::InvalidAction(_)));
+    assert!(matches!(err, EngineError::StaleAction));
     assert_eq!(
         state, before,
         "each rejected reducer attempt must leave the complete state unchanged"

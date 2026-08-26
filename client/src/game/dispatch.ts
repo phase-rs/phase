@@ -1,6 +1,6 @@
 import type { AiActionProposal, BatchResolveResult, EngineAdapter, EngineSnapshot, GameAction, GameEvent, GameLogEntry, GameState, RewindOption, WaitingFor } from "../adapter/types";
 import type { InteractionSubmission } from "../adapter/generated/interaction";
-import { AdapterError, AdapterErrorCode } from "../adapter/types";
+import { actionRejectionError, AdapterError, AdapterErrorCode } from "../adapter/types";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "./engineRecovery";
 import { normalizeEvents } from "../animation/eventNormalizer";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
@@ -333,7 +333,7 @@ async function processAction(
     }
     const outcome = await adapter.submitAiActionProposal(proposal);
     if (outcome.status === "stale") return null;
-    if (outcome.status === "rejected") throw new Error(`AI proposal rejected: ${outcome.reason}`);
+    if (outcome.status === "rejected") throw actionRejectionError(outcome.rejection);
     return outcome.result;
   };
   let result;

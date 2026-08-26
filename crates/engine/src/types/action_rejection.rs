@@ -15,6 +15,7 @@ pub enum ActionRejectionCode {
     InteractionUnavailable,
     InteractionNotAuthorized,
     StaleInteraction,
+    StaleAction,
     InvalidInteractionResponse,
     InteractionPayloadTooLarge,
     InteractionConstraintUnsatisfied,
@@ -53,7 +54,7 @@ impl ActionRejectionCode {
             | Self::InteractionUnavailable
             | Self::InteractionCancelOnly
             | Self::ResolveAllNotReady => ActionRejectionDisposition::Unavailable,
-            Self::StaleInteraction => ActionRejectionDisposition::Stale,
+            Self::StaleInteraction | Self::StaleAction => ActionRejectionDisposition::Stale,
             Self::UnsupportedInteractionResponse => ActionRejectionDisposition::Unsupported,
         }
     }
@@ -69,6 +70,7 @@ impl ActionRejectionCode {
             Self::InteractionUnavailable => "That interaction is no longer available.",
             Self::InteractionNotAuthorized => "You are not authorized to answer that interaction.",
             Self::StaleInteraction => "That interaction has already changed.",
+            Self::StaleAction => "That action is based on outdated game state.",
             Self::InvalidInteractionResponse => "That response is not valid for this interaction.",
             Self::InteractionPayloadTooLarge => "That interaction response is too large.",
             Self::InteractionConstraintUnsatisfied => {

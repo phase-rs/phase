@@ -69,7 +69,7 @@ use super::derived_views::{family_of, payload_seat, UnboundedFamily};
 use super::dungeon::DungeonId;
 use super::engine::{
     action_rejection_for_engine_error, apply_interaction, apply_interaction_for_simulation,
-    EngineError, MAX_SHORTCUT_CYCLES,
+    apply_interaction_with_rejection, EngineError, MAX_SHORTCUT_CYCLES,
 };
 use super::game_object::{AttachTarget, RoomDoor};
 use super::merge::MergeSide;
@@ -10002,20 +10002,12 @@ pub fn submit_interaction_with_rejection(
 ) -> Result<AppliedInteraction, ActionRejection> {
     let action = resolve_interaction_response(state, actor, &submission)
         .map_err(|error| action_rejection_for_interaction_reason(error.code))?;
-    let related_object_ids = action.related_object_ids();
     let semantic_owner = PlayerId(
         slot_for_submission(state, actor, &submission.interaction_id)
             .map_err(action_rejection_for_interaction_reason)?
             .semantic_owner,
     );
-    let result =
-        apply_interaction(state, actor, semantic_owner, action.clone()).map_err(|error| {
-            visibility::filter_action_rejection_for_viewer(
-                state,
-                actor,
-                &action_rejection_for_engine_error(&error, related_object_ids),
-            )
-        })?;
+    let result = apply_interaction_with_rejection(state, actor, semantic_owner, action)?;
     Ok(AppliedInteraction { action, result })
 }
 

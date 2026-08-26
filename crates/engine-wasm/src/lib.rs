@@ -14,11 +14,13 @@ use engine::ai_support::{
 use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
 use engine::database::{CardDatabase, CardSearchQuery};
 use engine::game::engine::{
-    apply, apply_for_simulation, recover_orphaned_resolve_all, resolve_all_ready_access,
-    resolve_all_ready_prefix, ResolveAllReadyAccess,
+    apply, apply_interaction_with_rejection, recover_orphaned_resolve_all,
+    resolve_all_ready_prefix_with_rejection,
 };
-use engine::game::interaction::{bind_interaction_authority, submit_interaction};
-use engine::game::preview::{compute_preview_diff, preview_auto_payment_sources};
+use engine::game::interaction::{bind_interaction_authority, submit_interaction_with_rejection};
+use engine::game::preview::{
+    preview_action_with_rejection, preview_auto_payment_sources_with_rejection,
+};
 use engine::game::{
     can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket,
     evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
@@ -467,8 +469,25 @@ enum AiProposalSubmission {
         reason: &'static str,
     },
     Rejected {
-        reason: String,
+        rejection: ActionRejection,
     },
+}
+
+/// Private WASM boundary outcome for expected engine rejections. Serialization
+/// keeps recoverable action failures distinct from raw WASM/runtime errors,
+/// which continue to cross this boundary as strings or thrown `JsValue`s.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", tag = "status")]
+enum ActionOutcome<T> {
+    Applied { result: T },
+    Rejected { rejection: ActionRejection },
+}
+
+fn action_outcome<T: Serialize>(result: Result<T, ActionRejection>) -> JsValue {
+    to_js(&match result {
+        Ok(result) => ActionOutcome::Applied { result },
+        Err(rejection) => ActionOutcome::Rejected { rejection },
+    })
 }
 
 /// Set the multiplayer enforcement flag directly.
@@ -1467,36 +1486,25 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
     // bindings post-signature-change) now get a clean error instead.
     let action: GameAction = match serde_wasm_bindgen::from_value(action) {
         Ok(a) => a,
-        Err(e) => {
-            return JsValue::from_str(&format!("Engine error: failed to deserialize action: {e}"));
+        Err(_) => {
+            return action_outcome(Err(ActionRejection::new(
+                ActionRejectionCode::InvalidAction,
+            )))
         }
     };
     let actor = PlayerId(actor);
 
-    // In P2P-host multiplayer mode, debug actions are gated on the
-    // sandbox per-player permission set, mirroring the server-core gate.
-    // Single-player (non-multiplayer) WASM ignores this branch entirely.
-    if matches!(action, GameAction::Debug(_)) && is_multiplayer_mode() {
-        let permitted = with_state(|state| state.debug_permitted.contains(&actor)).unwrap_or(false);
-        if !permitted {
-            return JsValue::from_str(
-                "Engine error: debug actions disabled (Sandbox mode off or no permission)",
-            );
-        }
-    }
-
     if let GameAction::Debug(debug_action) = &action {
         if debug_action.is_zero_count_create() {
             return match with_state(|state| {
-                engine::game::preflight_debug_action(state, actor, debug_action)?;
-                Ok::<_, engine::game::EngineError>(engine::types::game_state::ActionResult {
+                preflight_debug_action_with_rejection(state, actor, debug_action)?;
+                Ok::<_, ActionRejection>(engine::types::game_state::ActionResult {
                     events: vec![],
                     waiting_for: state.waiting_for.clone(),
                     log_entries: vec![],
                 })
             }) {
-                Ok(Ok(result)) => to_js(&result),
-                Ok(Err(error)) => JsValue::from_str(&format!("Engine error: {error}")),
+                Ok(result) => action_outcome(result),
                 Err(error) => error,
             };
         }
@@ -1529,16 +1537,13 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
     // reaches here.
     let action_for_replay = action.clone();
     let is_debug_action = matches!(action, GameAction::Debug(_));
-    match with_state_mut(|state| match apply(state, actor, action) {
+    match with_state_mut(|state| match apply_with_rejection(state, actor, action) {
         Ok(result) => {
             record_replay_action(is_debug_action, actor, action_for_replay);
             invalidate_ai_proposals();
-            to_js(&result)
+            action_outcome(Ok(result))
         }
-        Err(e) => {
-            let error_msg = format!("Engine error: {}", e);
-            JsValue::from_str(&error_msg)
-        }
+        Err(rejection) => action_outcome(Err(rejection)),
     }) {
         Ok(val) => val,
         Err(e) => e,
@@ -1552,20 +1557,20 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
 pub fn submit_interaction_js(actor: u8, submission: JsValue) -> JsValue {
     let submission: InteractionSubmission = match serde_wasm_bindgen::from_value(submission) {
         Ok(submission) => submission,
-        Err(error) => {
-            return JsValue::from_str(&format!(
-                "Engine error: failed to deserialize interaction submission: {error}"
-            ));
+        Err(_) => {
+            return action_outcome(Err(ActionRejection::new(
+                ActionRejectionCode::InvalidInteractionResponse,
+            )));
         }
     };
     let actor = PlayerId(actor);
-    match with_state_mut(|state| submit_interaction(state, actor, submission)) {
+    match with_state_mut(|state| submit_interaction_with_rejection(state, actor, submission)) {
         Ok(Ok(applied)) => {
             record_replay_action(false, actor, applied.action);
             invalidate_ai_proposals();
-            to_js(&applied.result)
+            action_outcome(Ok(applied.result))
         }
-        Ok(Err(error)) => JsValue::from_str(&format!("Engine error: {:?}", error.code)),
+        Ok(Err(rejection)) => action_outcome(Err(rejection)),
         Err(error) => error,
     }
 }
@@ -1614,8 +1619,24 @@ struct DebugCreateCardRequest<'a> {
 }
 
 fn handle_debug_create_card(request: DebugCreateCardRequest<'_>) -> JsValue {
+    let debug_action = DebugAction::CreateCard {
+        card_name: request.card_name.to_string(),
+        owner: request.owner,
+        zone: request.zone,
+        count: request.count,
+        attach_to: request.attach_to.clone(),
+        run_etb: request.run_etb,
+        nonlegendary: request.nonlegendary,
+    };
+    match with_state(|state| {
+        preflight_debug_action_with_rejection(state, request.actor, &debug_action)
+    }) {
+        Ok(Err(rejection)) => return action_outcome(Err(rejection)),
+        Ok(Ok(())) => {}
+        Err(error) => return error,
+    }
     match handle_debug_create_card_inner(request) {
-        Ok(result) => to_js(&result),
+        Ok(result) => action_outcome(Ok(result)),
         Err(msg) => JsValue::from_str(&msg),
     }
 }
@@ -1988,28 +2009,15 @@ pub fn get_viewer_snapshot_js(player_id: u32) -> JsValue {
 pub fn preview_action_js(actor: u8, action: JsValue) -> JsValue {
     let action: GameAction = match serde_wasm_bindgen::from_value(action) {
         Ok(a) => a,
-        Err(e) => {
-            return JsValue::from_str(&format!("Engine error: failed to deserialize action: {e}"));
+        Err(_) => {
+            return action_outcome(Err(ActionRejection::new(
+                ActionRejectionCode::InvalidAction,
+            )))
         }
     };
     let actor = PlayerId(actor);
-    match with_state(|state| {
-        // Simulate on a throwaway clone. `apply_for_simulation` is the same rules
-        // resolution the AI look-ahead uses; it mutates only `sim`, never the
-        // live `GAME_STATE` this closure borrows immutably.
-        let mut sim = state.clone();
-        engine::game::layers::flush_layers(&mut sim);
-        let before = filter_state_for_viewer(&sim, actor);
-        match apply_for_simulation(&mut sim, actor, action) {
-            Ok(_) => {
-                let after = filter_state_for_viewer(&sim, actor);
-                Ok(compute_preview_diff(&before, &after))
-            }
-            Err(e) => Err(format!("Engine error: {e}")),
-        }
-    }) {
-        Ok(Ok(diff)) => to_js(&diff),
-        Ok(Err(msg)) => JsValue::from_str(&msg),
+    match with_state(|state| action_outcome(preview_action_with_rejection(state, actor, &action))) {
+        Ok(outcome) => outcome,
         Err(e) => e,
     }
 }
@@ -2022,19 +2030,17 @@ pub fn preview_action_js(actor: u8, action: JsValue) -> JsValue {
 pub fn preview_mana_payment_js(actor: u8, action: JsValue) -> JsValue {
     let action: GameAction = match serde_wasm_bindgen::from_value(action) {
         Ok(action) => action,
-        Err(error) => {
-            return JsValue::from_str(&format!(
-                "Engine error: failed to deserialize action: {error}"
-            ));
+        Err(_) => {
+            return action_outcome(Err(ActionRejection::new(
+                ActionRejectionCode::InvalidAction,
+            )))
         }
     };
 
     match with_state(|state| {
-        preview_auto_payment_sources(state, PlayerId(actor), &action)
-            .map_err(|error| format!("Engine error: {error}"))
+        preview_auto_payment_sources_with_rejection(state, PlayerId(actor), &action)
     }) {
-        Ok(Ok(sources)) => to_js(&sources),
-        Ok(Err(message)) => JsValue::from_str(&message),
+        Ok(result) => action_outcome(result),
         Err(error) => error,
     }
 }
@@ -2976,9 +2982,9 @@ pub fn get_ai_action_proposal_from_scores_with_diagnostics(
 pub fn submit_ai_action_proposal(token: &str, actor: u8, action: JsValue) -> JsValue {
     let action: GameAction = match serde_wasm_bindgen::from_value(action) {
         Ok(action) => action,
-        Err(error) => {
+        Err(_) => {
             return to_js(&AiProposalSubmission::Rejected {
-                reason: format!("failed to deserialize action: {error}"),
+                rejection: ActionRejection::new(ActionRejectionCode::InvalidAction),
             });
         }
     };
@@ -2996,7 +3002,7 @@ pub fn submit_ai_action_proposal(token: &str, actor: u8, action: JsValue) -> JsV
                 reason: "decision_changed_or_action_outside_issued_bounds",
             };
         }
-        match engine::game::engine::apply_interaction(
+        match apply_interaction_with_rejection(
             state,
             actor,
             proposal.contract.semantic_owner,
@@ -3009,9 +3015,7 @@ pub fn submit_ai_action_proposal(token: &str, actor: u8, action: JsValue) -> JsV
                     result: Box::new(result),
                 }
             }
-            Err(error) => AiProposalSubmission::Rejected {
-                reason: error.to_string(),
-            },
+            Err(rejection) => AiProposalSubmission::Rejected { rejection },
         }
     }) {
         Ok(outcome) => to_js(&outcome),
@@ -3041,8 +3045,11 @@ pub fn resolve_all(
     ai_seats_json: &str,
     max_resolutions: u32,
 ) -> Result<JsValue, JsValue> {
-    let _: serde_json::Value = serde_json::from_str(ai_seats_json)
-        .map_err(|e| JsValue::from_str(&format!("Failed to deserialize AI seats: {e}")))?;
+    if serde_json::from_str::<Vec<serde_json::Value>>(ai_seats_json).is_err() {
+        return Ok(action_outcome(Err(ActionRejection::new(
+            ActionRejectionCode::InvalidAction,
+        ))));
+    }
 
     let requester = PlayerId(requester);
 
@@ -3053,20 +3060,10 @@ pub fn resolve_all(
         // priority window. Keep the legacy payload parse as a wire-compatible
         // boundary while the consent action owns the authoritative cap.
         let _ = max_resolutions;
-        // Reject only an unentitled caller. A latch whose frozen run has gone
-        // stale is still routed into the resolver, whose fail-closed
-        // invalidation restores ordinary priority — rejecting it here instead
-        // would leave the game parked with no acting player and, in practice,
-        // nothing any client offers the player to press.
-        // Exhaustive rather than an equality test: a future variant must be
-        // classified here instead of silently defaulting to allowed.
-        match resolve_all_ready_access(state, requester) {
-            ResolveAllReadyAccess::Refused => {
-                return Err(JsValue::from_str("Resolve All consent is not ready"));
-            }
-            ResolveAllReadyAccess::Admitted => {}
-        }
-        let mut result = resolve_all_ready_prefix(state, requester);
+        let mut result = match resolve_all_ready_prefix_with_rejection(state, requester) {
+            Ok(result) => result,
+            Err(rejection) => return Ok(action_outcome(Err(rejection))),
+        };
         // A Resolve All burst applies real actions directly via
         // `apply_action_boundary_with_stack_limit` (bypassing `submit_action`,
         // which is the only other place REPLAY_LOG is appended to) — without
@@ -3091,7 +3088,7 @@ pub fn resolve_all(
         }
         result.events.clear();
         result.log_entries.clear();
-        Ok(to_js(&result))
+        Ok(action_outcome(Ok(result)))
     })?
 }
 
@@ -4549,7 +4546,14 @@ mod tests {
         .expect("test state remains installed");
 
         let value = resolve_all(0, "[]", 0).unwrap();
-        let result: BatchResolveResult = serde_wasm_bindgen::from_value(value).unwrap();
+        let outcome: serde_json::Value = serde_wasm_bindgen::from_value(value).unwrap();
+        let result: BatchResolveResult = serde_json::from_value(
+            outcome
+                .get("result")
+                .cloned()
+                .expect("ready Resolve All returns an applied outcome"),
+        )
+        .unwrap();
 
         assert_eq!(result.items_resolved, 1);
         let restored: GameState = serde_wasm_bindgen::from_value(get_game_state()).unwrap();

@@ -93,6 +93,11 @@ fn every_rejection_code_has_a_closed_disposition_and_safe_message() {
             "stale_interaction",
         ),
         (
+            ActionRejectionCode::StaleAction,
+            ActionRejectionDisposition::Stale,
+            "stale_action",
+        ),
+        (
             ActionRejectionCode::InvalidInteractionResponse,
             ActionRejectionDisposition::Invalid,
             "invalid_interaction_response",
@@ -336,6 +341,29 @@ fn rich_apply_preserves_legacy_rejection_and_state() {
         legacy, rich,
         "rich wrapper must preserve legacy mutation semantics"
     );
+}
+
+#[test]
+fn only_stale_hand_reorder_rejections_use_stale_action() {
+    let mut state = GameState::new_two_player(1);
+    let before = state.clone();
+    let rejection = apply_with_rejection(
+        &mut state,
+        P0,
+        GameAction::ReorderHand {
+            order: vec![ObjectId(999)],
+        },
+    )
+    .expect_err("an order from an earlier hand is stale");
+
+    assert_eq!(rejection.code, ActionRejectionCode::StaleAction);
+    assert_eq!(rejection.disposition, ActionRejectionDisposition::Stale);
+    assert_eq!(state, before, "stale preferences must not mutate state");
+
+    let wrong_player = apply_with_rejection(&mut state, P1, GameAction::PassPriority)
+        .expect_err("a different player cannot pass priority");
+    assert_eq!(wrong_player.code, ActionRejectionCode::WrongPlayer);
+    assert_ne!(wrong_player.disposition, ActionRejectionDisposition::Stale);
 }
 
 #[test]

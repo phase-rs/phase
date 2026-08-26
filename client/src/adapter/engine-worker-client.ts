@@ -18,7 +18,12 @@ import type {
   SubmitResult,
   ViewerSnapshot,
 } from "./types";
-import { AdapterError, AdapterErrorCode } from "./types";
+import {
+  actionRejectionError,
+  AdapterError,
+  AdapterErrorCode,
+  isActionRejection,
+} from "./types";
 import type { InteractionSubmission } from "./generated/interaction";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import { debugLog } from "../game/debugLog";
@@ -32,6 +37,7 @@ type EngineResponse =
       message: string;
       bracketViolation?: true;
       engineOccupied?: true;
+      actionRejection?: unknown;
     };
 
 /**
@@ -105,7 +111,15 @@ export class EngineWorkerClient {
             // rejections so the caller can match by code rather than by string
             // substring on the error message.
             let err: Error;
-            if (msg.bracketViolation) {
+            if ("actionRejection" in msg && isActionRejection(msg.actionRejection)) {
+              err = actionRejectionError(msg.actionRejection);
+            } else if ("actionRejection" in msg) {
+              err = new AdapterError(
+                AdapterErrorCode.ACTION_REJECTED,
+                "The engine rejected that action.",
+                true,
+              );
+            } else if (msg.bracketViolation) {
               err = new AdapterError(AdapterErrorCode.BRACKET_VIOLATION, msg.message, false);
             } else if (msg.engineOccupied) {
               err = new AdapterError(AdapterErrorCode.ENGINE_OCCUPIED, msg.message, false);

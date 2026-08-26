@@ -18,7 +18,14 @@ import type {
   ViewerSnapshot,
 } from "./types";
 import type { InteractionSubmission } from "./generated/interaction";
-import { AdapterError, AdapterErrorCode, isStaleRejectionMessage, isStateLostMessage, nextSnapshotSeq } from "./types";
+import {
+  actionRejectionError,
+  AdapterError,
+  AdapterErrorCode,
+  isActionOutcome,
+  isStateLostMessage,
+  nextSnapshotSeq,
+} from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import { isBracketEstimate } from "../types/bracketEstimate";
 import { EngineWorkerClient } from "./engine-worker-client";
@@ -49,6 +56,21 @@ function isDebugCreateCard(action: GameAction): boolean {
 
 function isDebugCreateCardDbMissing(error: unknown): boolean {
   return error instanceof Error && error.message === DEBUG_CREATE_CARD_DB_MISSING;
+}
+
+function unwrapActionOutcome<T>(value: unknown): T {
+  if (typeof value === "string") throw new Error(value);
+  if (!isActionOutcome(value)) {
+    throw new AdapterError(
+      AdapterErrorCode.ACTION_REJECTED,
+      "The engine rejected that action.",
+      true,
+    );
+  }
+  if (value.status === "rejected") {
+    throw actionRejectionError(value.rejection);
+  }
+  return value.result as T;
 }
 
 class AiPoolScoreTimeoutError extends Error {
@@ -90,16 +112,12 @@ async function classifyEngineErrorAsync(
   err: unknown,
   takePanic: () => Promise<string | null>,
 ): Promise<Error> {
+  if (err instanceof AdapterError) return err;
   // Returns (rather than throws) the error to surface so call sites can
   // write `throw await classifyEngineErrorAsync(...)`. TypeScript doesn't
   // always narrow control flow through an awaited `Promise<never>`, so
   // making the throw explicit keeps the surrounding methods type-clean.
   const message = err instanceof Error ? err.message : String(err);
-  // Actor-authorization rejection (stale action after a priority/turn shift).
-  // Typed so dispatch can treat it as a benign no-op rather than a crash.
-  if (isStaleRejectionMessage(message)) {
-    return new AdapterError(AdapterErrorCode.STALE_ACTION, message, false);
-  }
   if (isStateLostMessage(message)) {
     let panic: string | null = null;
     try {
@@ -691,12 +709,15 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     maxResolutions: number = 0,
   ): Promise<BatchResolveResult> {
     this.assertInitialized();
-    if (this.engine) {
-      const result = await this.engine.resolveAll(requester, aiSeats, maxResolutions);
+    try {
+      const result = this.engine
+        ? await this.engine.resolveAll(requester, aiSeats, maxResolutions)
+        : await this.fallback!.resolveAll(requester, aiSeats, maxResolutions);
       this.invalidateAiDecisionDiagnostics();
       return result;
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
     }
-    throw new Error("resolveAll requires worker-based engine");
   }
 
   private async requireCardDbForRestore(): Promise<void> {
@@ -1040,6 +1061,11 @@ interface MainThreadFallback {
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
   submitInteraction(submission: InteractionSubmission, actor: PlayerId): Promise<SubmitResult>;
   previewManaPayment(action: GameAction, actor: PlayerId): Promise<ObjectId[]>;
+  resolveAll(
+    requester: number,
+    aiSeats: { playerId: number; difficulty: string }[],
+    maxResolutions?: number,
+  ): Promise<BatchResolveResult>;
   getState(): Promise<GameState>;
   getFilteredState(viewerId: number): Promise<GameState>;
   getLegalActions(): Promise<LegalActionsResult>;
@@ -1127,24 +1153,29 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
 
     submitAction: (action: GameAction, actor: PlayerId) =>
       enqueue(() => {
-        const r = wasm.submit_action(actor, action);
-        if (typeof r === "string") throw new Error(r);
+        const r = unwrapActionOutcome<{ events?: SubmitResult["events"]; log_entries?: SubmitResult["log_entries"] }>(
+          wasm.submit_action(actor, action),
+        );
         return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
       }),
 
     submitInteraction: (submission: InteractionSubmission, actor: PlayerId) =>
       enqueue(() => {
-        const r = wasm.submit_interaction_js(actor, submission);
-        if (typeof r === "string") throw new Error(r);
+        const r = unwrapActionOutcome<{ events?: SubmitResult["events"]; log_entries?: SubmitResult["log_entries"] }>(
+          wasm.submit_interaction_js(actor, submission),
+        );
         return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
       }),
 
     previewManaPayment: (action: GameAction, actor: PlayerId) =>
       enqueue(() => {
-        const sources = wasm.preview_mana_payment_js(actor, action);
-        if (typeof sources === "string") throw new Error(sources);
-        return sources as ObjectId[];
+        return unwrapActionOutcome<ObjectId[]>(wasm.preview_mana_payment_js(actor, action));
       }),
+
+    resolveAll: (requester, aiSeats, maxResolutions = 0) =>
+      enqueue(() => unwrapActionOutcome<BatchResolveResult>(
+        wasm.resolve_all(requester, JSON.stringify(aiSeats), maxResolutions),
+      )),
 
     // null from any of these three getters means WASM `GAME_STATE` is None
     // (worker restart, PWA update desync, panic recovery). Throw with the

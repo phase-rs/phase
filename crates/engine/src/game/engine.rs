@@ -91,6 +91,8 @@ pub enum EngineError {
     WrongPlayer,
     #[error("Not your priority")]
     NotYourPriority,
+    #[error("Action is stale")]
+    StaleAction,
     #[error("Action not allowed: {0}")]
     ActionNotAllowed(String),
 }
@@ -105,6 +107,7 @@ pub(crate) fn action_rejection_for_engine_error(
         EngineError::InvalidAction(_) => ActionRejectionCode::InvalidAction,
         EngineError::WrongPlayer => ActionRejectionCode::WrongPlayer,
         EngineError::NotYourPriority => ActionRejectionCode::NotYourPriority,
+        EngineError::StaleAction => ActionRejectionCode::StaleAction,
         EngineError::ActionNotAllowed(_) => ActionRejectionCode::ActionNotAllowed,
     };
     ActionRejection::from_code(code, related_object_ids)
@@ -1018,6 +1021,26 @@ pub fn apply_interaction(
         action,
         PublicFinalizeMode::Immediate,
     )
+}
+
+/// Applies an interaction-materialized action while returning stable, safe
+/// rejection metadata. The interaction projection remains the only authority
+/// that may materialize the action; this wrapper only preserves its actor and
+/// semantic-owner boundary when converting a reducer failure for the client.
+pub fn apply_interaction_with_rejection(
+    state: &mut GameState,
+    authenticated_actor: PlayerId,
+    semantic_owner: PlayerId,
+    action: GameAction,
+) -> Result<ActionResult, ActionRejection> {
+    let related_object_ids = action.related_object_ids();
+    apply_interaction(state, authenticated_actor, semantic_owner, action).map_err(|error| {
+        super::visibility::filter_action_rejection_for_viewer(
+            state,
+            authenticated_actor,
+            &action_rejection_for_engine_error(&error, related_object_ids),
+        )
+    })
 }
 
 pub(crate) fn apply_interaction_for_simulation(
@@ -8178,11 +8201,7 @@ fn apply_action(
         let player = &mut state.players[actor.0 as usize];
 
         if order.len() != player.hand.len() {
-            return Err(EngineError::InvalidAction(format!(
-                "ReorderHand: expected {} ids, got {}",
-                player.hand.len(),
-                order.len()
-            )));
+            return Err(EngineError::StaleAction);
         }
 
         // Permutation check: same multiset. Sort copies and compare — O(n log n)
@@ -8194,9 +8213,7 @@ fn apply_action(
         current.sort_unstable_by_key(|id| id.0);
         requested.sort_unstable_by_key(|id| id.0);
         if current != requested {
-            return Err(EngineError::InvalidAction(
-                "ReorderHand: order is not a permutation of the current hand".into(),
-            ));
+            return Err(EngineError::StaleAction);
         }
 
         player.hand = order.iter().copied().collect();

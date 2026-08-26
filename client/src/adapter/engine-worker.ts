@@ -49,7 +49,7 @@ import init, {
   get_card_rulings,
 } from "@wasm/engine";
 
-import type { AiActionProposal, GameAction } from "./types";
+import { isActionOutcome, type ActionRejection, type AiActionProposal, type GameAction } from "./types";
 import type { InteractionSubmission } from "./generated/interaction";
 import type { BracketDeckRequest } from "../types/bracketEstimate";
 import { classifyInitFailure, type InitFailure } from "./init-envelope";
@@ -129,6 +129,7 @@ type EngineResponse =
       message: string;
       bracketViolation?: true;
       engineOccupied?: true;
+      actionRejection?: ActionRejection;
     };
 
 // ── State ────────────────────────────────────────────────────────────────
@@ -145,6 +146,19 @@ function result(id: number, data: unknown): void {
 
 function error(id: number, message: string): void {
   respond({ type: "error", id, message });
+}
+
+function rejectionError(id: number, rejection: ActionRejection): void {
+  respond({ type: "error", id, message: rejection.message, actionRejection: rejection });
+}
+
+function malformedOutcomeError(id: number): void {
+  respond({
+    type: "error",
+    id,
+    message: "The engine rejected that action.",
+    actionRejection: undefined,
+  });
 }
 
 /**
@@ -300,14 +314,23 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
 
       case "submitAction": {
-        const actionResult = submit_action(msg.actor, msg.action);
-        if (typeof actionResult === "string") {
+        const outcome = submit_action(msg.actor, msg.action);
+        if (typeof outcome === "string") {
           // Rust's submit_action error contract: returns the error string
           // on failure. `NOT_INITIALIZED:` prefix signals state-loss —
           // forward verbatim so the adapter can classify it as STATE_LOST.
-          error(msg.id, actionResult);
+          error(msg.id, outcome);
           break;
         }
+        if (!isActionOutcome(outcome)) {
+          malformedOutcomeError(msg.id);
+          break;
+        }
+        if (outcome.status === "rejected") {
+          rejectionError(msg.id, outcome.rejection);
+          break;
+        }
+        const actionResult = outcome.result as { events?: unknown[]; log_entries?: unknown[] };
         result(msg.id, {
           events: actionResult.events ?? [],
           log_entries: actionResult.log_entries ?? [],
@@ -316,11 +339,20 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
 
       case "submitInteraction": {
-        const actionResult = submit_interaction_js(msg.actor, msg.submission);
-        if (typeof actionResult === "string") {
-          error(msg.id, actionResult);
+        const outcome = submit_interaction_js(msg.actor, msg.submission);
+        if (typeof outcome === "string") {
+          error(msg.id, outcome);
           break;
         }
+        if (!isActionOutcome(outcome)) {
+          malformedOutcomeError(msg.id);
+          break;
+        }
+        if (outcome.status === "rejected") {
+          rejectionError(msg.id, outcome.rejection);
+          break;
+        }
+        const actionResult = outcome.result as { events?: unknown[]; log_entries?: unknown[] };
         result(msg.id, {
           events: actionResult.events ?? [],
           log_entries: actionResult.log_entries ?? [],
@@ -329,12 +361,20 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
 
       case "previewManaPayment": {
-        const sources = preview_mana_payment_js(msg.actor, msg.action);
-        if (typeof sources === "string") {
-          error(msg.id, sources);
+        const outcome = preview_mana_payment_js(msg.actor, msg.action);
+        if (typeof outcome === "string") {
+          error(msg.id, outcome);
           break;
         }
-        result(msg.id, sources);
+        if (!isActionOutcome(outcome)) {
+          malformedOutcomeError(msg.id);
+          break;
+        }
+        if (outcome.status === "rejected") {
+          rejectionError(msg.id, outcome.rejection);
+          break;
+        }
+        result(msg.id, outcome.result);
         break;
       }
 
@@ -524,12 +564,20 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
 
       case "resolveAll": {
-        const r = resolve_all(msg.requester, msg.aiSeatsJson, msg.maxResolutions);
-        if (typeof r === "string") {
-          error(msg.id, r);
+        const outcome = resolve_all(msg.requester, msg.aiSeatsJson, msg.maxResolutions);
+        if (typeof outcome === "string") {
+          error(msg.id, outcome);
           break;
         }
-        result(msg.id, r);
+        if (!isActionOutcome(outcome)) {
+          malformedOutcomeError(msg.id);
+          break;
+        }
+        if (outcome.status === "rejected") {
+          rejectionError(msg.id, outcome.rejection);
+          break;
+        }
+        result(msg.id, outcome.result);
         break;
       }
 

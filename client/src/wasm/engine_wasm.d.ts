@@ -362,8 +362,9 @@ export function ping(): string;
  * `filter_state_for_viewer` snapshots (so any identity the viewer can't see is
  * already redacted), AND a transition is surfaced only when at least one
  * endpoint is a public zone (see `engine::game::preview`), so a fully-hidden
- * hand↔library draw is elided even for the acting player's opponents. Returns
- * an error string when `action` is malformed or illegal in the current state.
+ * hand↔library draw is elided even for the acting player's opponents. Expected
+ * engine rejections, including malformed action payloads, return a tagged
+ * `{ status: "rejected", rejection }` outcome; runtime faults remain raw.
  */
 export function preview_action_js(actor: number, action: any): any;
 
@@ -372,6 +373,8 @@ export function preview_action_js(actor: number, action: any): any;
  * exact, currently legal `CastSpell` action and returns the permanent ids that
  * produced mana before that spell was committed to the stack. It returns an
  * empty array when the cast needs another choice before payment can be final.
+ * Expected engine rejections return a tagged `{ status: "rejected",
+ * rejection }` outcome.
  */
 export function preview_mana_payment_js(actor: number, action: any): any;
 
@@ -405,6 +408,23 @@ export function replay_length_js(): number;
  */
 export function replay_seek_js(target: number): any;
 
+/**
+ * Batch-resolve the stack by auto-passing priority for the requesting player
+ * and delegating to the AI for opponent decisions. Runs entirely inside WASM
+ * with no JS round-trips between resolutions — collapses the O(N) priority
+ * pass cycle into a single call.
+ *
+ * `requester` is the human player seat (whose "Resolve All" click initiated
+ * this). `ai_seats_json` is a JSON array of `{ playerId, difficulty }` for
+ * each AI opponent.
+ *
+ * Returns a compact `BatchResolveResult` with the final `WaitingFor` and a
+ * count of items resolved. The Resolve All UI does not animate individual
+ * events, so the WASM boundary intentionally returns empty event/log arrays
+ * instead of serializing thousands of records for pathological stacks.
+ * Expected engine rejections return a tagged `{ status: "rejected",
+ * rejection }` outcome.
+ */
 export function resolve_all(requester: number, ai_seats_json: string, max_resolutions: number): any;
 
 /**
@@ -502,7 +522,8 @@ export function signatureSpellSelectionPolicy(request: any): any;
  * It must *never* come from UI or wire payload data. The engine rejects any
  * action whose `actor` does not match `authorized_submitter(state)`, so
  * passing a spoofed value here will fail cleanly rather than silently
- * applying the action as another player.
+ * applying the action as another player. Expected engine rejections return a
+ * tagged `{ status: "rejected", rejection }` outcome.
  */
 export function submit_action(actor: number, action: any): any;
 
@@ -518,7 +539,8 @@ export function submit_ai_action_proposal(token: string, actor: number, action: 
 /**
  * Submit one opaque, engine-authored interaction response. The browser never
  * materializes a `GameAction`; only a successful engine reducer result exposes
- * the exact action to the replay recorder.
+ * the exact action to the replay recorder. Expected engine rejections return a
+ * tagged `{ status: "rejected", rejection }` outcome.
  */
 export function submit_interaction_js(actor: number, submission: any): any;
 

@@ -41,6 +41,8 @@ const mockWorkerClient = {
     .fn()
     .mockResolvedValue({ events: [], log_entries: [] } as SubmitResult),
   submitInteraction: vi.fn().mockResolvedValue({ events: [], log_entries: [] } as SubmitResult),
+  previewManaPayment: vi.fn().mockResolvedValue([]),
+  resolveAll: vi.fn().mockResolvedValue({ items_resolved: 0 }),
   getAiActionProposal: vi.fn(),
   getAiActionProposalWithDiagnostics: vi.fn(),
   getAiTacticalActionProposal: vi.fn(),
@@ -139,7 +141,15 @@ describe("WasmAdapter", () => {
     it("publishes only after apply and retains a rejected proposal for retry", async () => {
       mockWorkerClient.getAiActionProposalWithDiagnostics.mockResolvedValue({ proposal, receipt });
       mockWorkerClient.submitAiActionProposal
-        .mockResolvedValueOnce({ status: "rejected", reason: "retry" })
+        .mockResolvedValueOnce({
+          status: "rejected",
+          rejection: {
+            code: "action_not_allowed",
+            disposition: "unavailable",
+            message: "That action is not allowed right now.",
+            related_object_ids: [7],
+          },
+        })
         .mockResolvedValueOnce({ status: "applied", result: { events: [], log_entries: [] } });
       await adapter.initialize();
       const listener = vi.fn();
@@ -147,7 +157,10 @@ describe("WasmAdapter", () => {
       adapter.subscribeAiDecisionDiagnostics(listener);
 
       await expect(adapter.getAiActionProposal("Medium", 0)).resolves.toEqual(proposal);
-      await expect(adapter.submitAiActionProposal(proposal)).resolves.toMatchObject({ status: "rejected" });
+      await expect(adapter.submitAiActionProposal(proposal)).resolves.toMatchObject({
+        status: "rejected",
+        rejection: { related_object_ids: [7] },
+      });
       expect(listener).not.toHaveBeenCalled();
 
       await expect(adapter.submitAiActionProposal(proposal)).resolves.toMatchObject({ status: "applied" });
@@ -446,6 +459,24 @@ describe("WasmAdapter", () => {
 
       expect(mockWorkerClient.submitAction).toHaveBeenCalledOnce();
       expect(mockWorkerClient.loadCardDbFromUrl).not.toHaveBeenCalled();
+    });
+
+    it("preserves a structured rejection without parsing its message", async () => {
+      const rejection = {
+        code: "wrong_player" as const,
+        disposition: "unauthorized" as const,
+        message: "That action belongs to a different player.",
+        related_object_ids: [42],
+      };
+      mockWorkerClient.submitAction.mockRejectedValueOnce(
+        new AdapterError(AdapterErrorCode.ACTION_REJECTED, rejection.message, true, undefined, rejection),
+      );
+      await adapter.initialize();
+
+      await expect(adapter.submitAction({ type: "PassPriority" }, 0)).rejects.toMatchObject({
+        code: AdapterErrorCode.ACTION_REJECTED,
+        rejection,
+      });
     });
 
     it("loads the card database and retries only after Rust admits a nonzero create", async () => {

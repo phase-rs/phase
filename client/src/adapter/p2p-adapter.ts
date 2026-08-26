@@ -1367,7 +1367,7 @@ export class P2PHostAdapter implements EngineAdapter {
         continue;
       }
       if (outcome.status === "rejected") {
-        throw new AdapterError("P2P_ERROR", `AI proposal rejected: ${outcome.reason}`, false);
+        throw actionRejectionError(outcome.rejection);
       }
       staleRetries = 0;
       const result = outcome.result;
