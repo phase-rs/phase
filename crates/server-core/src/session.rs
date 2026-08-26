@@ -5007,10 +5007,7 @@ mod tests {
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(
-            err.contains("not permitted") || err.contains("permission"),
-            "{err}"
-        );
+        assert_eq!(err, "That action is not valid in the current game state.");
     }
 
     /// Fixture shape for the `HostingMode` tests below, matching the existing
@@ -5654,7 +5651,7 @@ mod tests {
                 None,
             )
             .expect_err("revoked guests cannot reach the server CreateCard path");
-        assert_eq!(err, "Debug actions are not permitted for this seat");
+        assert_eq!(err, "You are not authorized to use debug actions.");
     }
 
     #[test]
@@ -6531,7 +6528,7 @@ mod tests {
 
         // The bypass must not weaken validation: a malformed freeform declaration
         // reaches the engine and is rejected there rather than by candidate lookup.
-        let duplicate = mgr.handle_action(
+        let duplicate = mgr.handle_action_with_card_db_outcome(
             &code,
             &token0,
             GameAction::DeclareAttackers {
@@ -6541,9 +6538,15 @@ mod tests {
                 ],
                 bands: vec![],
             },
+            None,
         );
         assert!(
-            matches!(duplicate, Err(ref error) if error.starts_with("Engine error:")),
+            matches!(
+                duplicate,
+                Err(SessionActionError::Rejected(rejection))
+                    if rejection.code
+                        == engine::types::action_rejection::ActionRejectionCode::InvalidAction
+            ),
             "a duplicate attacker must be rejected by the engine, got: {duplicate:?}"
         );
 

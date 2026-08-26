@@ -240,11 +240,12 @@ fn no_target_class_producer_constructs_a_choice_class_player_pin() {
             "engine/src/game/engine.rs",
             "engine/src/game/engine.rs",
             "engine/src/game/visibility.rs",
+            "engine/src/types/actions.rs",
             "server-core/src/game_action_payload_guard.rs",
         ],
         "CR 601.2c / CR 115.10a PROVENANCE SPLIT VIOLATED, or a new unclassified \
          `TargetPin::Player` production site appeared.\n\
-         The FIVE surviving production sites and their dispositions:\n\
+         The SIX surviving production sites and their dispositions:\n\
          1. `analysis/decision_template.rs` — `resolve_target`'s CHOICE authority arm \
             (CR 115.10a existence-only). This IS the class's authority; do not narrow it, \
             `a_shrouded_player_pin_is_still_published_by_the_offer_builder` is the shipped \
@@ -256,7 +257,9 @@ fn no_target_class_producer_constructs_a_choice_class_player_pin() {
             correct and is this census's positive control.\n\
          4. `game/visibility.rs` — `pins_name_hidden_source`'s redaction arm (`false`: seat \
             identity is public in this engine), kept for wire-sourced pins.\n\
-         5. `server-core/src/game_action_payload_guard.rs` — the wire pass-through arm.\n\
+         5. `types/actions.rs` — `GameAction::related_object_ids`' nested-pin read arm; a \
+            player pin has no object identity, so it deliberately contributes nothing.\n\
+         6. `server-core/src/game_action_payload_guard.rs` — the wire pass-through arm.\n\
          A hit in `game/interaction.rs` means the HUMAN ingress reverted to the choice-class \
          spelling; a THIRD hit in `game/engine.rs` means the announcement journal did. Either \
          re-creates two authorities selected by WHO SUBMITTED an answer rather than by WHAT IT \
@@ -293,7 +296,7 @@ fn no_target_class_producer_constructs_a_choice_class_player_pin() {
     );
 
     // CONJUNCT 3, keyed to the SAME instrument: both TARGET-class producers construct the
-    // ranked spelling. One needle returning five sites and the other returning the two
+    // ranked spelling. One needle returning six sites and the other returning the two
     // producers, over the same walk, is what makes conjunct 1's absence a measurement.
     let ranked = production_sites(&target_needle());
     let mut ranked_per_file: BTreeMap<&str, usize> = BTreeMap::new();
@@ -336,7 +339,7 @@ fn no_target_class_producer_constructs_a_choice_class_player_pin() {
 ///   `(2, 2)` ⇒ FAILS;
 /// * delete the comment filter ⇒ the prose plants count ⇒ `(1, 1)` becomes `(2, 2)` ⇒ FAILS.
 ///
-/// It is measured on the real tree too, in the row above: the same classifier returns five
+/// It is measured on the real tree too, in the row above: the same classifier returns six
 /// sites for one needle and four files for the other, so it is not constant in either
 /// direction.
 #[test]
