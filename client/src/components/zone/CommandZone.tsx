@@ -222,6 +222,8 @@ function EmblemCard({ group, label }: { group: GroupedEmblem; label: string }) {
         height: `calc(var(--art-crop-h) * ${EMBLEM_CHIP_SCALE})`,
       }}
       data-testid="emblem-card"
+      data-object-id={activeMember?.id}
+      data-grouped-ids={group.members.map((member) => member.id).join(" ")}
       data-activatable={isActivatable || undefined}
       role={isActivatable ? "button" : undefined}
       tabIndex={isActivatable ? 0 : undefined}

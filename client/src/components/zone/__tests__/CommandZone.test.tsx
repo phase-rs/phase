@@ -287,6 +287,15 @@ describe("CommandZone grouped-emblem activation identity", () => {
     expect(screen.getByText("×2")).toBeInTheDocument();
   }
 
+  it("anchors the active representative and every public member of its collapsed emblem group", () => {
+    const action = abilityAction(EMBLEM_ID);
+    seedGroupedPair({ [String(EMBLEM_ID)]: [action] });
+
+    const chip = screen.getByTestId("emblem-card");
+    expect(chip).toHaveAttribute("data-object-id", String(EMBLEM_ID));
+    expect(chip).toHaveAttribute("data-grouped-ids", `${EMBLEM_ID} ${SIBLING_EMBLEM_ID}`);
+  });
+
   // THE discriminating row both reviewers asked for.
   //
   // MEASURED (drop side): restoring the representative-only derivation
