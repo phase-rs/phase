@@ -57,6 +57,7 @@ const ENGINE_REQUEST_TIMEOUT_MS = 60_000;
  * WasmAdapter dispose the stalled worker and activate its main-thread fallback.
  */
 const ENGINE_INITIALIZATION_TIMEOUT_MS = 30_000;
+const MALFORMED_ACTION_REJECTION_MESSAGE = "The engine rejected that action.";
 
 type RequestTimeoutBehavior = "notify" | "reject";
 
@@ -113,10 +114,16 @@ export class EngineWorkerClient {
             let err: Error;
             if ("actionRejection" in msg && isActionRejection(msg.actionRejection)) {
               err = actionRejectionError(msg.actionRejection);
-            } else if ("actionRejection" in msg) {
+            } else if (
+              msg.actionRejection !== undefined
+              || (
+                "actionRejection" in msg
+                && msg.message === MALFORMED_ACTION_REJECTION_MESSAGE
+              )
+            ) {
               err = new AdapterError(
                 AdapterErrorCode.ACTION_REJECTED,
-                "The engine rejected that action.",
+                MALFORMED_ACTION_REJECTION_MESSAGE,
                 true,
               );
             } else if (msg.bracketViolation) {
