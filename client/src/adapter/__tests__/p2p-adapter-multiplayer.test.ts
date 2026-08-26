@@ -494,7 +494,7 @@ async function joinGuest(
   const conn = new FakeOpenableConnection();
   emitConnection(conn as unknown as DataConnection);
   conn.fireOpen();
-  await conn.simulateData(msg);
+  await conn.simulateData({ ...msg, wireProtocolVersion: msg.wireProtocolVersion ?? WIRE_PROTOCOL_VERSION });
   return conn;
 }
 
@@ -903,6 +903,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     const secondJoin = secondConn.simulateData({
       type: "guest_deck",
       deckData: { player: { main_deck: ["Swamp"], sideboard: [] } },
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
     });
     await flushPromises();
 
@@ -1149,16 +1150,60 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       action: { type: "PassPriority" },
     });
 
-    // Spoofing guest receives action_rejected.
+    // Envelope spoofing is an operational transport fault, not an engine
+    // rejection payload.
     const rejected = (await g2.getSentMessages()).find(
       (m) =>
         typeof m === "object" &&
         m !== null &&
-        (m as { type: string }).type === "action_rejected",
+        (m as { type: string }).type === "action_failed",
     );
     expect(rejected).toBeDefined();
     // And the spoofed action did NOT reach the engine.
     expect(mockSubmitAction).not.toHaveBeenCalled();
+  });
+
+  it("separates engine rejections from host operational action failures", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    guest.sent.length = 0;
+
+    const rejection = {
+      code: "invalid_action" as const,
+      disposition: "invalid" as const,
+      message: "Engine error: invalid action",
+      related_object_ids: [42],
+    };
+    mockSubmitAction.mockRejectedValueOnce(
+      new AdapterError(AdapterErrorCode.ACTION_REJECTED, rejection.message, true, undefined, rejection),
+    );
+    await guest.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+    expect(await guest.getSentMessages()).toContainEqual(expect.objectContaining({
+      type: "action_rejected",
+      rejection,
+    }));
+
+    guest.sent.length = 0;
+    mockSubmitAction.mockRejectedValueOnce(new Error("engine transport unavailable"));
+    await guest.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+    expect(await guest.getSentMessages()).toContainEqual(expect.objectContaining({
+      type: "action_failed",
+      message: "engine transport unavailable",
+    }));
+    adapter.dispose();
   });
 
   it("fan-outs filtered state per-guest on submitAction", async () => {
@@ -2477,12 +2522,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     );
   });
 
-  // Issue #5913: the host relays the engine's verdict verbatim, so a guest must
-  // classify a stale ReorderHand exactly as the local-WASM seat does. Before the
-  // shared classifier this path built a generic ACTION_REJECTED, and
-  // `dispatchAction` — which suppresses only STALE_ACTION — still surfaced the
-  // red error to P2P guests.
-  it("guest classifies a stale ReorderHand rejection from the host as STALE_ACTION", async () => {
+  it("guest preserves a structured stale engine rejection from the host", async () => {
     const { peer } = createFakePeer();
     const conn = new FakeDataConnection();
     const adapter = new P2PGuestAdapter(
@@ -2491,6 +2531,8 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       "host-peer",
       conn as unknown as DataConnection,
     );
+    const emitted = vi.fn();
+    adapter.onEvent(emitted);
     await adapter.initialize();
     await conn.simulateData({
       type: "game_setup",
@@ -2511,23 +2553,76 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     );
     await conn.simulateData({
       type: "action_rejected",
-      reason: "Engine error: ReorderHand: expected 6 ids, got 5",
+      rejection: {
+        code: "stale_action",
+        disposition: "stale",
+        message: "Engine error: ReorderHand no longer matches the hand",
+        related_object_ids: [1],
+      },
     });
     await expect(stale).rejects.toMatchObject({
       code: "STALE_ACTION",
       recoverable: false,
+      rejection: expect.objectContaining({ related_object_ids: [1] }),
     });
 
     // A genuine rejection must still surface as a recoverable ACTION_REJECTED.
     const real = adapter.submitAction({ type: "PassPriority" }, 1);
     await conn.simulateData({
       type: "action_rejected",
-      reason: "Engine error: Something genuinely wrong",
+      rejection: {
+        code: "invalid_action",
+        disposition: "invalid",
+        message: "Engine error: Something genuinely wrong",
+        related_object_ids: [],
+      },
     });
     await expect(real).rejects.toMatchObject({
       code: "ACTION_REJECTED",
       recoverable: true,
     });
+  });
+
+  it("guest rejects a malformed rejection DTO without exposing its arbitrary message", async () => {
+    const { peer } = createFakePeer();
+    const conn = new FakeDataConnection();
+    const adapter = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      peer as unknown as Peer,
+      "host-peer",
+      conn as unknown as DataConnection,
+    );
+    const emitted = vi.fn();
+    adapter.onEvent(emitted);
+    await adapter.initialize();
+    await conn.simulateData({
+      type: "game_setup",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      playerToken: "seat-token",
+      state: remoteState("setup"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    await adapter.initializeGame();
+
+    const pending = adapter.submitAction({ type: "PassPriority" }, 1);
+    await conn.simulateData({
+      type: "action_rejected",
+      rejection: { message: "untrusted host payload" },
+    } as never);
+    await expect(pending).rejects.toMatchObject({
+      code: "ACTION_REJECTED",
+      message: "Host sent an invalid action rejection",
+      rejection: undefined,
+    });
+
+    await conn.simulateData({ type: "action_failed", message: "Match concession unavailable" });
+    await conn.simulateData({ type: "action_rejected", rejection: { message: "untrusted" } } as never);
+    expect(emitted).toHaveBeenCalledWith({ type: "error", message: "Match concession unavailable" });
+    expect(emitted).toHaveBeenCalledWith({ type: "error", message: "Host sent an invalid action rejection" });
   });
 
   it("guest snapshots stay coherent and strictly ordered across successive state updates", async () => {
@@ -3031,8 +3126,8 @@ describe("P2PHostAdapter — bound draft match concession", () => {
     await guest.simulateData({ type: "match_concede" });
 
     expect(await guest.getSentMessages()).toContainEqual(expect.objectContaining({
-      type: "action_rejected",
-      reason: "Whole-match concession is unavailable for this game",
+      type: "action_failed",
+      message: "Whole-match concession is unavailable for this game",
     }));
     adapter.dispose();
   });
@@ -3275,14 +3370,14 @@ describe("P2P wire-protocol version gate", () => {
   // Both halves stamp LITERALS. A frame built from WIRE_PROTOCOL_VERSION
   // cannot tell a bumped client from an unbumped one, which is why every
   // other handshake fixture in the suite is useless as an instrument for a
-  // bump. Revert 30 → 29 and BOTH halves red: the v29 frame stops being
-  // refused, and the v30 frame stops being admitted. The admitting half is
-  // the reach-guard — without it "refuses v29" is also satisfied by a client
+  // bump. Revert 31 → 30 and BOTH halves red: the v30 frame stops being
+  // refused, and the v31 frame stops being admitted. The admitting half is
+  // the reach-guard — without it "refuses v30" is also satisfied by a client
   // that refuses everything.
-  it("refuses the previous wire protocol (v29) and admits its own (v30)", async () => {
+  it("refuses the previous wire protocol (v30) and admits its own (v31)", async () => {
     const refusing = makeGuest();
     await refusing.adapter.initialize();
-    await refusing.conn.simulateData(setupFrameAt(29));
+    await refusing.conn.simulateData(setupFrameAt(30));
 
     await expect(refusing.adapter.initializeGame()).rejects.toMatchObject({
       code: "P2P_REJECTED",
@@ -3294,12 +3389,30 @@ describe("P2P wire-protocol version gate", () => {
 
     const admitting = makeGuest();
     await admitting.adapter.initialize();
-    await admitting.conn.simulateData(setupFrameAt(30));
+    await admitting.conn.simulateData(setupFrameAt(31));
 
     await expect(admitting.adapter.initializeGame()).resolves.toBeDefined();
     expect(admitting.emitted).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: "reconnectFailed" }),
     );
+  });
+
+  it("rejects a malformed present authority before bootstrap adoption", async () => {
+    const guest = makeGuest();
+    await guest.adapter.initialize();
+    await guest.conn.simulateData({
+      ...setupFrameAt(WIRE_PROTOCOL_VERSION),
+      authority: { sessionKey: "session", hostIncarnation: "host", extra: true },
+    } as never);
+
+    await expect(guest.adapter.initializeGame()).rejects.toMatchObject({
+      code: "P2P_REJECTED",
+      message: "Host sent a malformed P2P authority",
+    });
+    expect(guest.emitted).toHaveBeenCalledWith(expect.objectContaining({
+      type: "reconnectFailed",
+      reason: "Host sent a malformed P2P authority",
+    }));
   });
 
   // Derived, not a literal: this gate tests "unequal", not any particular
@@ -3328,30 +3441,30 @@ describe("P2P wire-protocol version gate", () => {
     adapter.dispose();
   });
 
-  // The discriminator for "absent means admit". Without it this gate is
-  // indistinguishable from one that treats a missing field as a mismatch —
-  // which would refuse every guest on an older bundle, including the ones
-  // that pair fine today.
-  it("admits a guest that stamps no wire version at all", async () => {
+  it("refuses a guest that omits the mandatory v28 wire version", async () => {
     const { adapter, emitConnection } = makeHost(2);
     await adapter.initialize();
 
-    const guest = await joinGuest(emitConnection, {
+    const guest = new FakeOpenableConnection();
+    emitConnection(guest as unknown as DataConnection);
+    guest.fireOpen();
+    await guest.simulateData({
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
-    await adapter.initializeGame();
 
-    expect(await sentOfType(guest, "reconnect_rejected")).toBeUndefined();
-    expect(guest.open).toBe(true);
-    expect(await sentOfType(guest, "game_setup")).toBeDefined();
+    expect(await sentOfType(guest, "reconnect_rejected")).toEqual(expect.objectContaining({
+      reason: expect.stringContaining("Wire protocol version required"),
+    }));
+    expect(guest.open).toBe(false);
+    expect(await sentOfType(guest, "game_setup")).toBeUndefined();
     adapter.dispose();
   });
 
   // The two first-contact stamp sites, asserted on the OUTBOUND frame. Neither
   // was covered before: deleting either stamp left the whole suite green,
-  // because a guest that fails to stamp is indistinguishable from an older
-  // bundle and the host's absent-means-admit branch swallows it silently. A
+  // because a guest that fails to stamp is rejected before the host allocates
+  // a seat. A
   // refactor dropping the `guest_deck` stamp would turn Unit 2 into a no-op
   // for every fresh join — the common path — with nothing red.
   it("stamps the wire version on both first-contact guest messages", async () => {

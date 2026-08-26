@@ -52,6 +52,32 @@ export interface P2PAuthorityStamp {
   hostIncarnation: string;
 }
 
+/** Validates the exact persisted/wire authority envelope. */
+export function isP2PAuthorityStamp(value: unknown): value is P2PAuthorityStamp {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return false;
+  const authority = value as Record<string, unknown>;
+  const keys = Object.keys(authority);
+  return keys.length === 2
+    && keys.includes("sessionKey")
+    && keys.includes("hostIncarnation")
+    && typeof authority.sessionKey === "string"
+    && typeof authority.hostIncarnation === "string";
+}
+
+/**
+ * Checks the full fencing token, not just the stable session key. A guest may
+ * reconnect to a resumed host under the same session key, but every normal
+ * post-handshake frame must come from the exact host incarnation it adopted.
+ */
+export function hasExactP2PAuthority(
+  candidate: P2PAuthorityStamp | undefined,
+  authority: P2PAuthorityStamp,
+): boolean {
+  return isP2PAuthorityStamp(candidate)
+    && candidate.sessionKey === authority.sessionKey
+    && candidate.hostIncarnation === authority.hostIncarnation;
+}
+
 export function createP2PSessionKey(): P2PSessionKey {
   return crypto.randomUUID();
 }
@@ -146,7 +172,7 @@ export async function loadP2PSession(hostPeerId: string): Promise<P2PSessionData
   try {
     const session = await get<P2PSessionData>(storageKey(hostPeerId), getSessionStore());
     if (!session) return null;
-    if (!isFresh(session) || !session.authority?.sessionKey || !session.authority.hostIncarnation) {
+    if (!isFresh(session) || !isP2PAuthorityStamp(session.authority)) {
       await clearP2PSession(hostPeerId);
       return null;
     }

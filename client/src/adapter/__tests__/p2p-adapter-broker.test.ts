@@ -15,6 +15,7 @@ import type { DataConnection } from "peerjs";
 import { P2PHostAdapter } from "../p2p-adapter";
 import type { BrokerClient } from "../../services/brokerClient";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
+import { WIRE_PROTOCOL_VERSION } from "../../network/protocol";
 
 // See p2p-adapter-multiplayer.test.ts — bypass CompressionStream because it
 // doesn't drain under fake timers in happy-dom. `protocol.test.ts` covers
@@ -235,6 +236,7 @@ describe("P2PHostAdapter — broker integration", () => {
     conn.fireOpen();
     await conn.simulateData({
       type: "guest_deck",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
       deckData: {
         player: { main_deck: ["Forest"], sideboard: [] },
       },
@@ -259,6 +261,7 @@ describe("P2PHostAdapter — broker integration", () => {
     conn.fireOpen();
     await conn.simulateData({
       type: "guest_deck",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
       deckData: {
         player: { main_deck: ["Forest"], sideboard: [] },
       },
@@ -283,6 +286,7 @@ describe("P2PHostAdapter — broker integration", () => {
     conn.fireOpen();
     await conn.simulateData({
       type: "guest_deck",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
       deckData: {
         player: { main_deck: ["Forest"], sideboard: [] },
       },
@@ -305,6 +309,7 @@ describe("P2PHostAdapter — broker integration", () => {
     conn.fireOpen();
     await conn.simulateData({
       type: "guest_deck",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
       deckData: {
         player: { main_deck: ["Forest"], sideboard: [] },
       },

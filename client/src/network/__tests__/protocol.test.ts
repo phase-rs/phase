@@ -36,8 +36,8 @@ const viewerInteractionWithProducedMana = {
 } as never;
 
 describe("encodeWireMessage / decodeWireMessage", () => {
-  it("pins the P2P wire protocol to v30", () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(30);
+  it("pins the P2P wire protocol to v31", () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(31);
   });
 
   it("defaults shortcut actions for a legacy payload created before the additive field", () => {
@@ -87,12 +87,31 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     { type: "game_resumed" },
     { type: "lobby_progress", joined: 1, total: 3 },
     { type: "emote", emote: "🔥" },
-    { type: "reconnect", playerToken: "token-123" },
+    { type: "reconnect", playerToken: "token-123", wireProtocolVersion: WIRE_PROTOCOL_VERSION },
     { type: "reconnect_rejected", reason: "Unknown token" },
-    { type: "action_rejected", reason: "Player kicked" },
+    {
+      type: "action_rejected",
+      rejection: {
+        code: "action_not_allowed",
+        disposition: "unavailable",
+        message: "Player kicked",
+        related_object_ids: [],
+      },
+    },
+    { type: "action_failed", message: "Host failed to submit action" },
     { type: "action_noop" },
     { type: "mana_payment_preview", requestId: 4, sourceIds: [12] },
-    { type: "mana_payment_preview_rejected", requestId: 4, reason: "Not your turn" },
+    {
+      type: "mana_payment_preview_rejected",
+      requestId: 4,
+      rejection: {
+        code: "not_your_priority",
+        disposition: "unavailable",
+        message: "Not your turn",
+        related_object_ids: [],
+      },
+    },
+    { type: "mana_payment_preview_failed", requestId: 4, message: "Preview unavailable" },
     {
       type: "action",
       senderPlayerId: 0,

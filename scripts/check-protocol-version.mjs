@@ -14,7 +14,7 @@ const EXPECTED_LOBBY_PROTOCOL_VERSION = 1;
 // here, so a full-game bump could ship with an unbumped P2P version and CI
 // stayed green — a v(n-1) host and a v(n) guest would then complete a
 // handshake and only fail when the incompatible payload arrived.
-const EXPECTED_WIRE_PROTOCOL_VERSION = 30;
+const EXPECTED_WIRE_PROTOCOL_VERSION = 31;
 
 function extractVersion(source, pattern, label) {
   const match = source.match(pattern);
