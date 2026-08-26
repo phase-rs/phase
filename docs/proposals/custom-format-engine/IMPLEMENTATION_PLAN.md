@@ -204,12 +204,22 @@ unchanged. The `CommandZoneMode`-derived fields —
 `CommandZoneMode::Disabled` resolves to `command_zone: false`,
 `commander_damage_threshold: None`, `uses_commander: false`;
 `CommandZoneMode::Enabled { commander_damage_threshold, .. }` resolves to
-`command_zone: true`, that same `commander_damage_threshold`, and
-`uses_commander: true` — matching `PLAN.md`'s already-stated invariant
-(`command_zone && commander_damage_threshold.is_some()`), now expressed
-through the enum's own discriminant instead of three independently-settable
-fields. `CommandZoneMode::Enabled`'s `eligibility_rule` is not mirrored onto
-`FormatConfig` at all — `FormatConfig` has no such field; it stays on
+`command_zone: true` and that same `commander_damage_threshold` unchanged
+(which the `Enabled` arm itself permits to be `None` — a command zone
+without commander damage, e.g. Tiny Leaders/Oathbreaker-style formats), with
+`uses_commander: commander_damage_threshold.is_some()` — **not**
+unconditionally `true` on `Enabled` alone. This matches `PLAN.md`'s
+already-stated invariant (`command_zone && commander_damage_threshold.is_some()`)
+exactly, now expressed through the enum's own discriminant instead of three
+independently-settable fields, and keeps the enabled-without-threshold case
+(a supported format class) representable and resolved correctly rather than
+forced to `uses_commander: true`. **This phase's own tests must cover the
+`Enabled { commander_damage_threshold: None, .. }` case explicitly** (a
+Tiny-Leaders/Oathbreaker-shaped custom format) asserting it resolves to
+`uses_commander: false`, alongside the `Some(_)` case resolving to `true` —
+not just the two `CommandZoneMode` variants in isolation. `CommandZoneMode::
+Enabled`'s `eligibility_rule` is not mirrored onto `FormatConfig` at all —
+`FormatConfig` has no such field; it stays on
 `custom_rules.structural` for the commander-eligibility check (Phase 1d) to
 read directly. `supplies_fixed_deck` is the one `FormatConfig` field this
 resolver does **not** derive from `custom_rules.structural` — per `PLAN.md`'s
