@@ -9,7 +9,7 @@
 import type { Update } from "@tauri-apps/plugin-updater";
 
 import { isDesktopTauri } from "../services/platform";
-import { isMultiplayerGameLive, whenMultiplayerGameEnds } from "./multiplayerGuard";
+import { deferUntilMultiplayerSessionEnds, isMultiplayerGameLive } from "./multiplayerGuard";
 import { markPendingAutoUpdate } from "./updateMarker";
 import {
   claimUpdateStatus,
@@ -35,7 +35,9 @@ let inFlight: Promise<void> | null = null;
  *   the bundle is already swapped in by the first).
  * - Manual `↻` clicks from triggering parallel installs during the wait.
  */
-let deferredUnsub: (() => void) | null = null;
+let deferredCancel: (() => void) | null = null;
+let deferredUpdate: Update | null = null;
+let deferredInstall: Promise<void> | null = null;
 
 function setTauriUpdateStatus(next: "checking" | "downloading" | "activating" | "deferred", ownsStatus: boolean): void {
   if (ownsStatus) setUpdateStatus(next);
@@ -98,7 +100,7 @@ async function runInstall(update: Update, ownsStatus: boolean): Promise<void> {
 }
 
 async function performCheck(reason: "startup" | "interval" | "manual"): Promise<void> {
-  if (deferredUnsub) {
+  if (deferredCancel || deferredInstall) {
     pushUpdateDebug(
       `Tauri update check (${reason}) skipped — install already deferred for end of multiplayer game.`,
     );
@@ -147,12 +149,22 @@ async function performCheck(reason: "startup" | "interval" | "manual"): Promise<
         "warn",
       );
       setTauriUpdateStatus("deferred", ownsStatus);
-      const pending = update;
-      deferredUnsub = whenMultiplayerGameEnds(() => {
-        deferredUnsub = null;
+      deferredUpdate = update;
+      const scheduledInstall = deferUntilMultiplayerSessionEnds(() => {
+        const pending = deferredUpdate;
+        deferredUpdate = null;
+        deferredCancel = null;
+        if (!pending) return;
         pushUpdateDebug("Multiplayer game ended; applying deferred Tauri update.");
-        void runInstall(pending, ownsStatus);
-      });
+        deferredInstall = runInstall(pending, ownsStatus).finally(() => {
+          deferredInstall = null;
+        });
+      }, "install");
+      if (scheduledInstall.deferred && deferredUpdate !== null) {
+        deferredCancel = scheduledInstall.cancel;
+        return;
+      }
+      await deferredInstall;
       return;
     }
 
@@ -209,8 +221,9 @@ export function registerTauriUpdater(): void {
     () => {
       window.clearInterval(intervalId);
       manualCheck = null;
-      deferredUnsub?.();
-      deferredUnsub = null;
+      deferredCancel?.();
+      deferredCancel = null;
+      deferredUpdate = null;
       releaseUpdateStatus("tauri");
     },
     { once: true },

@@ -1,4 +1,4 @@
-import { isMultiplayerGameLive, whenMultiplayerGameEnds } from "./multiplayerGuard";
+import { deferUntilMultiplayerSessionEnds, isMultiplayerGameLive } from "./multiplayerGuard";
 import {
   claimUpdateStatus,
   pushUpdateDebug,
@@ -22,7 +22,7 @@ import { flushNow, trackEvent } from "../services/telemetry";
  * Multiplayer safety: a chunk-load failure mid-lobby or mid-game would
  * still reload and drop the P2P/WebSocket connection. We mirror the
  * service-worker updater's deferral by parking the reload until
- * `whenMultiplayerGameEnds()` fires, so the running game isn't killed for
+ * `deferUntilMultiplayerSessionEnds()` releases it, so the running game isn't killed for
  * everyone else in it. The user lives with a degraded UI for the rest of
  * the game (one missing lazy route), but the game itself stays alive and
  * the reconnect-on-end story remains intact.
@@ -43,7 +43,7 @@ import { flushNow, trackEvent } from "../services/telemetry";
  */
 let isInstalled = false;
 let deferredReload: (() => void) | null = null;
-let deferredReloadUnsub: (() => void) | null = null;
+let deferredReloadCancel: (() => void) | null = null;
 
 /** Reloads allowed per failing chunk within {@link RELOAD_GUARD_WINDOW_MS}. */
 const RELOAD_GUARD_MAX = 2;
@@ -190,12 +190,14 @@ export function installChunkReloadHandler(): void {
       // we already have a reload queued — replacing it changes nothing.
       if (deferredReload) return;
       deferredReload = doReload;
-      deferredReloadUnsub = whenMultiplayerGameEnds(() => {
+      const scheduledReload = deferUntilMultiplayerSessionEnds(() => {
         const fn = deferredReload;
         deferredReload = null;
-        deferredReloadUnsub = null;
+        deferredReloadCancel = null;
         fn?.();
-      });
+      }, "reload");
+      if (!scheduledReload.deferred || deferredReload === null) return;
+      deferredReloadCancel = scheduledReload.cancel;
       return;
     }
 
@@ -205,8 +207,8 @@ export function installChunkReloadHandler(): void {
   window.addEventListener(
     "beforeunload",
     () => {
-      deferredReloadUnsub?.();
-      deferredReloadUnsub = null;
+      deferredReloadCancel?.();
+      deferredReloadCancel = null;
       deferredReload = null;
       releaseUpdateStatus("chunk");
     },
