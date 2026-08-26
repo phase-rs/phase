@@ -929,7 +929,7 @@ pub fn preflight_debug_action_with_rejection(
 /// debug mode is enabled. Disabled debug mode continues through the ordinary
 /// preflight path so it remains an invalid action rather than an authorization
 /// failure.
-fn explicit_debug_permission_rejection(
+pub(crate) fn explicit_debug_permission_rejection(
     state: &GameState,
     actor: PlayerId,
     related_object_ids: Vec<ObjectId>,

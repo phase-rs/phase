@@ -464,8 +464,10 @@ fn rich_debug_permission_rejections_preserve_visible_object_ids() {
         .expect_err("an unlisted actor cannot apply a debug action");
     let preflight_rejection = preflight_debug_action_with_rejection(&state, P0, &action)
         .expect_err("an unlisted actor cannot preflight a debug action");
+    let preview_rejection = preview_action_with_rejection(&state, P0, &GameAction::Debug(action.clone()))
+        .expect_err("an unlisted actor cannot preview a debug action");
 
-    for rejection in [apply_rejection, preflight_rejection] {
+    for rejection in [apply_rejection, preflight_rejection, preview_rejection] {
         assert_eq!(rejection.code, ActionRejectionCode::DebugPermissionDenied);
         assert_eq!(
             rejection.disposition,

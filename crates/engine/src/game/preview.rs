@@ -16,7 +16,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ai_support::legal_actions_for_viewer;
-use crate::game::engine::{action_rejection_for_engine_error, apply_for_simulation, EngineError};
+use crate::game::engine::{
+    action_rejection_for_engine_error, apply_for_simulation, explicit_debug_permission_rejection,
+    EngineError,
+};
 use crate::game::visibility::filter_action_rejection_for_viewer;
 use crate::types::action_rejection::ActionRejection;
 use crate::types::actions::GameAction;
@@ -171,6 +174,13 @@ pub fn preview_action_with_rejection(
     action: &GameAction,
 ) -> Result<PreviewDiff, ActionRejection> {
     let related_object_ids = action.related_object_ids();
+    if matches!(action, GameAction::Debug(_)) {
+        if let Some(rejection) =
+            explicit_debug_permission_rejection(state, actor, related_object_ids.clone())
+        {
+            return Err(rejection);
+        }
+    }
     preview_action(state, actor, action).map_err(|error| {
         filter_action_rejection_for_viewer(
             state,
