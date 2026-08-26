@@ -311,12 +311,14 @@ fn no_target_class_producer_constructs_a_choice_class_player_pin() {
             ("engine/src/game/engine.rs", 1),
             ("engine/src/game/interaction.rs", 1),
             ("engine/src/game/visibility.rs", 1),
+            ("engine/src/types/actions.rs", 1),
         ],
         "the TARGET-class spelling must be CONSTRUCTED by BOTH producers — `game/engine.rs` \
          (`record_trigger_target_answer`) and `game/interaction.rs` \
-         (`materialize_loop_shortcut_response`) — beside its two READ sites: \
+         (`materialize_loop_shortcut_response`) — beside its three READ sites: \
          `evaluate_schedule`'s CR 601.2c resolver arm in `analysis/decision_template.rs` and \
-         the wildcard-free redaction arm in `game/visibility.rs`. A MISSING producer is the \
+         the wildcard-free redaction arm in `game/visibility.rs`, and `GameAction`'s object-id \
+         collection arm in `types/actions.rs`. A MISSING producer is the \
          revert this row exists to catch; an EXTRA file is a new producer that must be \
          classified rather than absorbed. got {ranked:?}"
     );

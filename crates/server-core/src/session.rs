@@ -4949,7 +4949,10 @@ mod tests {
                 }),
             )
             .expect_err("a real entry off Priority must fail before database lookup");
-        assert!(priority_error.contains("Priority window"));
+        assert_eq!(
+            priority_error,
+            "That action is not valid in the current game state."
+        );
         assert!(!priority_error.contains("card database"));
     }
 
