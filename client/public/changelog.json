@@ -1,6 +1,21 @@
 {
   "entries": [
     {
+      "id": 198,
+      "date": "2026-08-25",
+      "title": "Conditional spells keep their targets",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Cards can now check whether enough creatures died this turn, including Bloodline Recollector and the wider threshold class\n• Loyalty-counter triggers no longer need extra wording to be recognized, and token replacements can require the token’s creature subtype (Bilbo, Fellow Conspirator and similar cards)\n• “Whenever you attack a player” triggers fire once for each attacked player and stay out of planeswalker- and battle-only attacks (Namor, Atlantean King and the full card class)\n\n🛠️ Cards That Now Work Right\n• Face-down creature spells now receive their cost reductions and show their actual reduced cost before you cast them, including from exile (Kadena, Dream Chisel, and Obscuring Aether)\n• Solitary Confinement and other printed prevention shields remain active as long as their permanent does, while effects that say “this turn” still expire on time\n• Conditional and optional effects retain the targets you chose through every continuation, so later instructions resolve against the right cards and players\n• Cards with compound short names and effects that keep cards in exile now preserve the right card reference and casting permission\n• Token-granted abilities once again present their optional choices instead of silently losing them\n\n⚔️ Combat & Gameplay\n• Stack entries preserve each target’s identity even when similar spells are grouped, making choices and follow-up effects apply to the intended object\n• The game now uses the server-authoritative life total from the latest game snapshot\n\n🖥️ Interface\n• Castable cards fan out and drag normally again; mobile respects your chosen split-board layout\n• Blight choices can be confirmed, and Best-of-three sideboards remain available in their saved format configuration\n\n🤖 AI\n• The AI now carries out mandatory sacrifice choices instead of leaving them unissued\n\n🌐 Multiplayer\n• A P2P game paused manually can reconnect and resume reliably, with reconnect updates delivered in the right order",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1541984838171496574"
+    },
+    {
       "id": 197,
       "date": "2026-08-24",
       "title": "Dungeon rooms explain themselves",
