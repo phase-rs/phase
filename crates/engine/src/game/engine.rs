@@ -7648,7 +7648,13 @@ pub(crate) fn resume_auto_pass_after_resolve_all(
         waiting_for: state.waiting_for.clone(),
         log_entries: Vec::new(),
     };
+    // CR 704.3: mirror the ordinary action-boundary reconciliation on both
+    // sides of the internal auto-pass drive. The resume seam bypasses
+    // `finish_action_boundary`, so without this a loss created by its final
+    // resolution could remain at Priority instead of becoming GameOver.
+    reconcile_terminal_result(state, &mut result);
     run_auto_pass_loop(state, &mut result);
+    reconcile_terminal_result(state, &mut result);
 
     let log_entries = super::log::resolve_log_entries(&result.events, &before, state);
     batch.items_resolved = batch.items_resolved.saturating_add(

@@ -697,7 +697,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, CopyRetargetPermission, Effect,
-        ManaContribution, ManaProduction, ResolvedAbility, TargetFilter,
+        ManaContribution, ManaProduction, QuantityExpr, ResolvedAbility, TargetFilter,
     };
     use crate::types::actions::ResolveAllConsentDecision;
     use crate::types::card_type::{CardType, CoreType};
@@ -723,6 +723,27 @@ mod tests {
                 source_id: object_id,
                 ability: Box::new(ResolvedAbility::new(
                     Effect::NoOp,
+                    vec![],
+                    object_id,
+                    controller,
+                )),
+            },
+        }
+    }
+
+    fn draw_entry(id: u64, controller: PlayerId) -> StackEntry {
+        let object_id = ObjectId(id);
+        StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: object_id,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
                     vec![],
                     object_id,
                     controller,
@@ -1314,5 +1335,39 @@ mod tests {
             .events
             .iter()
             .any(|event| matches!(event, GameEvent::StackResolved { .. })));
+    }
+
+    #[test]
+    fn resumed_remainder_reconciles_empty_library_loss_to_game_over() {
+        // The no-op is consented and committed. The empty-library draw then
+        // fails the next proof on its terminal checkpoint and is resolved by
+        // the ordinary retained auto-pass remainder.
+        let mut state = ready_state(vec![
+            draw_entry(1, PlayerId(0)),
+            no_op_entry(2, PlayerId(0)),
+        ]);
+        for player in [PlayerId(0), PlayerId(1)] {
+            state.auto_pass.insert(
+                player,
+                AutoPassMode::UntilTurnBoundary {
+                    until: TurnBoundary::EndOfCurrentTurn,
+                },
+            );
+        }
+
+        let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(1))
+            }
+        ));
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::GameOver {
+                winner: Some(PlayerId(1))
+            }
+        )));
     }
 }
