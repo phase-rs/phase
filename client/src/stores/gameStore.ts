@@ -22,6 +22,7 @@ import type {
 import type { ViewerInteraction } from "../adapter/generated/interaction";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { applySpellPaymentPreference } from "../game/castPaymentMode";
+import { reportStructuredActionRejection } from "../game/actionRejectionReporter";
 import { getPlayerId } from "../hooks/usePlayerId";
 import { loadCheckpoints, saveAuthoritativeGame } from "../services/gamePersistence";
 import { resetStackThroughput } from "../utils/stackThroughput";
@@ -661,7 +662,13 @@ export const useGameStore = create<GameStore>()(
       // `getPlayerId()` returns the local human's authenticated seat ID.
       // The engine rejects the action if this doesn't match the authorized
       // submitter — never trust the UI to route actions to the right seat.
-      const result = await adapter.submitAction(submittedAction, getPlayerId());
+      let result: Awaited<ReturnType<EngineAdapter["submitAction"]>>;
+      try {
+        result = await adapter.submitAction(submittedAction, getPlayerId());
+      } catch (err) {
+        if (reportStructuredActionRejection(err) === "stale") return [];
+        throw err;
+      }
       // ONE atomic pair — a separate getState()/getLegalActions() pair could
       // straddle an engine advance and commit a mismatched state/actions pair.
       const snapshot = await adapter.getSnapshot();

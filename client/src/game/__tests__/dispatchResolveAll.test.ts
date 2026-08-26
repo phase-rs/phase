@@ -404,7 +404,7 @@ describe("dispatchResolveAll progress", () => {
 
     expect(useAppNotificationStore.getState().notification).toMatchObject({
       description: engineRejection.message,
-      anchor: { x: 60, y: 88 },
+      anchor: { x: 192, y: 172, placement: "below" },
     });
     anchor.remove();
   });

@@ -18,7 +18,7 @@ describe("AppToast", () => {
       notification: {
         title: "Action failed",
         description: "Engine error: ObjectId(200) must be blocked by 2 or more creatures",
-        anchor: { x: 240, y: 320 },
+        anchor: { x: 240, y: 320, placement: "above" },
       },
       expiresAt: Date.now() + 5_000,
     });

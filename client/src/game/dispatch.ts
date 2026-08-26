@@ -1,6 +1,7 @@
 import type { AiActionProposal, BatchResolveResult, EngineAdapter, EngineSnapshot, GameAction, GameEvent, GameLogEntry, GameState, RewindOption, WaitingFor } from "../adapter/types";
 import type { InteractionSubmission } from "../adapter/generated/interaction";
 import { actionRejectionError, AdapterError, AdapterErrorCode } from "../adapter/types";
+import { reportStructuredActionRejection } from "./actionRejectionReporter";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "./engineRecovery";
 import { normalizeEvents } from "../animation/eventNormalizer";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
@@ -24,7 +25,6 @@ import { usePreferencesStore } from "../stores/preferencesStore";
 import { useUiStore } from "../stores/uiStore";
 import { pressureMultiplier, stackPressureFromLength, STACK_PRESSURE_ELEVATED } from "../utils/stackPressure";
 import { effectiveStackPressure, recordStackResolutions } from "../utils/stackThroughput";
-import { objectAnchorSelector } from "../utils/objectAnchorSelector";
 import { applySpellPaymentPreference } from "./castPaymentMode";
 
 /**
@@ -279,29 +279,15 @@ function shouldShowActionError(err: unknown): boolean {
   return !isStateLost(err) && !isEnginePanic(err) && !isEngineUnresponsive(err) && !isStaleAction(err);
 }
 
-function actionErrorAnchor(err: unknown): { x: number; y: number } | undefined {
-  if (!(err instanceof AdapterError) || !err.rejection) return undefined;
-
-  for (const objectId of err.rejection.related_object_ids) {
-    const anchor = document.querySelector<HTMLElement>(objectAnchorSelector(objectId));
-    if (!anchor) continue;
-
-    const rect = anchor.getBoundingClientRect();
-    return { x: rect.left + rect.width / 2, y: rect.top - 12 };
-  }
-
-  return undefined;
-}
-
 function reportActionError(err: unknown, action?: GameAction): void {
   if (!shouldShowActionError(err)) return;
-  const anchor = actionErrorAnchor(err);
+  const title = i18n.t("actionError.title", {
+    action: action ? actionLabel(action) : i18n.t("actionError.genericAction"),
+  });
+  if (reportStructuredActionRejection(err, title) !== "not-structured") return;
   useAppNotificationStore.getState().showNotification({
-    title: i18n.t("actionError.title", {
-      action: action ? actionLabel(action) : i18n.t("actionError.genericAction"),
-    }),
+    title,
     description: actionErrorMessage(err),
-    ...(anchor ? { anchor } : {}),
   });
 }
 

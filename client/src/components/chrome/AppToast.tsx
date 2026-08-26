@@ -30,7 +30,9 @@ export function AppToast() {
             anchored ? "" : "top-4 right-4"
           }`}
           style={anchored ? { left: anchored.x, top: anchored.y } : undefined}
-          transformTemplate={(_, generated) => anchored ? `translate(-50%, -100%) ${generated}` : generated}
+          transformTemplate={(_, generated) => anchored
+            ? `translate(-50%, ${anchored.placement === "above" ? "-100%" : "0"}) ${generated}`
+            : generated}
           initial={{ opacity: 0, x: 24, y: -8 }}
           animate={{ opacity: 1, x: 0, y: 0 }}
           exit={{ opacity: 0, x: 24, y: -8 }}

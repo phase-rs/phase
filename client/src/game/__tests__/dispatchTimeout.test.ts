@@ -151,7 +151,7 @@ describe("dispatchAction recovery on ENGINE_UNRESPONSIVE", () => {
     expect(useAppNotificationStore.getState().notification).toEqual({
       title: "Skip target failed",
       description: engineRejection.message,
-      anchor: { x: 30, y: 18 },
+      anchor: { x: 192, y: 82, placement: "below" },
     });
     first.remove();
     second.remove();
@@ -200,7 +200,7 @@ describe("dispatchAction recovery on ENGINE_UNRESPONSIVE", () => {
     expect(useAppNotificationStore.getState().notification).toEqual({
       title: "Action failed",
       description: engineRejection.message,
-      anchor: { x: 90, y: 68 },
+      anchor: { x: 192, y: 132, placement: "below" },
     });
     anchor.remove();
   });
