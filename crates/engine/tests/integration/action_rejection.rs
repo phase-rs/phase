@@ -464,8 +464,9 @@ fn rich_debug_permission_rejections_preserve_visible_object_ids() {
         .expect_err("an unlisted actor cannot apply a debug action");
     let preflight_rejection = preflight_debug_action_with_rejection(&state, P0, &action)
         .expect_err("an unlisted actor cannot preflight a debug action");
-    let preview_rejection = preview_action_with_rejection(&state, P0, &GameAction::Debug(action.clone()))
-        .expect_err("an unlisted actor cannot preview a debug action");
+    let preview_rejection =
+        preview_action_with_rejection(&state, P0, &GameAction::Debug(action.clone()))
+            .expect_err("an unlisted actor cannot preview a debug action");
 
     for rejection in [apply_rejection, preflight_rejection, preview_rejection] {
         assert_eq!(rejection.code, ActionRejectionCode::DebugPermissionDenied);
@@ -487,6 +488,47 @@ fn rich_debug_permission_rejections_preserve_visible_object_ids() {
     apply_with_rejection(&mut state, P0, GameAction::Debug(action))
         .expect("a listed actor can apply a debug action");
     assert!(!state.objects.contains_key(&object_id));
+}
+
+#[test]
+fn rich_auto_payment_preview_enforces_debug_permission_without_mutation() {
+    let mut state = GameState::new_two_player(1);
+    state.debug_mode = true;
+    state.debug_permitted.insert(P1);
+    let object_id = create_object(
+        &mut state,
+        CardId(3),
+        P0,
+        "Visible debug object".to_string(),
+        Zone::Battlefield,
+    );
+    let action = GameAction::Debug(DebugAction::RemoveObject { object_id });
+    let before = state.clone();
+
+    let rejection = preview_auto_payment_sources_with_rejection(&state, P0, &action)
+        .expect_err("an unlisted actor cannot preview auto-payment for a debug action");
+
+    assert_eq!(rejection.code, ActionRejectionCode::DebugPermissionDenied);
+    assert_eq!(
+        rejection.disposition,
+        ActionRejectionDisposition::Unauthorized
+    );
+    assert_eq!(
+        rejection.message,
+        "You are not authorized to use debug actions."
+    );
+    assert_eq!(rejection.related_object_ids, vec![object_id]);
+    assert_eq!(state, before);
+
+    state.debug_permitted.insert(P0);
+    let permitted_before = state.clone();
+
+    assert_eq!(
+        preview_auto_payment_sources_with_rejection(&state, P0, &action)
+            .expect("a listed actor receives the legacy empty auto-payment preview"),
+        Vec::<ObjectId>::new()
+    );
+    assert_eq!(state, permitted_before);
 }
 
 #[test]

@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::ai_support::legal_actions_for_viewer;
 use crate::game::engine::{
     action_rejection_for_engine_error, apply_for_simulation, explicit_debug_permission_rejection,
-    EngineError,
+    preflight_debug_action_with_rejection, EngineError,
 };
 use crate::game::visibility::filter_action_rejection_for_viewer;
 use crate::types::action_rejection::ActionRejection;
@@ -246,6 +246,10 @@ pub fn preview_auto_payment_sources_with_rejection(
     actor: PlayerId,
     action: &GameAction,
 ) -> Result<Vec<ObjectId>, ActionRejection> {
+    if let GameAction::Debug(debug_action) = action {
+        preflight_debug_action_with_rejection(state, actor, debug_action)?;
+    }
+
     let related_object_ids = action.related_object_ids();
     preview_auto_payment_sources(state, actor, action).map_err(|error| {
         filter_action_rejection_for_viewer(
