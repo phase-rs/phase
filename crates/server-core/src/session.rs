@@ -6543,7 +6543,7 @@ mod tests {
         assert!(
             matches!(
                 duplicate,
-                Err(SessionActionError::Rejected(rejection))
+                Err(SessionActionError::Rejected(ref rejection))
                     if rejection.code
                         == engine::types::action_rejection::ActionRejectionCode::InvalidAction
             ),
