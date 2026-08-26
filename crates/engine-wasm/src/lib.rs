@@ -14,8 +14,8 @@ use engine::ai_support::{
 use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
 use engine::database::{CardDatabase, CardSearchQuery};
 use engine::game::engine::{
-    apply, apply_interaction_with_rejection, recover_orphaned_resolve_all,
-    resolve_all_ready_prefix_with_rejection,
+    apply_interaction_with_rejection, apply_with_rejection, preflight_debug_action_with_rejection,
+    recover_orphaned_resolve_all, resolve_all_ready_prefix_with_rejection,
 };
 use engine::game::interaction::{bind_interaction_authority, submit_interaction_with_rejection};
 use engine::game::preview::{
@@ -30,13 +30,16 @@ use engine::game::{
     validate_name_deck_for_format_full, BracketEstimate, DeckCompatibilityRequest, DeckList,
     PlayerDeckList, ReplayPlayer,
 };
+use engine::types::actions::DebugAction;
 use engine::types::format::{DeckCopyLimit, FormatConfig, GameFormat};
 use engine::types::game_state::{PersistedGameState, TrustedGameStateEnvelope, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::interaction::{InteractionSessionId, InteractionSubmission};
 use engine::types::mana::ManaCost;
 use engine::types::match_config::MatchConfig;
-use engine::types::{GameAction, GameState, PlayerId, ReplayHeader, ReplayLog};
+use engine::types::{
+    ActionRejection, ActionRejectionCode, GameAction, GameState, PlayerId, ReplayHeader, ReplayLog,
+};
 
 use engine::game::resolve_player_deck_list;
 use engine::starter_decks;
