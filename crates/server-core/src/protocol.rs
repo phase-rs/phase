@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use engine::game::interaction::ObjectActionPayload;
+use engine::types::action_rejection::ActionRejection;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
@@ -520,6 +521,12 @@ pub enum ServerMessage {
         rewind_targets: Vec<RewindOption>,
     },
     ActionRejected {
+        rejection: ActionRejection,
+    },
+    /// A request outside the engine game-action boundary was refused. This is
+    /// deliberately prose: takeback and match-lifecycle requests have no
+    /// engine action/rejection provenance to expose.
+    RequestRejected {
         reason: String,
     },
     /// Confirms an authenticated action that intentionally produced no state
@@ -530,7 +537,7 @@ pub enum ServerMessage {
     /// identifier prevents unrelated action failures from settling this promise.
     ResolveAllRejected {
         request_id: u64,
-        reason: String,
+        rejection: ActionRejection,
     },
     /// Requester-only acknowledgement for a native Resolve All batch. The
     /// matching StateUpdate is sent first and carries the authoritative state.
@@ -551,7 +558,7 @@ pub enum ServerMessage {
     },
     ManaPaymentPreviewRejected {
         request_id: u64,
-        reason: String,
+        rejection: ActionRejection,
     },
     OpponentDisconnected {
         grace_seconds: u32,
@@ -2398,8 +2405,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_39() {
-        assert_eq!(PROTOCOL_VERSION, 39);
+    fn protocol_version_is_40() {
+        assert_eq!(PROTOCOL_VERSION, 40);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -2409,7 +2416,7 @@ mod tests {
     /// understand.
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
-    /// this guards — and this test reds while `protocol_version_is_39` stays
+    /// this guards — and this test reds while `protocol_version_is_40` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
@@ -2456,11 +2463,13 @@ mod tests {
 
         let rejected = ServerMessage::ResolveAllRejected {
             request_id: 7,
-            reason: "Resolve All requires your priority".to_string(),
+            rejection: ActionRejection::new(
+                engine::types::action_rejection::ActionRejectionCode::ResolveAllNotReady,
+            ),
         };
         assert_eq!(
             serde_json::to_string(&rejected).unwrap(),
-            r#"{"type":"ResolveAllRejected","data":{"request_id":7,"reason":"Resolve All requires your priority"}}"#
+            r#"{"type":"ResolveAllRejected","data":{"request_id":7,"rejection":{"code":"resolve_all_not_ready","disposition":"unavailable","message":"Resolve All is not ready to run.","related_object_ids":[]}}}"#
         );
     }
 

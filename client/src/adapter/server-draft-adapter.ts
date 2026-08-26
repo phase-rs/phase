@@ -13,7 +13,7 @@ import type {
   SubmitResult,
 } from "./types";
 import type { InteractionSubmission } from "./generated/interaction";
-import { actionRejectionError, AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, nextSnapshotSeq } from "./types";
+import { actionRejectionError, AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, isActionRejection, nextSnapshotSeq } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import {
   HandshakeError,
@@ -699,7 +699,7 @@ export class ServerDraftAdapter implements EngineAdapter {
       }
 
       case "ActionRejected": {
-        const data = msg.data as { reason: string };
+        const data = msg.data as { rejection?: unknown };
         this.emit({ type: "actionPendingChanged", pending: false });
         if (this.pendingReject) {
           // Game-phase action rejection. `ServerDraftAdapter` is a full
@@ -714,7 +714,11 @@ export class ServerDraftAdapter implements EngineAdapter {
           // carries a pick/pass rejection, which is not a `GameAction` at all,
           // so no stale-action verdict is possible — it is a separate draft
           // protocol concern and stays a plain recoverable rejection.
-          this.pendingReject(actionRejectionError(data.reason));
+          this.pendingReject(
+            isActionRejection(data.rejection)
+              ? actionRejectionError(data.rejection)
+              : new AdapterError(AdapterErrorCode.WASM_ERROR, "Server sent an invalid action rejection.", false),
+          );
           this.pendingResolve = null;
           this.pendingReject = null;
         }
@@ -732,7 +736,7 @@ export class ServerDraftAdapter implements EngineAdapter {
       }
 
       case "ManaPaymentPreviewRejected": {
-        const data = msg.data as { request_id: number; reason: string };
+        const data = msg.data as { request_id: number; rejection?: unknown };
         const pending = this.pendingManaPaymentPreviews.get(data.request_id);
         if (pending) {
           this.pendingManaPaymentPreviews.delete(data.request_id);
@@ -742,7 +746,11 @@ export class ServerDraftAdapter implements EngineAdapter {
           // the request — and a stale preview is likewise void rather than
           // retryable. Non-stale reasons still classify as recoverable
           // ACTION_REJECTED, so existing surface/retry behavior is unchanged.
-          pending.reject(actionRejectionError(data.reason));
+          pending.reject(
+            isActionRejection(data.rejection)
+              ? actionRejectionError(data.rejection)
+              : new AdapterError(AdapterErrorCode.WASM_ERROR, "Server sent an invalid mana-payment rejection.", false),
+          );
         }
         break;
       }

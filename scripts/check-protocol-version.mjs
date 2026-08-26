@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const EXPECTED_PROTOCOL_VERSION = 39;
+const EXPECTED_PROTOCOL_VERSION = 40;
 // The LOBBY message-set version. Deliberately separate from the full-game
 // number above and deliberately NOT derived from it: a GameState-only bump must
 // not move the lobby's compatibility window. See the assertions at the bottom.

@@ -29,6 +29,7 @@ use engine::database::CardDatabase;
 use engine::game::derived_views::derive_filtered_views;
 use engine::game::interaction::{derive_viewer_interaction, object_action_payloads};
 use engine::game::validate_name_deck_for_format_full;
+use engine::types::action_rejection::{ActionRejection, ActionRejectionCode};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
@@ -73,7 +74,8 @@ use server_core::protocol::{
 use server_core::resolve_deck;
 use server_core::seat_mutation_wire_guard::guard_seat_mutation;
 use server_core::session::{
-    ActionResult, FullRuntime, GameSession, RevisionedActionResult, SessionManager,
+    ActionResult, FullRuntime, GameSession, RevisionedActionResult, SessionActionError,
+    SessionManager,
 };
 use server_core::spectator_wire_guard::{
     guard_draft_spectator_capacity, guard_game_spectator_capacity, guard_spectate_draft,
@@ -4147,6 +4149,17 @@ enum GameSubmission {
     Interaction(InteractionSubmission),
 }
 
+/// Maps the three-way session boundary onto the ordinary action-response
+/// channels. Resolve All has its own requester-correlated wrapper, but every
+/// other game submission uses this exact policy.
+fn session_action_error_message(error: SessionActionError) -> ServerMessage {
+    match error {
+        SessionActionError::Rejected(rejection) => ServerMessage::ActionRejected { rejection },
+        SessionActionError::RequestRejected(reason) => ServerMessage::RequestRejected { reason },
+        SessionActionError::Operational(error) => ServerMessage::error(error),
+    }
+}
+
 impl GameSubmission {
     /// Wire-bounds this submission and, on failure, names the channel the
     /// rejection is answered on.
@@ -4198,11 +4211,21 @@ impl GameSubmission {
 
     fn payload_rejection(&self) -> Result<(), Box<ServerMessage>> {
         match self {
-            GameSubmission::Action(action) => guard_game_action_payload(action)
-                .map_err(|reason| Box::new(ServerMessage::error(reason))),
+            GameSubmission::Action(action) => {
+                guard_game_action_payload(action).map_err(|_reason| {
+                    Box::new(ServerMessage::ActionRejected {
+                        rejection: ActionRejection::new(ActionRejectionCode::InvalidAction),
+                    })
+                })
+            }
             GameSubmission::Interaction(submission) => {
-                guard_interaction_submission_payload(submission)
-                    .map_err(|reason| Box::new(ServerMessage::ActionRejected { reason }))
+                guard_interaction_submission_payload(submission).map_err(|_reason| {
+                    Box::new(ServerMessage::ActionRejected {
+                        rejection: ActionRejection::new(
+                            ActionRejectionCode::InteractionPayloadTooLarge,
+                        ),
+                    })
+                })
             }
         }
     }
@@ -4276,11 +4299,14 @@ async fn handle_full_game_submission(
         let lock_start = std::time::Instant::now();
         let mut mgr = state.lock().await;
         let applied = match submission {
-            GameSubmission::Action(action) => {
-                mgr.handle_action_with_card_db(&game_code, &player_token, action, Some(db.as_ref()))
-            }
+            GameSubmission::Action(action) => mgr.handle_action_with_card_db_outcome(
+                &game_code,
+                &player_token,
+                action,
+                Some(db.as_ref()),
+            ),
             GameSubmission::Interaction(submission) => {
-                mgr.handle_interaction(&game_code, &player_token, submission)
+                mgr.handle_interaction_with_rejection(&game_code, &player_token, submission)
             }
         };
         match applied {
@@ -4527,8 +4553,8 @@ async fn handle_full_game_submission(
                 state.lock().await.remove_game(&game_code);
             }
         }
-        Err(e) => {
-            let msg = ServerMessage::ActionRejected { reason: e };
+        Err(error) => {
+            let msg = session_action_error_message(error);
             if let Ok(json) = serde_json::to_string(&msg) {
                 let _ = socket.send(Message::text(json)).await;
             }
@@ -4556,17 +4582,15 @@ async fn handle_resolve_all(
         identity.player_token.clone(),
         identity.player_id,
     ) else {
-        let msg = ServerMessage::ResolveAllRejected {
-            request_id,
-            reason: "Not in a game".to_string(),
-        };
+        let msg = ServerMessage::error("Not in a game".to_string());
         let _ = tx.send(msg);
         return;
     };
 
     let processed = {
         let mut mgr = state.lock().await;
-        match mgr.resolve_all_for_player(&game_code, &player_token, max_resolutions) {
+        match mgr.resolve_all_for_player_with_rejection(&game_code, &player_token, max_resolutions)
+        {
             Ok((transition, summary)) => match transition {
                 None => Ok((summary, None)),
                 Some((_, (_, _, _, batch_log_entries, _, _, _))) => {
@@ -4630,8 +4654,19 @@ async fn handle_resolve_all(
 
     let (summary, payload) = match processed {
         Ok(processed) => processed,
-        Err(reason) => {
-            let _ = tx.send(ServerMessage::ResolveAllRejected { request_id, reason });
+        Err(SessionActionError::Rejected(rejection)) => {
+            let _ = tx.send(ServerMessage::ResolveAllRejected {
+                request_id,
+                rejection,
+            });
+            return;
+        }
+        Err(SessionActionError::RequestRejected(reason)) => {
+            let _ = tx.send(ServerMessage::RequestRejected { reason });
+            return;
+        }
+        Err(SessionActionError::Operational(error)) => {
+            let _ = tx.send(ServerMessage::error(error));
             return;
         }
     };
@@ -5144,25 +5179,35 @@ async fn handle_client_message(
         ClientMessage::PreviewManaPayment { request_id, action } => {
             let response = match (identity.game_code.clone(), identity.player_token.clone()) {
                 (Some(game_code), Some(player_token)) => {
-                    if let Err(reason) = guard_game_action_payload(&action) {
-                        ServerMessage::ManaPaymentPreviewRejected { request_id, reason }
+                    if guard_game_action_payload(&action).is_err() {
+                        ServerMessage::ManaPaymentPreviewRejected {
+                            request_id,
+                            rejection: ActionRejection::new(ActionRejectionCode::InvalidAction),
+                        }
                     } else {
                         let mgr = state.lock().await;
-                        match mgr.preview_mana_payment(&game_code, &player_token, &action) {
+                        match mgr.preview_mana_payment_with_rejection(
+                            &game_code,
+                            &player_token,
+                            &action,
+                        ) {
                             Ok(source_ids) => ServerMessage::ManaPaymentPreview {
                                 request_id,
                                 source_ids,
                             },
-                            Err(reason) => {
-                                ServerMessage::ManaPaymentPreviewRejected { request_id, reason }
+                            Err(SessionActionError::Rejected(rejection)) => {
+                                ServerMessage::ManaPaymentPreviewRejected {
+                                    request_id,
+                                    rejection,
+                                }
+                            }
+                            Err(SessionActionError::Operational(error)) => {
+                                ServerMessage::error(error)
                             }
                         }
                     }
                 }
-                _ => ServerMessage::ManaPaymentPreviewRejected {
-                    request_id,
-                    reason: "Not in a game".to_string(),
-                },
+                _ => ServerMessage::error("Not in a game".to_string()),
             };
 
             if let Ok(json) = serde_json::to_string(&response) {
@@ -6758,10 +6803,11 @@ async fn handle_client_message(
             info!(game = %game_code, player = ?player_id, "player conceded game");
             let outcome = {
                 let mut mgr = state.lock().await;
-                match mgr.handle_action(
+                match mgr.handle_action_with_card_db_outcome(
                     &game_code,
                     &player_token,
                     engine::types::actions::GameAction::Concede { player_id },
+                    None,
                 ) {
                     Ok(result) => {
                         let session = mgr
@@ -6800,10 +6846,8 @@ async fn handle_client_message(
             };
 
             match outcome {
-                Err(reason) => {
-                    if let Ok(json) =
-                        serde_json::to_string(&ServerMessage::ActionRejected { reason })
-                    {
+                Err(error) => {
+                    if let Ok(json) = serde_json::to_string(&session_action_error_message(error)) {
                         let _ = socket.send(Message::text(json)).await;
                     }
                 }
@@ -6896,7 +6940,7 @@ async fn handle_client_message(
             match outcome {
                 Err(reason) => {
                     if let Ok(json) =
-                        serde_json::to_string(&ServerMessage::ActionRejected { reason })
+                        serde_json::to_string(&ServerMessage::RequestRejected { reason })
                     {
                         let _ = socket.send(Message::text(json)).await;
                     }
@@ -7028,7 +7072,7 @@ async fn handle_client_message(
                     // unrecoverable. Reaching for the error channel here was
                     // this handler's inconsistency with its own sibling ~2,400
                     // lines above, not a deliberate signal.
-                    let msg = ServerMessage::ActionRejected { reason };
+                    let msg = ServerMessage::RequestRejected { reason };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
                     }
@@ -7130,7 +7174,7 @@ async fn handle_client_message(
                     // Fixed here too so the pair stays consistent — a benign
                     // refusal must never travel the channel the native client
                     // treats as terminal.
-                    let msg = ServerMessage::ActionRejected { reason };
+                    let msg = ServerMessage::RequestRejected { reason };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
                     }
@@ -7211,7 +7255,7 @@ async fn handle_client_message(
                     // terminal error channel — `handleNativeEvent` disposes
                     // the adapter on ANY `error` event, so a mis-clicked
                     // cancel would end the desktop session.
-                    let msg = ServerMessage::ActionRejected { reason };
+                    let msg = ServerMessage::RequestRejected { reason };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
                     }
@@ -7400,13 +7444,11 @@ async fn handle_client_message(
                 };
 
                 if let Some(fault) = session.ai_driver_fault() {
-                    let msg = ServerMessage::ActionRejected {
-                        reason: format!(
-                            "Native AI driver fault {}: {}",
-                            fault.id,
-                            fault.cause.message()
-                        ),
-                    };
+                    let msg = ServerMessage::error(format!(
+                        "Native AI driver fault {}: {}",
+                        fault.id,
+                        fault.cause.message()
+                    ));
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
                     }
@@ -9395,7 +9437,9 @@ mod game_submission_tests {
             let msg = recv_server_message(socket).await;
             if matches!(
                 msg,
-                ServerMessage::ActionRejected { .. } | ServerMessage::Error { .. }
+                ServerMessage::ActionRejected { .. }
+                    | ServerMessage::RequestRejected { .. }
+                    | ServerMessage::Error { .. }
             ) {
                 return msg;
             }
@@ -9417,8 +9461,8 @@ mod game_submission_tests {
     /// *first* — before the seat check, before `debug_permitted`, and before
     /// `apply` — where `format_config.allow_debug_actions` is `false` because
     /// the wire sent `format_config: None` and `FormatConfig::standard()` sets
-    /// it to `false`. `handle_action`'s `Err(String)` is then answered verbatim,
-    /// with no `"Engine error: "` prefix.
+    /// it to `false`. The session rejects it as an engine-shaped action
+    /// refusal, so the client receives no server-policy prose.
     #[tokio::test]
     async fn action_frame_reaches_the_shared_submission_handler() {
         let (url, server, _temp_dir) = spawn_full_mode_server().await;
@@ -9444,11 +9488,23 @@ mod game_submission_tests {
 
         let answer = answer.expect("action frame was never answered");
         match answer {
-            ServerMessage::ActionRejected { reason } => {
-                assert_eq!(reason, "Sandbox mode is not enabled for this game");
+            ServerMessage::ActionRejected { rejection } => {
+                assert_eq!(rejection.code, ActionRejectionCode::ActionNotAllowed);
             }
             other => panic!("expected ActionRejected from the shared handler, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn pending_takeback_session_refusal_uses_the_request_channel() {
+        let message = session_action_error_message(SessionActionError::RequestRejected(
+            "A takeback request is pending — resolve it before taking further actions".to_string(),
+        ));
+        assert!(matches!(
+            message,
+            ServerMessage::RequestRejected { reason }
+                if reason == "A takeback request is pending — resolve it before taking further actions"
+        ));
     }
 
     fn submission(response: InteractionResponse) -> InteractionSubmission {
@@ -9478,21 +9534,21 @@ mod game_submission_tests {
         };
 
         // (i) an oversized interaction answers on the benign channel.
-        let handler_reason = match *GameSubmission::Interaction(oversized.clone())
+        let handler_rejection = match *GameSubmission::Interaction(oversized.clone())
             .payload_rejection()
             .expect_err("an oversized interaction is refused")
         {
-            ServerMessage::ActionRejected { reason } => reason,
+            ServerMessage::ActionRejected { rejection } => rejection,
             ref other => panic!("an oversized paste must not tear the session down: {other:?}"),
         };
 
         // (ii) an oversized action stays a malformed frame.
-        let action_reason = match *GameSubmission::Action(oversized_action.clone())
+        let action_rejection = match *GameSubmission::Action(oversized_action.clone())
             .payload_rejection()
             .expect_err("an oversized action is refused")
         {
-            ServerMessage::Error { message, .. } => message,
-            ref other => panic!("an oversized action is a malformed frame, got {other:?}"),
+            ServerMessage::ActionRejected { rejection } => rejection,
+            ref other => panic!("an oversized action is an invalid action, got {other:?}"),
         };
 
         // (iii) both layers agree, in variant *and* in reason string.
@@ -9502,7 +9558,7 @@ mod game_submission_tests {
         let wire_reason =
             guard_client_message_before_dispatch(&wire_interaction, ServerMode::Full).unwrap_err();
         match wire_rejection_message(&wire_interaction, wire_reason) {
-            ServerMessage::ActionRejected { reason } => assert_eq!(reason, handler_reason),
+            ServerMessage::ActionRejected { rejection } => assert_eq!(rejection, handler_rejection),
             other => panic!("wire and handler disagree on the interaction channel: {other:?}"),
         }
 
@@ -9512,7 +9568,7 @@ mod game_submission_tests {
         let wire_action_reason =
             guard_client_message_before_dispatch(&wire_action, ServerMode::Full).unwrap_err();
         match wire_rejection_message(&wire_action, wire_action_reason) {
-            ServerMessage::Error { message, .. } => assert_eq!(message, action_reason),
+            ServerMessage::ActionRejected { rejection } => assert_eq!(rejection, action_rejection),
             other => panic!("wire and handler disagree on the action channel: {other:?}"),
         }
 
@@ -9568,8 +9624,8 @@ mod game_submission_tests {
 
         let answer = answer.expect("interaction frame was never answered");
         match answer {
-            ServerMessage::ActionRejected { reason } => {
-                assert_eq!(reason, "Engine error: StaleInteraction");
+            ServerMessage::ActionRejected { rejection } => {
+                assert_eq!(rejection.code, ActionRejectionCode::StaleInteraction);
             }
             other => panic!("the wire schema must accept an Interaction frame, got {other:?}"),
         }
@@ -9624,8 +9680,11 @@ mod game_submission_tests {
 
         let (first, second) = answers.expect("oversized interaction was never answered");
         match first {
-            ServerMessage::ActionRejected { reason } => {
-                assert_eq!(reason, "Engine error: PayloadTooLarge");
+            ServerMessage::ActionRejected { rejection } => {
+                assert_eq!(
+                    rejection.code,
+                    ActionRejectionCode::InteractionPayloadTooLarge
+                );
             }
             other => panic!("an oversized paste must not end the match, got {other:?}"),
         }

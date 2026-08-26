@@ -43,6 +43,7 @@ pub enum ServerErrorCode {
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
 ///
+/// 40 — Action rejection responses carry engine-owned structured context.
 /// 39 — `ManaRestriction::CannotCastSpellFromZone` adds a serialized
 ///      GameState/ManaUnit restriction used by Karolina Dean. Older peers
 ///      cannot deserialize that externally tagged enum variant. Lobby messages
@@ -141,7 +142,7 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 39;
+pub const PROTOCOL_VERSION: u32 = 40;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -549,12 +550,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 39);
+        assert_eq!(PROTOCOL_VERSION, 40);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which is what refuses an older full-game peer whose GameState cannot
         // understand a success acknowledgment the submitting client awaits.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 38);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 39);
     }
 
     #[test]

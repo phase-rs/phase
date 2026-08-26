@@ -4,7 +4,8 @@ use crate::types::ability::{
     ContinuousModification, Effect, LibraryPosition, QuantityExpr, ResolvedAbility, TargetFilter,
     TargetRef,
 };
-use crate::types::actions::{DebugAction, DebugTokenRequest};
+use crate::types::action_rejection::ActionRejection;
+use crate::types::actions::{DebugAction, DebugTokenRequest, GameAction};
 use crate::types::card::CardFace;
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -20,8 +21,9 @@ use crate::types::zones::Zone;
 
 use super::effects::attach::{attach_to as attach_object_to, attach_to_player};
 use super::effects::change_zone::shuffle_library;
-use super::engine::{preflight_debug_action, EngineError};
+use super::engine::{action_rejection_for_engine_error, preflight_debug_action, EngineError};
 use super::game_object::AttachTarget;
+use super::visibility::filter_action_rejection_for_viewer;
 use super::zones;
 use crate::database::CardDatabase;
 use crate::game::token_presets::TokenPtProvenance;
@@ -1025,6 +1027,35 @@ pub fn create_debug_cards(
     });
     result.log_entries = super::log::resolve_log_entries(&result.events, &before, state);
     Ok(result)
+}
+
+/// Viewer-safe form of [`create_debug_cards`] for transport boundaries.
+///
+/// The card source is already bound by the transport. Only the engine's
+/// action-shaped refusal crosses this boundary; source lookup remains an
+/// operational transport failure.
+pub fn create_debug_cards_with_rejection(
+    state: &mut GameState,
+    request: DebugCardCreateRequest,
+) -> Result<ActionResult, ActionRejection> {
+    let actor = request.actor;
+    let related_object_ids = GameAction::Debug(DebugAction::CreateCard {
+        card_name: request.source.face.name.clone(),
+        owner: request.owner,
+        zone: request.zone,
+        count: request.count,
+        attach_to: request.attach_to,
+        run_etb: request.run_etb,
+        nonlegendary: request.nonlegendary,
+    })
+    .related_object_ids();
+    create_debug_cards(state, request).map_err(|error| {
+        filter_action_rejection_for_viewer(
+            state,
+            actor,
+            &action_rejection_for_engine_error(&error, related_object_ids),
+        )
+    })
 }
 
 /// Resume the active real-entry debug batch after its exact replacement or

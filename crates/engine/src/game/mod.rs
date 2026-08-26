@@ -223,8 +223,8 @@ pub use engine::{
     start_game_with_starting_player, EngineError,
 };
 pub use engine_debug::{
-    create_debug_cards, debug_card_entry_source, route_debug_create_to_battlefield,
-    DebugCardCreateRequest,
+    create_debug_cards, create_debug_cards_with_rejection, debug_card_entry_source,
+    route_debug_create_to_battlefield, DebugCardCreateRequest,
 };
 pub use engine_resolve_batch::{
     resolve_all_fast_forward, ResolveAllCallbackDecision, ResolveAllFastForwardResult,

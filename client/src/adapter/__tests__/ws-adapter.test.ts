@@ -211,13 +211,13 @@ describe("WebSocketAdapter", () => {
     );
     ws.dispatchSynthetic(
       "message",
-      JSON.stringify({ type: "ActionRejected", data: { reason: "stale action rejection" } }),
+      JSON.stringify({ type: "ActionRejected", data: { rejection: { code: "stale_action", disposition: "stale", message: "stale action rejection", related_object_ids: [] } } }),
     );
     ws.dispatchSynthetic(
       "message",
       JSON.stringify({
         type: "ResolveAllRejected",
-        data: { request_id: 2, reason: "a different batch" },
+        data: { request_id: 2, rejection: { code: "invalid_action", disposition: "invalid", message: "a different batch", related_object_ids: [] } },
       }),
     );
 
@@ -228,25 +228,25 @@ describe("WebSocketAdapter", () => {
       "message",
       JSON.stringify({
         type: "ResolveAllRejected",
-        data: { request_id: 1, reason: "batch snapshot rejected" },
+        data: { request_id: 1, rejection: { code: "invalid_action", disposition: "invalid", message: "batch snapshot rejected", related_object_ids: [] } },
       }),
     );
 
     await expect(resultPromise).rejects.toMatchObject({ message: "batch snapshot rejected" });
   });
 
-  it("scopes the stale priority race to correlated Resolve All rejections", async () => {
+  it("keeps correlated Resolve All rejections engine-classified", async () => {
     const stale = adapter.resolveAll(0, [{ playerId: 1, difficulty: "Medium" }], 5);
     ws.dispatchSynthetic(
       "message",
       JSON.stringify({
         type: "ResolveAllRejected",
-        data: { request_id: 1, reason: "Resolve All requires your priority" },
+        data: { request_id: 1, rejection: { code: "resolve_all_not_ready", disposition: "unavailable", message: "Resolve All is not ready to run.", related_object_ids: [] } },
       }),
     );
     await expect(stale).rejects.toMatchObject({
-      code: "STALE_ACTION",
-      recoverable: false,
+      code: "ACTION_REJECTED",
+      recoverable: true,
     });
 
     const rejected = adapter.resolveAll(0, [{ playerId: 1, difficulty: "Medium" }], 5);
@@ -254,7 +254,7 @@ describe("WebSocketAdapter", () => {
       "message",
       JSON.stringify({
         type: "ResolveAllRejected",
-        data: { request_id: 2, reason: "batch snapshot rejected" },
+        data: { request_id: 2, rejection: { code: "invalid_action", disposition: "invalid", message: "batch snapshot rejected", related_object_ids: [] } },
       }),
     );
     await expect(rejected).rejects.toMatchObject({
@@ -1239,7 +1239,7 @@ describe("WebSocketAdapter", () => {
         "message",
         JSON.stringify({
           type: "ActionRejected",
-          data: { reason: "Engine error: ReorderHand: expected 6 ids, got 5" },
+          data: { rejection: { code: "stale_action", disposition: "stale", message: "That action is based on outdated game state.", related_object_ids: [] } },
         }),
       );
       await expect(pending).rejects.toMatchObject({
@@ -1254,7 +1254,7 @@ describe("WebSocketAdapter", () => {
         "message",
         JSON.stringify({
           type: "ActionRejected",
-          data: { reason: "Resolve All requires your priority" },
+          data: { rejection: { code: "resolve_all_not_ready", disposition: "unavailable", message: "Resolve All is not ready to run.", related_object_ids: [] } },
         }),
       );
       await expect(pending).rejects.toMatchObject({
@@ -1298,7 +1298,7 @@ describe("WebSocketAdapter", () => {
     // body was skipped and the refusal was dropped on the floor — which is why
     // the server had been reaching for `ServerMessage::error` instead, the
     // event `handleNativeEvent` treats as terminal.
-    it("emits requestRejected when an ActionRejected has no in-flight action", () => {
+    it("emits requestRejected for a request-level refusal", () => {
       const listener = vi.fn();
       adapter.onEvent(listener);
 
@@ -1306,7 +1306,7 @@ describe("WebSocketAdapter", () => {
       ws.dispatchSynthetic(
         "message",
         JSON.stringify({
-          type: "ActionRejected",
+          type: "RequestRejected",
           data: { reason: "There is no previous action of yours to take back" },
         }),
       );
@@ -1339,7 +1339,7 @@ describe("WebSocketAdapter", () => {
         "message",
         JSON.stringify({
           type: "ActionRejected",
-          data: { reason: "Engine error: Something genuinely wrong" },
+          data: { rejection: { code: "invalid_action", disposition: "invalid", message: "That action is not valid in the current game state.", related_object_ids: [] } },
         }),
       );
 

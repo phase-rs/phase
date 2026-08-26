@@ -525,7 +525,7 @@ describe("ServerDraftAdapter", () => {
         "message",
         JSON.stringify({
           type: "ActionRejected",
-          data: { reason: "Engine error: ReorderHand: expected 6 ids, got 5" },
+          data: { rejection: { code: "stale_action", disposition: "stale", message: "That action is based on outdated game state.", related_object_ids: [] } },
         }),
       );
 
@@ -541,7 +541,7 @@ describe("ServerDraftAdapter", () => {
         "message",
         JSON.stringify({
           type: "ActionRejected",
-          data: { reason: "Engine error: something genuinely wrong" },
+          data: { rejection: { code: "invalid_action", disposition: "invalid", message: "That action is not valid in the current game state.", related_object_ids: [] } },
         }),
       );
 
@@ -566,7 +566,7 @@ describe("ServerDraftAdapter", () => {
           type: "ManaPaymentPreviewRejected",
           data: {
             request_id: sent.data.request_id,
-            reason: "Engine error: ReorderHand: expected 6 ids, got 5",
+            rejection: { code: "stale_action", disposition: "stale", message: "That action is based on outdated game state.", related_object_ids: [] },
           },
         }),
       );
@@ -585,7 +585,7 @@ describe("ServerDraftAdapter", () => {
         "message",
         JSON.stringify({
           type: "ManaPaymentPreviewRejected",
-          data: { request_id: sent.data.request_id, reason: "Engine error: no mana sources" },
+          data: { request_id: sent.data.request_id, rejection: { code: "invalid_action", disposition: "invalid", message: "That action is not valid in the current game state.", related_object_ids: [] } },
         }),
       );
 
