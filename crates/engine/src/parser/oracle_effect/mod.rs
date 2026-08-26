@@ -32795,7 +32795,7 @@ pub(crate) fn parse_effect_chain_ir(
         // generic "for each" repeat parser. Otherwise "for each opponent, you
         // create …" is lowered as a quantity repeat and loses the opponent
         // scope that binds an anaphoric "they" in its unless-payment clause.
-        let (early_player_scope, text) = super::clause_shell::peel_player_scope_subject(&text);
+        let (early_player_scope, text) = lower::strip_prepositional_player_scope_subject(&text);
         let prior_typed_referent = chain_has_prior_typed_referent(builder.clauses(), false);
         if prior_typed_referent
             && has_bare_recipient_counter_gate

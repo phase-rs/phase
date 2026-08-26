@@ -4468,6 +4468,26 @@ pub(crate) fn strip_player_scope_subject(text: &str) -> (Option<PlayerFilter>, S
     strip_each_player_subject(text)
 }
 
+/// Strip a prepositional player-scoped imperative while preserving the ordinary
+/// imperative body. This is the narrow form that must precede generic `for each`
+/// quantity parsing; subject-form player scopes retain their existing route.
+pub(super) fn strip_prepositional_player_scope_subject(
+    text: &str,
+) -> (Option<PlayerFilter>, String) {
+    let lower = text.to_lowercase();
+    let scope_rest = nom_on_lower(text, &lower, |i| {
+        alt((
+            value(PlayerFilter::Opponent, tag("for each opponent, you ")),
+            value(PlayerFilter::All, tag("for each player, you ")),
+        ))
+        .parse(i)
+    });
+    scope_rest.map_or_else(
+        || (None, text.to_string()),
+        |(scope, rest)| (Some(scope), rest.to_string()),
+    )
+}
+
 /// Parse the player anchor in an "each player other than ⟨anchor⟩" subject into
 /// the `PlayerFilter` whose population is excluded. Composable `alt()` so future
 /// anchors ("you", "that player") slot in without new `PlayerFilter` variants.
@@ -4492,6 +4512,11 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
     // though this dispatcher intentionally supports discard only.
     if strip_each_scope_who_didnt_verb_filter_this_way_subject(text).is_some() {
         return (None, text.to_string());
+    }
+
+    let (scope, stripped) = strip_prepositional_player_scope_subject(text);
+    if scope.is_some() {
+        return (scope, stripped);
     }
 
     let lower = text.to_lowercase();
@@ -4529,12 +4554,6 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
                 },
             ),
             value(PlayerFilter::All, tag("each player ")),
-            // CR 101.4 + CR 608.2c: prepositional player-scoped imperatives.
-            // Keep the subject as typed scope before the generic "for each"
-            // quantity parser sees it; the body still starts with the ordinary
-            // imperative grammar.
-            value(PlayerFilter::Opponent, tag("for each opponent, you ")),
-            value(PlayerFilter::All, tag("for each player, you ")),
             // CR 101.4 + CR 608.2c: comma-prefixed per-player imperative scope —
             // "For each player, <imperative> ... that player controls" (Curse of
             // Fenric I). The more-specific "for each player, you choose"/"choose
