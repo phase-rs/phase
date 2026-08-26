@@ -990,6 +990,7 @@ mod runadi_behemoth_caller_etb_counters;
 mod saddle_become_effect;
 mod saddle_state_model;
 mod saruman_white_hand_amass;
+mod satya_localized_destruction_commander_copy;
 mod sba_lethal_damage_redirect_single_application;
 mod scarab_god_regression;
 mod scholarship_sponsor;
