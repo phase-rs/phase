@@ -27,10 +27,10 @@ use crate::parser::oracle_target::{
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, ControllerRef,
-    CountScope, DamageChannel, DamageKindFilter, DevotionColors, FilterProp, ObjectProperty,
-    ObjectScope, PlayerFilter, PlayerScope, PtStat, QuantityExpr, QuantityRef, RoundingMode,
-    SharedQuality, SubtypeExclusion, TargetFilter, ThisWayCause, TurnJournalKind, TypeFilter,
-    TypedFilter, ZoneRef,
+    CountScope, DamageChannel, DamageKindFilter, DevotionColors, FilterProp, LifeChangeDirection,
+    ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PtStat, QuantityExpr,
+    QuantityRef, RoundingMode, SharedQuality, SubtypeExclusion, TargetFilter, ThisWayCause,
+    TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
@@ -3043,26 +3043,53 @@ fn parse_lost_game_player_count(input: &str) -> OracleResult<'_, QuantityRef> {
     ))
 }
 
-/// CR 119.3 + CR 700.1: Parse a "for each" opponent clause qualified by a
-/// life-change predicate — "(of your) opponents who lost/gained life this
-/// turn". Reached by the for-each clause path (Belbe, Corrupted Observer:
-/// "{C}{C} for each of your opponents who lost life this turn"). The leading
-/// "of your "/"of " is optional. Each qualifier is one `alt()` arm — no
-/// permutation enumeration.
-fn parse_for_each_opponents_life_change(input: &str) -> OracleResult<'_, QuantityRef> {
+/// CR 119.3 + CR 119.9 + CR 700.1: Parse a "for each" player-count clause
+/// qualified by a life-change predicate — "(of your) [opponents|players] who
+/// lost/gained life this turn". Reached by the for-each clause path (Belbe,
+/// Corrupted Observer: "{C}{C} for each of your opponents who lost life this
+/// turn"; Reaper's Scythe / Strefan: "… for each player who lost life this
+/// turn"). Scope is a prefix-dispatch nest (opponent[s] → `Opponent`; player[s]
+/// → `All`); the direction leaf is nested under each scope — one `alt()` per
+/// axis, no permutation enumeration. The leading "of your "/"of " is optional.
+/// The `{All, Gained}` cell is intentionally absent (no card says "for each
+/// player who gained life this turn"), so it fails closed to an honest
+/// `Unimplemented` rather than silently parsing.
+fn parse_for_each_life_change_player_count(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = opt(alt((tag("of your "), tag("of ")))).parse(input)?;
-    // Singular "opponent who lost life this turn" (Gev, Scaled Scorch's per-each
-    // counter scaling) and plural "opponents who …" (Belbe, Corrupted Observer)
-    // resolve to the same `PlayerCount` over the qualifying-opponents set.
-    let (rest, _) = alt((tag("opponents "), tag("opponent "))).parse(rest)?;
     let (rest, filter) = alt((
-        value(
-            PlayerFilter::OpponentLostLife,
-            tag("who lost life this turn"),
+        // Opponent scope: singular "opponent who …" (Gev, Scaled Scorch's
+        // per-each counter scaling) and plural "opponents who …" (Belbe,
+        // Corrupted Observer), both directions.
+        preceded(
+            alt((tag("opponents "), tag("opponent "))),
+            alt((
+                value(
+                    PlayerFilter::LifeChangedThisTurn {
+                        scope: PlayerRelation::Opponent,
+                        direction: LifeChangeDirection::Lost,
+                    },
+                    tag("who lost life this turn"),
+                ),
+                value(
+                    PlayerFilter::LifeChangedThisTurn {
+                        scope: PlayerRelation::Opponent,
+                        direction: LifeChangeDirection::Gained,
+                    },
+                    tag("who gained life this turn"),
+                ),
+            )),
         ),
-        value(
-            PlayerFilter::OpponentGainedLife,
-            tag("who gained life this turn"),
+        // All-players scope: LOST only (Reaper's Scythe, Strefan). The
+        // `{All, Gained}` cell is cardless, so it has no leaf and fails closed.
+        preceded(
+            alt((tag("players "), tag("player "))),
+            value(
+                PlayerFilter::LifeChangedThisTurn {
+                    scope: PlayerRelation::All,
+                    direction: LifeChangeDirection::Lost,
+                },
+                tag("who lost life this turn"),
+            ),
         ),
     ))
     .parse(rest)?;
@@ -4533,7 +4560,7 @@ fn parse_for_each_clause_ref_with_they_controller(
         alt((
             parse_for_each_one_life_changed,
             alt((
-                parse_for_each_opponents_life_change,
+                parse_for_each_life_change_player_count,
                 parse_lost_game_player_count,
             )),
             parse_counter_added_this_turn_for_each,
@@ -6958,51 +6985,69 @@ mod tests {
         assert!(parse_for_each_clause_ref("players who have lost the match").is_err());
     }
 
-    fn assert_opponent_life_change_count(qty: QuantityRef, expected: PlayerFilter) {
+    fn assert_life_change_player_count(qty: QuantityRef, expected: PlayerFilter) {
         assert_eq!(qty, QuantityRef::PlayerCount { filter: expected });
     }
 
-    #[test]
-    fn parse_for_each_opponents_life_change_full_surfaces() {
-        for (phrase, expected) in [
-            (
-                "opponents who lost life this turn",
-                PlayerFilter::OpponentLostLife,
-            ),
-            (
-                "opponent who lost life this turn",
-                PlayerFilter::OpponentLostLife,
-            ),
-            (
-                "of your opponents who lost life this turn",
-                PlayerFilter::OpponentLostLife,
-            ),
-            (
-                "of opponents who gained life this turn",
-                PlayerFilter::OpponentGainedLife,
-            ),
-            (
-                "of your opponent who gained life this turn",
-                PlayerFilter::OpponentGainedLife,
-            ),
-            (
-                "opponents who gained life this turn",
-                PlayerFilter::OpponentGainedLife,
-            ),
-        ] {
-            let (rest, qty) = parse_for_each_clause_ref_complete(phrase)
-                .unwrap_or_else(|_| panic!("life-change phrase should parse: {phrase}"));
-            assert_eq!(rest, "", "life-change phrase should fully consume");
-            assert_opponent_life_change_count(qty, expected);
+    fn opponent_lost() -> PlayerFilter {
+        PlayerFilter::LifeChangedThisTurn {
+            scope: PlayerRelation::Opponent,
+            direction: LifeChangeDirection::Lost,
+        }
+    }
+    fn opponent_gained() -> PlayerFilter {
+        PlayerFilter::LifeChangedThisTurn {
+            scope: PlayerRelation::Opponent,
+            direction: LifeChangeDirection::Gained,
+        }
+    }
+    fn any_player_lost() -> PlayerFilter {
+        PlayerFilter::LifeChangedThisTurn {
+            scope: PlayerRelation::All,
+            direction: LifeChangeDirection::Lost,
         }
     }
 
     #[test]
-    fn parse_for_each_opponents_life_change_rejects_suffix_and_wrong_duration() {
+    fn parse_for_each_life_change_player_count_full_surfaces() {
+        for (phrase, expected) in [
+            ("opponents who lost life this turn", opponent_lost()),
+            ("opponent who lost life this turn", opponent_lost()),
+            ("of your opponents who lost life this turn", opponent_lost()),
+            ("of opponents who gained life this turn", opponent_gained()),
+            (
+                "of your opponent who gained life this turn",
+                opponent_gained(),
+            ),
+            ("opponents who gained life this turn", opponent_gained()),
+            // All-players lost-life scope (Reaper's Scythe, Strefan) — the cell
+            // this fix adds.
+            ("player who lost life this turn", any_player_lost()),
+            ("players who lost life this turn", any_player_lost()),
+            ("of your players who lost life this turn", any_player_lost()),
+        ] {
+            let (rest, qty) = parse_for_each_clause_ref_complete(phrase)
+                .unwrap_or_else(|_| panic!("life-change phrase should parse: {phrase}"));
+            assert_eq!(rest, "", "life-change phrase should fully consume");
+            assert_life_change_player_count(qty, expected);
+        }
+
+        // The all-players GAINED cell is cardless and intentionally unproduced:
+        // "player[s] who gained life this turn" must fail closed (honest
+        // Unimplemented), never silently parse to some other shape.
+        assert!(
+            parse_for_each_clause_ref_complete("player who gained life this turn").is_err(),
+            "the cardless {{All, Gained}} cell must fail closed, not parse"
+        );
+        assert!(parse_for_each_clause_ref_complete("players who gained life this turn").is_err());
+    }
+
+    #[test]
+    fn parse_for_each_life_change_player_count_rejects_suffix_and_wrong_duration() {
         let (rest, qty) = parse_for_each_clause_ref_complete("opponent who lost life this turn")
             .expect("positive life-change phrase should reach parser");
         assert_eq!(rest, "");
-        assert_opponent_life_change_count(qty, PlayerFilter::OpponentLostLife);
+        assert_life_change_player_count(qty, opponent_lost());
 
         assert!(parse_for_each_clause_ref_complete(
             "opponent who lost life this turn and controls a creature"
@@ -7010,6 +7055,7 @@ mod tests {
         .is_err());
         assert!(parse_for_each_clause_ref_complete("opponent who lost life this game").is_err());
         assert!(parse_for_each_clause_ref_complete("opponents who gained life this game").is_err());
+        assert!(parse_for_each_clause_ref_complete("player who lost life this game").is_err());
     }
 
     #[test]

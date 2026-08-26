@@ -139,8 +139,7 @@ fn player_filter_has_x_mana_value_constraint(player: &PlayerFilter) -> bool {
         PlayerFilter::Controller
         | PlayerFilter::Opponent
         | PlayerFilter::DefendingPlayer
-        | PlayerFilter::OpponentLostLife
-        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::LifeChangedThisTurn { .. }
         | PlayerFilter::HasLostTheGame
         | PlayerFilter::OpponentAttacked { .. }
         | PlayerFilter::OpponentAttackingEnchantedPlayer

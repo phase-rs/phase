@@ -12,8 +12,8 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Effect,
-    PlayerFilter, QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter,
-    TypedFilter,
+    LifeChangeDirection, PlayerFilter, PlayerRelation, QuantityExpr, QuantityRef, StaticCondition,
+    StaticDefinition, TargetFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -164,7 +164,10 @@ fn setup_kaito_on_battlefield(phase: Phase) -> (GameRunner, ObjectId) {
             Effect::Draw {
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::PlayerCount {
-                        filter: PlayerFilter::OpponentLostLife,
+                        filter: PlayerFilter::LifeChangedThisTurn {
+                            scope: PlayerRelation::Opponent,
+                            direction: LifeChangeDirection::Lost,
+                        },
                     },
                 },
                 target: TargetFilter::Controller,

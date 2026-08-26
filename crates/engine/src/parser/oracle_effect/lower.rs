@@ -5460,8 +5460,7 @@ fn strip_performed_action_this_way_clause(
         PlayerFilter::All => PlayerRelation::All,
         PlayerFilter::Controller
         | PlayerFilter::DefendingPlayer
-        | PlayerFilter::OpponentLostLife
-        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::LifeChangedThisTurn { .. }
         | PlayerFilter::HasLostTheGame
         | PlayerFilter::OpponentDealtDamage { .. }
         | PlayerFilter::OpponentAttacked { .. }
@@ -13593,7 +13592,10 @@ mod strip_optional_effect_prefix_tests {
 mod dq_d_player_set_lift_tests {
     use super::{for_each_repeatable_repeat_for, strip_for_each_repeat_suffix};
     use crate::parser::oracle_nom::quantity::parse_for_each_clause_ref;
-    use crate::types::ability::{MultiTargetSpec, PlayerFilter, QuantityExpr, QuantityRef};
+    use crate::types::ability::{
+        LifeChangeDirection, MultiTargetSpec, PlayerFilter, PlayerRelation, QuantityExpr,
+        QuantityRef,
+    };
 
     // Matrix #3 — the shared `split_for_each_suffix` refactor is byte-identical:
     // each input yields the SAME `(Option<QuantityExpr>, String)` as pre-refactor.
@@ -13678,11 +13680,14 @@ mod dq_d_player_set_lift_tests {
                 teysa,
                 Some(QuantityExpr::Ref {
                     qty: QuantityRef::PlayerCount {
-                        filter: PlayerFilter::OpponentLostLife
+                        filter: PlayerFilter::LifeChangedThisTurn {
+                            scope: PlayerRelation::Opponent,
+                            direction: LifeChangeDirection::Lost,
+                        }
                     }
                 })
             ),
-            "Teysa must lift OpponentLostLife: {teysa:?}"
+            "Teysa must lift the opponent-lost-life PlayerCount: {teysa:?}"
         );
 
         // Wojek: PlayerAttribute (comparative hand size). REVERT PROBE: switching the

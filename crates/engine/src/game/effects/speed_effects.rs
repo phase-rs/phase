@@ -1,6 +1,8 @@
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::speed::{decrease_speed, increase_speed, set_speed};
-use crate::types::ability::{Effect, EffectError, PlayerFilter, ResolvedAbility, SpeedDelta};
+use crate::types::ability::{
+    Effect, EffectError, LifeChangeDirection, PlayerFilter, ResolvedAbility, SpeedDelta,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::player::PlayerId;
@@ -34,18 +36,20 @@ pub(crate) fn players_for_filter(
             .into_iter()
             .collect()
         }
-        PlayerFilter::OpponentLostLife => state
+        // CR 119.3 + CR 119.9 + CR 102.2/102.3: players in `scope` whose per-turn
+        // life ledger for `direction` is nonzero.
+        PlayerFilter::LifeChangedThisTurn { scope, direction } => state
             .players
             .iter()
             .filter(|player| !player.is_eliminated)
-            .filter(|player| player.id != controller && player.life_lost_this_turn > 0)
-            .map(|player| player.id)
-            .collect(),
-        PlayerFilter::OpponentGainedLife => state
-            .players
-            .iter()
-            .filter(|player| !player.is_eliminated)
-            .filter(|player| player.id != controller && player.life_gained_this_turn > 0)
+            .filter(|player| {
+                let tally = match direction {
+                    LifeChangeDirection::Lost => player.life_lost_this_turn,
+                    LifeChangeDirection::Gained => player.life_gained_this_turn,
+                };
+                crate::game::players::matches_relation(state, player.id, controller, *scope)
+                    && tally > 0
+            })
             .map(|player| player.id)
             .collect(),
         // CR 104.5 / CR 800.4: Players who lost have left the game; this

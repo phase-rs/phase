@@ -18,8 +18,8 @@
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    Comparator, ControllerRef, Effect, FilterProp, PlayerFilter, PlayerRelation, PlayerScope,
-    QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
+    Comparator, ControllerRef, Effect, FilterProp, LifeChangeDirection, PlayerFilter,
+    PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
 };
 use engine::types::game_state::GameState;
 use engine::types::phase::Phase;
@@ -77,7 +77,10 @@ fn teysa_end_step_investigate_lifts_opponent_lost_life() {
         execute.repeat_for,
         Some(QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentLostLife,
+                filter: PlayerFilter::LifeChangedThisTurn {
+                    scope: PlayerRelation::Opponent,
+                    direction: LifeChangeDirection::Lost,
+                },
             },
         }),
         "Teysa must investigate once per opponent who lost life this turn"
@@ -343,10 +346,13 @@ fn teysa_runtime_makes_one_clue_per_opponent_who_lost_life() {
         repeat_for,
         Some(QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentLostLife,
+                filter: PlayerFilter::LifeChangedThisTurn {
+                    scope: PlayerRelation::Opponent,
+                    direction: LifeChangeDirection::Lost,
+                },
             },
         }),
-        "reach-guard: Teysa's end-step trigger must carry the OpponentLostLife repeat_for, got {repeat_for:?}"
+        "reach-guard: Teysa's end-step trigger must carry the opponent lost-life PlayerCount repeat_for, got {repeat_for:?}"
     );
 
     // Controller P0 lost 5 (self-excluded); A(P1)=3 qualifies, B(P2)=0 excluded,

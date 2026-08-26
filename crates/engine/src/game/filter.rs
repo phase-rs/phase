@@ -1747,8 +1747,7 @@ pub(crate) fn player_filter_contains(
         PlayerFilter::Controller
         | PlayerFilter::Opponent
         | PlayerFilter::DefendingPlayer
-        | PlayerFilter::OpponentLostLife
-        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::LifeChangedThisTurn { .. }
         | PlayerFilter::HasLostTheGame
         | PlayerFilter::OpponentAttacked { .. }
         | PlayerFilter::OpponentAttackingEnchantedPlayer

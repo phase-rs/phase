@@ -3845,7 +3845,7 @@ fn typed_filter_axes(tf: &TypedFilter, mode: ScanMode) -> Axes {
 /// classified (fail-closed to CONSERVATIVE when its read surface is unproven).
 /// Every nested-bearing prop recurses the matching sub-scanner so a projected
 /// read reached through a property (`PtComparison { value: Ref(LifeTotal) }`,
-/// `ControllerMatches { OpponentLostLife }`, `Targets { Typed{..} }`, …) is not
+/// `ControllerMatches { LifeChangedThisTurn{..} }`, `Targets { Typed{..} }`, …) is not
 /// lost. The projected-axis authority is `project_out_resources`
 /// (analysis/resource.rs): a field is projected iff that fn clears it.
 fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
@@ -3950,7 +3950,7 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         FilterProp::TargetsOnly { filter } => scan_target_filter(filter, FilterReadContext::LiveBoardCensus, mode),
         FilterProp::Targets { filter } => scan_target_filter(filter, FilterReadContext::LiveBoardCensus, mode),
 
-        // --- Box<PlayerFilter>-bearing: recurse (OpponentLostLife/… is projected).
+        // --- Box<PlayerFilter>-bearing: recurse (LifeChangedThisTurn/… is projected).
         FilterProp::ControllerMatches { player } => scan_player_filter(player, mode),
 
         // --- FilterProp-nesting: recurse.
@@ -4019,12 +4019,7 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes {
         PlayerFilter::Controller => Axes::NONE,
         PlayerFilter::Opponent => Axes::NONE,
         PlayerFilter::DefendingPlayer => Axes::NONE,
-        PlayerFilter::OpponentLostLife => Axes {
-            event: false,
-            sibling: false,
-            projected: true,
-        },
-        PlayerFilter::OpponentGainedLife => Axes {
+        PlayerFilter::LifeChangedThisTurn { .. } => Axes {
             event: false,
             sibling: false,
             projected: true,

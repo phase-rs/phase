@@ -3181,8 +3181,8 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
             target_filter_reads_life_total(source) || target_filter_reads_life_total(target)
         }
 
-        // Player-count routes its `PlayerFilter`: `PlayerCount{OpponentLostLife}`
-        // reads `life_lost_this_turn` per candidate.
+        // Player-count routes its `PlayerFilter`: `PlayerCount{LifeChangedThisTurn{..}}`
+        // reads `life_lost_this_turn` / `life_gained_this_turn` per candidate.
         QuantityRef::PlayerCount { filter } => player_filter_reads_life(filter),
 
         // Distinct card-type / subtype / colour counts route the filters their
@@ -3292,7 +3292,7 @@ fn player_filter_reads_life(pf: &PlayerFilter) -> bool {
         // opponent who lost / gained life this turn") read
         // `life_lost_this_turn` / `life_gained_this_turn` directly (119.3:
         // loss/gain adjusts the total; 119.9: gain events).
-        PlayerFilter::OpponentLostLife | PlayerFilter::OpponentGainedLife => true,
+        PlayerFilter::LifeChangedThisTurn { .. } => true,
         // CR 120.9: the damage-history player set can restrict by a source
         // `TargetFilter`; route it.
         PlayerFilter::OpponentDealtDamage { source, .. } => source
@@ -3346,7 +3346,7 @@ fn player_filter_reads_life(pf: &PlayerFilter) -> bool {
 fn filter_prop_reads_life(prop: &FilterProp) -> bool {
     match prop {
         // CR 109.4 + CR 611.2c: the object's CONTROLLER is tested by a
-        // `PlayerFilter` — route it (`ControllerMatches{OpponentLostLife}` anthem
+        // `PlayerFilter` — route it (`ControllerMatches{LifeChangedThisTurn{..}}` anthem
         // flips its affected set at a life-loss site).
         FilterProp::ControllerMatches { player } => player_filter_reads_life(player),
         // The six TargetFilter-bearing props all route their nested filter
@@ -8848,6 +8848,7 @@ mod tests {
     };
     use crate::game::zones::create_object;
     use crate::parser::oracle_nom::condition::parse_inner_condition;
+    use crate::types::ability::LifeChangeDirection;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, BasicLandType,
         CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, ChosenSubtypeKind,
@@ -21784,7 +21785,10 @@ mod tests {
     fn router_arms_route_life_reading_payloads() {
         let life_filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
             FilterProp::ControllerMatches {
-                player: Box::new(PlayerFilter::OpponentLostLife),
+                player: Box::new(PlayerFilter::LifeChangedThisTurn {
+                    scope: PlayerRelation::Opponent,
+                    direction: LifeChangeDirection::Lost,
+                }),
             },
         ]));
         let plain = TargetFilter::Typed(TypedFilter::creature());
@@ -21816,7 +21820,10 @@ mod tests {
         ));
         // CR 608.2c: exclusion anchor recurses.
         assert!(player_filter_reads_life(&PlayerFilter::AllExcept {
-            exclude: Box::new(PlayerFilter::OpponentGainedLife),
+            exclude: Box::new(PlayerFilter::LifeChangedThisTurn {
+                scope: PlayerRelation::Opponent,
+                direction: LifeChangeDirection::Gained,
+            }),
         }));
         // CR 109.4 + CR 109.5: controls-count routes its object filter.
         assert!(player_filter_reads_life(&PlayerFilter::ControlsCount {
@@ -21888,14 +21895,20 @@ mod tests {
     fn nested_filter_and_player_surfaces_route_to_life() {
         let lost_life_controller = TargetFilter::Typed(TypedFilter::creature().properties(vec![
             FilterProp::ControllerMatches {
-                player: Box::new(PlayerFilter::OpponentLostLife),
+                player: Box::new(PlayerFilter::LifeChangedThisTurn {
+                    scope: PlayerRelation::Opponent,
+                    direction: LifeChangeDirection::Lost,
+                }),
             },
         ]));
         // FilterProp::ControllerMatches routes into PlayerFilter::OpponentLostLife.
         assert!(target_filter_reads_life_total(&lost_life_controller));
         // PlayerCount routes its PlayerFilter (Gap-A quantity route).
         assert!(quantity_ref_reads_life(&QuantityRef::PlayerCount {
-            filter: PlayerFilter::OpponentLostLife
+            filter: PlayerFilter::LifeChangedThisTurn {
+                scope: PlayerRelation::Opponent,
+                direction: LifeChangeDirection::Lost,
+            }
         }));
         // ObjectCount routes its TargetFilter (the other Gap-A route).
         assert!(quantity_ref_reads_life(&QuantityRef::ObjectCount {
@@ -22034,7 +22047,10 @@ mod tests {
         let def = StaticDefinition::continuous()
             .affected(TargetFilter::Typed(TypedFilter::creature().properties(
                 vec![FilterProp::ControllerMatches {
-                    player: Box::new(PlayerFilter::OpponentLostLife),
+                    player: Box::new(PlayerFilter::LifeChangedThisTurn {
+                        scope: PlayerRelation::Opponent,
+                        direction: LifeChangeDirection::Lost,
+                    }),
                 }],
             )))
             .modifications(vec![ContinuousModification::AddPower { value: 1 }]);
@@ -22057,7 +22073,10 @@ mod tests {
                     qty: QuantityRef::ObjectCount {
                         filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
                             FilterProp::ControllerMatches {
-                                player: Box::new(PlayerFilter::OpponentLostLife),
+                                player: Box::new(PlayerFilter::LifeChangedThisTurn {
+                                    scope: PlayerRelation::Opponent,
+                                    direction: LifeChangeDirection::Lost,
+                                }),
                             },
                         ])),
                     },

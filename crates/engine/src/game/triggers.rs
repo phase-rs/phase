@@ -11488,8 +11488,7 @@ fn player_filter_binding_diverges(player: &PlayerFilter) -> bool {
         | PlayerFilter::DefendingPlayer
         | PlayerFilter::HasLostTheGame
         | PlayerFilter::HighestSpeed
-        | PlayerFilter::OpponentLostLife
-        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::LifeChangedThisTurn { .. }
         | PlayerFilter::OpponentAttackingEnchantedPlayer => false,
     }
 }
@@ -13608,8 +13607,7 @@ fn evaluate_trigger_condition_with_source(
             // Set-valued / action-result / no-turn-binding variants: no natural
             // "whose turn" semantic. Fail-closed.
             PlayerFilter::DefendingPlayer
-            | PlayerFilter::OpponentLostLife
-            | PlayerFilter::OpponentGainedLife
+            | PlayerFilter::LifeChangedThisTurn { .. }
             | PlayerFilter::HasLostTheGame
             // CR 120.1 + CR 510.1: a set-valued damaged-this-turn predicate has
             // no single-player "whose turn" semantic.

@@ -10,10 +10,10 @@ use nom::Parser;
 
 use crate::types::ability::{
     AggregateFunction, AttachmentKind, ChoiceType, CombatRelation, CombatRelationSubject,
-    Comparator, ControllerRef, CountScope, DamageKindFilter, FilterProp, ObjectProperty,
-    ObjectScope, ParitySource, PlayerFilter, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-    SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode,
-    ThisWayCause, TypeFilter, TypedFilter,
+    Comparator, ControllerRef, CountScope, DamageKindFilter, FilterProp, LifeChangeDirection,
+    ObjectProperty, ObjectScope, ParitySource, PlayerFilter, PlayerRelation, PtStat, PtValueScope,
+    QuantityExpr, QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter,
+    TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -7162,7 +7162,8 @@ fn parse_ownership_or_controller_suffix(
 ///     The "<N> or more" threshold IS enforced (distinct-source count at runtime).
 ///   - "was dealt combat damage" (no source) → `OpponentDealtDamage {
 ///     CombatOnly, None, min_sources: 1 }`.
-///   - "lost life" → `OpponentLostLife` (sibling unlocked by the bridge).
+///   - "lost life" → `LifeChangedThisTurn { Opponent, Lost }` (sibling unlocked
+///     by the bridge).
 fn parse_controller_predicate_clause(input: &str) -> OracleResult<'_, PlayerFilter> {
     let (input, _) = tag("controlled by a player who ").parse(input)?;
     // Each leaf leaves the remainder positioned just before the trailing
@@ -7180,8 +7181,13 @@ fn parse_controller_predicate_clause(input: &str) -> OracleResult<'_, PlayerFilt
             terminated(tag("was dealt combat damage"), peek(tag(" this turn"))),
         ),
         // CR 119.3: "lost life this turn" — sibling unlocked by the same bridge.
+        // Behavior-preserved as opponent-scoped (no card exercises this bridge
+        // today); the all-players scope would be the right future extension.
         value(
-            PlayerFilter::OpponentLostLife,
+            PlayerFilter::LifeChangedThisTurn {
+                scope: PlayerRelation::Opponent,
+                direction: LifeChangeDirection::Lost,
+            },
             terminated(tag("lost life"), peek(tag(" this turn"))),
         ),
     ))

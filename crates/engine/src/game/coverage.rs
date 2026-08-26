@@ -1888,13 +1888,27 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
 }
 
 fn fmt_player_filter(pf: &PlayerFilter) -> String {
-    use crate::types::ability::{DamageKindFilter, PlayerRelation, PossessionAxis};
+    use crate::types::ability::{
+        DamageKindFilter, LifeChangeDirection, PlayerRelation, PossessionAxis,
+    };
     match pf {
         PlayerFilter::Controller => "you",
         PlayerFilter::Opponent => "each opponent",
         PlayerFilter::DefendingPlayer => "defending player",
-        PlayerFilter::OpponentLostLife => "each opponent who lost life this turn",
-        PlayerFilter::OpponentGainedLife => "each opponent who gained life this turn",
+        // CR 119.3 + CR 119.9: both the player scope and the direction select —
+        // "each opponent who lost life" is not "each player who gained life".
+        PlayerFilter::LifeChangedThisTurn { scope, direction } => {
+            let who = match scope {
+                PlayerRelation::Controller => "you",
+                PlayerRelation::Opponent => "each opponent",
+                PlayerRelation::All => "each player",
+            };
+            let verb = match direction {
+                LifeChangeDirection::Lost => "lost",
+                LifeChangeDirection::Gained => "gained",
+            };
+            return format!("{who} who {verb} life this turn");
+        }
         PlayerFilter::HasLostTheGame => "each player who has lost the game",
         // CR 120.2a/120.2b + CR 120.9: every field here is behavior-bearing —
         // `opponent_dealt_damage_matches` consumes the damage-source filter and
@@ -8536,8 +8550,7 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::AllExcept { .. } => ("AllExcept", Handled),
         PlayerFilter::Opponent => ("Opponent", Handled),
         PlayerFilter::DefendingPlayer => ("DefendingPlayer", Handled),
-        PlayerFilter::OpponentLostLife => ("OpponentLostLife", Handled),
-        PlayerFilter::OpponentGainedLife => ("OpponentGainedLife", Handled),
+        PlayerFilter::LifeChangedThisTurn { .. } => ("LifeChangedThisTurn", Handled),
         PlayerFilter::HasLostTheGame => ("HasLostTheGame", Handled),
         PlayerFilter::OpponentDealtDamage { .. } => ("OpponentDealtDamage", Handled),
         PlayerFilter::OpponentAttacked { .. } => ("OpponentAttacked", Handled),
@@ -12041,6 +12054,7 @@ mod tests {
         PreventionAmount, PreventionScope, ReplacementCondition, StaticDefinition, TargetFilter,
         TriggerConstraint, VoteTally, VoteVisibility, VoterScope,
     };
+    use crate::types::ability::{LifeChangeDirection, PlayerRelation};
     use crate::types::card_type::CardType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::KeywordKind;
@@ -12162,7 +12176,10 @@ mod tests {
         };
         let player_count = || QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentLostLife,
+                filter: PlayerFilter::LifeChangedThisTurn {
+                    scope: PlayerRelation::Opponent,
+                    direction: LifeChangeDirection::Lost,
+                },
             },
         };
 
