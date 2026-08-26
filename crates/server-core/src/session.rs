@@ -6603,10 +6603,7 @@ mod tests {
 
         let forged = mgr.handle_interaction(&code, other_token, witness.clone());
         let error = forged.expect_err("a valid token for another seat must not spend this slot");
-        assert!(
-            error.contains("NotAuthorized"),
-            "unexpected reason: {error}"
-        );
+        assert_eq!(error, "You are not authorized to answer that interaction.");
         assert_eq!(
             mgr.sessions[&code].state.active_interaction_slots, before,
             "a refused submission must not consume the capability"
@@ -6655,7 +6652,7 @@ mod tests {
         let error = mgr
             .handle_interaction(&code, acting_token, witness)
             .expect_err("an interaction id is single-use");
-        assert!(error.contains("StaleInteraction"), "unexpected: {error}");
+        assert_eq!(error, "That interaction has already changed.");
     }
 
     #[test]
@@ -6674,7 +6671,7 @@ mod tests {
         let error = mgr
             .handle_interaction(&code, acting_token, oversized)
             .expect_err("an oversized response is refused");
-        assert_eq!(error, "Engine error: PayloadTooLarge");
+        assert_eq!(error, "That interaction response is too large.");
 
         // Negative sibling: the boundary sits at the constant, not at "any
         // large list". The same shape at exactly the limit is still refused,
@@ -6689,7 +6686,7 @@ mod tests {
             .handle_interaction(&code, acting_token, at_limit)
             .expect_err("unknown choices are still refused");
         assert!(
-            !error.contains("PayloadTooLarge"),
+            error != "That interaction response is too large.",
             "the bound must be the constant, not list size in general: {error}"
         );
     }

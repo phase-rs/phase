@@ -939,7 +939,7 @@ pub struct DebugCardCreateRequest {
 }
 
 impl DebugCardCreateRequest {
-    fn as_debug_action(&self) -> DebugAction {
+    pub(crate) fn as_debug_action(&self) -> DebugAction {
         DebugAction::CreateCard {
             card_name: self.source.face.name.clone(),
             owner: self.owner,
