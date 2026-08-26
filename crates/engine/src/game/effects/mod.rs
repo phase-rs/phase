@@ -7057,7 +7057,7 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         // least one complete forage mode is currently available.
         Effect::Forage => !forage::can_forage(state, ability),
         Effect::PayCost {
-            cost: AbilityCost::TapCreatures { .. },
+            cost: cost @ AbilityCost::TapCreatures { .. },
             payer,
             ..
         } => {
