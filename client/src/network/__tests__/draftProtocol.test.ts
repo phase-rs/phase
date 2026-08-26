@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   DRAFT_PROTOCOL_VERSION,
+  deckSubmissionFingerprint,
   encodeDraftWireMessage,
   decodeDraftWireMessage,
   validateDraftMessage,
@@ -9,9 +10,15 @@ import {
 import type { DraftP2PMessage } from "../draftProtocol";
 
 describe("draftProtocol", () => {
+  it("uses a locale-independent multiset fingerprint for deck submissions", () => {
+    expect(deckSubmissionFingerprint(["Ångler", "Island", "Island"])).toBe(
+      deckSubmissionFingerprint(["Island", "Ångler", "Island"]),
+    );
+  });
+
   describe("DRAFT_PROTOCOL_VERSION", () => {
-    it("is version 12", () => {
-      expect(DRAFT_PROTOCOL_VERSION).toBe(12);
+    it("is version 14", () => {
+      expect(DRAFT_PROTOCOL_VERSION).toBe(14);
     });
   });
 
@@ -87,7 +94,11 @@ describe("draftProtocol", () => {
 
   describe("validateDraftMessage", () => {
     it("accepts valid draft_join message", () => {
-      const msg = validateDraftMessage({ type: "draft_join", displayName: "Alice" });
+      const msg = validateDraftMessage({
+        type: "draft_join",
+        displayName: "Alice",
+        draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
+      });
       expect(msg.type).toBe("draft_join");
     });
 
@@ -95,6 +106,30 @@ describe("draftProtocol", () => {
       const msg = validateDraftMessage({ type: "draft_pick", cardInstanceId: "card-001" });
       expect(msg.type).toBe("draft_pick");
     });
+
+    it("requires a stable identifier on a deck submission", () => {
+      expect(validateDraftMessage({
+        type: "draft_submit_deck",
+        submissionId: "submission-1",
+        mainDeck: ["Island"],
+      })).toMatchObject({ type: "draft_submit_deck", submissionId: "submission-1" });
+      expect(() => validateDraftMessage({
+        type: "draft_submit_deck",
+        mainDeck: ["Island"],
+      })).toThrow("Invalid deck submission");
+    });
+
+    it("rejects a malformed deck acknowledgement before it can clear an outbox", () => {
+      expect(() => validateDraftMessage({
+        type: "draft_deck_submit_ack",
+        submissionId: "submission-1",
+      })).toThrow("Invalid draft deck acknowledgement");
+      expect(() => validateDraftMessage({
+        type: "draft_deck_submit_ack",
+        view: {},
+      })).toThrow("Invalid deck acknowledgement");
+    });
+
 
     it("accepts a draft-effect pick message", () => {
       const msg = validateDraftMessage({
@@ -195,6 +230,30 @@ describe("draftProtocol", () => {
       expect(() => validateDraftMessage({ type: "game_setup" })).toThrow("Invalid draft message type");
     });
 
+    it("rejects a malformed typed reconnect rejection", () => {
+      expect(() => validateDraftMessage({
+        type: "draft_reconnect_rejected",
+        kind: "NotARejectionKind",
+        reason: "Unknown token",
+      })).toThrow("Invalid draft reconnect rejection");
+      expect(validateDraftMessage({
+        type: "draft_reconnect_rejected",
+        kind: "UnknownToken",
+        reason: "Unknown token",
+      })).toMatchObject({ kind: "UnknownToken" });
+    });
+
+    it("normalizes a pre-v13 untyped reconnect rejection to a credential-preserving protocol mismatch", () => {
+      expect(validateDraftMessage({
+        type: "draft_reconnect_rejected",
+        reason: "Unknown token",
+      })).toMatchObject({
+        type: "draft_reconnect_rejected",
+        kind: "ProtocolMismatch",
+        reason: "Unknown token",
+      });
+    });
+
     it.each([
       "draft_join",
       "draft_reconnect",
@@ -205,6 +264,7 @@ describe("draftProtocol", () => {
       "draft_reconnect_ack",
       "draft_reconnect_rejected",
       "draft_state_update",
+      "draft_deck_submit_ack",
       "draft_pick_ack",
       "draft_error",
       "draft_kicked",
@@ -231,22 +291,31 @@ describe("draftProtocol", () => {
       "draft_bo3_score_update",
       "draft_bo3_match_complete",
     ])("accepts message type '%s'", (msgType) => {
-      const msg = validateDraftMessage(
-        msgType === "draft_pick_with_draft_effect"
-          ? {
-              type: msgType,
-              effectCardInstanceId: "cogwork-1",
-              cardInstanceIds: ["card-001", "card-002"],
-            }
-          : { type: msgType },
-      );
+      // Types with a bespoke validator need a well-formed payload; every other
+      // member still reaches `validateDraftMessage`'s bare fall-through. One
+      // row per bespoke validator, so the next one costs a line rather than
+      // another nesting level.
+      const BESPOKE_PAYLOADS: Record<string, Record<string, unknown>> = {
+        draft_pick_with_draft_effect: {
+          effectCardInstanceId: "cogwork-1",
+          cardInstanceIds: ["card-001", "card-002"],
+        },
+        draft_reconnect_rejected: { kind: "NoReconnectWindow", reason: "No grace window" },
+        draft_submit_deck: { submissionId: "submission-1", mainDeck: [] },
+        draft_deck_submit_ack: { submissionId: "submission-1", view: {} },
+      };
+      const msg = validateDraftMessage({ type: msgType, ...BESPOKE_PAYLOADS[msgType] });
       expect(msg.type).toBe(msgType);
     });
   });
 
   describe("wire encoding/decoding round-trip", () => {
     it("round-trips a small message (raw path)", async () => {
-      const msg: DraftP2PMessage = { type: "draft_join", displayName: "Bob" };
+      const msg: DraftP2PMessage = {
+        type: "draft_join",
+        displayName: "Bob",
+        draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
+      };
       const encoded = await encodeDraftWireMessage(msg);
       // Small messages use raw format (0x00 prefix)
       expect(encoded[0]).toBe(0x00);

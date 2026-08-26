@@ -20,9 +20,10 @@ import type { CubeDraftSettings, TournamentFormat, PodPolicy, DraftKind as CoreD
 import type { DraftPodHostConfig } from "../adapter/draftPodHostAdapter";
 import type { DraftPodGuestConfig } from "../adapter/draftPodGuestAdapter";
 import {
-  clearActiveDraftPod,
-  loadActiveDraftPod,
+  clearActiveDraftPodIfCurrent,
+  inspectActiveDraftPod,
   loadDraftHostSession,
+  persistedDraftHostSessionState,
 } from "../services/draftPersistence";
 import { useMultiplayerDraftStore } from "./multiplayerDraftStore";
 
@@ -31,6 +32,9 @@ import { useMultiplayerDraftStore } from "./multiplayerDraftStore";
 export type DraftKind = Exclude<CoreDraftKind, "Quick">;
 
 export type PoolMode = "set" | "cube";
+
+/** Result of one host-recovery probe. Page entry owns the route policy. */
+export type HostedPodResumeOutcome = "resumed" | "absent" | "terminal" | "invalid" | "superseded";
 
 export interface CubeForm {
   cubeName: string;
@@ -90,7 +94,7 @@ interface DraftPodActions {
   /** Join an existing pod as guest. */
   joinPod: () => Promise<void>;
   /** Resume the active hosted pod from local persistence. */
-  resumeHostedPod: () => Promise<void>;
+  resumeHostedPod: (options?: { silent?: boolean; routeToken?: number; signal?: AbortSignal }) => Promise<HostedPodResumeOutcome>;
   /** Host: start the draft (delegates to multiplayerDraftStore). */
   startDraft: () => Promise<void>;
   /** Reset pod store state. */
@@ -126,7 +130,13 @@ function normalizePodConfig(config: PodConfig): PodConfig {
   return config;
 }
 
-let resumeHostedPodPromise: Promise<void> | null = null;
+interface HostedPodResumeAttempt {
+  routeToken: number;
+  signal: AbortSignal | undefined;
+  promise: Promise<HostedPodResumeOutcome>;
+}
+
+let resumeHostedPodAttempt: HostedPodResumeAttempt | null = null;
 
 // ── Store ──────────────────────────────────────────────────────────────
 
@@ -262,17 +272,36 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
       }
     },
 
-    resumeHostedPod: async () => {
-      if (resumeHostedPodPromise) {
-        return resumeHostedPodPromise;
+    resumeHostedPod: async (options = {}) => {
+      const routeToken = options.routeToken ?? 0;
+      if (
+        resumeHostedPodAttempt &&
+        resumeHostedPodAttempt.routeToken === routeToken &&
+        resumeHostedPodAttempt.signal === options.signal
+      ) {
+        return resumeHostedPodAttempt.promise;
       }
 
-      resumeHostedPodPromise = (async () => {
-        const meta = loadActiveDraftPod();
-        if (!meta) {
-          set({ configError: "No draft pod to resume" });
-          return;
+      const attempt: HostedPodResumeAttempt = {
+        routeToken,
+        signal: options.signal,
+        promise: Promise.resolve("superseded"),
+      };
+      const isCurrentAttempt = () =>
+        resumeHostedPodAttempt === attempt && !options.signal?.aborted;
+      attempt.promise = (async (): Promise<HostedPodResumeOutcome> => {
+        if (options.signal?.aborted) return "superseded";
+        const active = inspectActiveDraftPod();
+        if (active.type === "absent") {
+          if (!options.silent) set({ configError: "No draft pod to resume" });
+          return "absent";
         }
+        if (active.type === "invalid") {
+          if (active.capture) clearActiveDraftPodIfCurrent(active.capture);
+          if (!options.silent) set({ configError: "Saved draft pod is invalid" });
+          return "invalid";
+        }
+        const { meta, capture } = active;
 
         const activeDraft = useMultiplayerDraftStore.getState();
         if (
@@ -281,14 +310,30 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           activeDraft.phase !== "error" &&
           activeDraft.roomCode === meta.roomCode
         ) {
-          return;
+          return "resumed";
         }
 
         const persisted = await loadDraftHostSession(meta.id);
+        if (!isCurrentAttempt()) return "superseded";
         if (!persisted) {
-          clearActiveDraftPod();
-          set({ configError: "Saved draft pod was not found" });
-          return;
+          clearActiveDraftPodIfCurrent(capture);
+          if (!options.silent) set({ configError: "Saved draft pod was not found" });
+          return "invalid";
+        }
+        const sessionState = persistedDraftHostSessionState(persisted);
+        if (
+          persisted.persistenceId !== meta.id ||
+          persisted.roomCode !== meta.roomCode ||
+          sessionState !== "live"
+        ) {
+          // Release only the active locator. A terminal snapshot is retained as
+          // local history; a corrupt one is unreachable after this exact-match
+          // cleanup and cannot poison a replacement pod.
+          clearActiveDraftPodIfCurrent(capture);
+          if (!options.silent) {
+            set({ configError: sessionState === "terminal" ? "Saved draft pod is complete" : "Saved draft pod is invalid" });
+          }
+          return sessionState === "terminal" ? "terminal" : "invalid";
         }
 
         // Branch on the persisted pool source: restore the matching UI
@@ -346,13 +391,20 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           preferredRoomCode: persisted.roomCode || undefined,
         };
 
-        await useMultiplayerDraftStore.getState().hostDraft(hostConfig);
+        if (!isCurrentAttempt()) return "superseded";
+        const hosted = await useMultiplayerDraftStore.getState().hostDraft({
+          ...hostConfig,
+          signal: options.signal,
+        });
+        if (!isCurrentAttempt()) return "superseded";
+        return hosted ? "resumed" : "invalid";
       })();
+      resumeHostedPodAttempt = attempt;
 
       try {
-        await resumeHostedPodPromise;
+        return await attempt.promise;
       } finally {
-        resumeHostedPodPromise = null;
+        if (resumeHostedPodAttempt === attempt) resumeHostedPodAttempt = null;
       }
     },
 
@@ -371,6 +423,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
       set({ configError: null });
 
       const guestConfig: DraftPodGuestConfig = {
+        kind: "new",
         roomCode: joinCode.trim(),
         displayName: guestDisplayName.trim(),
       };

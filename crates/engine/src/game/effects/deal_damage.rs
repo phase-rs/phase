@@ -2502,17 +2502,45 @@ pub fn resolve_each_source_deals_damage(
         resolve_quantity_with_targets(state, amount, ability).max(0) as u32
     };
 
-    // CR 608.2 + CR 120.1: evaluate the source class against the battlefield at
-    // resolution (mirrors `resolve_all`). Each matching object is an independent
-    // source of its own damage.
-    let resolved_sources = crate::game::effects::resolved_object_filter(ability, sources);
-    let filter_ctx = filter::FilterContext::from_ability(ability);
-    let source_ids: Vec<ObjectId> = state
-        .battlefield
-        .iter()
-        .filter(|id| filter::matches_target_filter(state, **id, &resolved_sources, &filter_ctx))
-        .copied()
-        .collect();
+    // CR 608.2 + CR 120.1: ordinary source classes are evaluated against the
+    // battlefield. A pairwise targeted batch instead uses the exact announced
+    // objects stamped on this damage node; a missing target is absent, and an
+    // object whose incarnation is no longer current or which is no longer on
+    // the battlefield cannot deal damage.
+    let source_ids: Vec<ObjectId> = match recipient {
+        EachDamageRecipient::OtherBatchSource { source_filters } => ability
+            .targets
+            .iter()
+            .zip(source_filters)
+            .filter_map(|(target, source_filter)| {
+                let TargetRef::Object(id) = target else {
+                    return None;
+                };
+                (ability.target_pin_is_current(*id, state)
+                    && ability.selected_target_pin_is_current(*id, state)
+                    && !crate::game::targeting::validate_targets_for_ability(
+                        state,
+                        std::slice::from_ref(target),
+                        source_filter,
+                        ability,
+                    )
+                    .is_empty())
+                .then_some(*id)
+            })
+            .collect(),
+        EachDamageRecipient::Shared(_) | EachDamageRecipient::EachController => {
+            let resolved_sources = crate::game::effects::resolved_object_filter(ability, sources);
+            let filter_ctx = filter::FilterContext::from_ability(ability);
+            state
+                .battlefield
+                .iter()
+                .filter(|id| {
+                    filter::matches_target_filter(state, **id, &resolved_sources, &filter_ctx)
+                })
+                .copied()
+                .collect()
+        }
+    };
 
     // CR 115.1 / CR 608.2c: resolve the shared recipient ONCE (an announced target
     // or a hydrated context anaphor). An empty result (e.g. an "up to one" / fizzled
@@ -2521,7 +2549,9 @@ pub fn resolve_each_source_deals_damage(
         EachDamageRecipient::Shared(filter) => {
             resolve_effect_recipients(state, ability, filter, false)
         }
-        EachDamageRecipient::EachController => Vec::new(),
+        EachDamageRecipient::EachController | EachDamageRecipient::OtherBatchSource { .. } => {
+            Vec::new()
+        }
     };
 
     // Build every (source, context, recipient, amount) entry up front, before any
@@ -2565,6 +2595,19 @@ pub fn resolve_each_source_deals_damage(
                     .unwrap_or(ctx.controller);
                 entries.push((source_id, ctx, TargetRef::Player(controller), amt));
             }
+            // CR 120.1 + CR 608.2c: the relation exists only for an exact
+            // two-object batch. With zero/one surviving choices there is no
+            // "other" object, so this source produces no damage entry.
+            EachDamageRecipient::OtherBatchSource { .. } if source_ids.len() == 2 => {
+                if let Some(other) = source_ids
+                    .iter()
+                    .copied()
+                    .find(|candidate| *candidate != source_id)
+                {
+                    entries.push((source_id, ctx, TargetRef::Object(other), amt));
+                }
+            }
+            EachDamageRecipient::OtherBatchSource { .. } => {}
         }
     }
 

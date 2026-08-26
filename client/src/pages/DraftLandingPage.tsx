@@ -11,7 +11,9 @@ import {
   type ActiveQuickDraftMeta,
 } from "../services/quickDraftPersistence";
 import {
+  loadActiveDraftGuest,
   loadActiveDraftPod,
+  type ActiveDraftGuestMeta,
   type ActiveDraftPodMeta,
 } from "../services/draftPersistence";
 import { loadGame } from "../services/gamePersistence";
@@ -63,10 +65,12 @@ export function DraftLandingPage() {
   const navigate = useNavigate();
   const [activeDraft, setActiveDraft] = useState<ActiveQuickDraftMeta | null>(null);
   const [activePod, setActivePod] = useState<ActiveDraftPodMeta | null>(null);
+  const [activeGuestPod, setActiveGuestPod] = useState<ActiveDraftGuestMeta | null>(null);
 
   useEffect(() => {
     setActiveDraft(loadActiveQuickDraft());
     setActivePod(loadActiveDraftPod());
+    setActiveGuestPod(loadActiveDraftGuest());
   }, []);
 
   return (
@@ -85,6 +89,7 @@ export function DraftLandingPage() {
         <div className="flex w-full flex-col">
           {activeDraft && <ActiveDraftCard meta={activeDraft} />}
           {activePod && <ActivePodCard meta={activePod} />}
+          {activeGuestPod && <ActiveGuestPodCard meta={activeGuestPod} />}
 
           <div className="flex flex-col gap-3">
             <h2 className="text-[0.68rem] font-semibold uppercase tracking-[0.22em] text-fg-meta">
@@ -160,7 +165,7 @@ function ActivePodCard({ meta }: { meta: ActiveDraftPodMeta }) {
       </h2>
       <button
         type="button"
-        onClick={() => navigate("/draft-pod?resume=1")}
+        onClick={() => navigate("/draft-pod?entry=host")}
         className="group flex w-full cursor-pointer items-center gap-5 rounded-[20px] border border-cyan-300/20 bg-cyan-400/[0.06] p-5 text-left transition-colors hover:border-cyan-300/35 hover:bg-cyan-400/[0.10]"
       >
         <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border border-white/8 bg-black/24">
@@ -187,6 +192,40 @@ function ActivePodCard({ meta }: { meta: ActiveDraftPodMeta }) {
         <div className="flex items-center self-stretch pl-2">
           <div className="rounded-full border border-cyan-300/15 bg-cyan-400/10 px-4 py-2 text-sm font-medium text-cyan-100 transition-colors group-hover:border-cyan-300/30 group-hover:bg-cyan-400/18">
             {t("landing.resume")}
+          </div>
+        </div>
+      </button>
+    </div>
+  );
+}
+
+function ActiveGuestPodCard({ meta }: { meta: ActiveDraftGuestMeta }) {
+  const { t } = useTranslation("draft");
+  const navigate = useNavigate();
+
+  return (
+    <div className="mb-8">
+      <h2 className="mb-3 text-[0.68rem] font-semibold uppercase tracking-[0.22em] text-fg-meta">
+        {t("landing.guestPodInProgress")}
+      </h2>
+      <button
+        type="button"
+        onClick={() => navigate("/draft-pod?entry=guest")}
+        className="group flex w-full cursor-pointer items-center gap-5 rounded-[20px] border border-violet-300/20 bg-violet-400/[0.06] p-5 text-left transition-colors hover:border-violet-300/35 hover:bg-violet-400/[0.10]"
+      >
+        <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border border-white/8 bg-black/24">
+          <PodIcon />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-lg font-semibold text-white">{t("landing.guestPodLabel")}</div>
+          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-white/45">
+            <span>{t("landing.roomLabel", { code: meta.roomCode })}</span>
+            <span>{formatRelativeTime(meta.timestamp, t)}</span>
+          </div>
+        </div>
+        <div className="flex items-center self-stretch pl-2">
+          <div className="rounded-full border border-violet-300/15 bg-violet-400/10 px-4 py-2 text-sm font-medium text-violet-100 transition-colors group-hover:border-violet-300/30 group-hover:bg-violet-400/18">
+            {t("landing.reconnect")}
           </div>
         </div>
       </button>

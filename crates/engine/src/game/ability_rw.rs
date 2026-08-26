@@ -3162,6 +3162,9 @@ fn legacy_effect(x: &Effect) -> bool {
                         legacy_target_filter(f)
                     }
                     crate::types::ability::EachDamageRecipient::EachController => false,
+                    crate::types::ability::EachDamageRecipient::OtherBatchSource {
+                        source_filters,
+                    } => source_filters.iter().any(|filter| legacy_target_filter(filter)),
                 }
         }
         Effect::ChooseCounterKind { target } => legacy_target_filter(target),
@@ -4466,10 +4469,11 @@ fn rw_effect(
             p.merge(damage_writes(subject));
             (p, None)
         }
-        // CR 120.1 + CR 608.2c: each object matching `sources` (enumerated on the
-        // battlefield at resolution ⇒ a board membership read) deals `amount` damage.
-        // `Shared` ⇒ target damage_writes; `EachController` ⇒ each source's controller
-        // takes life loss (CR 120.3a).
+        // CR 120.1 + CR 608.2c: each object matching `sources` (or each legal
+        // member of a typed announced pair) deals `amount` damage. `Shared` ⇒
+        // target damage_writes; `EachController` ⇒ each source's controller
+        // takes life loss; `OtherBatchSource` ⇒ both slot filters are board
+        // reads and the reciprocal objects are damage writes.
         Effect::EachSourceDealsDamage {
             sources,
             amount,
@@ -4479,6 +4483,15 @@ fn rw_effect(
             p.merge(match recipient {
                 crate::types::ability::EachDamageRecipient::Shared(filter) => damage_writes(filter),
                 crate::types::ability::EachDamageRecipient::EachController => life_writes(),
+                crate::types::ability::EachDamageRecipient::OtherBatchSource {
+                    source_filters,
+                } => {
+                    let mut pair = damage_writes(&TargetFilter::ParentTarget);
+                    for filter in source_filters {
+                        pair.merge(board_membership_read(filter));
+                    }
+                    pair
+                }
             });
             p.merge(rw_quantity_expr(amount));
             (p, None)

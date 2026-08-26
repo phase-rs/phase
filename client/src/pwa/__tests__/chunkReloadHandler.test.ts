@@ -4,7 +4,9 @@ import { installChunkReloadHandler } from "../chunkReloadHandler";
 
 const mocks = vi.hoisted(() => ({
   isMultiplayerGameLive: vi.fn<() => boolean>(() => false),
-  whenMultiplayerGameEnds: vi.fn<(cb: () => void) => () => void>(),
+  deferUntilMultiplayerSessionEnds: vi.fn<
+    (action: () => void) => { deferred: boolean; cancel: () => void }
+  >(),
   trackEvent: vi.fn(),
   flushNow: vi.fn(),
   claimUpdateStatus: vi.fn(() => true),
@@ -16,7 +18,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../multiplayerGuard", () => ({
   isMultiplayerGameLive: mocks.isMultiplayerGameLive,
-  whenMultiplayerGameEnds: mocks.whenMultiplayerGameEnds,
+  deferUntilMultiplayerSessionEnds: mocks.deferUntilMultiplayerSessionEnds,
 }));
 vi.mock("../updateStatus", () => ({
   claimUpdateStatus: mocks.claimUpdateStatus,
@@ -83,9 +85,13 @@ describe("chunkReloadHandler loop breaker", () => {
     window.sessionStorage.clear();
     gameEndCallbacks = [];
     mocks.isMultiplayerGameLive.mockReturnValue(false);
-    mocks.whenMultiplayerGameEnds.mockImplementation((cb: () => void) => {
-      gameEndCallbacks.push(cb);
-      return () => {};
+    mocks.deferUntilMultiplayerSessionEnds.mockImplementation((action: () => void) => {
+      if (!mocks.isMultiplayerGameLive()) {
+        action();
+        return { deferred: false, cancel: () => {} };
+      }
+      gameEndCallbacks.push(action);
+      return { deferred: true, cancel: () => {} };
     });
     reloadSpy = vi.fn();
     Object.defineProperty(window.location, "reload", {
@@ -247,7 +253,7 @@ describe("chunkReloadHandler loop breaker", () => {
 
     // First-failure-wins: one queued reload, no executed reloads, no breach.
     expect(reloadSpy).not.toHaveBeenCalled();
-    expect(mocks.whenMultiplayerGameEnds).toHaveBeenCalledTimes(1);
+    expect(mocks.deferUntilMultiplayerSessionEnds).toHaveBeenCalledTimes(1);
     expect(mocks.setUpdateStatus).toHaveBeenCalledWith("deferred");
     expect(mocks.setUpdateError).not.toHaveBeenCalled();
     expect(guardEntry(message)).toBeNull();
@@ -264,7 +270,7 @@ describe("chunkReloadHandler loop breaker", () => {
       "Failed to fetch dynamically imported module: https://phase-rs.dev/assets/GamePage-mp.js";
 
     firePreloadError(message);
-    expect(mocks.whenMultiplayerGameEnds).toHaveBeenCalledTimes(1);
+    expect(mocks.deferUntilMultiplayerSessionEnds).toHaveBeenCalledTimes(1);
 
     // A breach mid-game (counter pre-filled from before the game started)
     // must not queue more work, but must not cancel the queued reload either.
@@ -274,7 +280,7 @@ describe("chunkReloadHandler loop breaker", () => {
     );
     firePreloadError(message);
 
-    expect(mocks.whenMultiplayerGameEnds).toHaveBeenCalledTimes(1);
+    expect(mocks.deferUntilMultiplayerSessionEnds).toHaveBeenCalledTimes(1);
     expect(mocks.setUpdateError).toHaveBeenCalledTimes(1);
     expectAbortEvent(message);
 

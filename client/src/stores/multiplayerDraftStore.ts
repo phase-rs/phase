@@ -39,11 +39,15 @@ import {
   type DraftPodGuestEvent,
   type DraftPodGuestStatus,
 } from "../adapter/draftPodGuestAdapter";
+import type { DraftGuestRecoveryFailure } from "../adapter/p2p-draft-guest";
 import {
   clearActiveDraftPod,
+  clearActiveDraftGuest,
   clearDraftSettlementOutbox,
   loadDraftIntergameCommands,
   loadActiveDraftPod,
+  loadActiveDraftGuest,
+  loadDraftGuestSession,
   loadDraftSettlementOutbox,
   saveActiveDraftPod,
   saveDraftIntergameCommands,
@@ -65,6 +69,8 @@ import { FORMAT_DEFAULTS } from "./multiplayerStore";
 // ── Types ──────────────────────────────────────────────────────────────
 
 export type DraftRole = "host" | "guest";
+
+export type GuestDraftResumeOutcome = "resumed" | "absent" | "invalid" | "failed" | "superseded";
 
 /**
  * The pod SESSION's phase.
@@ -194,6 +200,8 @@ interface MultiplayerDraftState {
   pauseReason: DraftPauseReason | null;
   pairing: PairingInfo | null;
   error: string | null;
+  /** Recovery-only failure semantics, retained for an explicit retry CTA. */
+  guestRecoveryFailure: DraftGuestRecoveryFailure | null;
   selectedCard: string | null;
   mainDeck: string[];
   landCounts: Record<string, number>;
@@ -227,9 +235,12 @@ interface MultiplayerDraftState {
 
 interface MultiplayerDraftActions {
   /** Host: create a new draft pod and start accepting guests. */
-  hostDraft: (config: DraftPodHostConfig) => Promise<void>;
+  /** `true` only after the current adapter initialized and remains owned. */
+  hostDraft: (config: DraftPodHostConfig) => Promise<boolean>;
   /** Guest: join an existing draft pod by room code. */
   joinDraft: (config: DraftPodGuestConfig) => Promise<void>;
+  /** Reconnect exclusively through the persisted capability, never `draft_join`. */
+  resumeDraft: (options?: { routeToken?: number; signal?: AbortSignal }) => Promise<GuestDraftResumeOutcome>;
   /** Host: start the draft once the pod is ready. */
   startDraft: (botFillEmptySeats?: boolean) => Promise<void>;
   /** Both: submit a pick. */
@@ -292,9 +303,112 @@ interface MultiplayerDraftActions {
 
 let activeHostAdapter: DraftPodHostAdapter | null = null;
 let activeGuestAdapter: DraftPodGuestAdapter | null = null;
+let activeHostEventUnsub: (() => void) | null = null;
+let activeGuestEventUnsub: (() => void) | null = null;
+let activeHostAbort: AbortController | null = null;
+let activeGuestAbort: AbortController | null = null;
+let activeHostRouteAbortListener: { signal: AbortSignal; listener: () => void } | null = null;
+let activeGuestRouteAbortListener: { signal: AbortSignal; listener: () => void } | null = null;
+let activeHostPersistenceId: string | null = null;
+let draftAdapterEpoch = 0;
+let resumeGuestDraftAttempt: {
+  routeToken: number;
+  signal: AbortSignal | undefined;
+  promise: Promise<GuestDraftResumeOutcome>;
+} | null = null;
+const disposedHostAdapters = new WeakSet<DraftPodHostAdapter>();
+const disposedGuestAdapters = new WeakSet<DraftPodGuestAdapter>();
+const retainedDraftSessionTeardowns = new Map<string, Promise<void>>();
 let activeMatchController: GameLoopController | null = null;
 const intergameControllers = new Map<string, IntergameCommandController>();
 const DRAFT_MATCH_FORMAT_CONFIG = FORMAT_DEFAULTS.Limited;
+
+interface DetachedDraftAdapters {
+  host: DraftPodHostAdapter | null;
+  guest: DraftPodGuestAdapter | null;
+  hostPersistenceId: string | null;
+}
+
+function detachDraftAdapters(): DetachedDraftAdapters {
+  const detached = {
+    host: activeHostAdapter,
+    guest: activeGuestAdapter,
+    hostPersistenceId: activeHostPersistenceId,
+  };
+  activeHostAdapter = null;
+  activeGuestAdapter = null;
+  activeHostPersistenceId = null;
+  activeHostAbort?.abort();
+  activeGuestAbort?.abort();
+  activeHostRouteAbortListener?.signal.removeEventListener("abort", activeHostRouteAbortListener.listener);
+  activeGuestRouteAbortListener?.signal.removeEventListener("abort", activeGuestRouteAbortListener.listener);
+  activeHostAbort = null;
+  activeGuestAbort = null;
+  activeHostRouteAbortListener = null;
+  activeGuestRouteAbortListener = null;
+  activeHostEventUnsub?.();
+  activeGuestEventUnsub?.();
+  activeHostEventUnsub = null;
+  activeGuestEventUnsub = null;
+  return detached;
+}
+
+async function disposeHostAdapter(adapter: DraftPodHostAdapter, preserveSession: boolean): Promise<void> {
+  if (disposedHostAdapters.has(adapter)) return;
+  disposedHostAdapters.add(adapter);
+  await adapter.dispose({ preserveSession });
+}
+
+async function disposeGuestAdapter(adapter: DraftPodGuestAdapter, preserveRecovery = true): Promise<void> {
+  if (disposedGuestAdapters.has(adapter)) return;
+  disposedGuestAdapters.add(adapter);
+  await adapter.dispose({ preserveRecovery });
+}
+
+async function disposeDetachedDraftAdapters(
+  detached: DetachedDraftAdapters,
+  preserveSession: boolean,
+): Promise<void> {
+  await Promise.allSettled([
+    ...(detached.host ? [disposeHostAdapter(detached.host, preserveSession)] : []),
+    ...(detached.guest ? [disposeGuestAdapter(detached.guest, preserveSession)] : []),
+  ]);
+}
+
+/** Retains teardown after the active adapter ref has been detached on route abort. */
+function retainDraftSessionTeardown(
+  persistenceId: string | null,
+  teardown: Promise<void>,
+): void {
+  if (!persistenceId) return;
+  const previous = retainedDraftSessionTeardowns.get(persistenceId);
+  const retained = previous
+    ? previous.then(() => teardown, () => teardown)
+    : teardown;
+  retainedDraftSessionTeardowns.set(persistenceId, retained);
+  void retained.then(
+    () => {
+      if (retainedDraftSessionTeardowns.get(persistenceId) === retained) {
+        retainedDraftSessionTeardowns.delete(persistenceId);
+      }
+    },
+    () => {
+      if (retainedDraftSessionTeardowns.get(persistenceId) === retained) {
+        retainedDraftSessionTeardowns.delete(persistenceId);
+      }
+    },
+  );
+}
+
+/** Waits for the previous local owner of this persisted draft session to finish. */
+async function claimDraftSessionOwner(persistenceId: string | undefined): Promise<void> {
+  if (!persistenceId) return;
+  await retainedDraftSessionTeardowns.get(persistenceId);
+}
+
+function lifecycleSignal(controller: AbortController): AbortSignal {
+  return controller.signal;
+}
 
 function intergameAction(payload: DraftIntergameCommandPayload): GameAction {
   switch (payload.type) {
@@ -585,6 +699,7 @@ const initialState: MultiplayerDraftState = {
   pauseReason: null,
   pairing: null,
   error: null,
+  guestRecoveryFailure: null,
   selectedCard: null,
   mainDeck: [],
   landCounts: {},
@@ -679,10 +794,38 @@ export const useMultiplayerDraftStore = create<
   ...initialState,
 
   hostDraft: async (config) => {
-    const adapter = new DraftPodHostAdapter();
-    activeHostAdapter = adapter;
+    const epoch = ++draftAdapterEpoch;
+    const previous = detachDraftAdapters();
+    const previousTeardown = disposeDetachedDraftAdapters(previous, true);
+    retainDraftSessionTeardown(previous.hostPersistenceId, previousTeardown);
+    if (previous.host || previous.guest) await previousTeardown;
+    if (config.persistenceId) await claimDraftSessionOwner(config.persistenceId);
+    if (epoch !== draftAdapterEpoch || config.signal?.aborted) return false;
 
-    adapter.onEvent((event) => handleHostEvent(event, set));
+    const adapter = new DraftPodHostAdapter();
+    const controller = new AbortController();
+    activeHostAdapter = adapter;
+    activeHostAbort = controller;
+    activeHostPersistenceId = config.persistenceId ?? null;
+
+    activeHostEventUnsub = adapter.onEvent((event) => {
+      if (activeHostAdapter === adapter && epoch === draftAdapterEpoch) {
+        handleHostEvent(event, set);
+      }
+    });
+
+    const abortOwner = () => {
+      controller.abort();
+      if (activeHostAdapter !== adapter || epoch !== draftAdapterEpoch) return;
+      ++draftAdapterEpoch;
+      const detached = detachDraftAdapters();
+      const teardown = disposeDetachedDraftAdapters(detached, true);
+      retainDraftSessionTeardown(detached.hostPersistenceId, teardown);
+      void teardown;
+      set(initialState);
+    };
+    config.signal?.addEventListener("abort", abortOwner, { once: true });
+    if (config.signal) activeHostRouteAbortListener = { signal: config.signal, listener: abortOwner };
 
     set({
       ...initialState,
@@ -691,8 +834,11 @@ export const useMultiplayerDraftStore = create<
       seatIndex: 0,
     });
 
+    let initialized = false;
     try {
-      await adapter.initialize(config);
+      await adapter.initialize({ ...config, signal: lifecycleSignal(controller) });
+      initialized = true;
+      if (activeHostAdapter !== adapter || epoch !== draftAdapterEpoch) return false;
       if (config.persistenceId) {
         const view = get().view;
         const phase = view ? activePhaseForDraftViewStatus(view.status) ?? "lobby" : "lobby";
@@ -709,16 +855,59 @@ export const useMultiplayerDraftStore = create<
           updatedAt: Date.now(),
         });
       }
+      return true;
     } catch {
-      // Error already emitted via adapter event
+      // The adapter reports the error while it is current. A late failure is
+      // deliberately silent: its event gate was detached by the new owner.
+    } finally {
+      if (activeHostAdapter !== adapter || epoch !== draftAdapterEpoch) {
+        config.signal?.removeEventListener("abort", abortOwner);
+        await disposeHostAdapter(adapter, true);
+      } else if (!initialized || adapter.status === "error") {
+        activeHostAdapter = null;
+        activeHostAbort = null;
+        activeHostPersistenceId = null;
+        activeHostEventUnsub?.();
+        activeHostEventUnsub = null;
+        config.signal?.removeEventListener("abort", abortOwner);
+        activeHostRouteAbortListener = null;
+        await disposeHostAdapter(adapter, true);
+      }
     }
+    return false;
   },
 
   joinDraft: async (config) => {
-    const adapter = new DraftPodGuestAdapter();
-    activeGuestAdapter = adapter;
+    const epoch = ++draftAdapterEpoch;
+    const previous = detachDraftAdapters();
+    const previousTeardown = disposeDetachedDraftAdapters(previous, true);
+    retainDraftSessionTeardown(previous.hostPersistenceId, previousTeardown);
+    if (previous.host || previous.guest) await previousTeardown;
+    if (epoch !== draftAdapterEpoch || config.signal?.aborted) return;
 
-    adapter.onEvent((event) => handleGuestEvent(event, set));
+    const adapter = new DraftPodGuestAdapter();
+    const controller = new AbortController();
+    activeGuestAdapter = adapter;
+    activeGuestAbort = controller;
+
+    activeGuestEventUnsub = adapter.onEvent((event) => {
+      if (activeGuestAdapter === adapter && epoch === draftAdapterEpoch) {
+        handleGuestEvent(event, set);
+      }
+    });
+
+    const abortOwner = () => {
+      controller.abort();
+      if (activeGuestAdapter !== adapter || epoch !== draftAdapterEpoch) return;
+      ++draftAdapterEpoch;
+      const detached = detachDraftAdapters();
+      const teardown = disposeDetachedDraftAdapters(detached, true);
+      retainDraftSessionTeardown(detached.hostPersistenceId, teardown);
+      void teardown;
+      set(initialState);
+    };
+    config.signal?.addEventListener("abort", abortOwner, { once: true });
+    if (config.signal) activeGuestRouteAbortListener = { signal: config.signal, listener: abortOwner };
 
     set({
       ...initialState,
@@ -726,10 +915,76 @@ export const useMultiplayerDraftStore = create<
       phase: "connecting",
     });
 
+    let initialized = false;
     try {
-      await adapter.initialize(config);
+      await adapter.initialize({ ...config, signal: lifecycleSignal(controller) });
+      initialized = true;
     } catch {
-      // Error already emitted via adapter event
+      // See hostDraft: only the current owner is allowed to project errors.
+    } finally {
+      if (activeGuestAdapter !== adapter || epoch !== draftAdapterEpoch) {
+        config.signal?.removeEventListener("abort", abortOwner);
+        await disposeGuestAdapter(adapter);
+      } else if (!initialized || adapter.status === "error") {
+        activeGuestAdapter = null;
+        activeGuestAbort = null;
+        activeGuestEventUnsub?.();
+        activeGuestEventUnsub = null;
+        config.signal?.removeEventListener("abort", abortOwner);
+        activeGuestRouteAbortListener = null;
+        await disposeGuestAdapter(adapter);
+      }
+    }
+  },
+
+  resumeDraft: async (options = {}) => {
+    const routeToken = options.routeToken ?? 0;
+    if (
+      resumeGuestDraftAttempt
+      && resumeGuestDraftAttempt.routeToken === routeToken
+      && resumeGuestDraftAttempt.signal === options.signal
+    ) {
+      return resumeGuestDraftAttempt.promise;
+    }
+
+    const attempt: NonNullable<typeof resumeGuestDraftAttempt> = {
+      routeToken,
+      signal: options.signal,
+      promise: Promise.resolve("superseded"),
+    };
+    const isCurrent = () => resumeGuestDraftAttempt === attempt && !options.signal?.aborted;
+    attempt.promise = (async (): Promise<GuestDraftResumeOutcome> => {
+      if (options.signal?.aborted) return "superseded";
+      const locator = loadActiveDraftGuest();
+      if (!locator) return "absent";
+      const session = await loadDraftGuestSession(locator.hostPeerId, locator);
+      if (!isCurrent()) return "superseded";
+      if (!session) {
+        clearActiveDraftGuest();
+        return "invalid";
+      }
+
+      await get().joinDraft({
+        kind: "reconnect",
+        roomCode: locator.roomCode,
+        displayName: locator.displayName,
+        hostPeerId: locator.hostPeerId,
+        draftToken: session.draftToken,
+        signal: options.signal,
+      });
+      if (!isCurrent()) return "superseded";
+      if (activeGuestAdapter) return "resumed";
+      if (get().guestRecoveryFailure?.kind === "invalid") {
+        clearActiveDraftGuest();
+        return "invalid";
+      }
+      return "failed";
+    })();
+    resumeGuestDraftAttempt = attempt;
+    try {
+      return await attempt.promise;
+    } finally {
+      if (resumeGuestDraftAttempt === attempt) resumeGuestDraftAttempt = null;
     }
   },
 
@@ -812,13 +1067,15 @@ export const useMultiplayerDraftStore = create<
     }
     const fullDeck = [...mainDeck, ...landCards];
 
-    set({ submittedDeck: fullDeck });
-
     if (role === "host" && activeHostAdapter) {
       const view = await activeHostAdapter.submitDeck(fullDeck);
-      set({ view });
+      set({ view, submittedDeck: fullDeck });
     } else if (role === "guest" && activeGuestAdapter) {
       await activeGuestAdapter.submitDeck(fullDeck);
+      // The guest adapter resolves only on `draft_deck_submit_ack`, not after
+      // a DataChannel write.  This keeps the deck builder honest across a
+      // reload between submit and host durability.
+      set({ submittedDeck: fullDeck });
     }
   },
 
@@ -1159,25 +1416,26 @@ export const useMultiplayerDraftStore = create<
   },
 
   leave: async (preserveSession = false) => {
+    const epoch = ++draftAdapterEpoch;
     // Dispose match adapter first (game P2P connection)
     disposeMatchAdapter(set);
 
-    if (activeHostAdapter) {
-      await activeHostAdapter.dispose({ preserveSession });
-      activeHostAdapter = null;
-      if (!preserveSession) {
-        clearActiveDraftPod();
-      }
-    }
-    if (activeGuestAdapter) {
-      await activeGuestAdapter.dispose();
-      activeGuestAdapter = null;
-    }
+    const detached = detachDraftAdapters();
+    const teardown = disposeDetachedDraftAdapters(detached, preserveSession);
+    retainDraftSessionTeardown(detached.hostPersistenceId, teardown);
+    await teardown;
+    if (epoch !== draftAdapterEpoch) return;
+    if (detached.host && !preserveSession) clearActiveDraftPod();
     set(initialState);
   },
 
   reset: () => {
+    ++draftAdapterEpoch;
     disposeMatchAdapter(set);
+    const detached = detachDraftAdapters();
+    const teardown = disposeDetachedDraftAdapters(detached, true);
+    retainDraftSessionTeardown(detached.hostPersistenceId, teardown);
+    void teardown;
     set(initialState);
   },
 })));
@@ -1465,7 +1723,9 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
       set({ error: event.message });
       break;
     case "reconnecting":
+      break;
     case "reconnectFailed":
+      set({ error: event.failure.message, guestRecoveryFailure: event.failure });
       break;
     case "bo3SideboardPrompt":
       // No `phase` write — see `draftPodScreen`. The pod session is already

@@ -3078,6 +3078,10 @@ pub enum ManaSpendRestriction {
     /// accepts the legacy bare-`Zone` serialized form for backward compatibility,
     /// mapping it to the inclusion reading.
     SpellFromZone(ZoneSpend),
+    /// CR 106.6 + CR 601.2a: "This mana can't be spent to cast spells from
+    /// [zone]." Unlike `SpellFromZone(NotFrom)`, this prohibits one class of
+    /// spell cast without restricting ability, effect, or special-action costs.
+    CannotCastSpellFromZone(Zone),
     /// CR 106.6 + CR 116.2m + CR 709.5e: "Spend this mana only to unlock
     /// [a ]door[s]" — the special-action half of a spend restriction. A leaf of
     /// the [`ManaSpendRestriction::Any`] disjunction (Smoky Lounge: "cast Room
@@ -3174,6 +3178,7 @@ impl ManaSpendRestriction {
             | ManaSpendRestriction::SpellWithColorCount { .. }
             | ManaSpendRestriction::SpellOfSourceChosenColor
             | ManaSpendRestriction::SpellFromZone(_)
+            | ManaSpendRestriction::CannotCastSpellFromZone(_)
             | ManaSpendRestriction::UnlockDoor => true,
             // CR 106.6: coverage for a disjunction requires every named branch to
             // be production-live (`.all()`). Partial absorption would drop
@@ -11653,6 +11658,16 @@ pub enum EachDamageRecipient {
     /// ("each creature deals 1 damage to its controller"). A per-source recipient
     /// computed at resolution — surfaces no player-selectable target slot.
     EachController,
+    /// CR 120.1 + CR 608.2c: in an exactly two-object targeted batch, each
+    /// source deals to the other source ("each of those creatures ... to the
+    /// other"). Zero or one surviving/chosen object has no "other" and deals
+    /// no damage; any non-pair cardinality fails closed.
+    OtherBatchSource {
+        /// The two declared target-slot filters, in announcement order. These
+        /// remain the CR 608.2b legality authority at resolution; the compact
+        /// selected object list alone cannot prove type/controller legality.
+        source_filters: [Box<TargetFilter>; 2],
+    },
     // DEFERRED (§9, set-audit backlog): AttachedPermanent — each Aura source deals
     // to the permanent it's attached to (CR 303.4). Needs a new attachment
     // `FilterProp` (`AttachedToObjectOfType`) for the source filter; until then
@@ -12329,7 +12344,7 @@ pub enum Effect {
     },
     /// CR 120.1 + CR 120.3 + CR 608.2: Each object matching `sources` (evaluated
     /// at resolution time, CR 608.2) deals `amount` damage as its OWN source
-    /// (CR 120.1) to `recipient`. The filter-evaluated-source counterpart of
+    /// (CR 120.1) to `recipient`. Primarily the filter-evaluated-source counterpart of
     /// [`Effect::EachDealsDamageEqualToPower`] (whose sources are announced
     /// targets with a `multi_target` count and whose amount is each source's own
     /// power). Split as a sibling — not unified — because the source-selection
@@ -12338,17 +12353,21 @@ pub enum Effect {
     /// `QuantityExpr` so a future variable-amount filter-source card extends
     /// `amount` rather than adding a third sibling.
     ///
-    /// Covers "each <object class> [you control] deals N damage to <recipient>":
+    /// Covers "each <object class> [you control] deals N damage to <recipient>"
+    /// and the targeted pairwise "each of those ... to the other" shape:
     /// tribal pingers (Sarkhan the Masterless, Princess Snowfall), villainous-
     /// choice / modal pingers (Missy, Rakdos Charm), and Pestilence-adjacent "each
     /// creature deals" (Aura Barbs clause 1). `recipient` is an
-    /// [`EachDamageRecipient`] so "its controller" (per-source) and a shared
-    /// announced/context target are both expressed without a boolean.
+    /// [`EachDamageRecipient`] so "its controller" (per-source), a shared
+    /// announced/context target, and an exact reciprocal pair are expressed
+    /// without booleans.
     EachSourceDealsDamage {
         /// CR 608.2: The source class, evaluated against the battlefield at
         /// resolution. Each matching object is an independent damage source
-        /// (CR 120.1). Always a non-player object-class filter — player-shaped
-        /// subjects route to `DamageEachPlayer`.
+        /// (CR 120.1). Ordinarily a non-player object-class filter — player-shaped
+        /// subjects route to `DamageEachPlayer`. `ParentTarget` is reserved for
+        /// the typed `OtherBatchSource` pairwise relation, whose exact announced
+        /// objects are retained on the damage node.
         sources: TargetFilter,
         /// CR 120.1: Damage dealt by every source. Uniform across the batch
         /// (resolved once, CR 608.2) UNLESS the amount reads the per-source
@@ -12356,8 +12375,8 @@ pub enum Effect {
         /// in which case it is resolved per batch member (each source is the
         /// source of its own damage, CR 120.1).
         amount: QuantityExpr,
-        /// CR 120.3: The recipient resolution strategy (shared target vs
-        /// per-source controller).
+        /// CR 120.3: The recipient resolution strategy (shared target,
+        /// per-source controller, or the other member of an exact target pair).
         recipient: EachDamageRecipient,
     },
     /// CR 121.1: Draw a card.
@@ -17188,8 +17207,8 @@ impl Effect {
             // CR 115.1 / CR 608.2c: a `Shared` recipient is resolved exactly like
             // `DealDamage::target` — surface it so the same target-slot collection
             // and event-context hydration build / bind the recipient. The
-            // `EachController` and deferred per-source recipients carry no slot and
-            // fall through to the `None` group below.
+            // `EachController` carries no slot; `OtherBatchSource` reuses the
+            // two preceding `TargetOnly` slots. Both fall through to `None`.
             Effect::EachSourceDealsDamage {
                 recipient: EachDamageRecipient::Shared(filter),
                 ..
@@ -17491,11 +17510,13 @@ impl Effect {
             // spec, the recipient is one mandatory slot), not by `target_filter()`.
             | Effect::EachDealsDamageEqualToPower { .. }
             // CR 109.4 + CR 120.3a: `EachController` resolves per-source at the
-            // resolver — no player-selectable target slot. Exhaustive match
-            // ensures any future `EachDamageRecipient` variant must be
-            // explicitly decided here rather than silently falling through.
+            // resolver; `OtherBatchSource` reuses the preceding declared object
+            // slots. Neither surfaces another selectable slot. Exhaustive match
+            // ensures future recipient variants are explicitly decided here.
             | Effect::EachSourceDealsDamage {
-                recipient: EachDamageRecipient::EachController,
+                recipient:
+                    EachDamageRecipient::EachController
+                        | EachDamageRecipient::OtherBatchSource { .. },
                 ..
             }
             // CR 701.12a: player targets (player_a/player_b) are surfaced as
@@ -29019,6 +29040,7 @@ mod tests {
             polarity: ZoneSpendPolarity::From,
         })
         .is_coverage_supported());
+        assert!(ManaSpendRestriction::CannotCastSpellFromZone(Zone::Hand).is_coverage_supported());
         assert!(ManaSpendRestriction::UnlockDoor.is_coverage_supported());
         // CR 116.2b + CR 702.37e: the paid `GameAction::TurnFaceUp` handler makes
         // the turn-face-up special-action gate satisfiable.

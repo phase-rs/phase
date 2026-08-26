@@ -2492,6 +2492,11 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 match recipient {
                     EachDamageRecipient::Shared(filter) => fmt_target(filter),
                     EachDamageRecipient::EachController => "its controller".into(),
+                    EachDamageRecipient::OtherBatchSource { source_filters } => format!(
+                        "the other batch source of ({}, {})",
+                        fmt_target(&source_filters[0]),
+                        fmt_target(&source_filters[1]),
+                    ),
                 },
             ));
         }

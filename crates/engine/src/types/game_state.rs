@@ -11090,6 +11090,34 @@ impl GameState {
         });
     }
 
+    /// CR 903.3 + CR 111.6 + CR 704.3 + CR 704.5d: a token cannot be the
+    /// commander card named by a command-zone return choice. Older snapshots
+    /// can retain such an impossible choice after a copied commander spell left
+    /// the battlefield, so resume at the normal SBA boundary and let the token
+    /// cease-to-exist sweep remove it.
+    ///
+    /// This is intentionally limited to token-backed choices. A real commander
+    /// card in a graveyard or exile retains its owner-facing CR 903.9a choice.
+    pub fn resume_stale_token_commander_zone_choice(&mut self) {
+        let WaitingFor::CommanderZoneChoice { commander_id, .. } = &self.waiting_for else {
+            return;
+        };
+        if !self
+            .objects
+            .get(commander_id)
+            .is_some_and(|object| object.is_token)
+        {
+            return;
+        }
+
+        crate::game::priority::reset_priority(self);
+        let waiting_for = WaitingFor::Priority {
+            player: self.active_player,
+        };
+        crate::game::public_state::sync_waiting_for(self, &waiting_for);
+        crate::game::sba::check_state_based_actions(self, &mut Vec::new());
+    }
+
     /// CR 732.2a: the seat whose driving period `last_loop_action_sequence` currently records.
     ///
     /// CR 732.2a lets "the player with priority … suggest a shortcut by describing a sequence of
@@ -11250,6 +11278,7 @@ impl PersistedGameState {
         //     <saved>, so the next `capture_rng_word_pos` `.expect`-panicked `HighWaterRegression`.
         // Offline tooling (`phase-ai`'s `load_saved_game_state`) simply inherits the repair.
         state.rehydrate_rng();
+        state.resume_stale_token_commander_zone_choice();
         state
     }
 }

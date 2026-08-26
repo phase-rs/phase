@@ -131,6 +131,12 @@ pub fn commander_lethal_headroom(
 /// commander. Hand/library components are not eligible for this SBA helper.
 pub fn commander_eligible_for_zone_return(state: &GameState) -> Option<(ObjectId, PlayerId, Zone)> {
     state.objects.values().find_map(|obj| {
+        // CR 903.3 + CR 111.6: command-zone roles designate cards, not tokens.
+        // This defensive gate also lets CR 704.5d remove malformed legacy
+        // token copies instead of pausing SBA processing for an impossible choice.
+        if obj.is_token {
+            return None;
+        }
         // Oathbreaker RC: signature spells return to the command zone just like
         // commanders.
         if !obj.uses_command_zone_rules() {
@@ -565,6 +571,131 @@ mod tests {
 
         assert!(commander_eligible_for_zone_return(&state).is_none());
         let _ = obj_id; // suppress unused warning
+    }
+
+    #[test]
+    fn token_command_zone_roles_are_not_sba_eligible() {
+        let mut state = setup_commander_game();
+        let commander = create_commander_in_command_zone(
+            &mut state,
+            PlayerId(0),
+            "Malformed Commander Copy",
+            vec![],
+        );
+        let signature_card_id = CardId(state.next_object_id);
+        let signature_spell = create_object(
+            &mut state,
+            signature_card_id,
+            PlayerId(1),
+            "Malformed Signature Copy".to_string(),
+            Zone::Exile,
+        );
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, commander, Zone::Graveyard, &mut events);
+        state.objects.get_mut(&commander).unwrap().is_token = true;
+        let signature = state.objects.get_mut(&signature_spell).unwrap();
+        signature.is_token = true;
+        signature.mark_signature_spell();
+
+        assert!(
+            commander_eligible_for_zone_return(&state).is_none(),
+            "CR 903.3: tokens with copied command-zone roles are not eligible"
+        );
+    }
+
+    #[test]
+    fn token_command_zone_roles_cease_without_blocking_sba_progress() {
+        use crate::game::sba::check_state_based_actions;
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = setup_commander_game();
+        let commander = create_commander_in_command_zone(
+            &mut state,
+            PlayerId(0),
+            "Malformed Commander Copy",
+            vec![],
+        );
+        let signature_card_id = CardId(state.next_object_id);
+        let signature_spell = create_object(
+            &mut state,
+            signature_card_id,
+            PlayerId(1),
+            "Malformed Signature Copy".to_string(),
+            Zone::Exile,
+        );
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, commander, Zone::Graveyard, &mut events);
+        state.objects.get_mut(&commander).unwrap().is_token = true;
+        let signature = state.objects.get_mut(&signature_spell).unwrap();
+        signature.is_token = true;
+        signature.mark_signature_spell();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::CommanderZoneChoice { .. }),
+            "malformed token roles must not create an unreachable commander choice"
+        );
+        assert!(
+            !state.objects.contains_key(&commander)
+                && !state.objects.contains_key(&signature_spell),
+            "CR 704.5d: token copies outside the battlefield must cease to exist"
+        );
+    }
+
+    #[test]
+    fn non_token_commander_and_signature_spell_remain_sba_eligible() {
+        use crate::game::sba::check_state_based_actions;
+        use crate::types::game_state::WaitingFor;
+
+        let mut commander_state = setup_commander_game();
+        let commander = create_commander_in_command_zone(
+            &mut commander_state,
+            PlayerId(0),
+            "Commander",
+            vec![],
+        );
+        let mut commander_events = Vec::new();
+        crate::game::zones::move_to_zone(
+            &mut commander_state,
+            commander,
+            Zone::Graveyard,
+            &mut commander_events,
+        );
+        check_state_based_actions(&mut commander_state, &mut commander_events);
+        assert!(matches!(
+            commander_state.waiting_for,
+            WaitingFor::CommanderZoneChoice {
+                commander_id,
+                current_zone: Zone::Graveyard,
+                ..
+            } if commander_id == commander
+        ));
+
+        let mut signature_state = setup_commander_game();
+        let signature_card_id = CardId(signature_state.next_object_id);
+        let signature_spell = create_object(
+            &mut signature_state,
+            signature_card_id,
+            PlayerId(1),
+            "Signature Spell".to_string(),
+            Zone::Exile,
+        );
+        signature_state
+            .objects
+            .get_mut(&signature_spell)
+            .unwrap()
+            .mark_signature_spell();
+        let mut signature_events = Vec::new();
+        check_state_based_actions(&mut signature_state, &mut signature_events);
+        assert!(matches!(
+            signature_state.waiting_for,
+            WaitingFor::CommanderZoneChoice {
+                commander_id,
+                current_zone: Zone::Exile,
+                ..
+            } if commander_id == signature_spell
+        ));
     }
 
     // --- Control-Condition Phasing Tests (CR 702.26b) ---

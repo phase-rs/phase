@@ -131,8 +131,13 @@ export class DraftPodHostAdapter {
   private host: P2PDraftHost | null = null;
   private hostResult: HostResult | null = null;
   private hostEventUnsub: (() => void) | null = null;
+  /** Closes an in-flight local host before a replacement may be created. */
+  private pendingDispose: (() => Promise<void>) | null = null;
+  /** Settles only after a canceled initializer has released every local resource. */
+  private pendingInitialization: Promise<void> | null = null;
   private _status: DraftPodHostStatus = "idle";
   private _roomCode: string | null = null;
+  private disposed = false;
 
   onEvent(listener: DraftPodHostEventListener): () => void {
     this.listeners.push(listener);
@@ -167,13 +172,54 @@ export class DraftPodHostAdapter {
    * accepting guest connections.
    */
   async initialize(config: DraftPodHostConfig): Promise<void> {
+    this.disposed = false;
     this.setStatus("connecting");
+    let finishInitialization!: () => void;
+    const initializationSettled = new Promise<void>((resolve) => {
+      finishInitialization = resolve;
+    });
+    this.pendingInitialization = initializationSettled;
+    let pendingHost: P2PDraftHost | null = null;
+    let pendingHostDisposed = false;
+    let pendingHostResult: HostResult | null = null;
+    let pendingHostResultDestroyed = false;
+
+    const abortIfRequested = () => {
+      if (config.signal?.aborted || this.disposed) {
+        throw new Error("Draft pod host initialization aborted");
+      }
+    };
+    const disposePending = async () => {
+      if (this.hostEventUnsub) {
+        this.hostEventUnsub();
+        this.hostEventUnsub = null;
+      }
+      if (pendingHost && !pendingHostDisposed) {
+        pendingHostDisposed = true;
+        await pendingHost.dispose();
+      }
+      if (pendingHostResult && !pendingHostResultDestroyed) {
+        pendingHostResultDestroyed = true;
+        pendingHostResult.destroy();
+      }
+      if (pendingHostResult) {
+        if (this.hostResult === pendingHostResult) this.hostResult = null;
+        pendingHostResult = null;
+      }
+      this._roomCode = null;
+    };
+    this.pendingDispose = disposePending;
 
     try {
       // 1. Create PeerJS host peer
       const hostResult = await hostRoom(config.signal, {
         preferredRoomCode: config.preferredRoomCode,
       });
+      pendingHostResult = hostResult;
+      // `hostRoom` is only cancellation-aware while it is pending. Once it
+      // resolves, every following async boundary must re-check before making
+      // this peer discoverable or starting its local draft host.
+      abortIfRequested();
       this.hostResult = hostResult;
       this._roomCode = hostResult.roomCode;
       this.emit({ type: "roomCreated", roomCode: hostResult.roomCode });
@@ -192,9 +238,11 @@ export class DraftPodHostAdapter {
             hostPeerId: hostResult.peerId,
           });
         } catch (err) {
+          if (config.signal?.aborted || this.disposed) throw err;
           console.warn("[DraftPodHostAdapter] broker registration failed:", err);
           // Non-fatal: direct room code still works
         }
+        abortIfRequested();
       }
 
       // 3. For cube drafts, the WASM CARD_DB must be populated before
@@ -203,13 +251,18 @@ export class DraftPodHostAdapter {
       //    and never touches CARD_DB.
       if (config.poolInput.type === "Cube") {
         const resp = await fetch(__CARD_DATA_URL__);
+        abortIfRequested();
         if (!resp.ok) {
           throw new Error(`Failed to load card data: ${resp.status}`);
         }
-        await new DraftAdapter().loadCardDatabase(await resp.text());
+        const cardData = await resp.text();
+        abortIfRequested();
+        await new DraftAdapter().loadCardDatabase(cardData);
+        abortIfRequested();
       }
 
       // 4. Create P2PDraftHost
+      abortIfRequested();
       const host = new P2PDraftHost(
         hostResult.peer,
         hostResult.onGuestConnected,
@@ -223,6 +276,7 @@ export class DraftPodHostAdapter {
         config.persistenceId,
         hostResult.roomCode,
       );
+      pendingHost = host;
 
       // 4. Wire host events
       this.hostEventUnsub = host.onEvent((event) => {
@@ -232,8 +286,10 @@ export class DraftPodHostAdapter {
       // 5. Check for persisted session to restore
       if (config.persistenceId) {
         const persisted = await loadDraftHostSession(config.persistenceId);
+        abortIfRequested();
         if (persisted) {
           const view = await host.restoreFromPersisted(persisted);
+          abortIfRequested();
           if (view) {
             this.setStatus(hostStatusForView(view));
             this.emit({ type: "viewUpdated", view });
@@ -243,16 +299,31 @@ export class DraftPodHostAdapter {
 
       // 6. Start accepting connections
       await host.initialize();
+      abortIfRequested();
       this.host = host;
+      pendingHost = null;
+      pendingHostResult = null;
+      if (this.pendingDispose === disposePending) this.pendingDispose = null;
 
       if (this._status === "connecting") {
         this.setStatus("lobby");
       }
     } catch (err) {
+      await disposePending();
+      if (config.signal?.aborted || this.disposed) {
+        this.setStatus("idle");
+        throw err;
+      }
       this.setStatus("error");
       const message = err instanceof Error ? err.message : String(err);
       this.emit({ type: "error", message });
       throw err;
+    } finally {
+      finishInitialization();
+      if (this.pendingDispose === disposePending) this.pendingDispose = null;
+      if (this.pendingInitialization === initializationSettled) {
+        this.pendingInitialization = null;
+      }
     }
   }
 
@@ -496,13 +567,18 @@ export class DraftPodHostAdapter {
   // ── Cleanup ────────────────────────────────────────────────────────
 
   async dispose(options: { preserveSession?: boolean } = {}): Promise<void> {
+    this.disposed = true;
+    const pendingDispose = this.pendingDispose;
+    const pendingInitialization = this.pendingInitialization;
+    if (pendingDispose) await pendingDispose();
+    if (pendingInitialization) await pendingInitialization;
     if (this.hostEventUnsub) {
       this.hostEventUnsub();
       this.hostEventUnsub = null;
     }
     if (this.host) {
       if (options.preserveSession) {
-        this.host.dispose();
+        await this.host.dispose();
       } else {
         await this.host.terminateDraft();
       }

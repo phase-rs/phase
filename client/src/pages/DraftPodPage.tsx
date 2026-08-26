@@ -8,9 +8,9 @@
  * 4. Deckbuilding: LimitedDeckBuilder (reuses Quick Draft component)
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useNavigate, useSearchParams } from "react-router";
+import { useLocation, useNavigate, useSearchParams } from "react-router";
 
 import { MenuSelect } from "../components/ui/MenuSelect";
 import type { CardHoverInfo } from "../components/card/CardPreview";
@@ -38,6 +38,7 @@ import {
   intergamePromptKey,
   useMultiplayerDraftStore,
   type DraftPodScreen,
+  type GuestDraftResumeOutcome,
 } from "../stores/multiplayerDraftStore";
 import { useDraftPodStore } from "../stores/draftPodStore";
 
@@ -757,20 +758,31 @@ function CompleteView({ onLeave }: { onLeave: () => void }) {
 function PodErrorView({
   phase,
   onLeave,
+  onRetry,
 }: {
   phase: "error" | "kicked" | "hostLeft";
   onLeave: () => void;
+  onRetry: () => void;
 }) {
   const { t } = useTranslation("draft");
+  const recoveryFailure = useMultiplayerDraftStore((s) => s.guestRecoveryFailure);
   const message =
     phase === "kicked"
       ? t("podError.kicked")
       : phase === "hostLeft"
         ? t("podError.hostLeft")
-        : t("podError.connection");
+        : recoveryFailure?.message ?? t("podError.connection");
   return (
     <div className="flex flex-col items-center justify-center gap-4 py-24">
       <div className="text-xl font-medium text-red-300">{message}</div>
+      {phase === "error" && recoveryFailure?.kind === "retryable" && (
+        <button
+          onClick={onRetry}
+          className={menuButtonClass({ tone: "emerald", size: "md" })}
+        >
+          {t("podError.retry")}
+        </button>
+      )}
       <button
         onClick={onLeave}
         className={menuButtonClass({ tone: "neutral", size: "md" })}
@@ -787,6 +799,7 @@ function phaseContent(
   screen: DraftPodScreen,
   onLeave: () => void,
   onDismissOverlay: () => void,
+  onRetry: () => void,
 ): React.ReactNode {
   // No `default` arm: `tsc` is what makes a future `DraftPodScreen` member
   // impossible to forget here.
@@ -813,7 +826,7 @@ function phaseContent(
     case "error":
     case "kicked":
     case "hostLeft":
-      return <PodErrorView phase={screen} onLeave={onLeave} />;
+      return <PodErrorView phase={screen} onLeave={onLeave} onRetry={onRetry} />;
   }
 }
 
@@ -830,16 +843,71 @@ export function DraftPodPage() {
   const playDrawPending = useMultiplayerDraftStore((s) => s.playDrawPrompt !== null);
   const [dismissedPromptKey, setDismissedPromptKey] = useState<string | null>(null);
   const leave = useMultiplayerDraftStore((s) => s.leave);
+  const resumeDraft = useMultiplayerDraftStore((s) => s.resumeDraft);
   const resetPod = useDraftPodStore((s) => s.reset);
   const resumeHostedPod = useDraftPodStore((s) => s.resumeHostedPod);
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams] = useSearchParams();
+  const entryGeneration = useRef(0);
+  const retryController = useRef<AbortController | null>(null);
+  const entry = searchParams.get("entry");
+  const entryMode = entry === "host" || entry === "guest" || entry === "auto"
+    ? entry
+    : searchParams.get("resume") === "1" ? "host" : "auto";
 
   useEffect(() => {
-    if (searchParams.get("resume") !== "1") return;
-    void resumeHostedPod();
-  }, [resumeHostedPod, searchParams]);
+    const generation = entryGeneration;
+    const routeToken = ++generation.current;
+    const controller = new AbortController();
 
+    void (async () => {
+      if (entryMode === "host" || entryMode === "auto") {
+        // A host locator gets first claim on automatic entry. A guest locator
+        // is considered only after a terminal/invalid host locator has actually
+        // been cleared, so a damaged host record cannot steal a guest's route.
+        const outcome = await resumeHostedPod({
+          silent: entryMode === "auto",
+          routeToken,
+          signal: controller.signal,
+        });
+        if (generation.current !== routeToken) return;
+        if (entryMode === "host" || outcome === "resumed" || outcome === "superseded") return;
+
+        if (outcome === "absent" || outcome === "terminal" || outcome === "invalid") {
+          const guestOutcome: GuestDraftResumeOutcome = await resumeDraft({
+            routeToken,
+            signal: controller.signal,
+          });
+          if (generation.current !== routeToken || guestOutcome === "superseded") return;
+          if (guestOutcome === "resumed" || guestOutcome === "failed") return;
+        }
+      } else {
+        const guestOutcome: GuestDraftResumeOutcome = await resumeDraft({
+          routeToken,
+          signal: controller.signal,
+        });
+        if (generation.current !== routeToken || guestOutcome === "superseded") return;
+        return;
+      }
+    })();
+    return () => {
+      controller.abort();
+      retryController.current?.abort();
+      retryController.current = null;
+      if (generation.current === routeToken) generation.current++;
+    };
+  }, [entryMode, location.pathname, location.search, resumeDraft, resumeHostedPod]);
+
+  const retryGuestRecovery = useCallback(() => {
+    retryController.current?.abort();
+    const controller = new AbortController();
+    retryController.current = controller;
+    const routeToken = ++entryGeneration.current;
+    void resumeDraft({ routeToken, signal: controller.signal }).finally(() => {
+      if (retryController.current === controller) retryController.current = null;
+    });
+  }, [resumeDraft]);
   const handleLeave = useCallback(async () => {
     await leave(true);
     resetPod();
@@ -888,7 +956,7 @@ export function DraftPodPage() {
           </div>
         )}
         <div className="flex w-full flex-col">
-          {phaseContent(visibleScreen, handleLeave, () => setDismissedPromptKey(promptKey))}
+          {phaseContent(visibleScreen, handleLeave, () => setDismissedPromptKey(promptKey), retryGuestRecovery)}
         </div>
       </MenuShell>
 

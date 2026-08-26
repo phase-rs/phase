@@ -100,6 +100,11 @@ pub fn resolve(
         // allow-raw-zone: spell-copy birth directly on stack has no from-zone event (CR 707.10).
         copy_obj.zone = Zone::Stack;
         copy_obj.is_token = true;
+        // CR 903.3 + CR 707.10: commander is a card designation, so a spell
+        // copy is never a commander. Command-zone roles likewise belong only
+        // to the designated card, not its copy.
+        copy_obj.is_commander = false;
+        copy_obj.signature_spell = None;
         copy_obj.additional_cost_payment_count = 0;
         copy_obj.kickers_paid.clear();
         // CR 707.10: A copy of a spell is put on the stack; it is not cast.
@@ -1004,6 +1009,14 @@ mod tests {
             original_ability.clone(),
             CastingVariant::Normal,
         );
+        {
+            let original = state
+                .objects
+                .get_mut(&ObjectId(10))
+                .expect("original spell object exists");
+            original.is_commander = true;
+            original.mark_signature_spell();
+        }
 
         let copy_ability = ResolvedAbility::new(
             Effect::CopySpell {
@@ -1031,6 +1044,18 @@ mod tests {
         let copy_obj = state.objects.get(&copy_id).expect("copy object exists");
         assert!(copy_obj.is_token);
         assert_eq!(copy_obj.zone, Zone::Stack);
+        assert!(
+            !copy_obj.is_commander && !copy_obj.is_signature_spell(),
+            "CR 903.3: a spell copy must not inherit command-zone card roles"
+        );
+        let original = state
+            .objects
+            .get(&ObjectId(10))
+            .expect("original spell object remains");
+        assert!(
+            original.is_commander && original.is_signature_spell(),
+            "clearing copied roles must not mutate the original card"
+        );
 
         // Same spell kind
         match (&state.stack[0].kind, &state.stack[1].kind) {

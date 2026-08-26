@@ -3,8 +3,8 @@ use crate::types::ability::TapStateChange;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
     CardTypeSetSource, CastManaSpentMetric, CombatRelationSubject, ControllerRef,
-    CounterMoveSelection, DamageSource, Effect, EffectKind, EffectScope, FilterProp,
-    GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
+    CounterMoveSelection, DamageSource, EachDamageRecipient, Effect, EffectKind, EffectScope,
+    FilterProp, GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
     MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
     ResolvedAbility, RestrictionPlayerScope, SpellContext, SubAbilityLink, TargetChoiceTiming,
     TargetFilter, TargetRef, TriggerDefinition, TypeFilter, TypedFilter,
@@ -1839,6 +1839,7 @@ pub fn assign_targets_in_chain(
             "Unused selected targets".to_string(),
         ));
     }
+    stamp_other_batch_source_targets(ability);
     ability.capture_target_incarnations_recursive(state);
     Ok(())
 }
@@ -1865,8 +1866,51 @@ pub fn assign_selected_slots_in_chain(
             "Unused selected target slots".to_string(),
         ));
     }
+    stamp_other_batch_source_targets(ability);
     ability.capture_target_incarnations_recursive(state);
     Ok(())
+}
+
+/// CR 608.2c + CR 120.1: a pairwise "each of those ... to the other" damage
+/// node has no target slot of its own, but it must retain the exact announced
+/// object pair rather than inherit only the immediately preceding slot.
+/// Uses the two nearest `TargetOnly` producers in this branch. Empty optional
+/// slots remain in the window so older unrelated targets cannot backfill them.
+fn stamp_other_batch_source_targets(ability: &mut ResolvedAbility) {
+    fn visit(ability: &mut ResolvedAbility, recent_slots: &mut Vec<Vec<TargetRef>>) {
+        if matches!(ability.effect, Effect::TargetOnly { .. }) {
+            recent_slots.push(object_targets_only(&ability.targets));
+            if recent_slots.len() > 2 {
+                recent_slots.remove(0);
+            }
+        }
+
+        if matches!(
+            ability.effect,
+            Effect::EachSourceDealsDamage {
+                sources: TargetFilter::ParentTarget,
+                recipient: EachDamageRecipient::OtherBatchSource { .. },
+                ..
+            }
+        ) {
+            ability.targets = if recent_slots.len() == 2 {
+                recent_slots.iter().flatten().cloned().collect()
+            } else {
+                Vec::new()
+            };
+        }
+
+        let branch_slots = recent_slots.clone();
+        if let Some(sub) = ability.sub_ability.as_deref_mut() {
+            visit(sub, recent_slots);
+        }
+        if let Some(other) = ability.else_ability.as_deref_mut() {
+            let mut other_slots = branch_slots;
+            visit(other, &mut other_slots);
+        }
+    }
+
+    visit(ability, &mut Vec::new());
 }
 
 pub fn flatten_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
@@ -4077,6 +4121,19 @@ pub(crate) fn collect_player_targets(
     ability: &ResolvedAbility,
     target: &TargetFilter,
 ) -> Vec<PlayerId> {
+    // CR 608.2c: a definite player anaphor may name one exact slot in the
+    // flattened resolving chain after an intervening object target. Resolve
+    // that slot before inspecting this node's propagated local targets, which
+    // may contain only the most-recent object slot.
+    if let TargetFilter::ParentTargetSlot { index } = target {
+        return crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index)
+            .and_then(|target| match target {
+                TargetRef::Player(player) => Some(player),
+                TargetRef::Object(_) => None,
+            })
+            .into_iter()
+            .collect();
+    }
     let from_targets: Vec<PlayerId> = ability
         .targets
         .iter()
@@ -11844,6 +11901,291 @@ mod tests {
             progress.current_legal_targets,
             vec![TargetRef::Object(ObjectId(42))]
         );
+    }
+
+    #[test]
+    fn great_aerie_resolves_every_optional_target_combination() {
+        for (choose_yours, choose_opponents, expected_damage) in [
+            (false, false, [0, 0]),
+            (true, false, [0, 0]),
+            (false, true, [0, 0]),
+            (true, true, [3, 2]),
+        ] {
+            let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "The Great Aerie".to_string(),
+                Zone::Battlefield,
+            );
+            let yours = create_creature(&mut state, PlayerId(0), CardId(2), "Your Creature");
+            let opponents =
+                create_creature(&mut state, PlayerId(1), CardId(3), "Opponent Creature");
+            for (id, toughness) in [(yours, 2), (opponents, 3)] {
+                let creature = state.objects.get_mut(&id).expect("test creature");
+                creature.power = Some(1);
+                creature.toughness = Some(toughness);
+                creature.base_power = Some(1);
+                creature.base_toughness = Some(toughness);
+            }
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                "Whenever chaos ensues, choose up to one target creature you control and up to one target creature an opponent controls. Each of those creatures deals damage equal to its toughness to the other.",
+                "The Great Aerie",
+                &[],
+                &["Plane".to_string()],
+                &["Tarkir".to_string()],
+            );
+            let definition = parsed
+                .triggers
+                .iter()
+                .find(|trigger| {
+                    matches!(
+                        trigger.mode,
+                        crate::types::triggers::TriggerMode::ChaosEnsues
+                    )
+                })
+                .and_then(|trigger| trigger.execute.as_deref())
+                .expect("Great Aerie chaos trigger");
+            let mut ability = build_resolved_from_def(definition, source, PlayerId(0));
+            let slots = build_target_slots(&state, &ability).expect("two optional target slots");
+
+            assert_eq!(slots.len(), 2);
+            assert!(slots.iter().all(|slot| slot.optional));
+            let progress = begin_target_selection_for_ability(&state, &ability, &slots, &[])
+                .expect("selection starts");
+            let first = choose_yours.then_some(TargetRef::Object(yours));
+            let TargetSelectionAdvance::InProgress(progress) =
+                choose_target_for_ability(&state, &ability, &slots, &[], &progress, first)
+                    .expect("first optional slot resolves")
+            else {
+                panic!("second optional slot remains");
+            };
+            let second = choose_opponents.then_some(TargetRef::Object(opponents));
+            let TargetSelectionAdvance::Complete(selected) =
+                choose_target_for_ability(&state, &ability, &slots, &[], &progress, second)
+                    .expect("second optional slot resolves")
+            else {
+                panic!("two optional slots complete selection");
+            };
+
+            assign_selected_slots_in_chain(&state, &mut ability, &selected)
+                .expect("optional pair assigns without inventing targets");
+            let mut events = Vec::new();
+            crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+                .expect("Great Aerie target combination must resolve");
+            assert_eq!(
+                [
+                    state.objects[&yours].damage_marked,
+                    state.objects[&opponents].damage_marked,
+                ],
+                expected_damage,
+                "pairwise damage mismatch for choices ({choose_yours}, {choose_opponents})"
+            );
+        }
+    }
+
+    #[test]
+    fn grim_contest_resolves_mandatory_pairwise_damage() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Grim Contest".to_string(),
+            Zone::Stack,
+        );
+        let yours = create_creature(&mut state, PlayerId(0), CardId(2), "Your Creature");
+        let opponents = create_creature(&mut state, PlayerId(1), CardId(3), "Opponent Creature");
+        for (id, toughness) in [(yours, 2), (opponents, 4)] {
+            let creature = state.objects.get_mut(&id).expect("test creature");
+            creature.power = Some(1);
+            creature.toughness = Some(toughness);
+            creature.base_power = Some(1);
+            creature.base_toughness = Some(toughness);
+        }
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Choose target creature you control and target creature an opponent controls. Each of those creatures deals damage equal to its toughness to the other.",
+            "Grim Contest",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        let definition = parsed
+            .abilities
+            .first()
+            .expect("Grim Contest spell ability");
+        let mut ability = build_resolved_from_def(definition, source, PlayerId(0));
+        let slots = build_target_slots(&state, &ability).expect("two mandatory target slots");
+        assert_eq!(slots.len(), 2);
+        assert!(slots.iter().all(|slot| !slot.optional));
+
+        let progress = begin_target_selection_for_ability(&state, &ability, &slots, &[])
+            .expect("selection starts");
+        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[],
+            &progress,
+            Some(TargetRef::Object(yours)),
+        )
+        .expect("first mandatory target resolves") else {
+            panic!("second mandatory slot remains");
+        };
+        let TargetSelectionAdvance::Complete(selected) = choose_target_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[],
+            &progress,
+            Some(TargetRef::Object(opponents)),
+        )
+        .expect("second mandatory target resolves") else {
+            panic!("mandatory pair completes selection");
+        };
+
+        assign_selected_slots_in_chain(&state, &mut ability, &selected)
+            .expect("mandatory pair assigns");
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("Grim Contest resolves");
+        assert_eq!(state.objects[&yours].damage_marked, 4);
+        assert_eq!(state.objects[&opponents].damage_marked, 2);
+    }
+
+    #[test]
+    fn pairwise_damage_uses_nearest_two_target_producers() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Pairwise Source".to_string(),
+            Zone::Battlefield,
+        );
+        let unrelated = create_creature(&mut state, PlayerId(0), CardId(2), "Unrelated");
+        let first = create_creature(&mut state, PlayerId(0), CardId(3), "First");
+        let second = create_creature(&mut state, PlayerId(1), CardId(4), "Second");
+
+        let damage = ResolvedAbility::new(
+            Effect::EachSourceDealsDamage {
+                sources: TargetFilter::ParentTarget,
+                amount: QuantityExpr::Fixed { value: 1 },
+                recipient: EachDamageRecipient::OtherBatchSource {
+                    source_filters: [
+                        Box::new(TargetFilter::Typed(
+                            TypedFilter::creature().controller(ControllerRef::You),
+                        )),
+                        Box::new(TargetFilter::Typed(
+                            TypedFilter::creature().controller(ControllerRef::Opponent),
+                        )),
+                    ],
+                },
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        let mut second_target = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::Opponent),
+                ),
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        second_target.sub_ability = Some(Box::new(damage));
+        let mut first_target = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        first_target.sub_ability = Some(Box::new(second_target));
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(first_target));
+
+        let mut omitted_first = ability.clone();
+        omitted_first.targets = vec![TargetRef::Object(unrelated)];
+        omitted_first
+            .sub_ability
+            .as_deref_mut()
+            .expect("first pair slot")
+            .sub_ability
+            .as_deref_mut()
+            .expect("second pair slot")
+            .targets = vec![TargetRef::Object(second)];
+        stamp_other_batch_source_targets(&mut omitted_first);
+        let omitted_pairwise = omitted_first
+            .sub_ability
+            .as_deref()
+            .and_then(|a| a.sub_ability.as_deref())
+            .and_then(|a| a.sub_ability.as_deref())
+            .expect("pairwise damage node");
+        assert_eq!(
+            omitted_pairwise.targets,
+            vec![TargetRef::Object(second)],
+            "an omitted immediate slot must not be filled by an older target"
+        );
+
+        assign_targets_in_chain(
+            &state,
+            &mut ability,
+            &[
+                TargetRef::Object(unrelated),
+                TargetRef::Object(first),
+                TargetRef::Object(second),
+            ],
+        )
+        .expect("three declared targets assign");
+        let pairwise = ability
+            .sub_ability
+            .as_deref()
+            .and_then(|a| a.sub_ability.as_deref())
+            .and_then(|a| a.sub_ability.as_deref())
+            .expect("pairwise damage node");
+        assert_eq!(
+            pairwise.targets,
+            vec![TargetRef::Object(first), TargetRef::Object(second)],
+            "an unrelated older target must not enter the immediate pair"
+        );
+
+        let mut invalidated = state.clone();
+        let mut invalid_events = Vec::new();
+        crate::game::zones::move_to_zone(
+            &mut invalidated,
+            first,
+            Zone::Graveyard,
+            &mut invalid_events,
+        );
+        crate::game::effects::resolve_ability_chain(
+            &mut invalidated,
+            &ability,
+            &mut invalid_events,
+            0,
+        )
+        .expect("invalidated pair resolves as a no-op");
+        assert_eq!(invalidated.objects[&first].damage_marked, 0);
+        assert_eq!(invalidated.objects[&second].damage_marked, 0);
+
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("pairwise chain resolves");
+        assert_eq!(state.objects[&unrelated].damage_marked, 0);
+        assert_eq!(state.objects[&first].damage_marked, 1);
+        assert_eq!(state.objects[&second].damage_marked, 1);
     }
 
     #[test]

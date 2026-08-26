@@ -1,6 +1,6 @@
 import { registerSW } from "virtual:pwa-register";
 import { isBundledTauriOrigin } from "../services/platform";
-import { isMultiplayerGameLive, whenMultiplayerGameEnds } from "./multiplayerGuard";
+import { deferUntilMultiplayerSessionEnds } from "./multiplayerGuard";
 import { claimServiceWorkerReload, markPendingAutoUpdate } from "./updateMarker";
 import {
   claimUpdateStatus,
@@ -33,7 +33,7 @@ let ownsUpdateStatus = false;
  * is live. Applied when the game ends. Null when nothing is deferred.
  */
 let deferredUpdate: (() => void) | null = null;
-let deferredUpdateUnsub: (() => void) | null = null;
+let deferredUpdateCancel: (() => void) | null = null;
 
 /**
  * Deferred reload closure captured at `controllerchange` time when a MP
@@ -41,7 +41,7 @@ let deferredUpdateUnsub: (() => void) | null = null;
  * activation of a new SW while this tab is still mid-game.
  */
 let deferredReload: (() => void) | null = null;
-let deferredReloadUnsub: (() => void) | null = null;
+let deferredReloadCancel: (() => void) | null = null;
 
 function formatError(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
@@ -204,7 +204,16 @@ export function registerServiceWorker() {
     // Defer reload until a live multiplayer game ends — reloading mid-game
     // tears down the P2P DataChannel / WebSocket, forcing the opponent
     // into the disconnect grace window and breaking continuity.
-    if (isMultiplayerGameLive()) {
+    deferredReloadCancel?.();
+    deferredReload = doReload;
+    const scheduledReload = deferUntilMultiplayerSessionEnds(() => {
+      const fn = deferredReload;
+      deferredReload = null;
+      deferredReloadCancel = null;
+      fn?.();
+    }, "reload");
+
+    if (scheduledReload.deferred && deferredReload !== null) {
       pushUpdateDebug(
         "Service worker controller changed during multiplayer game; deferring reload until game ends.",
         "warn",
@@ -212,18 +221,9 @@ export function registerServiceWorker() {
       if (claimServiceWorkerUpdateStatus()) {
         setServiceWorkerUpdateStatus("deferred");
       }
-      deferredReload = doReload;
-      deferredReloadUnsub = whenMultiplayerGameEnds(() => {
-        pushUpdateDebug("Multiplayer game ended; applying deferred reload.");
-        const fn = deferredReload;
-        deferredReload = null;
-        deferredReloadUnsub = null;
-        fn?.();
-      });
+      deferredReloadCancel = scheduledReload.cancel;
       return;
     }
-
-    doReload();
   });
 
   const updateSW = registerSW({
@@ -249,7 +249,16 @@ export function registerServiceWorker() {
       // `updateSW(true)` triggers skipWaiting → controllerchange → reload,
       // which would drop the user's live connection mid-game. Leave the new
       // SW parked in "installed" until the game ends, then activate.
-      if (isMultiplayerGameLive()) {
+      deferredUpdateCancel?.();
+      deferredUpdate = applyUpdate;
+      const scheduledUpdate = deferUntilMultiplayerSessionEnds(() => {
+        const fn = deferredUpdate;
+        deferredUpdate = null;
+        deferredUpdateCancel = null;
+        fn?.();
+      }, "activation");
+
+      if (scheduledUpdate.deferred && deferredUpdate !== null) {
         pushUpdateDebug(
           "Update ready during multiplayer game; deferring activation until game ends.",
           "warn",
@@ -262,19 +271,9 @@ export function registerServiceWorker() {
           setServiceWorkerDownloadProgress(0);
           setServiceWorkerUpdateStatus("deferred");
         }
-        deferredUpdate = applyUpdate;
-        deferredUpdateUnsub?.();
-        deferredUpdateUnsub = whenMultiplayerGameEnds(() => {
-          pushUpdateDebug("Multiplayer game ended; applying deferred update.");
-          const fn = deferredUpdate;
-          deferredUpdate = null;
-          deferredUpdateUnsub = null;
-          fn?.();
-        });
+        deferredUpdateCancel = scheduledUpdate.cancel;
         return;
       }
-
-      applyUpdate();
     },
     onRegisteredSW(swUrl, swRegistration) {
       if (!swRegistration) return;
@@ -379,8 +378,8 @@ export function registerServiceWorker() {
           clearActivationTimeout();
           document.removeEventListener("visibilitychange", handleVisibilityChange);
           manualCheckForUpdate = null;
-          deferredUpdateUnsub?.();
-          deferredReloadUnsub?.();
+          deferredUpdateCancel?.();
+          deferredReloadCancel?.();
           releaseUpdateStatus("serviceWorker");
           ownsUpdateStatus = false;
         },

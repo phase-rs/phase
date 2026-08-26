@@ -3082,6 +3082,8 @@ export function manaRestrictionLabel(
       return t("gamePage.manaRestrictions.onlyForSpellColor", restriction.data);
     case "onlyForSpellFromZone":
       return t("gamePage.manaRestrictions.onlyForSpellFromZone", restriction.data);
+    case "cannotCastSpellFromZone":
+      return t("gamePage.manaRestrictions.cannotCastSpellFromZone", restriction.data);
     case "onlyForFaceDownSpell":
       return t("gamePage.manaRestrictions.onlyForFaceDownSpell");
     case "onlyForAny":

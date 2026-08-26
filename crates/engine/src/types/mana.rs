@@ -614,6 +614,10 @@ pub enum ManaRestriction {
     /// accepts the legacy bare-`Zone` form (`{"OnlyForSpellFromZone":"Graveyard"}`)
     /// for backward compatibility, mapping it to the inclusion reading.
     OnlyForSpellFromZone(ZoneSpend),
+    /// CR 106.6 + CR 601.2g-h: This mana cannot pay for a spell cast from the
+    /// named zone. It remains unrestricted for every non-cast payment context.
+    /// A spell whose origin is unknown is rejected conservatively.
+    CannotCastSpellFromZone(Zone),
     /// CR 106.6 + CR 708.4: "Spend this mana only to cast face-down spells"
     /// (Tin Street Gossip). Gates spending on whether the spell is being CAST
     /// face down (morph/disguise/cloak), consulting `SpellMeta.is_face_down`.
@@ -873,11 +877,12 @@ fn cmp_mana_restriction(left: &ManaRestriction, right: &ManaRestriction) -> std:
             ManaRestriction::OnlyForSpellWithColorCount { .. } => 11,
             ManaRestriction::OnlyForSpellColor(_) => 12,
             ManaRestriction::OnlyForSpellFromZone(_) => 13,
-            ManaRestriction::OnlyForFaceDownSpell => 14,
-            ManaRestriction::OnlyForAny(_) => 15,
-            ManaRestriction::OnlyForSpecialAction(_) => 16,
-            ManaRestriction::Impossible => 17,
-            ManaRestriction::ConvokePayment => 18,
+            ManaRestriction::CannotCastSpellFromZone(_) => 14,
+            ManaRestriction::OnlyForFaceDownSpell => 15,
+            ManaRestriction::OnlyForAny(_) => 16,
+            ManaRestriction::OnlyForSpecialAction(_) => 17,
+            ManaRestriction::Impossible => 18,
+            ManaRestriction::ConvokePayment => 19,
         }
     }
     rank(left).cmp(&rank(right)).then_with(|| match (left, right) {
@@ -955,6 +960,10 @@ fn cmp_mana_restriction(left: &ManaRestriction, right: &ManaRestriction) -> std:
         ) => a.zone.cmp(&b.zone).then_with(|| {
             zone_spend_polarity_rank(a.polarity).cmp(&zone_spend_polarity_rank(b.polarity))
         }),
+        (
+            ManaRestriction::CannotCastSpellFromZone(a),
+            ManaRestriction::CannotCastSpellFromZone(b),
+        ) => a.cmp(b),
         (ManaRestriction::OnlyForAny(a), ManaRestriction::OnlyForAny(b)) => {
             cmp_mana_restriction_slices(a, b)
         }
@@ -1169,6 +1178,9 @@ impl ManaRestriction {
                     .cast_from_zone
                     .is_some_and(|cast_from| cast_from != zs.zone),
             },
+            ManaRestriction::CannotCastSpellFromZone(zone) => meta
+                .cast_from_zone
+                .is_some_and(|cast_from| cast_from != *zone),
             // CR 708.4: Face-down-spell-gated spend. The eligibility predicate is
             // `meta.is_face_down` — a spell qualifies only when it is being CAST
             // face down (morph/disguise/cloak); normal face-up casts are
@@ -1221,6 +1233,7 @@ impl ManaRestriction {
             // CR 116.2: Special-action-only mana never pays for ability activation.
             | ManaRestriction::OnlyForSpecialAction(_)
             | ManaRestriction::Impossible => false,
+            ManaRestriction::CannotCastSpellFromZone(_) => true,
             // CR 106.6: The ability-activation half of the OR. `OfSpellType`
             // restricts to abilities of permanents whose type matches the
             // restriction ("Elemental sources" includes creature type Elemental —
@@ -1265,23 +1278,28 @@ impl ManaRestriction {
                 ability_tag,
                 mana_color_constraint: _,
             } => self.allows_activation(source_types, source_subtypes, *ability_tag),
-            PaymentContext::Effect => false,
-            // CR 116.2: A special-action payment is permitted only by mana that
-            // is restricted to that exact special-action class, or by a
-            // disjunction that contains such a branch. Spell/activation/generic
-            // effect restrictions all reject it.
+            PaymentContext::Effect => match self {
+                ManaRestriction::CannotCastSpellFromZone(_) => true,
+                ManaRestriction::OnlyForAny(subs) => subs.iter().any(|r| r.allows(ctx)),
+                _ => false,
+            },
+            // CR 116.2: Positive "only for" restrictions must authorize this
+            // exact special-action class (directly or through a disjunction).
+            // A negative restriction naming only one spell-cast class does not
+            // restrict special-action payments.
             PaymentContext::SpecialAction(action) => self.allows_special_action(*action),
         }
     }
 
     /// CR 106.6 + CR 116.2: Returns `true` if this restriction permits spending
-    /// mana on the given special action (e.g. a Room door unlock). Only
-    /// [`ManaRestriction::OnlyForSpecialAction`] with a matching action — or a
-    /// disjunction containing one — qualifies; every spell/activation/effect
-    /// restriction rejects special actions.
+    /// mana on the given special action (e.g. a Room door unlock). An exact
+    /// [`ManaRestriction::OnlyForSpecialAction`] or a matching disjunction may
+    /// authorize one; a restriction that prohibits only a spell-cast class does
+    /// not restrict special actions at all.
     pub fn allows_special_action(&self, action: SpecialAction) -> bool {
         match self {
             ManaRestriction::OnlyForSpecialAction(allowed) => *allowed == action,
+            ManaRestriction::CannotCastSpellFromZone(_) => true,
             ManaRestriction::OnlyForAny(subs) => {
                 subs.iter().any(|r| r.allows_special_action(action))
             }
@@ -4134,6 +4152,26 @@ mod tests {
                 polarity: ZoneSpendPolarity::From,
             })
         );
+    }
+
+    #[test]
+    fn cannot_cast_from_zone_restriction_serde_round_trips() {
+        let restriction = ManaRestriction::CannotCastSpellFromZone(Zone::Hand);
+        let json = serde_json::to_string(&restriction).unwrap();
+        assert_eq!(json, r#"{"CannotCastSpellFromZone":"Hand"}"#);
+        assert_eq!(
+            serde_json::from_str::<ManaRestriction>(&json).unwrap(),
+            restriction
+        );
+
+        // ManaUnit is embedded in GameState and resolved-command journals, so
+        // this proves the new externally tagged leaf survives the actual wire
+        // carrier rather than only a standalone enum round trip.
+        let unit = ManaUnit::new(ManaType::Green, ObjectId(7), false, vec![restriction]);
+        let unit_json = serde_json::to_string(&unit).unwrap();
+        let decoded: ManaUnit = serde_json::from_str(&unit_json).unwrap();
+        assert_eq!(decoded, unit);
+        assert!(unit_json.contains(r#""CannotCastSpellFromZone":"Hand""#));
     }
 
     #[test]

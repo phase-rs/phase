@@ -11,11 +11,15 @@
  */
 
 import type { DraftPlayerView, SeatPublicView } from "./draft-adapter";
-import { P2PDraftGuest, type DraftGuestEvent } from "./p2p-draft-guest";
+import {
+  P2PDraftGuest,
+  type DraftGuestConnection,
+  type DraftGuestEvent,
+  type DraftGuestRecoveryFailure,
+} from "./p2p-draft-guest";
 import type { DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from "../network/draftProtocol";
 import type { DraftIntergameCommand, DraftIntergameCommandAck } from "../services/intergameCommandLedger";
 import { joinRoom, type JoinResult } from "../network/connection";
-import { loadDraftGuestSession } from "../services/draftPersistence";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -37,6 +41,7 @@ export type DraftPodGuestEvent =
   | { type: "reconnected"; seatIndex: number }
   | { type: "viewUpdated"; view: DraftPlayerView }
   | { type: "pickAcknowledged"; view: DraftPlayerView }
+  | { type: "deckSubmissionAcknowledged"; submissionId: string; view: DraftPlayerView }
   | { type: "lobbyUpdate"; seats: SeatPublicView[]; joined: number; total: number }
   | { type: "draftPaused"; reason: DraftPauseReason }
   | { type: "draftResumed" }
@@ -61,11 +66,25 @@ export type DraftPodGuestEvent =
   | { type: "hostLeft"; reason: string }
   | { type: "error"; message: string }
   | { type: "reconnecting"; attempt: number }
-  | { type: "reconnectFailed"; reason: string };
+  | { type: "reconnectFailed"; failure: DraftGuestRecoveryFailure };
 
 type DraftPodGuestEventListener = (event: DraftPodGuestEvent) => void;
 
-export interface DraftPodGuestConfig {
+const INITIAL_RECONNECT_JOIN_ATTEMPTS = 3;
+const INITIAL_RECONNECT_JOIN_BACKOFF_MS = [500, 1_000] as const;
+
+class HostIdentityMismatchError extends Error {
+  constructor() {
+    super("Draft pod host changed; reconnect credentials were not sent");
+    this.name = "HostIdentityMismatchError";
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+interface DraftPodGuestConnectionBase {
   roomCode: string;
   displayName: string;
   /** Abort signal for cancellation during connection. */
@@ -73,6 +92,11 @@ export interface DraftPodGuestConfig {
   /** Connection timeout in ms (default 30s). */
   timeoutMs?: number;
 }
+
+/** New joins and credentialed reconnects are intentionally disjoint. */
+export type DraftPodGuestConfig =
+  | ({ kind: "new" } & DraftPodGuestConnectionBase)
+  | ({ kind: "reconnect"; hostPeerId: string; draftToken: string } & DraftPodGuestConnectionBase);
 
 // ── DraftPodGuestAdapter ───────────────────────────────────────────────
 
@@ -85,6 +109,7 @@ export class DraftPodGuestAdapter {
   private _seatIndex: number | null = null;
   private _draftCode: string | null = null;
   private _currentView: DraftPlayerView | null = null;
+  private recoveryFailure: DraftGuestRecoveryFailure | null = null;
 
   onEvent(listener: DraftPodGuestEventListener): () => void {
     this.listeners.push(listener);
@@ -122,53 +147,100 @@ export class DraftPodGuestAdapter {
 
   // ── Initialization ─────────────────────────────────────────────────
 
-  /**
-   * Connect to a draft pod host via PeerJS room code. Checks for an
-   * existing draft token in IndexedDB for reconnection.
-   */
+  /** Connect to a draft pod host and wait for its first authoritative ack. */
   async initialize(config: DraftPodGuestConfig): Promise<void> {
     this.setStatus("connecting");
 
     try {
       // 1. Join the PeerJS room
-      const joinResult = await joinRoom(
-        config.roomCode,
-        config.signal,
-        config.timeoutMs,
-      );
+      const { joinResult, reconnectAttemptLimit } = await this.openRoom(config);
       this.joinResult = joinResult;
 
-      // 2. Check for existing draft token (reconnect case)
-      const persisted = await loadDraftGuestSession(joinResult.conn.peer);
-      const existingToken = persisted?.draftToken;
+      // The code route and the IndexedDB capability are both bound to this
+      // exact host. A different PeerJS target must never receive the token.
+      if (config.kind === "reconnect" && joinResult.conn.peer !== config.hostPeerId) {
+        joinResult.destroyPeer();
+        this.joinResult = null;
+        throw new HostIdentityMismatchError();
+      }
 
-      // 3. Create P2PDraftGuest
+      const connection: DraftGuestConnection = config.kind === "new"
+        ? { kind: "new", roomCode: config.roomCode, displayName: config.displayName }
+        : {
+          kind: "reconnect",
+          roomCode: config.roomCode,
+          displayName: config.displayName,
+          draftToken: config.draftToken,
+        };
+
+      // 2. Create P2PDraftGuest
       const guest = new P2PDraftGuest(
         joinResult.peer,
         joinResult.conn.peer,
         joinResult.conn,
-        config.displayName,
-        existingToken,
+        connection,
       );
 
-      // 4. Wire guest events
+      // 3. Wire guest events
       this.guestEventUnsub = guest.onEvent((event) => {
         this.handleGuestEvent(event);
       });
 
-      // 5. Initialize (sends join or reconnect message)
-      await guest.initialize();
+      // 4. Initialize only resolves after welcome/reconnect acknowledgement.
+      // Retain ownership before awaiting so supersession can abort an
+      // acknowledgement wait without revoking the persisted capability.
       this.guest = guest;
+      if (reconnectAttemptLimit === undefined) {
+        await guest.initialize(config.signal);
+      } else {
+        await guest.initialize(config.signal, reconnectAttemptLimit);
+      }
 
       if (this._status === "connecting") {
         this.setStatus("lobby");
       }
     } catch (err) {
+      if (isAbortError(err)) throw err;
       this.setStatus("error");
       const message = err instanceof Error ? err.message : String(err);
+      if (config.kind === "reconnect" && !this.recoveryFailure) {
+        const failure: DraftGuestRecoveryFailure = err instanceof HostIdentityMismatchError
+          ? { kind: "invalid", message }
+          : { kind: "retryable", message };
+        this.recoveryFailure = failure;
+        this.emit({ type: "reconnectFailed", failure });
+      }
       this.emit({ type: "error", message });
       throw err;
     }
+  }
+
+  /** A fresh seat never retries; a persisted reconnect capability gets a small, abortable join budget. */
+  private async openRoom(
+    config: DraftPodGuestConfig,
+  ): Promise<{ joinResult: JoinResult; reconnectAttemptLimit?: number }> {
+    if (config.kind === "new") {
+      return { joinResult: await joinRoom(config.roomCode, config.signal, config.timeoutMs) };
+    }
+
+    let lastError: unknown;
+    for (let attempt = 0; attempt < INITIAL_RECONNECT_JOIN_ATTEMPTS; attempt++) {
+      if (config.signal?.aborted) throw abortError();
+      try {
+        return {
+          joinResult: await joinRoom(config.roomCode, config.signal, config.timeoutMs),
+          // The initial room join consumes the same bounded recovery budget as
+          // a later acknowledgement retry; the first handshake always gets one
+          // attempt after a successful room connection.
+          reconnectAttemptLimit: Math.max(1, INITIAL_RECONNECT_JOIN_ATTEMPTS - attempt),
+        };
+      } catch (error) {
+        lastError = error;
+        if (config.signal?.aborted || attempt === INITIAL_RECONNECT_JOIN_ATTEMPTS - 1) break;
+        await waitForReconnectJoinBackoff(INITIAL_RECONNECT_JOIN_BACKOFF_MS[attempt]!, config.signal);
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 
   // ── Guest event mapping ────────────────────────────────────────────
@@ -197,6 +269,14 @@ export class DraftPodGuestAdapter {
       case "pickAcknowledged":
         this._currentView = event.view;
         this.emit({ type: "pickAcknowledged", view: event.view });
+        break;
+      case "deckSubmissionAcknowledged":
+        this._currentView = event.view;
+        this.emit({
+          type: "deckSubmissionAcknowledged",
+          submissionId: event.submissionId,
+          view: event.view,
+        });
         break;
       case "lobbyUpdate":
         this.emit({
@@ -263,7 +343,8 @@ export class DraftPodGuestAdapter {
         break;
       case "reconnectFailed":
         this.setStatus("error");
-        this.emit({ type: "reconnectFailed", reason: event.reason });
+        this.recoveryFailure = event.failure;
+        this.emit({ type: "reconnectFailed", failure: event.failure });
         break;
       case "bo3SideboardPrompt":
         this.emit({
@@ -375,13 +456,21 @@ export class DraftPodGuestAdapter {
 
   // ── Cleanup ────────────────────────────────────────────────────────
 
-  async dispose(): Promise<void> {
+  /**
+   * Transport/lifecycle disposal preserves credentials by default. Only an
+   * explicit participant leave is allowed to revoke durable guest recovery.
+   */
+  async dispose({ preserveRecovery = true }: { preserveRecovery?: boolean } = {}): Promise<void> {
     if (this.guestEventUnsub) {
       this.guestEventUnsub();
       this.guestEventUnsub = null;
     }
     if (this.guest) {
-      await this.guest.leave();
+      if (preserveRecovery) {
+        this.guest.dispose();
+      } else {
+        await this.guest.leave();
+      }
       this.guest = null;
     }
     if (this.joinResult) {
@@ -394,4 +483,23 @@ export class DraftPodGuestAdapter {
     this._draftCode = null;
     this.setStatus("idle");
   }
+}
+
+function waitForReconnectJoinBackoff(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(abortError());
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function abortError(): Error {
+  return new DOMException("Draft reconnect aborted", "AbortError");
 }

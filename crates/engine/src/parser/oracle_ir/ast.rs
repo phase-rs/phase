@@ -1509,7 +1509,9 @@ pub(crate) enum ChooseImperativeAst {
     /// sub_ability lattice.
     TwoTargets {
         target_a: TargetFilter,
-        target_b: TargetFilter,
+        target_a_multi_target: Option<MultiTargetSpec>,
+        target_b: Box<TargetFilter>,
+        target_b_multi_target: Option<MultiTargetSpec>,
     },
     /// CR 608.2d + CR 122.1: "choose a counter on it / that permanent" — pick one
     /// of the distinct counter kinds present on the anaphoric object (The Caves

@@ -17,16 +17,26 @@ vi.mock("idb-keyval", () => ({
 
 import {
   clearActiveDraftPod,
+  clearActiveDraftPodIfCurrent,
+  clearActiveDraftGuest,
+  clearDraftGuestRecovery,
   clearDraftGuestSession,
+  clearDraftDeckSubmission,
   clearDraftHostSession,
   loadActiveDraftPod,
+  loadActiveDraftGuest,
+  inspectActiveDraftPod,
   loadDraftGuestSession,
+  loadDraftDeckSubmission,
   loadDraftHostSession,
   loadDraftIntergameCommands,
   loadDraftSettlementOutbox,
   saveActiveDraftPod,
+  saveActiveDraftGuest,
   saveDraftGuestSession,
+  saveDraftDeckSubmission,
   saveDraftHostSession,
+  persistedDraftHostSessionState,
   saveDraftIntergameCommands,
   saveDraftSettlementOutbox,
 } from "../draftPersistence";
@@ -83,6 +93,14 @@ describe("draftPersistence", () => {
       expect(loaded!.draftStarted).toBe(false);
     });
 
+    it("accepts a live pre-draft lobby before it has generated a draft code", async () => {
+      const lobby = { ...testSession, draftStarted: false, draftSessionJson: null, draftCode: "" };
+      await saveDraftHostSession(lobby.persistenceId, lobby);
+
+      await expect(loadDraftHostSession(lobby.persistenceId)).resolves.toEqual(lobby);
+      expect(persistedDraftHostSessionState(lobby)).toBe("live");
+    });
+
     it("returns null for legacy snapshots missing poolInput (C6 shape guard)", async () => {
       // Simulate a pre-#1253 snapshot with the flat setPoolJson field.
       const legacy = {
@@ -121,6 +139,27 @@ describe("draftPersistence", () => {
       const loaded = await loadDraftHostSession("cube-1");
       expect(loaded).toEqual(cubeSession);
       expect(loaded?.poolInput.type).toBe("Cube");
+    });
+
+    it("rejects persisted Set and Cube snapshots missing data used by resume", async () => {
+      mockStore.set("phase-draft-host:bad-set", {
+        ...testSession,
+        poolInput: { type: "Set", data: {} },
+      });
+      mockStore.set("phase-draft-host:bad-cube", {
+        ...testSession,
+        poolInput: {
+          type: "Cube",
+          data: {
+            cube_list_text: "1 Lightning Bolt",
+            cube_name: "Cube",
+            cube_draft_settings: { pod_size: 8 },
+          },
+        },
+      });
+
+      await expect(loadDraftHostSession("bad-set")).resolves.toBeNull();
+      await expect(loadDraftHostSession("bad-cube")).resolves.toBeNull();
     });
 
     it("saves and loads active host resume metadata", () => {
@@ -162,6 +201,54 @@ describe("draftPersistence", () => {
 
       expect(loadActiveDraftPod()).toBeNull();
     });
+
+    it("does not clear metadata replaced while an older resume was loading", () => {
+      const older = {
+        id: "test-draft-1", roomCode: "ABCDE", updatedAt: Date.now(),
+      };
+      saveActiveDraftPod({
+        id: older.id,
+        roomCode: older.roomCode,
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Alice",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+        phase: "drafting",
+        pickCount: 1,
+        updatedAt: older.updatedAt,
+      });
+      saveActiveDraftPod({
+        id: "new-draft",
+        roomCode: "FGHJK",
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Alice",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+        phase: "lobby",
+        pickCount: 0,
+        updatedAt: older.updatedAt + 1,
+      });
+
+      clearActiveDraftPodIfCurrent(older);
+
+      expect(loadActiveDraftPod()).toMatchObject({ id: "new-draft", roomCode: "FGHJK" });
+    });
+
+    it("classifies only live snapshot states as host-resumable", () => {
+      expect(persistedDraftHostSessionState({ ...testSession, draftStarted: false, draftSessionJson: null })).toBe("live");
+      expect(persistedDraftHostSessionState(testSession)).toBe("live");
+      expect(persistedDraftHostSessionState({ ...testSession, draftSessionJson: '{"status":"Complete"}' })).toBe("terminal");
+      expect(persistedDraftHostSessionState({ ...testSession, draftSessionJson: '{"status":"Abandoned"}' })).toBe("invalid");
+      expect(persistedDraftHostSessionState({ ...testSession, draftSessionJson: "not json" })).toBe("invalid");
+    });
+
+    it("reports malformed active metadata as invalid", () => {
+      localStorage.setItem("phase-active-draft-pod", JSON.stringify({ id: "draft", roomCode: "lower", updatedAt: 1 }));
+
+      expect(inspectActiveDraftPod()).toMatchObject({ type: "invalid" });
+    });
   });
 
   it("persists a held intergame command until its receipt", async () => {
@@ -193,11 +280,30 @@ describe("draftPersistence", () => {
   });
 
   describe("guest session", () => {
+    it("canonicalizes a deck submission room code for replay and removal", async () => {
+      await saveDraftDeckSubmission("phase2-HOST1", {
+        draftCode: "draft-xyz",
+        roomCode: " abcde ",
+        draftToken: "token-abc",
+        submissionId: "submission-1",
+        mainDeck: ["Island"],
+      });
+
+      await expect(loadDraftDeckSubmission("phase2-HOST1", {
+        roomCode: "abcde",
+        draftToken: "token-abc",
+      })).resolves.toMatchObject({ roomCode: "ABCDE" });
+      await clearDraftDeckSubmission("phase2-HOST1", "submission-1");
+      await expect(loadDraftDeckSubmission("phase2-HOST1")).resolves.toBeNull();
+    });
+
     it("saves and loads a guest session", async () => {
       await saveDraftGuestSession("phase2-HOST1", {
         draftToken: "token-abc",
         seatIndex: 3,
         draftCode: "draft-xyz",
+        roomCode: "ABCDE",
+        displayName: "Alice",
       });
 
       const loaded = await loadDraftGuestSession("phase2-HOST1");
@@ -206,6 +312,8 @@ describe("draftPersistence", () => {
       expect(loaded!.seatIndex).toBe(3);
       expect(loaded!.draftCode).toBe("draft-xyz");
       expect(loaded!.hostPeerId).toBe("phase2-HOST1");
+      expect(loaded!.roomCode).toBe("ABCDE");
+      expect(loaded!.displayName).toBe("Alice");
     });
 
     it("returns null for expired session", async () => {
@@ -214,6 +322,8 @@ describe("draftPersistence", () => {
         draftToken: "old-token",
         seatIndex: 1,
         draftCode: "draft-old",
+        roomCode: "ABCDE",
+        displayName: "Alice",
       });
 
       // Manually patch the stored timestamp to simulate expiry
@@ -231,15 +341,76 @@ describe("draftPersistence", () => {
       expect(loaded).toBeNull();
     });
 
+    it("refuses a token record stored under a different host peer key", async () => {
+      mockStore.set("phase-draft-guest:phase2-EXPECTED", {
+        hostPeerId: "phase2-OTHER",
+        draftToken: "cross-key-token",
+        seatIndex: 1,
+        draftCode: "draft-xyz",
+        roomCode: "ABCDE",
+        displayName: "Alice",
+        timestamp: Date.now(),
+      });
+
+      await expect(loadDraftGuestSession("phase2-EXPECTED", {
+        roomCode: "ABCDE",
+        displayName: "Alice",
+      })).resolves.toBeNull();
+    });
+
     it("clears a guest session", async () => {
       await saveDraftGuestSession("phase2-CLEAR", {
         draftToken: "token-clear",
         seatIndex: 0,
         draftCode: "draft-clear",
+        roomCode: "ABCDE",
+        displayName: "Alice",
       });
       await clearDraftGuestSession("phase2-CLEAR");
       const loaded = await loadDraftGuestSession("phase2-CLEAR");
       expect(loaded).toBeNull();
+    });
+
+    it("uses a non-secret room-code locator to bind the IndexedDB capability", async () => {
+      await saveDraftGuestSession("phase2-HOST1", {
+        draftToken: "token-abc",
+        seatIndex: 3,
+        draftCode: "draft-xyz",
+        roomCode: "ABCDE",
+        displayName: "Alice",
+      });
+      saveActiveDraftGuest({ roomCode: "ABCDE", displayName: "Alice", hostPeerId: "phase2-HOST1" });
+
+      expect(loadActiveDraftGuest()).toMatchObject({
+        roomCode: "ABCDE",
+        displayName: "Alice",
+        hostPeerId: "phase2-HOST1",
+      });
+      expect(localStorage.getItem("phase-active-draft-guest")).not.toContain("token-abc");
+      await expect(loadDraftGuestSession("phase2-HOST1", {
+        roomCode: "ABCDE",
+        displayName: "Alice",
+      })).resolves.toMatchObject({ draftToken: "token-abc" });
+      await expect(loadDraftGuestSession("phase2-HOST1", {
+        roomCode: "ABCDE",
+        displayName: "Mallory",
+      })).resolves.toBeNull();
+    });
+
+    it("clears both recovery records for an explicit terminal removal", async () => {
+      await saveDraftGuestSession("phase2-HOST1", {
+        draftToken: "token-abc",
+        seatIndex: 3,
+        draftCode: "draft-xyz",
+        roomCode: "ABCDE",
+        displayName: "Alice",
+      });
+      saveActiveDraftGuest({ roomCode: "ABCDE", displayName: "Alice", hostPeerId: "phase2-HOST1" });
+
+      await clearDraftGuestRecovery("phase2-HOST1");
+      expect(loadActiveDraftGuest()).toBeNull();
+      await expect(loadDraftGuestSession("phase2-HOST1")).resolves.toBeNull();
+      clearActiveDraftGuest();
     });
   });
 });

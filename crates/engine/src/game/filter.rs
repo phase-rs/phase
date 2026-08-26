@@ -1465,13 +1465,12 @@ pub(crate) fn controller_ref_player(
         ControllerRef::ScopedPlayer => {
             scoped_player_or_controller(state, ability, source_controller, None)
         }
-        // CR 109.4: TargetOpponent reads identically to TargetPlayer (first player target).
-        ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => ability.and_then(|a| {
-            a.targets.iter().find_map(|t| match t {
-                TargetRef::Player(pid) => Some(*pid),
-                TargetRef::Object(_) => None,
-            })
-        }),
+        // CR 109.4: TargetOpponent reads identically to TargetPlayer (first
+        // declared player target), including an earlier slot in the resolving
+        // root after an intervening object-target node.
+        ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => {
+            target_player_from_ability_or_root(state, ability)
+        }
         ControllerRef::ParentTargetController => parent_target_controller_player(state, ability),
         ControllerRef::ParentTargetOwner => parent_target_owner_player(state, ability),
         ControllerRef::DefendingPlayer => {
@@ -1503,6 +1502,36 @@ pub(crate) fn controller_ref_player(
         // resolving ability (Gideon Jura's "+2").
         ControllerRef::SpecificPlayer { id } => Some(*id),
     }
+}
+
+/// CR 608.2c: resolve the first declared player target without letting a
+/// chained node's most-recent object-target propagation hide an earlier player
+/// slot. Local targets remain the fast path; the flattened resolving root is
+/// the exact fallback used by `ParentTargetSlot` anaphors elsewhere.
+fn target_player_from_ability_or_root(
+    state: &GameState,
+    ability: Option<&ResolvedAbility>,
+) -> Option<PlayerId> {
+    let ability = ability?;
+    ability
+        .targets
+        .iter()
+        .find_map(|target| match target {
+            TargetRef::Player(player) => Some(*player),
+            TargetRef::Object(_) => None,
+        })
+        .or_else(|| {
+            let root = crate::game::targeting::resolving_root_ability(state, ability);
+            if std::ptr::eq(root, ability) {
+                return None;
+            }
+            crate::game::ability_utils::flatten_targets_in_chain(root)
+                .into_iter()
+                .find_map(|target| match target {
+                    TargetRef::Player(player) => Some(player),
+                    TargetRef::Object(_) => None,
+                })
+        })
 }
 /// Whether `filter`, or any filter nested anywhere inside it, satisfies `leaf`.
 ///
@@ -1987,15 +2016,10 @@ fn stack_entry_controller_matches(
             ctx.scoped_iteration_player,
         )
         .is_some_and(|pid| pid == entry_controller),
-        Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => ctx
-            .ability
-            .and_then(|ability| {
-                ability.targets.iter().find_map(|target| match target {
-                    TargetRef::Player(pid) => Some(*pid),
-                    TargetRef::Object(_) => None,
-                })
-            })
-            .is_some_and(|pid| pid == entry_controller),
+        Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => {
+            target_player_from_ability_or_root(state, ctx.ability)
+                .is_some_and(|pid| pid == entry_controller)
+        }
         Some(ControllerRef::ParentTargetController) => {
             parent_target_controller_player(state, ctx.ability)
                 .is_some_and(|pid| pid == entry_controller)
@@ -3167,13 +3191,7 @@ fn filter_inner_for_object(
                     // whenever this variant appears). CR 109.4: TargetOpponent reads
                     // identically (the opponent constraint lives in the slot).
                     ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => {
-                        let target_player = ability
-                            .and_then(|a| {
-                                a.targets.iter().find_map(|t| match t {
-                                    TargetRef::Player(pid) => Some(*pid),
-                                    TargetRef::Object(_) => None,
-                                })
-                            })
+                        let target_player = target_player_from_ability_or_root(state, ability)
                             // CR 603.2: When no player target was chosen, "that
                             // player" is the triggering event's player. Non-Phase
                             // triggers resolve their player anaphor from event
@@ -3804,12 +3822,7 @@ fn zone_change_filter_inner(
                     // record's controller against the chosen player target.
                     // TargetOpponent reads identically (opponent constraint in slot).
                     ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => {
-                        let target_player = ability.and_then(|a| {
-                            a.targets.iter().find_map(|t| match t {
-                                TargetRef::Player(pid) => Some(*pid),
-                                TargetRef::Object(_) => None,
-                            })
-                        });
+                        let target_player = target_player_from_ability_or_root(state, ability);
                         match target_player {
                             Some(pid) if pid == record.controller => {}
                             _ => return false,
@@ -5774,17 +5787,13 @@ fn matches_filter_prop(
                     .is_some_and(|pid| pid == obj.owner)
             }
             // CR 109.5: Ownership relative to a chosen target player.
-            // Resolves against the first TargetRef::Player in ability.targets.
-            // TargetOpponent reads identically (opponent constraint lives in the slot).
-            ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => source
-                .ability
-                .and_then(|a| {
-                    a.targets.iter().find_map(|t| match t {
-                        TargetRef::Player(pid) => Some(*pid),
-                        TargetRef::Object(_) => None,
-                    })
-                })
-                .is_some_and(|pid| pid == obj.owner),
+            // Resolves against the first player target on the current node or
+            // its resolving root. TargetOpponent reads identically (the
+            // opponent constraint lives in the declared slot).
+            ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => {
+                target_player_from_ability_or_root(state, source.ability)
+                    .is_some_and(|pid| pid == obj.owner)
+            }
             ControllerRef::ParentTargetController => {
                 parent_target_controller_player(state, source.ability)
                     .is_some_and(|pid| pid == obj.owner)
@@ -6538,14 +6547,8 @@ fn zone_change_record_matches_property(
             }
             // CR 109.5: Ownership relative to a chosen target player.
             // TargetOpponent reads identically (opponent constraint lives in the slot).
-            ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => source
-                .ability
-                .and_then(|a| {
-                    a.targets.iter().find_map(|t| match t {
-                        TargetRef::Player(pid) => Some(*pid),
-                        TargetRef::Object(_) => None,
-                    })
-                })
+            ControllerRef::TargetPlayer | ControllerRef::TargetOpponent =>
+                target_player_from_ability_or_root(state, source.ability)
                 .is_some_and(|pid| pid == record.owner),
             ControllerRef::ParentTargetController => {
                 parent_target_controller_player(state, source.ability)
@@ -6906,15 +6909,10 @@ fn attachment_controller_matches(
             scoped_player_or_controller(state, source.ability, source.controller, None)
                 .is_some_and(|pid| pid == attachment_controller)
         }
-        Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => source
-            .ability
-            .and_then(|a| {
-                a.targets.iter().find_map(|t| match t {
-                    TargetRef::Player(pid) => Some(*pid),
-                    TargetRef::Object(_) => None,
-                })
-            })
-            .is_some_and(|pid| pid == attachment_controller),
+        Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => {
+            target_player_from_ability_or_root(state, source.ability)
+                .is_some_and(|pid| pid == attachment_controller)
+        }
         Some(ControllerRef::ParentTargetController) => {
             parent_target_controller_player(state, source.ability)
                 .is_some_and(|pid| pid == attachment_controller)
@@ -7767,6 +7765,118 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
         id
+    }
+
+    /// CR 608.2c: every target-relative player seam must recover the root's
+    /// earlier player slot when the current chained node carries only an object.
+    #[test]
+    fn sibling_target_player_lookups_recover_player_from_resolving_root() {
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let opponent_object = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Object".to_string(),
+            Zone::Battlefield,
+        );
+        let child = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(opponent_object)],
+            source,
+            PlayerId(0),
+        );
+        let mut root = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Opponent,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        root.sub_ability = Some(Box::new(child.clone()));
+        state.stack.push_back(StackEntry {
+            id: ObjectId(900),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(root),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+
+        let ctx = FilterContext::from_ability(&child);
+        assert!(stack_entry_controller_matches(
+            &state,
+            Some(&ControllerRef::TargetOpponent),
+            PlayerId(1),
+            &ctx,
+        ));
+
+        let owned =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Owned {
+                controller: ControllerRef::TargetOpponent,
+            }]));
+        assert!(super::matches_target_filter(
+            &state,
+            opponent_object,
+            &owned,
+            &ctx,
+        ));
+
+        let record = ZoneChangeRecord {
+            controller: PlayerId(1),
+            owner: PlayerId(1),
+            ..ZoneChangeRecord::test_minimal(
+                opponent_object,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )
+        };
+        assert!(zone_change_filter_inner(
+            &state,
+            &record,
+            &TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::TargetOpponent)),
+            source,
+            Some(PlayerId(0)),
+            Some(&child),
+            None,
+        ));
+        assert!(zone_change_filter_inner(
+            &state,
+            &record,
+            &owned,
+            source,
+            Some(PlayerId(0)),
+            Some(&child),
+            None,
+        ));
+
+        let source_ctx =
+            source_context_from_filter(&state, source, Some(PlayerId(0)), Some(&child), None, None);
+        assert!(attachment_controller_matches(
+            Some(&ControllerRef::TargetOpponent),
+            PlayerId(1),
+            &state,
+            &source_ctx,
+        ));
     }
 
     #[test]

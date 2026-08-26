@@ -553,6 +553,9 @@ pub(crate) fn resolve_restrictions(
             ManaSpendRestriction::SpellFromZone(zs) => {
                 Some(ManaRestriction::OnlyForSpellFromZone(*zs))
             }
+            ManaSpendRestriction::CannotCastSpellFromZone(zone) => {
+                Some(ManaRestriction::CannotCastSpellFromZone(*zone))
+            }
             // CR 106.6 + CR 116.2m + CR 709.5e: Lower the door-unlock special-action
             // leaf into the runtime gate checked by `allows_special_action` when a
             // Room's unlock cost is paid through `PaymentContext::SpecialAction`.

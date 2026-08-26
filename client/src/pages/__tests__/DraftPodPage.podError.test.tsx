@@ -12,7 +12,9 @@ const { draftState } = vi.hoisted(() => ({
     sideboardPrompt: null,
     playDrawPrompt: null,
     error: null as string | null,
+    guestRecoveryFailure: null as { kind: "retryable" | "incompatible" | "invalid"; message: string } | null,
     clearError: vi.fn(),
+    resumeDraft: vi.fn<(options?: { signal?: AbortSignal }) => Promise<string>>(async () => "resumed"),
     currentRound: 2,
     nextPairingRound: 3,
     standings: [],
@@ -50,7 +52,7 @@ vi.mock("../../components/draft/LimitedDeckBuilder", () => ({ LimitedDeckBuilder
 vi.mock("../../components/draft/ScoreBadge", () => ({ ScoreBadge: () => <div data-testid="score-badge" /> }));
 
 function renderPage() {
-  return render(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+  return render(<MemoryRouter initialEntries={["/draft-pod?entry=host"]}><DraftPodPage /></MemoryRouter>);
 }
 
 const ERROR_TEXT = "Failed to advance round: pairing generation failed";
@@ -60,7 +62,9 @@ describe("DraftPodPage pod error banner", () => {
 
   beforeEach(() => {
     draftState.error = null;
+    draftState.guestRecoveryFailure = null;
     draftState.clearError.mockClear();
+    draftState.resumeDraft.mockClear();
   });
 
   it("surfaces the store error in the pairing phase", () => {
@@ -125,5 +129,50 @@ describe("DraftPodPage pod error banner", () => {
     await user.click(screen.getByRole("button", { name: "Close" }));
 
     expect(draftState.clearError).toHaveBeenCalled();
+  });
+
+  it("offers retry only for a typed retryable guest recovery failure", async () => {
+    const user = userEvent.setup();
+    draftState.phase = "error";
+    draftState.guestRecoveryFailure = {
+      kind: "retryable",
+      message: "Host is still coming back online",
+    };
+    renderPage();
+
+    expect(screen.getByText("Host is still coming back online")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Try Reconnecting" }));
+    expect(draftState.resumeDraft).toHaveBeenCalledOnce();
+  });
+
+  it("does not offer retry for an incompatible recovery failure", () => {
+    draftState.phase = "error";
+    draftState.guestRecoveryFailure = {
+      kind: "incompatible",
+      message: "Refresh both windows",
+    };
+    renderPage();
+
+    expect(screen.getByText("Refresh both windows")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try Reconnecting" })).toBeNull();
+  });
+
+  it("aborts the retry attempt when its page unmounts", async () => {
+    const user = userEvent.setup();
+    let settle!: (outcome: string) => void;
+    draftState.phase = "error";
+    draftState.guestRecoveryFailure = { kind: "retryable", message: "Host is restarting" };
+    draftState.resumeDraft.mockImplementationOnce(({ signal }: { signal?: AbortSignal } = {}) => new Promise<string>((resolve) => {
+      settle = resolve;
+      expect(signal?.aborted).toBe(false);
+    }));
+    const { unmount } = renderPage();
+
+    await user.click(screen.getByRole("button", { name: "Try Reconnecting" }));
+    const [{ signal } = {}] = draftState.resumeDraft.mock.calls[0]!;
+    unmount();
+
+    expect(signal?.aborted).toBe(true);
+    settle("superseded");
   });
 });

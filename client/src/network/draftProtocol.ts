@@ -43,8 +43,31 @@ import type {
  *  10 — add authenticated draft-effect pick actions
  *  11 — instance-addressable pool entries (`instance_ids`) + engine rarity axis
  *  12 — publish the engine-derived next pairing round on the player view
+ *  13 — first-contact `draft_join` and `draft_reconnect` messages carry an
+ *       exact draft protocol version; reconnect rejections became typed so
+ *       only an invalidated capability is cleared from durable guest recovery.
+ *  14 — deck submissions carry an immutable client-generated id and the
+ *       host returns an explicit durable receipt.  This makes a reloaded
+ *       participant's deck outbox idempotent instead of relying on a
+ *       best-effort state update.
  */
-export const DRAFT_PROTOCOL_VERSION = 12 as const;
+export const DRAFT_PROTOCOL_VERSION = 14 as const;
+
+/** Canonical multiset fingerprint: deck order is UI-only, card counts are not. */
+export function deckSubmissionFingerprint(mainDeck: readonly string[]): string {
+  const counts = new Map<string, number>();
+  for (const card of mainDeck) counts.set(card, (counts.get(card) ?? 0) + 1);
+  return JSON.stringify([...counts.entries()].sort(([left], [right]) => (
+    left < right ? -1 : left > right ? 1 : 0
+  )));
+}
+
+/** The host's reason for declining a first-contact draft connection. */
+export type DraftReconnectRejectionKind =
+  | "ProtocolMismatch"
+  | "Kicked"
+  | "UnknownToken"
+  | "NoReconnectWindow";
 
 /**
  * Typed reason for a draft pause, used over the wire and on the i18n key path.
@@ -157,10 +180,12 @@ export type DraftP2PMessage =
   | {
       type: "draft_join";
       displayName: string;
+      draftProtocolVersion: typeof DRAFT_PROTOCOL_VERSION;
     }
   | {
       type: "draft_reconnect";
       draftToken: string;
+      draftProtocolVersion: typeof DRAFT_PROTOCOL_VERSION;
     }
   | {
       type: "draft_pick";
@@ -173,6 +198,8 @@ export type DraftP2PMessage =
     }
   | {
       type: "draft_submit_deck";
+      /** Stable across reconnect/reload retries of this exact payload. */
+      submissionId: string;
       mainDeck: string[];
     }
   // ── Host → Guest ───────────────────────────────────────────────────
@@ -197,10 +224,17 @@ export type DraftP2PMessage =
     }
   | {
       type: "draft_reconnect_rejected";
+      kind: DraftReconnectRejectionKind;
       reason: string;
     }
   | {
       type: "draft_state_update";
+      view: DraftPlayerView;
+    }
+  | {
+      /** The submission is in the host's durable receipt ledger. */
+      type: "draft_deck_submit_ack";
+      submissionId: string;
       view: DraftPlayerView;
     }
   | {
@@ -210,6 +244,10 @@ export type DraftP2PMessage =
   | {
       type: "draft_error";
       reason: string;
+      /** Present only when this rejects one durable deck-submission command. */
+      submissionId?: string;
+      /** A retryable failure retains the guest outbox; rejection frees it. */
+      submissionDisposition?: "Rejected" | "Retryable";
     }
   | {
       type: "draft_kicked";
@@ -368,6 +406,7 @@ const VALID_DRAFT_TYPES = new Set([
   "draft_reconnect_ack",
   "draft_reconnect_rejected",
   "draft_state_update",
+  "draft_deck_submit_ack",
   "draft_pick_ack",
   "draft_error",
   "draft_kicked",
@@ -397,13 +436,17 @@ const VALID_DRAFT_TYPES = new Set([
 
 const MAX_DRAFT_CARD_INSTANCE_ID_LENGTH = 256;
 
-function requireDraftCardInstanceId(value: unknown, field: string): string {
+function requireDraftCardInstanceId(
+  value: unknown,
+  field: string,
+  context = "draft-effect pick",
+): string {
   if (
     typeof value !== "string"
     || value.length === 0
     || value.length > MAX_DRAFT_CARD_INSTANCE_ID_LENGTH
   ) {
-    throw new Error(`Invalid draft-effect pick: ${field} must be a bounded string`);
+    throw new Error(`Invalid ${context}: ${field} must be a bounded string`);
   }
   return value;
 }
@@ -525,6 +568,59 @@ export function validateDraftMessage(raw: unknown): DraftP2PMessage {
   }
   if (msg.type === "draft_pick_with_draft_effect") {
     return validateDraftEffectPick(raw as Record<string, unknown>);
+  }
+  if (msg.type === "draft_submit_deck") {
+    const submission = raw as Record<string, unknown>;
+    requireDraftCardInstanceId(submission.submissionId, "submissionId", "deck submission");
+    if (!Array.isArray(submission.mainDeck)
+      || !submission.mainDeck.every((card) => typeof card === "string")) {
+      throw new Error("Invalid draft deck submission");
+    }
+    return submission as DraftP2PMessage;
+  }
+  if (msg.type === "draft_deck_submit_ack") {
+    const acknowledgement = raw as Record<string, unknown>;
+    requireDraftCardInstanceId(acknowledgement.submissionId, "submissionId", "deck acknowledgement");
+    if (typeof acknowledgement.view !== "object" || acknowledgement.view === null) {
+      throw new Error("Invalid draft deck acknowledgement");
+    }
+    return {
+      ...acknowledgement,
+      view: normalizeDraftPlayerView(acknowledgement.view),
+    } as DraftP2PMessage;
+  }
+  if (msg.type === "draft_error") {
+    const error = raw as Record<string, unknown>;
+    if (error.submissionDisposition !== undefined) {
+      if (error.submissionDisposition !== "Rejected" && error.submissionDisposition !== "Retryable") {
+        throw new Error("Invalid draft submission error disposition");
+      }
+      requireDraftCardInstanceId(error.submissionId, "submissionId", "deck submission error");
+    }
+    return error as DraftP2PMessage;
+  }
+  if (msg.type === "draft_reconnect_rejected") {
+    const rejection = raw as Record<string, unknown>;
+    // Pre-v13 frames carried only a string reason. They are never a capability-revocation
+    // signal: normalize it to the safe terminal outcome that preserves the
+    // guest's recovery records and asks the user to refresh.
+    if (rejection.kind === undefined && typeof rejection.reason === "string") {
+      return {
+        ...rejection,
+        type: "draft_reconnect_rejected",
+        kind: "ProtocolMismatch",
+      } as DraftP2PMessage;
+    }
+    if (
+      (rejection.kind !== "ProtocolMismatch"
+        && rejection.kind !== "Kicked"
+        && rejection.kind !== "UnknownToken"
+        && rejection.kind !== "NoReconnectWindow")
+      || typeof rejection.reason !== "string"
+    ) {
+      throw new Error("Invalid draft reconnect rejection");
+    }
+    return rejection as DraftP2PMessage;
   }
   const viewMessage = raw as { type: string; view?: unknown; seats?: unknown };
   if (["draft_welcome", "draft_reconnect_ack", "draft_state_update", "draft_pick_ack"].includes(msg.type)) {

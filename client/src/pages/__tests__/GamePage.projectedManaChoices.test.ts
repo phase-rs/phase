@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { projectedManaChoices } from "../GamePage";
+import i18n from "../../i18n";
+import { manaRestrictionLabel, projectedManaChoices } from "../GamePage";
 import type {
   InteractionActionId,
   InteractionChoice,
@@ -72,6 +73,15 @@ function interactionWith(choices: InteractionChoice[]): ViewerInteraction {
 }
 
 describe("projectedManaChoices", () => {
+  it("labels a cast-from-zone prohibition without presenting it as spell-only mana", () => {
+    expect(
+      manaRestrictionLabel(i18n.getFixedT("en", "game"), {
+        type: "cannotCastSpellFromZone",
+        data: { zone: "hand" },
+      }),
+    ).toBe("Can't be spent to cast spells from hand.");
+  });
+
   it("keys each tapLandForMana choice by its action id", () => {
     const choices = projectedManaChoices(
       interactionWith([tapChoice("act-green", FOREST, "G")]),

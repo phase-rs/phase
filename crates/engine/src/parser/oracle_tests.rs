@@ -17023,6 +17023,33 @@ Artifacts you control have \"{T}: Add {U}. Spend this mana only to cast a spell 
     );
 }
 
+#[test]
+fn karolina_dean_mana_carries_cast_from_hand_prohibition() {
+    use crate::types::ability::{Effect, ManaSpendRestriction};
+    use crate::types::zones::Zone;
+
+    let parsed = super::parse_oracle_text(
+        "Flying\nAt the beginning of your first main phase, add {W}{U}{B}{R}{G}. This mana can't be spent to cast spells from your hand.",
+        "Karolina Dean, Runaway",
+        &["Flying".to_string()],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Human".to_string(), "Citizen".to_string()],
+    );
+    let trigger = parsed.triggers.first().expect("first-main-phase trigger");
+    let execute = trigger.execute.as_deref().expect("mana effect");
+    assert!(
+        !has_unimplemented(execute),
+        "Karolina's production Oracle must have zero Unimplemented effects: {execute:#?}"
+    );
+    let Effect::Mana { restrictions, .. } = &*execute.effect else {
+        panic!("expected typed Mana effect, got {:?}", execute.effect);
+    };
+    assert_eq!(
+        restrictions,
+        &[ManaSpendRestriction::CannotCastSpellFromZone(Zone::Hand)]
+    );
+}
+
 /// Rosheen Meanderer / Elementalist's Palette / Nexos / Rosheen, Roaring
 /// Prophet. Runtime spend proof: `restricted_mana_x_cost_only.rs`.
 #[test]

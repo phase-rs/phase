@@ -189,11 +189,20 @@
       "description": "Załóż lub dołącz do grupy liczącej do 8 graczy, draftujcie razem na żywo, a potem rozegrajcie turniej szwajcarski lub na wylot."
     },
     "podInProgress": "Trwa draft w grupie",
+    "guestPodInProgress": "Dołączony pod gotowy do ponownego połączenia",
     "podLabel": "Grupa {{kind}}",
-    "seatCount": "{{count}} miejsc",
+    "guestPodLabel": "Pod draftowy",
+    "seatCount_one": "{{count}} miejsce",
+    "seatCount_few": "{{count}} miejsca",
+    "seatCount_many": "{{count}} miejsc",
+    "seatCount_other": "{{count}} miejsc",
     "roomLabel": "Pokój {{code}}",
-    "cardsPicked": "{{count}} wybranych kart",
+    "cardsPicked_one": "{{count}} wybrana karta",
+    "cardsPicked_few": "{{count}} wybrane karty",
+    "cardsPicked_many": "{{count}} wybranych kart",
+    "cardsPicked_other": "{{count}} wybranych kart",
     "resume": "Wznów",
+    "reconnect": "Połącz ponownie",
     "draftInProgress": "Trwa draft",
     "draftComplete": "Draft zakończony",
     "resumeMatch": "Wznów mecz",
@@ -386,7 +395,8 @@
   "podError": {
     "kicked": "Zostałeś wyrzucony z grupy",
     "hostLeft": "Gospodarz opuścił draft",
-    "connection": "Błąd połączenia"
+    "connection": "Błąd połączenia",
+    "retry": "Spróbuj połączyć ponownie"
   },
   "lobby": {
     "title": "Poczekalnia grupy draftu",

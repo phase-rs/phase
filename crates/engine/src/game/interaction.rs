@@ -4091,6 +4091,11 @@ fn interaction_mana_restriction(restriction: &ManaRestriction) -> InteractionMan
                 },
             }
         }
+        ManaRestriction::CannotCastSpellFromZone(zone) => {
+            InteractionManaRestriction::CannotCastSpellFromZone {
+                zone: zone_code(*zone),
+            }
+        }
         ManaRestriction::OnlyForFaceDownSpell => InteractionManaRestriction::OnlyForFaceDownSpell,
         ManaRestriction::OnlyForAny(restrictions) => InteractionManaRestriction::OnlyForAny {
             restrictions: restrictions
@@ -8204,6 +8209,7 @@ fn bound_outbound_mana_restriction(
         | InteractionManaRestriction::OnlyForSpellWithColorCount { .. }
         | InteractionManaRestriction::OnlyForSpellColor { .. }
         | InteractionManaRestriction::OnlyForSpellFromZone { .. }
+        | InteractionManaRestriction::CannotCastSpellFromZone { .. }
         | InteractionManaRestriction::OnlyForSpecialAction { .. } => {}
         InteractionManaRestriction::OnlyForAny { restrictions } => {
             budget.list(restrictions.len())?;
@@ -9919,6 +9925,25 @@ pub fn submit_interaction(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cannot_cast_from_zone_projection_is_lossless() {
+        let projection =
+            interaction_mana_restriction(&ManaRestriction::CannotCastSpellFromZone(Zone::Hand));
+        assert_eq!(
+            projection,
+            InteractionManaRestriction::CannotCastSpellFromZone {
+                zone: InteractionZoneCode::Hand,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&projection).unwrap(),
+            serde_json::json!({
+                "type": "cannotCastSpellFromZone",
+                "data": { "zone": "hand" }
+            })
+        );
+    }
 
     #[test]
     fn choose_objects_projection_preserves_runtime_cardinality() {

@@ -1,5 +1,6 @@
-//! Mm'menon, the Right Hand — Artifacts you control have "{T}: Add {U}. Spend
-//! this mana only to cast a spell from anywhere other than your hand."
+//! Mm'menon, the Right Hand — positive spell-only `NotFrom(Hand)` restriction;
+//! and Karolina Dean, Runaway — a narrow prohibition on casts from hand that
+//! leaves every non-cast payment context unrestricted.
 //!
 //! CR 106.6 (restricted mana spend) + CR 400.7 (cast-from zone identity).
 //!
@@ -10,16 +11,20 @@
 //!      route, proving a `NotFrom`-restricted unit is CONSUMED for a spell cast
 //!      from a non-hand zone and WITHHELD for a spell cast from hand.
 //!
-//! Revert-proof: if the `ZoneSpendPolarity::NotFrom` arm of
-//! `OnlyForSpellFromZone` were reverted to the inclusion (`From`) reading, the
-//! "from hand" spell would become payable and the "from graveyard" spell would
-//! become unpayable — every assertion below flips.
+//! Revert-proof: reverting either the polarity axis or Karolina's dedicated
+//! prohibition makes the corresponding hand/non-hand and non-cast assertions
+//! flip.
 
-use engine::types::identifiers::ObjectId;
+use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::zones::create_object;
+use engine::types::actions::GameAction;
+use engine::types::card_type::{CoreType, Supertype};
+use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{
-    ManaPool, ManaRestriction, ManaType, ManaUnit, PaymentContext, SpellMeta, ZoneSpend,
-    ZoneSpendPolarity,
+    ActivationManaColorConstraint, ManaCost, ManaPool, ManaRestriction, ManaType, ManaUnit,
+    PaymentContext, SpecialAction, SpellMeta, ZoneSpend, ZoneSpendPolarity,
 };
+use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 /// Mm'menon, the Right Hand: spend only to cast a spell from anywhere other than
@@ -29,6 +34,12 @@ fn not_from_hand_restriction() -> ManaRestriction {
         zone: Zone::Hand,
         polarity: ZoneSpendPolarity::NotFrom,
     })
+}
+
+/// Karolina Dean: this mana cannot pay for the one forbidden cast class, but
+/// remains unrestricted for non-cast payments.
+fn cannot_cast_from_hand_restriction() -> ManaRestriction {
+    ManaRestriction::CannotCastSpellFromZone(Zone::Hand)
 }
 
 fn spell_cast_from(zone: Zone) -> SpellMeta {
@@ -103,6 +114,166 @@ fn spend_for_consumes_for_non_hand_and_withholds_for_hand() {
         "NotFrom-restricted mana must not pay a spell cast from hand"
     );
     assert_eq!(pool.total(), 1, "the unit must remain unspent");
+}
+
+#[test]
+fn karolina_restriction_is_a_narrow_cast_prohibition() {
+    let source = ObjectId(1);
+    let make_pool = || {
+        let mut pool = ManaPool::default();
+        pool.add(ManaUnit::new(
+            ManaType::White,
+            source,
+            false,
+            vec![cannot_cast_from_hand_restriction()],
+        ));
+        pool
+    };
+
+    let mut hand_pool = make_pool();
+    assert!(
+        hand_pool
+            .spend_for(
+                ManaType::White,
+                &PaymentContext::Spell(&spell_cast_from(Zone::Hand)),
+            )
+            .is_none(),
+        "Karolina's mana must be withheld from a spell cast from hand"
+    );
+    assert_eq!(hand_pool.total(), 1);
+
+    for origin in [Zone::Graveyard, Zone::Exile] {
+        let mut pool = make_pool();
+        assert!(
+            pool.spend_for(
+                ManaType::White,
+                &PaymentContext::Spell(&spell_cast_from(origin)),
+            )
+            .is_some(),
+            "Karolina's mana must pay for a spell cast from {origin:?}"
+        );
+        assert_eq!(pool.total(), 0, "eligible mana must be consumed");
+    }
+
+    let mut unknown_pool = make_pool();
+    assert!(
+        unknown_pool
+            .spend_for(
+                ManaType::White,
+                &PaymentContext::Spell(&SpellMeta::default()),
+            )
+            .is_none(),
+        "unknown spell origins must fail closed"
+    );
+
+    let source_types = ["Creature".to_string()];
+    let source_subtypes = ["Human".to_string()];
+    let activation = PaymentContext::Activation {
+        source_types: &source_types,
+        source_subtypes: &source_subtypes,
+        ability_tag: None,
+        mana_color_constraint: ActivationManaColorConstraint::Unrestricted,
+    };
+    let mut activation_pool = make_pool();
+    assert!(activation_pool
+        .spend_for(ManaType::White, &activation)
+        .is_some());
+
+    let mut effect_pool = make_pool();
+    assert!(effect_pool
+        .spend_for(ManaType::White, &PaymentContext::Effect)
+        .is_some());
+
+    for action in [
+        SpecialAction::CompanionToHand,
+        SpecialAction::UnlockDoor,
+        SpecialAction::Plot,
+        SpecialAction::TurnFaceUp,
+        SpecialAction::RollPlanarDie,
+        SpecialAction::EndContinuousEffect,
+    ] {
+        let mut pool = make_pool();
+        assert!(
+            pool.spend_for(ManaType::White, &PaymentContext::SpecialAction(action))
+                .is_some(),
+            "Karolina's prohibition must not reject {action:?}"
+        );
+    }
+}
+
+#[test]
+fn karolina_restriction_drives_the_production_cast_payment_pipeline() {
+    const KAROLINA_ORACLE: &str = "Flying\nAt the beginning of your first main phase, add {W}{U}{B}{R}{G}. This mana can't be spent to cast spells from your hand.";
+
+    let build_game = |zone, commander| -> (GameRunner, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Upkeep);
+        scenario.with_library_top(P0, &["P0 Card"; 40]);
+        scenario.with_library_top(engine::types::player::PlayerId(1), &["P1 Card"; 40]);
+        scenario
+            .add_creature(P0, "Karolina Dean, Runaway", 4, 4)
+            .from_oracle_text(KAROLINA_ORACLE);
+        let mut game = scenario.build();
+        let state = game.state_mut();
+        state.format_config.command_zone = commander;
+
+        let spell = create_object(
+            state,
+            CardId(if commander { 9_102 } else { 9_101 }),
+            P0,
+            "Restricted Mana Cast Probe".to_string(),
+            zone,
+        );
+        let object = state.objects.get_mut(&spell).unwrap();
+        object.card_types.core_types.push(CoreType::Creature);
+        object.mana_cost = ManaCost::generic(1);
+        if commander {
+            object.card_types.supertypes.push(Supertype::Legendary);
+            object.is_commander = true;
+        }
+
+        game.advance_to_phase(Phase::PreCombatMain);
+        for _ in 0..4 {
+            if game.state().players[P0.0 as usize].mana_pool.total() == 5 {
+                break;
+            }
+            game.act(GameAction::PassPriority)
+                .expect("Karolina's first-main-phase trigger must resolve through priority");
+        }
+
+        let pool = &game.state().players[P0.0 as usize].mana_pool;
+        assert_eq!(pool.total(), 5, "Karolina's trigger must produce WUBRG");
+        for color in [
+            ManaType::White,
+            ManaType::Blue,
+            ManaType::Black,
+            ManaType::Red,
+            ManaType::Green,
+        ] {
+            assert_eq!(pool.count_color(color), 1);
+        }
+        assert!(pool.mana.iter().all(|unit| {
+            unit.restrictions == vec![ManaRestriction::CannotCastSpellFromZone(Zone::Hand)]
+        }));
+        (game, spell)
+    };
+
+    let (mut hand_game, hand_spell) = build_game(Zone::Hand, false);
+    let error = match hand_game.cast(hand_spell).try_resolve() {
+        Ok(_) => panic!("Karolina's mana must not fund a spell cast from hand"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("Cannot pay mana cost"));
+    assert_eq!(hand_game.state().objects[&hand_spell].zone, Zone::Hand);
+    assert_eq!(hand_game.state().players[0].mana_pool.total(), 5);
+
+    // The command zone is a naturally castable non-hand origin, so this half
+    // reaches the same production payment path without granting a test-only
+    // graveyard or exile permission.
+    let (mut command_game, command_spell) = build_game(Zone::Command, true);
+    let outcome = command_game.cast(command_spell).resolve();
+    outcome.assert_zone(&[command_spell], Zone::Battlefield);
+    assert_eq!(outcome.mana_pool_total(P0), 4);
 }
 
 /// Guard against the inclusion polarity regressing: the positive `From` reading

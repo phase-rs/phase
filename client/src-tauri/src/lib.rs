@@ -582,14 +582,20 @@ mod tests {
             json!(["linux", "macOS", "windows"])
         );
 
-        let desktop_permissions = BTreeSet::from([
-            "core:window:allow-set-fullscreen",
-            "process:allow-exit",
-            "process:allow-restart",
-            "updater:default",
-        ]);
-        assert_eq!(capability_permissions(desktop_local), desktop_permissions);
-        assert_eq!(capability_permissions(desktop_remote), desktop_permissions);
+        // Self-update, exit and restart belong to the trusted remote origins only.
+        assert_eq!(
+            capability_permissions(desktop_local),
+            BTreeSet::from(["core:window:allow-set-fullscreen"])
+        );
+        assert_eq!(
+            capability_permissions(desktop_remote),
+            BTreeSet::from([
+                "core:window:allow-set-fullscreen",
+                "process:allow-exit",
+                "process:allow-restart",
+                "updater:default",
+            ])
+        );
         for capability in [common_local, common_remote] {
             let permissions = capability_permissions(capability);
             assert!(!permissions.contains("core:window:allow-set-fullscreen"));

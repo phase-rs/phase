@@ -12,6 +12,7 @@ import {
   useMultiplayerDraftStore,
   type DraftPodScreen,
 } from "../multiplayerDraftStore";
+import { DraftPodHostAdapter } from "../../adapter/draftPodHostAdapter";
 import type { DraftPlayerView } from "../../adapter/draft-adapter";
 import { DraftPauseReason, type DraftMatchLaunch } from "../../network/draftProtocol";
 
@@ -138,6 +139,116 @@ describe("multiplayerDraftStore", () => {
   });
 
   describe("hostDraft", () => {
+    it("hands a completed host session off before joining and gates its late events", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      const staleHostEvent = capturedHostEventHandler!;
+
+      await useMultiplayerDraftStore.getState().joinDraft({ kind: "new", roomCode: "ABCDE", displayName: "Guest" });
+      staleHostEvent({ type: "roomCreated", roomCode: "STALE" });
+
+      expect(mockHostAdapter.dispose).toHaveBeenCalledWith({ preserveSession: true });
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "guest", roomCode: null });
+    });
+
+    it("waits for a cancelled recovery's same-ID host cleanup before starting its replacement", async () => {
+      const config = {
+        poolInput: { type: "Set" as const, data: { set_pool_json: "{}" } },
+        kind: "Premier" as const,
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss" as const,
+        podPolicy: "Competitive" as const,
+        persistenceId: "shared-recovery",
+      };
+      await expect(useMultiplayerDraftStore.getState().hostDraft(config)).resolves.toBe(true);
+
+      let releaseCleanup!: () => void;
+      mockHostAdapter.dispose.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        releaseCleanup = resolve;
+      }));
+      const replacement = useMultiplayerDraftStore.getState().hostDraft(config);
+      await Promise.resolve();
+
+      expect(vi.mocked(DraftPodHostAdapter)).toHaveBeenCalledTimes(1);
+      releaseCleanup();
+
+      await expect(replacement).resolves.toBe(true);
+      expect(vi.mocked(DraftPodHostAdapter)).toHaveBeenCalledTimes(2);
+    });
+
+    it("disposes a superseded in-flight host after its late initialization resolves", async () => {
+      let resolveHost!: () => void;
+      mockHostAdapter.initialize.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        resolveHost = resolve;
+      }));
+
+      const first = useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      await useMultiplayerDraftStore.getState().joinDraft({ kind: "new", roomCode: "ABCDE", displayName: "Guest" });
+      resolveHost();
+      await first;
+
+      expect(mockHostAdapter.dispose).toHaveBeenCalledWith({ preserveSession: true });
+      expect(useMultiplayerDraftStore.getState().role).toBe("guest");
+    });
+
+    it("releases an in-flight host when its owning route aborts", async () => {
+      let resolveHost!: () => void;
+      mockHostAdapter.initialize.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        resolveHost = resolve;
+      }));
+      const controller = new AbortController();
+      const hosting = useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+        signal: controller.signal,
+      });
+
+      await Promise.resolve();
+      controller.abort();
+      resolveHost();
+
+      await expect(hosting).resolves.toBe(false);
+      expect(mockHostAdapter.dispose).toHaveBeenCalledWith({ preserveSession: true });
+      expect(useMultiplayerDraftStore.getState().role).not.toBe("host");
+    });
+
+    it("releases an initialized host when its owning route later aborts", async () => {
+      const controller = new AbortController();
+      await expect(useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+        signal: controller.signal,
+      })).resolves.toBe(true);
+
+      controller.abort();
+      await Promise.resolve();
+
+      expect(mockHostAdapter.dispose).toHaveBeenCalledWith({ preserveSession: true });
+      expect(useMultiplayerDraftStore.getState().role).not.toBe("host");
+    });
+
     it("sets role to host and phase to connecting", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
         poolInput: { type: "Set", data: { set_pool_json: "{}" } },
@@ -401,6 +512,7 @@ describe("multiplayerDraftStore", () => {
   describe("joinDraft", () => {
     it("sets role to guest and phase to connecting", async () => {
       await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new",
         roomCode: "ABCDE",
         displayName: "Alice",
       });
@@ -409,8 +521,33 @@ describe("multiplayerDraftStore", () => {
       expect(state.role).toBe("guest");
     });
 
+    it("releases an in-flight guest recovery when its route aborts", async () => {
+      let resolveGuest!: () => void;
+      mockGuestAdapter.initialize.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        resolveGuest = resolve;
+      }));
+      const controller = new AbortController();
+      const joining = useMultiplayerDraftStore.getState().joinDraft({
+        kind: "reconnect",
+        roomCode: "ABCDE",
+        displayName: "Alice",
+        hostPeerId: "phase2-ABCDE",
+        draftToken: "opaque-token",
+        signal: controller.signal,
+      });
+
+      await Promise.resolve();
+      controller.abort();
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: null, phase: "idle" });
+
+      resolveGuest();
+      await joining;
+      expect(mockGuestAdapter.dispose).toHaveBeenCalledWith({ preserveRecovery: true });
+    });
+
     it("sets seatIndex and draftCode on joined event", async () => {
       await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new",
         roomCode: "ABCDE",
         displayName: "Alice",
       });
@@ -429,6 +566,7 @@ describe("multiplayerDraftStore", () => {
 
     it("tracks pause state", async () => {
       await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new",
         roomCode: "ABCDE",
         displayName: "Alice",
       });
@@ -450,6 +588,7 @@ describe("multiplayerDraftStore", () => {
 
     it("tracks pairing info", async () => {
       await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new",
         roomCode: "ABCDE",
         displayName: "Alice",
       });
@@ -475,6 +614,7 @@ describe("multiplayerDraftStore", () => {
 
     it("sets phase to kicked on kicked event", async () => {
       await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new",
         roomCode: "ABCDE",
         displayName: "Alice",
       });
@@ -486,8 +626,29 @@ describe("multiplayerDraftStore", () => {
       expect(state.error).toBe("AFK");
     });
 
+    it("retains typed reconnect failure semantics for the recovery screen", async () => {
+      await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "reconnect",
+        roomCode: "ABCDE",
+        displayName: "Alice",
+        hostPeerId: "phase2-ABCDE",
+        draftToken: "opaque-token",
+      });
+
+      capturedGuestEventHandler!({
+        type: "reconnectFailed",
+        failure: { kind: "retryable", message: "Host is restarting" },
+      });
+
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({
+        error: "Host is restarting",
+        guestRecoveryFailure: { kind: "retryable", message: "Host is restarting" },
+      });
+    });
+
     it("retires a guest error when the phase changes, and only then", async () => {
       await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new",
         roomCode: "ABCDE",
         displayName: "Alice",
       });
@@ -546,6 +707,7 @@ describe("multiplayerDraftStore", () => {
 
     it("clears a stale message when the guest enters a message-less error phase, but not one that follows the flip", async () => {
       await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new",
         roomCode: "ABCDE",
         displayName: "Alice",
       });
@@ -736,6 +898,7 @@ describe("multiplayerDraftStore", () => {
 
     async function guestInMatch(): Promise<void> {
       await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new",
         roomCode: "ABCDE",
         displayName: "Alice",
       });

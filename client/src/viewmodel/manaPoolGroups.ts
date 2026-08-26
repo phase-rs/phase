@@ -32,6 +32,7 @@ export const RESTRICTION_LABEL_KEYS: Record<ManaRestrictionTag, string> = {
   OnlyForSpellWithColorCount: "manaPool.onlyForSpellWithColorCount",
   OnlyForSpellColor: "manaPool.onlyForSpellColor",
   OnlyForSpellFromZone: "manaPool.onlyForSpellFromZone",
+  CannotCastSpellFromZone: "manaPool.cannotCastSpellFromZone",
   OnlyForFaceDownSpell: "manaPool.onlyForFaceDownSpell",
   OnlyForActivation: "manaPool.onlyForActivation",
   OnlyForXCosts: "manaPool.onlyForXCosts",

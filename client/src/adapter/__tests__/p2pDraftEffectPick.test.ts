@@ -9,7 +9,7 @@ describe("P2P draft-effect picks", () => {
       {} as never,
       "host-peer",
       {} as never,
-      "Alice",
+      { kind: "new", roomCode: "ABCDE", displayName: "Alice" },
     );
     const send = vi.fn(async () => {});
     (guest as unknown as { session: { send: typeof send } }).session = { send };

@@ -1538,25 +1538,35 @@ fn parse_restricted_spell_type_phrase(spell_part: &str) -> Option<String> {
     )
 }
 
-/// CR 106.6: Parse the negative spend restriction "this mana can't be spent to
-/// cast [a/an] non<TYPE> spell(s)" into a `SpellTypeOrAbilityActivation` whose
-/// `spell_type` is `<TYPE>` (the phrase with the leading "non" stripped) and
-/// whose ability scope is `Any`. The double-negative restricts spell-casting to
-/// `<TYPE>` spells while leaving every ability activation payable (CR 605/602) —
-/// Karn, Legacy Reforged; Hydraulic Helper. Returns `None` for any other
-/// phrasing so the positive-form parser and the existing gap behavior are
-/// untouched.
+/// CR 106.6 + CR 601.2g-h: Parse "this mana can't be spent to cast ..." restrictions.
+/// A spell-from-zone clause lowers to a prohibition of that cast class
+/// (`spells from your hand` -> `CannotCastSpellFromZone(Hand)`, Karolina Dean).
+/// An already-negative "from anywhere other than" clause is rejected rather
+/// than double-negated.
+/// The existing `non<TYPE>` form lowers to `SpellTypeOrAbilityActivation`, leaving
+/// ability payments unrestricted (Karn, Legacy Reforged; Hydraulic Helper).
 fn parse_negative_mana_spend_restriction(lower: &str) -> Option<ManaSpendRestriction> {
     let (_, rest) = nom_on_lower(lower, lower, |i| {
         // MTGJSON Oracle text is not apostrophe-normalized, so accept both the
         // ASCII (') and curly (U+2019) apostrophe forms of "can't".
         let (i, _) = tag("this mana ca").parse(i)?;
         let (i, _) = alt((tag("n't"), tag("n\u{2019}t"))).parse(i)?;
-        let (i, _) = tag(" be spent to cast ").parse(i)?;
+        value((), tag(" be spent to cast ")).parse(i)
+    })?;
+    let rest = rest.trim().trim_end_matches(['.', '"']).trim();
+
+    if let Some((zone, polarity)) = parse_spell_from_zone(rest) {
+        return match polarity {
+            ZoneSpendPolarity::From => Some(ManaSpendRestriction::CannotCastSpellFromZone(zone)),
+            ZoneSpendPolarity::NotFrom => None,
+        };
+    }
+
+    let rest_lower = rest.to_lowercase();
+    let (_, rest) = nom_on_lower(rest, &rest_lower, |i| {
         let (i, _) = opt(nom_primitives::parse_article).parse(i)?;
         value((), alt((tag("non-"), tag("non")))).parse(i)
     })?;
-    let rest = rest.trim().trim_end_matches(['.', '"']).trim();
     // `rest` is now "<type> spell(s)" (the article and "non" prefix already
     // consumed); reuse the shared type-phrase combinator to canonicalize the
     // spell type.
@@ -4297,6 +4307,33 @@ mod tests {
                 ability: AbilityActivationScope::Any,
             }]
         );
+    }
+
+    #[test]
+    fn negated_spell_from_zone_lowers_to_cast_prohibition_once() {
+        let expected = vec![ManaSpendRestriction::CannotCastSpellFromZone(Zone::Hand)];
+
+        for text in [
+            "this mana can't be spent to cast spells from your hand",
+            "this mana can\u{2019}t be spent to cast a spell from your hand",
+        ] {
+            assert_eq!(
+                parse_mana_spend_restriction(text).map(|(restrictions, _)| restrictions),
+                Some(expected.clone()),
+                "negative zone restriction must parse fully: {text}"
+            );
+        }
+
+        for hostile in [
+            "this mana can't be spent to cast spells from anywhere other than your hand",
+            "this mana can't be spent to cast spells from your hand nonsense",
+        ] {
+            assert_eq!(
+                parse_mana_spend_restriction(hostile),
+                None,
+                "already-negative and trailing-tail shapes must remain unsupported: {hostile}"
+            );
+        }
     }
 
     // CR 106.6 + CR 107.3 + CR 202.3: Troyan, Gutsy Explorer — any-type

@@ -191,6 +191,7 @@ fn guard_mana_restrictions_payload(
                 count: _,
             }
             | ManaRestriction::OnlyForSpellFromZone(_)
+            | ManaRestriction::CannotCastSpellFromZone(_)
             | ManaRestriction::OnlyForFaceDownSpell
             | ManaRestriction::OnlyForSpecialAction(_)
             | ManaRestriction::Impossible

@@ -21,6 +21,7 @@ use engine::types::mana::{
 use engine::types::match_config::DeckCardCount;
 use engine::types::player::PlayerId;
 use engine::types::proposed_event::TokenCharacteristics;
+use engine::types::zones::Zone;
 use engine::types::{GameAction, ObjectId};
 use server_core::game_action_payload_guard::{
     guard_game_action_payload, MAX_ACTION_LIST_LEN, MAX_CHOICE_LEN, MAX_DEBUG_AST_JSON_LEN,
@@ -85,6 +86,7 @@ fn accepts_realistic_tap_land_semantic_selection() {
     selection.atomic_combination = Some(vec![ManaType::Green, ManaType::Blue]);
     selection.restrictions = vec![
         ManaRestriction::OnlyForSpellType("Creature".to_string()),
+        ManaRestriction::CannotCastSpellFromZone(Zone::Hand),
         ManaRestriction::OnlyForAny(vec![
             ManaRestriction::OnlyForCreatureType("Elf".to_string()),
             ManaRestriction::OnlyForSpellMatchingCostCriteria {

@@ -94,6 +94,9 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * admitted; see the gate for why.
  *
  * Bumps to date:
+ *  30 — ManaRestriction.CannotCastSpellFromZone adds a serialized
+ *       GameState/ManaUnit restriction used by Karolina Dean. Older peers
+ *       cannot deserialize that externally tagged enum variant.
  *  29 — WaitingFor.ChooseObjectsSelection publishes min and optional max
  *       bounds. A v28 peer silently ignores the additive fields and offers
  *       out-of-range selections, so refuse the capability mismatch during
@@ -172,7 +175,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 29 as const;
+export const WIRE_PROTOCOL_VERSION = 30 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   // `wireProtocolVersion` is optional on both first-contact guest messages:

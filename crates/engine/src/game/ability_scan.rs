@@ -496,8 +496,16 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(sources, target_ctx, mode));
             acc = acc.or(scan_quantity_expr(amount, mode));
-            if let EachDamageRecipient::Shared(filter) = recipient {
-                acc = acc.or(scan_target_filter(filter, target_ctx, mode));
+            match recipient {
+                EachDamageRecipient::Shared(filter) => {
+                    acc = acc.or(scan_target_filter(filter, target_ctx, mode));
+                }
+                EachDamageRecipient::OtherBatchSource { source_filters } => {
+                    for filter in source_filters {
+                        acc = acc.or(scan_target_filter(filter, target_ctx, mode));
+                    }
+                }
+                EachDamageRecipient::EachController => {}
             }
             acc
         }

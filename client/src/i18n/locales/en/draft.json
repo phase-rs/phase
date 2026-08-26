@@ -189,11 +189,20 @@
       "description": "Host or join a pod with up to 8 players, draft live together, then play a Swiss or elimination tournament."
     },
     "podInProgress": "Pod Draft in Progress",
+    "guestPodInProgress": "Joined Pod Ready to Reconnect",
     "podLabel": "{{kind}} Pod",
-    "seatCount": "{{count}} seats",
+    "guestPodLabel": "Draft Pod",
+    "seatCount_one": "{{count}} seat",
+    "seatCount_few": "{{count}} seats",
+    "seatCount_many": "{{count}} seats",
+    "seatCount_other": "{{count}} seats",
     "roomLabel": "Room {{code}}",
-    "cardsPicked": "{{count}} cards picked",
+    "cardsPicked_one": "{{count}} card picked",
+    "cardsPicked_few": "{{count}} cards picked",
+    "cardsPicked_many": "{{count}} cards picked",
+    "cardsPicked_other": "{{count}} cards picked",
     "resume": "Resume",
+    "reconnect": "Reconnect",
     "draftInProgress": "Draft in Progress",
     "draftComplete": "Draft Complete",
     "resumeMatch": "Resume Match",
@@ -386,7 +395,8 @@
   "podError": {
     "kicked": "You were kicked from the pod",
     "hostLeft": "Host left the draft",
-    "connection": "Connection Error"
+    "connection": "Connection Error",
+    "retry": "Try Reconnecting"
   },
   "spectator": {
     "eyebrow": "Draft spectator",
