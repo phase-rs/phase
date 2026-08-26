@@ -1704,7 +1704,12 @@ export class P2PDraftHost {
     try {
       const seed = this.draftSeed ?? hashStringToSeed(this.draftCode || this.roomCode || "draft");
       await this.adapter.replaceSeatWithBot(seat, this.botNameForSeat(seat, seed));
+      const grace = this.disconnectedSeats.get(seat);
+      if (grace && grace.timer !== null) clearTimeout(grace.timer);
+      this.disconnectedSeats.delete(seat);
       this.expiredDisconnectedSeats.delete(seat);
+      this.seatTokens.delete(seat);
+      this.seatNames.delete(seat);
       await this.persistSessionStrict();
       await this.broadcastViews();
       this.reconcileEffectivePause();
@@ -2127,6 +2132,7 @@ export class P2PDraftHost {
     }
     this.emit({ type: "seatKicked", seatIndex: seat, reason });
     this.syncLobbyToGuests();
+    this.reconcileEffectivePause();
   }
 
   requestPause(): void {

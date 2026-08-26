@@ -53,6 +53,19 @@ function recoveredHost(hostDisplayName: string): P2PDraftHost {
   );
 }
 
+function ephemeralHost(hostDisplayName: string): P2PDraftHost {
+  return new P2PDraftHost(
+    { id: hostDisplayName } as never,
+    () => () => {},
+    { type: "Set", data: { set_pool_json: "{}" } } as never,
+    "Premier",
+    8,
+    hostDisplayName,
+    "Swiss",
+    "Casual",
+  );
+}
+
 describe("P2PDraftHost persistence disposal", () => {
   afterEach(() => {
     vi.clearAllMocks();
@@ -91,6 +104,41 @@ describe("P2PDraftHost persistence disposal", () => {
 
     expect(saveDraftHostSession).toHaveBeenCalledTimes(1);
     await current.dispose();
+  });
+
+  it("releases pause and reconnect state when a disconnected seat becomes a bot or is kicked", async () => {
+    const host = ephemeralHost("Host");
+    const privateHost = host as unknown as {
+      adapter: { replaceSeatWithBot: ReturnType<typeof vi.fn>; getViewForSeat: ReturnType<typeof vi.fn> };
+      disconnectedSeats: Map<number, { disconnectedAt: number; timer: ReturnType<typeof setTimeout> | null }>;
+      expiredDisconnectedSeats: Set<number>;
+      seatTokens: Map<number, string>;
+      seatNames: Map<number, string>;
+      paused: boolean;
+      replaceSeatWithBot: (seat: number) => Promise<void>;
+      kickPlayerDurably: (seat: number, reason: string) => Promise<void>;
+    };
+    privateHost.adapter.replaceSeatWithBot = vi.fn(async () => ({}));
+    privateHost.adapter.getViewForSeat = vi.fn(async () => ({ status: "Lobby" }));
+    privateHost.disconnectedSeats.set(1, { disconnectedAt: Date.now(), timer: setTimeout(() => {}, 60_000) });
+    privateHost.expiredDisconnectedSeats.add(1);
+    privateHost.seatTokens.set(1, "guest-token");
+    privateHost.seatNames.set(1, "Guest");
+    privateHost.paused = true;
+
+    await privateHost.replaceSeatWithBot(1);
+
+    expect(privateHost.disconnectedSeats.has(1)).toBe(false);
+    expect(privateHost.expiredDisconnectedSeats.has(1)).toBe(false);
+    expect(privateHost.seatTokens.has(1)).toBe(false);
+    expect(privateHost.seatNames.has(1)).toBe(false);
+    expect(privateHost.paused).toBe(false);
+
+    privateHost.disconnectedSeats.set(2, { disconnectedAt: Date.now(), timer: null });
+    privateHost.paused = true;
+    await privateHost.kickPlayerDurably(2, "Kicked");
+    expect(privateHost.paused).toBe(false);
+    await host.dispose();
   });
 
   it("persists a deck receipt before ack and treats its exact retry as idempotent", async () => {

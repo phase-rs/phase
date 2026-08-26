@@ -57,7 +57,9 @@ export const DRAFT_PROTOCOL_VERSION = 14 as const;
 export function deckSubmissionFingerprint(mainDeck: readonly string[]): string {
   const counts = new Map<string, number>();
   for (const card of mainDeck) counts.set(card, (counts.get(card) ?? 0) + 1);
-  return JSON.stringify([...counts.entries()].sort(([left], [right]) => left.localeCompare(right)));
+  return JSON.stringify([...counts.entries()].sort(([left], [right]) => (
+    left < right ? -1 : left > right ? 1 : 0
+  )));
 }
 
 /** The host's reason for declining a first-contact draft connection. */
@@ -569,8 +571,8 @@ export function validateDraftMessage(raw: unknown): DraftP2PMessage {
   }
   if (msg.type === "draft_submit_deck") {
     const submission = raw as Record<string, unknown>;
-    if (!requireDraftCardInstanceId(submission.submissionId, "submissionId", "deck submission")
-      || !Array.isArray(submission.mainDeck)
+    requireDraftCardInstanceId(submission.submissionId, "submissionId", "deck submission");
+    if (!Array.isArray(submission.mainDeck)
       || !submission.mainDeck.every((card) => typeof card === "string")) {
       throw new Error("Invalid draft deck submission");
     }
@@ -621,7 +623,7 @@ export function validateDraftMessage(raw: unknown): DraftP2PMessage {
     return rejection as DraftP2PMessage;
   }
   const viewMessage = raw as { type: string; view?: unknown; seats?: unknown };
-  if (["draft_welcome", "draft_reconnect_ack", "draft_state_update", "draft_pick_ack", "draft_deck_submit_ack"].includes(msg.type)) {
+  if (["draft_welcome", "draft_reconnect_ack", "draft_state_update", "draft_pick_ack"].includes(msg.type)) {
     return {
       ...viewMessage,
       view: normalizeDraftPlayerView(viewMessage.view),

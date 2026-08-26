@@ -17,6 +17,7 @@ import {
   createDraftPeerSession,
   type DraftPeerSession,
 } from "../network/draftPeerSession";
+import { parseRoomCode } from "../network/connection";
 import {
   deckSubmissionFingerprint,
   DRAFT_PROTOCOL_VERSION,
@@ -382,8 +383,9 @@ export class P2PDraftGuest {
   }
 
   private deckSubmissionIdentity(): { roomCode: string; draftToken: string } | null {
-    if (!this.draftCode || !this.draftToken) return null;
-    return { roomCode: this.connection.roomCode, draftToken: this.draftToken };
+    const roomCode = parseRoomCode(this.connection.roomCode);
+    if (!this.draftCode || !this.draftToken || !roomCode) return null;
+    return { roomCode, draftToken: this.draftToken };
   }
 
   sendMatchSettlement(settlement: DraftMatchSettlement): void {

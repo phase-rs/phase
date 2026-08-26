@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   DRAFT_PROTOCOL_VERSION,
+  deckSubmissionFingerprint,
   encodeDraftWireMessage,
   decodeDraftWireMessage,
   validateDraftMessage,
@@ -9,6 +10,12 @@ import {
 import type { DraftP2PMessage } from "../draftProtocol";
 
 describe("draftProtocol", () => {
+  it("uses a locale-independent multiset fingerprint for deck submissions", () => {
+    expect(deckSubmissionFingerprint(["Ångler", "Island", "Island"])).toBe(
+      deckSubmissionFingerprint(["Island", "Ångler", "Island"]),
+    );
+  });
+
   describe("DRAFT_PROTOCOL_VERSION", () => {
     it("is version 14", () => {
       expect(DRAFT_PROTOCOL_VERSION).toBe(14);

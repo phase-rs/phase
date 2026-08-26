@@ -568,10 +568,12 @@ export async function saveDraftDeckSubmission(
   hostPeerId: string,
   submission: Omit<PersistedDraftDeckSubmission, "hostPeerId" | "timestamp">,
 ): Promise<void> {
+  const roomCode = parseRoomCode(submission.roomCode);
+  if (!roomCode) throw new Error("Invalid draft room code");
   const value: PersistedDraftDeckSubmission = {
     hostPeerId,
     draftCode: submission.draftCode,
-    roomCode: submission.roomCode,
+    roomCode,
     draftToken: submission.draftToken,
     submissionId: submission.submissionId,
     mainDeck: [...submission.mainDeck],
@@ -585,6 +587,8 @@ export async function loadDraftDeckSubmission(
   identity?: Pick<PersistedDraftDeckSubmission, "roomCode" | "draftToken">,
 ): Promise<PersistedDraftDeckSubmission | null> {
   try {
+    const roomCode = identity && parseRoomCode(identity.roomCode);
+    if (identity && !roomCode) return null;
     const value = await get<PersistedDraftDeckSubmission>(
       `${DRAFT_DECK_SUBMISSION_PREFIX}${hostPeerId}`,
       getDraftStore(),
@@ -595,7 +599,7 @@ export async function loadDraftDeckSubmission(
       || !Array.isArray(value.mainDeck) || !value.mainDeck.every((card) => typeof card === "string")) {
       return null;
     }
-    if (identity && (value.roomCode !== identity.roomCode || value.draftToken !== identity.draftToken)) {
+    if (identity && (value.roomCode !== roomCode || value.draftToken !== identity.draftToken)) {
       return null;
     }
     return value;

@@ -21,17 +21,20 @@ import {
   clearActiveDraftGuest,
   clearDraftGuestRecovery,
   clearDraftGuestSession,
+  clearDraftDeckSubmission,
   clearDraftHostSession,
   loadActiveDraftPod,
   loadActiveDraftGuest,
   inspectActiveDraftPod,
   loadDraftGuestSession,
+  loadDraftDeckSubmission,
   loadDraftHostSession,
   loadDraftIntergameCommands,
   loadDraftSettlementOutbox,
   saveActiveDraftPod,
   saveActiveDraftGuest,
   saveDraftGuestSession,
+  saveDraftDeckSubmission,
   saveDraftHostSession,
   persistedDraftHostSessionState,
   saveDraftIntergameCommands,
@@ -277,6 +280,23 @@ describe("draftPersistence", () => {
   });
 
   describe("guest session", () => {
+    it("canonicalizes a deck submission room code for replay and removal", async () => {
+      await saveDraftDeckSubmission("phase2-HOST1", {
+        draftCode: "draft-xyz",
+        roomCode: " abcde ",
+        draftToken: "token-abc",
+        submissionId: "submission-1",
+        mainDeck: ["Island"],
+      });
+
+      await expect(loadDraftDeckSubmission("phase2-HOST1", {
+        roomCode: "abcde",
+        draftToken: "token-abc",
+      })).resolves.toMatchObject({ roomCode: "ABCDE" });
+      await clearDraftDeckSubmission("phase2-HOST1", "submission-1");
+      await expect(loadDraftDeckSubmission("phase2-HOST1")).resolves.toBeNull();
+    });
+
     it("saves and loads a guest session", async () => {
       await saveDraftGuestSession("phase2-HOST1", {
         draftToken: "token-abc",

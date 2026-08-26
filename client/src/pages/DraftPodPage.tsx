@@ -38,6 +38,7 @@ import {
   intergamePromptKey,
   useMultiplayerDraftStore,
   type DraftPodScreen,
+  type GuestDraftResumeOutcome,
 } from "../stores/multiplayerDraftStore";
 import { useDraftPodStore } from "../stores/draftPodStore";
 
@@ -861,7 +862,6 @@ export function DraftPodPage() {
     const controller = new AbortController();
 
     void (async () => {
-      let guestOutcome: "resumed" | "absent" | "invalid" | "failed" | "superseded" | null = null;
       if (entryMode === "host" || entryMode === "auto") {
         // A host locator gets first claim on automatic entry. A guest locator
         // is considered only after a terminal/invalid host locator has actually
@@ -875,12 +875,18 @@ export function DraftPodPage() {
         if (entryMode === "host" || outcome === "resumed" || outcome === "superseded") return;
 
         if (outcome === "absent" || outcome === "terminal" || outcome === "invalid") {
-          guestOutcome = await resumeDraft({ routeToken, signal: controller.signal });
+          const guestOutcome: GuestDraftResumeOutcome = await resumeDraft({
+            routeToken,
+            signal: controller.signal,
+          });
           if (generation.current !== routeToken || guestOutcome === "superseded") return;
           if (guestOutcome === "resumed" || guestOutcome === "failed") return;
         }
       } else {
-        guestOutcome = await resumeDraft({ routeToken, signal: controller.signal });
+        const guestOutcome: GuestDraftResumeOutcome = await resumeDraft({
+          routeToken,
+          signal: controller.signal,
+        });
         if (generation.current !== routeToken || guestOutcome === "superseded") return;
         return;
       }
