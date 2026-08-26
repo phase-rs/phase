@@ -188,13 +188,38 @@ not yet as something a game can start with.
 at the moment a player *selects* it to start a game — a distinct step from
 saving/defining it, with no owner in earlier passes of this charter. This
 phase builds that one shared resolver (name/signature is this phase's own
-implementation decision): given a `CustomFormatRules`, it derives every
-runtime field (`command_zone`/`uses_commander`/`commander_damage_threshold`/
-`singleton`/`sideboard_policy`) from `custom_rules.structural` rather than
-accepting them independently, sets `format`/`custom_rules` consistently, and
-is the one place `PLAN.md`'s validated-construction requirement (§1; `CONTEXT.md` open
-item 1) is actually satisfiable — `from_lobby_config`'s own output has no
-`format` field to validate that invariant against. The resolver's callers:
+implementation decision): given a `CustomFormatRules`, it derives the
+**complete** `StructuralRules -> FormatConfig` mapping — not a subset —
+since `StructuralRules`' own doc comment states every field mirrors an
+existing `FormatConfig` field 1:1, and `PLAN.md:713-719` requires
+`from_lobby_config` (the reverse direction) to capture every one of them
+with full fidelity; a resolver covering only a subset would leave two
+independently-writable representations of the omitted fields with no
+stated authority for keeping them consistent. The direct-copy fields —
+`starting_life`/`min_players`/`max_players`/`deck_size`/`singleton`/
+`range_of_influence`/`team_based`/`sideboard_policy` — pass through
+unchanged. The `CommandZoneMode`-derived fields —
+`command_zone`/`commander_damage_threshold`/`uses_commander` — come from
+`custom_rules.structural.command_zone_mode`'s own discriminant:
+`CommandZoneMode::Disabled` resolves to `command_zone: false`,
+`commander_damage_threshold: None`, `uses_commander: false`;
+`CommandZoneMode::Enabled { commander_damage_threshold, .. }` resolves to
+`command_zone: true`, that same `commander_damage_threshold`, and
+`uses_commander: true` — matching `PLAN.md`'s already-stated invariant
+(`command_zone && commander_damage_threshold.is_some()`), now expressed
+through the enum's own discriminant instead of three independently-settable
+fields. `CommandZoneMode::Enabled`'s `eligibility_rule` is not mirrored onto
+`FormatConfig` at all — `FormatConfig` has no such field; it stays on
+`custom_rules.structural` for the commander-eligibility check (Phase 1d) to
+read directly. `supplies_fixed_deck` is the one `FormatConfig` field this
+resolver does **not** derive from `custom_rules.structural` — per `PLAN.md`'s
+own accounting, it is always `false` for every Custom format, since no
+custom-format use case for an engine-supplied fixed deck exists today; this
+is a deliberate, named exclusion, not an oversight. The resolver sets
+`format`/`custom_rules` consistently and is the one place `PLAN.md`'s
+validated-construction requirement (§1; `CONTEXT.md` open item 1) is
+actually satisfiable — `from_lobby_config`'s own output has no `format`
+field to validate that invariant against. The resolver's callers:
 Axis-A saved-definition selection (this phase) and Axis-B registry-preset
 selection (Phase 1d, reusing this same resolver — no separate one built
 there). Phase 1a's `FormatConfig` deserialization boundary currently rejects
