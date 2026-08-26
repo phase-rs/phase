@@ -170,6 +170,7 @@ fn scoped_unless_sacrifice_settles_earlier_declines_when_final_payer_is_eliminat
         .add_spell_to_hand_from_oracle(P0, "Scoped Zombie Test", false, SCOPED_UNLESS_ZOMBIE)
         .with_mana_cost(ManaCost::zero())
         .id();
+    let _p2_creature = scenario.add_creature(P2, "P2 Sacrifice", 1, 1).id();
     let mut runner = scenario.build();
     give_p0_sorcery_window(&mut runner);
     runner.cast(spell).resolve();
@@ -225,6 +226,7 @@ fn scoped_unless_sacrifice_abandons_when_its_original_controller_leaves() {
         .add_spell_to_hand_from_oracle(P0, "Scoped Zombie Test", false, SCOPED_UNLESS_ZOMBIE)
         .with_mana_cost(ManaCost::zero())
         .id();
+    let _p2_creature = scenario.add_creature(P2, "P2 Sacrifice", 1, 1).id();
     let mut runner = scenario.build();
     give_p0_sorcery_window(&mut runner);
     runner.cast(spell).resolve();
@@ -251,6 +253,7 @@ fn scoped_unless_sacrifice_resumes_after_a_graveyard_replacement_choice() {
     let colossus = scenario
         .add_creature_from_oracle(P1, "Darksteel Colossus", 11, 11, DARKSTEEL_COLOSSUS)
         .id();
+    let _p2_creature = scenario.add_creature(P2, "P2 Sacrifice", 1, 1).id();
     let mut runner = scenario.build();
     give_p0_sorcery_window(&mut runner);
     runner.cast(spell).resolve();
@@ -283,6 +286,7 @@ fn scoped_unless_sacrifice_abandons_a_payers_replacement_choice_when_controller_
     let colossus = scenario
         .add_creature_from_oracle(P1, "Darksteel Colossus", 11, 11, DARKSTEEL_COLOSSUS)
         .id();
+    let _p2_creature = scenario.add_creature(P2, "P2 Sacrifice", 1, 1).id();
     let mut runner = scenario.build();
     give_p0_sorcery_window(&mut runner);
     runner.cast(spell).resolve();
