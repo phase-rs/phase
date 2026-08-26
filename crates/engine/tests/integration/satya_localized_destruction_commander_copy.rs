@@ -2,7 +2,7 @@
 //! source card's commander designation and block state-based actions after a
 //! Localized Destruction board wipe.
 
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::move_to_zone;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{PersistedGameState, WaitingFor};
@@ -128,23 +128,99 @@ fn restored_token_commander_choice_resumes_sba_cleanup() {
         .get_mut(&copied_commander)
         .unwrap()
         .is_token = true;
-    runner.state_mut().waiting_for = WaitingFor::CommanderZoneChoice {
-        player,
-        commander_id: copied_commander,
-        current_zone: Zone::Graveyard,
-    };
+    {
+        let state = runner.state_mut();
+        state.priority_player = P1;
+        state.priority_pass_count = 1;
+        state.priority_passes.insert(P1);
+        state.waiting_for = WaitingFor::CommanderZoneChoice {
+            player,
+            commander_id: copied_commander,
+            current_zone: Zone::Graveyard,
+        };
+    }
 
     let serialized = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
         .expect("the captured command-zone choice serializes");
-    let restored = serde_json::from_str::<PersistedGameState>(&serialized)
+    let mut restored = serde_json::from_str::<PersistedGameState>(&serialized)
         .expect("the captured command-zone choice restores")
         .into_game_state();
 
-    assert!(matches!(restored.waiting_for, WaitingFor::Priority { .. }));
+    assert!(matches!(
+        &restored.waiting_for,
+        WaitingFor::Priority { player } if *player == P0
+    ));
+    assert_eq!(restored.priority_player, P0);
+    assert_eq!(restored.priority_pass_count, 0);
+    assert!(restored.priority_passes.is_empty());
     assert!(
         !restored.objects.contains_key(&copied_commander),
         "CR 704.5d: the malformed token must cease to exist during restore cleanup"
     );
+    engine::game::engine::apply(&mut restored, P0, GameAction::PassPriority)
+        .expect("the active player must be able to act after stale choice recovery");
+}
+
+/// CR 723.3 + CR 723.5: restoring an impossible command-zone prompt during a
+/// controlled turn preserves the controlled seat as the semantic priority
+/// holder while assigning action authority to the turn controller.
+#[test]
+fn restored_token_commander_choice_respects_turn_control_priority_authority() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let copied_commander = scenario
+        .add_creature(P0, "Controlled Copied Commander", 3, 4)
+        .commander()
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().format_config.command_zone = true;
+
+    let mut events = Vec::new();
+    move_to_zone(
+        runner.state_mut(),
+        copied_commander,
+        Zone::Graveyard,
+        &mut events,
+    );
+    let player = runner.state().objects[&copied_commander].owner;
+    {
+        let state = runner.state_mut();
+        state.objects.get_mut(&copied_commander).unwrap().is_token = true;
+        state.active_player = P0;
+        state.turn_decision_controller = Some(P1);
+        state.priority_player = P0;
+        state.priority_pass_count = 1;
+        state.priority_passes.insert(P0);
+        state.waiting_for = WaitingFor::CommanderZoneChoice {
+            player,
+            commander_id: copied_commander,
+            current_zone: Zone::Graveyard,
+        };
+    }
+
+    let serialized = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("the controlled stale command-zone choice serializes");
+    let mut restored = serde_json::from_str::<PersistedGameState>(&serialized)
+        .expect("the controlled stale command-zone choice restores")
+        .into_game_state();
+
+    assert!(matches!(
+        &restored.waiting_for,
+        WaitingFor::Priority { player } if *player == P0
+    ));
+    assert_eq!(restored.priority_player, P1);
+    assert_eq!(restored.priority_pass_count, 0);
+    assert!(restored.priority_passes.is_empty());
+    assert!(
+        !restored.objects.contains_key(&copied_commander),
+        "CR 704.5d: the malformed token must cease to exist during restore cleanup"
+    );
+    assert!(
+        engine::game::engine::apply(&mut restored, P0, GameAction::PassPriority).is_err(),
+        "CR 723.5: the controlled seat cannot submit its own priority action"
+    );
+    engine::game::engine::apply(&mut restored, P1, GameAction::PassPriority)
+        .expect("CR 723.5: the turn controller must be able to submit priority actions");
 }
 
 /// CR 903.3 + CR 903.9a: restore must preserve a legitimate card-backed
