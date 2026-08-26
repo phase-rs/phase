@@ -493,6 +493,10 @@ fn action_outcome<T: Serialize>(result: Result<T, ActionRejection>) -> JsValue {
     })
 }
 
+fn rejected_action_outcome(rejection: ActionRejection) -> JsValue {
+    to_js(&ActionOutcome::<()>::Rejected { rejection })
+}
+
 /// Set the multiplayer enforcement flag directly.
 ///
 /// Entering multiplayer is *not* done here: the engine claims the flag itself,
@@ -1490,9 +1494,9 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
     let action: GameAction = match serde_wasm_bindgen::from_value(action) {
         Ok(a) => a,
         Err(_) => {
-            return action_outcome(Err(ActionRejection::new(
+            return rejected_action_outcome(ActionRejection::new(
                 ActionRejectionCode::InvalidAction,
-            )))
+            ))
         }
     };
     let actor = PlayerId(actor);
@@ -1546,7 +1550,7 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
             invalidate_ai_proposals();
             action_outcome(Ok(result))
         }
-        Err(rejection) => action_outcome(Err(rejection)),
+        Err(rejection) => rejected_action_outcome(rejection),
     }) {
         Ok(val) => val,
         Err(e) => e,
@@ -1561,9 +1565,9 @@ pub fn submit_interaction_js(actor: u8, submission: JsValue) -> JsValue {
     let submission: InteractionSubmission = match serde_wasm_bindgen::from_value(submission) {
         Ok(submission) => submission,
         Err(_) => {
-            return action_outcome(Err(ActionRejection::new(
+            return rejected_action_outcome(ActionRejection::new(
                 ActionRejectionCode::InvalidInteractionResponse,
-            )));
+            ));
         }
     };
     let actor = PlayerId(actor);
@@ -1573,7 +1577,7 @@ pub fn submit_interaction_js(actor: u8, submission: JsValue) -> JsValue {
             invalidate_ai_proposals();
             action_outcome(Ok(applied.result))
         }
-        Ok(Err(rejection)) => action_outcome(Err(rejection)),
+        Ok(Err(rejection)) => rejected_action_outcome(rejection),
         Err(error) => error,
     }
 }
@@ -1634,7 +1638,7 @@ fn handle_debug_create_card(request: DebugCreateCardRequest<'_>) -> JsValue {
     match with_state(|state| {
         preflight_debug_action_with_rejection(state, request.actor, &debug_action)
     }) {
-        Ok(Err(rejection)) => return action_outcome(Err(rejection)),
+        Ok(Err(rejection)) => return rejected_action_outcome(rejection),
         Ok(Ok(())) => {}
         Err(error) => return error,
     }
@@ -2013,9 +2017,9 @@ pub fn preview_action_js(actor: u8, action: JsValue) -> JsValue {
     let action: GameAction = match serde_wasm_bindgen::from_value(action) {
         Ok(a) => a,
         Err(_) => {
-            return action_outcome(Err(ActionRejection::new(
+            return rejected_action_outcome(ActionRejection::new(
                 ActionRejectionCode::InvalidAction,
-            )))
+            ))
         }
     };
     let actor = PlayerId(actor);
@@ -2034,9 +2038,9 @@ pub fn preview_mana_payment_js(actor: u8, action: JsValue) -> JsValue {
     let action: GameAction = match serde_wasm_bindgen::from_value(action) {
         Ok(action) => action,
         Err(_) => {
-            return action_outcome(Err(ActionRejection::new(
+            return rejected_action_outcome(ActionRejection::new(
                 ActionRejectionCode::InvalidAction,
-            )))
+            ))
         }
     };
 
@@ -3049,9 +3053,9 @@ pub fn resolve_all(
     max_resolutions: u32,
 ) -> Result<JsValue, JsValue> {
     if serde_json::from_str::<Vec<serde_json::Value>>(ai_seats_json).is_err() {
-        return Ok(action_outcome(Err(ActionRejection::new(
+        return Ok(rejected_action_outcome(ActionRejection::new(
             ActionRejectionCode::InvalidAction,
-        ))));
+        )));
     }
 
     let requester = PlayerId(requester);
@@ -3065,7 +3069,7 @@ pub fn resolve_all(
         let _ = max_resolutions;
         let mut result = match resolve_all_ready_prefix_with_rejection(state, requester) {
             Ok(result) => result,
-            Err(rejection) => return Ok(action_outcome(Err(rejection))),
+            Err(rejection) => return Ok(rejected_action_outcome(rejection)),
         };
         // A Resolve All burst applies real actions directly via
         // `apply_action_boundary_with_stack_limit` (bypassing `submit_action`,
