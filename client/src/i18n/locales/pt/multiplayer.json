@@ -81,6 +81,12 @@
   "joinErrorDialog": {
     "dismiss": "Dispensar"
   },
+  "reconnectRejected": {
+    "firstMessageInvalid": "O anfitrião recusou a ligação antes da configuração. Atualize ambas as janelas e tente novamente.",
+    "versionRequired": "Este anfitrião requer o protocolo de ligação v{{version}}. Atualize ambas as janelas e tente novamente.",
+    "versionMismatch": "O protocolo de ligação não corresponde: o seu cliente enviou v{{guestVersion}}, mas o anfitrião usa v{{hostVersion}}. Atualize ambas as janelas.",
+    "malformedAuthority": "O anfitrião recusou uma autorização de ligação inválida. Entre novamente com um novo código de sala."
+  },
   "serverOfflinePrompt": {
     "title": "Matchmaking inacessível",
     "message": "Não conseguimos alcançar o servidor do jogo, então o lobby público está indisponível no momento. Você ainda pode jogar compartilhando um código direto com um amigo.",

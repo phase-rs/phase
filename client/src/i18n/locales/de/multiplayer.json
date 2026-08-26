@@ -81,6 +81,12 @@
   "joinErrorDialog": {
     "dismiss": "Schließen"
   },
+  "reconnectRejected": {
+    "firstMessageInvalid": "Der Host hat die Verbindung vor der Einrichtung abgelehnt. Aktualisiere beide Fenster und versuche es erneut.",
+    "versionRequired": "Dieser Host benötigt das Übertragungsprotokoll v{{version}}. Aktualisiere beide Fenster und versuche es erneut.",
+    "versionMismatch": "Übertragungsprotokoll stimmt nicht überein: Dein Client hat v{{guestVersion}} gesendet, der Host verwendet jedoch v{{hostVersion}}. Aktualisiere beide Fenster.",
+    "malformedAuthority": "Der Host hat eine ungültige Verbindungsberechtigung abgelehnt. Tritt mit einem neuen Raumcode erneut bei."
+  },
   "serverOfflinePrompt": {
     "title": "Matchmaking nicht erreichbar",
     "message": "Wir konnten den Spielserver nicht erreichen, daher ist die öffentliche Lobby derzeit nicht verfügbar. Du kannst trotzdem spielen, indem du einen direkten Code mit einem Freund teilst.",

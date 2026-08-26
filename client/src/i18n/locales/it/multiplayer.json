@@ -81,6 +81,12 @@
   "joinErrorDialog": {
     "dismiss": "Ignora"
   },
+  "reconnectRejected": {
+    "firstMessageInvalid": "L'host ha rifiutato la connessione prima della configurazione. Aggiorna entrambe le finestre e riprova.",
+    "versionRequired": "Questo host richiede il protocollo di connessione v{{version}}. Aggiorna entrambe le finestre e riprova.",
+    "versionMismatch": "Il protocollo di connessione non corrisponde: il tuo client ha inviato v{{guestVersion}}, ma l'host usa v{{hostVersion}}. Aggiorna entrambe le finestre.",
+    "malformedAuthority": "L'host ha rifiutato un'autorizzazione di connessione non valida. Rientra con un nuovo codice stanza."
+  },
   "serverOfflinePrompt": {
     "title": "Matchmaking irraggiungibile",
     "message": "Non siamo riusciti a raggiungere il server di gioco, quindi la lobby pubblica non è disponibile al momento. Puoi comunque giocare condividendo un codice diretto con un amico.",

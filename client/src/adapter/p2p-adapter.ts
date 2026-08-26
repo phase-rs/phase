@@ -77,7 +77,7 @@ import {
   type P2PTerminalResult,
 } from "../services/p2pTerminalResult";
 import { NativeEngineSocket } from "../services/nativeEngineSocket";
-import i18n from "../i18n";
+import i18n from "i18next";
 
 /**
  * Adapter-level events emitted to the UI. Wire-protocol messages are

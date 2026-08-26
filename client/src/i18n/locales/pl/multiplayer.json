@@ -81,6 +81,12 @@
   "joinErrorDialog": {
     "dismiss": "Zamknij"
   },
+  "reconnectRejected": {
+    "firstMessageInvalid": "Host odrzucił połączenie przed konfiguracją. Odśwież oba okna i spróbuj ponownie.",
+    "versionRequired": "Ten host wymaga protokołu połączenia v{{version}}. Odśwież oba okna i spróbuj ponownie.",
+    "versionMismatch": "Niezgodność protokołu połączenia: klient wysłał v{{guestVersion}}, ale host używa v{{hostVersion}}. Odśwież oba okna.",
+    "malformedAuthority": "Host odrzucił nieprawidłowe uprawnienia połączenia. Dołącz ponownie, używając nowego kodu pokoju."
+  },
   "serverOfflinePrompt": {
     "title": "Dobieranie graczy nieosiągalne",
     "message": "Nie udało się połączyć z serwerem gry, więc publiczna poczekalnia jest teraz niedostępna. Nadal możesz grać, udostępniając bezpośredni kod znajomemu.",

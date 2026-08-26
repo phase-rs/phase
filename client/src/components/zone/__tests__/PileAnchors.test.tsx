@@ -54,6 +54,7 @@ describe("zone pile contextual anchors", () => {
       exile: [faceUp.id, hidden.id],
       stack: [],
       waiting_for: buildPriorityWaitingFor(),
+      derived: { visible_exile_object_ids: { 0: [faceUp.id] } },
     });
     useGameStore.setState({ gameState, waitingFor: gameState.waiting_for, legalActionsByObject: {} });
 

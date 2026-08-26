@@ -81,6 +81,12 @@
   "joinErrorDialog": {
     "dismiss": "Ignorer"
   },
+  "reconnectRejected": {
+    "firstMessageInvalid": "L’hôte a refusé la connexion avant la configuration. Actualisez les deux fenêtres puis réessayez.",
+    "versionRequired": "Cet hôte nécessite le protocole de connexion v{{version}}. Actualisez les deux fenêtres puis réessayez.",
+    "versionMismatch": "Les protocoles de connexion ne correspondent pas : votre client a envoyé v{{guestVersion}}, mais l’hôte utilise v{{hostVersion}}. Actualisez les deux fenêtres.",
+    "malformedAuthority": "L’hôte a refusé une autorisation de connexion non valide. Rejoignez avec un nouveau code de salon."
+  },
   "serverOfflinePrompt": {
     "title": "Matchmaking injoignable",
     "message": "Nous n'avons pas pu joindre le serveur de jeu, donc le salon public est indisponible pour le moment. Vous pouvez toujours jouer en partageant un code direct avec un ami.",
