@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, tag_no_case, take_until};
+use nom::bytes::complete::{tag, tag_no_case, take_until, take_while1};
 use nom::character::complete::{anychar, char, multispace0, multispace1};
 use nom::combinator::{all_consuming, eof, map_opt, opt, peek, recognize, rest, value};
 use nom::multi::{many_till, separated_list1};
@@ -791,6 +791,9 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     if nom_primitives::scan_contains(&lower, "you would create a")
         && nom_primitives::scan_contains(&lower, "instead")
     {
+        if let Some(def) = parse_same_subtype_plus_additional_token_replacement(&lower, &text) {
+            return Some(def);
+        }
         if let Some(def) = parse_subtype_token_substitution(&lower, &text) {
             return Some(def);
         }
@@ -9741,6 +9744,60 @@ fn parse_xorn_subtype_token_replacement(
             // CR 614.1a + CR 109.5: "If *you* would create..." scopes the
             // replacement to the source's controller — it must not fire for
             // tokens created by other players (issue #1967).
+            .token_owner_scope(ControllerRef::You)
+            .additional_token_spec(spec)
+            .description(original_text.to_string()),
+    )
+}
+
+/// CR 614.1a + CR 111.1: Parse subtype-gated replacements that preserve the
+/// original token batch and append an equal-sized batch of another subtype:
+///
+/// ```text
+/// If you would create a <S> token, instead create a <S> token and a <T> token.
+/// ```
+///
+/// The repeated primary subtype must match the antecedent. Keeping that check
+/// here prevents a substitution such as Food -> Clue plus Treasure from being
+/// misrepresented as an additional-token effect.
+fn parse_same_subtype_plus_additional_token_replacement(
+    lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let subtype = |input| {
+        take_while1::<_, _, OracleError<'_>>(|c: char| {
+            c.is_alphanumeric() || matches!(c, '-' | '\'')
+        })
+        .parse(input)
+    };
+    let article = || alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")));
+    let (_, (antecedent, _, repeated, _, additional, _, _)) = all_consuming((
+        preceded(tag("if you would create "), preceded(article(), subtype)),
+        tag(" token, instead create "),
+        preceded(article(), subtype),
+        tag(" token and "),
+        preceded(article(), subtype),
+        tag(" token."),
+        eof,
+    ))
+    .parse(lower)
+    .ok()?;
+
+    if !antecedent.eq_ignore_ascii_case(repeated) {
+        return None;
+    }
+
+    let descriptor = format!("a {additional} token");
+    let token = super::oracle_effect::parse_token_description(&descriptor)?;
+    let spec = token_description_to_spec(&token)?;
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .condition(ReplacementCondition::TokenSubtypeMatches {
+                subtypes: vec![canonicalize_subtype(antecedent)],
+            })
+            // CR 109.5 + CR 111.2: "you" is the source controller, and only
+            // token batches that player creates are affected.
             .token_owner_scope(ControllerRef::You)
             .additional_token_spec(spec)
             .description(original_text.to_string()),
@@ -22894,6 +22951,59 @@ mod tests {
                 .any(|s| s.eq_ignore_ascii_case("Treasure")),
             "appended spec must be a Treasure token, got {:?}",
             spec.characteristics.subtypes
+        );
+    }
+
+    /// CR 614.1a + CR 111.10a-b: Bilbo preserves each Food token in the
+    /// proposed batch and appends one Treasure token for each of them.
+    #[test]
+    fn parses_same_subtype_plus_additional_token_replacement() {
+        let text =
+            "If you would create a Food token, instead create a Food token and a Treasure token.";
+        let def = parse_replacement_line(text, "Bilbo, Fellow Conspirator")
+            .expect("Bilbo replacement must parse");
+
+        assert_eq!(def.event, ReplacementEvent::CreateToken);
+        assert_eq!(def.token_owner_scope, Some(ControllerRef::You));
+        assert!(matches!(
+            def.condition,
+            Some(ReplacementCondition::TokenSubtypeMatches { ref subtypes })
+                if subtypes == &["Food".to_string()]
+        ));
+        let additional = def
+            .additional_token_spec
+            .expect("Bilbo must append a token spec");
+        assert_eq!(
+            additional.characteristics.subtypes,
+            vec!["Treasure".to_string()]
+        );
+    }
+
+    #[test]
+    fn same_subtype_plus_additional_rejects_changed_primary_subtype() {
+        let text =
+            "If you would create a Food token, instead create a Clue token and a Treasure token.";
+        assert!(
+            parse_same_subtype_plus_additional_token_replacement(text, text).is_none(),
+            "a changed primary token is substitution plus addition, not Bilbo's class"
+        );
+    }
+
+    #[test]
+    fn same_subtype_plus_additional_rejects_malformed_second_token() {
+        let text = "If you would create a Food token, instead create a Food and a Treasure token.";
+        assert!(
+            parse_same_subtype_plus_additional_token_replacement(text, text).is_none(),
+            "the repeated primary must be a complete token description"
+        );
+    }
+
+    #[test]
+    fn same_subtype_plus_additional_rejects_semantic_tail() {
+        let text = "If you would create a Food token, instead create a Food token and a Treasure token if it is your turn.";
+        assert!(
+            parse_same_subtype_plus_additional_token_replacement(text, text).is_none(),
+            "all-consuming grammar must not swallow a semantic tail"
         );
     }
 

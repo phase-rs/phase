@@ -6475,6 +6475,7 @@ fn parse_played_a_land_this_turn(input: &str) -> OracleResult<'_, StaticConditio
 
 fn parse_creature_died_this_turn_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
+        parse_creatures_died_this_turn_threshold,
         parse_died_under_your_control_this_turn,
         // "a creature died this turn" (Morbid) → zone-change count >= 1
         value(
@@ -6491,6 +6492,19 @@ fn parse_creature_died_this_turn_conditions(input: &str) -> OracleResult<'_, Sta
         parse_filtered_creature_died_this_turn,
     ))
     .parse(input)
+}
+
+/// CR 603.4 + CR 700.4: "N or more/fewer creatures died this turn" compares
+/// the requested threshold with the number of creature battlefield-to-graveyard
+/// moves recorded this turn. The shared threshold grammar also covers the
+/// equivalent "at least N" wording and keeps the comparator axis typed.
+fn parse_creatures_died_this_turn_threshold(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, (threshold, comparator)) = parse_amount_threshold(input)?;
+    let (rest, _) = tag(" creatures died this turn").parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_comparison(creatures_died_this_turn_ref(), comparator, threshold),
+    ))
 }
 
 /// "a <type-phrase> died this turn" — the filtered Morbid gate without a
@@ -17258,6 +17272,29 @@ mod tests {
                 assert_eq!(rhs, QuantityExpr::Fixed { value: 1 });
             }
             _ => panic!("expected QuantityComparison, got {c:?}"),
+        }
+    }
+
+    #[test]
+    fn creature_death_threshold_uses_zone_change_count_and_typed_comparator() {
+        for (text, comparator, threshold) in [
+            ("three or more creatures died this turn", Comparator::GE, 3),
+            ("two or fewer creatures died this turn", Comparator::LE, 2),
+            ("at least five creatures died this turn", Comparator::GE, 5),
+        ] {
+            let (rest, condition) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "{text}");
+            assert_eq!(
+                condition,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: creatures_died_this_turn_ref(),
+                    },
+                    comparator,
+                    rhs: QuantityExpr::Fixed { value: threshold },
+                },
+                "{text}"
+            );
         }
     }
 
