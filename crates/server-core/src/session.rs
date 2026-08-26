@@ -2256,6 +2256,20 @@ impl SessionManager {
         game_code: &str,
         player_token: &str,
     ) -> Result<RevisionedActionResult, String> {
+        self.handle_match_concede_outcome(game_code, player_token)
+            .map_err(SessionActionError::into_legacy_reason)
+    }
+
+    /// Three-way result for the transport-owned match-concede request.
+    ///
+    /// Authentication/session availability remains operational. A request that
+    /// is validly authenticated but cannot forfeit the current match is a
+    /// requester-visible lifecycle refusal instead.
+    pub fn handle_match_concede_outcome(
+        &mut self,
+        game_code: &str,
+        player_token: &str,
+    ) -> Result<RevisionedActionResult, SessionActionError> {
         let session = self
             .sessions
             .get_mut(game_code)
@@ -2265,16 +2279,17 @@ impl SessionManager {
             .ok_or_else(|| "Invalid player token".to_string())?;
         session.reject_if_ai_driver_faulted()?;
         if session.pending_takeback.is_some() {
-            return Err(
+            return Err(SessionActionError::RequestRejected(
                 "A takeback request is pending — resolve it before conceding the match".to_string(),
-            );
+            ));
         }
 
         let events = apply_trusted_match_forfeit(
             &mut session.state,
             player,
             MatchForfeitCause::MatchConcede,
-        )?;
+        )
+        .map_err(SessionActionError::RequestRejected)?;
         let (legal_actions, spell_costs, by_object) = engine_legal_actions_full(&session.state);
         let auto_pass = auto_pass_recommended(&session.state, &legal_actions);
         let revision = session.advance_state_revision();
@@ -4514,6 +4529,25 @@ mod tests {
             .handle_match_concede(&code, &token0)
             .expect_err("a terminal AI driver fault blocks match concede");
         assert!(err.contains("Native AI driver fault"));
+    }
+
+    #[test]
+    fn match_concede_distinguishes_lifecycle_refusal_from_operational_failure() {
+        let (mut mgr, code, token0, _token1) = setup_two_player_game();
+
+        let lifecycle = mgr
+            .handle_match_concede_outcome(&code, &token0)
+            .expect_err("a non-Bo3 match cannot be conceded as a match");
+        assert!(matches!(
+            lifecycle,
+            SessionActionError::RequestRejected(reason)
+                if reason == "Match forfeits require a best-of-three match"
+        ));
+
+        let operational = mgr
+            .handle_match_concede_outcome("missing", &token0)
+            .expect_err("an absent session is operational");
+        assert!(matches!(operational, SessionActionError::Operational(_)));
     }
 
     /// Drives the fixture until **`run_ai` itself** publishes a turn boundary

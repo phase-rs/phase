@@ -5201,6 +5201,9 @@ async fn handle_client_message(
                                     rejection,
                                 }
                             }
+                            Err(SessionActionError::RequestRejected(reason)) => {
+                                ServerMessage::RequestRejected { reason }
+                            }
                             Err(SessionActionError::Operational(error)) => {
                                 ServerMessage::error(error)
                             }
@@ -6909,7 +6912,7 @@ async fn handle_client_message(
 
             let outcome = {
                 let mut mgr = state.lock().await;
-                match mgr.handle_match_concede(&game_code, &player_token) {
+                match mgr.handle_match_concede_outcome(&game_code, &player_token) {
                     Ok((revision, result)) => {
                         let winner = match &result.0.waiting_for {
                             engine::types::game_state::WaitingFor::GameOver { winner } => *winner,
@@ -6932,16 +6935,15 @@ async fn handle_client_message(
                             ranked_result,
                         )
                         .map(|terminal| (revision, result, winner, terminal, rewind_targets))
+                        .map_err(SessionActionError::Operational)
                     }
                     Err(error) => Err(error),
                 }
             };
 
             match outcome {
-                Err(reason) => {
-                    if let Ok(json) =
-                        serde_json::to_string(&ServerMessage::RequestRejected { reason })
-                    {
+                Err(error) => {
+                    if let Ok(json) = serde_json::to_string(&session_action_error_message(error)) {
                         let _ = socket.send(Message::text(json)).await;
                     }
                 }
@@ -9504,6 +9506,12 @@ mod game_submission_tests {
             message,
             ServerMessage::RequestRejected { reason }
                 if reason == "A takeback request is pending — resolve it before taking further actions"
+        ));
+        assert!(matches!(
+            session_action_error_message(SessionActionError::Operational(
+                "session storage failed".to_string(),
+            )),
+            ServerMessage::Error { message, .. } if message == "session storage failed"
         ));
     }
 
