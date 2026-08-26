@@ -272,6 +272,12 @@ describe("AttachmentFan mode 2 — the permanent's own legal actions", () => {
     expect(dispatchAction).not.toHaveBeenCalled();
   });
 
+  it("identifies fanned cards for contextual errors", () => {
+    seed({ legalActionsByObject: { [String(FREED_ID)]: [FREED_TAP] } });
+
+    expect(fanCard("Freed from the Real")).toHaveAttribute("data-object-id", String(FREED_ID));
+  });
+
   // V2 — a lone benign action auto-dispatches rather than opening a one-option
   // modal. PAIR-ONLY (§7.1): POINTER sweep row `C4 lone benign ability`; its
   // always-side mutant is `alwaysChoose`.

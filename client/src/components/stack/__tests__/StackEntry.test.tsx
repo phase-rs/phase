@@ -151,6 +151,23 @@ describe("StackEntry", () => {
     vi.useRealTimers();
   });
 
+  it("identifies the represented stack object and compact group for contextual errors", () => {
+    const entry = buildStackEntry({ id: 77, source_id: 42 });
+
+    render(
+      <StackEntry
+        entry={entry}
+        groupedObjectIds={[77, 78]}
+        index={0}
+        isTop
+        cardSize={{ width: 120, height: 168 }}
+      />,
+    );
+
+    expect(document.querySelector('[data-stack-entry="77"]')).toHaveAttribute("data-object-id", "77");
+    expect(document.querySelector('[data-stack-entry="77"]')).toHaveAttribute("data-grouped-ids", "77 78");
+  });
+
   it("offers Revoke for an AllCopies yield after the source token has ceased", () => {
     // CR 400.7 + CR 704.5d: a ceased token is gone from `objects`, so the entry
     // has no live source object to read a card_id from — the menu must match the

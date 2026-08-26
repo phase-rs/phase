@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { BatchResolveResult, EngineSnapshot, GameState } from "../../adapter/types";
-import { AdapterError, AdapterErrorCode, nextSnapshotSeq } from "../../adapter/types";
+import type { ActionRejection, BatchResolveResult, EngineSnapshot, GameState } from "../../adapter/types";
+import { actionRejectionError, nextSnapshotSeq } from "../../adapter/types";
 import { useGameStore } from "../../stores/gameStore";
 import { useAppNotificationStore } from "../../stores/appToastStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
@@ -27,6 +27,16 @@ function readyStateWithStack(len: number): GameState {
 
 function chunk(itemsResolved: number, total: number): BatchResolveResult {
   return { events: [], waitingFor: priorityWf, logEntries: [], itemsResolved, total };
+}
+
+function rejection(overrides: Partial<ActionRejection> = {}): ActionRejection {
+  return {
+    code: "resolve_all_not_ready",
+    disposition: "unavailable",
+    message: "Engine error: ObjectId(200) cannot resolve all from the current stack",
+    related_object_ids: [200],
+    ...overrides,
+  };
 }
 
 /**
@@ -318,11 +328,11 @@ describe("dispatchResolveAll progress", () => {
     const resolveAll = vi
       .fn<EngineResolveAll>()
       .mockRejectedValue(
-        new AdapterError(
-          AdapterErrorCode.STALE_ACTION,
-          "Resolve All requires your priority",
-          false,
-        ),
+        actionRejectionError(rejection({
+          code: "stale_action",
+          disposition: "stale",
+          message: "Resolve All requires your priority",
+        })),
       );
     const getState = vi.fn().mockResolvedValue(stateWithStack(2));
     useGameStore.setState({
@@ -364,6 +374,39 @@ describe("dispatchResolveAll progress", () => {
     expect(useAppNotificationStore.getState().notification).toMatchObject({
       description: "batch snapshot rejected",
     });
+  });
+
+  it("anchors a structured Resolve All rejection at its engine-provided related object", async () => {
+    const anchor = document.createElement("div");
+    anchor.dataset.objectId = "200";
+    anchor.getBoundingClientRect = () => ({
+      x: 30, y: 100, top: 100, right: 90, bottom: 160, left: 30, width: 60, height: 60,
+      toJSON: () => ({}),
+    });
+    document.body.append(anchor);
+    const engineRejection = rejection();
+    const resolveAll = vi
+      .fn<EngineResolveAll>()
+      .mockRejectedValue(actionRejectionError(engineRejection));
+    const getState = vi.fn().mockResolvedValue(stateWithStack(2));
+    useGameStore.setState({
+      gameState: readyStateWithStack(2),
+      adapter: {
+        resolveAll,
+        resolveAllUsesServerAi: true,
+        getState,
+        getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
+        getSnapshot: snapshotVia(getState),
+      } as never,
+    });
+
+    await expect(dispatchResolveAll(0, [])).resolves.toBeUndefined();
+
+    expect(useAppNotificationStore.getState().notification).toMatchObject({
+      description: engineRejection.message,
+      anchor: { x: 60, y: 88 },
+    });
+    anchor.remove();
   });
 
   it("falls back to an engine-side UntilStackEmpty auto-pass when the adapter has no batch resolveAll (multiplayer)", async () => {

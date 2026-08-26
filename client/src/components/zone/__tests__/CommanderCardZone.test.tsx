@@ -141,6 +141,14 @@ describe("CommanderCardZone commander ninjutsu (issue #5239)", () => {
     expect(useUiStore.getState().inspectedObjectId).toBeNull();
   });
 
+  it("identifies the commander card for contextual errors", () => {
+    seedStores([castAction()]);
+
+    render(<CommanderCardZone playerId={0} />);
+
+    expect(screen.getByRole("button")).toHaveAttribute("data-object-id", String(COMMANDER_ID));
+  });
+
   it("opens the ability-choice modal when multiple attackers can be returned", () => {
     const actions = [ninjutsuAction(9), ninjutsuAction(12)];
     seedStores(actions);

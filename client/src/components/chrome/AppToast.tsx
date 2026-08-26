@@ -10,6 +10,7 @@ export function AppToast() {
   const notification = useAppNotificationStore((s) => s.notification);
   const expiresAt = useAppNotificationStore((s) => s.expiresAt);
   const clearNotification = useAppNotificationStore((s) => s.clearNotification);
+  const anchored = notification?.anchor;
 
   useEffect(() => {
     if (!notification) return;
@@ -25,7 +26,11 @@ export function AppToast() {
           role="status"
           aria-live="polite"
           aria-atomic="true"
-          className="fixed top-4 right-4 z-[60] w-[min(100vw-2rem,22rem)] overflow-hidden rounded-xl border border-white/10 bg-[#0b1020]/96 shadow-[0_16px_48px_rgba(0,0,0,0.45)] backdrop-blur-md"
+          className={`fixed z-[60] w-[min(100vw-2rem,22rem)] overflow-hidden rounded-xl border border-white/10 bg-[#0b1020]/96 shadow-[0_16px_48px_rgba(0,0,0,0.45)] backdrop-blur-md ${
+            anchored ? "" : "top-4 right-4"
+          }`}
+          style={anchored ? { left: anchored.x, top: anchored.y } : undefined}
+          transformTemplate={(_, generated) => anchored ? `translate(-50%, -100%) ${generated}` : generated}
           initial={{ opacity: 0, x: 24, y: -8 }}
           animate={{ opacity: 1, x: 0, y: 0 }}
           exit={{ opacity: 0, x: 24, y: -8 }}

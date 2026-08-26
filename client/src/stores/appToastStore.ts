@@ -5,6 +5,8 @@ const NOTIFICATION_DURATION_MS = 5000;
 export interface AppNotification {
   title: string;
   description: string;
+  /** Viewport point for a notification attached to a rendered game object. */
+  anchor?: { x: number; y: number };
 }
 
 interface AppNotificationState {

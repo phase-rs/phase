@@ -110,6 +110,12 @@ describe("ZoneViewer", () => {
     );
   });
 
+  it("identifies visible zone cards for contextual errors", () => {
+    render(<ZoneViewer zone="graveyard" playerId={0} onClose={vi.fn()} />);
+
+    expect(screen.getByTestId("card-image").parentElement).toHaveAttribute("data-object-id", "7");
+  });
+
   it("resolves graveyard card art via printed_ref oracle_id, not name", () => {
     // Regression: a transformed / DFC / back-face card (e.g. a transformed
     // planeswalker) has a back-face name that isn't a scryfall-data key, so the

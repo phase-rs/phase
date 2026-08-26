@@ -246,6 +246,7 @@ function ZoneCard({
             : "hover:ring-1 hover:ring-white/20"
       }`}
       title={canCast && !isValidTarget ? castTitle : undefined}
+      data-object-id={hiddenFromViewer ? undefined : obj.id}
       {...hoverProps(obj.id)}
       onClick={handleClick}
     >

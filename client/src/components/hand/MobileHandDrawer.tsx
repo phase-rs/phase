@@ -286,6 +286,7 @@ const DrawerCard = memo(function DrawerCard({
   return (
     <button
       className={`relative aspect-[5/7] w-full overflow-hidden rounded-lg bg-gray-800 ${glowClass}`}
+      data-object-id={objectId}
       onClick={handleClick}
       {...handlers}
     >

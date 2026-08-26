@@ -54,10 +54,12 @@ interface StackEntryProps {
    * visible card remains `entry`; choice membership and dispatch use this id.
    */
   choiceObjectId?: ObjectId;
+  /** All object identities represented by a compact group. */
+  groupedObjectIds?: ObjectId[];
   details?: StackEntryDisplay;
 }
 
-export function StackEntry({ entry, choiceObjectId = entry.id, index, isTop, isPending, cardSize, style, onHoverChange, pacingMultiplier = 1, groupCount = 1, details }: StackEntryProps) {
+export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds, index, isTop, isPending, cardSize, style, onHoverChange, pacingMultiplier = 1, groupCount = 1, details }: StackEntryProps) {
   const { t } = useTranslation("game");
   const isMobile = useIsMobile();
   const playerId = usePlayerId();
@@ -220,6 +222,8 @@ export function StackEntry({ entry, choiceObjectId = entry.id, index, isTop, isP
       }}
       style={style}
       data-stack-entry={entry.id}
+      data-object-id={entry.id}
+      data-grouped-ids={groupedObjectIds && groupedObjectIds.length > 1 ? groupedObjectIds.join(" ") : undefined}
       data-card-hover
       className="relative cursor-pointer"
       onClick={handleClick}

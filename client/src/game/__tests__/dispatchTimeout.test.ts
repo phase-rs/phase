@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { EngineAdapter, GameAction, SubmitResult } from "../../adapter/types";
-import { AdapterError, AdapterErrorCode, nextSnapshotSeq } from "../../adapter/types";
+import type { ActionRejection, EngineAdapter, GameAction, SubmitResult } from "../../adapter/types";
+import { actionRejectionError, AdapterError, AdapterErrorCode, nextSnapshotSeq } from "../../adapter/types";
 import { useAppNotificationStore } from "../../stores/appToastStore";
 import { useGameStore } from "../../stores/gameStore";
 import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory";
@@ -11,7 +11,7 @@ import {
   buildPlayer,
   buildPriorityWaitingFor,
 } from "../../test/factories/gameStateFactory";
-import { dispatchAction } from "../dispatch";
+import { dispatchAction, dispatchInteraction } from "../dispatch";
 
 // Spy on the recovery escalation so we can assert the dispatch.ts branch that
 // fires `notifyEngineLost` on ENGINE_UNRESPONSIVE actually runs. Without this
@@ -33,6 +33,16 @@ const emptyState = buildGameState({
   stack: [],
   players: [],
 });
+
+function rejection(overrides: Partial<ActionRejection> = {}): ActionRejection {
+  return {
+    code: "invalid_action",
+    disposition: "invalid",
+    message: "Engine error: ObjectId(200) must be blocked by 2 or more creatures",
+    related_object_ids: [200],
+    ...overrides,
+  };
+}
 
 /**
  * Regression for the silent-freeze bug: when a gameplay worker round-trip
@@ -112,6 +122,121 @@ describe("dispatchAction recovery on ENGINE_UNRESPONSIVE", () => {
     expect(useAppNotificationStore.getState().notification).toEqual({
       title: "Skip target failed",
       description: "Engine error: Action not allowed: Cannot pay mana cost",
+    });
+  });
+
+  it("anchors a structured rejection at the first rendered related object without changing its message", async () => {
+    const first = document.createElement("div");
+    first.dataset.objectId = "200";
+    first.getBoundingClientRect = () => ({
+      x: 10, y: 30, top: 30, right: 50, bottom: 70, left: 10, width: 40, height: 40,
+      toJSON: () => ({}),
+    });
+    const second = document.createElement("div");
+    second.dataset.objectId = "201";
+    document.body.append(first, second);
+    const engineRejection = rejection({ related_object_ids: [200, 201] });
+    const submitAction = vi
+      .fn<EngineAdapter["submitAction"]>()
+      .mockRejectedValue(actionRejectionError(engineRejection));
+
+    useGameStore.setState({
+      adapter: buildEngineAdapterMock(emptyState, { submitAction }),
+      gameState: emptyState,
+      gameMode: "ai",
+    });
+
+    await expect(dispatchAction({ type: "ChooseTarget", data: { target: null } }, 0)).rejects.toBeInstanceOf(AdapterError);
+
+    expect(useAppNotificationStore.getState().notification).toEqual({
+      title: "Skip target failed",
+      description: engineRejection.message,
+      anchor: { x: 30, y: 18 },
+    });
+    first.remove();
+    second.remove();
+  });
+
+  it("silently absorbs a stale structured rejection", async () => {
+    const submitAction = vi
+      .fn<EngineAdapter["submitAction"]>()
+      .mockRejectedValue(actionRejectionError(rejection({
+        code: "stale_action",
+        disposition: "stale",
+        message: "The action is no longer current",
+      })));
+
+    useGameStore.setState({
+      adapter: buildEngineAdapterMock(emptyState, { submitAction }),
+      gameState: emptyState,
+      gameMode: "ai",
+    });
+
+    await expect(dispatchAction({ type: "PassPriority", data: {} } as GameAction, 0)).resolves.toBeUndefined();
+    expect(useAppNotificationStore.getState().notification).toBeNull();
+  });
+
+  it("reports structured interaction rejections through the same contextual path", async () => {
+    const anchor = document.createElement("div");
+    anchor.dataset.groupedIds = "201 202";
+    anchor.getBoundingClientRect = () => ({
+      x: 40, y: 80, top: 80, right: 140, bottom: 120, left: 40, width: 100, height: 40,
+      toJSON: () => ({}),
+    });
+    document.body.append(anchor);
+    const engineRejection = rejection({ related_object_ids: [202] });
+    const submitInteraction = vi
+      .fn<NonNullable<EngineAdapter["submitInteraction"]>>()
+      .mockRejectedValue(actionRejectionError(engineRejection));
+
+    useGameStore.setState({
+      adapter: buildEngineAdapterMock(emptyState, { submitInteraction }),
+      gameState: emptyState,
+      gameMode: "ai",
+    });
+
+    await expect(dispatchInteraction({} as never, 0)).rejects.toBeInstanceOf(AdapterError);
+
+    expect(useAppNotificationStore.getState().notification).toEqual({
+      title: "Action failed",
+      description: engineRejection.message,
+      anchor: { x: 90, y: 68 },
+    });
+    anchor.remove();
+  });
+
+  it("reports a queued structured rejection once it reaches the dispatch pipeline", async () => {
+    const engineRejection = rejection({ related_object_ids: [] });
+    let resolveFirst!: (result: SubmitResult) => void;
+    const submitAction = vi
+      .fn<EngineAdapter["submitAction"]>()
+      .mockImplementationOnce(() => new Promise<SubmitResult>((resolve) => {
+        resolveFirst = resolve;
+      }))
+      .mockRejectedValueOnce(actionRejectionError(engineRejection));
+    const getSnapshot = vi.fn<EngineAdapter["getSnapshot"]>().mockResolvedValue({
+      state: emptyState,
+      legalResult: buildLegalActionsResult({ actions: [{ type: "ChooseTarget", data: { target: null } }] }),
+      seq: nextSnapshotSeq(),
+    });
+
+    useGameStore.setState({
+      adapter: buildEngineAdapterMock(emptyState, { submitAction, getSnapshot }),
+      gameState: emptyState,
+      waitingFor: emptyState.waiting_for,
+      legalActions: [{ type: "ChooseTarget", data: { target: null } }],
+      gameMode: "ai",
+    });
+
+    const first = dispatchAction({ type: "PassPriority", data: {} } as GameAction, 0);
+    const queued = dispatchAction({ type: "ChooseTarget", data: { target: null } }, 0);
+    resolveFirst({ events: [], log_entries: [] } as SubmitResult);
+
+    await expect(first).resolves.toBeUndefined();
+    await expect(queued).rejects.toBeInstanceOf(AdapterError);
+    expect(useAppNotificationStore.getState().notification).toMatchObject({
+      title: "Skip target failed",
+      description: engineRejection.message,
     });
   });
 

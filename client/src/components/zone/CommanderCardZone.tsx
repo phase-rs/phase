@@ -224,6 +224,7 @@ function CommanderCard({
       onDragStart={startManaPaymentPreview}
       onDragEnd={onDragEnd}
       whileDrag={{ cursor: "grabbing", scale: 1.04 }}
+      data-object-id={commander.id}
       className={`group relative ${
         canCast ? "cursor-grab" : canNinjutsu ? "cursor-pointer" : "cursor-default"
       }`}
