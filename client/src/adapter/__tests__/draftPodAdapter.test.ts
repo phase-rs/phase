@@ -618,6 +618,7 @@ describe("DraftPodGuestAdapter", () => {
 
   afterEach(async () => {
     await adapter.dispose();
+    vi.useRealTimers();
   });
 
   it("starts in idle status", () => {

@@ -237,12 +237,12 @@ export class DraftPodHostAdapter {
             ...config.brokerRequest,
             hostPeerId: hostResult.peerId,
           });
-          abortIfRequested();
         } catch (err) {
           if (config.signal?.aborted || this.disposed) throw err;
           console.warn("[DraftPodHostAdapter] broker registration failed:", err);
           // Non-fatal: direct room code still works
         }
+        abortIfRequested();
       }
 
       // 3. For cube drafts, the WASM CARD_DB must be populated before

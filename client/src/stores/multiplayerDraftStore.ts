@@ -947,9 +947,13 @@ export const useMultiplayerDraftStore = create<
       return resumeGuestDraftAttempt.promise;
     }
 
-    let attempt!: NonNullable<typeof resumeGuestDraftAttempt>;
+    const attempt: NonNullable<typeof resumeGuestDraftAttempt> = {
+      routeToken,
+      signal: options.signal,
+      promise: Promise.resolve("superseded"),
+    };
     const isCurrent = () => resumeGuestDraftAttempt === attempt && !options.signal?.aborted;
-    const promise = (async (): Promise<GuestDraftResumeOutcome> => {
+    attempt.promise = (async (): Promise<GuestDraftResumeOutcome> => {
       if (options.signal?.aborted) return "superseded";
       const locator = loadActiveDraftGuest();
       if (!locator) return "absent";
@@ -976,10 +980,9 @@ export const useMultiplayerDraftStore = create<
       }
       return "failed";
     })();
-    attempt = { routeToken, signal: options.signal, promise };
     resumeGuestDraftAttempt = attempt;
     try {
-      return await promise;
+      return await attempt.promise;
     } finally {
       if (resumeGuestDraftAttempt === attempt) resumeGuestDraftAttempt = null;
     }

@@ -236,7 +236,7 @@ describe("draftProtocol", () => {
       })).toMatchObject({ kind: "UnknownToken" });
     });
 
-    it("normalizes a v14 untyped reconnect rejection to a credential-preserving protocol mismatch", () => {
+    it("normalizes a pre-v13 untyped reconnect rejection to a credential-preserving protocol mismatch", () => {
       expect(validateDraftMessage({
         type: "draft_reconnect_rejected",
         reason: "Unknown token",

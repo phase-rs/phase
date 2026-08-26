@@ -39,7 +39,6 @@ import {
   useMultiplayerDraftStore,
   type DraftPodScreen,
 } from "../stores/multiplayerDraftStore";
-import { inspectActiveDraftPod } from "../services/draftPersistence";
 import { useDraftPodStore } from "../stores/draftPodStore";
 
 // ── Setup Mode ────────────────────────────────────────────────────────
@@ -857,7 +856,8 @@ export function DraftPodPage() {
     : searchParams.get("resume") === "1" ? "host" : "auto";
 
   useEffect(() => {
-    const routeToken = ++entryGeneration.current;
+    const generation = entryGeneration;
+    const routeToken = ++generation.current;
     const controller = new AbortController();
 
     void (async () => {
@@ -871,17 +871,17 @@ export function DraftPodPage() {
           routeToken,
           signal: controller.signal,
         });
-        if (entryGeneration.current !== routeToken) return;
+        if (generation.current !== routeToken) return;
         if (entryMode === "host" || outcome === "resumed" || outcome === "superseded") return;
 
-        if (inspectActiveDraftPod().type === "absent") {
+        if (outcome === "absent" || outcome === "terminal" || outcome === "invalid") {
           guestOutcome = await resumeDraft({ routeToken, signal: controller.signal });
-          if (entryGeneration.current !== routeToken || guestOutcome === "superseded") return;
+          if (generation.current !== routeToken || guestOutcome === "superseded") return;
           if (guestOutcome === "resumed" || guestOutcome === "failed") return;
         }
       } else {
         guestOutcome = await resumeDraft({ routeToken, signal: controller.signal });
-        if (entryGeneration.current !== routeToken || guestOutcome === "superseded") return;
+        if (generation.current !== routeToken || guestOutcome === "superseded") return;
         return;
       }
     })();
@@ -889,7 +889,7 @@ export function DraftPodPage() {
       controller.abort();
       retryController.current?.abort();
       retryController.current = null;
-      ++entryGeneration.current;
+      if (generation.current === routeToken) generation.current++;
     };
   }, [entryMode, location.pathname, location.search, resumeDraft, resumeHostedPod]);
 

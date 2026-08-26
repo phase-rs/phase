@@ -12,7 +12,7 @@
 
 import { createStore, del, get, set } from "idb-keyval";
 
-import type { DraftKind, PoolInput } from "../adapter/draft-adapter";
+import type { DraftKind, DraftStatus, PoolInput } from "../adapter/draft-adapter";
 import type { DraftMatchBinding, DraftMatchLaunch, DraftMatchSettlement } from "../network/draftProtocol";
 import { parseRoomCode } from "../network/connection";
 import { ACTIVE_DRAFT_GUEST_KEY, ACTIVE_DRAFT_POD_KEY } from "../constants/storage";
@@ -163,6 +163,18 @@ export type ActiveDraftPodLoadResult =
   | { type: "present"; meta: ActiveDraftPodMeta; capture: ActiveDraftPodMetaCapture };
 
 export type PersistedDraftHostSessionState = "live" | "terminal" | "invalid";
+
+const PERSISTED_DRAFT_STATUS: Record<DraftStatus, PersistedDraftHostSessionState> = {
+  Lobby: "live",
+  Drafting: "live",
+  Paused: "live",
+  Deckbuilding: "live",
+  Pairing: "live",
+  MatchInProgress: "live",
+  RoundComplete: "live",
+  Complete: "terminal",
+  Abandoned: "invalid",
+};
 
 // ── Store ──────────────────────────────────────────────────────────────
 
@@ -333,22 +345,8 @@ export function persistedDraftHostSessionState(
   try {
     const value: unknown = JSON.parse(session.draftSessionJson);
     if (!isRecord(value) || typeof value.status !== "string") return "invalid";
-    switch (value.status) {
-      case "Lobby":
-      case "Drafting":
-      case "Paused":
-      case "Deckbuilding":
-      case "Pairing":
-      case "MatchInProgress":
-      case "RoundComplete":
-        return "live";
-      case "Complete":
-        return "terminal";
-      case "Abandoned":
-        return "invalid";
-      default:
-        return "invalid";
-    }
+    if (!(value.status in PERSISTED_DRAFT_STATUS)) return "invalid";
+    return PERSISTED_DRAFT_STATUS[value.status as DraftStatus];
   } catch {
     return "invalid";
   }
@@ -507,7 +505,8 @@ export async function saveDraftGuestSession(
 ): Promise<void> {
   const roomCode = parseRoomCode(data.roomCode);
   const displayName = data.displayName.trim();
-  if (!roomCode || !displayName) return;
+  if (!roomCode) throw new Error("Invalid draft room code");
+  if (!displayName) throw new Error("Draft display name is required");
   const session: PersistedDraftGuestSession = {
     hostPeerId,
     draftToken: data.draftToken,

@@ -73,6 +73,17 @@ type DraftPodGuestEventListener = (event: DraftPodGuestEvent) => void;
 const INITIAL_RECONNECT_JOIN_ATTEMPTS = 3;
 const INITIAL_RECONNECT_JOIN_BACKOFF_MS = [500, 1_000] as const;
 
+class HostIdentityMismatchError extends Error {
+  constructor() {
+    super("Draft pod host changed; reconnect credentials were not sent");
+    this.name = "HostIdentityMismatchError";
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
 interface DraftPodGuestConnectionBase {
   roomCode: string;
   displayName: string;
@@ -142,7 +153,7 @@ export class DraftPodGuestAdapter {
 
     try {
       // 1. Join the PeerJS room
-      const joinResult = await this.openRoom(config);
+      const { joinResult, reconnectAttemptLimit } = await this.openRoom(config);
       this.joinResult = joinResult;
 
       // The code route and the IndexedDB capability are both bound to this
@@ -150,7 +161,7 @@ export class DraftPodGuestAdapter {
       if (config.kind === "reconnect" && joinResult.conn.peer !== config.hostPeerId) {
         joinResult.destroyPeer();
         this.joinResult = null;
-        throw new Error("Draft pod host changed; reconnect credentials were not sent");
+        throw new HostIdentityMismatchError();
       }
 
       const connection: DraftGuestConnection = config.kind === "new"
@@ -179,16 +190,23 @@ export class DraftPodGuestAdapter {
       // Retain ownership before awaiting so supersession can abort an
       // acknowledgement wait without revoking the persisted capability.
       this.guest = guest;
-      await guest.initialize(config.signal);
+      if (reconnectAttemptLimit === undefined) {
+        await guest.initialize(config.signal);
+      } else {
+        await guest.initialize(config.signal, reconnectAttemptLimit);
+      }
 
       if (this._status === "connecting") {
         this.setStatus("lobby");
       }
     } catch (err) {
+      if (isAbortError(err)) throw err;
       this.setStatus("error");
       const message = err instanceof Error ? err.message : String(err);
       if (config.kind === "reconnect" && !this.recoveryFailure) {
-        const failure: DraftGuestRecoveryFailure = { kind: "retryable", message };
+        const failure: DraftGuestRecoveryFailure = err instanceof HostIdentityMismatchError
+          ? { kind: "invalid", message }
+          : { kind: "retryable", message };
         this.recoveryFailure = failure;
         this.emit({ type: "reconnectFailed", failure });
       }
@@ -198,16 +216,24 @@ export class DraftPodGuestAdapter {
   }
 
   /** A fresh seat never retries; a persisted reconnect capability gets a small, abortable join budget. */
-  private async openRoom(config: DraftPodGuestConfig): Promise<JoinResult> {
+  private async openRoom(
+    config: DraftPodGuestConfig,
+  ): Promise<{ joinResult: JoinResult; reconnectAttemptLimit?: number }> {
     if (config.kind === "new") {
-      return joinRoom(config.roomCode, config.signal, config.timeoutMs);
+      return { joinResult: await joinRoom(config.roomCode, config.signal, config.timeoutMs) };
     }
 
     let lastError: unknown;
     for (let attempt = 0; attempt < INITIAL_RECONNECT_JOIN_ATTEMPTS; attempt++) {
       if (config.signal?.aborted) throw abortError();
       try {
-        return await joinRoom(config.roomCode, config.signal, config.timeoutMs);
+        return {
+          joinResult: await joinRoom(config.roomCode, config.signal, config.timeoutMs),
+          // The initial room join consumes the same bounded recovery budget as
+          // a later acknowledgement retry; the first handshake always gets one
+          // attempt after a successful room connection.
+          reconnectAttemptLimit: Math.max(1, INITIAL_RECONNECT_JOIN_ATTEMPTS - attempt),
+        };
       } catch (error) {
         lastError = error;
         if (config.signal?.aborted || attempt === INITIAL_RECONNECT_JOIN_ATTEMPTS - 1) break;

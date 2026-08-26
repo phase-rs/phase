@@ -19,7 +19,12 @@ import {
   createDraftPeerSession,
   type DraftPeerSession,
 } from "../network/draftPeerSession";
-import { DRAFT_PROTOCOL_VERSION, DraftPauseReason } from "../network/draftProtocol";
+import { parseRoomCode } from "../network/connection";
+import {
+  deckSubmissionFingerprint,
+  DRAFT_PROTOCOL_VERSION,
+  DraftPauseReason,
+} from "../network/draftProtocol";
 import type {
   DraftDeckPayload,
   DraftMatchBinding,
@@ -148,13 +153,6 @@ function deckSubmission(deck: DraftDeckPayload): { main: DeckCardCount[]; sidebo
     main: deckCardCounts(deck.main_deck),
     sideboard: deckCardCounts(deck.sideboard),
   };
-}
-
-/** Canonical multiset fingerprint: deck order is UI-only, card counts are not. */
-function deckSubmissionFingerprint(mainDeck: readonly string[]): string {
-  const counts = new Map<string, number>();
-  for (const card of mainDeck) counts.set(card, (counts.get(card) ?? 0) + 1);
-  return JSON.stringify([...counts.entries()].sort(([left], [right]) => left.localeCompare(right)));
 }
 
 /** Sideboarding may move cards between zones, but cannot change a player's pool. */
@@ -286,6 +284,9 @@ export class P2PDraftHost {
     private readonly roomCode?: string,
     backupEndpoint?: string,
   ) {
+    if (persistenceId && (!roomCode || parseRoomCode(roomCode) !== roomCode)) {
+      throw new Error("Persistent draft hosts require a canonical room code");
+    }
     // Host is always seat 0
     this.seatNames.set(0, hostDisplayName);
     this.activePodSize = podSize;
@@ -338,6 +339,19 @@ export class P2PDraftHost {
     return task;
   }
 
+  /** Reports a failed detached mutation instead of leaking an unhandled rejection. */
+  private reportDetachedMutationFailure(label: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[P2PDraftHost] ${label} failed:`, error);
+    this.emit({ type: "error", message: `${label} did not commit: ${message}` });
+  }
+
+  private runDetachedMutation(label: string, operation: () => Promise<unknown>): void {
+    void this.enqueueAuthoritativeMutation(operation).catch((error: unknown) => {
+      this.reportDetachedMutationFailure(label, error);
+    });
+  }
+
   // ── Initialization ─────────────────────────────────────────────────
 
   async initialize(): Promise<void> {
@@ -363,31 +377,31 @@ export class P2PDraftHost {
     });
 
     let identified = false;
-    const unsub = session.onMessage(async (msg) => {
+    const unsub = session.onMessage((msg) => {
       if (identified) return;
       identified = true;
       unsub();
 
       if (msg.type !== "draft_join" && msg.type !== "draft_reconnect") {
-        await this.rejectAndClose(
+        void this.rejectAndClose(
           session,
           "ProtocolMismatch",
           "Expected draft_join or draft_reconnect as first message",
           "Protocol violation",
-        );
+        ).catch((error: unknown) => this.reportDetachedMutationFailure("first-contact rejection", error));
       } else if (msg.draftProtocolVersion !== DRAFT_PROTOCOL_VERSION) {
         // First-contact versioning is a hard gate. Do not allocate a seat,
         // consume reconnect grace, or attach the session before it passes.
-        await this.rejectAndClose(
+        void this.rejectAndClose(
           session,
           "ProtocolMismatch",
           `Draft protocol mismatch: host v${DRAFT_PROTOCOL_VERSION}, client v${String(msg.draftProtocolVersion)}. Refresh both windows.`,
           "Draft protocol mismatch",
-        );
+        ).catch((error: unknown) => this.reportDetachedMutationFailure("first-contact rejection", error));
       } else if (msg.type === "draft_join") {
-        await this.enqueueAuthoritativeMutation(() => this.handleNewGuest(session, msg.displayName));
+        this.runDetachedMutation("guest admission", () => this.handleNewGuest(session, msg.displayName));
       } else {
-        await this.enqueueAuthoritativeMutation(() => this.handleReconnect(session, msg.draftToken));
+        this.runDetachedMutation("guest reconnect", () => this.handleReconnect(session, msg.draftToken));
       }
     });
   }
@@ -433,15 +447,21 @@ export class P2PDraftHost {
   ): Promise<void> {
     if (!isFirstContactLive()) return;
     if (this.draftStarted) {
-      session.send({ type: "draft_kicked", reason: "Draft already in progress" });
-      session.close("Draft in progress");
+      try {
+        await session.send({ type: "draft_kicked", reason: "Draft already in progress" });
+      } finally {
+        session.close("Draft in progress");
+      }
       return;
     }
 
     const seat = this.firstOpenSeat();
     if (seat === null) {
-      session.send({ type: "draft_kicked", reason: "Pod is full" });
-      session.close("Pod full");
+      try {
+        await session.send({ type: "draft_kicked", reason: "Pod is full" });
+      } finally {
+        session.close("Pod full");
+      }
       return;
     }
 
@@ -476,7 +496,7 @@ export class P2PDraftHost {
       return;
     }
     session.onMessage((msg) => {
-      void this.enqueueAuthoritativeMutation(() => this.handleGuestMessage(seat, msg));
+      this.runDetachedMutation("guest message", () => this.handleGuestMessage(seat, msg));
     });
 
     // Send welcome with empty view (draft hasn't started)
@@ -580,7 +600,7 @@ export class P2PDraftHost {
       this.disconnectedSeats.delete(reconnectSeat);
       this.guestSessions.set(reconnectSeat, session);
       session.onMessage((msg) => {
-        void this.enqueueAuthoritativeMutation(() => this.handleGuestMessage(reconnectSeat, msg));
+        this.runDetachedMutation("guest message", () => this.handleGuestMessage(reconnectSeat, msg));
       });
 
       const view = this.draftStarted
@@ -597,9 +617,25 @@ export class P2PDraftHost {
       if (view.status === "MatchInProgress") await this.dispatchMatchLaunchesForSeat(view, reconnectSeat);
     } catch (err) {
       console.error("[P2PDraftHost] reconnect view failed:", err);
+      if (this.guestSessions.get(reconnectSeat) === session) {
+        this.guestSessions.delete(reconnectSeat);
+      }
       if (this.draftStarted) {
         try { await this.adapter.setSeatConnected(reconnectSeat, false); } catch { /* best-effort rollback */ }
       }
+      if (!this.disconnectedSeats.has(reconnectSeat)) {
+        const timer = setTimeout(() => {
+          this.runDetachedMutation("reconnect grace expiry", () => this.expireReconnectGrace(reconnectSeat));
+        }, this.gracePeriodMs);
+        this.disconnectedSeats.set(reconnectSeat, { disconnectedAt: Date.now(), timer });
+      }
+      try {
+        await this.persistSessionStrict();
+      } catch (persistError) {
+        this.reportDetachedMutationFailure("reconnect rollback", persistError);
+      }
+      session.close("Reconnect failed");
+      return;
     } finally {
       stopWatching();
     }
@@ -1059,7 +1095,7 @@ export class P2PDraftHost {
       // Pre-draft disconnect: free the seat
       this.seatTokens.delete(seat);
       this.seatNames.delete(seat);
-      void this.enqueueAuthoritativeMutation(async () => {
+      this.runDetachedMutation("pre-draft disconnect", async () => {
         await this.persistSessionStrict();
         this.syncLobbyToGuests();
         this.emit({ type: "seatDisconnected", seatIndex: seat });
@@ -1069,25 +1105,18 @@ export class P2PDraftHost {
 
     // Mid-draft disconnect: grace window
     const timer = setTimeout(() => {
-      void this.enqueueAuthoritativeMutation(() => this.expireReconnectGrace(seat));
+      this.runDetachedMutation("reconnect grace expiry", () => this.expireReconnectGrace(seat));
     }, this.gracePeriodMs);
 
     this.disconnectedSeats.set(seat, { disconnectedAt: Date.now(), timer });
     // The socket callback is synchronous, but all externally visible state
     // follows the one durable queue: connected bitmap → snapshot → views/pause.
-    void this.enqueueAuthoritativeMutation(async () => {
-      try {
-        await this.adapter.setSeatConnected(seat, false);
-        await this.persistSessionStrict();
-        await this.broadcastViews();
-        this.reconcileEffectivePause();
-        this.emit({ type: "seatDisconnected", seatIndex: seat });
-      } catch (err) {
-        console.error(
-          `[P2PDraftHost] setSeatConnected(false) failed for seat ${seat}:`,
-          err,
-        );
-      }
+    this.runDetachedMutation("guest disconnect", async () => {
+      await this.adapter.setSeatConnected(seat, false);
+      await this.persistSessionStrict();
+      await this.broadcastViews();
+      this.reconcileEffectivePause();
+      this.emit({ type: "seatDisconnected", seatIndex: seat });
     });
   }
 
@@ -1189,7 +1218,7 @@ export class P2PDraftHost {
     if (this.timerRemainingMs <= 0) {
       this.clearActiveTimer();
       this.emit({ type: "timerExpired" });
-      void this.enqueueAuthoritativeMutation(() => this.autoPickAllPending());
+      this.runDetachedMutation("pick timer expiry", () => this.autoPickAllPending());
     }
   }
 
@@ -1205,7 +1234,7 @@ export class P2PDraftHost {
       this.broadcastToGuests({ type: "draft_timer_sync", remainingMs: this.timerRemainingMs });
       if (this.timerRemainingMs <= 0) {
         this.clearActiveTimer();
-        void this.enqueueAuthoritativeMutation(async () => this.autoSubmitSideboards(matchId));
+        this.runDetachedMutation("sideboard timer expiry", () => this.autoSubmitSideboards(matchId));
       }
     }, 1_000);
   }
@@ -1222,7 +1251,7 @@ export class P2PDraftHost {
       this.broadcastToGuests({ type: "draft_timer_sync", remainingMs: this.timerRemainingMs });
       if (this.timerRemainingMs <= 0) {
         this.clearActiveTimer();
-        void this.enqueueAuthoritativeMutation(async () => this.autoChoosePlayDraw(matchId));
+        this.runDetachedMutation("play-draw timer expiry", () => this.autoChoosePlayDraw(matchId));
       }
     }, 1_000);
   }
@@ -1706,7 +1735,7 @@ export class P2PDraftHost {
     seatA: number,
     seatB: number,
   ): void {
-    void this.enqueueAuthoritativeMutation(() => this.handleMatchBetweenGamesDurably(
+    this.runDetachedMutation("between-games transition", () => this.handleMatchBetweenGamesDurably(
       matchId, gameNumber, score, loserSeat, seatA, seatB,
     ));
   }
@@ -1790,7 +1819,7 @@ export class P2PDraftHost {
 
   /** The sole command ingress for host UI and authenticated guest sessions. */
   submitAuthorized(seat: number, command: DraftIntergameCommand): void {
-    void this.enqueueAuthoritativeMutation(() => this.submitAuthorizedDurably(seat, command));
+    this.runDetachedMutation("authorized intergame command", () => this.submitAuthorizedDurably(seat, command));
   }
 
   private async submitAuthorizedDurably(seat: number, command: DraftIntergameCommand): Promise<void> {
@@ -2073,7 +2102,7 @@ export class P2PDraftHost {
   // ── Host controls ──────────────────────────────────────────────────
 
   kickPlayer(seat: number, reason: string = "Kicked by host"): void {
-    void this.enqueueAuthoritativeMutation(async () => this.kickPlayerDurably(seat, reason));
+    this.runDetachedMutation("kick player", () => this.kickPlayerDurably(seat, reason));
   }
 
   private async kickPlayerDurably(seat: number, reason: string): Promise<void> {
@@ -2183,7 +2212,7 @@ export class P2PDraftHost {
   private buildPersistedSnapshot(draftSessionJson: string | null): PersistedDraftHostSession {
     return {
       persistenceId: this.persistenceId!,
-      roomCode: this.roomCode ?? "",
+      roomCode: this.roomCode!,
       kind: this.kind,
       podSize: this.podSize,
       hostDisplayName: this.hostDisplayName,
@@ -2362,7 +2391,7 @@ export class P2PDraftHost {
     for (const seat of this.seatTokens.keys()) {
       if (seat === 0 || this.disconnectedSeats.has(seat) || this.expiredDisconnectedSeats.has(seat)) continue;
       const timer = setTimeout(() => {
-        void this.enqueueAuthoritativeMutation(() => this.expireReconnectGrace(seat));
+        this.runDetachedMutation("recovered reconnect grace expiry", () => this.expireReconnectGrace(seat));
       }, 5 * 60_000);
       this.disconnectedSeats.set(seat, { disconnectedAt: Date.now(), timer });
     }

@@ -44,14 +44,21 @@ import type {
  *  11 — instance-addressable pool entries (`instance_ids`) + engine rarity axis
  *  12 — publish the engine-derived next pairing round on the player view
  *  13 — first-contact `draft_join` and `draft_reconnect` messages carry an
- *       exact draft protocol version; reconnect rejection is typed so only an
- *       invalidated capability is cleared from durable guest recovery.
+ *       exact draft protocol version; reconnect rejections became typed so
+ *       only an invalidated capability is cleared from durable guest recovery.
  *  14 — deck submissions carry an immutable client-generated id and the
  *       host returns an explicit durable receipt.  This makes a reloaded
  *       participant's deck outbox idempotent instead of relying on a
  *       best-effort state update.
  */
 export const DRAFT_PROTOCOL_VERSION = 14 as const;
+
+/** Canonical multiset fingerprint: deck order is UI-only, card counts are not. */
+export function deckSubmissionFingerprint(mainDeck: readonly string[]): string {
+  const counts = new Map<string, number>();
+  for (const card of mainDeck) counts.set(card, (counts.get(card) ?? 0) + 1);
+  return JSON.stringify([...counts.entries()].sort(([left], [right]) => left.localeCompare(right)));
+}
 
 /** The host's reason for declining a first-contact draft connection. */
 export type DraftReconnectRejectionKind =
@@ -592,7 +599,7 @@ export function validateDraftMessage(raw: unknown): DraftP2PMessage {
   }
   if (msg.type === "draft_reconnect_rejected") {
     const rejection = raw as Record<string, unknown>;
-    // v14 carried only a string reason. It is never a capability-revocation
+    // Pre-v13 frames carried only a string reason. They are never a capability-revocation
     // signal: normalize it to the safe terminal outcome that preserves the
     // guest's recovery records and asks the user to refresh.
     if (rejection.kind === undefined && typeof rejection.reason === "string") {

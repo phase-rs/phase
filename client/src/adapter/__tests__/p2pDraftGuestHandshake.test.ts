@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const sessionState = vi.hoisted(() => ({
   sessions: [] as Array<{
@@ -51,6 +51,12 @@ const reconnectAck = {
 };
 
 describe("P2P draft guest handshake attempts", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sessionState.sessions.length = 0;
+    persistenceState.loadDraftDeckSubmission.mockResolvedValue(null);
+  });
+
   it("keeps a deck submission in the participant outbox until its matching receipt", async () => {
     sessionState.sessions.length = 0;
     persistenceState.loadDraftDeckSubmission.mockResolvedValue(null);

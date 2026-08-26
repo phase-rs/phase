@@ -18,6 +18,7 @@ import {
   type DraftPeerSession,
 } from "../network/draftPeerSession";
 import {
+  deckSubmissionFingerprint,
   DRAFT_PROTOCOL_VERSION,
   type DraftReconnectRejectionKind,
 } from "../network/draftProtocol";
@@ -167,7 +168,7 @@ export class P2PDraftGuest {
 
   // ── Initialization ─────────────────────────────────────────────────
 
-  async initialize(signal?: AbortSignal): Promise<void> {
+  async initialize(signal?: AbortSignal, reconnectAttemptLimit = Number.POSITIVE_INFINITY): Promise<void> {
     // A new guest gets exactly one join attempt. Only a persisted capability
     // may use retry, and every retry waits for a complete host acknowledgement.
     if (this.connection.kind === "new") {
@@ -176,12 +177,13 @@ export class P2PDraftGuest {
     }
 
     let conn = this.initialConn;
-    for (let attempt = 0; !this.terminated; attempt++) {
+    for (let attempt = 0; !this.terminated && attempt < reconnectAttemptLimit; attempt++) {
       try {
         await this.handshakeOn(conn, signal, true);
         return;
       } catch (err) {
         if (this.terminated || signal?.aborted) throw asError(err);
+        if (attempt + 1 >= reconnectAttemptLimit) throw asError(err);
         this.emit({ type: "reconnecting", attempt: attempt + 1 });
         await this.waitForRetry(attempt, signal);
         if (this.terminated || signal?.aborted) throw abortError();
@@ -316,8 +318,8 @@ export class P2PDraftGuest {
     const identity = this.deckSubmissionIdentity();
     if (!identity) throw new Error("Draft identity is unavailable");
     const existing = await loadDraftDeckSubmission(this.hostPeerId, identity);
-    const samePayload = existing?.mainDeck.length === mainDeck.length
-      && existing.mainDeck.every((card, index) => card === mainDeck[index]);
+    const samePayload = existing !== null
+      && deckSubmissionFingerprint(existing.mainDeck) === deckSubmissionFingerprint(mainDeck);
     if (existing && !samePayload) {
       throw new Error("A deck submission is still awaiting host confirmation");
     }
@@ -355,6 +357,13 @@ export class P2PDraftGuest {
         this.deckSubmissionWaiters.delete(submissionId);
       }
     }
+  }
+
+  private failDeckSubmissionWaiters(reason: string): void {
+    for (const waiter of this.deckSubmissionWaiters.values()) {
+      waiter.reject(new Error(reason));
+    }
+    this.deckSubmissionWaiters.clear();
   }
 
   /** A reconnect makes the participant-owned command eligible for replay. */
@@ -531,6 +540,7 @@ export class P2PDraftGuest {
         this.terminated = true;
         void clearDraftGuestRecovery(this.hostPeerId);
         void clearDraftDeckSubmission(this.hostPeerId);
+        this.failDeckSubmissionWaiters(msg.reason);
         this.emit({ type: "kicked", reason: msg.reason });
         break;
       }
@@ -601,6 +611,7 @@ export class P2PDraftGuest {
 
       case "draft_host_left": {
         this.terminated = true;
+        this.failDeckSubmissionWaiters(msg.reason);
         this.emit({ type: "hostLeft", reason: msg.reason });
         break;
       }
@@ -694,6 +705,7 @@ export class P2PDraftGuest {
     this.terminated = true;
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
+    this.failDeckSubmissionWaiters("Draft connection disposed");
     if (this.handshake) this.rejectHandshake(this.handshake.session, abortError());
     if (this.session) {
       this.retireSession(this.session);

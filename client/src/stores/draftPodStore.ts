@@ -282,10 +282,14 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
         return resumeHostedPodAttempt.promise;
       }
 
-      let attempt!: HostedPodResumeAttempt;
+      const attempt: HostedPodResumeAttempt = {
+        routeToken,
+        signal: options.signal,
+        promise: Promise.resolve("superseded"),
+      };
       const isCurrentAttempt = () =>
         resumeHostedPodAttempt === attempt && !options.signal?.aborted;
-      const promise = (async (): Promise<HostedPodResumeOutcome> => {
+      attempt.promise = (async (): Promise<HostedPodResumeOutcome> => {
         if (options.signal?.aborted) return "superseded";
         const active = inspectActiveDraftPod();
         if (active.type === "absent") {
@@ -395,11 +399,10 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
         if (!isCurrentAttempt()) return "superseded";
         return hosted ? "resumed" : "invalid";
       })();
-      attempt = { routeToken, signal: options.signal, promise };
       resumeHostedPodAttempt = attempt;
 
       try {
-        return await promise;
+        return await attempt.promise;
       } finally {
         if (resumeHostedPodAttempt === attempt) resumeHostedPodAttempt = null;
       }
