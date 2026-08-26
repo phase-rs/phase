@@ -78,7 +78,7 @@ fn localized_destruction_does_not_deadlock_on_a_copied_commander_spell() {
         energy_optional.waiting_for,
         WaitingFor::OptionalEffectChoice { .. }
     ));
-    let result = destruction
+    destruction
         .act(GameAction::DecideOptionalEffect { accept: true })
         .expect("accepting Localized Destruction's energy payment is valid");
     drop(destruction);
@@ -88,6 +88,13 @@ fn localized_destruction_does_not_deadlock_on_a_copied_commander_spell() {
         0,
         "the accepted one-or-more energy payment spends the one energy the spell granted"
     );
+
+    // The optional-payment continuation has finished the spell; the next
+    // priority action enters the normal SBA check that offers the command-zone
+    // return for Sarah Jane Smith.
+    let result = runner
+        .act(GameAction::PassPriority)
+        .expect("priority resumes after Localized Destruction resolves");
 
     assert!(matches!(
         result.waiting_for,
