@@ -582,9 +582,10 @@ mod tests {
             "Malformed Commander Copy",
             vec![],
         );
+        let signature_card_id = CardId(state.next_object_id);
         let signature_spell = create_object(
             &mut state,
-            CardId(state.next_object_id),
+            signature_card_id,
             PlayerId(1),
             "Malformed Signature Copy".to_string(),
             Zone::Exile,
@@ -614,9 +615,10 @@ mod tests {
             "Malformed Commander Copy",
             vec![],
         );
+        let signature_card_id = CardId(state.next_object_id);
         let signature_spell = create_object(
             &mut state,
-            CardId(state.next_object_id),
+            signature_card_id,
             PlayerId(1),
             "Malformed Signature Copy".to_string(),
             Zone::Exile,
@@ -671,9 +673,10 @@ mod tests {
         ));
 
         let mut signature_state = setup_commander_game();
+        let signature_card_id = CardId(signature_state.next_object_id);
         let signature_spell = create_object(
             &mut signature_state,
-            CardId(signature_state.next_object_id),
+            signature_card_id,
             PlayerId(1),
             "Signature Spell".to_string(),
             Zone::Exile,
