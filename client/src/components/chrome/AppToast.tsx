@@ -26,7 +26,7 @@ export function AppToast() {
           role="status"
           aria-live="polite"
           aria-atomic="true"
-          className={`fixed z-[60] w-[min(100vw-2rem,22rem)] overflow-hidden rounded-xl border border-white/10 bg-[#0b1020]/96 shadow-[0_16px_48px_rgba(0,0,0,0.45)] backdrop-blur-md ${
+          className={`fixed z-[200] w-[min(100vw-2rem,22rem)] overflow-hidden rounded-xl border border-white/10 bg-[#0b1020]/96 shadow-[0_16px_48px_rgba(0,0,0,0.45)] backdrop-blur-md ${
             anchored ? "" : "top-4 right-4"
           }`}
           style={anchored ? { left: anchored.x, top: anchored.y } : undefined}

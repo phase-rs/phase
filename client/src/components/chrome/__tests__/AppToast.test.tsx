@@ -26,6 +26,7 @@ describe("AppToast", () => {
     render(<AppToast />);
 
     const toast = screen.getByRole("status");
+    expect(toast).toHaveClass("z-[200]");
     expect(toast).toHaveStyle({ left: "240px", top: "320px" });
     expect(screen.getByText("Engine error: ObjectId(200) must be blocked by 2 or more creatures")).toBeInTheDocument();
   });

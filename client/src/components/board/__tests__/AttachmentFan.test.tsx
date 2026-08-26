@@ -399,6 +399,22 @@ describe("AttachmentFan mode 2 — the permanent's own legal actions", () => {
     expect(useUiStore.getState().pendingAbilityChoice).toBeNull();
   });
 
+  it("leaves the fan open when the centralized interaction dispatcher rejects", async () => {
+    const rejection = new Error("Engine error: invalid attachment choice");
+    vi.mocked(dispatchInteraction).mockRejectedValue(rejection);
+    seed({
+      legalActionsByObject: {},
+      viewerInteraction: projection([FREED_ID], { published: [FREED_ID] }),
+    });
+
+    fireEvent.click(fanCard("Freed from the Real"));
+    await expect(vi.mocked(dispatchInteraction).mock.results[0]?.value).rejects.toBe(rejection);
+    await Promise.resolve();
+
+    expect(useUiStore.getState().attachmentFanHostId).toBe(HOST_ID);
+    expect(document.querySelector("[data-attachment-fan]")).not.toBeNull();
+  });
+
   // V9 — MULTI-AUTHORITY HOSTILE FIXTURE. Both sources are live at once: an
   // interaction owns the prompt AND the same object has a populated bucket.
   // Exactly one authority may win, and it must be the engine's prompt.

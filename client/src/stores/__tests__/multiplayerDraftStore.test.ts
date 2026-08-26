@@ -14,7 +14,15 @@ import {
 } from "../multiplayerDraftStore";
 import { DraftPodHostAdapter } from "../../adapter/draftPodHostAdapter";
 import type { DraftPlayerView } from "../../adapter/draft-adapter";
+import type { ActionRejection, EngineAdapter } from "../../adapter/types";
+import { actionRejectionError } from "../../adapter/types";
 import { DraftPauseReason, type DraftMatchLaunch } from "../../network/draftProtocol";
+import {
+  commandAcknowledgement,
+  draftIntergameDigest,
+  type DraftIntergameCommand,
+} from "../../services/intergameCommandLedger";
+import { useAppNotificationStore } from "../../stores/appToastStore";
 
 // ── Mocks ──────────────────────────────────────────────────────────────
 
@@ -121,6 +129,7 @@ describe("multiplayerDraftStore", () => {
     capturedHostEventHandler = null;
     capturedGuestEventHandler = null;
     useMultiplayerDraftStore.getState().reset();
+    useAppNotificationStore.setState({ notification: null, expiresAt: 0 });
   });
 
   afterEach(async () => {
@@ -838,6 +847,99 @@ describe("multiplayerDraftStore", () => {
 
       useMultiplayerDraftStore.getState().setLandCount("Plains", -2);
       expect(useMultiplayerDraftStore.getState().landCounts).toEqual({ Plains: 0 });
+    });
+  });
+
+  describe("authorized intergame actions", () => {
+    it("reports structured rejections without leaking either sideboard or play-draw submission", async () => {
+      const launch: DraftMatchLaunch = {
+        type: "HumanHost",
+        matchId: "action-rejection-match",
+        matchRoomCode: "MATCH",
+        round: 1,
+        localSeat: 0,
+        opponentSeat: 1,
+        opponentName: "Alice",
+        matchHostPeerId: "peer-0",
+        deckPayload: {
+          player: { main_deck: [], sideboard: [], commander: [] },
+          opponent: { main_deck: [], sideboard: [], commander: [] },
+          ai_decks: [],
+        },
+        matchConfig: { match_type: "Bo3" },
+        binding: {
+          podId: "pod-1", matchId: "action-rejection-match", round: 1,
+          sessionKey: "session", lease: "lease", nonce: "nonce",
+          revision: 1, matchAuthoritySeat: 0,
+        },
+      };
+      const rejection: ActionRejection = {
+        code: "invalid_action",
+        disposition: "invalid",
+        message: "Engine error: ObjectId(199) cannot change deck partitions",
+        related_object_ids: [199],
+      };
+      const adapter = {
+        submitAction: vi.fn()
+          .mockRejectedValueOnce(actionRejectionError(rejection))
+          .mockRejectedValueOnce(actionRejectionError({
+            code: "stale_action",
+            disposition: "stale",
+            message: "This action is no longer current",
+            related_object_ids: [199],
+          })),
+      } as unknown as EngineAdapter;
+      useMultiplayerDraftStore.setState({
+        role: "host",
+        seatIndex: 0,
+        matchPairing: launch,
+        matchAdapter: adapter,
+      });
+      const command = (
+        commandId: string,
+        payload: DraftIntergameCommand["payload"],
+      ): DraftIntergameCommand => ({
+        commandId,
+        matchId: launch.matchId,
+        gameNumber: 2,
+        seat: 0,
+        payload,
+        launchPayload: launch,
+        launchDigest: draftIntergameDigest(launch),
+        payloadDigest: draftIntergameDigest(payload),
+        status: "Authorized",
+      });
+      const sideboard = command("sideboard-rejection", {
+        type: "SubmitSideboard", main: [], sideboard: [],
+      });
+
+      await expect(useMultiplayerDraftStore.getState().submitAuthorized(
+        sideboard,
+        commandAcknowledgement(sideboard),
+      )).resolves.toBeUndefined();
+
+      expect(adapter.submitAction).toHaveBeenCalledWith({
+        type: "SubmitSideboard",
+        data: { main: [], sideboard: [] },
+      }, 0);
+      expect(useAppNotificationStore.getState().notification).toEqual({
+        title: "Action failed",
+        description: rejection.message,
+      });
+
+      useAppNotificationStore.setState({ notification: null, expiresAt: 0 });
+      const playDraw = command("play-draw-stale", { type: "ChoosePlayDraw", playFirst: true });
+
+      await expect(useMultiplayerDraftStore.getState().submitAuthorized(
+        playDraw,
+        commandAcknowledgement(playDraw),
+      )).resolves.toBeUndefined();
+
+      expect(adapter.submitAction).toHaveBeenLastCalledWith({
+        type: "ChoosePlayDraw",
+        data: { play_first: true },
+      }, 0);
+      expect(useAppNotificationStore.getState().notification).toBeNull();
     });
   });
 
