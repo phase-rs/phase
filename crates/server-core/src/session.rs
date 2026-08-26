@@ -6775,18 +6775,11 @@ mod tests {
         (mgr, game_code, ai_player)
     }
 
-    /// An AI-granted latch whose run is INCOHERENT is the one with no exit at
-    /// all, so it is the one the hand-off must not decline.
-    ///
-    /// `ready_consent_run` requires `auto_pass.is_empty()`, so a single seat
-    /// holding an End Turn auto-pass makes every latch minted that turn
-    /// incoherent. The hand-off previously read its requester through
-    /// `pending_resolve_all_ready_requester`, whose `?` propagates exactly that
-    /// coherence test — so it returned `None` here and left the latch standing:
-    /// no acting player, and no client that renders `ResolveAllReady`. This is
-    /// the reported hang, reachable from the ordinary End Turn button.
+    /// A retained End Turn auto-pass remains coherent with an AI-granted Ready
+    /// latch. The Resolve All proof temporarily suppresses it only on its
+    /// private one-entry clone, then restores it before committing the proof.
     #[test]
-    fn run_ai_repairs_its_own_grant_when_the_frozen_run_is_incoherent() {
+    fn run_ai_consumes_its_own_grant_with_a_retained_end_turn_auto_pass() {
         let (mut mgr, game_code, _ai_player) = ai_table_awaiting_one_consent();
         let session = mgr
             .sessions
@@ -6799,10 +6792,7 @@ mod tests {
             GameAction::BeginResolveAll { max_resolutions: 1 },
         )
         .expect("the priority holder may start Resolve All consent");
-        // Freeze the run first, THEN make the live game disagree with the
-        // snapshot it froze. `BeginResolveAll` has no auto-pass precondition,
-        // and `apply` exempts consent actions from clearing the actor's entry,
-        // so this is the ordinary End Turn shape and not a contrived state.
+        // A live End Turn preference must stay coherent through the AI's grant.
         session.state.auto_pass.insert(
             PlayerId(0),
             AutoPassMode::UntilTurnBoundary {
@@ -6839,12 +6829,12 @@ mod tests {
                 session.state.waiting_for,
                 WaitingFor::ResolveAllReady { .. }
             ),
-            "an incoherent AI-granted latch must not survive its own hand-off, got {:?}",
+            "an AI-granted latch must not survive its own hand-off, got {:?}",
             session.state.waiting_for
         );
         assert!(
             session.state.resolve_all_consent_run.is_none(),
-            "the repair discards the run it could not honor"
+            "consuming the ready run clears its one-shot consent record"
         );
     }
 

@@ -7596,7 +7596,9 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                 }
             }
 
-            // Auto-submit empty blockers only when there's nothing to choose.
+            // Auto-submit empty blockers when nothing can be chosen, and submit
+            // an empty declaration for a live turn-boundary preference just as
+            // Declare Attackers does above.
             // CR 509.1 says the turn-based action still runs when no legal blocks
             // are available, and CR 117.1c requires the active player to receive
             // priority during the step (instants and Ninjutsu-family activations
@@ -7610,7 +7612,8 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                 ..
             } if !state.phase_stop_hit(*player)
                 && (valid_blocker_ids.is_empty()
-                    || !super::combat::has_attackers_in_play(state)) =>
+                    || !super::combat::has_attackers_in_play(state)
+                    || end_of_turn_active(state, *player)) =>
             {
                 let mut events = Vec::new();
                 match engine_combat::handle_empty_blockers(state, *player, &mut events) {
@@ -7629,6 +7632,35 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
         }
     }
     advanced
+}
+
+/// CR 117.3d + CR 117.4: continues a live auto-pass preference after Resolve
+/// All has discharged its one-run consent. Resolve All is not an ordinary
+/// action boundary, so it owns the aggregation while this seam owns the normal
+/// priority progression.
+pub(crate) fn resume_auto_pass_after_resolve_all(
+    state: &mut GameState,
+    batch: &mut super::engine_resolve_batch::ResolveAllFastForwardResult,
+) {
+    let before = state.clone();
+    let mut result = ActionResult {
+        events: Vec::new(),
+        waiting_for: state.waiting_for.clone(),
+        log_entries: Vec::new(),
+    };
+    run_auto_pass_loop(state, &mut result);
+
+    let log_entries = super::log::resolve_log_entries(&result.events, &before, state);
+    batch.items_resolved = batch.items_resolved.saturating_add(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::StackResolved { .. }))
+            .count() as u32,
+    );
+    batch.events.extend(result.events);
+    batch.log_entries.extend(log_entries);
+    batch.waiting_for = state.waiting_for.clone();
 }
 
 /// CR 732.2: settle a runaway mandatory cascade gracefully. Pauses resolution,
@@ -7746,10 +7778,6 @@ fn begin_resolve_all_consent(
     max_resolutions: u32,
 ) -> Result<WaitingFor, EngineError> {
     super::priority::pass_priority_legality(state, priority_player)?;
-    // Resolve All consent supersedes this representative's standing yield. A
-    // Ready run must be free of auto-pass state so its one-resolution proof
-    // cannot advance beyond the consented boundary.
-    state.auto_pass.remove(&priority_player);
     let current_representative =
         super::topology::priority_pass_representative(state, priority_player);
     let mut representatives = super::topology::priority_pass_participants(state);
@@ -7959,9 +7987,6 @@ fn respond_resolve_all_consent(
                 .find(|participant| participant.representative == representative)
                 .expect("pending Resolve All representative must be a participant");
             participant.granted = true;
-            // A grant replaces this representative's standing auto-pass with
-            // the consented, bounded Resolve All sequence.
-            state.auto_pass.remove(&representative);
         }
     }
     if matches!(decision, ResolveAllConsentDecision::Decline) {
@@ -11003,11 +11028,47 @@ fn apply_action(
             engine_combat::handle_declare_attackers(state, *player, &attacks, &bands, &mut events)?
         }
         (
+            WaitingFor::DeclareAttackers { player, .. },
+            GameAction::SetAutoPass {
+                mode: AutoPassRequest::UntilTurnBoundary { until },
+            },
+        ) => {
+            store_auto_pass_request(
+                state,
+                *player,
+                AutoPassRequest::UntilTurnBoundary { until },
+            );
+            state.waiting_for.clone()
+        }
+        (WaitingFor::DeclareAttackers { .. }, GameAction::SetAutoPass { .. }) => {
+            return Err(EngineError::ActionNotAllowed(
+                "UntilStackEmpty auto-pass is unavailable while declaring attackers".to_string(),
+            ));
+        }
+        (
             WaitingFor::DeclareBlockers { player, .. },
             GameAction::DeclareBlockers { assignments },
         ) => {
             triggers_processed_inline = true;
             engine_combat::handle_declare_blockers(state, *player, &assignments, &mut events)?
+        }
+        (
+            WaitingFor::DeclareBlockers { player, .. },
+            GameAction::SetAutoPass {
+                mode: AutoPassRequest::UntilTurnBoundary { until },
+            },
+        ) => {
+            store_auto_pass_request(
+                state,
+                *player,
+                AutoPassRequest::UntilTurnBoundary { until },
+            );
+            state.waiting_for.clone()
+        }
+        (WaitingFor::DeclareBlockers { .. }, GameAction::SetAutoPass { .. }) => {
+            return Err(EngineError::ActionNotAllowed(
+                "UntilStackEmpty auto-pass is unavailable while declaring blockers".to_string(),
+            ));
         }
         (
             WaitingFor::UntapChoice {

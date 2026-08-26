@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::ai_support::AiDecisionContract;
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, ResolveAllConsentRun, WaitingFor};
+use crate::types::game_state::{AutoPassMode, GameState, ResolveAllConsentRun, WaitingFor};
 use crate::types::log::GameLogEntry;
 use crate::types::player::PlayerId;
 
@@ -76,9 +76,10 @@ pub fn resolve_all_ready_prefix(
 /// actionable state back and stops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolveAllContinuation {
-    /// Install the ordinary `UntilStackEmpty` auto-pass and pass priority, so
-    /// the requester's standing intent to avoid manual passes survives a proof
-    /// that could not collapse the whole batch. The live-session answer.
+    /// Resume the requester's retained auto-pass, or install the ordinary
+    /// `UntilStackEmpty` fallback when they have no retained preference, so
+    /// a proof that could not collapse the whole batch does not require manual
+    /// priority passes. The live-session answer.
     AutoPassRemainder,
     /// Stop at ordinary priority and install nothing.
     ///
@@ -138,8 +139,24 @@ pub fn resolve_all_ready_prefix_with(
     while items_resolved < resolution_cap && !state.stack.is_empty() {
         let mut proof = state.clone();
         let stack_before = proof.stack.len();
-        let Some((boundary, mut actions)) = materialize_one_consented_resolution(&mut proof, &run)
-        else {
+        // A turn-boundary preference remains live while Resolve All is asking
+        // for consent, but this proof is allowed to materialize exactly one
+        // consented resolution. Suppress only those entries on the clone, then
+        // restore the exact map entries before a successful clone is committed.
+        let suspended_turn_boundary_auto_passes: Vec<_> = proof
+            .auto_pass
+            .iter()
+            .filter_map(|(player, mode)| {
+                matches!(mode, AutoPassMode::UntilTurnBoundary { .. })
+                    .then_some((*player, mode.clone()))
+            })
+            .collect();
+        proof
+            .auto_pass
+            .retain(|_, mode| !matches!(mode, AutoPassMode::UntilTurnBoundary { .. }));
+        let materialized = materialize_one_consented_resolution(&mut proof, &run);
+        proof.auto_pass.extend(suspended_turn_boundary_auto_passes);
+        let Some((boundary, mut actions)) = materialized else {
             proof_stopped = true;
             break;
         };
@@ -168,31 +185,36 @@ pub fn resolve_all_ready_prefix_with(
     // Authorization is one run only. Once the proved prefix ends, no later
     // stack entry inherits this consent. A proof failure is different from a
     // requested cap: it only rejects collapsing this sequence, not the
-    // requester's durable intent to avoid manual priority passes. Continue
-    // through the ordinary `UntilStackEmpty` engine path in that case.
+    // requester's durable intent to avoid manual priority passes.
     turn_control::invalidate_resolve_all_consent(state);
-    if proof_stopped && continuation == ResolveAllContinuation::AutoPassRemainder {
-        let mut fallback_events = Vec::new();
-        match super::engine::install_until_stack_empty_auto_pass_and_pass_priority(
-            state,
-            run.priority_snapshot.waiting_player,
-            &mut fallback_events,
-        ) {
-            Ok(fallback) => {
-                items_resolved += stack_resolved_count(&fallback.events);
-                events.extend(fallback.events);
-                log_entries.extend(fallback.log_entries);
-            }
-            Err(_) => {
-                // A pre-cast shortcut may require a meaningful action before the
-                // current Priority window can pass. Keep the requester's durable
-                // preference so the ordinary loop resumes after that action.
-                super::engine::install_until_stack_empty_auto_pass(
-                    state,
-                    run.priority_snapshot.waiting_player,
-                );
-            }
+    if continuation == ResolveAllContinuation::AutoPassRemainder {
+        if proof_stopped
+            && !state
+                .auto_pass
+                .contains_key(&run.priority_snapshot.waiting_player)
+        {
+            // Keep the previous fallback for a requester without a retained
+            // turn-boundary preference. The ordinary loop below also preserves
+            // its pre-cast guard: it leaves this request armed until an allowed
+            // action can resume it.
+            super::engine::install_until_stack_empty_auto_pass(
+                state,
+                run.priority_snapshot.waiting_player,
+            );
         }
+        let mut resumed = ResolveAllFastForwardResult {
+            events,
+            waiting_for: state.waiting_for.clone(),
+            log_entries,
+            items_resolved,
+            total,
+            recorded_actions,
+        };
+        super::engine::resume_auto_pass_after_resolve_all(state, &mut resumed);
+        events = resumed.events;
+        log_entries = resumed.log_entries;
+        items_resolved = resumed.items_resolved;
+        recorded_actions = resumed.recorded_actions;
     }
     finalize_display_state(state);
     interaction::ensure_interaction_authority(state);
@@ -356,11 +378,10 @@ fn ready_consent_run(state: &GameState, requester: PlayerId) -> Option<&ResolveA
     let WaitingFor::ResolveAllReady { epoch } = &state.waiting_for else {
         return None;
     };
-    let run = state.resolve_all_consent_run.as_ref().filter(|run| {
-        state.auto_pass.is_empty()
-            && run.epoch == *epoch
-            && run.participants.iter().all(|p| p.granted)
-    })?;
+    let run = state
+        .resolve_all_consent_run
+        .as_ref()
+        .filter(|run| run.epoch == *epoch && run.participants.iter().all(|p| p.granted))?;
     (run.participants
         .iter()
         .any(|participant| participant.authorized_submitter == requester)
@@ -1088,7 +1109,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_all_consent_supersedes_until_end_of_turn_auto_passes() {
+    fn resolve_all_consent_retains_until_end_of_turn_auto_passes() {
         let mut state = priority_state(PlayerId(0), vec![no_op_entry(1, PlayerId(0))]);
         state.auto_pass.insert(
             PlayerId(0),
@@ -1103,7 +1124,7 @@ mod tests {
             GameAction::BeginResolveAll { max_resolutions: 0 },
         )
         .expect("priority holder begins the consent run");
-        assert!(!state.auto_pass.contains_key(&PlayerId(0)));
+        assert!(state.auto_pass.contains_key(&PlayerId(0)));
 
         let epoch = match &state.waiting_for {
             WaitingFor::ResolveAllConsent { epoch, .. } => *epoch,
@@ -1129,11 +1150,24 @@ mod tests {
             state.waiting_for,
             WaitingFor::ResolveAllReady { .. }
         ));
-        assert!(state.auto_pass.is_empty());
+        assert_eq!(
+            state.auto_pass.get(&PlayerId(0)),
+            Some(&AutoPassMode::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            })
+        );
+        assert_eq!(
+            state.auto_pass.get(&PlayerId(1)),
+            Some(&AutoPassMode::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            })
+        );
 
         let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
         assert_eq!(result.items_resolved, 1);
         assert!(state.stack.is_empty());
+        assert!(state.auto_pass.contains_key(&PlayerId(0)));
+        assert!(state.auto_pass.contains_key(&PlayerId(1)));
     }
 
     #[test]
@@ -1217,20 +1251,61 @@ mod tests {
     }
 
     #[test]
-    fn ready_consent_refuses_to_collapse_while_an_auto_pass_preference_is_active() {
-        let mut state = ready_state(vec![no_op_entry(1, PlayerId(0))]);
+    fn ready_consent_proof_isolates_turn_boundary_auto_pass_from_the_second_entry() {
+        let mut state = ready_state(vec![
+            no_op_entry(1, PlayerId(0)),
+            no_op_entry(2, PlayerId(0)),
+        ]);
+        state
+            .resolve_all_consent_run
+            .as_mut()
+            .expect("Ready retains its frozen run")
+            .max_resolutions = 1;
         state.auto_pass.insert(
             PlayerId(0),
-            AutoPassMode::UntilStackEmpty {
-                initial_stack_len: state.stack.len(),
+            AutoPassMode::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
             },
         );
 
         let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
 
-        assert_eq!(result.items_resolved, 0);
+        assert_eq!(result.items_resolved, 1);
         assert_eq!(state.stack.len(), 1);
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert!(state.resolve_all_consent_run.is_none());
+        assert_eq!(
+            state.auto_pass.get(&PlayerId(0)),
+            Some(&AutoPassMode::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            })
+        );
+    }
+
+    #[test]
+    fn ready_consumer_resumes_retained_turn_boundary_auto_pass_after_clearing_stack() {
+        let mut state = ready_state(vec![no_op_entry(1, PlayerId(0))]);
+        state.phase = Phase::PreCombatMain;
+        state.auto_pass.insert(
+            PlayerId(0),
+            AutoPassMode::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        );
+        let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
+
+        assert_eq!(result.items_resolved, 1);
+        assert!(state.stack.is_empty());
+        assert_eq!(result.waiting_for, state.waiting_for);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(1)
+            }
+        ));
+        assert!(result
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::StackResolved { .. })));
     }
 }

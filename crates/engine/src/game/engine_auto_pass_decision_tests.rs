@@ -1,10 +1,11 @@
 use super::*;
 use std::sync::Arc;
 
+use crate::game::combat::AttackTarget;
 use crate::game::zones::create_object;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, CopyRetargetPermission, Effect, QuantityExpr, ResolvedAbility,
-    TargetFilter,
+    StaticDefinition, TargetFilter,
 };
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
@@ -12,6 +13,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{CastingVariant, TurnBoundary};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::phase::{PhaseStop, PhaseStopScope};
+use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 fn stack_entry(controller: PlayerId) -> StackEntry {
@@ -56,6 +58,20 @@ fn priority_state() -> GameState {
     state.priority_passes.clear();
     state.priority_pass_count = 0;
     state
+}
+
+fn add_untapped_creature(state: &mut GameState, controller: PlayerId, card_id: u64) -> ObjectId {
+    let object_id = create_object(
+        state,
+        CardId(card_id),
+        controller,
+        "Combat creature".to_string(),
+        Zone::Battlefield,
+    );
+    let object = state.objects.get_mut(&object_id).unwrap();
+    object.card_types.core_types.push(CoreType::Creature);
+    object.summoning_sick = false;
+    object_id
 }
 
 #[test]
@@ -121,6 +137,228 @@ fn set_auto_pass_carries_requested_boundary_via_dispatch() {
             "SetAutoPass must store the requested boundary {until:?}"
         );
     }
+}
+
+#[test]
+fn declare_attackers_accepts_turn_boundary_auto_pass_but_rejects_stack_empty() {
+    let waiting_for = WaitingFor::DeclareAttackers {
+        player: PlayerId(0),
+        valid_attacker_ids: Vec::new(),
+        valid_attack_targets: Vec::new(),
+        valid_attack_targets_by_attacker: None,
+        attacker_constraints: Default::default(),
+    };
+    let mut state = priority_state();
+    state.phase = Phase::DeclareAttackers;
+    state.waiting_for = waiting_for;
+    state.phase_stops.insert(
+        PlayerId(0),
+        vec![stop(Phase::DeclareAttackers, PhaseStopScope::AllTurns)],
+    );
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        },
+    )
+    .expect("turn-boundary auto-pass is valid at Declare Attackers");
+    assert!(state.auto_pass.contains_key(&PlayerId(0)));
+
+    let error = apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .expect_err("UntilStackEmpty must not bypass attacker declaration");
+    assert!(matches!(error, EngineError::ActionNotAllowed(_)));
+}
+
+#[test]
+fn declare_blockers_accepts_turn_boundary_auto_pass_but_rejects_stack_empty() {
+    let waiting_for = WaitingFor::DeclareBlockers {
+        player: PlayerId(0),
+        valid_blocker_ids: Vec::new(),
+        valid_block_targets: Default::default(),
+        block_requirements: Default::default(),
+        blocker_constraints: Default::default(),
+    };
+    let mut state = priority_state();
+    state.phase = Phase::DeclareBlockers;
+    state.active_player = PlayerId(1);
+    state.waiting_for = waiting_for;
+    state.phase_stops.insert(
+        PlayerId(0),
+        vec![stop(Phase::DeclareBlockers, PhaseStopScope::AllTurns)],
+    );
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        },
+    )
+    .expect("turn-boundary auto-pass is valid at Declare Blockers");
+    assert!(state.auto_pass.contains_key(&PlayerId(0)));
+
+    let error = apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .expect_err("UntilStackEmpty must not bypass blocker declaration");
+    assert!(matches!(error, EngineError::ActionNotAllowed(_)));
+}
+
+#[test]
+fn turn_boundary_auto_pass_submits_a_legal_empty_attacker_declaration() {
+    let mut state = priority_state();
+    let attacker = add_untapped_creature(&mut state, PlayerId(0), 910);
+    state.phase = Phase::DeclareAttackers;
+    state.combat = Some(crate::game::combat::CombatState::default());
+    state.waiting_for = WaitingFor::DeclareAttackers {
+        player: PlayerId(0),
+        valid_attacker_ids: vec![attacker],
+        valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+        valid_attack_targets_by_attacker: None,
+        attacker_constraints: Default::default(),
+    };
+
+    let result = apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        },
+    )
+    .expect("a legal empty attack declaration may be auto-submitted");
+
+    assert!(!matches!(
+        result.waiting_for,
+        WaitingFor::DeclareAttackers { .. }
+    ));
+}
+
+#[test]
+fn turn_boundary_auto_pass_does_not_bypass_must_attack() {
+    let mut state = priority_state();
+    let attacker = add_untapped_creature(&mut state, PlayerId(0), 911);
+    state
+        .objects
+        .get_mut(&attacker)
+        .unwrap()
+        .static_definitions
+        .push(StaticDefinition::new(StaticMode::MustAttack).affected(TargetFilter::SelfRef));
+    state.phase = Phase::DeclareAttackers;
+    state.combat = Some(crate::game::combat::CombatState::default());
+    state.waiting_for = WaitingFor::DeclareAttackers {
+        player: PlayerId(0),
+        valid_attacker_ids: vec![attacker],
+        valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+        valid_attack_targets_by_attacker: None,
+        attacker_constraints: Default::default(),
+    };
+
+    let result = apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        },
+    )
+    .expect("the preference itself is valid at Declare Attackers");
+
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::DeclareAttackers { .. }
+    ));
+}
+
+fn blockers_declaration_state(must_block: bool) -> GameState {
+    let mut state = priority_state();
+    let attacker = add_untapped_creature(&mut state, PlayerId(1), 912);
+    let blocker = add_untapped_creature(&mut state, PlayerId(0), 913);
+    if must_block {
+        state
+            .objects
+            .get_mut(&blocker)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::MustBlock).affected(TargetFilter::SelfRef));
+    }
+    state.phase = Phase::DeclareBlockers;
+    state.active_player = PlayerId(1);
+    state.combat = Some(crate::game::combat::CombatState {
+        attackers: vec![crate::game::combat::AttackerInfo::attacking_player(
+            attacker,
+            PlayerId(0),
+        )],
+        ..Default::default()
+    });
+    state.waiting_for = WaitingFor::DeclareBlockers {
+        player: PlayerId(0),
+        valid_blocker_ids: vec![blocker],
+        valid_block_targets: [(blocker, vec![attacker])].into_iter().collect(),
+        block_requirements: Default::default(),
+        blocker_constraints: Default::default(),
+    };
+    state
+}
+
+#[test]
+fn turn_boundary_auto_pass_submits_a_legal_empty_blocker_declaration() {
+    let mut state = blockers_declaration_state(false);
+
+    let result = apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        },
+    )
+    .expect("a legal empty block declaration may be auto-submitted");
+
+    assert!(!matches!(
+        result.waiting_for,
+        WaitingFor::DeclareBlockers { .. }
+    ));
+}
+
+#[test]
+fn turn_boundary_auto_pass_does_not_bypass_must_block() {
+    let mut state = blockers_declaration_state(true);
+
+    let result = apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        },
+    )
+    .expect("the preference itself is valid at Declare Blockers");
+
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::DeclareBlockers { .. }
+    ));
 }
 
 fn push_simple_stack_entry(state: &mut GameState, id: u64, controller: PlayerId) {
@@ -540,7 +778,7 @@ fn phase_stop_hit_is_independent_of_auto_pass_mode() {
 }
 
 #[test]
-fn until_end_of_turn_does_not_auto_submit_available_blockers() {
+fn until_end_of_turn_auto_submits_the_empty_blocker_declaration() {
     let waiting_for = WaitingFor::DeclareBlockers {
         player: PlayerId(0),
         valid_blocker_ids: vec![ObjectId(10)],
@@ -568,16 +806,13 @@ fn until_end_of_turn_does_not_auto_submit_available_blockers() {
     };
     run_auto_pass_loop(&mut state, &mut result);
 
-    assert!(matches!(
+    assert!(!matches!(
         result.waiting_for,
-        WaitingFor::DeclareBlockers {
-            player: PlayerId(0),
-            ..
-        }
+        WaitingFor::DeclareBlockers { .. }
     ));
     assert!(
         state.auto_pass.contains_key(&PlayerId(0)),
-        "the defender's auto-pass session should stay armed after pausing for legal blockers"
+        "the defender's turn-boundary session remains armed after the empty declaration"
     );
 }
 
