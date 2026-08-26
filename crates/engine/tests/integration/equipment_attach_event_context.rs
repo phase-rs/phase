@@ -1,10 +1,10 @@
 //! Public-resolution regressions for Equipment attachment continuations.
 
+use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
-use engine::types::actions::{CastPaymentMode, GameAction};
+use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_object::AttachTarget;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
