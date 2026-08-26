@@ -227,7 +227,9 @@ describe("P2PDraftHost persistence disposal", () => {
 
     await privateHost.handleDeckSubmission(1, ["Island"], "submission-1");
     expect(privateHost.generatePairingsInner).toHaveBeenCalledOnce();
-    const recoveredSnapshot = saveDraftHostSession.mock.calls.at(-1)?.[1] as Record<string, unknown>;
+    const recoveredSnapshot = saveDraftHostSession.mock.calls[
+      saveDraftHostSession.mock.calls.length - 1
+    ]?.[1] as Record<string, unknown>;
     const recovered = recoveredHost("Host");
     await recovered.restoreFromPersisted({ ...recoveredSnapshot, draftSessionJson: null } as never);
     const recoveredPrivate = recovered as unknown as {
@@ -326,7 +328,9 @@ describe("P2PDraftHost persistence disposal", () => {
 
       await vi.advanceTimersByTimeAsync(5 * 60_000);
       expect(privateHost.expiredDisconnectedSeats.has(1)).toBe(true);
-      const expiredSnapshot = saveDraftHostSession.mock.calls.at(-1)?.[1] as Record<string, unknown>;
+      const expiredSnapshot = saveDraftHostSession.mock.calls[
+        saveDraftHostSession.mock.calls.length - 1
+      ]?.[1] as Record<string, unknown>;
       expect(expiredSnapshot).toMatchObject({ expiredDisconnectedSeats: [1] });
 
       const recovered = recoveredHost("Host");

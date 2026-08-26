@@ -11,7 +11,7 @@ const mocks = vi.hoisted(() => ({
     role: null as "host" | "guest" | null,
     phase: "idle",
     roomCode: null as string | null,
-    hostDraft: vi.fn(async () => true),
+    hostDraft: vi.fn<(config: unknown) => Promise<boolean>>(async () => true),
   },
 }));
 
@@ -68,7 +68,7 @@ describe("draftPodStore", () => {
     mocks.multiplayerState.role = null;
     mocks.multiplayerState.phase = "idle";
     mocks.multiplayerState.roomCode = null;
-    mocks.multiplayerState.hostDraft = vi.fn(async () => true);
+    mocks.multiplayerState.hostDraft = vi.fn<(config: unknown) => Promise<boolean>>(async () => true);
     mocks.persistedDraftHostSessionState.mockReturnValue("live");
     mocks.inspectActiveDraftPod.mockReturnValue({
       type: "absent",
@@ -111,7 +111,7 @@ describe("draftPodStore", () => {
     it("does not report recovery as resumed when host initialization fails", async () => {
       mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
       mocks.loadDraftHostSession.mockResolvedValue(persistedSession);
-      mocks.multiplayerState.hostDraft = vi.fn(async () => false);
+      mocks.multiplayerState.hostDraft = vi.fn<(config: unknown) => Promise<boolean>>(async () => false);
 
       await expect(useDraftPodStore.getState().resumeHostedPod({ routeToken: 4 })).resolves.toBe("invalid");
       expect(mocks.clearActiveDraftPodIfCurrent).not.toHaveBeenCalled();
@@ -192,7 +192,9 @@ describe("draftPodStore", () => {
       // The hostConfig dispatched to multiplayerDraftStore must mirror the
       // persisted Cube source 1:1 so the host re-initializes onto the same
       // cube content rather than falling back to "{}".
-      const dispatched = mocks.multiplayerState.hostDraft.mock.calls[0]?.[0];
+      const dispatched = mocks.multiplayerState.hostDraft.mock.calls[0]?.[0] as {
+        poolInput: { type: string };
+      };
       expect(dispatched.poolInput.type).toBe("Cube");
     });
   });
@@ -241,7 +243,9 @@ describe("draftPodStore", () => {
       await useDraftPodStore.getState().createPod();
 
       expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce();
-      const dispatched = mocks.multiplayerState.hostDraft.mock.calls[0]?.[0];
+      const dispatched = mocks.multiplayerState.hostDraft.mock.calls[0]?.[0] as {
+        poolInput: { type: string; data: { cube_name: string; cube_list_text: string } };
+      };
       expect(dispatched.poolInput.type).toBe("Cube");
       expect(dispatched.poolInput.data.cube_name).toBe("Test Cube");
       expect(dispatched.poolInput.data.cube_list_text).toBe("1 Lightning Bolt\n");

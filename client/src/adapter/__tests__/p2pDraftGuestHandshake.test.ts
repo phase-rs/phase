@@ -1,5 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+type SavedDeckSubmission = {
+  hostPeerId: string;
+  draftCode: string;
+  roomCode: string;
+  draftToken: string;
+  submissionId: string;
+  mainDeck: string[];
+  timestamp: number;
+};
+
 const sessionState = vi.hoisted(() => ({
   sessions: [] as Array<{
     handler: ((message: unknown) => void) | null;
@@ -11,7 +21,9 @@ const sessionState = vi.hoisted(() => ({
 const persistenceState = vi.hoisted(() => ({
   clearDraftGuestRecovery: vi.fn(async () => {}),
   clearDraftDeckSubmission: vi.fn(async () => {}),
-  loadDraftDeckSubmission: vi.fn(async () => null),
+  loadDraftDeckSubmission: vi.fn<
+    (hostPeerId: string, identity?: { roomCode: string; draftToken: string }) => Promise<SavedDeckSubmission | null>
+  >(async () => null),
   saveDraftDeckSubmission: vi.fn(async () => {}),
   saveActiveDraftGuest: vi.fn(),
   saveDraftGuestSession: vi.fn(async () => {}),
@@ -90,7 +102,9 @@ describe("P2P draft guest handshake attempts", () => {
     const sendIndex = sessionState.sessions[0]!.send.mock.calls.findIndex(
       ([message]) => (message as { type?: string }).type === "draft_submit_deck",
     );
-    expect(persistenceState.saveDraftDeckSubmission.mock.invocationCallOrder.at(-1)!)
+    expect(persistenceState.saveDraftDeckSubmission.mock.invocationCallOrder[
+      persistenceState.saveDraftDeckSubmission.mock.invocationCallOrder.length - 1
+    ]!)
       .toBeLessThan(sessionState.sessions[0]!.send.mock.invocationCallOrder[sendIndex]!);
 
     sessionState.sessions[0]!.handler!({
