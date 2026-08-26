@@ -104,7 +104,10 @@ pub fn handle_priority_pass_with_limit(
             // Update auto-pass baselines by the SAME amount so trigger-growth
             // detection stays accurate across apply() calls (§7.2 / R6).
             for mode in state.auto_pass.values_mut() {
-                if let AutoPassMode::UntilStackEmpty { initial_stack_len } = mode {
+                if let AutoPassMode::UntilStackEmpty {
+                    initial_stack_len, ..
+                } = mode
+                {
                     *initial_stack_len = initial_stack_len.saturating_sub(consumed as usize);
                 }
             }

@@ -3382,6 +3382,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::actions::GameAction;
     use crate::types::card_type::Supertype;
+    use crate::types::game_state::StackResolutionPolicy;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::phase::{PhaseStop, PhaseStopScope};
     use crate::types::player::PlayerId;
@@ -5186,6 +5187,7 @@ mod tests {
             PlayerId(1),
             AutoPassMode::UntilStackEmpty {
                 initial_stack_len: 2,
+                policy: StackResolutionPolicy::Committed,
             },
         );
 
@@ -5195,7 +5197,8 @@ mod tests {
         assert_eq!(
             state.auto_pass.get(&PlayerId(1)),
             Some(&AutoPassMode::UntilStackEmpty {
-                initial_stack_len: 2
+                initial_stack_len: 2,
+                policy: StackResolutionPolicy::Committed,
             }),
             "UntilStackEmpty is turn-agnostic and must survive the boundary"
         );

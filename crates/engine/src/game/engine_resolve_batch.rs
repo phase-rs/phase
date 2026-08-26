@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use crate::ai_support::AiDecisionContract;
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, ResolveAllConsentRun, WaitingFor};
+use crate::types::game_state::{
+    GameState, ResolveAllConsentRun, StackResolutionBudget, WaitingFor,
+};
 use crate::types::log::GameLogEntry;
 use crate::types::player::PlayerId;
 
@@ -130,11 +132,7 @@ pub fn resolve_all_ready_prefix_with(
         player: run.priority_snapshot.waiting_player,
     };
 
-    let resolution_cap = if run.max_resolutions == 0 {
-        u32::MAX
-    } else {
-        run.max_resolutions
-    };
+    let resolution_cap = run.max_resolutions.max_resolutions().unwrap_or(u32::MAX);
 
     while items_resolved < resolution_cap && !state.stack.is_empty() {
         let mut proof = state.clone();
@@ -693,7 +691,8 @@ mod tests {
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        AutoPassMode, PublicStateDirty, StackEntry, StackEntryKind, TurnBoundary,
+        AutoPassMode, PublicStateDirty, StackEntry, StackEntryKind, StackResolutionPolicy,
+        TurnBoundary,
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::ManaColor;
@@ -1246,7 +1245,7 @@ mod tests {
             .resolve_all_consent_run
             .as_mut()
             .expect("Ready retains its frozen run")
-            .max_resolutions = 1;
+            .max_resolutions = StackResolutionBudget::Limited(1);
 
         let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
 
@@ -1278,7 +1277,7 @@ mod tests {
             .resolve_all_consent_run
             .as_mut()
             .expect("Ready retains its frozen run")
-            .max_resolutions = 1;
+            .max_resolutions = StackResolutionBudget::Limited(1);
         state.auto_pass.insert(
             PlayerId(0),
             AutoPassMode::UntilTurnBoundary {
@@ -1310,11 +1309,14 @@ mod tests {
             .resolve_all_consent_run
             .as_mut()
             .expect("Ready retains its frozen run")
-            .max_resolutions = 1;
+            .max_resolutions = StackResolutionBudget::Limited(1);
         let initial_stack_len = state.stack.len();
         state.auto_pass.insert(
             PlayerId(0),
-            AutoPassMode::UntilStackEmpty { initial_stack_len },
+            AutoPassMode::UntilStackEmpty {
+                initial_stack_len,
+                policy: StackResolutionPolicy::Committed,
+            },
         );
 
         let result = resolve_all_ready_prefix_with(
@@ -1335,6 +1337,7 @@ mod tests {
             state.auto_pass.get(&PlayerId(0)),
             Some(&AutoPassMode::UntilStackEmpty {
                 initial_stack_len: 2,
+                policy: StackResolutionPolicy::Committed,
             })
         );
     }
@@ -1388,6 +1391,7 @@ mod tests {
             PlayerId(1),
             AutoPassMode::UntilStackEmpty {
                 initial_stack_len: 1,
+                policy: StackResolutionPolicy::Committed,
             },
         );
 

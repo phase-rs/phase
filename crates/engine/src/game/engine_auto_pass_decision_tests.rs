@@ -10,7 +10,7 @@ use crate::types::ability::{
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{CastingVariant, TurnBoundary};
+use crate::types::game_state::{CastingVariant, StackResolutionPolicy, TurnBoundary};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::phase::{PhaseStop, PhaseStopScope};
 use crate::types::statics::StaticMode;
@@ -1164,6 +1164,7 @@ fn until_stack_empty_non_requester_own_stack_shortcut_does_not_hide_action() {
         PlayerId(0),
         AutoPassMode::UntilStackEmpty {
             initial_stack_len: 1,
+            policy: StackResolutionPolicy::Committed,
         },
     );
 

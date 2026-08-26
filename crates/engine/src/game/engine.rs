@@ -17,7 +17,7 @@ use crate::types::game_state::{
     ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume,
     PendingCounterPostAction, PendingEffectResolved, ResolveAllConsentParticipant,
     ResolveAllConsentRun, ResolveAllPrioritySnapshot, RetargetScope, StackEntry, StackEntryKind,
-    WaitingFor,
+    StackResolutionBudget, StackResolutionPolicy, WaitingFor,
 };
 use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;
@@ -7135,7 +7135,9 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
         return AutoPassDecision::Exit;
     };
     match mode {
-        AutoPassMode::UntilStackEmpty { initial_stack_len } => {
+        AutoPassMode::UntilStackEmpty {
+            initial_stack_len, ..
+        } => {
             if state.stack.is_empty() || state.stack.len() > *initial_stack_len {
                 AutoPassDecision::Finish
             } else {
@@ -7352,11 +7354,9 @@ fn finish_completed_or_interrupted_until_stack_empty_sessions(state: &mut GameSt
         .auto_pass
         .iter()
         .filter_map(|(player, mode)| match mode {
-            AutoPassMode::UntilStackEmpty { initial_stack_len }
-                if state.stack.is_empty() || state.stack.len() > *initial_stack_len =>
-            {
-                Some(*player)
-            }
+            AutoPassMode::UntilStackEmpty {
+                initial_stack_len, ..
+            } if state.stack.is_empty() || state.stack.len() > *initial_stack_len => Some(*player),
             _ => None,
         })
         .collect();
@@ -7807,7 +7807,7 @@ fn begin_resolve_all_consent(
     // or revoked before its authorized one-entry materialization begins.
     state.resolve_all_consent_run = Some(ResolveAllConsentRun {
         epoch,
-        max_resolutions,
+        max_resolutions: StackResolutionBudget::from_legacy_max_resolutions(max_resolutions),
         priority_snapshot: ResolveAllPrioritySnapshot {
             waiting_player: priority_player,
             priority_player: state.priority_player,
@@ -7908,6 +7908,7 @@ fn store_auto_pass_request(
     let stored_mode = match mode {
         AutoPassRequest::UntilStackEmpty => AutoPassMode::UntilStackEmpty {
             initial_stack_len: state.stack.len(),
+            policy: StackResolutionPolicy::Committed,
         },
         AutoPassRequest::UntilTurnBoundary { until } => AutoPassMode::UntilTurnBoundary { until },
     };

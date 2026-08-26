@@ -3556,8 +3556,18 @@ export function persistedGameStateView(state: PersistedGameState): GameState {
 
 export type TurnBoundary = "EndOfCurrentTurn" | "MyNextTurnStart";
 
+/** Mirrors the engine's per-window stack-resolution policy. A missing policy
+ * on UntilStackEmpty is the legacy committed behavior. */
+export type StackResolutionPolicy =
+  | "Committed"
+  | "RecheckNoMeaningfulPriorityAction";
+
 export type AutoPassMode =
-  | { type: "UntilStackEmpty"; initial_stack_len: number }
+  | {
+      type: "UntilStackEmpty";
+      initial_stack_len: number;
+      policy?: StackResolutionPolicy;
+    }
   | { type: "UntilTurnBoundary"; until: TurnBoundary };
 
 /**

@@ -210,6 +210,13 @@ pub fn eliminate_players_simultaneously(
         return;
     }
 
+    // A frozen stack cohort cannot survive CR 800.4a: elimination removes
+    // stack objects and can remove one of the session's canonical
+    // representatives. Phase 1 keeps sessions inert, so clearing the stale
+    // authority is the only safe schema-level response; later session phases
+    // own any overlay restoration before a live runner can install one.
+    state.stack_resolution_session = None;
+
     // CR 800.4a: after ALL owned-exiles, end control effects the leaving players
     // control and exile anything still under a leaver's control. Runs ONCE over
     // the full `leaving_set` — the retain+sweep scope is what makes a co-leaver's

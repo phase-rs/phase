@@ -2076,7 +2076,10 @@ pub struct ResolveAllConsentParticipant {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolveAllConsentRun {
     pub epoch: u64,
-    pub max_resolutions: u32,
+    /// Legacy numeric saves use `0` for no cap. The shared resolution-session
+    /// budget keeps that established wire shape while normalizing it in memory.
+    #[serde(default)]
+    pub max_resolutions: StackResolutionBudget,
     pub priority_snapshot: ResolveAllPrioritySnapshot,
     pub participants: Vec<ResolveAllConsentParticipant>,
 }
@@ -14548,13 +14551,237 @@ pub enum AutoPassRequest {
     },
 }
 
+/// Per-window continuation rule for a stack-resolution session.
+///
+/// `Committed` is the historical `UntilStackEmpty` meaning: once a player has
+/// armed it, the engine keeps passing until the stack empties or grows beyond
+/// the captured baseline. `RecheckNoMeaningfulPriorityAction` is reserved for
+/// an AI decision that must be checked again at every future priority window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum StackResolutionPolicy {
+    #[default]
+    Committed,
+    RecheckNoMeaningfulPriorityAction,
+}
+
+impl StackResolutionPolicy {
+    fn is_committed(policy: &Self) -> bool {
+        *policy == Self::Committed
+    }
+}
+
+/// A persisted resolution cap. The established `0` wire spelling and an
+/// absent field both mean no cap; nonzero values preserve the exact cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StackResolutionBudget {
+    #[default]
+    Unlimited,
+    Limited(u32),
+}
+
+impl StackResolutionBudget {
+    pub const fn from_legacy_max_resolutions(max_resolutions: u32) -> Self {
+        if max_resolutions == 0 {
+            Self::Unlimited
+        } else {
+            Self::Limited(max_resolutions)
+        }
+    }
+
+    pub const fn max_resolutions(self) -> Option<u32> {
+        match self {
+            Self::Unlimited => None,
+            Self::Limited(max_resolutions) => Some(max_resolutions),
+        }
+    }
+
+    const fn wire_value(self) -> u32 {
+        match self {
+            Self::Unlimited => 0,
+            Self::Limited(max_resolutions) => max_resolutions,
+        }
+    }
+}
+
+impl Serialize for StackResolutionBudget {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_u32(self.wire_value())
+    }
+}
+
+impl<'de> Deserialize<'de> for StackResolutionBudget {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(Self::from_legacy_max_resolutions(u32::deserialize(
+            deserializer,
+        )?))
+    }
+}
+
+/// A complete, entry-local snapshot used to prove that a later stack entry is
+/// the same entry authorized when a resolution session began. It reads only
+/// data stored on the entry; in particular it never rebinds a departed source
+/// through the live object map (CR 400.7 / CR 113.7a).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackResolutionEntryFence {
+    pub entry_id: ObjectId,
+    pub source_id: ObjectId,
+    pub controller: PlayerId,
+    pub provenance: StackResolutionEntryProvenance,
+    /// CR 400.7 / CR 603.7c: delayed-trigger referent pins.
+    pub target_incarnations: Vec<ObjectIncarnationRef>,
+    /// CR 400.7 / CR 601.2c: ordinary selected-target pins.
+    pub selected_target_incarnations: Vec<ObjectIncarnationRef>,
+}
+
+/// Exhaustive provenance of one stack-entry kind. Keeping every field that is
+/// present on the source `StackEntryKind` makes a fence fail closed when a
+/// future kind field changes: the capture match below must be extended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum StackResolutionEntryProvenance {
+    Spell {
+        card_id: CardId,
+        ability: Option<Box<ResolvedAbility>>,
+        casting_variant: CastingVariant,
+        actual_mana_spent: u32,
+    },
+    ActivatedAbility {
+        source_id: ObjectId,
+        ability: Box<ResolvedAbility>,
+    },
+    TriggeredAbility {
+        source_id: ObjectId,
+        ability: Box<ResolvedAbility>,
+        condition: Option<TriggerCondition>,
+        trigger_event: Option<GameEvent>,
+        description: Option<String>,
+        source_name: String,
+        subject_match_count: Option<u32>,
+        die_result: Option<i32>,
+        provenance: Option<SyntheticTriggerProvenance>,
+    },
+    KeywordAction {
+        action: KeywordAction,
+    },
+}
+
+impl StackResolutionEntryFence {
+    pub fn capture(entry: &StackEntry) -> Self {
+        let provenance = match &entry.kind {
+            StackEntryKind::Spell {
+                card_id,
+                ability,
+                casting_variant,
+                actual_mana_spent,
+            } => StackResolutionEntryProvenance::Spell {
+                card_id: *card_id,
+                ability: ability.clone(),
+                casting_variant: *casting_variant,
+                actual_mana_spent: *actual_mana_spent,
+            },
+            StackEntryKind::ActivatedAbility { source_id, ability } => {
+                StackResolutionEntryProvenance::ActivatedAbility {
+                    source_id: *source_id,
+                    ability: ability.clone(),
+                }
+            }
+            StackEntryKind::TriggeredAbility {
+                source_id,
+                ability,
+                condition,
+                trigger_event,
+                description,
+                source_name,
+                subject_match_count,
+                die_result,
+                provenance,
+            } => StackResolutionEntryProvenance::TriggeredAbility {
+                source_id: *source_id,
+                ability: ability.clone(),
+                condition: condition.clone(),
+                trigger_event: trigger_event.clone(),
+                description: description.clone(),
+                source_name: source_name.clone(),
+                subject_match_count: *subject_match_count,
+                die_result: *die_result,
+                provenance: provenance.clone(),
+            },
+            StackEntryKind::KeywordAction { action } => {
+                StackResolutionEntryProvenance::KeywordAction {
+                    action: action.clone(),
+                }
+            }
+        };
+        let (target_incarnations, selected_target_incarnations) = entry
+            .ability()
+            .map(|ability| {
+                (
+                    ability.target_incarnations.clone(),
+                    ability.selected_target_incarnations.clone(),
+                )
+            })
+            .unwrap_or_default();
+
+        Self {
+            entry_id: entry.id,
+            source_id: entry.source_id,
+            controller: entry.controller,
+            provenance,
+            target_incarnations,
+            selected_target_incarnations,
+        }
+    }
+
+    /// Compares captured stack data only. This stays correct even when the
+    /// source object has left the battlefield and live LKI lookup is impossible.
+    pub fn matches_captured_entry(&self, entry: &StackEntry) -> bool {
+        self == &Self::capture(entry)
+    }
+}
+
+/// The temporary auto-pass overlay installed for a shared resolution session.
+/// The full sparse map is retained so ending the session can restore the exact
+/// pre-session preferences transactionally.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackResolutionAutoPassOverlay {
+    pub baseline: BTreeMap<PlayerId, AutoPassMode>,
+}
+
+/// Persisted state for the one ordinary stack-resolution runner shared by
+/// consented human Resolve All and verified AI continuation. Phase 1 only
+/// stores this data; later phases construct and consume it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackResolutionSession {
+    /// Ordered from the next entry to resolve toward the bottom of the
+    /// authorized stack cohort.
+    pub entries: Vec<StackResolutionEntryFence>,
+    #[serde(default)]
+    pub cursor: usize,
+    pub representatives: BTreeSet<PlayerId>,
+    #[serde(default)]
+    pub budget: StackResolutionBudget,
+    #[serde(default)]
+    pub policy: StackResolutionPolicy,
+    pub auto_pass_overlay: StackResolutionAutoPassOverlay,
+}
+
 /// What the engine stores for auto-pass (includes captured state).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AutoPassMode {
     /// Auto-pass while stack is non-empty. Clears when stack empties or grows
     /// beyond `initial_stack_len` (the stack size when the flag was set).
-    UntilStackEmpty { initial_stack_len: usize },
+    UntilStackEmpty {
+        initial_stack_len: usize,
+        #[serde(default, skip_serializing_if = "StackResolutionPolicy::is_committed")]
+        policy: StackResolutionPolicy,
+    },
     /// Auto-pass through priority/combat stops until the turn boundary in
     /// `until` is reached — `EndOfCurrentTurn` (the flag dies at the next turn
     /// start, regardless of whose turn it is) or `MyNextTurnStart` (persists
@@ -16042,6 +16269,11 @@ declare_game_state! {
     /// Private protocol ledger behind the public consent/ready waiting states.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolve_all_consent_run: Option<ResolveAllConsentRun>,
+    /// Private authority for an active shared stack-resolution session. Viewer
+    /// projections retain the public stack and priority state, never its frozen
+    /// cohort, target pins, or temporary auto-pass baseline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack_resolution_session: Option<StackResolutionSession>,
     /// Trusted interaction capability scope. Viewer-filtered copies always
     /// redact this field; only the engine uses it to mint opaque decision IDs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -22110,6 +22342,7 @@ impl GameState {
             },
             next_resolve_all_consent_epoch: initial_resolve_all_consent_epoch(),
             resolve_all_consent_run: None,
+            stack_resolution_session: None,
             interaction_session_id: None,
             interaction_generation: 0,
             next_interaction_serial: default_interaction_serial(),
@@ -24061,6 +24294,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         waiting_for: _,
         next_resolve_all_consent_epoch: _,
         resolve_all_consent_run: _,
+        stack_resolution_session: _,
         interaction_session_id: _,
         interaction_generation: _,
         next_interaction_serial: _,
@@ -24429,6 +24663,7 @@ impl PartialEq for GameState {
             && self.waiting_for == other.waiting_for
             && self.next_resolve_all_consent_epoch == other.next_resolve_all_consent_epoch
             && self.resolve_all_consent_run == other.resolve_all_consent_run
+            && self.stack_resolution_session == other.stack_resolution_session
             && self.lands_played_this_turn == other.lands_played_this_turn
             && self.max_lands_per_turn == other.max_lands_per_turn
             && self.priority_pass_count == other.priority_pass_count
@@ -28723,8 +28958,120 @@ mod tests {
             )
             .unwrap(),
             AutoPassMode::UntilStackEmpty {
-                initial_stack_len: 3
+                initial_stack_len: 3,
+                policy: StackResolutionPolicy::Committed,
             }
+        );
+    }
+
+    #[test]
+    fn stack_resolution_budget_keeps_the_legacy_numeric_wire_contract() {
+        #[derive(Deserialize)]
+        struct BudgetCarrier {
+            #[serde(default)]
+            budget: StackResolutionBudget,
+        }
+
+        assert_eq!(
+            serde_json::to_string(&StackResolutionBudget::Unlimited).unwrap(),
+            "0"
+        );
+        assert_eq!(
+            serde_json::from_str::<StackResolutionBudget>("0").unwrap(),
+            StackResolutionBudget::Unlimited
+        );
+        assert_eq!(
+            serde_json::from_str::<StackResolutionBudget>("17").unwrap(),
+            StackResolutionBudget::Limited(17)
+        );
+        assert!(
+            serde_json::from_str::<StackResolutionBudget>("null").is_err(),
+            "only the established numeric zero, not null, means unlimited"
+        );
+        assert_eq!(
+            serde_json::from_str::<BudgetCarrier>("{}").unwrap().budget,
+            StackResolutionBudget::Unlimited,
+            "a pre-session save with no cap field is unlimited"
+        );
+    }
+
+    #[test]
+    fn until_stack_empty_uses_committed_policy_for_legacy_and_new_payloads() {
+        let committed = AutoPassMode::UntilStackEmpty {
+            initial_stack_len: 3,
+            policy: StackResolutionPolicy::Committed,
+        };
+        assert_eq!(
+            serde_json::to_string(&committed).unwrap(),
+            r#"{"type":"UntilStackEmpty","initial_stack_len":3}"#,
+            "the default policy retains the old persisted shape"
+        );
+        let rechecking = AutoPassMode::UntilStackEmpty {
+            initial_stack_len: 3,
+            policy: StackResolutionPolicy::RecheckNoMeaningfulPriorityAction,
+        };
+        assert_eq!(
+            serde_json::from_str::<AutoPassMode>(
+                r#"{"type":"UntilStackEmpty","initial_stack_len":3,"policy":"RecheckNoMeaningfulPriorityAction"}"#
+            )
+            .unwrap(),
+            rechecking
+        );
+    }
+
+    #[test]
+    fn stack_resolution_entry_fence_uses_latched_lki_and_both_target_pin_vectors() {
+        let mut ability = ResolvedAbility::new(
+            Effect::NoOp,
+            vec![TargetRef::Object(ObjectId(8))],
+            ObjectId(7),
+            PlayerId(0),
+        );
+        ability.source_incarnation = Some(3);
+        ability.target_incarnations = vec![ObjectIncarnationRef::of(ObjectId(8), 4)];
+        ability.selected_target_incarnations = vec![ObjectIncarnationRef::of(ObjectId(8), 5)];
+        let entry = StackEntry {
+            id: ObjectId(6),
+            source_id: ObjectId(7),
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ObjectId(7),
+                ability: Box::new(ability),
+            },
+        };
+
+        let fence = StackResolutionEntryFence::capture(&entry);
+        assert_eq!(fence.entry_id, ObjectId(6));
+        assert_eq!(fence.source_id, ObjectId(7));
+        assert_eq!(fence.controller, PlayerId(0));
+        assert_eq!(
+            fence.target_incarnations,
+            vec![ObjectIncarnationRef::of(ObjectId(8), 4)]
+        );
+        assert_eq!(
+            fence.selected_target_incarnations,
+            vec![ObjectIncarnationRef::of(ObjectId(8), 5)]
+        );
+        assert!(
+            fence.matches_captured_entry(&entry),
+            "comparison must use the entry's latched source state, without a live source object"
+        );
+
+        let mut changed_lki = entry.clone();
+        changed_lki.ability_mut().unwrap().source_incarnation = Some(9);
+        assert!(
+            !fence.matches_captured_entry(&changed_lki),
+            "a changed LKI source capture invalidates the fence even when ids match"
+        );
+
+        let mut changed_selected_pin = entry;
+        changed_selected_pin
+            .ability_mut()
+            .unwrap()
+            .selected_target_incarnations = vec![ObjectIncarnationRef::of(ObjectId(8), 10)];
+        assert!(
+            !fence.matches_captured_entry(&changed_selected_pin),
+            "ordinary selected-target pins are independently fenced"
         );
     }
 

@@ -22,7 +22,8 @@ use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{
-    AutoPassMode, GameState, PersistedGameState, StackEntry, StackEntryKind, TurnBoundary,
+    AutoPassMode, GameState, PersistedGameState, StackEntry, StackEntryKind, StackResolutionPolicy,
+    TurnBoundary,
     WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId};
@@ -910,6 +911,7 @@ fn ready_access_refuses_an_unentitled_seat_and_admits_an_incoherent_run() {
         P1,
         AutoPassMode::UntilStackEmpty {
             initial_stack_len: 1,
+            policy: StackResolutionPolicy::Committed,
         },
     );
     assert_eq!(

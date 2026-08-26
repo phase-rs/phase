@@ -14,7 +14,7 @@ use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{
     AutoPassMode, LandPlayRecord, LiminalEntrant, LiminalEntry, LinkedExileSnapshot,
     PendingConniveReentry, PersistedGameState, PriorityPassingMode, SpellCastRecord,
-    StackPaidSnapshot, TokenProjection, WaitingFor,
+    StackPaidSnapshot, StackResolutionPolicy, TokenProjection, WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use engine::types::keywords::ProtectionTarget;
@@ -1491,12 +1491,14 @@ fn build_all_direct_numeric_maps_state() -> GameState {
             PlayerId(0),
             AutoPassMode::UntilStackEmpty {
                 initial_stack_len: 1,
+                policy: StackResolutionPolicy::Committed,
             },
         ),
         (
             PlayerId(1),
             AutoPassMode::UntilStackEmpty {
                 initial_stack_len: 2,
+                policy: StackResolutionPolicy::Committed,
             },
         ),
     ]);
