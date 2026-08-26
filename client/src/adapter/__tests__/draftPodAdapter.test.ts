@@ -288,6 +288,154 @@ describe("DraftPodHostAdapter", () => {
     expect(events).toContainEqual({ type: "viewUpdated", view: restoredView });
   });
 
+  it("destroys a post-hostRoom host when its restore is aborted", async () => {
+    const { hostRoom } = await import("../../network/connection");
+    const hostResult = mockHostResult();
+    (hostRoom as ReturnType<typeof vi.fn>).mockResolvedValue(hostResult);
+    vi.mocked(loadDraftHostSession).mockResolvedValue({
+      persistenceId: "draft-1",
+      roomCode: "ABCDE",
+      kind: "Premier",
+      podSize: 8,
+      hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+      seatTokens: { 0: "host" },
+      seatNames: { 0: "Host" },
+      kickedTokens: [],
+      draftStarted: true,
+      draftCode: "draft-1",
+      draftSessionJson: "{}",
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+    });
+    let resolveRestore!: (view: DraftPlayerView | null) => void;
+    mockHostRestoreFromPersisted.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveRestore = resolve;
+    }));
+    const controller = new AbortController();
+    const initializing = adapter.initialize({
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      kind: "Premier",
+      podSize: 8,
+      hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+      persistenceId: "draft-1",
+      signal: controller.signal,
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    controller.abort();
+    resolveRestore(mockView("Drafting"));
+
+    await expect(initializing).rejects.toThrow("initialization aborted");
+    expect(mockHostDispose).toHaveBeenCalledOnce();
+    expect(hostResult.destroy).toHaveBeenCalledOnce();
+    expect(mockHostInitialize).not.toHaveBeenCalled();
+    expect(adapter.roomCode).toBeNull();
+  });
+
+  it("cleans a pending local host when the adapter is disposed during restore", async () => {
+    const { hostRoom } = await import("../../network/connection");
+    const hostResult = mockHostResult();
+    (hostRoom as ReturnType<typeof vi.fn>).mockResolvedValue(hostResult);
+    let resolveSession!: (session: null) => void;
+    vi.mocked(loadDraftHostSession).mockImplementationOnce(() => new Promise<null>((resolve) => {
+      resolveSession = resolve;
+    }));
+    const initializing = adapter.initialize({
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      kind: "Premier",
+      podSize: 8,
+      hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+      persistenceId: "draft-1",
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    const disposing = adapter.dispose({ preserveSession: true });
+    resolveSession(null);
+
+    await disposing;
+    await expect(initializing).rejects.toThrow("initialization aborted");
+    expect(hostResult.destroy).toHaveBeenCalledOnce();
+    expect(mockHostDispose).toHaveBeenCalledOnce();
+    expect(mockHostInitialize).not.toHaveBeenCalled();
+  });
+
+  it("destroys a late hostRoom result before the same room code is rehosted", async () => {
+    const { hostRoom } = await import("../../network/connection");
+    const staleHostResult = mockHostResult();
+    let resolveHostRoom!: (result: ReturnType<typeof mockHostResult>) => void;
+    (hostRoom as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise<ReturnType<typeof mockHostResult>>((resolve) => {
+        resolveHostRoom = resolve;
+      }),
+    );
+    const initializing = adapter.initialize({
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      kind: "Premier",
+      podSize: 8,
+      hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+      preferredRoomCode: "ABCDE",
+    });
+
+    await Promise.resolve();
+    const disposing = adapter.dispose({ preserveSession: true });
+    resolveHostRoom(staleHostResult);
+
+    await disposing;
+    await expect(initializing).rejects.toThrow("initialization aborted");
+    expect(staleHostResult.destroy).toHaveBeenCalledOnce();
+
+    const replacement = new DraftPodHostAdapter();
+    const replacementResult = mockHostResult();
+    (hostRoom as ReturnType<typeof vi.fn>).mockResolvedValueOnce(replacementResult);
+    await replacement.initialize({
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      kind: "Premier",
+      podSize: 8,
+      hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+      preferredRoomCode: "ABCDE",
+    });
+
+    expect(replacement.roomCode).toBe("ABCDE");
+    await replacement.dispose({ preserveSession: true });
+  });
+
+  it("does not publish a host if cancellation wins its local initialize race", async () => {
+    let resolveInitialize!: () => void;
+    mockHostInitialize.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      resolveInitialize = resolve;
+    }));
+    const controller = new AbortController();
+    const initializing = adapter.initialize({
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      kind: "Premier",
+      podSize: 8,
+      hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+      signal: controller.signal,
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    controller.abort();
+    resolveInitialize();
+
+    await expect(initializing).rejects.toThrow("initialization aborted");
+    expect(mockHostDispose).toHaveBeenCalledOnce();
+    await expect(adapter.startDraft()).rejects.toThrow("Host not initialized");
+  });
+
   it("delegates submitPick and returns view", async () => {
     await adapter.initialize({
       poolInput: { type: "Set", data: { set_pool_json: "{}" } },

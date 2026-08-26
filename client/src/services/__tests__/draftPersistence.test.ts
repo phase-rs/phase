@@ -17,9 +17,11 @@ vi.mock("idb-keyval", () => ({
 
 import {
   clearActiveDraftPod,
+  clearActiveDraftPodIfCurrent,
   clearDraftGuestSession,
   clearDraftHostSession,
   loadActiveDraftPod,
+  inspectActiveDraftPod,
   loadDraftGuestSession,
   loadDraftHostSession,
   loadDraftIntergameCommands,
@@ -27,6 +29,7 @@ import {
   saveActiveDraftPod,
   saveDraftGuestSession,
   saveDraftHostSession,
+  persistedDraftHostSessionState,
   saveDraftIntergameCommands,
   saveDraftSettlementOutbox,
 } from "../draftPersistence";
@@ -83,6 +86,14 @@ describe("draftPersistence", () => {
       expect(loaded!.draftStarted).toBe(false);
     });
 
+    it("accepts a live pre-draft lobby before it has generated a draft code", async () => {
+      const lobby = { ...testSession, draftStarted: false, draftSessionJson: null, draftCode: "" };
+      await saveDraftHostSession(lobby.persistenceId, lobby);
+
+      await expect(loadDraftHostSession(lobby.persistenceId)).resolves.toEqual(lobby);
+      expect(persistedDraftHostSessionState(lobby)).toBe("live");
+    });
+
     it("returns null for legacy snapshots missing poolInput (C6 shape guard)", async () => {
       // Simulate a pre-#1253 snapshot with the flat setPoolJson field.
       const legacy = {
@@ -123,6 +134,27 @@ describe("draftPersistence", () => {
       expect(loaded?.poolInput.type).toBe("Cube");
     });
 
+    it("rejects persisted Set and Cube snapshots missing data used by resume", async () => {
+      mockStore.set("phase-draft-host:bad-set", {
+        ...testSession,
+        poolInput: { type: "Set", data: {} },
+      });
+      mockStore.set("phase-draft-host:bad-cube", {
+        ...testSession,
+        poolInput: {
+          type: "Cube",
+          data: {
+            cube_list_text: "1 Lightning Bolt",
+            cube_name: "Cube",
+            cube_draft_settings: { pod_size: 8 },
+          },
+        },
+      });
+
+      await expect(loadDraftHostSession("bad-set")).resolves.toBeNull();
+      await expect(loadDraftHostSession("bad-cube")).resolves.toBeNull();
+    });
+
     it("saves and loads active host resume metadata", () => {
       saveActiveDraftPod({
         id: "test-draft-1",
@@ -161,6 +193,54 @@ describe("draftPersistence", () => {
       clearActiveDraftPod();
 
       expect(loadActiveDraftPod()).toBeNull();
+    });
+
+    it("does not clear metadata replaced while an older resume was loading", () => {
+      const older = {
+        id: "test-draft-1", roomCode: "ABCDE", updatedAt: Date.now(),
+      };
+      saveActiveDraftPod({
+        id: older.id,
+        roomCode: older.roomCode,
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Alice",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+        phase: "drafting",
+        pickCount: 1,
+        updatedAt: older.updatedAt,
+      });
+      saveActiveDraftPod({
+        id: "new-draft",
+        roomCode: "FGHJK",
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Alice",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+        phase: "lobby",
+        pickCount: 0,
+        updatedAt: older.updatedAt + 1,
+      });
+
+      clearActiveDraftPodIfCurrent(older);
+
+      expect(loadActiveDraftPod()).toMatchObject({ id: "new-draft", roomCode: "FGHJK" });
+    });
+
+    it("classifies only live snapshot states as host-resumable", () => {
+      expect(persistedDraftHostSessionState({ ...testSession, draftStarted: false, draftSessionJson: null })).toBe("live");
+      expect(persistedDraftHostSessionState(testSession)).toBe("live");
+      expect(persistedDraftHostSessionState({ ...testSession, draftSessionJson: '{"status":"Complete"}' })).toBe("terminal");
+      expect(persistedDraftHostSessionState({ ...testSession, draftSessionJson: '{"status":"Abandoned"}' })).toBe("invalid");
+      expect(persistedDraftHostSessionState({ ...testSession, draftSessionJson: "not json" })).toBe("invalid");
+    });
+
+    it("reports malformed active metadata as invalid", () => {
+      localStorage.setItem("phase-active-draft-pod", JSON.stringify({ id: "draft", roomCode: "lower", updatedAt: 1 }));
+
+      expect(inspectActiveDraftPod()).toMatchObject({ type: "invalid" });
     });
   });
 

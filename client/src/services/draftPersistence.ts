@@ -14,6 +14,7 @@ import { createStore, del, get, set } from "idb-keyval";
 
 import type { DraftKind, PoolInput } from "../adapter/draft-adapter";
 import type { DraftMatchBinding, DraftMatchLaunch, DraftMatchSettlement } from "../network/draftProtocol";
+import { parseRoomCode } from "../network/connection";
 import { ACTIVE_DRAFT_POD_KEY } from "../constants/storage";
 import type { DraftIntergameCommand } from "./intergameCommandLedger";
 
@@ -114,6 +115,20 @@ export interface ActiveDraftPodMeta {
   updatedAt: number;
 }
 
+/** Stable identity captured before an asynchronous resume attempt. */
+export interface ActiveDraftPodMetaCapture {
+  id: string;
+  roomCode: string;
+  updatedAt: number;
+}
+
+export type ActiveDraftPodLoadResult =
+  | { type: "absent" }
+  | { type: "invalid"; capture: ActiveDraftPodMetaCapture | null }
+  | { type: "present"; meta: ActiveDraftPodMeta; capture: ActiveDraftPodMetaCapture };
+
+export type PersistedDraftHostSessionState = "live" | "terminal" | "invalid";
+
 // ── Store ──────────────────────────────────────────────────────────────
 
 const DRAFT_HOST_PREFIX = "phase-draft-host:";
@@ -155,15 +170,7 @@ export async function loadDraftHostSession(
       getDraftStore(),
     );
     if (!s) return null;
-    // C6 shape guard: legacy snapshots (pre-#1253) carried a flat
-    // `setPoolJson: string` field instead of the PoolInput discriminated
-    // union. Discriminate on the new shape; reject anything that doesn't
-    // self-identify as Set or Cube so the resume path falls back to
-    // "no draft pod to resume" instead of crashing on `persisted.poolInput.data`.
-    if (s.poolInput?.type !== "Set" && s.poolInput?.type !== "Cube") {
-      return null;
-    }
-    return s;
+    return isPersistedDraftHostSession(s) ? s : null;
   } catch {
     return null;
   }
@@ -182,23 +189,213 @@ export function saveActiveDraftPod(meta: ActiveDraftPodMeta): void {
 }
 
 export function loadActiveDraftPod(): ActiveDraftPodMeta | null {
+  const result = inspectActiveDraftPod();
+  return result.type === "present" ? result.meta : null;
+}
+
+/**
+ * Reads active-host metadata without mutating it. Resume owns deletion because
+ * the record can change while IndexedDB is being read.
+ */
+export function inspectActiveDraftPod(): ActiveDraftPodLoadResult {
   try {
     const raw = localStorage.getItem(ACTIVE_DRAFT_POD_KEY);
-    if (!raw) return null;
-    const meta = JSON.parse(raw) as ActiveDraftPodMeta;
-    if (Date.now() - meta.updatedAt > HOST_SESSION_TTL_MS) {
-      void clearDraftHostSession(meta.id);
-      clearActiveDraftPod();
-      return null;
+    if (!raw) return { type: "absent" };
+    const value: unknown = JSON.parse(raw);
+    const capture = activeDraftPodCapture(value);
+    if (!isActiveDraftPodMeta(value) || Date.now() - value.updatedAt > HOST_SESSION_TTL_MS) {
+      return { type: "invalid", capture };
     }
-    return meta;
+    return { type: "present", meta: value, capture: activeDraftPodCapture(value)! };
   } catch {
-    return null;
+    return { type: "invalid", capture: null };
   }
 }
 
 export function clearActiveDraftPod(): void {
   localStorage.removeItem(ACTIVE_DRAFT_POD_KEY);
+}
+
+/** Clears stale metadata only when it is still the record this caller read. */
+export function clearActiveDraftPodIfCurrent(capture: ActiveDraftPodMetaCapture): void {
+  try {
+    const raw = localStorage.getItem(ACTIVE_DRAFT_POD_KEY);
+    if (!raw) return;
+    const current: unknown = JSON.parse(raw);
+    const currentCapture = activeDraftPodCapture(current);
+    if (
+      currentCapture?.id === capture.id &&
+      currentCapture.roomCode === capture.roomCode &&
+      currentCapture.updatedAt === capture.updatedAt
+    ) {
+      clearActiveDraftPod();
+    }
+  } catch {
+    // A malformed replacement is not evidence that this caller owns it.
+  }
+}
+
+/**
+ * The host snapshot, not the UI progress cache, decides whether a pod can be
+ * resumed. A lobby has not created a WASM session yet, so its null JSON is a
+ * valid live state only before `draftStarted`.
+ */
+export function persistedDraftHostSessionState(
+  session: PersistedDraftHostSession,
+): PersistedDraftHostSessionState {
+  if (typeof session.draftStarted !== "boolean") return "invalid";
+  if (!session.draftStarted) {
+    return session.draftSessionJson === null ? "live" : "invalid";
+  }
+  if (typeof session.draftSessionJson !== "string") return "invalid";
+
+  try {
+    const value: unknown = JSON.parse(session.draftSessionJson);
+    if (!isRecord(value) || typeof value.status !== "string") return "invalid";
+    switch (value.status) {
+      case "Lobby":
+      case "Drafting":
+      case "Paused":
+      case "Deckbuilding":
+      case "Pairing":
+      case "MatchInProgress":
+      case "RoundComplete":
+        return "live";
+      case "Complete":
+        return "terminal";
+      case "Abandoned":
+        return "invalid";
+      default:
+        return "invalid";
+    }
+  } catch {
+    return "invalid";
+  }
+}
+
+function isActiveDraftPodMeta(value: unknown): value is ActiveDraftPodMeta {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.id === "string" && value.id.length > 0 &&
+    isCanonicalRoomCode(value.roomCode) &&
+    (value.kind === "Premier" || value.kind === "Traditional" || value.kind === "Sealed" || value.kind === "CommanderDraft") &&
+    Number.isInteger(value.podSize) && value.podSize > 0 &&
+    typeof value.hostDisplayName === "string" &&
+    (value.tournamentFormat === "Swiss" || value.tournamentFormat === "SingleElimination") &&
+    (value.podPolicy === "Competitive" || value.podPolicy === "Casual") &&
+    (value.phase === "lobby" || value.phase === "drafting" || value.phase === "deckbuilding" ||
+      value.phase === "pairing" || value.phase === "matchInProgress" || value.phase === "complete") &&
+    Number.isFinite(value.pickCount) && value.pickCount >= 0 &&
+    Number.isFinite(value.updatedAt) && value.updatedAt > 0
+  );
+}
+
+/**
+ * IndexedDB is a user-controlled boundary. Validate every persisted field the
+ * recovery path reads before rebuilding host configuration or passing the
+ * snapshot into the P2P host; a type assertion here would turn bad storage
+ * into a resume-time exception.
+ */
+function isPersistedDraftHostSession(value: unknown): value is PersistedDraftHostSession {
+  if (!isRecord(value)) return false;
+  return (
+    isNonEmptyString(value.persistenceId) &&
+    isCanonicalRoomCode(value.roomCode) &&
+    isDraftKind(value.kind) &&
+    isPositiveInteger(value.podSize) &&
+    isNonEmptyString(value.hostDisplayName) &&
+    (value.tournamentFormat === "Swiss" || value.tournamentFormat === "SingleElimination") &&
+    (value.podPolicy === "Competitive" || value.podPolicy === "Casual") &&
+    isSeatStringRecord(value.seatTokens) &&
+    isSeatStringRecord(value.seatNames) &&
+    Array.isArray(value.kickedTokens) && value.kickedTokens.every((token) => typeof token === "string") &&
+    typeof value.draftStarted === "boolean" &&
+    // A live pre-draft lobby has no generated draft code yet; the host uses
+    // the room code as its seed fallback until StartDraft assigns one.
+    typeof value.draftCode === "string" &&
+    (value.draftSessionJson === null || typeof value.draftSessionJson === "string") &&
+    isPoolInput(value.poolInput) &&
+    isOptionalRecordArray(value.matchBindings) &&
+    isOptionalRecordArray(value.settlementOutbox) &&
+    isOptionalRecordArray(value.settlementReceipts) &&
+    isOptionalRecordArray(value.intergameCommands) &&
+    isOptionalRecordArray(value.bo3State) &&
+    isOptionalRecordArray(value.launchDigests) &&
+    isOptionalRecordArray(value.matchLaunches)
+  );
+}
+
+function isDraftKind(value: unknown): value is Exclude<DraftKind, "Quick"> {
+  return value === "Premier" || value === "Traditional" || value === "Sealed" || value === "CommanderDraft";
+}
+
+function isPoolInput(value: unknown): value is PoolInput {
+  if (!isRecord(value) || !isRecord(value.data)) return false;
+  if (value.type === "Set") {
+    return typeof value.data.set_pool_json === "string" && isJsonRecord(value.data.set_pool_json);
+  }
+  if (value.type !== "Cube") return false;
+  const settings = value.data.cube_draft_settings;
+  return (
+    isNonEmptyString(value.data.cube_list_text) &&
+    isNonEmptyString(value.data.cube_name) &&
+    isRecord(settings) &&
+    isPositiveInteger(settings.pod_size) &&
+    isPositiveInteger(settings.pack_count) &&
+    isPositiveInteger(settings.cards_per_pack) &&
+    isPositiveInteger(settings.min_deck_size) &&
+    isRecord(settings.addable_cards) &&
+    (settings.addable_cards.policy === "StandardBasics" ||
+      settings.addable_cards.policy === "CustomOnly" ||
+      settings.addable_cards.policy === "StandardBasicsPlusCustom") &&
+    Array.isArray(settings.addable_cards.custom) &&
+    settings.addable_cards.custom.every((card) => typeof card === "string")
+  );
+}
+
+function isSeatStringRecord(value: unknown): value is Record<number, string> {
+  return isRecord(value) && Object.entries(value).every(([seat, token]) => isPositiveSeat(seat) && typeof token === "string");
+}
+
+function isPositiveSeat(value: string): boolean {
+  const seat = Number(value);
+  return Number.isInteger(seat) && seat >= 0 && String(seat) === value;
+}
+
+function isOptionalRecordArray(value: unknown): boolean {
+  return value === undefined || (Array.isArray(value) && value.every(isRecord));
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return Number.isInteger(value) && value > 0;
+}
+
+function isJsonRecord(value: string): boolean {
+  try {
+    return isRecord(JSON.parse(value));
+  } catch {
+    return false;
+  }
+}
+
+function activeDraftPodCapture(value: unknown): ActiveDraftPodMetaCapture | null {
+  if (!isRecord(value) || typeof value.id !== "string" || !isCanonicalRoomCode(value.roomCode) ||
+    !Number.isFinite(value.updatedAt)) {
+    return null;
+  }
+  return { id: value.id, roomCode: value.roomCode, updatedAt: value.updatedAt };
+}
+
+function isCanonicalRoomCode(value: unknown): value is string {
+  return typeof value === "string" && parseRoomCode(value) === value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 // ── Guest Persistence ──────────────────────────────────────────────────

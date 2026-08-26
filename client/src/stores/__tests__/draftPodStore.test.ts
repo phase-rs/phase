@@ -3,19 +3,25 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   clearActiveDraftPod: vi.fn(),
   loadActiveDraftPod: vi.fn(),
+  inspectActiveDraftPod: vi.fn(),
+  clearActiveDraftPodIfCurrent: vi.fn(),
   loadDraftHostSession: vi.fn(),
+  persistedDraftHostSessionState: vi.fn(() => "live"),
   multiplayerState: {
     role: null as "host" | "guest" | null,
     phase: "idle",
     roomCode: null as string | null,
-    hostDraft: vi.fn(),
+    hostDraft: vi.fn(async () => true),
   },
 }));
 
 vi.mock("../../services/draftPersistence", () => ({
   clearActiveDraftPod: mocks.clearActiveDraftPod,
   loadActiveDraftPod: mocks.loadActiveDraftPod,
+  inspectActiveDraftPod: mocks.inspectActiveDraftPod,
+  clearActiveDraftPodIfCurrent: mocks.clearActiveDraftPodIfCurrent,
   loadDraftHostSession: mocks.loadDraftHostSession,
+  persistedDraftHostSessionState: mocks.persistedDraftHostSessionState,
 }));
 
 vi.mock("../multiplayerDraftStore", () => ({
@@ -62,17 +68,61 @@ describe("draftPodStore", () => {
     mocks.multiplayerState.role = null;
     mocks.multiplayerState.phase = "idle";
     mocks.multiplayerState.roomCode = null;
-    mocks.multiplayerState.hostDraft = vi.fn(async () => {});
+    mocks.multiplayerState.hostDraft = vi.fn(async () => true);
+    mocks.persistedDraftHostSessionState.mockReturnValue("live");
+    mocks.inspectActiveDraftPod.mockReturnValue({
+      type: "absent",
+    });
     useDraftPodStore.getState().reset();
   });
 
   describe("resumeHostedPod", () => {
+    it("returns absent silently without changing setup state", async () => {
+      const outcome = await useDraftPodStore.getState().resumeHostedPod({ silent: true, routeToken: 1 });
+
+      expect(outcome).toBe("absent");
+      expect(useDraftPodStore.getState().configError).toBeNull();
+    });
+
+    it("treats a completed persisted snapshot as terminal and never re-hosts it", async () => {
+      mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
+      mocks.loadDraftHostSession.mockResolvedValue(persistedSession);
+      mocks.persistedDraftHostSessionState.mockReturnValue("terminal");
+
+      const outcome = await useDraftPodStore.getState().resumeHostedPod({ routeToken: 2 });
+
+      expect(outcome).toBe("terminal");
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+      expect(mocks.clearActiveDraftPodIfCurrent).toHaveBeenCalled();
+    });
+
+    it("uses the snapshot rather than stale complete metadata as resume authority", async () => {
+      const staleMeta = { ...activeMeta, phase: "complete" as const };
+      mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: staleMeta, capture: { id: staleMeta.id, roomCode: staleMeta.roomCode, updatedAt: staleMeta.updatedAt } });
+      mocks.loadDraftHostSession.mockResolvedValue(persistedSession);
+
+      const outcome = await useDraftPodStore.getState().resumeHostedPod({ routeToken: 3 });
+
+      expect(outcome).toBe("resumed");
+      expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce();
+      expect(mocks.clearActiveDraftPodIfCurrent).not.toHaveBeenCalled();
+    });
+
+    it("does not report recovery as resumed when host initialization fails", async () => {
+      mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
+      mocks.loadDraftHostSession.mockResolvedValue(persistedSession);
+      mocks.multiplayerState.hostDraft = vi.fn(async () => false);
+
+      await expect(useDraftPodStore.getState().resumeHostedPod({ routeToken: 4 })).resolves.toBe("invalid");
+      expect(mocks.clearActiveDraftPodIfCurrent).not.toHaveBeenCalled();
+    });
+
     it("deduplicates concurrent resume calls for the same hosted pod", async () => {
       let resolveSession!: (session: typeof persistedSession) => void;
       const sessionPromise = new Promise<typeof persistedSession>((resolve) => {
         resolveSession = resolve;
       });
-      mocks.loadActiveDraftPod.mockReturnValue(activeMeta);
+      mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
       mocks.loadDraftHostSession.mockReturnValue(sessionPromise);
 
       const first = useDraftPodStore.getState().resumeHostedPod();
@@ -88,7 +138,7 @@ describe("draftPodStore", () => {
       mocks.multiplayerState.role = "host";
       mocks.multiplayerState.phase = "matchInProgress";
       mocks.multiplayerState.roomCode = "ABCDE";
-      mocks.loadActiveDraftPod.mockReturnValue(activeMeta);
+      mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
 
       await useDraftPodStore.getState().resumeHostedPod();
 
@@ -100,7 +150,7 @@ describe("draftPodStore", () => {
       mocks.multiplayerState.role = "host";
       mocks.multiplayerState.phase = "error";
       mocks.multiplayerState.roomCode = "ABCDE";
-      mocks.loadActiveDraftPod.mockReturnValue(activeMeta);
+      mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
       mocks.loadDraftHostSession.mockResolvedValue(persistedSession);
 
       await useDraftPodStore.getState().resumeHostedPod();
@@ -127,7 +177,7 @@ describe("draftPodStore", () => {
           },
         },
       };
-      mocks.loadActiveDraftPod.mockReturnValue(activeMeta);
+      mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
       mocks.loadDraftHostSession.mockResolvedValue(cubeSession);
 
       await useDraftPodStore.getState().resumeHostedPod();

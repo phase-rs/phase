@@ -12,6 +12,7 @@ import {
   useMultiplayerDraftStore,
   type DraftPodScreen,
 } from "../multiplayerDraftStore";
+import { DraftPodHostAdapter } from "../../adapter/draftPodHostAdapter";
 import type { DraftPlayerView } from "../../adapter/draft-adapter";
 import { DraftPauseReason, type DraftMatchLaunch } from "../../network/draftProtocol";
 
@@ -138,6 +139,116 @@ describe("multiplayerDraftStore", () => {
   });
 
   describe("hostDraft", () => {
+    it("hands a completed host session off before joining and gates its late events", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      const staleHostEvent = capturedHostEventHandler!;
+
+      await useMultiplayerDraftStore.getState().joinDraft({ roomCode: "ABCDE", displayName: "Guest" });
+      staleHostEvent({ type: "roomCreated", roomCode: "STALE" });
+
+      expect(mockHostAdapter.dispose).toHaveBeenCalledWith({ preserveSession: true });
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "guest", roomCode: null });
+    });
+
+    it("waits for a cancelled recovery's same-ID host cleanup before starting its replacement", async () => {
+      const config = {
+        poolInput: { type: "Set" as const, data: { set_pool_json: "{}" } },
+        kind: "Premier" as const,
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss" as const,
+        podPolicy: "Competitive" as const,
+        persistenceId: "shared-recovery",
+      };
+      await expect(useMultiplayerDraftStore.getState().hostDraft(config)).resolves.toBe(true);
+
+      let releaseCleanup!: () => void;
+      mockHostAdapter.dispose.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        releaseCleanup = resolve;
+      }));
+      const replacement = useMultiplayerDraftStore.getState().hostDraft(config);
+      await Promise.resolve();
+
+      expect(vi.mocked(DraftPodHostAdapter)).toHaveBeenCalledTimes(1);
+      releaseCleanup();
+
+      await expect(replacement).resolves.toBe(true);
+      expect(vi.mocked(DraftPodHostAdapter)).toHaveBeenCalledTimes(2);
+    });
+
+    it("disposes a superseded in-flight host after its late initialization resolves", async () => {
+      let resolveHost!: () => void;
+      mockHostAdapter.initialize.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        resolveHost = resolve;
+      }));
+
+      const first = useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      await useMultiplayerDraftStore.getState().joinDraft({ roomCode: "ABCDE", displayName: "Guest" });
+      resolveHost();
+      await first;
+
+      expect(mockHostAdapter.dispose).toHaveBeenCalledWith({ preserveSession: true });
+      expect(useMultiplayerDraftStore.getState().role).toBe("guest");
+    });
+
+    it("releases an in-flight host when its owning route aborts", async () => {
+      let resolveHost!: () => void;
+      mockHostAdapter.initialize.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        resolveHost = resolve;
+      }));
+      const controller = new AbortController();
+      const hosting = useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+        signal: controller.signal,
+      });
+
+      await Promise.resolve();
+      controller.abort();
+      resolveHost();
+
+      await expect(hosting).resolves.toBe(false);
+      expect(mockHostAdapter.dispose).toHaveBeenCalledWith({ preserveSession: true });
+      expect(useMultiplayerDraftStore.getState().role).not.toBe("host");
+    });
+
+    it("releases an initialized host when its owning route later aborts", async () => {
+      const controller = new AbortController();
+      await expect(useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+        signal: controller.signal,
+      })).resolves.toBe(true);
+
+      controller.abort();
+      await Promise.resolve();
+
+      expect(mockHostAdapter.dispose).toHaveBeenCalledWith({ preserveSession: true });
+      expect(useMultiplayerDraftStore.getState().role).not.toBe("host");
+    });
+
     it("sets role to host and phase to connecting", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
         poolInput: { type: "Set", data: { set_pool_json: "{}" } },

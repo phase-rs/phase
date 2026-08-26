@@ -8,9 +8,9 @@
  * 4. Deckbuilding: LimitedDeckBuilder (reuses Quick Draft component)
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useNavigate, useSearchParams } from "react-router";
+import { useLocation, useNavigate, useSearchParams } from "react-router";
 
 import { MenuSelect } from "../components/ui/MenuSelect";
 import type { CardHoverInfo } from "../components/card/CardPreview";
@@ -833,13 +833,31 @@ export function DraftPodPage() {
   const resetPod = useDraftPodStore((s) => s.reset);
   const resumeHostedPod = useDraftPodStore((s) => s.resumeHostedPod);
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams] = useSearchParams();
+  const entryGeneration = useRef(0);
+  const explicitResume = searchParams.get("resume") === "1";
 
   useEffect(() => {
-    if (searchParams.get("resume") !== "1") return;
-    void resumeHostedPod();
-  }, [resumeHostedPod, searchParams]);
+    const routeToken = ++entryGeneration.current;
+    const controller = new AbortController();
 
+    void (async () => {
+      // A persisted host is the only authority that may claim this route
+      // before a fresh setup intent. The generation gate makes a stale route's
+      // late IndexedDB result inert after navigation or StrictMode re-entry.
+      await resumeHostedPod({
+        silent: !explicitResume,
+        routeToken,
+        signal: controller.signal,
+      });
+      if (entryGeneration.current !== routeToken) return;
+    })();
+    return () => {
+      controller.abort();
+      ++entryGeneration.current;
+    };
+  }, [explicitResume, location.pathname, location.search, resumeHostedPod]);
   const handleLeave = useCallback(async () => {
     await leave(true);
     resetPod();

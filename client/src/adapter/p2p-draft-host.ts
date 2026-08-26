@@ -2015,7 +2015,11 @@ export class P2PDraftHost {
 
   // ── Cleanup ────────────────────────────────────────────────────────
 
-  dispose(): void {
+  async dispose(): Promise<void> {
+    // Closing this synchronously is a write fence: `persistSession` continuations
+    // may already be queued, but none may snapshot or save after their host loses
+    // ownership to a newer recovery using the same persistence ID.
+    this.persistenceClosed = true;
     this.clearActiveTimer();
     if (this.hostConnectionUnsub) this.hostConnectionUnsub();
     for (const { timer } of this.disconnectedSeats.values()) {
@@ -2030,19 +2034,21 @@ export class P2PDraftHost {
     }
     this.guestSessions.clear();
     this.listeners = [];
+    await this.persistQueue;
   }
 
   async terminateDraft(): Promise<void> {
+    // Fence queued non-terminal saves before awaiting guest notifications.
+    this.persistenceClosed = true;
     for (const session of this.guestSessions.values()) {
       await session.send({ type: "draft_host_left", reason: "Host left the draft" });
     }
-    this.persistenceClosed = true;
     await this.persistQueue;
     if (this.persistenceId) {
       await clearDraftHostSession(this.persistenceId);
     }
     void this.cleanupServerBackup();
-    this.dispose();
+    await this.dispose();
     try {
       this.hostPeer.destroy();
     } catch { /* best-effort */ }
