@@ -9498,14 +9498,21 @@ mod game_submission_tests {
     }
 
     #[test]
-    fn pending_takeback_session_refusal_uses_the_request_channel() {
-        let message = session_action_error_message(SessionActionError::RequestRejected(
-            "A takeback request is pending — resolve it before taking further actions".to_string(),
+    fn action_and_request_session_refusals_use_their_distinct_channels() {
+        let message = session_action_error_message(SessionActionError::Rejected(
+            ActionRejection::new(ActionRejectionCode::ActionNotAllowed),
         ));
         assert!(matches!(
             message,
+            ServerMessage::ActionRejected { rejection }
+                if rejection.code == ActionRejectionCode::ActionNotAllowed
+        ));
+        assert!(matches!(
+            session_action_error_message(SessionActionError::RequestRejected(
+                "Match forfeits require a best-of-three match".to_string(),
+            )),
             ServerMessage::RequestRejected { reason }
-                if reason == "A takeback request is pending — resolve it before taking further actions"
+                if reason == "Match forfeits require a best-of-three match"
         ));
         assert!(matches!(
             session_action_error_message(SessionActionError::Operational(

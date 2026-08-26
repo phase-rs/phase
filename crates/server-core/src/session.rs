@@ -106,8 +106,9 @@ pub type RevisionedActionResult = (u64, ActionResult);
 #[derive(Debug)]
 pub enum SessionActionError {
     Operational(String),
-    /// A non-engine request cannot proceed because a session lifecycle action
-    /// (such as an in-flight takeback) must settle first.
+    /// A request-only lifecycle operation cannot proceed. Game-action-shaped
+    /// attempts use [`Self::Rejected`] so their pending client promises settle
+    /// on correlated action-response frames.
     RequestRejected(String),
     Rejected(ActionRejection),
 }
@@ -1876,10 +1877,9 @@ impl SessionManager {
         // voting on or silently discard the action once the rollback lands.
         // Require the table to resolve (approve/decline/cancel) first.
         if session.pending_takeback.is_some() {
-            return Err(SessionActionError::RequestRejected(
-                "A takeback request is pending — resolve it before taking further actions"
-                    .to_string(),
-            ));
+            return Err(SessionActionError::Rejected(ActionRejection::new(
+                engine::types::action_rejection::ActionRejectionCode::ActionNotAllowed,
+            )));
         }
 
         // Debug capability gate. `debug_permitted` is the single authority:
@@ -2083,10 +2083,9 @@ impl SessionManager {
             .ok_or_else(|| "Invalid player token".to_string())?;
 
         if session.pending_takeback.is_some() {
-            return Err(SessionActionError::RequestRejected(
-                "A takeback request is pending — resolve it before taking further actions"
-                    .to_string(),
-            ));
+            return Err(SessionActionError::Rejected(ActionRejection::new(
+                engine::types::action_rejection::ActionRejectionCode::ActionNotAllowed,
+            )));
         }
 
         // Reject only an unentitled caller. A latch whose frozen run has gone
@@ -2192,10 +2191,9 @@ impl SessionManager {
         // GH #1507: the authoritative state must not move while the table is
         // voting on a rollback. Same interlock, same reason, as `handle_action`.
         if session.pending_takeback.is_some() {
-            return Err(SessionActionError::RequestRejected(
-                "A takeback request is pending — resolve it before taking further actions"
-                    .to_string(),
-            ));
+            return Err(SessionActionError::Rejected(ActionRejection::new(
+                engine::types::action_rejection::ActionRejectionCode::ActionNotAllowed,
+            )));
         }
 
         // Snapshot BEFORE `log_player_names` is written, matching
@@ -3669,11 +3667,15 @@ mod tests {
             .request_takeback(priority_player, RewindTarget::LastAction)
             .unwrap();
 
-        let result = mgr.handle_action(&code, &other_token, GameAction::PassPriority);
-        assert!(
-            result.is_err(),
-            "action should be rejected while a takeback is pending"
-        );
+        let result = mgr
+            .handle_action_with_card_db_outcome(&code, &other_token, GameAction::PassPriority, None)
+            .expect_err("action should be rejected while a takeback is pending");
+        assert!(matches!(
+            result,
+            SessionActionError::Rejected(rejection)
+                if rejection.code
+                    == engine::types::action_rejection::ActionRejectionCode::ActionNotAllowed
+        ));
     }
 
     /// A solo human vs. AI seats auto-resolves their own takeback request —
