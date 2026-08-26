@@ -681,7 +681,9 @@ mod tests {
     use crate::types::actions::ResolveAllConsentDecision;
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::format::FormatConfig;
-    use crate::types::game_state::{AutoPassMode, PublicStateDirty, StackEntry, StackEntryKind};
+    use crate::types::game_state::{
+        AutoPassMode, PublicStateDirty, StackEntry, StackEntryKind, TurnBoundary,
+    };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::ManaColor;
     use crate::types::phase::{Phase, PhaseStop, PhaseStopScope};
@@ -1081,6 +1083,55 @@ mod tests {
 
         let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
 
+        assert_eq!(result.items_resolved, 1);
+        assert!(state.stack.is_empty());
+    }
+
+    #[test]
+    fn resolve_all_consent_supersedes_until_end_of_turn_auto_passes() {
+        let mut state = priority_state(PlayerId(0), vec![no_op_entry(1, PlayerId(0))]);
+        state.auto_pass.insert(
+            PlayerId(0),
+            AutoPassMode::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        );
+
+        super::super::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::BeginResolveAll { max_resolutions: 0 },
+        )
+        .expect("priority holder begins the consent run");
+        assert!(!state.auto_pass.contains_key(&PlayerId(0)));
+
+        let epoch = match &state.waiting_for {
+            WaitingFor::ResolveAllConsent { epoch, .. } => *epoch,
+            _ => panic!("second representative should be queued"),
+        };
+        state.auto_pass.insert(
+            PlayerId(1),
+            AutoPassMode::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        );
+        super::super::engine::apply(
+            &mut state,
+            PlayerId(1),
+            GameAction::RespondResolveAllConsent {
+                epoch,
+                decision: ResolveAllConsentDecision::Grant,
+            },
+        )
+        .expect("second representative grants");
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ResolveAllReady { .. }
+        ));
+        assert!(state.auto_pass.is_empty());
+
+        let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
         assert_eq!(result.items_resolved, 1);
         assert!(state.stack.is_empty());
     }

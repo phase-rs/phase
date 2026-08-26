@@ -7602,6 +7602,10 @@ fn begin_resolve_all_consent(
     max_resolutions: u32,
 ) -> Result<WaitingFor, EngineError> {
     super::priority::pass_priority_legality(state, priority_player)?;
+    // Resolve All consent supersedes this representative's standing yield. A
+    // Ready run must be free of auto-pass state so its one-resolution proof
+    // cannot advance beyond the consented boundary.
+    state.auto_pass.remove(&priority_player);
     let current_representative =
         super::topology::priority_pass_representative(state, priority_player);
     let mut representatives = super::topology::priority_pass_participants(state);
@@ -7811,6 +7815,9 @@ fn respond_resolve_all_consent(
                 .find(|participant| participant.representative == representative)
                 .expect("pending Resolve All representative must be a participant");
             participant.granted = true;
+            // A grant replaces this representative's standing auto-pass with
+            // the consented, bounded Resolve All sequence.
+            state.auto_pass.remove(&representative);
         }
     }
     if matches!(decision, ResolveAllConsentDecision::Decline) {
