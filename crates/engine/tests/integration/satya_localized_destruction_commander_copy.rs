@@ -89,15 +89,29 @@ fn localized_destruction_does_not_deadlock_on_a_copied_commander_spell() {
         "the accepted one-or-more energy payment spends the one energy the spell granted"
     );
 
-    // The optional-payment continuation has finished the spell; the next
-    // priority action enters the normal SBA check that offers the command-zone
-    // return for Sarah Jane Smith.
-    let result = runner
-        .act(GameAction::PassPriority)
-        .expect("priority resumes after Localized Destruction resolves");
+    // The optional-payment continuation has finished the spell. Drive the
+    // current priority round until its normal SBA check offers the command-zone
+    // return; the number of passes is determined by the player count, not this
+    // two-player fixture's seat order.
+    for _ in 0..runner.state().players.len() {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::CommanderZoneChoice { .. }
+        ) {
+            break;
+        }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "Localized Destruction must resume at priority before the next SBA check; got {:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority pass must advance the post-resolution SBA pipeline");
+    }
 
     assert!(matches!(
-        result.waiting_for,
+        runner.state().waiting_for,
         WaitingFor::CommanderZoneChoice {
             commander_id,
             current_zone: Zone::Graveyard,
