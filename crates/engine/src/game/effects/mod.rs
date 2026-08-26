@@ -7056,6 +7056,25 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         // CR 701.61a + CR 608.2d: A player cannot choose to forage unless at
         // least one complete forage mode is currently available.
         Effect::Forage => !forage::can_forage(state, ability),
+        Effect::PayCost { cost, payer, .. } => {
+            let Some(payer) =
+                crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
+            else {
+                return true;
+            };
+            let mut payment_ability = ability.clone();
+            payment_ability.controller = payer;
+            !crate::game::costs::can_pay(
+                state,
+                payer,
+                ability.source_id,
+                cost,
+                &crate::game::costs::PaymentScope::Resolution {
+                    ability: &payment_ability,
+                    cost_move_root: crate::game::costs::ResolutionCostMoveRoot::EffectPayCost,
+                },
+            )
+        }
         Effect::CastFromZone {
             mode,
             target,

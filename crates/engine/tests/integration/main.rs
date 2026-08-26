@@ -1078,6 +1078,7 @@ mod thor_god_of_thunder;
 mod thorna_and_twigtooth_shared_x_relay_6956;
 mod thought_distortion;
 mod thoughtweft_trample_regression;
+mod thousand_moons_smithy;
 mod throne_of_eldraine_mana_riders;
 mod throw_instead_tail_class;
 mod timely_ward_regression;

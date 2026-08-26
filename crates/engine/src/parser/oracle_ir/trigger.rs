@@ -10,9 +10,9 @@ use super::ast::parsed_clause;
 use super::context::ParseContext;
 use super::effect_chain::{DieResultBranchIr, EffectChainIr, ModalModeIr};
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, Effect, ModalChoice,
-    TargetFilter, TargetSelectionMode, TriggerCondition, TriggerConstraint, TriggerDefinition,
-    UnlessPayModifier,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ControllerRef,
+    Effect, ModalChoice, TargetFilter, TargetSelectionMode, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, UnlessPayModifier,
 };
 use crate::types::triggers::TriggerMode;
 
@@ -167,7 +167,9 @@ pub(crate) enum TriggerBody {
 pub(crate) struct ReflexiveParentIr {
     /// How the parent instruction is printed and offered.
     pub(crate) parent: ReflexiveParent,
-    /// The reflexive body — what `"When you do, …"` introduces.
+    /// The connector between the parent instruction and its dependent body.
+    pub(crate) connector: AbilityCondition,
+    /// The reflexive body that follows the connector.
     pub(crate) effect_chain: EffectChainIr,
     /// CR 700.2b: modal metadata when the reflexive body is a mode choice.
     pub(crate) modal: Option<ModalIr>,

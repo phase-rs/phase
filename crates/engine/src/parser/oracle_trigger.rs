@@ -22,7 +22,9 @@ use super::oracle_ir::trigger::{
     TriggerBody, TriggerIr, TriggerModifiers, TriggerNodeIr,
 };
 use super::oracle_modal::try_parse_inline_modal_ir;
-use super::oracle_nom::condition::parse_elided_subject_state_condition;
+use super::oracle_nom::condition::{
+    parse_affirmative_reflexive_connector, parse_elided_subject_state_condition,
+};
 use super::oracle_nom::condition::{
     parse_inner_condition, parse_spell_history_filter, parse_there_are_battlefield_count_clause,
 };
@@ -1546,7 +1548,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     let has_up_to = scan_contains(&effect_for_parse_lower, "up to one")
         || scan_contains(&effect_for_parse_lower, "any number of target");
     let body = if !effect_for_parse.is_empty() {
-        if let Some((cost, reflexive_effect_text)) =
+        if let Some((cost, connector, reflexive_effect_text)) =
             split_reflexive_optional_payment(&effect_for_parse)
         {
             optional = false;
@@ -1557,6 +1559,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                     cost,
                     payment_chain: None,
                 },
+                connector,
                 effect_chain,
                 modal: None,
             })))
@@ -1826,7 +1829,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 modifiers,
                 reflexive_die_results,
             );
-            reflexive_ability.condition = Some(AbilityCondition::WhenYouDo);
+            reflexive_ability.condition = Some(reflexive.connector.clone());
 
             if let Some(modal) = &reflexive.modal {
                 reflexive_ability = reflexive_ability.with_modal(
@@ -1841,7 +1844,8 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
 
             // CR 603.12: the parent is either an optional instruction the
             // controller may decline or a mandatory instruction. Both build the
-            // same parent → `WhenYouDo` sub shape.
+            // same parent → dependent-subability shape; the typed connector
+            // preserves whether the printed rider is reflexive or outcome-gated.
             let mut parent_ability = match &reflexive.parent {
                 ReflexiveParent::MayPay {
                     cost,
@@ -3330,7 +3334,9 @@ fn infer_pronoun_unless_payer(
 /// fully recognized and payable during resolution; unsupported or branch-choice
 /// costs should remain honest parser gaps rather than becoming a broad no-op
 /// `PayCost`.
-fn split_reflexive_optional_payment(effect_text: &str) -> Option<(AbilityCost, String)> {
+fn split_reflexive_optional_payment(
+    effect_text: &str,
+) -> Option<(AbilityCost, AbilityCondition, String)> {
     let lower = effect_text.to_lowercase();
     let (after_prefix, _) = tag::<_, _, OracleError<'_>>("you may ")
         .parse(lower.as_str())
@@ -3338,9 +3344,7 @@ fn split_reflexive_optional_payment(effect_text: &str) -> Option<(AbilityCost, S
     let (connector, cost_lower) = terminated(take_until::<_, _, OracleError<'_>>(". "), tag(". "))
         .parse(after_prefix)
         .ok()?;
-    let (body_lower, _) = tag::<_, _, OracleError<'_>>("when you do, ")
-        .parse(connector)
-        .ok()?;
+    let (body_lower, connector) = parse_affirmative_reflexive_connector(connector).ok()?;
 
     let cost_start = effect_text.len() - after_prefix.len();
     let cost_len = cost_lower.len();
@@ -3359,7 +3363,62 @@ fn split_reflexive_optional_payment(effect_text: &str) -> Option<(AbilityCost, S
     {
         return None;
     }
-    Some((cost, body_text.to_string()))
+    Some((cost, connector, body_text.to_string()))
+}
+
+#[cfg(test)]
+#[test]
+fn reflexive_optional_payment_preserves_the_printed_affirmative_connector() {
+    const THOUSAND_MOONS_SMITHY: &str = "At the beginning of your first main phase, you may tap five untapped artifacts and/or creatures you control. If you do, transform Thousand Moons Smithy.";
+
+    let trigger = parse_trigger_line(THOUSAND_MOONS_SMITHY, "Thousand Moons Smithy");
+    let parent = trigger
+        .execute
+        .as_deref()
+        .expect("Smithy's first-main-phase trigger must have a parent instruction");
+    let Effect::PayCost { cost, .. } = parent.effect.as_ref() else {
+        panic!(
+            "Smithy's parent must lower to PayCost, got {:?}",
+            parent.effect
+        );
+    };
+    assert!(matches!(
+        cost,
+        AbilityCost::TapCreatures {
+            requirement: TapCreaturesRequirement::Count { count: 5 },
+            ..
+        }
+    ));
+    assert!(
+        parent.target_prompt.is_none()
+            && parent.multi_target.is_none()
+            && parent.target_constraints.is_empty(),
+        "the fixed-five payment must not introduce a spell-target selection"
+    );
+    assert_eq!(
+        parent
+            .sub_ability
+            .as_deref()
+            .and_then(|child| child.condition.clone()),
+        Some(AbilityCondition::EffectOutcome {
+            signal: crate::types::ability::EffectOutcomeSignal::OptionalEffectPerformed,
+        }),
+        "Smithy's printed If-you-do rider must remain an EffectOutcome gate"
+    );
+
+    let when_you_do = parse_trigger_line(
+        "Whenever ~ attacks, you may tap five untapped creatures you control. When you do, transform ~.",
+        "When Probe",
+    );
+    assert_eq!(
+        when_you_do
+            .execute
+            .as_deref()
+            .and_then(|parent| parent.sub_ability.as_deref())
+            .and_then(|child| child.condition.clone()),
+        Some(AbilityCondition::WhenYouDo),
+        "a printed When-you-do connector must remain a reflexive trigger"
+    );
 }
 
 fn is_unsupported_disjunctive_reflexive_optional_payment(effect_text: &str) -> bool {
@@ -3379,8 +3438,7 @@ fn is_unsupported_disjunctive_reflexive_optional_payment(effect_text: &str) -> b
     {
         return false;
     }
-    let parsed_reflexive_connector = tag::<_, _, OracleError<'_>>("when you do, ").parse(connector);
-    if parsed_reflexive_connector.is_err() {
+    if parse_affirmative_reflexive_connector(connector).is_err() {
         return false;
     }
 
