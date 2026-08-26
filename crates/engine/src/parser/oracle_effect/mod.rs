@@ -7635,7 +7635,15 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
         UnlessSuffixStrip::Absent => (None, clause_text),
         UnlessSuffixStrip::Parsed(c) => (Some(c), clause_text),
         UnlessSuffixStrip::Unrecognized { rider } => {
-            let (stripped, unless_pay) = extract_resolution_unless_pay_modifier(&clause_text, None);
+            // The clause shell owns player-scope recognition. The unless-payment
+            // modifier is extracted before the main shell pass below, so consult
+            // the same shell here to bind an anaphoric "they" to a prepositional
+            // scope such as "for each opponent, you … unless they …".
+            let (_, clause_context) = super::clause_shell::peel_clause(&clause_text);
+            let (stripped, unless_pay) = extract_resolution_unless_pay_modifier(
+                &clause_text,
+                clause_context.player_scope.as_ref(),
+            );
             if unless_pay.is_some() {
                 unless_pay_deferred = unless_pay;
                 (None, stripped)
