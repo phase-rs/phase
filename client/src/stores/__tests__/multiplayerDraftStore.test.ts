@@ -150,7 +150,7 @@ describe("multiplayerDraftStore", () => {
       });
       const staleHostEvent = capturedHostEventHandler!;
 
-      await useMultiplayerDraftStore.getState().joinDraft({ roomCode: "ABCDE", displayName: "Guest" });
+      await useMultiplayerDraftStore.getState().joinDraft({ kind: "new", roomCode: "ABCDE", displayName: "Guest" });
       staleHostEvent({ type: "roomCreated", roomCode: "STALE" });
 
       expect(mockHostAdapter.dispose).toHaveBeenCalledWith({ preserveSession: true });
@@ -197,7 +197,7 @@ describe("multiplayerDraftStore", () => {
         tournamentFormat: "Swiss",
         podPolicy: "Competitive",
       });
-      await useMultiplayerDraftStore.getState().joinDraft({ roomCode: "ABCDE", displayName: "Guest" });
+      await useMultiplayerDraftStore.getState().joinDraft({ kind: "new", roomCode: "ABCDE", displayName: "Guest" });
       resolveHost();
       await first;
 
@@ -512,6 +512,7 @@ describe("multiplayerDraftStore", () => {
   describe("joinDraft", () => {
     it("sets role to guest and phase to connecting", async () => {
       await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new",
         roomCode: "ABCDE",
         displayName: "Alice",
       });
@@ -522,6 +523,7 @@ describe("multiplayerDraftStore", () => {
 
     it("sets seatIndex and draftCode on joined event", async () => {
       await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new",
         roomCode: "ABCDE",
         displayName: "Alice",
       });
@@ -540,6 +542,7 @@ describe("multiplayerDraftStore", () => {
 
     it("tracks pause state", async () => {
       await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new",
         roomCode: "ABCDE",
         displayName: "Alice",
       });
@@ -561,6 +564,7 @@ describe("multiplayerDraftStore", () => {
 
     it("tracks pairing info", async () => {
       await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new",
         roomCode: "ABCDE",
         displayName: "Alice",
       });
@@ -586,6 +590,7 @@ describe("multiplayerDraftStore", () => {
 
     it("sets phase to kicked on kicked event", async () => {
       await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new",
         roomCode: "ABCDE",
         displayName: "Alice",
       });
@@ -599,6 +604,7 @@ describe("multiplayerDraftStore", () => {
 
     it("retires a guest error when the phase changes, and only then", async () => {
       await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new",
         roomCode: "ABCDE",
         displayName: "Alice",
       });
@@ -657,6 +663,7 @@ describe("multiplayerDraftStore", () => {
 
     it("clears a stale message when the guest enters a message-less error phase, but not one that follows the flip", async () => {
       await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new",
         roomCode: "ABCDE",
         displayName: "Alice",
       });
@@ -847,6 +854,7 @@ describe("multiplayerDraftStore", () => {
 
     async function guestInMatch(): Promise<void> {
       await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new",
         roomCode: "ABCDE",
         displayName: "Alice",
       });

@@ -11,11 +11,10 @@
  */
 
 import type { DraftPlayerView, SeatPublicView } from "./draft-adapter";
-import { P2PDraftGuest, type DraftGuestEvent } from "./p2p-draft-guest";
+import { P2PDraftGuest, type DraftGuestConnection, type DraftGuestEvent } from "./p2p-draft-guest";
 import type { DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from "../network/draftProtocol";
 import type { DraftIntergameCommand, DraftIntergameCommandAck } from "../services/intergameCommandLedger";
 import { joinRoom, type JoinResult } from "../network/connection";
-import { loadDraftGuestSession } from "../services/draftPersistence";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -65,7 +64,10 @@ export type DraftPodGuestEvent =
 
 type DraftPodGuestEventListener = (event: DraftPodGuestEvent) => void;
 
-export interface DraftPodGuestConfig {
+const INITIAL_RECONNECT_JOIN_ATTEMPTS = 3;
+const INITIAL_RECONNECT_JOIN_BACKOFF_MS = [500, 1_000] as const;
+
+interface DraftPodGuestConnectionBase {
   roomCode: string;
   displayName: string;
   /** Abort signal for cancellation during connection. */
@@ -73,6 +75,11 @@ export interface DraftPodGuestConfig {
   /** Connection timeout in ms (default 30s). */
   timeoutMs?: number;
 }
+
+/** New joins and credentialed reconnects are intentionally disjoint. */
+export type DraftPodGuestConfig =
+  | ({ kind: "new" } & DraftPodGuestConnectionBase)
+  | ({ kind: "reconnect"; hostPeerId: string; draftToken: string } & DraftPodGuestConnectionBase);
 
 // ── DraftPodGuestAdapter ───────────────────────────────────────────────
 
@@ -122,43 +129,50 @@ export class DraftPodGuestAdapter {
 
   // ── Initialization ─────────────────────────────────────────────────
 
-  /**
-   * Connect to a draft pod host via PeerJS room code. Checks for an
-   * existing draft token in IndexedDB for reconnection.
-   */
+  /** Connect to a draft pod host and wait for its first authoritative ack. */
   async initialize(config: DraftPodGuestConfig): Promise<void> {
     this.setStatus("connecting");
 
     try {
       // 1. Join the PeerJS room
-      const joinResult = await joinRoom(
-        config.roomCode,
-        config.signal,
-        config.timeoutMs,
-      );
+      const joinResult = await this.openRoom(config);
       this.joinResult = joinResult;
 
-      // 2. Check for existing draft token (reconnect case)
-      const persisted = await loadDraftGuestSession(joinResult.conn.peer);
-      const existingToken = persisted?.draftToken;
+      // The code route and the IndexedDB capability are both bound to this
+      // exact host. A different PeerJS target must never receive the token.
+      if (config.kind === "reconnect" && joinResult.conn.peer !== config.hostPeerId) {
+        joinResult.destroyPeer();
+        this.joinResult = null;
+        throw new Error("Draft pod host changed; reconnect credentials were not sent");
+      }
 
-      // 3. Create P2PDraftGuest
+      const connection: DraftGuestConnection = config.kind === "new"
+        ? { kind: "new", roomCode: config.roomCode, displayName: config.displayName }
+        : {
+          kind: "reconnect",
+          roomCode: config.roomCode,
+          displayName: config.displayName,
+          draftToken: config.draftToken,
+        };
+
+      // 2. Create P2PDraftGuest
       const guest = new P2PDraftGuest(
         joinResult.peer,
         joinResult.conn.peer,
         joinResult.conn,
-        config.displayName,
-        existingToken,
+        connection,
       );
 
-      // 4. Wire guest events
+      // 3. Wire guest events
       this.guestEventUnsub = guest.onEvent((event) => {
         this.handleGuestEvent(event);
       });
 
-      // 5. Initialize (sends join or reconnect message)
-      await guest.initialize();
+      // 4. Initialize only resolves after welcome/reconnect acknowledgement.
+      // Retain ownership before awaiting so supersession can abort an
+      // acknowledgement wait without revoking the persisted capability.
       this.guest = guest;
+      await guest.initialize(config.signal);
 
       if (this._status === "connecting") {
         this.setStatus("lobby");
@@ -169,6 +183,26 @@ export class DraftPodGuestAdapter {
       this.emit({ type: "error", message });
       throw err;
     }
+  }
+
+  /** A fresh seat never retries; a persisted reconnect capability gets a small, abortable join budget. */
+  private async openRoom(config: DraftPodGuestConfig): Promise<JoinResult> {
+    if (config.kind === "new") {
+      return joinRoom(config.roomCode, config.signal, config.timeoutMs);
+    }
+
+    let lastError: unknown;
+    for (let attempt = 0; attempt < INITIAL_RECONNECT_JOIN_ATTEMPTS; attempt++) {
+      if (config.signal?.aborted) throw abortError();
+      try {
+        return await joinRoom(config.roomCode, config.signal, config.timeoutMs);
+      } catch (error) {
+        lastError = error;
+        if (config.signal?.aborted || attempt === INITIAL_RECONNECT_JOIN_ATTEMPTS - 1) break;
+        await waitForReconnectJoinBackoff(INITIAL_RECONNECT_JOIN_BACKOFF_MS[attempt]!, config.signal);
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 
   // ── Guest event mapping ────────────────────────────────────────────
@@ -375,13 +409,21 @@ export class DraftPodGuestAdapter {
 
   // ── Cleanup ────────────────────────────────────────────────────────
 
-  async dispose(): Promise<void> {
+  /**
+   * Transport/lifecycle disposal preserves credentials by default. Only an
+   * explicit participant leave is allowed to revoke durable guest recovery.
+   */
+  async dispose({ preserveRecovery = true }: { preserveRecovery?: boolean } = {}): Promise<void> {
     if (this.guestEventUnsub) {
       this.guestEventUnsub();
       this.guestEventUnsub = null;
     }
     if (this.guest) {
-      await this.guest.leave();
+      if (preserveRecovery) {
+        this.guest.dispose();
+      } else {
+        await this.guest.leave();
+      }
       this.guest = null;
     }
     if (this.joinResult) {
@@ -394,4 +436,23 @@ export class DraftPodGuestAdapter {
     this._draftCode = null;
     this.setStatus("idle");
   }
+}
+
+function waitForReconnectJoinBackoff(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(abortError());
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function abortError(): Error {
+  return new DOMException("Draft reconnect aborted", "AbortError");
 }

@@ -525,7 +525,7 @@ export function MultiplayerPage() {
     async (code: string, _context?: LobbyGame) => {
       const playerName = useMultiplayerStore.getState().displayName ?? "Player";
       try {
-        await joinDraft({ roomCode: code, displayName: playerName });
+        await joinDraft({ kind: "new", roomCode: code, displayName: playerName });
         setView("draft-lobby");
       } catch {
         showToast(t("page.failedToJoinDraft"));

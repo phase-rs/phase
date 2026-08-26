@@ -41,9 +41,12 @@ import {
 } from "../adapter/draftPodGuestAdapter";
 import {
   clearActiveDraftPod,
+  clearActiveDraftGuest,
   clearDraftSettlementOutbox,
   loadDraftIntergameCommands,
   loadActiveDraftPod,
+  loadActiveDraftGuest,
+  loadDraftGuestSession,
   loadDraftSettlementOutbox,
   saveActiveDraftPod,
   saveDraftIntergameCommands,
@@ -231,6 +234,8 @@ interface MultiplayerDraftActions {
   hostDraft: (config: DraftPodHostConfig) => Promise<boolean>;
   /** Guest: join an existing draft pod by room code. */
   joinDraft: (config: DraftPodGuestConfig) => Promise<void>;
+  /** Reconnect exclusively through the persisted capability, never `draft_join`. */
+  resumeDraft: () => Promise<"resumed" | "absent" | "invalid">;
   /** Host: start the draft once the pod is ready. */
   startDraft: (botFillEmptySeats?: boolean) => Promise<void>;
   /** Both: submit a pick. */
@@ -341,19 +346,19 @@ async function disposeHostAdapter(adapter: DraftPodHostAdapter, preserveSession:
   await adapter.dispose({ preserveSession });
 }
 
-async function disposeGuestAdapter(adapter: DraftPodGuestAdapter): Promise<void> {
+async function disposeGuestAdapter(adapter: DraftPodGuestAdapter, preserveRecovery = true): Promise<void> {
   if (disposedGuestAdapters.has(adapter)) return;
   disposedGuestAdapters.add(adapter);
-  await adapter.dispose();
+  await adapter.dispose({ preserveRecovery });
 }
 
 async function disposeDetachedDraftAdapters(
   detached: DetachedDraftAdapters,
-  preserveHostSession: boolean,
+  preserveSession: boolean,
 ): Promise<void> {
   await Promise.allSettled([
-    ...(detached.host ? [disposeHostAdapter(detached.host, preserveHostSession)] : []),
-    ...(detached.guest ? [disposeGuestAdapter(detached.guest)] : []),
+    ...(detached.host ? [disposeHostAdapter(detached.host, preserveSession)] : []),
+    ...(detached.guest ? [disposeGuestAdapter(detached.guest, preserveSession)] : []),
   ]);
 }
 
@@ -900,6 +905,25 @@ export const useMultiplayerDraftStore = create<
         await disposeGuestAdapter(adapter);
       }
     }
+  },
+
+  resumeDraft: async () => {
+    const locator = loadActiveDraftGuest();
+    if (!locator) return "absent";
+    const session = await loadDraftGuestSession(locator.hostPeerId, locator);
+    if (!session) {
+      clearActiveDraftGuest();
+      return "invalid";
+    }
+
+    await get().joinDraft({
+      kind: "reconnect",
+      roomCode: locator.roomCode,
+      displayName: locator.displayName,
+      hostPeerId: locator.hostPeerId,
+      draftToken: session.draftToken,
+    });
+    return activeGuestAdapter ? "resumed" : "invalid";
   },
 
   startDraft: async (botFillEmptySeats = true) => {

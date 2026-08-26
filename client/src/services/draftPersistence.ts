@@ -15,7 +15,7 @@ import { createStore, del, get, set } from "idb-keyval";
 import type { DraftKind, PoolInput } from "../adapter/draft-adapter";
 import type { DraftMatchBinding, DraftMatchLaunch, DraftMatchSettlement } from "../network/draftProtocol";
 import { parseRoomCode } from "../network/connection";
-import { ACTIVE_DRAFT_POD_KEY } from "../constants/storage";
+import { ACTIVE_DRAFT_GUEST_KEY, ACTIVE_DRAFT_POD_KEY } from "../constants/storage";
 import type { DraftIntergameCommand } from "./intergameCommandLedger";
 
 export type { PoolInput } from "../adapter/draft-adapter";
@@ -91,6 +91,17 @@ export interface PersistedDraftGuestSession {
   draftToken: string;
   seatIndex: number;
   draftCode: string;
+  /** Bound to the non-secret recovery pointer before reconnect is attempted. */
+  roomCode: string;
+  displayName: string;
+  timestamp: number;
+}
+
+/** A non-secret, validated route back to a guest's persisted capability. */
+export interface ActiveDraftGuestMeta {
+  roomCode: string;
+  displayName: string;
+  hostPeerId: string;
   timestamp: number;
 }
 
@@ -158,6 +169,7 @@ export async function saveDraftHostSession(
     await set(DRAFT_HOST_PREFIX + id, session, getDraftStore());
   } catch (err) {
     console.warn("[saveDraftHostSession] IDB write failed:", err);
+    throw err;
   }
 }
 
@@ -214,6 +226,50 @@ export function inspectActiveDraftPod(): ActiveDraftPodLoadResult {
 
 export function clearActiveDraftPod(): void {
   localStorage.removeItem(ACTIVE_DRAFT_POD_KEY);
+}
+
+// ── Active Guest Meta ─────────────────────────────────────────────────
+
+/**
+ * The room code and display name are enough to reconnect, but never confer a
+ * seat. The opaque draft token stays in IndexedDB under the expected host id.
+ */
+export function saveActiveDraftGuest(meta: Omit<ActiveDraftGuestMeta, "timestamp">): void {
+  const roomCode = parseRoomCode(meta.roomCode);
+  const displayName = meta.displayName.trim();
+  if (!roomCode || !displayName || !meta.hostPeerId.trim()) return;
+  localStorage.setItem(ACTIVE_DRAFT_GUEST_KEY, JSON.stringify({
+    roomCode,
+    displayName,
+    hostPeerId: meta.hostPeerId,
+    timestamp: Date.now(),
+  }));
+}
+
+export function loadActiveDraftGuest(): ActiveDraftGuestMeta | null {
+  try {
+    const raw = localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY);
+    if (!raw) return null;
+    const value: unknown = JSON.parse(raw);
+    if (!isActiveDraftGuestMeta(value) || Date.now() - value.timestamp > GUEST_SESSION_TTL_MS) {
+      clearActiveDraftGuest();
+      return null;
+    }
+    return value;
+  } catch {
+    clearActiveDraftGuest();
+    return null;
+  }
+}
+
+export function clearActiveDraftGuest(): void {
+  localStorage.removeItem(ACTIVE_DRAFT_GUEST_KEY);
+}
+
+/** Do not erase a newer guest locator when an older adapter is disposed. */
+export function clearActiveDraftGuestForHost(hostPeerId: string): void {
+  const current = loadActiveDraftGuest();
+  if (current?.hostPeerId === hostPeerId) clearActiveDraftGuest();
 }
 
 /** Clears stale metadata only when it is still the record this caller read. */
@@ -279,15 +335,23 @@ function isActiveDraftPodMeta(value: unknown): value is ActiveDraftPodMeta {
     typeof value.id === "string" && value.id.length > 0 &&
     isCanonicalRoomCode(value.roomCode) &&
     (value.kind === "Premier" || value.kind === "Traditional" || value.kind === "Sealed" || value.kind === "CommanderDraft") &&
-    Number.isInteger(value.podSize) && value.podSize > 0 &&
+    isPositiveInteger(value.podSize) &&
     typeof value.hostDisplayName === "string" &&
     (value.tournamentFormat === "Swiss" || value.tournamentFormat === "SingleElimination") &&
     (value.podPolicy === "Competitive" || value.podPolicy === "Casual") &&
     (value.phase === "lobby" || value.phase === "drafting" || value.phase === "deckbuilding" ||
       value.phase === "pairing" || value.phase === "matchInProgress" || value.phase === "complete") &&
-    Number.isFinite(value.pickCount) && value.pickCount >= 0 &&
-    Number.isFinite(value.updatedAt) && value.updatedAt > 0
+    isNonnegativeInteger(value.pickCount) &&
+    isPositiveFiniteNumber(value.updatedAt)
   );
+}
+
+function isActiveDraftGuestMeta(value: unknown): value is ActiveDraftGuestMeta {
+  if (!isRecord(value)) return false;
+  return isCanonicalRoomCode(value.roomCode)
+    && isNonEmptyString(value.displayName)
+    && isNonEmptyString(value.hostPeerId)
+    && isPositiveFiniteNumber(value.timestamp);
 }
 
 /**
@@ -371,7 +435,15 @@ function isNonEmptyString(value: unknown): value is string {
 }
 
 function isPositiveInteger(value: unknown): value is number {
-  return Number.isInteger(value) && value > 0;
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
+function isNonnegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function isPositiveFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
 function isJsonRecord(value: string): boolean {
@@ -384,7 +456,7 @@ function isJsonRecord(value: string): boolean {
 
 function activeDraftPodCapture(value: unknown): ActiveDraftPodMetaCapture | null {
   if (!isRecord(value) || typeof value.id !== "string" || !isCanonicalRoomCode(value.roomCode) ||
-    !Number.isFinite(value.updatedAt)) {
+    !isPositiveFiniteNumber(value.updatedAt)) {
     return null;
   }
   return { id: value.id, roomCode: value.roomCode, updatedAt: value.updatedAt };
@@ -402,33 +474,43 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export async function saveDraftGuestSession(
   hostPeerId: string,
-  data: { draftToken: string; seatIndex: number; draftCode: string },
+  data: { draftToken: string; seatIndex: number; draftCode: string; roomCode: string; displayName: string },
 ): Promise<void> {
+  const roomCode = parseRoomCode(data.roomCode);
+  const displayName = data.displayName.trim();
+  if (!roomCode || !displayName) return;
   const session: PersistedDraftGuestSession = {
     hostPeerId,
     draftToken: data.draftToken,
     seatIndex: data.seatIndex,
     draftCode: data.draftCode,
+    roomCode,
+    displayName,
     timestamp: Date.now(),
   };
   try {
     await set(DRAFT_GUEST_PREFIX + hostPeerId, session, getDraftStore());
   } catch (err) {
     console.warn("[saveDraftGuestSession] IDB write failed:", err);
+    throw err;
   }
 }
 
 export async function loadDraftGuestSession(
   hostPeerId: string,
+  identity?: Pick<ActiveDraftGuestMeta, "roomCode" | "displayName">,
 ): Promise<PersistedDraftGuestSession | null> {
   try {
     const session = await get<PersistedDraftGuestSession>(
       DRAFT_GUEST_PREFIX + hostPeerId,
       getDraftStore(),
     );
-    if (!session) return null;
+    if (!session || !isPersistedDraftGuestSession(session) || session.hostPeerId !== hostPeerId) return null;
     if (Date.now() - session.timestamp > GUEST_SESSION_TTL_MS) {
       await clearDraftGuestSession(hostPeerId);
+      return null;
+    }
+    if (identity && (session.roomCode !== identity.roomCode || session.displayName !== identity.displayName)) {
       return null;
     }
     return session;
@@ -441,6 +523,23 @@ export async function clearDraftGuestSession(hostPeerId: string): Promise<void> 
   try {
     await del(DRAFT_GUEST_PREFIX + hostPeerId, getDraftStore());
   } catch { /* best-effort */ }
+}
+
+/** Clears both halves of one guest's recovery identity. */
+export async function clearDraftGuestRecovery(hostPeerId: string): Promise<void> {
+  await clearDraftGuestSession(hostPeerId);
+  clearActiveDraftGuestForHost(hostPeerId);
+}
+
+function isPersistedDraftGuestSession(value: unknown): value is PersistedDraftGuestSession {
+  if (!isRecord(value)) return false;
+  return isNonEmptyString(value.hostPeerId)
+    && isNonEmptyString(value.draftToken)
+    && isNonnegativeInteger(value.seatIndex)
+    && typeof value.draftCode === "string"
+    && isCanonicalRoomCode(value.roomCode)
+    && isNonEmptyString(value.displayName)
+    && isPositiveFiniteNumber(value.timestamp);
 }
 
 /** A participant-owned outbox survives a reload until the pod host acks it. */

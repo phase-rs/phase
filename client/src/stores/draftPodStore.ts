@@ -420,6 +420,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
       set({ configError: null });
 
       const guestConfig: DraftPodGuestConfig = {
+        kind: "new",
         roomCode: joinCode.trim(),
         displayName: guestDisplayName.trim(),
       };

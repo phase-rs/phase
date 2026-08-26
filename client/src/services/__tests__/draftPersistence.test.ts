@@ -18,15 +18,19 @@ vi.mock("idb-keyval", () => ({
 import {
   clearActiveDraftPod,
   clearActiveDraftPodIfCurrent,
+  clearActiveDraftGuest,
+  clearDraftGuestRecovery,
   clearDraftGuestSession,
   clearDraftHostSession,
   loadActiveDraftPod,
+  loadActiveDraftGuest,
   inspectActiveDraftPod,
   loadDraftGuestSession,
   loadDraftHostSession,
   loadDraftIntergameCommands,
   loadDraftSettlementOutbox,
   saveActiveDraftPod,
+  saveActiveDraftGuest,
   saveDraftGuestSession,
   saveDraftHostSession,
   persistedDraftHostSessionState,
@@ -278,6 +282,8 @@ describe("draftPersistence", () => {
         draftToken: "token-abc",
         seatIndex: 3,
         draftCode: "draft-xyz",
+        roomCode: "ABCDE",
+        displayName: "Alice",
       });
 
       const loaded = await loadDraftGuestSession("phase2-HOST1");
@@ -286,6 +292,8 @@ describe("draftPersistence", () => {
       expect(loaded!.seatIndex).toBe(3);
       expect(loaded!.draftCode).toBe("draft-xyz");
       expect(loaded!.hostPeerId).toBe("phase2-HOST1");
+      expect(loaded!.roomCode).toBe("ABCDE");
+      expect(loaded!.displayName).toBe("Alice");
     });
 
     it("returns null for expired session", async () => {
@@ -294,6 +302,8 @@ describe("draftPersistence", () => {
         draftToken: "old-token",
         seatIndex: 1,
         draftCode: "draft-old",
+        roomCode: "ABCDE",
+        displayName: "Alice",
       });
 
       // Manually patch the stored timestamp to simulate expiry
@@ -311,15 +321,76 @@ describe("draftPersistence", () => {
       expect(loaded).toBeNull();
     });
 
+    it("refuses a token record stored under a different host peer key", async () => {
+      mockStore.set("phase-draft-guest:phase2-EXPECTED", {
+        hostPeerId: "phase2-OTHER",
+        draftToken: "cross-key-token",
+        seatIndex: 1,
+        draftCode: "draft-xyz",
+        roomCode: "ABCDE",
+        displayName: "Alice",
+        timestamp: Date.now(),
+      });
+
+      await expect(loadDraftGuestSession("phase2-EXPECTED", {
+        roomCode: "ABCDE",
+        displayName: "Alice",
+      })).resolves.toBeNull();
+    });
+
     it("clears a guest session", async () => {
       await saveDraftGuestSession("phase2-CLEAR", {
         draftToken: "token-clear",
         seatIndex: 0,
         draftCode: "draft-clear",
+        roomCode: "ABCDE",
+        displayName: "Alice",
       });
       await clearDraftGuestSession("phase2-CLEAR");
       const loaded = await loadDraftGuestSession("phase2-CLEAR");
       expect(loaded).toBeNull();
+    });
+
+    it("uses a non-secret room-code locator to bind the IndexedDB capability", async () => {
+      await saveDraftGuestSession("phase2-HOST1", {
+        draftToken: "token-abc",
+        seatIndex: 3,
+        draftCode: "draft-xyz",
+        roomCode: "ABCDE",
+        displayName: "Alice",
+      });
+      saveActiveDraftGuest({ roomCode: "ABCDE", displayName: "Alice", hostPeerId: "phase2-HOST1" });
+
+      expect(loadActiveDraftGuest()).toMatchObject({
+        roomCode: "ABCDE",
+        displayName: "Alice",
+        hostPeerId: "phase2-HOST1",
+      });
+      expect(localStorage.getItem("phase-active-draft-guest")).not.toContain("token-abc");
+      await expect(loadDraftGuestSession("phase2-HOST1", {
+        roomCode: "ABCDE",
+        displayName: "Alice",
+      })).resolves.toMatchObject({ draftToken: "token-abc" });
+      await expect(loadDraftGuestSession("phase2-HOST1", {
+        roomCode: "ABCDE",
+        displayName: "Mallory",
+      })).resolves.toBeNull();
+    });
+
+    it("clears both recovery records for an explicit terminal removal", async () => {
+      await saveDraftGuestSession("phase2-HOST1", {
+        draftToken: "token-abc",
+        seatIndex: 3,
+        draftCode: "draft-xyz",
+        roomCode: "ABCDE",
+        displayName: "Alice",
+      });
+      saveActiveDraftGuest({ roomCode: "ABCDE", displayName: "Alice", hostPeerId: "phase2-HOST1" });
+
+      await clearDraftGuestRecovery("phase2-HOST1");
+      expect(loadActiveDraftGuest()).toBeNull();
+      await expect(loadDraftGuestSession("phase2-HOST1")).resolves.toBeNull();
+      clearActiveDraftGuest();
     });
   });
 });

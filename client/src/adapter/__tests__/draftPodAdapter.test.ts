@@ -88,6 +88,7 @@ const mockGuestSubmitPick = vi.fn(async () => {});
 const mockGuestSubmitPickWithDraftEffect = vi.fn(async () => {});
 const mockGuestSubmitDeck = vi.fn(async () => {});
 const mockGuestLeave = vi.fn(async () => {});
+const mockGuestDispose = vi.fn();
 
 vi.mock("../p2p-draft-guest", () => ({
   P2PDraftGuest: vi.fn().mockImplementation(function () {
@@ -98,6 +99,7 @@ vi.mock("../p2p-draft-guest", () => ({
       submitPickWithDraftEffect: mockGuestSubmitPickWithDraftEffect,
       submitDeck: mockGuestSubmitDeck,
       leave: mockGuestLeave,
+      dispose: mockGuestDispose,
       view: null,
       seat: null,
       token: null,
@@ -178,6 +180,7 @@ describe("DraftPodHostAdapter", () => {
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
     await adapter.dispose();
   });
 
@@ -626,6 +629,7 @@ describe("DraftPodGuestAdapter", () => {
 
   it("transitions to lobby after initialization", async () => {
     await adapter.initialize({
+      kind: "new",
       roomCode: "ABCDE",
       displayName: "Alice",
     });
@@ -637,15 +641,104 @@ describe("DraftPodGuestAdapter", () => {
     expect(statusEvents).toContainEqual({ type: "statusChanged", status: "lobby" });
   });
 
-  it("looks up reconnect tokens by host peer id", async () => {
+  it("does not look up a reconnect token for a new join", async () => {
     const { loadDraftGuestSession } = await import("../../services/draftPersistence");
-
     await adapter.initialize({
+      kind: "new",
       roomCode: "ABCDE",
       displayName: "Alice",
     });
 
-    expect(loadDraftGuestSession).toHaveBeenCalledWith("phase2-ABCDE");
+    expect(loadDraftGuestSession).not.toHaveBeenCalled();
+  });
+
+  it("refuses to send a reconnect capability to a different host peer", async () => {
+    const { joinRoom } = await import("../../network/connection");
+    const mismatched = {
+      ...mockJoinResult(),
+      conn: { peer: "phase2-OTHER" },
+    };
+    (joinRoom as ReturnType<typeof vi.fn>).mockResolvedValueOnce(mismatched);
+
+    await expect(adapter.initialize({
+      kind: "reconnect",
+      roomCode: "ABCDE",
+      displayName: "Alice",
+      hostPeerId: "phase2-ABCDE",
+      draftToken: "opaque-token",
+    })).rejects.toThrow("host changed");
+    expect(mockGuestInitialize).not.toHaveBeenCalled();
+    expect(mismatched.destroyPeer).toHaveBeenCalledOnce();
+  });
+
+  it("retries only credentialed reconnect room joins within a bounded budget", async () => {
+    vi.useFakeTimers();
+    const { joinRoom } = await import("../../network/connection");
+    (joinRoom as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(new Error("first transport failure"))
+      .mockRejectedValueOnce(new Error("second transport failure"))
+      .mockResolvedValueOnce(mockJoinResult());
+
+    const reconnecting = adapter.initialize({
+      kind: "reconnect",
+      roomCode: "ABCDE",
+      displayName: "Alice",
+      hostPeerId: "phase2-ABCDE",
+      draftToken: "opaque-token",
+    });
+    await vi.runAllTimersAsync();
+    await expect(reconnecting).resolves.toBeUndefined();
+    expect(joinRoom).toHaveBeenCalledTimes(3);
+  });
+
+  it("aborts a credentialed reconnect join without starting another attempt", async () => {
+    vi.useFakeTimers();
+    const { joinRoom } = await import("../../network/connection");
+    (joinRoom as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("transport failure"));
+    const controller = new AbortController();
+
+    const reconnecting = adapter.initialize({
+      kind: "reconnect",
+      roomCode: "ABCDE",
+      displayName: "Alice",
+      hostPeerId: "phase2-ABCDE",
+      draftToken: "opaque-token",
+      signal: controller.signal,
+    });
+    await Promise.resolve();
+    controller.abort();
+    await expect(reconnecting).rejects.toMatchObject({ name: "AbortError" });
+    expect(joinRoom).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes a reconnect config through without a join fallback", async () => {
+    await adapter.initialize({
+      kind: "reconnect",
+      roomCode: "ABCDE",
+      displayName: "Alice",
+      hostPeerId: "phase2-ABCDE",
+      draftToken: "opaque-token",
+    });
+
+    const { P2PDraftGuest } = await import("../p2p-draft-guest");
+    expect(P2PDraftGuest).toHaveBeenLastCalledWith(
+      expect.anything(),
+      "phase2-ABCDE",
+      expect.anything(),
+      expect.objectContaining({ kind: "reconnect", draftToken: "opaque-token" }),
+    );
+  });
+
+  it("preserves recovery credentials for lifecycle disposal but clears them on explicit leave", async () => {
+    await adapter.initialize({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
+    await adapter.dispose();
+    expect(mockGuestDispose).toHaveBeenCalled();
+    expect(mockGuestLeave).not.toHaveBeenCalled();
+
+    adapter = new DraftPodGuestAdapter();
+    await adapter.initialize({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
+    await adapter.dispose({ preserveRecovery: false });
+    expect(mockGuestLeave).toHaveBeenCalled();
   });
 
   it("emits error on connection failure", async () => {
@@ -655,7 +748,7 @@ describe("DraftPodGuestAdapter", () => {
     );
 
     await expect(
-      adapter.initialize({ roomCode: "ZZZZZ", displayName: "Bob" }),
+      adapter.initialize({ kind: "new", roomCode: "ZZZZZ", displayName: "Bob" }),
     ).rejects.toThrow("Connection timed out");
 
     expect(adapter.status).toBe("error");
@@ -666,21 +759,21 @@ describe("DraftPodGuestAdapter", () => {
   });
 
   it("delegates submitPick to P2PDraftGuest", async () => {
-    await adapter.initialize({ roomCode: "ABCDE", displayName: "Alice" });
+    await adapter.initialize({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
 
     await adapter.submitPick("card-456");
     expect(mockGuestSubmitPick).toHaveBeenCalledWith("card-456");
   });
 
   it("delegates draft-effect picks to P2PDraftGuest", async () => {
-    await adapter.initialize({ roomCode: "ABCDE", displayName: "Alice" });
+    await adapter.initialize({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
 
     await adapter.submitPickWithDraftEffect("cogwork-1", ["card-1", "card-2"]);
     expect(mockGuestSubmitPickWithDraftEffect).toHaveBeenCalledWith("cogwork-1", ["card-1", "card-2"]);
   });
 
   it("delegates submitDeck to P2PDraftGuest", async () => {
-    await adapter.initialize({ roomCode: "ABCDE", displayName: "Alice" });
+    await adapter.initialize({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
 
     await adapter.submitDeck(["Swamp", "Mountain"]);
     expect(mockGuestSubmitDeck).toHaveBeenCalledWith(["Swamp", "Mountain"]);
@@ -692,7 +785,7 @@ describe("DraftPodGuestAdapter", () => {
   });
 
   it("maps P2PDraftGuest events to DraftPodGuestEvents", async () => {
-    await adapter.initialize({ roomCode: "ABCDE", displayName: "Alice" });
+    await adapter.initialize({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
 
     const guestEventHandler = mockGuestOnEvent.mock.calls[0][0];
 
@@ -747,7 +840,7 @@ describe("DraftPodGuestAdapter", () => {
   });
 
   it("updates status based on DraftPlayerView status", async () => {
-    await adapter.initialize({ roomCode: "ABCDE", displayName: "Alice" });
+    await adapter.initialize({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
     const guestEventHandler = mockGuestOnEvent.mock.calls[0][0];
 
     guestEventHandler({ type: "viewUpdated", view: mockView("Drafting") });
@@ -761,10 +854,11 @@ describe("DraftPodGuestAdapter", () => {
   });
 
   it("cleans up on dispose", async () => {
-    await adapter.initialize({ roomCode: "ABCDE", displayName: "Alice" });
+    await adapter.initialize({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
 
     await adapter.dispose();
-    expect(mockGuestLeave).toHaveBeenCalledOnce();
+    expect(mockGuestDispose).toHaveBeenCalledOnce();
+    expect(mockGuestLeave).not.toHaveBeenCalled();
     expect(adapter.status).toBe("idle");
     expect(adapter.currentView).toBeNull();
     expect(adapter.seatIndex).toBeNull();

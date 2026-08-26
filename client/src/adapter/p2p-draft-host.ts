@@ -27,6 +27,7 @@ import type {
   DraftMatchLaunch,
   DraftMatchSettlement,
   DraftP2PMessage,
+  DraftReconnectRejectionKind,
 } from "../network/draftProtocol";
 import type { DeckCardCount, MatchConfig, MatchScore } from "./types";
 import {
@@ -243,6 +244,8 @@ export class P2PDraftHost {
   private backupEndpoint: string | null = null;
   private picksSinceLastBackup = 0;
   private persistQueue = Promise.resolve();
+  /** Admissions mutate token state before their durability fence, so serialize them. */
+  private admissionQueue = Promise.resolve();
   private persistenceClosed = false;
   private static readonly BACKUP_INTERVAL_PICKS = 5;
 
@@ -308,26 +311,75 @@ export class P2PDraftHost {
     });
 
     let identified = false;
-    const unsub = session.onMessage((msg) => {
+    const unsub = session.onMessage(async (msg) => {
       if (identified) return;
       identified = true;
       unsub();
 
-      if (msg.type === "draft_join") {
-        this.handleNewGuest(session, msg.displayName);
-      } else if (msg.type === "draft_reconnect") {
-        this.handleReconnect(session, msg.draftToken);
+      if (msg.type !== "draft_join" && msg.type !== "draft_reconnect") {
+        await this.rejectAndClose(
+          session,
+          "ProtocolMismatch",
+          "Expected draft_join or draft_reconnect as first message",
+          "Protocol violation",
+        );
+      } else if (msg.draftProtocolVersion !== DRAFT_PROTOCOL_VERSION) {
+        // First-contact versioning is a hard gate. Do not allocate a seat,
+        // consume reconnect grace, or attach the session before it passes.
+        await this.rejectAndClose(
+          session,
+          "ProtocolMismatch",
+          `Draft protocol mismatch: host v${DRAFT_PROTOCOL_VERSION}, client v${String(msg.draftProtocolVersion)}. Refresh both windows.`,
+          "Draft protocol mismatch",
+        );
+      } else if (msg.type === "draft_join") {
+        await this.handleNewGuest(session, msg.displayName);
       } else {
-        session.send({
-          type: "draft_reconnect_rejected",
-          reason: "Expected draft_join or draft_reconnect as first message",
-        });
-        session.close("Protocol violation");
+        await this.handleReconnect(session, msg.draftToken);
       }
     });
   }
 
-  private handleNewGuest(session: DraftPeerSession, displayName: string): void {
+  /** Flush a typed rejection before closing its DataConnection. */
+  private async rejectAndClose(
+    session: DraftPeerSession,
+    kind: DraftReconnectRejectionKind,
+    reason: string,
+    closeReason: string,
+  ): Promise<void> {
+    await session.send({
+      type: "draft_reconnect_rejected",
+      kind,
+      reason,
+    });
+    session.close(closeReason);
+  }
+
+  private async handleNewGuest(session: DraftPeerSession, displayName: string): Promise<void> {
+    // This is intentionally outside `admissionQueue`: a connection can close
+    // while waiting behind another guest, before its admission transaction
+    // starts. In that case it must never allocate a provisional token.
+    let firstContactLive = true;
+    const stopWatchingFirstContact = session.onDisconnect(() => {
+      firstContactLive = false;
+    });
+    try {
+      const admission = this.admissionQueue.then(() =>
+        this.admitNewGuest(session, displayName, () => firstContactLive),
+      );
+      this.admissionQueue = admission.catch(() => {});
+      await admission;
+    } finally {
+      stopWatchingFirstContact();
+    }
+  }
+
+  private async admitNewGuest(
+    session: DraftPeerSession,
+    displayName: string,
+    isFirstContactLive: () => boolean,
+  ): Promise<void> {
+    if (!isFirstContactLive()) return;
     if (this.draftStarted) {
       session.send({ type: "draft_kicked", reason: "Draft already in progress" });
       session.close("Draft in progress");
@@ -343,15 +395,40 @@ export class P2PDraftHost {
 
     const token = crypto.randomUUID();
     this.seatTokens.set(seat, token);
-    this.guestSessions.set(seat, session);
     this.seatNames.set(seat, displayName);
 
+    try {
+      // The guest receives the capability only after this host can recover the
+      // matching token and seat. Publishing either welcome or lobby state
+      // first would leave a reloaded host unable to honour that capability.
+      await this.persistSessionStrict();
+    } catch (err) {
+      this.seatTokens.delete(seat);
+      this.seatNames.delete(seat);
+      console.warn("[P2PDraftHost] guest admission persistence failed:", err);
+      session.close("Guest admission persistence failed");
+      return;
+    }
+
+    if (!isFirstContactLive()) {
+      await this.rollbackDisconnectedAdmission(seat);
+      return;
+    }
+
+    this.guestSessions.set(seat, session);
+    // A synchronous transport close can occur during registration. The
+    // first-contact watcher remains active until this transaction returns, so
+    // roll back before installing a guest handler or announcing the seat.
+    if (!isFirstContactLive()) {
+      await this.rollbackDisconnectedAdmission(seat, session);
+      return;
+    }
     session.onMessage((msg) => this.handleGuestMessage(seat, msg));
 
     // Send welcome with empty view (draft hasn't started)
     const emptyView: DraftPlayerView = this.buildLobbyView();
 
-    session.send({
+    await session.send({
       type: "draft_welcome",
       draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
       draftToken: token,
@@ -360,7 +437,11 @@ export class P2PDraftHost {
       draftCode: this.draftCode || "pending",
     });
 
-    this.persistSession();
+    // `send` yields for wire encoding. A close during that await runs the
+    // registered session-end handler, which removes the seat and persists the
+    // disconnect; do not announce a guest that no longer exists.
+    if (this.guestSessions.get(seat) !== session) return;
+
     this.emit({ type: "seatJoined", seatIndex: seat, displayName });
     this.syncLobbyToGuests();
 
@@ -369,10 +450,25 @@ export class P2PDraftHost {
     }
   }
 
-  private handleReconnect(session: DraftPeerSession, draftToken: string): void {
+  /** Removes a post-fence provisional admission and commits that removal. */
+  private async rollbackDisconnectedAdmission(seat: number, session?: DraftPeerSession): Promise<void> {
+    if (session && this.guestSessions.get(seat) === session) {
+      this.guestSessions.delete(seat);
+    }
+    this.seatTokens.delete(seat);
+    this.seatNames.delete(seat);
+    try {
+      // The admission snapshot already committed this provisional token, so
+      // make the rollback durable before another admission can begin.
+      await this.persistSessionStrict();
+    } catch (err) {
+      console.warn("[P2PDraftHost] disconnected admission rollback failed:", err);
+    }
+  }
+
+  private async handleReconnect(session: DraftPeerSession, draftToken: string): Promise<void> {
     if (this.kickedTokens.has(draftToken)) {
-      session.send({ type: "draft_reconnect_rejected", reason: "Player kicked" });
-      session.close("Kicked");
+      await this.rejectAndClose(session, "Kicked", "Player kicked", "Kicked");
       return;
     }
 
@@ -385,17 +481,17 @@ export class P2PDraftHost {
     }
 
     if (seat === null) {
-      session.send({ type: "draft_reconnect_rejected", reason: "Unknown token" });
-      session.close("Unknown token");
+      await this.rejectAndClose(session, "UnknownToken", "Unknown token", "Unknown token");
       return;
     }
 
     if (!this.disconnectedSeats.has(seat)) {
-      session.send({
-        type: "draft_reconnect_rejected",
-        reason: "No grace window active for this seat",
-      });
-      session.close("Not in grace");
+      await this.rejectAndClose(
+        session,
+        "NoReconnectWindow",
+        "No grace window active for this seat",
+        "Not in grace",
+      );
       return;
     }
 
@@ -1796,56 +1892,78 @@ export class P2PDraftHost {
 
   private persistSession(): void {
     if (!this.persistenceId || this.persistenceClosed) return;
-    this.persistQueue = this.persistQueue.then(async () => {
-      try {
-        if (this.persistenceClosed) return;
-        const sessionJson = this.draftStarted
-          ? await this.adapter.exportSession()
-          : null;
-        if (this.persistenceClosed) return;
+    // Lobby snapshots contain no asynchronous engine export, so capture them
+    // at mutation time. A later admission must not leak into an earlier queued
+    // snapshot if its own strict write fails.
+    const snapshot = this.draftStarted ? undefined : this.buildPersistedSnapshot(null);
+    void this.enqueuePersistSession(snapshot).catch(() => {});
+  }
 
-        const snapshot: PersistedDraftHostSession = {
-          persistenceId: this.persistenceId!,
-          roomCode: this.roomCode ?? "",
-          kind: this.kind,
-          podSize: this.podSize,
-          hostDisplayName: this.hostDisplayName,
-          tournamentFormat: this.tournamentFormat,
-          podPolicy: this.podPolicy,
-          seatTokens: Object.fromEntries(this.seatTokens),
-          seatNames: Object.fromEntries(this.seatNames),
-          kickedTokens: [...this.kickedTokens],
-          draftStarted: this.draftStarted,
-          draftCode: this.draftCode,
-          draftSessionJson: sessionJson,
-          poolInput: this.poolInput,
-          matchBindings: [...this.matchBindings.values()],
-          settlementOutbox: [...this.settlementOutbox.values()],
-          settlementReceipts: [...this.settlementReceipts.entries()].map(
-            ([matchId, receipt]) => ({ matchId, ...receipt }),
-          ),
-          intergameCommands: this.intergameCommands.snapshot(),
-          bo3State: [...this.bo3State.entries()].map(([matchId, state]) => ({ matchId, ...state })),
-          launchDigests: [...this.launchDigests.entries()].flatMap(([matchId, digests]) =>
-            [...digests.entries()].map(([seat, digest]) => ({ matchId, seat, digest })),
-          ),
-          matchLaunches: [...this.matchLaunches.entries()].flatMap(([matchId, launches]) =>
-            [...launches.entries()].map(([seat, launch]) => ({ matchId, seat, launch })),
-          ),
-        };
+  /** Admission callers await this fence before issuing a recoverable token. */
+  private persistSessionStrict(): Promise<void> {
+    if (!this.persistenceId || this.persistenceClosed) return Promise.resolve();
+    return this.enqueuePersistSession(this.buildPersistedSnapshot(null));
+  }
 
-        await saveDraftHostSession(this.persistenceId!, snapshot);
+  /**
+   * Serializes snapshots while retaining a live queue after a failed write.
+   * Fire-and-forget mutations report errors through `persistSession`; admission
+   * awaits the returned task and rolls its mutation back on failure.
+   */
+  private enqueuePersistSession(snapshotAtMutation?: PersistedDraftHostSession): Promise<void> {
+    if (!this.persistenceId || this.persistenceClosed) return Promise.resolve();
+    const persist = this.persistQueue.then(async () => {
+      if (this.persistenceClosed) return;
+      const snapshot = snapshotAtMutation ?? this.buildPersistedSnapshot(
+        this.draftStarted ? await this.adapter.exportSession() : null,
+      );
+      if (this.persistenceClosed) return;
 
-        // Server backup upload (D-08, T-60-11: rate-limited to every N picks)
-        this.picksSinceLastBackup++;
-        if (this.backupEndpoint && this.picksSinceLastBackup >= P2PDraftHost.BACKUP_INTERVAL_PICKS) {
-          this.picksSinceLastBackup = 0;
-          void this.uploadBackupSnapshot(snapshot);
-        }
-      } catch (err) {
-        console.warn("[P2PDraftHost] persist failed:", err);
+      await saveDraftHostSession(this.persistenceId!, snapshot);
+
+      // Server backup upload (D-08, T-60-11: rate-limited to every N picks)
+      this.picksSinceLastBackup++;
+      if (this.backupEndpoint && this.picksSinceLastBackup >= P2PDraftHost.BACKUP_INTERVAL_PICKS) {
+        this.picksSinceLastBackup = 0;
+        void this.uploadBackupSnapshot(snapshot);
       }
     });
+    this.persistQueue = persist.catch((err) => {
+      console.warn("[P2PDraftHost] persist failed:", err);
+    });
+    return persist;
+  }
+
+  private buildPersistedSnapshot(draftSessionJson: string | null): PersistedDraftHostSession {
+    return {
+      persistenceId: this.persistenceId!,
+      roomCode: this.roomCode ?? "",
+      kind: this.kind,
+      podSize: this.podSize,
+      hostDisplayName: this.hostDisplayName,
+      tournamentFormat: this.tournamentFormat,
+      podPolicy: this.podPolicy,
+      seatTokens: Object.fromEntries(this.seatTokens),
+      seatNames: Object.fromEntries(this.seatNames),
+      kickedTokens: [...this.kickedTokens],
+      draftStarted: this.draftStarted,
+      draftCode: this.draftCode,
+      draftSessionJson,
+      poolInput: this.poolInput,
+      matchBindings: [...this.matchBindings.values()],
+      settlementOutbox: [...this.settlementOutbox.values()],
+      settlementReceipts: [...this.settlementReceipts.entries()].map(
+        ([matchId, receipt]) => ({ matchId, ...receipt }),
+      ),
+      intergameCommands: this.intergameCommands.snapshot(),
+      bo3State: [...this.bo3State.entries()].map(([matchId, state]) => ({ matchId, ...state })),
+      launchDigests: [...this.launchDigests.entries()].flatMap(([matchId, digests]) =>
+        [...digests.entries()].map(([seat, digest]) => ({ matchId, seat, digest })),
+      ),
+      matchLaunches: [...this.matchLaunches.entries()].flatMap(([matchId, launches]) =>
+        [...launches.entries()].map(([seat, launch]) => ({ matchId, seat, launch })),
+      ),
+    };
   }
 
   /**
@@ -1941,20 +2059,11 @@ export class P2PDraftHost {
       this.rememberMatchDecks(recoveredLaunch);
     }
 
+    this.armRecoveredGuestGrace();
+
     if (session.draftSessionJson) {
       const view = await this.adapter.importSession(session.draftSessionJson, 2);
       await this.recoverSettlementOutbox(view);
-
-      // Arm grace windows for all guest seats
-      for (const seatStr of Object.keys(session.seatTokens)) {
-        const seat = Number(seatStr);
-        if (seat === 0) continue;
-        const timer = setTimeout(() => {
-          this.disconnectedSeats.delete(seat);
-          this.emit({ type: "seatKicked", seatIndex: seat, reason: "Resume grace expired" });
-        }, 5 * 60_000);
-        this.disconnectedSeats.set(seat, { disconnectedAt: Date.now(), timer });
-      }
 
       if (this.disconnectedSeats.size > 0) {
         this.paused = true;
@@ -1991,6 +2100,18 @@ export class P2PDraftHost {
     }
 
     return null;
+  }
+
+  /** Restored guests get the same bounded reconnect window in lobby or draft. */
+  private armRecoveredGuestGrace(): void {
+    for (const seat of this.seatTokens.keys()) {
+      if (seat === 0 || this.disconnectedSeats.has(seat)) continue;
+      const timer = setTimeout(() => {
+        this.disconnectedSeats.delete(seat);
+        this.emit({ type: "seatKicked", seatIndex: seat, reason: "Resume grace expired" });
+      }, 5 * 60_000);
+      this.disconnectedSeats.set(seat, { disconnectedAt: Date.now(), timer });
+    }
   }
 
   /** Replays only write-ahead settlements that the restored draft still lacks. */

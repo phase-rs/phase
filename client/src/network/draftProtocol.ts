@@ -43,8 +43,18 @@ import type {
  *  10 — add authenticated draft-effect pick actions
  *  11 — instance-addressable pool entries (`instance_ids`) + engine rarity axis
  *  12 — publish the engine-derived next pairing round on the player view
+ *  13 — first-contact `draft_join` and `draft_reconnect` messages carry an
+ *       exact draft protocol version; reconnect rejection is typed so only an
+ *       invalidated capability is cleared from durable guest recovery.
  */
-export const DRAFT_PROTOCOL_VERSION = 12 as const;
+export const DRAFT_PROTOCOL_VERSION = 13 as const;
+
+/** The host's reason for declining a first-contact draft connection. */
+export type DraftReconnectRejectionKind =
+  | "ProtocolMismatch"
+  | "Kicked"
+  | "UnknownToken"
+  | "NoReconnectWindow";
 
 /**
  * Typed reason for a draft pause, used over the wire and on the i18n key path.
@@ -157,10 +167,12 @@ export type DraftP2PMessage =
   | {
       type: "draft_join";
       displayName: string;
+      draftProtocolVersion: typeof DRAFT_PROTOCOL_VERSION;
     }
   | {
       type: "draft_reconnect";
       draftToken: string;
+      draftProtocolVersion: typeof DRAFT_PROTOCOL_VERSION;
     }
   | {
       type: "draft_pick";
@@ -197,6 +209,7 @@ export type DraftP2PMessage =
     }
   | {
       type: "draft_reconnect_rejected";
+      kind: DraftReconnectRejectionKind;
       reason: string;
     }
   | {
@@ -525,6 +538,29 @@ export function validateDraftMessage(raw: unknown): DraftP2PMessage {
   }
   if (msg.type === "draft_pick_with_draft_effect") {
     return validateDraftEffectPick(raw as Record<string, unknown>);
+  }
+  if (msg.type === "draft_reconnect_rejected") {
+    const rejection = raw as Record<string, unknown>;
+    // v14 carried only a string reason. It is never a capability-revocation
+    // signal: normalize it to the safe terminal outcome that preserves the
+    // guest's recovery records and asks the user to refresh.
+    if (rejection.kind === undefined && typeof rejection.reason === "string") {
+      return {
+        ...rejection,
+        type: "draft_reconnect_rejected",
+        kind: "ProtocolMismatch",
+      } as DraftP2PMessage;
+    }
+    if (
+      (rejection.kind !== "ProtocolMismatch"
+        && rejection.kind !== "Kicked"
+        && rejection.kind !== "UnknownToken"
+        && rejection.kind !== "NoReconnectWindow")
+      || typeof rejection.reason !== "string"
+    ) {
+      throw new Error("Invalid draft reconnect rejection");
+    }
+    return rejection as DraftP2PMessage;
   }
   const viewMessage = raw as { type: string; view?: unknown; seats?: unknown };
   if (["draft_welcome", "draft_reconnect_ack", "draft_state_update", "draft_pick_ack"].includes(msg.type)) {
