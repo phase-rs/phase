@@ -330,7 +330,8 @@ fn rich_apply_preserves_legacy_rejection_and_state() {
     assert!(apply(&mut legacy, P0, action.clone()).is_err());
     let rejection = apply_with_rejection(&mut rich, P0, action).expect_err("action rejects");
 
-    assert_eq!(rejection.code, ActionRejectionCode::InvalidAction);
+    assert_eq!(rejection.code, ActionRejectionCode::ActionNotAllowed);
+    assert_eq!(rejection.message, "That action is not allowed right now.");
     assert_eq!(
         legacy, rich,
         "rich wrapper must preserve legacy mutation semantics"
@@ -366,11 +367,8 @@ fn rich_action_preview_does_not_mutate_state() {
     let rejection = preview_action_with_rejection(&state, P0, &action)
         .expect_err("an invalid action cannot produce a preview");
 
-    assert_eq!(rejection.code, ActionRejectionCode::InvalidAction);
-    assert_eq!(
-        rejection.message,
-        "That action is not valid in the current game state."
-    );
+    assert_eq!(rejection.code, ActionRejectionCode::ActionNotAllowed);
+    assert_eq!(rejection.message, "That action is not allowed right now.");
     assert!(
         rejection.related_object_ids.is_empty(),
         "the unknown object identity must be filtered from the viewer projection"
