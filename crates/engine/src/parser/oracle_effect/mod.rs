@@ -7639,11 +7639,9 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
             // modifier is extracted before the main shell pass below, so consult
             // the same shell here to bind an anaphoric "they" to a prepositional
             // scope such as "for each opponent, you … unless they …".
-            let (_, clause_context) = super::clause_shell::peel_clause(&clause_text);
-            let (stripped, unless_pay) = extract_resolution_unless_pay_modifier(
-                &clause_text,
-                clause_context.player_scope.as_ref(),
-            );
+            let (player_scope, _) = super::clause_shell::peel_player_scope_subject(&clause_text);
+            let (stripped, unless_pay) =
+                extract_resolution_unless_pay_modifier(&clause_text, player_scope.as_ref());
             if unless_pay.is_some() {
                 unless_pay_deferred = unless_pay;
                 (None, stripped)
@@ -32793,6 +32791,11 @@ pub(crate) fn parse_effect_chain_ir(
             (None, Some(unless_cond)) => Some(unless_cond),
             (existing, None) => existing,
         };
+        // Player-scoped prepositional imperatives must be peeled before the
+        // generic "for each" repeat parser. Otherwise "for each opponent, you
+        // create …" is lowered as a quantity repeat and loses the opponent
+        // scope that binds an anaphoric "they" in its unless-payment clause.
+        let (early_player_scope, text) = super::clause_shell::peel_player_scope_subject(&text);
         let prior_typed_referent = chain_has_prior_typed_referent(builder.clauses(), false);
         if prior_typed_referent
             && has_bare_recipient_counter_gate
@@ -32856,7 +32859,10 @@ pub(crate) fn parse_effect_chain_ir(
             // conditional strip ("a number of times equal to the difference").
             .or(difference_repeat)
             .or_else(|| pending_repeat_for.take());
-        let (player_scope, text) = super::clause_shell::peel_player_scope_subject(&text);
+        let (player_scope, text) = match early_player_scope {
+            Some(scope) => (Some(scope), text),
+            None => super::clause_shell::peel_player_scope_subject(&text),
+        };
         let pending_player_scope_for_clause = pending_player_scope.take();
         let carried_player_scope = if player_scope.is_none()
             && !sequence::starts_clause_text(&text)
